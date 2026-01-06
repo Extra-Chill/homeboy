@@ -1,0 +1,476 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		161D714E72D2DAF7C51C8FB1 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4F68A2B08D873462D17712F /* APIClient.swift */; };
+		3FDCC3B7517B7376E3382999 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36AC0D7547F8B3A8C3FFFA5E /* AuthManager.swift */; };
+		45D8EB5C40444140699D1A05 /* WPCLITerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 868D9CF99D91AEC19C9CD02E /* WPCLITerminalView.swift */; };
+		724E824D0B17A388BA4B32CF /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 422AA09E60F21B7C1CD743AF /* LoginView.swift */; };
+		9E12F846D60A1367A7B64BEC /* BandcampScraperViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FBBCB47002F72CB15EB7A4F /* BandcampScraperViewModel.swift */; };
+		A12311CF18E3A58B9375AB44 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B992958350672AC0DBDF8FB /* SidebarView.swift */; };
+		B50D451CDBD0744808F625A2 /* bandcamp_scraper.py in Resources */ = {isa = PBXBuildFile; fileRef = 002695EF8F44B2A8D476C2ED /* bandcamp_scraper.py */; };
+		B936AB973D44C24FCF914679 /* BandcampScraperView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B803DCC0A05C316278625C97 /* BandcampScraperView.swift */; };
+		C978D88549D3C85719002EBE /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C29E25296D4A24AF6781AA4 /* KeychainService.swift */; };
+		D03524EA8D0F48E5BBDCCE74 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 877561A751695DFAFC8A8E18 /* APITypes.swift */; };
+		D39BE481BDB73F45EFAA89CB /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4180F5882C6EEFA621ADB0C /* ContentView.swift */; };
+		E06343F62054875E4CA9A0AE /* WPCLITerminalViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6819AD6A5D26930B0546135 /* WPCLITerminalViewModel.swift */; };
+		EC1D4868F5AC35C0F392A3F8 /* BandcampTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C9ABFB7347C539FE1D95B3B /* BandcampTypes.swift */; };
+		F351EB8A124448DC45E1B764 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD7D122C65F70DB389BBF6 /* SettingsView.swift */; };
+		F677A8CF348528D30CA40ABE /* ExtraChillDesktopApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B44017207706B6D039C6023 /* ExtraChillDesktopApp.swift */; };
+		F6D7E5F90157FAD0EBE30FCC /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B18BD3510E4E0DD2617284E /* PythonRunner.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		002695EF8F44B2A8D476C2ED /* bandcamp_scraper.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = bandcamp_scraper.py; sourceTree = "<group>"; };
+		1C29E25296D4A24AF6781AA4 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
+		2FBBCB47002F72CB15EB7A4F /* BandcampScraperViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BandcampScraperViewModel.swift; sourceTree = "<group>"; };
+		36AC0D7547F8B3A8C3FFFA5E /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
+		3C9ABFB7347C539FE1D95B3B /* BandcampTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BandcampTypes.swift; sourceTree = "<group>"; };
+		422AA09E60F21B7C1CD743AF /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
+		49FD7D122C65F70DB389BBF6 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		5B44017207706B6D039C6023 /* ExtraChillDesktopApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtraChillDesktopApp.swift; sourceTree = "<group>"; };
+		6B18BD3510E4E0DD2617284E /* PythonRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonRunner.swift; sourceTree = "<group>"; };
+		6B992958350672AC0DBDF8FB /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		868D9CF99D91AEC19C9CD02E /* WPCLITerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WPCLITerminalView.swift; sourceTree = "<group>"; };
+		877561A751695DFAFC8A8E18 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
+		A4F68A2B08D873462D17712F /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		B803DCC0A05C316278625C97 /* BandcampScraperView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BandcampScraperView.swift; sourceTree = "<group>"; };
+		C2B85C2F61E9883EA5301BC3 /* ExtraChillDesktop.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ExtraChillDesktop.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D4180F5882C6EEFA621ADB0C /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		E6819AD6A5D26930B0546135 /* WPCLITerminalViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WPCLITerminalViewModel.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		09D7A79D024FBC5CB7279439 /* Auth */ = {
+			isa = PBXGroup;
+			children = (
+				36AC0D7547F8B3A8C3FFFA5E /* AuthManager.swift */,
+				1C29E25296D4A24AF6781AA4 /* KeychainService.swift */,
+			);
+			path = Auth;
+			sourceTree = "<group>";
+		};
+		0C6A073DC06DCAF0329570A5 /* WPCLITerminal */ = {
+			isa = PBXGroup;
+			children = (
+				AEB01D12B049CA84A2D660C8 /* Views */,
+				E6819AD6A5D26930B0546135 /* WPCLITerminalViewModel.swift */,
+			);
+			path = WPCLITerminal;
+			sourceTree = "<group>";
+		};
+		0FA37615572F5219A78401F7 /* API */ = {
+			isa = PBXGroup;
+			children = (
+				A4F68A2B08D873462D17712F /* APIClient.swift */,
+				877561A751695DFAFC8A8E18 /* APITypes.swift */,
+			);
+			path = API;
+			sourceTree = "<group>";
+		};
+		3E021EA6B6697984856B6833 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				D4180F5882C6EEFA621ADB0C /* ContentView.swift */,
+				5B44017207706B6D039C6023 /* ExtraChillDesktopApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		663ECFF207FDC8B102A0C1C2 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				0FA37615572F5219A78401F7 /* API */,
+				09D7A79D024FBC5CB7279439 /* Auth */,
+				7BB5CFC8359A5F36BF4FE4AB /* Process */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		7BB5CFC8359A5F36BF4FE4AB /* Process */ = {
+			isa = PBXGroup;
+			children = (
+				6B18BD3510E4E0DD2617284E /* PythonRunner.swift */,
+			);
+			path = Process;
+			sourceTree = "<group>";
+		};
+		903721DE4633B6C621B1318A = {
+			isa = PBXGroup;
+			children = (
+				A41E243AAA817D7799CD001D /* ExtraChillDesktop */,
+				9F0E53D3FEB7886A9F476AB2 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		915144484E0B92A370C471E6 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				EF5B11F22AC0F65180E92230 /* Scripts */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		952831DC575989F376B2A12F /* Modules */ = {
+			isa = PBXGroup;
+			children = (
+				C71A93E27B5F105791DE00A2 /* BandcampScraper */,
+				0C6A073DC06DCAF0329570A5 /* WPCLITerminal */,
+			);
+			path = Modules;
+			sourceTree = "<group>";
+		};
+		9C4A135CEF3CF3E28E6BB5B1 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				422AA09E60F21B7C1CD743AF /* LoginView.swift */,
+				49FD7D122C65F70DB389BBF6 /* SettingsView.swift */,
+				6B992958350672AC0DBDF8FB /* SidebarView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		9F0E53D3FEB7886A9F476AB2 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C2B85C2F61E9883EA5301BC3 /* ExtraChillDesktop.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A41E243AAA817D7799CD001D /* ExtraChillDesktop */ = {
+			isa = PBXGroup;
+			children = (
+				3E021EA6B6697984856B6833 /* App */,
+				663ECFF207FDC8B102A0C1C2 /* Core */,
+				952831DC575989F376B2A12F /* Modules */,
+				915144484E0B92A370C471E6 /* Resources */,
+				9C4A135CEF3CF3E28E6BB5B1 /* Views */,
+			);
+			path = ExtraChillDesktop;
+			sourceTree = "<group>";
+		};
+		AEB01D12B049CA84A2D660C8 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				868D9CF99D91AEC19C9CD02E /* WPCLITerminalView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		C71A93E27B5F105791DE00A2 /* BandcampScraper */ = {
+			isa = PBXGroup;
+			children = (
+				FD4C6BB7690BFA2426B4AEC0 /* Views */,
+				2FBBCB47002F72CB15EB7A4F /* BandcampScraperViewModel.swift */,
+				3C9ABFB7347C539FE1D95B3B /* BandcampTypes.swift */,
+			);
+			path = BandcampScraper;
+			sourceTree = "<group>";
+		};
+		EF5B11F22AC0F65180E92230 /* Scripts */ = {
+			isa = PBXGroup;
+			children = (
+				002695EF8F44B2A8D476C2ED /* bandcamp_scraper.py */,
+			);
+			path = Scripts;
+			sourceTree = "<group>";
+		};
+		FD4C6BB7690BFA2426B4AEC0 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				B803DCC0A05C316278625C97 /* BandcampScraperView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		9814F8C3D7DD7F78E83E04EE /* ExtraChillDesktop */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C13CB7FA7535159837A9F8D0 /* Build configuration list for PBXNativeTarget "ExtraChillDesktop" */;
+			buildPhases = (
+				2A42C1EA59354996F408956B /* Sources */,
+				E3E8F6AC082A372E2806AADA /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ExtraChillDesktop;
+			packageProductDependencies = (
+			);
+			productName = ExtraChillDesktop;
+			productReference = C2B85C2F61E9883EA5301BC3 /* ExtraChillDesktop.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A588AAD227039F82126C33AE /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					9814F8C3D7DD7F78E83E04EE = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 38881C96FD4C13074E901316 /* Build configuration list for PBXProject "ExtraChillDesktop" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 903721DE4633B6C621B1318A;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				9814F8C3D7DD7F78E83E04EE /* ExtraChillDesktop */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		E3E8F6AC082A372E2806AADA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B50D451CDBD0744808F625A2 /* bandcamp_scraper.py in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		2A42C1EA59354996F408956B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				161D714E72D2DAF7C51C8FB1 /* APIClient.swift in Sources */,
+				D03524EA8D0F48E5BBDCCE74 /* APITypes.swift in Sources */,
+				3FDCC3B7517B7376E3382999 /* AuthManager.swift in Sources */,
+				B936AB973D44C24FCF914679 /* BandcampScraperView.swift in Sources */,
+				9E12F846D60A1367A7B64BEC /* BandcampScraperViewModel.swift in Sources */,
+				EC1D4868F5AC35C0F392A3F8 /* BandcampTypes.swift in Sources */,
+				D39BE481BDB73F45EFAA89CB /* ContentView.swift in Sources */,
+				F677A8CF348528D30CA40ABE /* ExtraChillDesktopApp.swift in Sources */,
+				C978D88549D3C85719002EBE /* KeychainService.swift in Sources */,
+				724E824D0B17A388BA4B32CF /* LoginView.swift in Sources */,
+				F6D7E5F90157FAD0EBE30FCC /* PythonRunner.swift in Sources */,
+				F351EB8A124448DC45E1B764 /* SettingsView.swift in Sources */,
+				A12311CF18E3A58B9375AB44 /* SidebarView.swift in Sources */,
+				45D8EB5C40444140699D1A05 /* WPCLITerminalView.swift in Sources */,
+				E06343F62054875E4CA9A0AE /* WPCLITerminalViewModel.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		81CB597DBD8A60D006593033 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Extra Chill Desktop";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Extra Chill. All rights reserved.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.desktop;
+				PRODUCT_NAME = "Extra Chill Desktop";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+		CEF7F8626D2EAC3FB9EAFF00 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		DA300D726C8AD9E5B2AE6FBF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Extra Chill Desktop";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Extra Chill. All rights reserved.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.desktop;
+				PRODUCT_NAME = "Extra Chill Desktop";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+		F58917AEE064A25013C29AED /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		38881C96FD4C13074E901316 /* Build configuration list for PBXProject "ExtraChillDesktop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F58917AEE064A25013C29AED /* Debug */,
+				CEF7F8626D2EAC3FB9EAFF00 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C13CB7FA7535159837A9F8D0 /* Build configuration list for PBXNativeTarget "ExtraChillDesktop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				81CB597DBD8A60D006593033 /* Debug */,
+				DA300D726C8AD9E5B2AE6FBF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A588AAD227039F82126C33AE /* Project object */;
+}
