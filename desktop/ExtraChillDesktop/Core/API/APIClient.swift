@@ -66,9 +66,9 @@ actor APIClient {
     
     // MARK: - Newsletter Methods
     
-    func bulkSubscribe(emails: [EmailEntry], listId: String) async throws -> BulkSubscribeResponse {
-        let request = BulkSubscribeRequest(emails: emails, listId: listId)
-        return try await post("/admin/newsletter/bulk-subscribe", body: request, requiresAuth: true)
+    func bulkSubscribe(emails: [EmailEntry], listId: String, source: String = "bandcamp-scraper") async throws -> BulkSubscribeResponse {
+        let request = BulkSubscribeRequest(emails: emails, listId: listId, source: source)
+        return try await post("/newsletter/subscribe", body: request, requiresAuth: true)
     }
     
     // MARK: - Private Methods

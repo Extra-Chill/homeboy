@@ -15,6 +15,7 @@
 		A12311CF18E3A58B9375AB44 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B992958350672AC0DBDF8FB /* SidebarView.swift */; };
 		B50D451CDBD0744808F625A2 /* bandcamp_scraper.py in Resources */ = {isa = PBXBuildFile; fileRef = 002695EF8F44B2A8D476C2ED /* bandcamp_scraper.py */; };
 		B936AB973D44C24FCF914679 /* BandcampScraperView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B803DCC0A05C316278625C97 /* BandcampScraperView.swift */; };
+		C0716622676CC4D27CA89498 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 48A8C43486401705FB888EF0 /* Assets.xcassets */; };
 		C978D88549D3C85719002EBE /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C29E25296D4A24AF6781AA4 /* KeychainService.swift */; };
 		D03524EA8D0F48E5BBDCCE74 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 877561A751695DFAFC8A8E18 /* APITypes.swift */; };
 		D39BE481BDB73F45EFAA89CB /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4180F5882C6EEFA621ADB0C /* ContentView.swift */; };
@@ -32,6 +33,7 @@
 		36AC0D7547F8B3A8C3FFFA5E /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
 		3C9ABFB7347C539FE1D95B3B /* BandcampTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BandcampTypes.swift; sourceTree = "<group>"; };
 		422AA09E60F21B7C1CD743AF /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
+		48A8C43486401705FB888EF0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		49FD7D122C65F70DB389BBF6 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		5B44017207706B6D039C6023 /* ExtraChillDesktopApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtraChillDesktopApp.swift; sourceTree = "<group>"; };
 		6B18BD3510E4E0DD2617284E /* PythonRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonRunner.swift; sourceTree = "<group>"; };
@@ -151,6 +153,7 @@
 				952831DC575989F376B2A12F /* Modules */,
 				915144484E0B92A370C471E6 /* Resources */,
 				9C4A135CEF3CF3E28E6BB5B1 /* Views */,
+				48A8C43486401705FB888EF0 /* Assets.xcassets */,
 			);
 			path = ExtraChillDesktop;
 			sourceTree = "<group>";
@@ -248,6 +251,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0716622676CC4D27CA89498 /* Assets.xcassets in Resources */,
 				B50D451CDBD0744808F625A2 /* bandcamp_scraper.py in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -16,6 +16,7 @@ targets:
           - Resources/Scripts/**
       - path: ExtraChillDesktop/Resources/Scripts
         buildPhase: resources
+      - path: ExtraChillDesktop/Assets.xcassets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.extrachill.desktop
@@ -30,3 +31,4 @@ targets:
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

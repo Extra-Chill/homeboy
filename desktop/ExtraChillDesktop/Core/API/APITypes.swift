@@ -79,10 +79,12 @@ struct LogoutRequest: Codable {
 struct BulkSubscribeRequest: Codable {
     let emails: [EmailEntry]
     let listId: String
+    let source: String
     
     enum CodingKeys: String, CodingKey {
         case emails
         case listId = "list_id"
+        case source
     }
 }
 

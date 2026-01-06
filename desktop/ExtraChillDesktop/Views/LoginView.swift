@@ -9,10 +9,11 @@ struct LoginView: View {
         VStack(spacing: 20) {
             Spacer()
             
-            // Logo placeholder
-            Image(systemName: "music.note.house")
-                .font(.system(size: 60))
-                .foregroundColor(.accentColor)
+            // Logo
+            Image("Logo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 150, height: 150)
             
             Text("Extra Chill Desktop")
                 .font(.largeTitle)
