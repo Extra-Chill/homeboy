@@ -11,7 +11,6 @@ struct SettingsView: View {
             Section("Account") {
                 if let user = authManager.user {
                     LabeledContent("Logged in as", value: user.displayName)
-                    LabeledContent("Email", value: user.email)
                     LabeledContent("Username", value: user.username)
                     
                     Button("Logout", role: .destructive) {

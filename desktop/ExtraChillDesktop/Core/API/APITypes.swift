@@ -18,12 +18,14 @@ struct LoginResponse: Codable {
     let accessToken: String
     let refreshToken: String
     let accessExpiresAt: String
+    let refreshExpiresAt: String
     let user: User
     
     enum CodingKeys: String, CodingKey {
         case accessToken = "access_token"
         case refreshToken = "refresh_token"
         case accessExpiresAt = "access_expires_at"
+        case refreshExpiresAt = "refresh_expires_at"
         case user
     }
 }
@@ -42,26 +44,28 @@ struct RefreshResponse: Codable {
     let accessToken: String
     let refreshToken: String
     let accessExpiresAt: String
+    let refreshExpiresAt: String
     
     enum CodingKeys: String, CodingKey {
         case accessToken = "access_token"
         case refreshToken = "refresh_token"
         case accessExpiresAt = "access_expires_at"
+        case refreshExpiresAt = "refresh_expires_at"
     }
 }
 
 struct User: Codable {
     let id: Int
     let username: String
-    let email: String
     let displayName: String
+    let avatarUrl: String?
     let profileUrl: String?
     
     enum CodingKeys: String, CodingKey {
         case id
         case username
-        case email
         case displayName = "display_name"
+        case avatarUrl = "avatar_url"
         case profileUrl = "profile_url"
     }
 }
