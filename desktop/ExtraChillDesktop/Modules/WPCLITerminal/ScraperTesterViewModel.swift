@@ -72,8 +72,17 @@ class ScraperTesterViewModel: ObservableObject {
         }
         
         process.terminationHandler = { [weak self] _ in
+            // Clear handler synchronously to prevent race with queued callbacks
+            pipe.fileHandleForReading.readabilityHandler = nil
+            
+            // Read any remaining data before dispatching to main
+            let remainingData = pipe.fileHandleForReading.readDataToEndOfFile()
+            let remainingOutput = String(data: remainingData, encoding: .utf8) ?? ""
+            
             DispatchQueue.main.async {
-                pipe.fileHandleForReading.readabilityHandler = nil
+                if !remainingOutput.isEmpty {
+                    self?.output += remainingOutput
+                }
                 self?.output += "\n--- Test Complete ---\n"
                 self?.isRunning = false
                 self?.process = nil

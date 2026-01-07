@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 
 @MainActor
 class BandcampScraperViewModel: ObservableObject {
@@ -130,6 +131,11 @@ class BandcampScraperViewModel: ObservableObject {
     
     func deselectAll() {
         selectedEmails.removeAll()
+    }
+    
+    func copyConsoleOutput() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(consoleOutput, forType: .string)
     }
     
     func subscribeToNewsletter() async {

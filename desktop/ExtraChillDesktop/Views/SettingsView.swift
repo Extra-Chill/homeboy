@@ -222,7 +222,7 @@ struct SettingsView: View {
             }
             
             Section("About") {
-                LabeledContent("Version", value: "0.1.2")
+                LabeledContent("Version", value: "0.1.3")
                 LabeledContent("Build", value: "3")
             }
         }

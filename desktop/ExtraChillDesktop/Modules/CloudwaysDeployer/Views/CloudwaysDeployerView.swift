@@ -2,6 +2,7 @@ import SwiftUI
 
 struct CloudwaysDeployerView: View {
     @StateObject private var viewModel = CloudwaysDeployerViewModel()
+    @State private var showCopiedFeedback = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -205,11 +206,26 @@ struct CloudwaysDeployerView: View {
                 Text("Console Output")
                     .font(.headline)
                 Spacer()
-                Button("Clear") {
+                Button {
+                    viewModel.copyConsoleOutput()
+                    showCopiedFeedback = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        showCopiedFeedback = false
+                    }
+                } label: {
+                    Image(systemName: showCopiedFeedback ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .disabled(viewModel.consoleOutput.isEmpty)
+                .help("Copy output")
+                Button {
                     viewModel.consoleOutput = ""
+                } label: {
+                    Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
                 .disabled(viewModel.isDeploying)
+                .help("Clear output")
             }
             
             ScrollViewReader { proxy in

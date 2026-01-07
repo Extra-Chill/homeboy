@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 
 struct NetworkSite: Identifiable, Hashable {
     let id: String
@@ -101,8 +102,17 @@ class WPCLITerminalViewModel: ObservableObject {
         }
         
         process.terminationHandler = { [weak self] _ in
+            // Clear handler synchronously to prevent race with queued callbacks
+            pipe.fileHandleForReading.readabilityHandler = nil
+            
+            // Read any remaining data before dispatching to main
+            let remainingData = pipe.fileHandleForReading.readDataToEndOfFile()
+            let remainingOutput = String(data: remainingData, encoding: .utf8) ?? ""
+            
             DispatchQueue.main.async {
-                pipe.fileHandleForReading.readabilityHandler = nil
+                if !remainingOutput.isEmpty {
+                    self?.output += remainingOutput
+                }
                 self?.output += "\n"
                 self?.isRunning = false
                 self?.process = nil
@@ -124,6 +134,11 @@ class WPCLITerminalViewModel: ObservableObject {
     
     func clearOutput() {
         output = ""
+    }
+    
+    func copyOutput() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(output, forType: .string)
     }
     
     func navigateHistory(direction: Int) {

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 
 @MainActor
 class CloudwaysDeployerViewModel: ObservableObject {
@@ -119,6 +120,11 @@ class CloudwaysDeployerViewModel: ObservableObject {
         selectedComponents.removeAll()
     }
     
+    func copyConsoleOutput() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(consoleOutput, forType: .string)
+    }
+    
     func selectOutdated() {
         selectedComponents = Set(components.filter { component in
             let status = self.status(for: component)
@@ -152,6 +158,7 @@ class CloudwaysDeployerViewModel: ObservableObject {
         currentDeployTask = nil
         isDeploying = false
         consoleOutput += "\n> Deployment cancelled\n"
+        deselectAll()
     }
     
     private func deployComponents(_ componentsToDeploy: [DeployableComponent]) async {
@@ -184,6 +191,7 @@ class CloudwaysDeployerViewModel: ObservableObject {
         isDeploying = false
         consoleOutput += "\n> Deployment complete. Refreshing versions...\n"
         refreshVersions()
+        deselectAll()
     }
     
     private func deployComponent(_ component: DeployableComponent, sshService: SSHService) async throws {
@@ -209,7 +217,8 @@ class CloudwaysDeployerViewModel: ObservableObject {
     }
     
     private func runBuild(for component: DeployableComponent) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        // Continuation returns remaining output to avoid DispatchQueue.main.sync deadlock
+        let remainingOutput: String = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: component.localFullPath)
             process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -238,12 +247,15 @@ class CloudwaysDeployerViewModel: ObservableObject {
                 try process.run()
                 process.waitUntilExit()
                 
+                // Clear handler and read remaining data synchronously
                 pipe.fileHandleForReading.readabilityHandler = nil
+                let remainingData = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: remainingData, encoding: .utf8) ?? ""
                 
                 if process.terminationStatus == 0 {
                     // Verify zip exists
                     if FileManager.default.fileExists(atPath: component.buildOutputPath) {
-                        continuation.resume()
+                        continuation.resume(returning: output)
                     } else {
                         continuation.resume(throwing: SSHError.commandFailed("Build completed but zip not found at \(component.buildOutputPath)"))
                     }
@@ -254,6 +266,12 @@ class CloudwaysDeployerViewModel: ObservableObject {
                 continuation.resume(throwing: error)
             }
         }
+        
+        // UI updates happen here, safely on @MainActor after continuation completes
+        if !remainingOutput.isEmpty {
+            consoleOutput += remainingOutput
+        }
+        consoleOutput += "> Build complete.\n"
     }
     
     private func uploadZip(for component: DeployableComponent, sshService: SSHService) async throws {
@@ -306,7 +324,7 @@ class CloudwaysDeployerViewModel: ObservableObject {
             }
             
             sshService.executeCommand(
-                "unzip -o ~/tmp/\(component.id).zip -d \"\(targetDir)\"",
+                "unzip -o ~/tmp/\(component.id).zip -d \"\(targetDir)\" && chmod -R 755 \"\(targetDir)/\(component.id)\"",
                 onOutput: { [weak self] line in
                     self?.consoleOutput += line
                 },

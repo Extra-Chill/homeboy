@@ -4,6 +4,8 @@ struct WPCLITerminalView: View {
     @StateObject private var terminalViewModel = WPCLITerminalViewModel()
     @StateObject private var scraperViewModel = ScraperTesterViewModel()
     @State private var selectedTab = 0
+    @State private var showTerminalCopiedFeedback = false
+    @State private var showScraperCopiedFeedback = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -65,6 +67,19 @@ struct WPCLITerminalView: View {
                 .frame(width: 180)
                 
                 Spacer()
+                
+                Button {
+                    terminalViewModel.copyOutput()
+                    showTerminalCopiedFeedback = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        showTerminalCopiedFeedback = false
+                    }
+                } label: {
+                    Image(systemName: showTerminalCopiedFeedback ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .disabled(terminalViewModel.output.isEmpty)
+                .help("Copy output")
                 
                 Button {
                     terminalViewModel.clearOutput()
@@ -199,10 +214,18 @@ struct WPCLITerminalView: View {
                 
                 Spacer()
                 
-                Button("Copy Output") {
+                Button {
                     scraperViewModel.copyOutput()
+                    showScraperCopiedFeedback = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        showScraperCopiedFeedback = false
+                    }
+                } label: {
+                    Image(systemName: showScraperCopiedFeedback ? "checkmark" : "doc.on.doc")
                 }
+                .buttonStyle(.borderless)
                 .disabled(scraperViewModel.output.isEmpty)
+                .help("Copy output")
                 
                 Button {
                     scraperViewModel.clearOutput()
