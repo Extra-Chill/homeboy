@@ -14,8 +14,17 @@ struct KeychainService {
     private enum Keys {
         static let accessToken = "accessToken"
         static let refreshToken = "refreshToken"
+        static let sshPrivateKey = "sshPrivateKey"
+    }
+    
+    // Non-sensitive data stored in UserDefaults to avoid Keychain prompts
+    private enum UserDefaultsKeys {
         static let accessExpiresAt = "accessExpiresAt"
         static let deviceId = "deviceId"
+        static let cloudwaysHost = "cloudwaysHost"
+        static let cloudwaysUsername = "cloudwaysUsername"
+        static let cloudwaysAppPath = "cloudwaysAppPath"
+        static let sshPublicKey = "sshPublicKey"
     }
     
     // MARK: - Token Storage
@@ -23,14 +32,14 @@ struct KeychainService {
     static func storeTokens(accessToken: String, refreshToken: String, expiresAt: Date) throws {
         try store(key: Keys.accessToken, value: accessToken)
         try store(key: Keys.refreshToken, value: refreshToken)
-        try store(key: Keys.accessExpiresAt, value: String(expiresAt.timeIntervalSince1970))
+        UserDefaults.standard.set(expiresAt.timeIntervalSince1970, forKey: UserDefaultsKeys.accessExpiresAt)
     }
     
     static func getTokens() -> (accessToken: String?, refreshToken: String?, expiresAt: Date?) {
         let accessToken = try? retrieve(key: Keys.accessToken)
         let refreshToken = try? retrieve(key: Keys.refreshToken)
-        let expiresAtString = try? retrieve(key: Keys.accessExpiresAt)
-        let expiresAt = expiresAtString.flatMap { Double($0) }.map { Date(timeIntervalSince1970: $0) }
+        let expiresAtInterval = UserDefaults.standard.double(forKey: UserDefaultsKeys.accessExpiresAt)
+        let expiresAt = expiresAtInterval > 0 ? Date(timeIntervalSince1970: expiresAtInterval) : nil
         
         return (accessToken, refreshToken, expiresAt)
     }
@@ -38,18 +47,18 @@ struct KeychainService {
     static func clearTokens() {
         try? delete(key: Keys.accessToken)
         try? delete(key: Keys.refreshToken)
-        try? delete(key: Keys.accessExpiresAt)
+        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.accessExpiresAt)
     }
     
-    // MARK: - Device ID
+    // MARK: - Device ID (UserDefaults - not sensitive)
     
     static func getOrCreateDeviceId() -> String {
-        if let existing = try? retrieve(key: Keys.deviceId) {
+        if let existing = UserDefaults.standard.string(forKey: UserDefaultsKeys.deviceId) {
             return existing
         }
         
         let newId = UUID().uuidString
-        try? store(key: Keys.deviceId, value: newId)
+        UserDefaults.standard.set(newId, forKey: UserDefaultsKeys.deviceId)
         return newId
     }
     
@@ -62,7 +71,8 @@ struct KeychainService {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: key,
-            kSecValueData as String: data
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked
         ]
         
         // Try to delete existing item first
@@ -110,5 +120,69 @@ struct KeychainService {
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainError.unexpectedStatus(status)
         }
+    }
+    
+    // MARK: - Cloudways Credentials (UserDefaults - not sensitive)
+    
+    static func storeCloudwaysCredentials(host: String, username: String, appPath: String) {
+        UserDefaults.standard.set(host, forKey: UserDefaultsKeys.cloudwaysHost)
+        UserDefaults.standard.set(username, forKey: UserDefaultsKeys.cloudwaysUsername)
+        UserDefaults.standard.set(appPath, forKey: UserDefaultsKeys.cloudwaysAppPath)
+    }
+    
+    static func getCloudwaysCredentials() -> (host: String?, username: String?, appPath: String?) {
+        let host = UserDefaults.standard.string(forKey: UserDefaultsKeys.cloudwaysHost)
+        let username = UserDefaults.standard.string(forKey: UserDefaultsKeys.cloudwaysUsername)
+        let appPath = UserDefaults.standard.string(forKey: UserDefaultsKeys.cloudwaysAppPath)
+        return (host, username, appPath)
+    }
+    
+    static func hasCloudwaysCredentials() -> Bool {
+        let creds = getCloudwaysCredentials()
+        return creds.host != nil && !creds.host!.isEmpty &&
+               creds.username != nil && !creds.username!.isEmpty &&
+               creds.appPath != nil && !creds.appPath!.isEmpty
+    }
+    
+    static func clearCloudwaysCredentials() {
+        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.cloudwaysHost)
+        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.cloudwaysUsername)
+        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.cloudwaysAppPath)
+    }
+    
+    // MARK: - SSH Key Storage (Private key in Keychain, public key in UserDefaults)
+    
+    static func storeSSHKeyPair(privateKey: String, publicKey: String) throws {
+        try store(key: Keys.sshPrivateKey, value: privateKey)
+        UserDefaults.standard.set(publicKey, forKey: UserDefaultsKeys.sshPublicKey)
+    }
+    
+    static func getSSHKeyPair() -> (privateKey: String?, publicKey: String?) {
+        let privateKey = try? retrieve(key: Keys.sshPrivateKey)
+        let publicKey = UserDefaults.standard.string(forKey: UserDefaultsKeys.sshPublicKey)
+        return (privateKey, publicKey)
+    }
+    
+    static func hasSSHKey() -> Bool {
+        // Check file on disk instead of Keychain to avoid password prompts
+        let keyPath = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("ExtraChillDesktop")
+            .appendingPathComponent("id_rsa")
+            .path
+        return FileManager.default.fileExists(atPath: keyPath)
+    }
+    
+    static func clearSSHKeys() {
+        try? delete(key: Keys.sshPrivateKey)
+        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.sshPublicKey)
+    }
+    
+    // MARK: - Reset All
+    
+    static func clearAll() {
+        clearTokens()
+        clearCloudwaysCredentials()
+        clearSSHKeys()
+        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.deviceId)
     }
 }

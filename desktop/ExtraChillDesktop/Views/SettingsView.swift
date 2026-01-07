@@ -6,6 +6,25 @@ struct SettingsView: View {
     @AppStorage("localWPPath") private var localWPPath = "/Users/chubes/Developer/LocalWP/testing-grounds/app/public"
     @AppStorage("lastUsedTag") private var lastUsedTag = ""
     
+    // Deployment paths
+    @AppStorage("extraChillBasePath") private var extraChillBasePath = "/Users/chubes/Developer/Extra Chill Platform"
+    @AppStorage("dataMachineBasePath") private var dataMachineBasePath = "/Users/chubes/Developer/Data Machine Ecosystem"
+    
+    @State private var phpVersion: String?
+    @State private var mysqlVersion: String?
+    @State private var testResult: (success: Bool, message: String)?
+    @State private var isTesting = false
+    
+    // Cloudways settings
+    @State private var cloudwaysHost = ""
+    @State private var cloudwaysUsername = ""
+    @State private var cloudwaysAppPath = ""
+    @State private var hasSSHKey = false
+    @State private var publicKey: String?
+    @State private var isGeneratingKey = false
+    @State private var isTestingCloudways = false
+    @State private var cloudwaysTestResult: (success: Bool, message: String)?
+    
     var body: some View {
         Form {
             Section("Account") {
@@ -37,6 +56,27 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
+                // Detected Local by Flywheel paths
+                LabeledContent("PHP Version") {
+                    if let version = phpVersion {
+                        Text(version)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Not detected")
+                            .foregroundColor(.red)
+                    }
+                }
+                
+                LabeledContent("MySQL Version") {
+                    if let version = mysqlVersion {
+                        Text(version)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Not detected")
+                            .foregroundColor(.orange)
+                    }
+                }
+                
                 HStack {
                     Button("Browse...") {
                         selectFolder()
@@ -44,6 +84,18 @@ struct SettingsView: View {
                     
                     Button("Test Connection") {
                         testWPCLI()
+                    }
+                    .disabled(isTesting || phpVersion == nil)
+                }
+                
+                // Test result display
+                if let result = testResult {
+                    HStack {
+                        Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(result.success ? .green : .red)
+                        Text(result.message)
+                            .font(.caption)
+                            .foregroundColor(result.success ? .green : .red)
                     }
                 }
             }
@@ -56,14 +108,206 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
             
+            Section("Deployment Paths") {
+                TextField("Extra Chill Platform", text: $extraChillBasePath)
+                    .textFieldStyle(.roundedBorder)
+                Text("Local path to the Extra Chill Platform repository")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                TextField("Data Machine Ecosystem", text: $dataMachineBasePath)
+                    .textFieldStyle(.roundedBorder)
+                Text("Local path to the Data Machine Ecosystem repository")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Section("Cloudways Deployment") {
+                TextField("Server Host", text: $cloudwaysHost)
+                    .textFieldStyle(.roundedBorder)
+                TextField("SSH Username", text: $cloudwaysUsername)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Application Path", text: $cloudwaysAppPath)
+                    .textFieldStyle(.roundedBorder)
+                Text("e.g., /applications/extrachill_main/public_html")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                HStack {
+                    Button("Save Credentials") {
+                        saveCloudwaysCredentials()
+                    }
+                    .disabled(cloudwaysHost.isEmpty || cloudwaysUsername.isEmpty || cloudwaysAppPath.isEmpty)
+                }
+                
+                Divider()
+                
+                // SSH Key Section
+                Text("SSH Key Authentication")
+                    .font(.headline)
+                
+                if hasSSHKey {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("SSH key configured")
+                        Spacer()
+                        Button("Show Public Key") {
+                            showPublicKey()
+                        }
+                        .buttonStyle(.borderless)
+                        Button("Remove Key", role: .destructive) {
+                            removeSSHKey()
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                } else {
+                    Text("Generate an SSH key pair to enable passwordless deployment.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Button("Generate SSH Key") {
+                        generateSSHKey()
+                    }
+                    .disabled(isGeneratingKey)
+                    
+                    if isGeneratingKey {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+                
+                if let key = publicKey {
+                    GroupBox("Public Key (add to ~/.ssh/authorized_keys on server)") {
+                        ScrollView {
+                            Text(key)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(height: 60)
+                        
+                        Button("Copy to Clipboard") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(key, forType: .string)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                
+                Divider()
+                
+                // Test connection
+                HStack {
+                    Button("Test Connection") {
+                        testCloudwaysConnection()
+                    }
+                    .disabled(!hasSSHKey || isTestingCloudways || cloudwaysHost.isEmpty)
+                    
+                    if isTestingCloudways {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+                
+                if let result = cloudwaysTestResult {
+                    HStack {
+                        Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(result.success ? .green : .red)
+                        Text(result.message)
+                            .font(.caption)
+                            .foregroundColor(result.success ? .green : .red)
+                    }
+                }
+            }
+            
             Section("About") {
-                LabeledContent("Version", value: "0.1.0")
-                LabeledContent("Build", value: "1")
+                LabeledContent("Version", value: "0.1.1")
+                LabeledContent("Build", value: "2")
             }
         }
         .formStyle(.grouped)
         .padding()
         .frame(minWidth: 500)
+        .onAppear {
+            detectLocalPaths()
+            loadCloudwaysSettings()
+        }
+    }
+    
+    private func detectLocalPaths() {
+        phpVersion = LocalEnvironment.detectedPHPVersion()
+        mysqlVersion = LocalEnvironment.detectedMySQLVersion()
+    }
+    
+    // MARK: - Cloudways Settings
+    
+    private func loadCloudwaysSettings() {
+        let creds = KeychainService.getCloudwaysCredentials()
+        cloudwaysHost = creds.host ?? ""
+        cloudwaysUsername = creds.username ?? ""
+        cloudwaysAppPath = creds.appPath ?? ""
+        hasSSHKey = KeychainService.hasSSHKey()
+    }
+    
+    private func saveCloudwaysCredentials() {
+        KeychainService.storeCloudwaysCredentials(
+            host: cloudwaysHost,
+            username: cloudwaysUsername,
+            appPath: cloudwaysAppPath
+        )
+        cloudwaysTestResult = (true, "Credentials saved")
+    }
+    
+    private func generateSSHKey() {
+        isGeneratingKey = true
+        publicKey = nil
+        
+        SSHService.generateSSHKeyPair { result in
+            isGeneratingKey = false
+            switch result {
+            case .success(let keys):
+                hasSSHKey = true
+                publicKey = keys.publicKey
+            case .failure(let error):
+                cloudwaysTestResult = (false, "Key generation failed: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    private func showPublicKey() {
+        publicKey = KeychainService.getSSHKeyPair().publicKey
+    }
+    
+    private func removeSSHKey() {
+        KeychainService.clearSSHKeys()
+        
+        // Also remove from disk
+        try? FileManager.default.removeItem(atPath: SSHService.defaultKeyPath)
+        try? FileManager.default.removeItem(atPath: SSHService.defaultPublicKeyPath)
+        
+        hasSSHKey = false
+        publicKey = nil
+    }
+    
+    private func testCloudwaysConnection() {
+        guard let sshService = SSHService() else {
+            cloudwaysTestResult = (false, "SSH not configured")
+            return
+        }
+        
+        isTestingCloudways = true
+        cloudwaysTestResult = nil
+        
+        sshService.testConnection { result in
+            isTestingCloudways = false
+            switch result {
+            case .success(let output):
+                cloudwaysTestResult = (true, output)
+            case .failure(let error):
+                cloudwaysTestResult = (false, error.localizedDescription)
+            }
+        }
     }
     
     private func selectFolder() {
@@ -79,8 +323,47 @@ struct SettingsView: View {
     }
     
     private func testWPCLI() {
-        // TODO: Implement WP-CLI test
-        print("Testing WP-CLI at: \(localWPPath)")
+        guard let environment = LocalEnvironment.buildEnvironment() else {
+            testResult = (false, "PHP not detected")
+            return
+        }
+        
+        isTesting = true
+        testResult = nil
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.currentDirectoryURL = URL(fileURLWithPath: localWPPath)
+            process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/wp")
+            process.arguments = ["core", "version"]
+            process.environment = environment
+            
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            
+            do {
+                try process.run()
+                process.waitUntilExit()
+                
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                
+                DispatchQueue.main.async {
+                    isTesting = false
+                    if process.terminationStatus == 0 {
+                        testResult = (true, "WordPress \(output)")
+                    } else {
+                        testResult = (false, output.isEmpty ? "Command failed" : output)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    isTesting = false
+                    testResult = (false, error.localizedDescription)
+                }
+            }
+        }
     }
 }
 

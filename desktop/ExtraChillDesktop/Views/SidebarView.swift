@@ -7,7 +7,7 @@ struct SidebarView: View {
     var body: some View {
         List(selection: $selectedItem) {
             Section("Tools") {
-                ForEach([SidebarItem.bandcampScraper, .wpcliTerminal], id: \.self) { item in
+                ForEach([SidebarItem.bandcampScraper, .cloudwaysDeployer, .wpcliTerminal], id: \.self) { item in
                     Label(item.rawValue, systemImage: item.icon)
                         .tag(item)
                 }
@@ -15,8 +15,6 @@ struct SidebarView: View {
             
             Section("VPS (Coming Soon)") {
                 Label("Instagram Bot", systemImage: "camera")
-                    .foregroundColor(.secondary)
-                Label("Streaming", systemImage: "video")
                     .foregroundColor(.secondary)
             }
             .disabled(true)

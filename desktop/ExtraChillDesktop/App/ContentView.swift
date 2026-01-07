@@ -2,6 +2,7 @@ import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable {
     case bandcampScraper = "Bandcamp Scraper"
+    case cloudwaysDeployer = "Cloudways Deployer"
     case wpcliTerminal = "WP-CLI Terminal"
     case settings = "Settings"
     
@@ -10,6 +11,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .bandcampScraper: return "music.note.list"
+        case .cloudwaysDeployer: return "arrow.up.to.line"
         case .wpcliTerminal: return "terminal"
         case .settings: return "gear"
         }
@@ -37,18 +39,23 @@ struct ContentView: View {
         }
     }
     
-    @ViewBuilder
+    /// Views are kept mounted in a ZStack to preserve state (including running processes)
+    /// when switching tabs. Only the selected view is visible via opacity.
     private var detailView: some View {
-        switch selectedItem {
-        case .bandcampScraper:
+        ZStack {
             BandcampScraperView()
-        case .wpcliTerminal:
+                .opacity(selectedItem == .bandcampScraper ? 1 : 0)
+            CloudwaysDeployerView()
+                .opacity(selectedItem == .cloudwaysDeployer ? 1 : 0)
             WPCLITerminalView()
-        case .settings:
+                .opacity(selectedItem == .wpcliTerminal ? 1 : 0)
             SettingsView()
-        case .none:
-            Text("Select an item from the sidebar")
-                .foregroundColor(.secondary)
+                .opacity(selectedItem == .settings ? 1 : 0)
+            
+            if selectedItem == nil {
+                Text("Select an item from the sidebar")
+                    .foregroundColor(.secondary)
+            }
         }
     }
 }

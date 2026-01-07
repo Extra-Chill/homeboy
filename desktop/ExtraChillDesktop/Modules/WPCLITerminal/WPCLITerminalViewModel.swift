@@ -1,6 +1,17 @@
 import Foundation
 import SwiftUI
 
+struct NetworkSite: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let path: String
+    let blogId: Int
+    
+    var urlFlag: String {
+        "testing-grounds.local\(path)"
+    }
+}
+
 @MainActor
 class WPCLITerminalViewModel: ObservableObject {
     @Published var command = ""
@@ -10,32 +21,35 @@ class WPCLITerminalViewModel: ObservableObject {
     @Published var historyIndex = -1
     
     @AppStorage("localWPPath") var localWPPath = "/Users/chubes/Developer/LocalWP/testing-grounds/app/public"
-    @AppStorage("savedCommands") private var savedCommandsData = Data()
-    
-    var savedCommands: [SavedCommand] {
-        get {
-            (try? JSONDecoder().decode([SavedCommand].self, from: savedCommandsData)) ?? defaultCommands
-        }
-        set {
-            savedCommandsData = (try? JSONEncoder().encode(newValue)) ?? Data()
-        }
-    }
+    @AppStorage("selectedSiteId") private var selectedSiteId = "main"
     
     private var process: Process?
     
-    private var defaultCommands: [SavedCommand] {
-        [
-            SavedCommand(name: "Core Version", command: "wp core version"),
-            SavedCommand(name: "Plugin List", command: "wp plugin list --status=active"),
-            SavedCommand(name: "Clear Cache", command: "wp cache flush"),
-            SavedCommand(name: "DB Export", command: "wp db export"),
-        ]
+    static let networkSites: [NetworkSite] = [
+        NetworkSite(id: "main", name: "Main", path: "", blogId: 1),
+        NetworkSite(id: "community", name: "Community", path: "/community", blogId: 2),
+        NetworkSite(id: "shop", name: "Shop", path: "/shop", blogId: 3),
+        NetworkSite(id: "artist", name: "Artist", path: "/artist", blogId: 4),
+        NetworkSite(id: "chat", name: "Chat", path: "/chat", blogId: 5),
+        NetworkSite(id: "events", name: "Events", path: "/events", blogId: 7),
+        NetworkSite(id: "stream", name: "Stream", path: "/stream", blogId: 8),
+        NetworkSite(id: "newsletter", name: "Newsletter", path: "/newsletter", blogId: 9),
+        NetworkSite(id: "docs", name: "Docs", path: "/docs", blogId: 10),
+        NetworkSite(id: "wire", name: "Wire", path: "/wire", blogId: 11),
+        NetworkSite(id: "horoscope", name: "Horoscope", path: "/horoscope", blogId: 12),
+    ]
+    
+    var selectedSite: NetworkSite {
+        Self.networkSites.first { $0.id == selectedSiteId } ?? Self.networkSites[0]
+    }
+    
+    func selectSite(_ site: NetworkSite) {
+        selectedSiteId = site.id
     }
     
     func runCommand() {
         guard !command.isEmpty, !isRunning else { return }
         
-        // Add to history
         if commandHistory.last != command {
             commandHistory.append(command)
         }
@@ -45,25 +59,31 @@ class WPCLITerminalViewModel: ObservableObject {
         command = ""
     }
     
-    func runSavedCommand(_ savedCommand: SavedCommand) {
-        guard !isRunning else { return }
-        executeCommand(savedCommand.command)
-    }
-    
     private func executeCommand(_ cmd: String) {
         isRunning = true
-        output += "$ \(cmd)\n"
+        output += "$ \(cmd) --url=\(selectedSite.urlFlag)\n"
+        
+        guard let environment = LocalEnvironment.buildEnvironment() else {
+            output += "Error: Local by Flywheel PHP not detected.\n"
+            output += "Please ensure Local is installed and has a PHP version available.\n"
+            output += "Expected path: ~/Library/Application Support/Local/lightning-services/php-*/\n"
+            isRunning = false
+            return
+        }
         
         let process = Process()
         self.process = process
         
         process.currentDirectoryURL = URL(fileURLWithPath: localWPPath)
         process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/wp")
+        process.environment = environment
         
-        // Parse command string into arguments (simple split, doesn't handle quoted strings perfectly)
-        let args = cmd.replacingOccurrences(of: "wp ", with: "")
+        var args = cmd.replacingOccurrences(of: "wp ", with: "")
             .components(separatedBy: " ")
             .filter { !$0.isEmpty }
+        
+        // Append --url flag for multisite targeting
+        args.append("--url=\(selectedSite.urlFlag)")
         
         process.arguments = args
         
@@ -117,22 +137,4 @@ class WPCLITerminalViewModel: ObservableObject {
             command = ""
         }
     }
-    
-    func addSavedCommand(name: String, command: String) {
-        var commands = savedCommands
-        commands.append(SavedCommand(name: name, command: command))
-        savedCommands = commands
-    }
-    
-    func removeSavedCommand(_ savedCommand: SavedCommand) {
-        var commands = savedCommands
-        commands.removeAll { $0.id == savedCommand.id }
-        savedCommands = commands
-    }
-}
-
-struct SavedCommand: Codable, Identifiable, Equatable {
-    var id = UUID()
-    let name: String
-    let command: String
 }

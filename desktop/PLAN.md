@@ -34,7 +34,6 @@ Execute WP-CLI commands on testing-grounds.local with real-time output.
 
 ### 4. VPS Dashboard (Future - Placeholder)
 - Instagram Bot management (when VPS deployed)
-- Streaming controls (when VPS deployed)
 - Disabled sidebar items until VPS is ready
 
 ---
@@ -444,7 +443,6 @@ POST /extrachill/v1/admin/newsletter/bulk-subscribe
 
 ### VPS Integration (when deployed)
 - Instagram Bot dashboard (account management, campaign config, real-time logs)
-- Streaming controls (start/stop streams, view status)
 - WebSocket connection for live updates
 
 ### Agent Integration

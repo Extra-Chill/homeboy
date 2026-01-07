@@ -6,6 +6,7 @@ class BandcampScraperViewModel: ObservableObject {
     @Published var tag: String = ""
     @Published var clicks: Int = 3
     @Published var isRunning = false
+    @Published var isSettingUp = false
     @Published var consoleOutput = ""
     @Published var results: [ScrapedEmail] = []
     @Published var selectedEmails: Set<String> = []
@@ -19,23 +20,44 @@ class BandcampScraperViewModel: ObservableObject {
     private let pythonRunner = PythonRunner()
     
     init() {
-        // Load last used tag
         if !lastUsedTag.isEmpty {
             tag = lastUsedTag
         }
     }
     
     func startScrape() {
-        guard !isRunning else { return }
+        guard !isRunning && !isSettingUp else { return }
         
-        // Save tag for next time
         lastUsedTag = tag
-        
-        isRunning = true
         consoleOutput = ""
         results = []
         selectedEmails = []
         error = nil
+        
+        // Check if Python environment exists, set it up if not
+        if !pythonRunner.checkVenvExists() {
+            isSettingUp = true
+            pythonRunner.runFullSetup(
+                onOutput: { [weak self] line in
+                    self?.consoleOutput += line
+                },
+                onComplete: { [weak self] result in
+                    self?.isSettingUp = false
+                    switch result {
+                    case .success:
+                        self?.runScraper()
+                    case .failure(let error):
+                        self?.error = "Setup failed: \(error.localizedDescription)"
+                    }
+                }
+            )
+        } else {
+            runScraper()
+        }
+    }
+    
+    private func runScraper() {
+        isRunning = true
         
         let arguments = [
             "--tag", tag,

@@ -2,37 +2,19 @@ import SwiftUI
 
 struct BandcampScraperView: View {
     @StateObject private var viewModel = BandcampScraperViewModel()
-    @State private var showingSetup = false
-    @State private var setupOutput = ""
-    @State private var isSettingUp = false
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             headerSection
-            
             Divider()
-            
-            // Main content
             HSplitView {
-                // Left: Console output
                 consoleSection
                     .frame(minWidth: 300)
-                
-                // Right: Results table
                 resultsSection
                     .frame(minWidth: 400)
             }
         }
         .frame(minWidth: 800, minHeight: 600)
-        .onAppear {
-            if !viewModel.checkPythonSetup() {
-                showingSetup = true
-            }
-        }
-        .sheet(isPresented: $showingSetup) {
-            setupSheet
-        }
     }
     
     // MARK: - Header Section
@@ -47,7 +29,7 @@ struct BandcampScraperView: View {
                 TextField("e.g., south-carolina, lo-fi", text: $viewModel.tag)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 200)
-                    .disabled(viewModel.isRunning)
+                    .disabled(viewModel.isRunning || viewModel.isSettingUp)
             }
             
             // Clicks stepper
@@ -57,20 +39,27 @@ struct BandcampScraperView: View {
                     .foregroundColor(.secondary)
                 Stepper("\(viewModel.clicks)", value: $viewModel.clicks, in: 1...10)
                     .frame(width: 100)
-                    .disabled(viewModel.isRunning)
+                    .disabled(viewModel.isRunning || viewModel.isSettingUp)
             }
             
             Spacer()
             
             // Action buttons
-            if viewModel.isRunning {
+            if viewModel.isRunning || viewModel.isSettingUp {
                 Button("Cancel") {
                     viewModel.cancelScrape()
                 }
                 .buttonStyle(.bordered)
+                .disabled(viewModel.isSettingUp)
                 
                 ProgressView()
                     .controlSize(.small)
+                
+                if viewModel.isSettingUp {
+                    Text("Setting up...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             } else {
                 Button("Start Scrape") {
                     viewModel.startScrape()
@@ -201,71 +190,6 @@ struct BandcampScraperView: View {
         .padding()
     }
     
-    // MARK: - Setup Sheet
-    
-    private var setupSheet: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "gear.badge.questionmark")
-                .font(.system(size: 50))
-                .foregroundColor(.orange)
-            
-            Text("Python Setup Required")
-                .font(.title)
-            
-            Text("The Bandcamp Scraper needs to set up a Python environment with Playwright.")
-                .multilineTextAlignment(.center)
-                .foregroundColor(.secondary)
-            
-            if isSettingUp {
-                ScrollView {
-                    Text(setupOutput)
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(height: 200)
-                .background(Color(nsColor: .textBackgroundColor))
-                .cornerRadius(8)
-                
-                ProgressView()
-            } else {
-                Button("Set Up Python Environment") {
-                    runSetup()
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            
-            Button("Cancel") {
-                showingSetup = false
-            }
-            .buttonStyle(.bordered)
-            .disabled(isSettingUp)
-        }
-        .padding(40)
-        .frame(width: 500)
-    }
-    
-    private func runSetup() {
-        isSettingUp = true
-        setupOutput = "Creating virtual environment...\n"
-        
-        viewModel.setupPython(
-            onOutput: { line in
-                setupOutput += line
-            },
-            onComplete: { result in
-                isSettingUp = false
-                switch result {
-                case .success:
-                    setupOutput += "\n✓ Setup complete!"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                        showingSetup = false
-                    }
-                case .failure(let error):
-                    setupOutput += "\n✗ Setup failed: \(error.localizedDescription)"
-                }
-            }
-        )
-    }
 }
 
 #Preview {

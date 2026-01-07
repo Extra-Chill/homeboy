@@ -2,6 +2,7 @@ import Foundation
 
 class PythonRunner: ObservableObject {
     @Published var isRunning = false
+    @Published var isSettingUp = false
     @Published var output = ""
     @Published var error: String?
     
@@ -9,8 +10,8 @@ class PythonRunner: ObservableObject {
     private let pythonPath = "/opt/homebrew/bin/python3"
     
     var venvPath: String {
-        let bundlePath = Bundle.main.bundlePath
-        return "\(bundlePath)/../venv"
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent("ExtraChillDesktop/venv").path
     }
     
     var venvPythonPath: String {
@@ -19,6 +20,15 @@ class PythonRunner: ObservableObject {
     
     var scriptsPath: String {
         Bundle.main.resourcePath ?? ""
+    }
+    
+    private func ensureAppSupportDirectoryExists() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appDir = appSupport.appendingPathComponent("ExtraChillDesktop")
+        
+        if !FileManager.default.fileExists(atPath: appDir.path) {
+            try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+        }
     }
     
     func run(script: String, arguments: [String] = [], onOutput: @escaping (String) -> Void, onComplete: @escaping (Result<String, Error>) -> Void) {
@@ -98,6 +108,8 @@ class PythonRunner: ObservableObject {
     }
     
     func setupVenv(onOutput: @escaping (String) -> Void, onComplete: @escaping (Result<Void, Error>) -> Void) {
+        ensureAppSupportDirectoryExists()
+        
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-m", "venv", venvPath]
@@ -169,6 +181,36 @@ class PythonRunner: ObservableObject {
             try process.run()
         } catch {
             onComplete(.failure(error))
+        }
+    }
+    
+    func runFullSetup(onOutput: @escaping (String) -> Void, onComplete: @escaping (Result<Void, Error>) -> Void) {
+        isSettingUp = true
+        onOutput("Setting up Python environment...\n")
+        onOutput("Creating virtual environment at \(venvPath)...\n")
+        
+        setupVenv(onOutput: onOutput) { [weak self] result in
+            switch result {
+            case .success:
+                onOutput("\nInstalling dependencies...\n")
+                self?.installDependencies(onOutput: onOutput) { result in
+                    DispatchQueue.main.async {
+                        self?.isSettingUp = false
+                    }
+                    switch result {
+                    case .success:
+                        onOutput("\nPython environment ready!\n\n")
+                        onComplete(.success(()))
+                    case .failure(let error):
+                        onComplete(.failure(error))
+                    }
+                }
+            case .failure(let error):
+                DispatchQueue.main.async {
+                    self?.isSettingUp = false
+                }
+                onComplete(.failure(error))
+            }
         }
     }
     
