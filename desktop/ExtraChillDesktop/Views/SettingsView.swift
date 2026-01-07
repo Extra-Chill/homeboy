@@ -222,8 +222,8 @@ struct SettingsView: View {
             }
             
             Section("About") {
-                LabeledContent("Version", value: "0.1.1")
-                LabeledContent("Build", value: "2")
+                LabeledContent("Version", value: "0.1.2")
+                LabeledContent("Build", value: "3")
             }
         }
         .formStyle(.grouped)

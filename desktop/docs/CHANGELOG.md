@@ -2,6 +2,11 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.1.2
+
+- Cloudways Deployer: after a deployment finishes, remote/local versions are reloaded via `refreshVersions()` (previously only re-fetched remote versions).
+- Cloudways Deployer: upload/extract/cleanup now consistently uses `~/tmp/<component>.zip` instead of `/tmp/<component>.zip`.
+
 ## 0.1.1
 
 - Added Cloudways deployment module: component registry, local/remote version comparison, and SSH/SCP-based build+deploy workflow.

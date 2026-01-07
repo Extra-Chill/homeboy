@@ -183,7 +183,7 @@ class CloudwaysDeployerViewModel: ObservableObject {
         
         isDeploying = false
         consoleOutput += "\n> Deployment complete. Refreshing versions...\n"
-        fetchRemoteVersions()
+        refreshVersions()
     }
     
     private func deployComponent(_ component: DeployableComponent, sshService: SSHService) async throws {
@@ -260,7 +260,7 @@ class CloudwaysDeployerViewModel: ObservableObject {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sshService.uploadFile(
                 localPath: component.buildOutputPath,
-                remotePath: "/tmp/\(component.id).zip",
+                remotePath: "tmp/\(component.id).zip",
                 onOutput: { [weak self] line in
                     self?.consoleOutput += line
                 },
@@ -306,7 +306,7 @@ class CloudwaysDeployerViewModel: ObservableObject {
             }
             
             sshService.executeCommand(
-                "unzip -o /tmp/\(component.id).zip -d \"\(targetDir)\"",
+                "unzip -o ~/tmp/\(component.id).zip -d \"\(targetDir)\"",
                 onOutput: { [weak self] line in
                     self?.consoleOutput += line
                 },
@@ -325,7 +325,7 @@ class CloudwaysDeployerViewModel: ObservableObject {
     private func cleanupRemoteZip(for component: DeployableComponent, sshService: SSHService) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sshService.executeCommand(
-                "rm -f /tmp/\(component.id).zip",
+                "rm -f ~/tmp/\(component.id).zip",
                 onOutput: nil,
                 onComplete: { result in
                     switch result {
