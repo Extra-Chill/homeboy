@@ -43,6 +43,16 @@ struct BandcampScraperView: View {
                     .disabled(viewModel.isRunning || viewModel.isSettingUp)
             }
             
+            // Workers stepper
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Concurrent Workers")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Stepper("\(viewModel.workers)", value: $viewModel.workers, in: 1...10)
+                    .frame(width: 100)
+                    .disabled(viewModel.isRunning || viewModel.isSettingUp)
+            }
+            
             Spacer()
             
             // Action buttons

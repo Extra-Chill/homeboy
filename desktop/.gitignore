@@ -39,3 +39,4 @@ dist/
 # Environment
 .env
 .env.local
+.build/

@@ -6,6 +6,7 @@ import AppKit
 class BandcampScraperViewModel: ObservableObject {
     @Published var tag: String = ""
     @Published var clicks: Int = 3
+    @Published var workers: Int = 2
     @Published var isRunning = false
     @Published var isSettingUp = false
     @Published var consoleOutput = ""
@@ -17,6 +18,7 @@ class BandcampScraperViewModel: ObservableObject {
     
     @AppStorage("sendyListId") var sendyListId = ""
     @AppStorage("lastUsedTag") var lastUsedTag = ""
+    @AppStorage("scraperWorkers") var savedWorkers = 2
     
     private let pythonRunner = PythonRunner()
     
@@ -24,6 +26,7 @@ class BandcampScraperViewModel: ObservableObject {
         if !lastUsedTag.isEmpty {
             tag = lastUsedTag
         }
+        workers = savedWorkers
     }
     
     func startScrape() {
@@ -60,9 +63,12 @@ class BandcampScraperViewModel: ObservableObject {
     private func runScraper() {
         isRunning = true
         
+        savedWorkers = workers  // Persist for next session
+        
         let arguments = [
             "--tag", tag,
             "--clicks", String(clicks),
+            "--workers", String(workers),
             "--output", "json",
             "--headless", "true"
         ]

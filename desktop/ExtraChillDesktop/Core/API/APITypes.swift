@@ -115,10 +115,14 @@ struct BulkSubscribeResponse: Codable {
 
 // MARK: - API Error
 
-struct APIError: Codable, Error {
+struct APIError: Codable, LocalizedError {
     let code: String?
     let message: String
     let data: APIErrorData?
+    
+    var errorDescription: String? {
+        message
+    }
 }
 
 struct APIErrorData: Codable {

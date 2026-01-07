@@ -2,6 +2,13 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.1.4
+
+- Bandcamp Scraper: add concurrent worker support (persisted via Settings) and pass `--workers` to the Python runner.
+- Bandcamp Scraper: add headless mode flag (`--headless true`) by default.
+- Bandcamp Scraper (Python): add stricter email extraction/validation, mailto parsing, domain filtering, external contact-page probing, and rate-limit backoff handling.
+- API: extend `User` model with optional `profileUrl` field.
+
 ## 0.1.3
 
 - Bandcamp Scraper: console output can now be copied to clipboard (plus icon-only copy/clear controls).
