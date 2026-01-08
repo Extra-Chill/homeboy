@@ -317,8 +317,9 @@ class DeployerViewModel: ObservableObject {
                 errorMessage = "Build artifact not found at \(component.buildArtifactPath)"
                 outputBuffer += "> FAILED: \(errorMessage!)\n"
                 
+                let capturedErrorMessage = errorMessage
                 await MainActor.run {
-                    self.deploymentStatus[component.id] = .failed(errorMessage!)
+                    self.deploymentStatus[component.id] = .failed(capturedErrorMessage!)
                 }
                 
                 reports.append(DeploymentReport(

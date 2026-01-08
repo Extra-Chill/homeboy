@@ -21,6 +21,7 @@ struct ProjectSwitcherView: View {
     @State private var newProjectId = ""
     @State private var newProjectIdWasManuallyEdited = false
     @State private var newProjectType: String = "wordpress"
+    @FocusState private var newProjectNameFieldFocused: Bool
     
     private var availableProjects: [ProjectConfiguration] {
         configManager.availableProjectIds().compactMap { configManager.loadProject(id: $0) }
@@ -218,16 +219,21 @@ struct ProjectSwitcherView: View {
                 Section("Project Information") {
                     TextField("Project Name", text: $newProjectName)
                         .textFieldStyle(.roundedBorder)
-                        .onChange(of: newProjectName) { _, newValue in
-                            if !newProjectIdWasManuallyEdited {
-                                newProjectId = configManager.slugFromName(newValue)
+                        .focused($newProjectNameFieldFocused)
+                        .onChange(of: newProjectNameFieldFocused) { _, isFocused in
+                            // Auto-generate ID when name field loses focus
+                            if !isFocused && !newProjectIdWasManuallyEdited && newProjectId.isEmpty {
+                                newProjectId = configManager.slugFromName(newProjectName)
                             }
                         }
                     
                     TextField("Project ID", text: $newProjectId)
                         .textFieldStyle(.roundedBorder)
-                        .onChange(of: newProjectId) { _, _ in
-                            newProjectIdWasManuallyEdited = true
+                        .onChange(of: newProjectId) { oldValue, newValue in
+                            // Only mark as manually edited if user actually changed it
+                            if !oldValue.isEmpty || !newValue.isEmpty {
+                                newProjectIdWasManuallyEdited = true
+                            }
                         }
                     
                     if let message = idValidationMessage {

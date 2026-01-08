@@ -217,7 +217,27 @@ struct DBQuery: ParsableCommand {
     }
 }
 
-// MARK: - Helper
+// MARK: - Helpers
+
+/// Resolves a potential blog nickname to a domain (WordPress multisite)
+func resolveBlogDomain(
+    projectConfig: ProjectConfiguration,
+    potentialNickname: String
+) -> (domain: String, wasNickname: Bool) {
+    guard let multisite = projectConfig.multisite,
+          multisite.enabled else {
+        return (projectConfig.domain, false)
+    }
+    
+    // Case-insensitive match against blog names
+    if let blog = multisite.blogs.first(where: {
+        $0.name.lowercased() == potentialNickname.lowercased()
+    }) {
+        return (blog.domain, true)
+    }
+    
+    return (projectConfig.domain, false)
+}
 
 /// Validates WordPress project configuration and returns all needed values
 func validateWordPressProject(projectId: String) throws -> (projectConfig: ProjectConfiguration, serverConfig: ServerConfig, wordpress: WordPressConfig, serverId: String) {

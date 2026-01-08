@@ -12,6 +12,7 @@ struct CreateProjectSheet: View {
     @State private var projectId = ""
     @State private var idWasManuallyEdited = false
     @State private var projectType: String = "wordpress"
+    @FocusState private var nameFieldFocused: Bool
     
     var isFirstProject: Bool = false
     var onProjectCreated: ((ProjectConfiguration) -> Void)?
@@ -60,16 +61,21 @@ struct CreateProjectSheet: View {
                 Section {
                     TextField("Project Name", text: $projectName)
                         .textFieldStyle(.roundedBorder)
-                        .onChange(of: projectName) { _, newValue in
-                            if !idWasManuallyEdited {
-                                projectId = configManager.slugFromName(newValue)
+                        .focused($nameFieldFocused)
+                        .onChange(of: nameFieldFocused) { _, isFocused in
+                            // Auto-generate ID when name field loses focus
+                            if !isFocused && !idWasManuallyEdited && projectId.isEmpty {
+                                projectId = configManager.slugFromName(projectName)
                             }
                         }
                     
                     TextField("Project ID", text: $projectId)
                         .textFieldStyle(.roundedBorder)
-                        .onChange(of: projectId) { _, _ in
-                            idWasManuallyEdited = true
+                        .onChange(of: projectId) { oldValue, newValue in
+                            // Only mark as manually edited if user actually changed it
+                            if !oldValue.isEmpty || !newValue.isEmpty {
+                                idWasManuallyEdited = true
+                            }
                         }
                     
                     if let message = idValidationMessage {

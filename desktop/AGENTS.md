@@ -12,7 +12,7 @@ Native macOS SwiftUI application for WordPress development and deployment automa
 ## Commands
 
 ```bash
-# Regenerate Xcode project after adding/removing files
+# Regenerate Xcode project after adding/removing files or changing project.yml settings
 xcodegen generate
 
 # Open in Xcode
@@ -22,6 +22,8 @@ open Homeboy.xcodeproj
 cd /path/to/your/local-wp-site/app/public
 wp core version
 ```
+
+**Important:** When changing version numbers (`MARKETING_VERSION`, `CURRENT_PROJECT_VERSION`) in `project.yml`, you must run `xcodegen generate` to update the Xcode project, then do a clean build. Otherwise the old version will remain baked into the app's Info.plist.
 
 ## Code Style
 
@@ -40,21 +42,21 @@ Homeboy/
 │   ├── API/                      # HTTP client and types
 │   ├── Auth/                     # Keychain and auth management
 │   ├── CLI/                      # CLI installer (CLIInstaller.swift)
-│   ├── Config/                   # JSON configuration management
+│   ├── Config/                   # JSON config, ProjectTypeManager, ProjectTypeDefinition
 │   ├── Copyable/                 # Error/warning/output copy system
-│   ├── Database/                 # MySQL and SSH tunnel services
+│   ├── Database/                 # MySQL, SSH tunnel, SchemaResolver
+│   ├── Grouping/                 # GroupingManager, ItemGrouping, TableProtectionManager
 │   ├── Modules/                  # Module plugin system
 │   ├── Process/                  # Python and shell runners
-│   └── SSH/                      # SSH/SCP operations
+│   └── SSH/                      # SSH/SCP operations, DeploymentService
 ├── Modules/                      # Built-in core tools
-│   ├── ConfigEditor/             # Configuration file editor
 │   ├── DatabaseBrowser/          # MySQL database browser
-│   ├── DebugLogs/                # Debug log viewer
 │   ├── Deployer/                 # SSH deployment module
-│   └── WPCLITerminal/            # WP-CLI execution
+│   ├── RemoteFileEditor/         # Remote file editing over SSH
+│   └── RemoteLogViewer/          # Remote log viewing over SSH
 ├── ViewModels/                   # Module view models
 ├── Views/
-│   ├── Components/               # Reusable UI components
+│   ├── Components/               # Reusable UI (Table/, Grouping/, etc.)
 │   ├── Modules/                  # Dynamic module UI harness
 │   └── Settings/                 # Settings tabs
 └── docs/                         # Documentation
@@ -129,26 +131,25 @@ See `docs/ERROR-HANDLING.md` for the complete Copyable system specification.
 ### Deployer
 SSH/SCP deployment of WordPress plugins and themes.
 - Component registry defined in JSON site config
-- Build script execution
+- Build script execution via DeploymentService
 - Version comparison
-
-### WP-CLI Terminal
-Execute WP-CLI commands on Local by Flywheel sites.
-- Real-time output streaming
-- Command history
-- Environment detection
 
 ### Database Browser
 Browse remote MySQL databases over SSH tunnel.
-- WordPress multisite table categorization
-- Query editor
+- WordPress multisite table categorization via SchemaResolver
+- Grouping system for organizing tables
+- Query editor with NativeDataTable results
 - Row selection and clipboard
 
-### Config Editor
-Edit JSON configuration files with backup support.
+### Remote File Editor
+Edit remote files over SSH with backup support.
+- Pinnable file tabs for frequently accessed files
+- Syntax highlighting via CodeTextView
 
-### Debug Logs
-View WordPress debug logs from remote servers.
+### Remote Log Viewer
+View and search remote log files over SSH.
+- Real-time log viewing with filtering
+- Pinnable log tabs for frequently accessed logs
 
 ## CLI Tool
 

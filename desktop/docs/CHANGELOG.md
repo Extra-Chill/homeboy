@@ -2,6 +2,37 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.5.0
+
+### New Features
+- **Generic Remote CLI System**: Replaced monolithic `WPCommand.swift` with modular `RemoteCommand.swift` supporting multiple tools (WP-CLI, PM2).
+- **Template Rendering**: Added `TemplateRenderer.swift` for flexible command template substitution with `{{variable}}` placeholders.
+- **PM2 Command Support**: Added `homeboy pm2 <project> [sub-target] <args...>` for Node.js project process management.
+- **CLI Configuration**: Added `CLIConfig` to project type definitions, enabling per-project-type remote CLI tools.
+- **Sub-Target Support**: Added `subTargets` computed property to `ProjectConfiguration` for generic sub-target targeting (e.g., multisite blogs, environments).
+
+### Refactoring
+- **Remote CLI Architecture**: Refactored WP-CLI command to use shared `RemoteCLI.execute()` system with template-based command rendering.
+- **Project Type Extensions**: Added `CLIConfig` with tool name, display name, and command template fields to `ProjectTypeDefinition`.
+
+### Bug Fixes
+- **DeployerViewModel**: Fixed async capture bug where `errorMessage` was incorrectly captured in `MainActor.run` block.
+- **CreateProjectSheet**: Improved project ID auto-generation UX - now triggers on name field blur instead of on every keystroke.
+- **ProjectSwitcherView**: Same project ID auto-generation improvement as CreateProjectSheet.
+- **RemoteFileBrowserView**: Fixed selection logic for `selectPath` mode to properly handle directory selection.
+- **ServersSettingsTab**: Improved validation UI to use `InlineErrorView` component for wp-content validation errors.
+
+### Build
+- Added `xcodegen generate` step to `build.sh` to ensure project.yml changes are automatically applied to Xcode project before building.
+
+### Configuration
+- Updated `nodejs.json`: Added PM2 CLI configuration with `pm2 {{args}} {{projectId}}` template.
+- Updated `wordpress.json`: Added WP-CLI configuration with `cd {{appPath}} && wp {{args}} --url={{targetDomain}}` template.
+
+### CLI
+- Replaced standalone `WPCommand.swift` (178 lines) with `RemoteCommand.swift` (291 lines) containing generic `RemoteCLI` enum and tool-specific commands.
+- Added `loadProjectTypeDefinition()` helper for loading bundled and user-defined project type definitions in CLI context.
+
 ## 0.4.0
 
 ### New Features
@@ -24,7 +55,7 @@ All notable code changes to this project are documented in this file.
 ### Removed
 - **ConfigEditor module**: Removed `Homeboy/Modules/ConfigEditor/` (BackupService, ConfigEditorViewModel, ConfigFile, ConfigEditorView).
 - **DebugLogs module**: Removed `Homeboy/Modules/DebugLogs/` (DebugLogsViewModel, DebugLogsView).
-- **WP-CLI Terminal module**: Removed `Homeboy/Modules/WPCLITerminal/` (WPCLITerminalViewModel, WPCLITerminalView).
+- **WP-CLI Terminal module**: Removed `Homeboy/Modules/WPCLITerminal/` (local WP-CLI execution on Local by Flywheel sites). Remote WP-CLI is available via CLI tool (`homeboy wp`).
 - **MigrationService**: Removed legacy ExtraChillDesktop migration service.
 - **WordPressSiteMap**: Removed in favor of new Database Browser grouping system.
 

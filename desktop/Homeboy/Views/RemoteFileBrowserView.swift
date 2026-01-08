@@ -199,10 +199,14 @@ struct RemoteFileBrowserView: View {
     // MARK: - Selection Footer
     
     private var selectedPath: String {
-        if mode == .selectFile, let file = browser.selectedFile {
-            return browser.currentPath.hasSuffix("/")
-                ? "\(browser.currentPath)\(file.name)"
-                : "\(browser.currentPath)/\(file.name)"
+        if let file = browser.selectedFile {
+            // For selectFile: always use the highlighted file
+            // For selectPath: use highlighted directory if one is selected
+            if mode == .selectFile || (mode == .selectPath && file.isDirectory) {
+                return browser.currentPath.hasSuffix("/")
+                    ? "\(browser.currentPath)\(file.name)"
+                    : "\(browser.currentPath)/\(file.name)"
+            }
         }
         return browser.currentPath
     }

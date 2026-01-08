@@ -173,12 +173,19 @@ struct ServersSettingsTab: View {
                                 .foregroundColor(.secondary)
                         }
                     } else if let validation = wpContentValidation {
-                        HStack {
-                            Image(systemName: validation.isValid ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundColor(validation.isValid ? .green : .red)
-                            Text(validation.message)
-                                .font(.caption)
-                                .foregroundColor(validation.isValid ? .green : .red)
+                        if validation.isValid {
+                            HStack {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text(validation.message)
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                            }
+                        } else {
+                            InlineErrorView(validation.message, source: "WordPress Deployment", path: wpContentPath) {
+                                wpContentValidation = nil
+                            }
+                            .font(.caption)
                         }
                     } else if !wpContentPath.isEmpty {
                         Button("Validate wp-content") {

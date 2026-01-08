@@ -49,7 +49,6 @@
 		4426ED70D0640D4D817A558F /* RemoteFileEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */; };
 		469CB781A5654E2EA41A3B30 /* RemoteFileEditorViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1682E9BF7F10ED915C606359 /* RemoteFileEditorViewModel.swift */; };
 		471FBA3C8CEB4393CFEE5091 /* project-types in Resources */ = {isa = PBXBuildFile; fileRef = 69F9E6767A9B6A9F4792EAE5 /* project-types */; };
-		4A0F1AFEA41E1836E63D43FE /* WPCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2050368C9E4DBD4CF400B830 /* WPCommand.swift */; };
 		4B78EEC5008E43BE7ACE09A2 /* AppWarning.swift in Sources */ = {isa = PBXBuildFile; fileRef = C489D03946456721B73D70EA /* AppWarning.swift */; };
 		50C74163D68312AC098E4FE4 /* ModuleInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7B0366D7FFE2A9A7F15384 /* ModuleInstaller.swift */; };
 		52FDF39D89C383078D344296 /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC3095C66C75EB70DD73775 /* PythonRunner.swift */; };
@@ -93,6 +92,7 @@
 		8DD50D5975E4E471BDE8DB3B /* DatabaseBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DAA8DDE50178FCA20E0FD11 /* DatabaseBrowserView.swift */; };
 		90B07E3C3A53C081A0511182 /* ProjectsCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75BEE49FCF4D9DB9637C8B0E /* ProjectsCommand.swift */; };
 		91A89EAFB68B53F8D473F5AA /* SSHCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67207B29A512B7E577C66A05 /* SSHCommand.swift */; };
+		95D9D11A7A1F2C47430CF88C /* TemplateRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7238308BE920991E80D8D6B0 /* TemplateRenderer.swift */; };
 		999116DB4DB5B3DF3EA9C171 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C3C30739F765981B37603DD /* SidebarView.swift */; };
 		9ACBEB5DF2D256960184C815 /* QueryEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF490ADD191341069884F61B /* QueryEditorView.swift */; };
 		A051F697BD41C8D9A5298333 /* DataTableColumn.swift in Sources */ = {isa = PBXBuildFile; fileRef = C503C8896286EA38288A139F /* DataTableColumn.swift */; };
@@ -114,6 +114,7 @@
 		C727FE57ACE75A3152D4C972 /* NativeDataTable.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2800F57FE83EEBB76CC1F1A /* NativeDataTable.swift */; };
 		C7897C8689B4E0075B1CB0D6 /* ModuleViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21BD4D2024772E1CFC5F01C2 /* ModuleViewModel.swift */; };
 		C8E23E9BFFE99665244167D8 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */; };
+		CB4813491B525C0559239396 /* RemoteCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6146119051BC060D7F272D08 /* RemoteCommand.swift */; };
 		CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA88D343E94C4C34E1069813 /* CodeTextView.swift */; };
 		D17F7A98F3FB9E8F40991024 /* LogContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 514BD1BE8868C181AD9401CF /* LogContentView.swift */; };
 		D1D14C90B738887ECD0265B6 /* GroupingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2A7B75D6A4B4DED5F193C64 /* GroupingManager.swift */; };
@@ -164,7 +165,6 @@
 		1F19D1A6E916AD977240F494 /* DeployCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployCommand.swift; sourceTree = "<group>"; };
 		20129FFBFEEBA4948B8DA194 /* WarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WarningView.swift; sourceTree = "<group>"; };
 		2026B5BAE550AC7BD82744DA /* BackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupService.swift; sourceTree = "<group>"; };
-		2050368C9E4DBD4CF400B830 /* WPCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WPCommand.swift; sourceTree = "<group>"; };
 		21BD4D2024772E1CFC5F01C2 /* ModuleViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleViewModel.swift; sourceTree = "<group>"; };
 		267B4789567169ABFC9AAD53 /* ModuleManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleManifest.swift; sourceTree = "<group>"; };
 		29EDC4F278327A663263D4A7 /* DatabaseBrowserViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseBrowserViewModel.swift; sourceTree = "<group>"; };
@@ -188,12 +188,14 @@
 		5B19BDE6DDAAF5D914C29785 /* RemoteFileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorView.swift; sourceTree = "<group>"; };
 		5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSSHModule.swift; sourceTree = "<group>"; };
 		5F014356904A59206993DA47 /* ModuleConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleConsoleView.swift; sourceTree = "<group>"; };
+		6146119051BC060D7F272D08 /* RemoteCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteCommand.swift; sourceTree = "<group>"; };
 		6304E63C8AC4239FBA559CC8 /* ModuleRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleRunner.swift; sourceTree = "<group>"; };
 		6668890DE94C7DC530C66125 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnableTabBar.swift; sourceTree = "<group>"; };
 		67207B29A512B7E577C66A05 /* SSHCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHCommand.swift; sourceTree = "<group>"; };
 		69348F2856AF692571BB880E /* ModuleContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleContainerView.swift; sourceTree = "<group>"; };
 		69F9E6767A9B6A9F4792EAE5 /* project-types */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "project-types"; path = "Homeboy/Resources/project-types"; sourceTree = SOURCE_ROOT; };
+		7238308BE920991E80D8D6B0 /* TemplateRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemplateRenderer.swift; sourceTree = "<group>"; };
 		75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */ = {isa = PBXFileReference; path = "bandcamp_scraper.cpython-314.pyc"; sourceTree = "<group>"; };
 		75BEE49FCF4D9DB9637C8B0E /* ProjectsCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectsCommand.swift; sourceTree = "<group>"; };
 		7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorView.swift; sourceTree = "<group>"; };
@@ -266,6 +268,7 @@
 			isa = PBXGroup;
 			children = (
 				0A42ACE763B674FE9CEEACF7 /* OutputFormatter.swift */,
+				7238308BE920991E80D8D6B0 /* TemplateRenderer.swift */,
 			);
 			path = Utilities;
 			sourceTree = "<group>";
@@ -318,8 +321,8 @@
 				CDB9CADC5E234387CF05076E /* DBCommand.swift */,
 				1F19D1A6E916AD977240F494 /* DeployCommand.swift */,
 				75BEE49FCF4D9DB9637C8B0E /* ProjectsCommand.swift */,
+				6146119051BC060D7F272D08 /* RemoteCommand.swift */,
 				67207B29A512B7E577C66A05 /* SSHCommand.swift */,
-				2050368C9E4DBD4CF400B830 /* WPCommand.swift */,
 			);
 			path = Commands;
 			sourceTree = "<group>";
@@ -815,6 +818,7 @@
 				33BC501E3C96A4C432B65810 /* ProjectTypeManager.swift in Sources */,
 				90B07E3C3A53C081A0511182 /* ProjectsCommand.swift in Sources */,
 				52FDF39D89C383078D344296 /* PythonRunner.swift in Sources */,
+				CB4813491B525C0559239396 /* RemoteCommand.swift in Sources */,
 				D72F629CB7818A3E3829B864 /* RemoteFileBrowser.swift in Sources */,
 				4426ED70D0640D4D817A558F /* RemoteFileEntry.swift in Sources */,
 				91A89EAFB68B53F8D473F5AA /* SSHCommand.swift in Sources */,
@@ -823,7 +827,7 @@
 				A774FB7341AC4F1A57B7E54D /* SchemaResolver.swift in Sources */,
 				D60F895AAD01B00086E36C75 /* ServerConfig.swift in Sources */,
 				540940CC1B9785A5EA225760 /* TableProtectionManager.swift in Sources */,
-				4A0F1AFEA41E1836E63D43FE /* WPCommand.swift in Sources */,
+				95D9D11A7A1F2C47430CF88C /* TemplateRenderer.swift in Sources */,
 				D41F41CD2CB3BC5F74E5011E /* WordPressSSHModule.swift in Sources */,
 				42F5499F7E0F4A63AC0C66DF /* main.swift in Sources */,
 			);
@@ -1011,7 +1015,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 8;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Homeboy;
@@ -1022,7 +1026,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 0.3.0;
+				MARKETING_VERSION = 0.5.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
 				PRODUCT_NAME = Homeboy;
 				SDKROOT = macosx;
@@ -1054,7 +1058,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 8;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Homeboy;
@@ -1065,7 +1069,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 0.3.0;
+				MARKETING_VERSION = 0.5.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
 				PRODUCT_NAME = Homeboy;
 				SDKROOT = macosx;

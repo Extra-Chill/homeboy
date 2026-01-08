@@ -13,6 +13,14 @@ APP_NAME="Homeboy"
 
 mkdir -p "$DIST_DIR" "$BUILD_DIR"
 
+# Regenerate Xcode project from project.yml to ensure settings are current
+echo "Regenerating Xcode project..."
+if command -v xcodegen >/dev/null 2>&1; then
+  xcodegen generate --spec "$ROOT_DIR/project.yml"
+else
+  echo "Warning: xcodegen not found. Using existing .xcodeproj (may be stale)." >&2
+fi
+
 if ! command -v xcodebuild >/dev/null 2>&1; then
   echo "xcodebuild not found. Install Xcode and CLI tools." >&2
   exit 1

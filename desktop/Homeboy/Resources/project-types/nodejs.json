@@ -4,6 +4,11 @@
   "icon": "server.rack",
   "features": ["deployer", "debugLogs", "configEditor"],
   "configSchema": null,
+  "cli": {
+    "tool": "pm2",
+    "displayName": "PM2",
+    "commandTemplate": "pm2 {{args}} {{projectId}}"
+  },
   "defaultPinnedFiles": ["package.json", "ecosystem.config.js", ".env.example"],
   "defaultPinnedLogs": ["logs/combined.log", "logs/err.log", "logs/out.log"]
 }

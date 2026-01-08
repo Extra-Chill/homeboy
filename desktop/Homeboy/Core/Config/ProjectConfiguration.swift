@@ -88,7 +88,7 @@ struct ProjectFeatures: Codable, Equatable {
             hasDatabase: typeDefinition.hasDatabaseBrowser,
             hasRemoteDeployment: typeDefinition.hasDeployer,
             hasRemoteLogs: typeDefinition.hasDebugLogs,
-            hasLocalCLI: typeDefinition.isWordPress
+            hasLocalCLI: false  // Local CLI deferred to future phase
         )
     }
 }
@@ -128,6 +128,21 @@ struct ProjectConfiguration: Codable, Identifiable {
     /// Whether this is a WordPress project
     var isWordPress: Bool {
         projectType == "wordpress"
+    }
+    
+    /// Generic sub-targets for CLI targeting (e.g., multisite blogs, environments).
+    /// Derived from MultisiteConfig for WordPress projects.
+    var subTargets: [SubTarget] {
+        guard let multisite = multisite, multisite.enabled else {
+            return []
+        }
+        return multisite.blogs.map { blog in
+            SubTarget(
+                id: blog.name.lowercased(),
+                name: blog.name,
+                domain: blog.domain
+            )
+        }
     }
     
     /// Memberwise initializer
@@ -317,6 +332,16 @@ struct APIConfig: Codable {
         self.enabled = enabled
         self.baseURL = baseURL
     }
+}
+
+// MARK: - Sub-Target Configuration
+
+/// A generic sub-target within a project (e.g., multisite blog, environment, service).
+/// Used by the CLI for targeting specific domains within a project.
+struct SubTarget: Codable, Identifiable, Equatable {
+    var id: String
+    var name: String
+    var domain: String
 }
 
 // MARK: - Multisite Configuration

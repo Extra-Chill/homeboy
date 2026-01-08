@@ -13,23 +13,22 @@ One-click deployment of WordPress plugins and themes to any SSH-accessible serve
 - Version comparison (local vs remote)
 - Per-site component registry
 
-**WP-CLI Terminal**
-Execute WP-CLI commands on Local by Flywheel sites.
-- Real-time output streaming
-- Command history navigation
-- Environment detection for Local by Flywheel PHP/MySQL paths
-
 **Database Browser**
 Browse and query remote MySQL databases over SSH tunnel.
 - Table listing with WordPress multisite support
-- Query editor with results display
+- Table grouping system for organization
+- Query editor with native table results display
 - Row selection and clipboard operations
 
-**Config Editor**
-Edit project configuration JSON files with syntax highlighting and backup support.
+**Remote File Editor**
+Edit remote files over SSH with backup support.
+- Pinnable file tabs for frequently accessed files
+- Syntax highlighting
 
-**Debug Logs**
-View and search WordPress debug logs from remote servers.
+**Remote Log Viewer**
+View and search remote log files over SSH.
+- Real-time log viewing with filtering
+- Pinnable log tabs for frequently accessed logs
 
 ### Module System
 
@@ -63,7 +62,6 @@ Projects must be configured via Homeboy.app before using the CLI. See [docs/CLI.
 - macOS 14.4+ (Sonoma)
 - Xcode 15.0+
 - Python 3.12+ (Homebrew) - for modules with Python scripts
-- Homebrew packages: `wp-cli` (used by WP-CLI features)
 
 ## Setup
 
@@ -131,21 +129,21 @@ Homeboy/
 │   ├── API/                      # REST API client
 │   ├── Auth/                     # Keychain and authentication
 │   ├── CLI/                      # CLI installer
-│   ├── Config/                   # JSON configuration management
+│   ├── Config/                   # JSON config, ProjectTypeManager
 │   ├── Copyable/                 # Error/warning copy system
-│   ├── Database/                 # MySQL and SSH tunnel services
+│   ├── Database/                 # MySQL, SSH tunnel, SchemaResolver
+│   ├── Grouping/                 # GroupingManager, ItemGrouping
 │   ├── Modules/                  # Module loading and execution
 │   ├── Process/                  # Python and shell runners
-│   └── SSH/                      # SSH/SCP operations
+│   └── SSH/                      # SSH/SCP operations, DeploymentService
 ├── Modules/
-│   ├── ConfigEditor/             # Configuration editor
 │   ├── DatabaseBrowser/          # Database browser
-│   ├── DebugLogs/                # Debug log viewer
 │   ├── Deployer/                 # Deployment module
-│   └── WPCLITerminal/            # WP-CLI terminal
+│   ├── RemoteFileEditor/         # Remote file editor
+│   └── RemoteLogViewer/          # Remote log viewer
 ├── ViewModels/                   # Module view models
 ├── Views/                        # SwiftUI views
-│   ├── Components/               # Reusable components
+│   ├── Components/               # Reusable components (Table/, Grouping/)
 │   ├── Modules/                  # Dynamic module UI
 │   └── Settings/                 # Settings tabs
 └── docs/                         # Documentation

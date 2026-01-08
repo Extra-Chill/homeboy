@@ -6,8 +6,8 @@ struct HomeboyCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "homeboy",
         abstract: "CLI for project development and deployment",
-        version: "0.4.0",
-        subcommands: [WP.self, DB.self, Deploy.self, Projects.self, SSH.self],
+        version: "0.5.0",
+        subcommands: [WP.self, PM2.self, DB.self, Deploy.self, Projects.self, SSH.self],
         defaultSubcommand: nil
     )
 }

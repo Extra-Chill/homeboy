@@ -5,6 +5,12 @@
   "features": ["deployer", "debugLogs", "configEditor", "databaseBrowser"],
   "configSchema": "wordpress",
 
+  "cli": {
+    "tool": "wp",
+    "displayName": "WP-CLI",
+    "commandTemplate": "cd {{appPath}} && wp {{args}} --url={{targetDomain}}"
+  },
+
   "defaultPinnedFiles": ["wp-config.php", ".htaccess", "robots.txt"],
   "defaultPinnedLogs": ["wp-content/debug.log"],
 

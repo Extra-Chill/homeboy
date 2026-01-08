@@ -37,8 +37,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.extrachill.homeboy
         PRODUCT_NAME: Homeboy
-        MARKETING_VERSION: 0.4.0
-        CURRENT_PROJECT_VERSION: 7
+        MARKETING_VERSION: 0.5.0
+        CURRENT_PROJECT_VERSION: 8
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Extra Chill. All rights reserved."

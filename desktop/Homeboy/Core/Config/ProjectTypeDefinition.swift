@@ -11,6 +11,7 @@ struct ProjectTypeDefinition: Codable, Identifiable, Equatable {
     let defaultPinnedFiles: [String]
     let defaultPinnedLogs: [String]
     let database: DatabaseSchemaDefinition?
+    let cli: CLIConfig?
     
     static let featureDeployer = "deployer"
     static let featureDebugLogs = "debugLogs"
@@ -21,6 +22,7 @@ struct ProjectTypeDefinition: Codable, Identifiable, Equatable {
     var hasDebugLogs: Bool { features.contains(Self.featureDebugLogs) }
     var hasConfigEditor: Bool { features.contains(Self.featureConfigEditor) }
     var hasDatabaseBrowser: Bool { features.contains(Self.featureDatabaseBrowser) }
+    var hasCLI: Bool { cli != nil }
     var isWordPress: Bool { configSchema == "wordpress" }
     
     init(from decoder: Decoder) throws {
@@ -33,6 +35,7 @@ struct ProjectTypeDefinition: Codable, Identifiable, Equatable {
         defaultPinnedFiles = try container.decodeIfPresent([String].self, forKey: .defaultPinnedFiles) ?? []
         defaultPinnedLogs = try container.decodeIfPresent([String].self, forKey: .defaultPinnedLogs) ?? []
         database = try container.decodeIfPresent(DatabaseSchemaDefinition.self, forKey: .database)
+        cli = try container.decodeIfPresent(CLIConfig.self, forKey: .cli)
     }
 }
 
@@ -47,7 +50,8 @@ extension ProjectTypeDefinition {
         configSchema: nil,
         defaultPinnedFiles: [],
         defaultPinnedLogs: [],
-        database: nil
+        database: nil,
+        cli: nil
     )
     
     init(
@@ -58,7 +62,8 @@ extension ProjectTypeDefinition {
         configSchema: String?,
         defaultPinnedFiles: [String],
         defaultPinnedLogs: [String],
-        database: DatabaseSchemaDefinition? = nil
+        database: DatabaseSchemaDefinition? = nil,
+        cli: CLIConfig? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -68,6 +73,7 @@ extension ProjectTypeDefinition {
         self.defaultPinnedFiles = defaultPinnedFiles
         self.defaultPinnedLogs = defaultPinnedLogs
         self.database = database
+        self.cli = cli
     }
 }
 
@@ -108,4 +114,14 @@ struct SiteGroupingTemplate: Codable, Equatable {
     let idTemplate: String
     let nameTemplate: String
     let patternTemplate: String
+}
+
+// MARK: - CLI Configuration
+
+/// Defines the remote CLI tool configuration for a project type.
+/// Used by the Homeboy CLI to execute commands on remote servers.
+struct CLIConfig: Codable, Equatable {
+    let tool: String
+    let displayName: String
+    let commandTemplate: String
 }
