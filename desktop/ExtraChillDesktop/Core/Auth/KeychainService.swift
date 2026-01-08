@@ -15,6 +15,7 @@ struct KeychainService {
         static let accessToken = "accessToken"
         static let refreshToken = "refreshToken"
         static let sshPrivateKey = "sshPrivateKey"
+        static let liveMySQLPassword = "liveMySQLPassword"
     }
     
     // Non-sensitive data stored in UserDefaults to avoid Keychain prompts
@@ -25,6 +26,9 @@ struct KeychainService {
         static let cloudwaysUsername = "cloudwaysUsername"
         static let cloudwaysAppPath = "cloudwaysAppPath"
         static let sshPublicKey = "sshPublicKey"
+        // MySQL credentials (non-sensitive parts)
+        static let liveMySQLUsername = "liveMySQLUsername"
+        static let liveMySQLDatabase = "liveMySQLDatabase"
     }
     
     // MARK: - Token Storage
@@ -177,12 +181,40 @@ struct KeychainService {
         UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.sshPublicKey)
     }
     
+    // MARK: - Live MySQL Credentials
+    
+    static func storeLiveMySQLCredentials(username: String, password: String, database: String) throws {
+        try store(key: Keys.liveMySQLPassword, value: password)
+        UserDefaults.standard.set(username, forKey: UserDefaultsKeys.liveMySQLUsername)
+        UserDefaults.standard.set(database, forKey: UserDefaultsKeys.liveMySQLDatabase)
+    }
+    
+    static func getLiveMySQLCredentials() -> (username: String?, password: String?, database: String?) {
+        let username = UserDefaults.standard.string(forKey: UserDefaultsKeys.liveMySQLUsername)
+        let password = try? retrieve(key: Keys.liveMySQLPassword)
+        let database = UserDefaults.standard.string(forKey: UserDefaultsKeys.liveMySQLDatabase)
+        return (username, password, database)
+    }
+    
+    static func hasLiveMySQLCredentials() -> Bool {
+        let creds = getLiveMySQLCredentials()
+        return creds.username != nil && !creds.username!.isEmpty &&
+               creds.database != nil && !creds.database!.isEmpty
+    }
+    
+    static func clearLiveMySQLCredentials() {
+        try? delete(key: Keys.liveMySQLPassword)
+        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.liveMySQLUsername)
+        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.liveMySQLDatabase)
+    }
+    
     // MARK: - Reset All
     
     static func clearAll() {
         clearTokens()
         clearCloudwaysCredentials()
         clearSSHKeys()
+        clearLiveMySQLCredentials()
         UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.deviceId)
     }
 }

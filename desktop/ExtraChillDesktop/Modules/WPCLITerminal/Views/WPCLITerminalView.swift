@@ -170,27 +170,7 @@ struct WPCLITerminalView: View {
                         .textFieldStyle(.roundedBorder)
                 }
                 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Venue Name Override (optional)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextField("e.g., The Music Hall", text: $scraperViewModel.venueName)
-                        .textFieldStyle(.roundedBorder)
-                }
-                
-                HStack {
-                    Stepper("Max Results: \(scraperViewModel.maxResults)", value: $scraperViewModel.maxResults, in: 1...10)
-                    
-                    Spacer()
-                    
-                    Toggle("Upsert Events", isOn: $scraperViewModel.doUpsert)
-                }
-                
-                if scraperViewModel.doUpsert {
-                    Text("Warning: This will create/update events in the database")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                }
+
             }
             .padding()
             

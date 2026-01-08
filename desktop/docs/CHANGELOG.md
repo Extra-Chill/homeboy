@@ -2,6 +2,14 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.2.0
+
+- Database Browser: add a new sidebar tool for browsing the live production MySQL database over Cloudways SSH.
+- Database Browser: categorize multisite tables by site (plus Network/Other) via `WordPressSiteMap`, including protected table checks for core WordPress tables.
+- Database Browser: add table viewer with pagination, multi-row selection, copy-to-clipboard, and single-row deletion (with confirmation).
+- Database Browser: add SQL query mode with results table, row selection, and copy-to-clipboard.
+- Core/Database: add `SSHTunnelService` port-forwarding (local 3307 -> remote 3306) and `MySQLService` for listing tables/columns/rows, executing queries, and destructive operations.
+
 ## 0.1.4
 
 - Bandcamp Scraper: add concurrent worker support (persisted via Settings) and pass `--workers` to the Python runner.

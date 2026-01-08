@@ -25,6 +25,12 @@ struct SettingsView: View {
     @State private var isTestingCloudways = false
     @State private var cloudwaysTestResult: (success: Bool, message: String)?
     
+    // Live MySQL settings
+    @State private var liveMySQLUsername = ""
+    @State private var liveMySQLPassword = ""
+    @State private var liveMySQLDatabase = ""
+    @State private var liveMySQLSaveResult: (success: Bool, message: String)?
+    
     var body: some View {
         Form {
             Section("Account") {
@@ -120,6 +126,35 @@ struct SettingsView: View {
                 Text("Local path to the Data Machine Ecosystem repository")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+            
+            Section("Database (Cloudways)") {
+                TextField("MySQL Username", text: $liveMySQLUsername)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("MySQL Password", text: $liveMySQLPassword)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Database Name", text: $liveMySQLDatabase)
+                    .textFieldStyle(.roundedBorder)
+                Text("Credentials for your Cloudways MySQL database. Connection uses SSH tunnel with credentials above.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                HStack {
+                    Button("Save Credentials") {
+                        saveLiveMySQLCredentials()
+                    }
+                    .disabled(liveMySQLUsername.isEmpty || liveMySQLPassword.isEmpty || liveMySQLDatabase.isEmpty)
+                }
+                
+                if let result = liveMySQLSaveResult {
+                    HStack {
+                        Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(result.success ? .green : .red)
+                        Text(result.message)
+                            .font(.caption)
+                            .foregroundColor(result.success ? .green : .red)
+                    }
+                }
             }
             
             Section("Cloudways Deployment") {
@@ -222,8 +257,8 @@ struct SettingsView: View {
             }
             
             Section("About") {
-                LabeledContent("Version", value: "0.1.4")
-                LabeledContent("Build", value: "4")
+                LabeledContent("Version", value: "0.2.0")
+                LabeledContent("Build", value: "5")
             }
         }
         .formStyle(.grouped)
@@ -232,6 +267,7 @@ struct SettingsView: View {
         .onAppear {
             detectLocalPaths()
             loadCloudwaysSettings()
+            loadMySQLSettings()
         }
     }
     
@@ -363,6 +399,28 @@ struct SettingsView: View {
                     testResult = (false, error.localizedDescription)
                 }
             }
+        }
+    }
+    
+    // MARK: - MySQL Settings
+    
+    private func loadMySQLSettings() {
+        let liveCreds = KeychainService.getLiveMySQLCredentials()
+        liveMySQLUsername = liveCreds.username ?? ""
+        liveMySQLPassword = liveCreds.password ?? ""
+        liveMySQLDatabase = liveCreds.database ?? ""
+    }
+    
+    private func saveLiveMySQLCredentials() {
+        do {
+            try KeychainService.storeLiveMySQLCredentials(
+                username: liveMySQLUsername,
+                password: liveMySQLPassword,
+                database: liveMySQLDatabase
+            )
+            liveMySQLSaveResult = (true, "Credentials saved")
+        } catch {
+            liveMySQLSaveResult = (false, "Failed to save: \(error.localizedDescription)")
         }
     }
 }

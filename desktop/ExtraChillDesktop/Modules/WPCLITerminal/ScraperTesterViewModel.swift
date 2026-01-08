@@ -5,9 +5,6 @@ import AppKit
 @MainActor
 class ScraperTesterViewModel: ObservableObject {
     @Published var targetUrl = ""
-    @Published var venueName = ""
-    @Published var maxResults = 3
-    @Published var doUpsert = false
     @Published var output = ""
     @Published var isRunning = false
     
@@ -27,13 +24,7 @@ class ScraperTesterViewModel: ObservableObject {
         
         isRunning = true
         output = "Running scraper test...\n"
-        output += "Target URL: \(targetUrl)\n"
-        if !venueName.isEmpty {
-            output += "Venue Override: \(venueName)\n"
-        }
-        output += "Max Results: \(maxResults)\n"
-        output += "Upsert: \(doUpsert ? "Yes" : "No")\n"
-        output += "\n"
+        output += "Target URL: \(targetUrl)\n\n"
         
         let process = Process()
         self.process = process
@@ -44,16 +35,6 @@ class ScraperTesterViewModel: ObservableObject {
         
         var args = ["datamachine-events", "test-scraper"]
         args.append("--target_url=\(targetUrl)")
-        args.append("--max=\(maxResults)")
-        
-        if !venueName.isEmpty {
-            args.append("--venue_name=\(venueName)")
-        }
-        
-        if doUpsert {
-            args.append("--upsert")
-        }
-        
         args.append("--url=\(eventsSiteUrl)")
         
         process.arguments = args

@@ -7,7 +7,7 @@ struct SidebarView: View {
     var body: some View {
         List(selection: $selectedItem) {
             Section("Tools") {
-                ForEach([SidebarItem.bandcampScraper, .cloudwaysDeployer, .wpcliTerminal], id: \.self) { item in
+                ForEach([SidebarItem.bandcampScraper, .cloudwaysDeployer, .wpcliTerminal, .databaseBrowser], id: \.self) { item in
                     Label(item.rawValue, systemImage: item.icon)
                         .tag(item)
                 }

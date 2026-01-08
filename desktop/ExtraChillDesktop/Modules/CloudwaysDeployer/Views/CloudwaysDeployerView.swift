@@ -124,49 +124,37 @@ struct CloudwaysDeployerView: View {
     // MARK: - Component List Section
     
     private var componentListSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Column headers
-            HStack {
-                Text("Component")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .frame(width: 180, alignment: .leading)
-                Spacer()
-                Text("Local")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .frame(width: 60)
-                Text("Remote")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .frame(width: 60)
-                Text("Status")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .frame(width: 80)
-            }
-            .padding(.horizontal)
-            
-            Divider()
-            
-            // Component list
-            List {
-                ForEach(ComponentRegistry.grouped(), id: \.type) { group in
-                    Section(header: Text(group.type.rawValue)) {
-                        ForEach(group.components) { component in
-                            ComponentRow(
-                                component: component,
-                                isSelected: viewModel.selectedComponents.contains(component.id),
-                                localVersion: viewModel.localVersions[component.id],
-                                remoteVersion: viewModel.remoteVersions[component.id],
-                                status: viewModel.status(for: component),
-                                onToggle: { viewModel.toggleSelection(component.id) }
-                            )
-                        }
-                    }
+        VStack(alignment: .leading, spacing: 0) {
+            Table(viewModel.components, selection: $viewModel.selectedComponents) {
+                TableColumn("Component", value: \.name)
+                    .width(min: 140, ideal: 180)
+                
+                TableColumn("Type") { component in
+                    Text(component.type.rawValue)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
+                .width(min: 80, ideal: 100)
+                
+                TableColumn("Local") { component in
+                    Text(viewModel.localVersions[component.id] ?? "—")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .width(60)
+                
+                TableColumn("Remote") { component in
+                    Text(viewModel.remoteVersions[component.id] ?? "—")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .width(60)
+                
+                TableColumn("Status") { component in
+                    statusView(for: viewModel.status(for: component))
+                }
+                .width(min: 70, ideal: 90)
             }
-            .listStyle(.sidebar)
             
             Divider()
             
@@ -195,6 +183,51 @@ struct CloudwaysDeployerView: View {
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
+        }
+    }
+    
+    @ViewBuilder
+    private func statusView(for status: DeployStatus) -> some View {
+        HStack(spacing: 4) {
+            switch status {
+            case .current:
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+                Text("Current")
+                    .font(.caption)
+                    .foregroundColor(.green)
+            case .needsUpdate:
+                Image(systemName: "arrow.up.circle.fill")
+                    .foregroundColor(.orange)
+                Text("Update")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            case .missing:
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.red)
+                Text("Missing")
+                    .font(.caption)
+                    .foregroundColor(.red)
+            case .unknown:
+                Image(systemName: "questionmark.circle")
+                    .foregroundColor(.gray)
+                Text("Unknown")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            case .deploying:
+                ProgressView()
+                    .controlSize(.small)
+                Text("...")
+                    .font(.caption)
+                    .foregroundColor(.blue)
+            case .failed(let msg):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.red)
+                    .help(msg)
+                Text("Failed")
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
         }
     }
     
@@ -251,96 +284,6 @@ struct CloudwaysDeployerView: View {
             }
         }
         .padding()
-    }
-}
-
-// MARK: - Component Row
-
-struct ComponentRow: View {
-    let component: DeployableComponent
-    let isSelected: Bool
-    let localVersion: String?
-    let remoteVersion: String?
-    let status: DeployStatus
-    let onToggle: () -> Void
-    
-    var body: some View {
-        HStack {
-            // Checkbox
-            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                .foregroundColor(isSelected ? .accentColor : .secondary)
-                .onTapGesture { onToggle() }
-            
-            // Name
-            Text(component.name)
-                .frame(width: 160, alignment: .leading)
-                .lineLimit(1)
-            
-            Spacer()
-            
-            // Local version
-            Text(localVersion ?? "—")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: 60)
-            
-            // Remote version
-            Text(remoteVersion ?? "—")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: 60)
-            
-            // Status
-            statusView
-                .frame(width: 80)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { onToggle() }
-    }
-    
-    @ViewBuilder
-    private var statusView: some View {
-        HStack(spacing: 4) {
-            switch status {
-            case .current:
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                Text("Current")
-                    .font(.caption)
-                    .foregroundColor(.green)
-            case .needsUpdate:
-                Image(systemName: "arrow.up.circle.fill")
-                    .foregroundColor(.orange)
-                Text("Update")
-                    .font(.caption)
-                    .foregroundColor(.orange)
-            case .missing:
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.red)
-                Text("Missing")
-                    .font(.caption)
-                    .foregroundColor(.red)
-            case .unknown:
-                Image(systemName: "questionmark.circle")
-                    .foregroundColor(.gray)
-                Text("Unknown")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            case .deploying:
-                ProgressView()
-                    .controlSize(.small)
-                Text("...")
-                    .font(.caption)
-                    .foregroundColor(.blue)
-            case .failed(let msg):
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.red)
-                    .help(msg)
-                Text("Failed")
-                    .font(.caption)
-                    .foregroundColor(.red)
-            }
-        }
     }
 }
 
