@@ -3,7 +3,8 @@ import Foundation
 enum DeployStatus: Equatable {
     case current
     case needsUpdate
-    case missing
+    case notDeployed
+    case buildRequired
     case unknown
     case deploying
     case failed(String)
@@ -12,7 +13,8 @@ enum DeployStatus: Equatable {
         switch self {
         case .current: return "checkmark.circle.fill"
         case .needsUpdate: return "arrow.up.circle.fill"
-        case .missing: return "xmark.circle.fill"
+        case .notDeployed: return "xmark.circle.fill"
+        case .buildRequired: return "hammer.fill"
         case .unknown: return "questionmark.circle"
         case .deploying: return "arrow.triangle.2.circlepath"
         case .failed: return "exclamationmark.triangle.fill"
@@ -23,7 +25,8 @@ enum DeployStatus: Equatable {
         switch self {
         case .current: return "green"
         case .needsUpdate: return "orange"
-        case .missing: return "red"
+        case .notDeployed: return "red"
+        case .buildRequired: return "yellow"
         case .unknown: return "gray"
         case .deploying: return "blue"
         case .failed: return "red"
@@ -34,36 +37,53 @@ enum DeployStatus: Equatable {
 struct DeployableComponent: Identifiable, Hashable {
     let id: String
     let name: String
-    let type: ComponentType
     let localPath: String
+    let remotePath: String
+    let buildArtifact: String
+    let versionFile: String?
+    let versionPattern: String?
+    let group: String
     let isNetwork: Bool
     
-    var mainFile: String {
-        type == .theme ? "style.css" : "\(id).php"
+    var buildArtifactPath: String {
+        "\(localPath)/\(buildArtifact)"
     }
     
-    var remotePath: String {
-        type == .theme ? "themes/\(id)" : "plugins/\(id)"
+    var versionFilePath: String? {
+        guard let vf = versionFile else { return nil }
+        return "\(localPath)/\(vf)"
     }
     
-    var mainFilePath: String {
-        "\(localPath)/\(mainFile)"
+    var artifactExtension: String {
+        (buildArtifact as NSString).pathExtension.lowercased()
     }
     
-    var buildScriptPath: String {
-        "\(localPath)/build.sh"
+    var hasBuildArtifact: Bool {
+        FileManager.default.fileExists(atPath: buildArtifactPath)
     }
     
-    var buildOutputPath: String {
-        "\(localPath)/build/\(id).zip"
+    /// Auto-detect if this is a network plugin by parsing the plugin header.
+    /// Returns the stored isNetwork value if detection fails or for non-plugins.
+    var isNetworkPlugin: Bool {
+        // If we have a version file, try to detect from header
+        if let versionPath = versionFilePath {
+            let detected = VersionParser.parseNetworkFlag(from: versionPath)
+            if detected { return true }
+        }
+        // Fall back to stored value (from config)
+        return isNetwork
     }
     
     init(from config: ComponentConfig) {
         self.id = config.id
         self.name = config.name
-        self.type = config.type
         self.localPath = config.localPath
-        self.isNetwork = config.isNetwork
+        self.remotePath = config.remotePath
+        self.buildArtifact = config.buildArtifact
+        self.versionFile = config.versionFile
+        self.versionPattern = config.versionPattern
+        self.group = config.group ?? "Components"
+        self.isNetwork = config.isNetwork ?? false
     }
     
     func hash(into hasher: inout Hasher) {
@@ -82,81 +102,81 @@ struct ComponentRegistry {
     
     static func grouped() -> [(title: String, components: [DeployableComponent])] {
         let allComponents = all
-        var result: [(title: String, components: [DeployableComponent])] = []
-        
-        let themes = allComponents.filter { $0.type == .theme }
-        if !themes.isEmpty {
-            result.append((title: "Themes", components: themes))
-        }
-        
-        let networkPlugins = allComponents.filter { $0.type == .plugin && $0.isNetwork }
-        if !networkPlugins.isEmpty {
-            result.append((title: "Network Plugins", components: networkPlugins))
-        }
-        
-        let sitePlugins = allComponents.filter { $0.type == .plugin && !$0.isNetwork }
-        if !sitePlugins.isEmpty {
-            result.append((title: "Site Plugins", components: sitePlugins))
-        }
-        
-        return result
+        return Dictionary(grouping: allComponents, by: { $0.group })
+            .sorted { $0.key < $1.key }
+            .map { (title: $0.key, components: $0.value.sorted { $0.name < $1.name }) }
     }
 }
 
-// MARK: - Version & Header Parsing
+// MARK: - Version Info
+
+enum VersionInfo: Equatable {
+    case version(String)
+    case timestamp(Date)
+    case notDeployed
+    
+    var displayString: String {
+        switch self {
+        case .version(let v):
+            return v
+        case .timestamp(let date):
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .none
+            return formatter.string(from: date)
+        case .notDeployed:
+            return "—"
+        }
+    }
+}
+
+// MARK: - Version Parsing
 
 struct VersionParser {
+    
+    /// Default WordPress version pattern
+    static let wordPressVersionPattern = "Version:\\s*([0-9]+\\.[0-9]+\\.?[0-9]*)"
+    
+    /// Parse version from local file for a component
     static func parseLocalVersion(for component: DeployableComponent) -> String? {
-        guard let content = try? String(contentsOfFile: component.mainFilePath, encoding: .utf8) else {
+        guard let filePath = component.versionFilePath,
+              let content = try? String(contentsOfFile: filePath, encoding: .utf8) else {
             return nil
         }
-        return parseVersion(from: content)
+        return parseVersion(from: content, pattern: component.versionPattern)
     }
     
-    static func parseVersion(from content: String) -> String? {
-        let pattern = "Version:\\s*([0-9]+\\.[0-9]+\\.?[0-9]*)"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+    /// Parse version from content using optional custom pattern
+    static func parseVersion(from content: String, pattern: String? = nil) -> String? {
+        let regexPattern = pattern ?? wordPressVersionPattern
+        guard let regex = try? NSRegularExpression(pattern: regexPattern, options: .caseInsensitive) else {
             return nil
         }
         
         let range = NSRange(content.startIndex..., in: content)
-        guard let match = regex.firstMatch(in: content, options: [], range: range) else {
-            return nil
-        }
-        
-        guard let versionRange = Range(match.range(at: 1), in: content) else {
+        guard let match = regex.firstMatch(in: content, options: [], range: range),
+              match.numberOfRanges > 1,
+              let versionRange = Range(match.range(at: 1), in: content) else {
             return nil
         }
         
         return String(content[versionRange]).trimmingCharacters(in: .whitespaces)
     }
     
-    static func parsePluginName(from filePath: String) -> String? {
+    /// Parse WordPress plugin header for "Network: true" flag.
+    /// This indicates the plugin is network-activated in WordPress multisite.
+    static func parseNetworkFlag(from filePath: String) -> Bool {
         guard let content = try? String(contentsOfFile: filePath, encoding: .utf8) else {
-            return nil
+            return false
         }
-        return parseHeader(key: "Plugin Name", from: content)
-    }
-    
-    static func parseThemeName(from filePath: String) -> String? {
-        guard let content = try? String(contentsOfFile: filePath, encoding: .utf8) else {
-            return nil
-        }
-        return parseHeader(key: "Theme Name", from: content)
-    }
-    
-    private static func parseHeader(key: String, from content: String) -> String? {
-        let pattern = "\(key):\\s*(.+)"
+        
+        // Look for "Network: true" or "Network: True" in plugin header
+        let pattern = "Network:\\s*(true|yes)"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
-            return nil
+            return false
         }
         
         let range = NSRange(content.startIndex..., in: content)
-        guard let match = regex.firstMatch(in: content, options: [], range: range),
-              let valueRange = Range(match.range(at: 1), in: content) else {
-            return nil
-        }
-        
-        return String(content[valueRange]).trimmingCharacters(in: .whitespaces)
+        return regex.firstMatch(in: content, options: [], range: range) != nil
     }
 }

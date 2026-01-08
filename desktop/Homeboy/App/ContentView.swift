@@ -9,10 +9,9 @@ enum NavigationItem: Hashable {
 /// Built-in core tools (not modules)
 enum CoreTool: String, CaseIterable, Identifiable {
     case deployer = "Deployer"
-    case wpcliTerminal = "WP-CLI Terminal"
     case databaseBrowser = "Database"
-    case debugLogs = "Debug Logs"
-    case configEditor = "Config Editor"
+    case remoteLogViewer = "Log Viewer"
+    case remoteFileEditor = "File Editor"
     case settings = "Settings"
     
     var id: String { rawValue }
@@ -20,10 +19,9 @@ enum CoreTool: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .deployer: return "arrow.up.to.line"
-        case .wpcliTerminal: return "terminal"
         case .databaseBrowser: return "cylinder.split.1x2"
-        case .debugLogs: return "doc.text.magnifyingglass"
-        case .configEditor: return "doc.badge.gearshape"
+        case .remoteLogViewer: return "doc.text.magnifyingglass"
+        case .remoteFileEditor: return "doc.badge.gearshape"
         case .settings: return "gear"
         }
     }
@@ -31,14 +29,25 @@ enum CoreTool: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject var authManager: AuthManager
+    @ObservedObject private var configManager = ConfigurationManager.shared
     @ObservedObject private var moduleManager = ModuleManager.shared
     @State private var selectedItem: NavigationItem? = .coreTool(.deployer)
     
     var body: some View {
-        NavigationSplitView {
-            SidebarView(selectedItem: $selectedItem)
-        } detail: {
-            detailView
+        Group {
+            if configManager.activeProject != nil {
+                NavigationSplitView {
+                    SidebarView(selectedItem: $selectedItem)
+                } detail: {
+                    detailView
+                }
+            } else {
+                // Placeholder while waiting for project creation sheet
+                Color.clear
+            }
+        }
+        .sheet(isPresented: $configManager.needsProjectCreation) {
+            CreateProjectSheet(isFirstProject: true)
         }
     }
     
@@ -50,14 +59,12 @@ struct ContentView: View {
             // Core tools - kept mounted to preserve state
             DeployerView()
                 .opacity(selectedItem == .coreTool(.deployer) ? 1 : 0)
-            WPCLITerminalView()
-                .opacity(selectedItem == .coreTool(.wpcliTerminal) ? 1 : 0)
             DatabaseBrowserView()
                 .opacity(selectedItem == .coreTool(.databaseBrowser) ? 1 : 0)
-            DebugLogsView()
-                .opacity(selectedItem == .coreTool(.debugLogs) ? 1 : 0)
-            ConfigEditorView()
-                .opacity(selectedItem == .coreTool(.configEditor) ? 1 : 0)
+            RemoteLogViewerView()
+                .opacity(selectedItem == .coreTool(.remoteLogViewer) ? 1 : 0)
+            RemoteFileEditorView()
+                .opacity(selectedItem == .coreTool(.remoteFileEditor) ? 1 : 0)
             SettingsView()
                 .opacity(selectedItem == .coreTool(.settings) ? 1 : 0)
             

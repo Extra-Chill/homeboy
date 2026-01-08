@@ -1,0 +1,46 @@
+{
+  "id": "wordpress",
+  "displayName": "WordPress",
+  "icon": "w.circle.fill",
+  "features": ["deployer", "debugLogs", "configEditor", "databaseBrowser"],
+  "configSchema": "wordpress",
+
+  "defaultPinnedFiles": ["wp-config.php", ".htaccess", "robots.txt"],
+  "defaultPinnedLogs": ["wp-content/debug.log"],
+
+  "database": {
+    "defaultTablePrefix": "wp_",
+    "prefixDetectionSuffixes": ["options", "posts", "users"],
+
+    "tableSuffixes": {
+      "core": ["commentmeta", "comments", "links", "options", "postmeta",
+               "posts", "termmeta", "terms", "term_relationships", "term_taxonomy"],
+      "users": ["users", "usermeta"],
+      "network": ["blogs", "blogmeta", "site", "sitemeta", "registration_log", "signups"]
+    },
+
+    "protectedSuffixes": ["options", "posts", "postmeta", "users", "usermeta",
+                          "comments", "commentmeta", "terms", "termmeta",
+                          "term_relationships", "term_taxonomy", "links",
+                          "blogs", "blogmeta", "site", "sitemeta",
+                          "registration_log", "signups"],
+
+    "defaultGrouping": {
+      "id": "wordpress-tables",
+      "name": "WordPress Tables",
+      "patternTemplate": "{{prefix}}*"
+    },
+
+    "multisiteGrouping": {
+      "network": {
+        "id": "wordpress-network",
+        "name": "Network Tables"
+      },
+      "site": {
+        "idTemplate": "wordpress-site-{{blogId}}",
+        "nameTemplate": "{{siteName}}",
+        "patternTemplate": "{{sitePrefix}}*"
+      }
+    }
+  }
+}

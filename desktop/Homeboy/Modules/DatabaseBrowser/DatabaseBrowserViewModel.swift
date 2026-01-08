@@ -13,10 +13,10 @@ class DatabaseBrowserViewModel: ObservableObject {
     
     @Published var connectionStatus: DatabaseConnectionStatus = .disconnected
     
-    // Site-based organization
-    @Published var sites: [WordPressSite] = []
-    @Published var networkCategory: TableCategory = TableCategory(name: "Network")
-    @Published var otherCategory: TableCategory = TableCategory(name: "Other")
+    // Table groupings (universal system)
+    @Published var groupedTables: [(grouping: ItemGrouping, tables: [DatabaseTable], isExpanded: Bool)] = []
+    @Published var ungroupedTables: [DatabaseTable] = []
+    @Published var isUngroupedExpanded: Bool = true
     
     // Selected table
     @Published var selectedTable: DatabaseTable?
@@ -44,7 +44,7 @@ class DatabaseBrowserViewModel: ObservableObject {
     @Published var hasExecutedQuery: Bool = false
     
     // Error handling
-    @Published var errorMessage: String?
+    @Published var errorMessage: AppError?
     
     // Row deletion
     @Published var pendingRowDeletion: PendingRowDeletion? = nil
@@ -58,12 +58,10 @@ class DatabaseBrowserViewModel: ObservableObject {
     @Published var tableDeletionConfirmText: String = ""
     @Published var isDeletingTable: Bool = false
     
-    // Detected prefix for protection system
-    @Published var detectedPrefix: String? = nil
-    
     // MARK: - Private State
     
     private var mysqlService: MySQLService?
+    private var currentGroupings: [ItemGrouping] = []
     
     // MARK: - Computed Properties
     
@@ -93,7 +91,7 @@ class DatabaseBrowserViewModel: ObservableObject {
     }
     
     var totalTableCount: Int {
-        sites.reduce(0) { $0 + $1.tableCount } + networkCategory.tableCount + otherCategory.tableCount
+        groupedTables.reduce(0) { $0 + $1.tables.count } + ungroupedTables.count
     }
     
     var canConfirmRowDeletion: Bool {
@@ -106,7 +104,8 @@ class DatabaseBrowserViewModel: ObservableObject {
     }
     
     func isTableProtected(_ table: DatabaseTable) -> Bool {
-        WordPressSiteMap.isProtectedTable(table.name, prefix: detectedPrefix)
+        let project = ConfigurationManager.readCurrentProject()
+        return TableProtectionManager.isProtected(tableName: table.name, config: project)
     }
     
     // MARK: - Connection Methods
@@ -129,7 +128,7 @@ class DatabaseBrowserViewModel: ObservableObject {
             await fetchTables()
         } catch {
             connectionStatus = .error(error.localizedDescription)
-            errorMessage = error.localizedDescription
+            errorMessage = AppError(error.localizedDescription, source: "Database Browser")
             mysqlService = nil
         }
     }
@@ -140,9 +139,9 @@ class DatabaseBrowserViewModel: ObservableObject {
         connectionStatus = .disconnected
         
         // Clear state
-        sites = []
-        networkCategory = TableCategory(name: "Network")
-        otherCategory = TableCategory(name: "Other")
+        groupedTables = []
+        ungroupedTables = []
+        currentGroupings = []
         selectedTable = nil
         columns = []
         rows = []
@@ -151,20 +150,16 @@ class DatabaseBrowserViewModel: ObservableObject {
         errorMessage = nil
     }
     
-    // MARK: - Site Expansion
+    // MARK: - Group Expansion
     
-    func toggleSiteExpansion(_ site: WordPressSite) {
-        if let index = sites.firstIndex(where: { $0.id == site.id }) {
-            sites[index].isExpanded.toggle()
+    func toggleGroupExpansion(groupingId: String) {
+        if let index = groupedTables.firstIndex(where: { $0.grouping.id == groupingId }) {
+            groupedTables[index].isExpanded.toggle()
         }
     }
     
-    func toggleNetworkExpansion() {
-        networkCategory.isExpanded.toggle()
-    }
-    
-    func toggleOtherExpansion() {
-        otherCategory.isExpanded.toggle()
+    func toggleUngroupedExpansion() {
+        isUngroupedExpanded.toggle()
     }
     
     // MARK: - Data Methods
@@ -174,22 +169,32 @@ class DatabaseBrowserViewModel: ObservableObject {
         
         do {
             let allTables = try await service.fetchTables()
+            let project = ConfigurationManager.readCurrentProject()
             
-            // Detect table prefix for protection system
-            detectedPrefix = WordPressSiteMap.detectTablePrefix(from: allTables)
+            // Load groupings from project config
+            currentGroupings = project.tableGroupings
             
-            // Get multisite config from current site configuration
-            let siteConfig = ConfigurationManager.readCurrentProject()
-            let (categorizedSites, network, other) = WordPressSiteMap.categorize(
-                tables: allTables,
-                config: siteConfig.multisite
+            // Categorize tables using the universal grouping system
+            let result = GroupingManager.categorize(
+            
+                items: allTables,
+                groupings: currentGroupings,
+                idExtractor: { $0.name }
             )
             
-            sites = categorizedSites
-            networkCategory = TableCategory(name: "Network", tables: network)
-            otherCategory = TableCategory(name: "Other", tables: other)
+            // Convert to view-friendly format with expansion state
+            groupedTables = result.grouped.map { (grouping, items) in
+                (grouping: grouping, tables: items, isExpanded: false)
+            }
+            ungroupedTables = result.ungrouped
+            
+            // Auto-expand first group if only one exists
+            if groupedTables.count == 1 {
+                groupedTables[0].isExpanded = true
+            }
+            
         } catch {
-            errorMessage = "Failed to fetch tables: \(error.localizedDescription)"
+            errorMessage = AppError("Failed to fetch tables: \(error.localizedDescription)", source: "Database Browser")
         }
     }
     
@@ -218,7 +223,7 @@ class DatabaseBrowserViewModel: ObservableObject {
                 offset: 0
             )
         } catch {
-            errorMessage = "Failed to load table: \(error.localizedDescription)"
+            errorMessage = AppError("Failed to load table: \(error.localizedDescription)", source: "Database Browser")
         }
         
         isLoadingTableData = false
@@ -238,7 +243,7 @@ class DatabaseBrowserViewModel: ObservableObject {
                 offset: offset
             )
         } catch {
-            errorMessage = "Failed to fetch rows: \(error.localizedDescription)"
+            errorMessage = AppError("Failed to fetch rows: \(error.localizedDescription)", source: "Database Browser")
         }
     }
     
@@ -347,12 +352,12 @@ class DatabaseBrowserViewModel: ObservableObject {
     func requestRowDeletion(row: TableRow) {
         guard let table = selectedTable,
               let primaryKey = columns.first(where: { $0.isPrimaryKey }) else {
-            errorMessage = "Cannot delete: no primary key found"
+            errorMessage = AppError("Cannot delete: no primary key found", source: "Database Browser")
             return
         }
         
         guard let pkValue = row.values[primaryKey.name], pkValue != nil else {
-            errorMessage = "Cannot delete: primary key value is null"
+            errorMessage = AppError("Cannot delete: primary key value is null", source: "Database Browser")
             return
         }
         
@@ -393,7 +398,7 @@ class DatabaseBrowserViewModel: ObservableObject {
             // Refresh current view
             await refresh()
         } catch {
-            errorMessage = "Delete failed: \(error.localizedDescription)"
+            errorMessage = AppError("Delete failed: \(error.localizedDescription)", source: "Database Browser")
         }
         
         isDeletingRow = false
@@ -442,7 +447,7 @@ class DatabaseBrowserViewModel: ObservableObject {
             // Refresh table list
             await fetchTables()
         } catch {
-            errorMessage = "Drop table failed: \(error.localizedDescription)"
+            errorMessage = AppError("Drop table failed: \(error.localizedDescription)", source: "Database Browser")
         }
         
         isDeletingTable = false
@@ -511,5 +516,155 @@ class DatabaseBrowserViewModel: ObservableObject {
                 self?.disconnect()
             }
             .store(in: &cancellables)
+    }
+    
+    // MARK: - Grouping Management
+    
+    /// Create a new grouping from table names
+    func createGrouping(name: String, fromTableNames tableNames: [String]) {
+        let newGrouping = GroupingManager.createGrouping(
+            name: name,
+            fromIds: tableNames,
+            existingGroupings: currentGroupings
+        )
+        currentGroupings.append(newGrouping)
+        saveGroupings()
+        refreshGroupedTables()
+    }
+    
+    /// Add tables to an existing grouping
+    func addTablesToGrouping(tableNames: [String], groupingId: String) {
+        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
+        currentGroupings[index] = GroupingManager.addMembers(tableNames, to: currentGroupings[index])
+        saveGroupings()
+        refreshGroupedTables()
+    }
+    
+    /// Remove tables from a grouping
+    func removeTablesFromGrouping(tableNames: [String], groupingId: String) {
+        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
+        currentGroupings[index] = GroupingManager.removeMembers(tableNames, from: currentGroupings[index])
+        saveGroupings()
+        refreshGroupedTables()
+    }
+    
+    /// Rename a grouping
+    func renameGrouping(groupingId: String, newName: String) {
+        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
+        currentGroupings[index].name = newName
+        saveGroupings()
+        refreshGroupedTables()
+    }
+    
+    /// Delete a grouping (tables become ungrouped)
+    func deleteGrouping(groupingId: String) {
+        currentGroupings = GroupingManager.deleteGrouping(id: groupingId, from: currentGroupings)
+        saveGroupings()
+        refreshGroupedTables()
+    }
+    
+    /// Move a grouping up in the list
+    func moveGroupingUp(groupingId: String) {
+        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
+        guard let index = sorted.firstIndex(where: { $0.id == groupingId }),
+              index > 0 else { return }
+        currentGroupings = GroupingManager.moveGrouping(in: currentGroupings, fromIndex: index, toIndex: index - 1)
+        saveGroupings()
+        refreshGroupedTables()
+    }
+    
+    /// Move a grouping down in the list
+    func moveGroupingDown(groupingId: String) {
+        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
+        guard let index = sorted.firstIndex(where: { $0.id == groupingId }),
+              index < sorted.count - 1 else { return }
+        currentGroupings = GroupingManager.moveGrouping(in: currentGroupings, fromIndex: index, toIndex: index + 1)
+        saveGroupings()
+        refreshGroupedTables()
+    }
+    
+    /// Check if a grouping can be moved up
+    func canMoveGroupingUp(groupingId: String) -> Bool {
+        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
+        guard let index = sorted.firstIndex(where: { $0.id == groupingId }) else { return false }
+        return index > 0
+    }
+    
+    /// Check if a grouping can be moved down
+    func canMoveGroupingDown(groupingId: String) -> Bool {
+        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
+        guard let index = sorted.firstIndex(where: { $0.id == groupingId }) else { return false }
+        return index < sorted.count - 1
+    }
+    
+    /// Find which grouping a table belongs to (by explicit membership)
+    func groupingForTable(_ tableName: String) -> ItemGrouping? {
+        currentGroupings.first { $0.memberIds.contains(tableName) }
+    }
+    
+    /// Check if a table is in a group by explicit membership (not pattern)
+    func isTableInGroupByMembership(_ tableName: String) -> Bool {
+        currentGroupings.contains { $0.memberIds.contains(tableName) }
+    }
+    
+    // MARK: - Table Protection Management
+    
+    /// Protect a table from deletion
+    func protectTable(_ tableName: String) {
+        var project = ConfigurationManager.readCurrentProject()
+        TableProtectionManager.protect(tableName: tableName, in: &project)
+        ConfigurationManager.shared.saveProject(project)
+    }
+    
+    /// Remove protection from a table
+    func unprotectTable(_ tableName: String) {
+        var project = ConfigurationManager.readCurrentProject()
+        TableProtectionManager.unprotect(tableName: tableName, in: &project)
+        ConfigurationManager.shared.saveProject(project)
+    }
+    
+    /// Unlock a core protected table (allows deletion)
+    func unlockTable(_ tableName: String) {
+        var project = ConfigurationManager.readCurrentProject()
+        TableProtectionManager.unlock(tableName: tableName, in: &project)
+        ConfigurationManager.shared.saveProject(project)
+    }
+    
+    /// Check if a table is a core protected table
+    func isCoreProtectedTable(_ tableName: String) -> Bool {
+        let project = ConfigurationManager.readCurrentProject()
+        return TableProtectionManager.isCoreProtected(tableName: tableName, config: project)
+    }
+    
+    /// Check if a table has been unlocked
+    func isTableUnlocked(_ tableName: String) -> Bool {
+        let project = ConfigurationManager.readCurrentProject()
+        return TableProtectionManager.isUnlocked(tableName: tableName, config: project)
+    }
+    
+    // MARK: - Private Helpers
+    
+    private func saveGroupings() {
+        var project = ConfigurationManager.readCurrentProject()
+        project.tableGroupings = currentGroupings
+        ConfigurationManager.shared.saveProject(project)
+    }
+    
+    private func refreshGroupedTables() {
+        let allTables = groupedTables.flatMap { $0.tables } + ungroupedTables
+        let result = GroupingManager.categorize(
+            items: allTables,
+            groupings: currentGroupings,
+            idExtractor: { $0.name }
+        )
+        
+        // Preserve expansion state where possible
+        let oldExpansionState = Dictionary(uniqueKeysWithValues: groupedTables.map { ($0.grouping.id, $0.isExpanded) })
+        
+        groupedTables = result.grouped.map { (grouping, items) in
+            let wasExpanded = oldExpansionState[grouping.id] ?? false
+            return (grouping: grouping, tables: items, isExpanded: wasExpanded)
+        }
+        ungroupedTables = result.ungrouped
     }
 }

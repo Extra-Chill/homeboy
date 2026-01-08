@@ -39,7 +39,9 @@ Homeboy/
 ├── Core/
 │   ├── API/                      # HTTP client and types
 │   ├── Auth/                     # Keychain and auth management
+│   ├── CLI/                      # CLI installer (CLIInstaller.swift)
 │   ├── Config/                   # JSON configuration management
+│   ├── Copyable/                 # Error/warning/output copy system
 │   ├── Database/                 # MySQL and SSH tunnel services
 │   ├── Modules/                  # Module plugin system
 │   ├── Process/                  # Python and shell runners
@@ -56,6 +58,16 @@ Homeboy/
 │   ├── Modules/                  # Dynamic module UI harness
 │   └── Settings/                 # Settings tabs
 └── docs/                         # Documentation
+CLI/
+├── main.swift                    # Entry point, HomeboyCLI, Projects command
+├── Commands/
+│   ├── WPCommand.swift           # WP-CLI passthrough to remote servers
+│   ├── DBCommand.swift           # Database operations (tables, describe, query)
+│   ├── DeployCommand.swift       # Component deployment with build automation
+│   ├── SSHCommand.swift          # SSH command execution and interactive shell
+│   └── ProjectsCommand.swift     # Reserved for future subcommands
+└── Utilities/
+    └── OutputFormatter.swift     # Table and JSON formatting utilities
 ```
 
 ## Module Plugin System
@@ -78,6 +90,39 @@ The app supports installable modules via JSON manifest. Modules are stored at:
 - `Views/Modules/ModuleActionsBar.swift` - Builtin and API actions
 
 See `docs/MODULE-SPEC.md` for the complete module manifest specification.
+
+## Copyable Error System
+
+The Copyable system provides user-friendly error reporting with one-click copy to clipboard. All errors generate structured markdown with debugging context.
+
+### Key Files
+- `Core/Copyable/CopyableContent.swift` - Protocol and ContentType enum
+- `Core/Copyable/ContentContext.swift` - Rich metadata for debugging context
+- `Core/Copyable/AppError.swift` - Copyable error struct
+- `Core/Copyable/AppWarning.swift` - Copyable warning struct
+- `Core/Copyable/ConsoleOutput.swift` - Copyable console output
+- `Core/Copyable/CopyButton.swift` - SwiftUI copy button component
+
+### View Components
+- `Views/Components/ErrorView.swift` - Full-screen error with retry
+- `Views/Components/InlineErrorView.swift` - Compact inline error
+- `Views/Components/WarningView.swift` - Full-screen warning with action
+- `Views/Components/InlineWarningView.swift` - Compact inline warning
+
+### ViewModel Pattern
+All ViewModels use `@Published var error: AppError?` for consistent error handling:
+
+```swift
+@Published var error: AppError?
+
+// Setting error with source context
+error = AppError("Database credentials not configured", source: "Database Browser")
+
+// Setting error with file path
+error = AppError(error.localizedDescription, source: "Log Viewer", path: file.displayName)
+```
+
+See `docs/ERROR-HANDLING.md` for the complete Copyable system specification.
 
 ## Core Tools
 
@@ -105,15 +150,43 @@ Edit JSON configuration files with backup support.
 ### Debug Logs
 View WordPress debug logs from remote servers.
 
+## CLI Tool
+
+Bundled command-line tool for terminal access to Homeboy functionality.
+
+### Commands
+- `projects` - List configured projects (`--current` for active only)
+- `wp <project> [blog] <args>` - WP-CLI passthrough to production
+- `db <project> [blog] <subcommand>` - Database operations (tables, describe, query)
+- `deploy <project> [components]` - Deploy plugins/themes with build automation
+- `ssh <project> [command]` - SSH access (interactive or single command)
+
+### Build Configuration
+- Target: `homeboy-cli` (type: tool) in project.yml
+- Dependencies: swift-argument-parser 1.3.0+
+- Sources: `CLI/` directory + `Homeboy/Core` (shared services)
+- Post-build script copies CLI binary to app bundle as `homeboy-cli`
+- Installed via symlink to `/usr/local/bin/homeboy`
+
+### Key Files
+- `CLI/main.swift` - Entry point with HomeboyCLI and Projects command
+- `CLI/Commands/*.swift` - Individual command implementations
+- `Core/CLI/CLIInstaller.swift` - Install/uninstall via osascript admin privileges
+
+See `docs/CLI.md` for the complete CLI reference.
+
 ## Configuration
 
-Site configurations stored as JSON:
+Configuration is stored as JSON:
 ```
 ~/Library/Application Support/Homeboy/
-├── config.json           # Active site ID
-├── sites/                # Per-site configuration
-│   └── <site-id>.json
+├── config.json           # App-level config (active project ID)
+├── projects/             # Per-project configuration
+│   └── <project-id>.json
+├── servers/              # SSH server configuration
+│   └── <server-id>.json
 ├── modules/              # Installed modules
+├── keys/                 # SSH keys (per server)
 └── playwright-browsers/  # Shared Playwright cache
 ```
 
@@ -142,6 +215,7 @@ Module-defined API actions can call any endpoint on the configured site.
 
 ## Migration
 
-On first launch, Homeboy automatically migrates data from the previous ExtraChillDesktop installation:
-- Application Support folder (`~/Library/Application Support/ExtraChillDesktop/` → `Homeboy/`)
-- Keychain items (service `com.extrachill.desktop` → `com.extrachill.homeboy`)
+Homeboy does not run an automatic migration from ExtraChillDesktop in the current implementation.
+
+- The Keychain service is `com.extrachill.homeboy`.
+- `KeychainService.clearLegacyTokens()` removes the legacy, non-namespaced token keys (`accessToken`, `refreshToken`) if needed.

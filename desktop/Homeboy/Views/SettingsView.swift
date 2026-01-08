@@ -15,9 +15,11 @@ struct SettingsView: View {
             DatabaseSettingsTab(config: config)
                 .tabItem { Text("Database") }
             
-            WordPressSettingsTab(config: config)
-                .environmentObject(authManager)
-                .tabItem { Text("WordPress") }
+            if config.safeActiveProject.isWordPress {
+                WordPressSettingsTab(config: config)
+                    .environmentObject(authManager)
+                    .tabItem { Text("WordPress") }
+            }
             
             ComponentsSettingsTab(config: config)
                 .tabItem { Text("Components") }

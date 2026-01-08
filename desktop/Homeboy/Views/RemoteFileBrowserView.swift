@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// View for browsing remote server filesystem
 struct RemoteFileBrowserView: View {
@@ -8,34 +9,43 @@ struct RemoteFileBrowserView: View {
     let mode: FileBrowserMode
     let onSelectPath: ((String) -> Void)?
     
-    init(serverId: String, mode: FileBrowserMode = .browse, onSelectPath: ((String) -> Void)? = nil) {
-        _browser = StateObject(wrappedValue: RemoteFileBrowser(serverId: serverId))
+    @State private var sortDescriptor: DataTableSortDescriptor<RemoteFileEntry>?
+    
+    init(serverId: String, startingPath: String? = nil, mode: FileBrowserMode = .browse, onSelectPath: ((String) -> Void)? = nil) {
+        _browser = StateObject(wrappedValue: RemoteFileBrowser(serverId: serverId, startingPath: startingPath))
         self.mode = mode
         self.onSelectPath = onSelectPath
     }
     
+    /// Sorted entries based on current sort descriptor, with default sort (directories first, then alphabetical)
+    private var sortedEntries: [RemoteFileEntry] {
+        if let descriptor = sortDescriptor {
+            return browser.entries.sorted { lhs, rhs in
+                descriptor.compare(lhs, rhs) == .orderedAscending
+            }
+        }
+        // Default: directories first, then alphabetical
+        return browser.entries.sorted()
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar
             toolbar
             
             Divider()
             
-            // Breadcrumbs
             breadcrumbsBar
             
             Divider()
             
-            // Content
             content
             
-            // Footer (for selectPath mode)
-            if mode == .selectPath {
+            if mode == .selectPath || mode == .selectFile {
                 Divider()
                 selectionFooter
             }
         }
-        .frame(minWidth: 500, minHeight: 400)
+        .frame(minWidth: 600, minHeight: 400)
         .task {
             await browser.connect()
         }
@@ -124,43 +134,95 @@ struct RemoteFileBrowserView: View {
     @ViewBuilder
     private var content: some View {
         if let error = browser.error {
-            VStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.largeTitle)
-                    .foregroundColor(.orange)
-                Text(error)
-                    .foregroundColor(.secondary)
-                Button("Retry") {
-                    Task { await browser.refresh() }
-                }
+            ErrorView(error) {
+                Task { await browser.refresh() }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if browser.entries.isEmpty && !browser.isLoading {
-            VStack(spacing: 12) {
-                Image(systemName: "folder")
-                    .font(.largeTitle)
-                    .foregroundColor(.secondary)
-                Text("Directory is empty")
-                    .foregroundColor(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Color.clear
         } else {
-            List(browser.entries) { entry in
-                FileEntryRow(entry: entry, isLoading: browser.isLoading) {
-                    Task { await browser.navigateInto(entry) }
-                }
-            }
-            .listStyle(.plain)
+            fileTable
         }
     }
     
+    // MARK: - File Table
+    
+    private var fileTable: some View {
+        NativeDataTable(
+            items: sortedEntries,
+            columns: fileTableColumns,
+            selection: $browser.selectedEntries,
+            sortDescriptor: $sortDescriptor,
+            onDoubleClick: { entry in
+                if entry.isDirectory {
+                    Task { await browser.navigateInto(entry) }
+                }
+            },
+            onKeyboardActivate: { entry in
+                if entry.isDirectory {
+                    Task { await browser.navigateInto(entry) }
+                }
+            }
+        )
+    }
+    
+    private var fileTableColumns: [DataTableColumn<RemoteFileEntry>] {
+        [
+            .iconWithText(
+                id: "name",
+                title: "Name",
+                width: .auto(min: 200, ideal: 300, max: 600),
+                textKeyPath: \.name,
+                iconKeyPath: \.icon,
+                iconColorProvider: { entry in
+                    entry.isDirectory ? NSColor.controlAccentColor : NSColor.secondaryLabelColor
+                }
+            ),
+            .monospaced(
+                id: "size",
+                title: "Size",
+                width: .auto(min: 60, ideal: 80, max: 120),
+                alignment: .right,
+                keyPath: \.formattedSize,
+                nullPlaceholder: "—"
+            ),
+            .monospaced(
+                id: "permissions",
+                title: "Permissions",
+                width: .auto(min: 80, ideal: 100, max: 120),
+                alignment: .left,
+                keyPath: \.permissions,
+                nullPlaceholder: ""
+            )
+        ]
+    }
+    
     // MARK: - Selection Footer
+    
+    private var selectedPath: String {
+        if mode == .selectFile, let file = browser.selectedFile {
+            return browser.currentPath.hasSuffix("/")
+                ? "\(browser.currentPath)\(file.name)"
+                : "\(browser.currentPath)/\(file.name)"
+        }
+        return browser.currentPath
+    }
+    
+    private var canSelect: Bool {
+        switch mode {
+        case .selectPath:
+            return !browser.currentPath.isEmpty
+        case .selectFile:
+            return browser.selectedFile != nil && !(browser.selectedFile?.isDirectory ?? true)
+        case .browse:
+            return false
+        }
+    }
     
     private var selectionFooter: some View {
         HStack {
             Text("Selected: ")
                 .foregroundColor(.secondary)
-            Text(browser.currentPath)
+            Text(selectedPath)
                 .fontWeight(.medium)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -173,55 +235,14 @@ struct RemoteFileBrowserView: View {
             .keyboardShortcut(.cancelAction)
             
             Button("Select") {
-                onSelectPath?(browser.currentPath)
+                onSelectPath?(selectedPath)
                 dismiss()
             }
             .keyboardShortcut(.defaultAction)
-            .disabled(browser.currentPath.isEmpty)
+            .disabled(!canSelect)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-    }
-}
-
-// MARK: - File Entry Row
-
-private struct FileEntryRow: View {
-    let entry: RemoteFileEntry
-    let isLoading: Bool
-    let onNavigate: () -> Void
-    
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: entry.icon)
-                .foregroundColor(entry.isDirectory ? .accentColor : .secondary)
-                .frame(width: 20)
-            
-            Text(entry.name)
-                .lineLimit(1)
-            
-            Spacer()
-            
-            if let size = entry.formattedSize {
-                Text(size)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            
-            if let permissions = entry.permissions {
-                Text(permissions)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fontDesign(.monospaced)
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            if entry.isDirectory {
-                onNavigate()
-            }
-        }
-        .opacity(isLoading ? 0.5 : 1.0)
     }
 }
 

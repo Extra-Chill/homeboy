@@ -5,19 +5,18 @@ struct ModuleConsoleView: View {
     @Binding var output: String
     @ObservedObject var viewModel: ModuleViewModel
     
+    private var moduleName: String {
+        ModuleManager.shared.module(withId: viewModel.moduleId)?.name ?? viewModel.moduleId
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
             HStack {
                 Spacer()
                 
-                Button {
-                    viewModel.copyConsoleOutput()
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                }
-                .buttonStyle(.plain)
-                .help("Copy to clipboard")
+                CopyButton.console(output, source: "Module: \(moduleName)")
+                    .disabled(output.isEmpty)
                 
                 Button {
                     viewModel.clearConsole()

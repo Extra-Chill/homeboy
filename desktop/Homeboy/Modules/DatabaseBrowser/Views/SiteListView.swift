@@ -1,83 +1,159 @@
 import SwiftUI
 
-/// Sidebar view showing WordPress sites with expandable table lists
+/// Sidebar view showing table groupings with expandable table lists
 struct SiteListView: View {
     @ObservedObject var viewModel: DatabaseBrowserViewModel
+    @State private var showingGroupEditor = false
+    @State private var groupEditorMode: GroupingEditorSheet.Mode = .create
+    @State private var pendingNewGroupTableName: String? = nil
     
     var body: some View {
         List {
-            // Sites section
-            ForEach(viewModel.sites) { site in
-                SiteSection(
-                    site: site,
+            // Grouped tables sections
+            ForEach(Array(viewModel.groupedTables.enumerated()), id: \.element.grouping.id) { index, group in
+                GroupSection(
+                    grouping: group.grouping,
+                    tables: group.tables,
+                    isExpanded: group.isExpanded,
                     selectedTable: viewModel.selectedTable,
-                    onToggle: { viewModel.toggleSiteExpansion(site) },
+                    allGroupings: viewModel.groupedTables.map { $0.grouping },
+                    canMoveUp: viewModel.canMoveGroupingUp(groupingId: group.grouping.id),
+                    canMoveDown: viewModel.canMoveGroupingDown(groupingId: group.grouping.id),
+                    onToggle: { viewModel.toggleGroupExpansion(groupingId: group.grouping.id) },
                     onSelectTable: { table in
                         Task {
                             await viewModel.selectTable(table)
                         }
                     },
                     isTableProtected: { viewModel.isTableProtected($0) },
-                    onDeleteTable: { viewModel.requestTableDeletion($0) }
+                    isCoreProtected: { viewModel.isCoreProtectedTable($0.name) },
+                    isUnlocked: { viewModel.isTableUnlocked($0.name) },
+                    isInGroup: { viewModel.isTableInGroupByMembership($0.name) },
+                    onDeleteTable: { viewModel.requestTableDeletion($0) },
+                    onRenameGroup: {
+                        groupEditorMode = .rename(group.grouping)
+                        showingGroupEditor = true
+                    },
+                    onMoveGroupUp: { viewModel.moveGroupingUp(groupingId: group.grouping.id) },
+                    onMoveGroupDown: { viewModel.moveGroupingDown(groupingId: group.grouping.id) },
+                    onDeleteGroup: { viewModel.deleteGrouping(groupingId: group.grouping.id) },
+                    onAddTableToGroup: { table, grouping in
+                        viewModel.addTablesToGrouping(tableNames: [table.name], groupingId: grouping.id)
+                    },
+                    onRemoveTableFromGroup: { table in
+                        if let currentGrouping = viewModel.groupingForTable(table.name) {
+                            viewModel.removeTablesFromGrouping(tableNames: [table.name], groupingId: currentGrouping.id)
+                        }
+                    },
+                    onCreateNewGroup: { tableName in
+                        pendingNewGroupTableName = tableName
+                        groupEditorMode = .create
+                        showingGroupEditor = true
+                    },
+                    onProtectTable: { viewModel.protectTable($0.name) },
+                    onUnprotectTable: { viewModel.unprotectTable($0.name) },
+                    onUnlockTable: { viewModel.unlockTable($0.name) }
                 )
             }
             
-            // Network tables section
-            if viewModel.networkCategory.tableCount > 0 {
-                CategorySection(
-                    category: viewModel.networkCategory,
+            // Ungrouped tables section
+            if !viewModel.ungroupedTables.isEmpty {
+                UngroupedSection(
+                    tables: viewModel.ungroupedTables,
+                    isExpanded: viewModel.isUngroupedExpanded,
                     selectedTable: viewModel.selectedTable,
-                    onToggle: { viewModel.toggleNetworkExpansion() },
+                    allGroupings: viewModel.groupedTables.map { $0.grouping },
+                    onToggle: { viewModel.toggleUngroupedExpansion() },
                     onSelectTable: { table in
                         Task {
                             await viewModel.selectTable(table)
                         }
                     },
                     isTableProtected: { viewModel.isTableProtected($0) },
-                    onDeleteTable: { viewModel.requestTableDeletion($0) }
-                )
-            }
-            
-            // Other tables section (only show if tables exist)
-            if viewModel.otherCategory.tableCount > 0 {
-                CategorySection(
-                    category: viewModel.otherCategory,
-                    selectedTable: viewModel.selectedTable,
-                    onToggle: { viewModel.toggleOtherExpansion() },
-                    onSelectTable: { table in
-                        Task {
-                            await viewModel.selectTable(table)
-                        }
+                    isCoreProtected: { viewModel.isCoreProtectedTable($0.name) },
+                    isUnlocked: { viewModel.isTableUnlocked($0.name) },
+                    onDeleteTable: { viewModel.requestTableDeletion($0) },
+                    onAddTableToGroup: { table, grouping in
+                        viewModel.addTablesToGrouping(tableNames: [table.name], groupingId: grouping.id)
                     },
-                    isTableProtected: { viewModel.isTableProtected($0) },
-                    onDeleteTable: { viewModel.requestTableDeletion($0) }
+                    onCreateNewGroup: { tableName in
+                        pendingNewGroupTableName = tableName
+                        groupEditorMode = .create
+                        showingGroupEditor = true
+                    },
+                    onProtectTable: { viewModel.protectTable($0.name) },
+                    onUnprotectTable: { viewModel.unprotectTable($0.name) },
+                    onUnlockTable: { viewModel.unlockTable($0.name) }
                 )
             }
         }
         .listStyle(.sidebar)
+        .sheet(isPresented: $showingGroupEditor) {
+            GroupingEditorSheet(mode: groupEditorMode) { name in
+                switch groupEditorMode {
+                case .create:
+                    if let tableName = pendingNewGroupTableName {
+                        viewModel.createGrouping(name: name, fromTableNames: [tableName])
+                        pendingNewGroupTableName = nil
+                    } else {
+                        viewModel.createGrouping(name: name, fromTableNames: [])
+                    }
+                case .rename(let grouping):
+                    viewModel.renameGrouping(groupingId: grouping.id, newName: name)
+                }
+            }
+        }
     }
 }
 
-/// A collapsible section for a WordPress site
-struct SiteSection: View {
-    let site: WordPressSite
+/// A collapsible section for a table grouping
+struct GroupSection: View {
+    let grouping: ItemGrouping
+    let tables: [DatabaseTable]
+    let isExpanded: Bool
     let selectedTable: DatabaseTable?
+    let allGroupings: [ItemGrouping]
+    let canMoveUp: Bool
+    let canMoveDown: Bool
     let onToggle: () -> Void
     let onSelectTable: (DatabaseTable) -> Void
     let isTableProtected: (DatabaseTable) -> Bool
+    let isCoreProtected: (DatabaseTable) -> Bool
+    let isUnlocked: (DatabaseTable) -> Bool
+    let isInGroup: (DatabaseTable) -> Bool
     let onDeleteTable: (DatabaseTable) -> Void
+    let onRenameGroup: () -> Void
+    let onMoveGroupUp: () -> Void
+    let onMoveGroupDown: () -> Void
+    let onDeleteGroup: () -> Void
+    let onAddTableToGroup: (DatabaseTable, ItemGrouping) -> Void
+    let onRemoveTableFromGroup: (DatabaseTable) -> Void
+    let onCreateNewGroup: (String) -> Void
+    let onProtectTable: (DatabaseTable) -> Void
+    let onUnprotectTable: (DatabaseTable) -> Void
+    let onUnlockTable: (DatabaseTable) -> Void
     
     var body: some View {
         DisclosureGroup(isExpanded: Binding(
-            get: { site.isExpanded },
+            get: { isExpanded },
             set: { _ in onToggle() }
         )) {
-            ForEach(site.tables) { table in
+            ForEach(tables) { table in
                 TableRowView(
                     table: table,
                     isSelected: selectedTable?.id == table.id,
                     isProtected: isTableProtected(table),
-                    onDelete: { onDeleteTable(table) }
+                    isCoreProtected: isCoreProtected(table),
+                    isUnlocked: isUnlocked(table),
+                    isInGroup: isInGroup(table),
+                    allGroupings: allGroupings,
+                    onDelete: { onDeleteTable(table) },
+                    onAddToGroup: { grouping in onAddTableToGroup(table, grouping) },
+                    onRemoveFromGroup: { onRemoveTableFromGroup(table) },
+                    onCreateNewGroup: { onCreateNewGroup(table.name) },
+                    onProtect: { onProtectTable(table) },
+                    onUnprotect: { onUnprotectTable(table) },
+                    onUnlock: { onUnlockTable(table) }
                 )
                 .contentShape(Rectangle())
                 .onTapGesture {
@@ -85,86 +161,48 @@ struct SiteSection: View {
                 }
             }
         } label: {
-            SiteHeaderView(site: site)
-        }
-    }
-}
-
-/// Header for a site section showing name, domain, and table count
-struct SiteHeaderView: View {
-    let site: WordPressSite
-    
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(site.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                
-                Text(site.domain)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-            }
-            
-            Spacer()
-            
-            Text("\(site.tableCount)")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.secondary.opacity(0.2))
-                .cornerRadius(4)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-/// A collapsible section for a table category (Network, Other)
-struct CategorySection: View {
-    let category: TableCategory
-    let selectedTable: DatabaseTable?
-    let onToggle: () -> Void
-    let onSelectTable: (DatabaseTable) -> Void
-    let isTableProtected: (DatabaseTable) -> Bool
-    let onDeleteTable: (DatabaseTable) -> Void
-    
-    var body: some View {
-        DisclosureGroup(isExpanded: Binding(
-            get: { category.isExpanded },
-            set: { _ in onToggle() }
-        )) {
-            ForEach(category.tables) { table in
-                TableRowView(
-                    table: table,
-                    isSelected: selectedTable?.id == table.id,
-                    isProtected: isTableProtected(table),
-                    onDelete: { onDeleteTable(table) }
-                )
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    onSelectTable(table)
+            GroupHeaderView(grouping: grouping, tableCount: tables.count)
+                .contextMenu {
+                    Button("Rename Group...") {
+                        onRenameGroup()
+                    }
+                    
+                    Divider()
+                    
+                    Button("Move Up") {
+                        onMoveGroupUp()
+                    }
+                    .disabled(!canMoveUp)
+                    
+                    Button("Move Down") {
+                        onMoveGroupDown()
+                    }
+                    .disabled(!canMoveDown)
+                    
+                    Divider()
+                    
+                    Button("Delete Group", role: .destructive) {
+                        onDeleteGroup()
+                    }
                 }
-            }
-        } label: {
-            CategoryHeaderView(category: category)
         }
     }
 }
 
-/// Header for a category section
-struct CategoryHeaderView: View {
-    let category: TableCategory
+/// Header for a grouping section showing name and table count
+struct GroupHeaderView: View {
+    let grouping: ItemGrouping
+    let tableCount: Int
     
     var body: some View {
         HStack {
-            Text(category.name)
+            Text(grouping.name)
                 .font(.headline)
+                .lineLimit(1)
             
             Spacer()
             
-            Text("\(category.tableCount)")
+            Text("\(tableCount)")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 6)
@@ -173,6 +211,64 @@ struct CategoryHeaderView: View {
                 .cornerRadius(4)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// Section for ungrouped tables (appears at bottom with minimal styling)
+struct UngroupedSection: View {
+    let tables: [DatabaseTable]
+    let isExpanded: Bool
+    let selectedTable: DatabaseTable?
+    let allGroupings: [ItemGrouping]
+    let onToggle: () -> Void
+    let onSelectTable: (DatabaseTable) -> Void
+    let isTableProtected: (DatabaseTable) -> Bool
+    let isCoreProtected: (DatabaseTable) -> Bool
+    let isUnlocked: (DatabaseTable) -> Bool
+    let onDeleteTable: (DatabaseTable) -> Void
+    let onAddTableToGroup: (DatabaseTable, ItemGrouping) -> Void
+    let onCreateNewGroup: (String) -> Void
+    let onProtectTable: (DatabaseTable) -> Void
+    let onUnprotectTable: (DatabaseTable) -> Void
+    let onUnlockTable: (DatabaseTable) -> Void
+    
+    var body: some View {
+        DisclosureGroup(isExpanded: Binding(
+            get: { isExpanded },
+            set: { _ in onToggle() }
+        )) {
+            ForEach(tables) { table in
+                TableRowView(
+                    table: table,
+                    isSelected: selectedTable?.id == table.id,
+                    isProtected: isTableProtected(table),
+                    isCoreProtected: isCoreProtected(table),
+                    isUnlocked: isUnlocked(table),
+                    isInGroup: false,
+                    allGroupings: allGroupings,
+                    onDelete: { onDeleteTable(table) },
+                    onAddToGroup: { grouping in onAddTableToGroup(table, grouping) },
+                    onRemoveFromGroup: { },
+                    onCreateNewGroup: { onCreateNewGroup(table.name) },
+                    onProtect: { onProtectTable(table) },
+                    onUnprotect: { onUnprotectTable(table) },
+                    onUnlock: { onUnlockTable(table) }
+                )
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onSelectTable(table)
+                }
+            }
+        } label: {
+            HStack {
+                Text("\(tables.count) ungrouped")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                
+                Spacer()
+            }
+            .padding(.vertical, 4)
+        }
     }
 }
 
@@ -181,7 +277,17 @@ struct TableRowView: View {
     let table: DatabaseTable
     let isSelected: Bool
     let isProtected: Bool
+    let isCoreProtected: Bool
+    let isUnlocked: Bool
+    let isInGroup: Bool
+    let allGroupings: [ItemGrouping]
     let onDelete: () -> Void
+    let onAddToGroup: (ItemGrouping) -> Void
+    let onRemoveFromGroup: () -> Void
+    let onCreateNewGroup: () -> Void
+    let onProtect: () -> Void
+    let onUnprotect: () -> Void
+    let onUnlock: () -> Void
     
     var body: some View {
         HStack {
@@ -191,11 +297,16 @@ struct TableRowView: View {
                         .font(.body)
                         .lineLimit(1)
                     
-                    if isProtected {
+                    if isProtected && !isUnlocked {
                         Image(systemName: "lock.fill")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .help("Protected table - cannot be dropped")
+                    } else if isUnlocked {
+                        Image(systemName: "lock.open.fill")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                            .help("Unlocked - deletion allowed")
                     }
                 }
                 
@@ -217,6 +328,7 @@ struct TableRowView: View {
         .background(isSelected ? Color.accentColor.opacity(0.2) : Color.clear)
         .cornerRadius(4)
         .contextMenu {
+            // Copy
             Button {
                 let tableInfo = "\(table.name)\t\(table.rowCount) rows\t\(table.formattedSize)"
                 NSPasteboard.general.clearContents()
@@ -227,12 +339,65 @@ struct TableRowView: View {
             
             Divider()
             
+            // Group management
+            Menu("Add to Group...") {
+                ForEach(allGroupings) { grouping in
+                    Button(grouping.name) {
+                        onAddToGroup(grouping)
+                    }
+                }
+                
+                if !allGroupings.isEmpty {
+                    Divider()
+                }
+                
+                Button("New Group...") {
+                    onCreateNewGroup()
+                }
+            }
+            
+            if isInGroup {
+                Button("Remove from Group") {
+                    onRemoveFromGroup()
+                }
+            }
+            
+            Divider()
+            
+            // Protection management
+            if isProtected {
+                if isCoreProtected {
+                    if isUnlocked {
+                        Button("Re-lock Table") {
+                            onUnprotect()
+                        }
+                    } else {
+                        Button("Unlock Table...") {
+                            onUnlock()
+                        }
+                        .help("Allow deletion of this protected table")
+                    }
+                } else {
+                    Button("Remove Protection") {
+                        onUnprotect()
+                    }
+                }
+            } else {
+                Button("Protect Table") {
+                    onProtect()
+                }
+                .help("Prevent accidental deletion")
+            }
+            
+            Divider()
+            
+            // Delete
             Button(role: .destructive) {
                 onDelete()
             } label: {
                 Label("Drop Table...", systemImage: "trash")
             }
-            .disabled(isProtected)
+            .disabled(isProtected && !isUnlocked)
         }
     }
 }

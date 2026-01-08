@@ -10,40 +10,52 @@
 		023E9AE450BF036FF40C0E76 /* ProjectConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = C794768AF4898995F64DB92D /* ProjectConfiguration.swift */; };
 		02AD314100925D82AE384CE8 /* GeneralSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8974EB4ED392FD3B52D70FD3 /* GeneralSettingsTab.swift */; };
 		079027CF40B8043B84F77945 /* ProjectConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = C794768AF4898995F64DB92D /* ProjectConfiguration.swift */; };
-		0AFDF74AFB14AA2CD9C1D635 /* DebugLogsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2AACC0B82A8DC4EE3AFFB4DD /* DebugLogsViewModel.swift */; };
 		0B1C053B8DCA686200739C43 /* ServerEditSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5D75CB92C4916A5B3A8DE34 /* ServerEditSheet.swift */; };
 		0BB5245A79F8709EBD8C5269 /* ModuleInstallSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA1C2F245C5FCEF82A5D2D3 /* ModuleInstallSheet.swift */; };
 		0BC1FC2E1B3FC48292BF982A /* DBCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDB9CADC5E234387CF05076E /* DBCommand.swift */; };
-		0CD4B805E6550364EA5EEA20 /* BackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F0F6446CD495D946BF2341A /* BackupService.swift */; };
 		0FE6351E7C94950D6A459978 /* DeployerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F978C6E7F1C5288FF7303DF7 /* DeployerView.swift */; };
+		1A164D8DD4607926F6964B95 /* CopyableContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */; };
 		1C661B0BF3D61D3C0D4035E5 /* MySQLService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8106225CC14632C9644AFC7C /* MySQLService.swift */; };
 		1E0233CF5AC026C74233786E /* TableDataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EC7ED01925DBCB9195A8A4D /* TableDataView.swift */; };
+		1EBFEF675F781A40A250D009 /* BackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2026B5BAE550AC7BD82744DA /* BackupService.swift */; };
 		1F8E8F33D5C287B10A7460C8 /* ModuleRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6304E63C8AC4239FBA559CC8 /* ModuleRunner.swift */; };
 		22221233AC86561D48490886 /* RemoteFileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7C2AF5C1F794564BF7DC0F4 /* RemoteFileBrowserView.swift */; };
 		2453E7963F678EA067547AEF /* ModuleRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6304E63C8AC4239FBA559CC8 /* ModuleRunner.swift */; };
-		269E43FB717A7FF8A0BEB495 /* WordPressSiteMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7F9FAB036E470D0F131257C /* WordPressSiteMap.swift */; };
+		2758722FCCE88A4DD68D0B2E /* ContentContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC77F3DE919D687C5088735B /* ContentContext.swift */; };
 		27914A30B3E4E4A474ACE8CC /* ModuleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F16DF708DA86DFB9E5B27FBC /* ModuleManager.swift */; };
+		27D41F217F00E3A8171BEC63 /* AppWarning.swift in Sources */ = {isa = PBXBuildFile; fileRef = C489D03946456721B73D70EA /* AppWarning.swift */; };
 		27FA9FFDA56F6C7BCAFE0296 /* ModulesSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C398F35F8687FF75D86A408 /* ModulesSettingsTab.swift */; };
 		280E8263D00B0D9C5F202111 /* SSHTunnelService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D476C8F7828EF0FDC4996034 /* SSHTunnelService.swift */; };
-		2A01FB155B0D142B22505488 /* WPCLITerminalViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E46890F2B17F1D60EF39B0 /* WPCLITerminalViewModel.swift */; };
+		29AC5918A42B81DE1D250360 /* ContentContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC77F3DE919D687C5088735B /* ContentContext.swift */; };
 		2A0D8EC80F531D2458B4F000 /* DatabaseSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99F53066BAD2365203BC1A21 /* DatabaseSettingsTab.swift */; };
+		2A2B0D75AF5291B05895FBBB /* GroupingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2A7B75D6A4B4DED5F193C64 /* GroupingManager.swift */; };
 		2B8459AD77C15BBB15B16830 /* SSHService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD23DCF3987518BDD613AA7A /* SSHService.swift */; };
 		305E5C164DFA751B1ABFE77B /* LocalEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 076C7293F0318D0DF7C1263E /* LocalEnvironment.swift */; };
+		30856C36D38963CB5A540EFC /* WarningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20129FFBFEEBA4948B8DA194 /* WarningView.swift */; };
 		3188A425BBDAED4249534CE8 /* WordPressSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9172819247F48893F5F20EA2 /* WordPressSettingsTab.swift */; };
 		3217293C5F7A8E77ACE714EB /* DeployableComponent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */; };
+		337BB8150B603A86CAECBE7F /* CopyButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4784FCC0B29C23649013882 /* CopyButton.swift */; };
+		33BC501E3C96A4C432B65810 /* ProjectTypeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */; };
 		34B6D8FD95927DA85561881D /* ModuleSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 432441A63F12FD70294090A6 /* ModuleSetupView.swift */; };
 		36948AE7BAD67E09B8873D53 /* ModuleActionsBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 572D0318B7820B97ABDBC10A /* ModuleActionsBar.swift */; };
 		37BB6A35F6B6CF8B2A5D7408 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D06A62D2DDC840DC6A12CC7 /* KeychainService.swift */; };
 		38D566E59E85DF4E4D14C48F /* RemoteFileBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */; };
 		3C8729EDE4E9C35B6C3CD817 /* CLIInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42B48848AAF3B2E6808ED4E9 /* CLIInstaller.swift */; };
+		3CBF41346F060E438864152C /* AppError.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59036A328B5EEE5B0D5DF9C /* AppError.swift */; };
+		3D5278E44CF446DC733DFDF7 /* ConsoleOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FDE17265BB36CD42258798 /* ConsoleOutput.swift */; };
 		3D9711220108F7258431211E /* ModuleInputsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E42F070FBBA9AFFEE6E6F44 /* ModuleInputsView.swift */; };
+		3E503022AB80B6AEA06D0E24 /* ItemGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC24361248E8DB9D359A8C1E /* ItemGrouping.swift */; };
 		42F5499F7E0F4A63AC0C66DF /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6668890DE94C7DC530C66125 /* main.swift */; };
 		4426ED70D0640D4D817A558F /* RemoteFileEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */; };
+		469CB781A5654E2EA41A3B30 /* RemoteFileEditorViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1682E9BF7F10ED915C606359 /* RemoteFileEditorViewModel.swift */; };
+		471FBA3C8CEB4393CFEE5091 /* project-types in Resources */ = {isa = PBXBuildFile; fileRef = 69F9E6767A9B6A9F4792EAE5 /* project-types */; };
 		4A0F1AFEA41E1836E63D43FE /* WPCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2050368C9E4DBD4CF400B830 /* WPCommand.swift */; };
+		4B78EEC5008E43BE7ACE09A2 /* AppWarning.swift in Sources */ = {isa = PBXBuildFile; fileRef = C489D03946456721B73D70EA /* AppWarning.swift */; };
 		50C74163D68312AC098E4FE4 /* ModuleInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7B0366D7FFE2A9A7F15384 /* ModuleInstaller.swift */; };
 		52FDF39D89C383078D344296 /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC3095C66C75EB70DD73775 /* PythonRunner.swift */; };
 		53E684EC9B358CC6CF15C7C2 /* DatabaseTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */; };
-		54E0906C0CD66000C5A4612D /* ConfigFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 707AD9BFD9FCE94E69B79A8C /* ConfigFile.swift */; };
+		540940CC1B9785A5EA225760 /* TableProtectionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4E159274386B7761D62FF53 /* TableProtectionManager.swift */; };
+		573F38B148371DC60CB6C0A7 /* DeploymentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */; };
 		57C3AE0D20A591DEE69B0FF0 /* HomeboyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFEA6E42C1D9292B10447CDA /* HomeboyApp.swift */; };
 		58782E3C2B83E467318758D3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E134C3E1AFDFB8B9C3BFA989 /* Assets.xcassets */; };
 		58D7EB6E82E865D5736663C0 /* DeployerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C206F8FCC7B57F9E68E99A08 /* DeployerViewModel.swift */; };
@@ -51,59 +63,81 @@
 		5AAC8C88082027144361696A /* ModuleManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 267B4789567169ABFC9AAD53 /* ModuleManifest.swift */; };
 		5BD322602F64CCA4E7A54FEF /* ConfigurationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */; };
 		5C04267FDCF7C82C4BE9B087 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7A27F9F448DAC4DF35613F9 /* APIClient.swift */; };
+		5CA76C92A6AF0C42784FD35D /* ErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */; };
 		5F263EE965848ADD6D72A773 /* SSHTunnelService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D476C8F7828EF0FDC4996034 /* SSHTunnelService.swift */; };
+		63BC2B0238AB8471A0F42F4F /* CopyableContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */; };
 		648329C427815A753D9AFBC6 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A6FE3DEAD139D529B6724D8 /* APITypes.swift */; };
+		67B0C8541A262E38CBA8AECA /* ProjectTypeDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 599231AFF8DD800C0BA6DF12 /* ProjectTypeDefinition.swift */; };
 		6A8A3EB9DEF0C27DD8310EB0 /* ModuleInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7B0366D7FFE2A9A7F15384 /* ModuleInstaller.swift */; };
-		6DAE40BB34A8A4EA58137566 /* ConfigEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761D933A825CF8050D3E368F /* ConfigEditorView.swift */; };
+		6DA58994C9A0D94854E44A62 /* RemoteLogViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A6E91E37345CFC1CFCF9AA6 /* RemoteLogViewerView.swift */; };
 		6DAE472061CCB32A10D85BF8 /* homeboy-cli in Resources */ = {isa = PBXBuildFile; fileRef = EA261ED0F098626930E89703 /* homeboy-cli */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		6DEC679DBFB512E99A03DC8A /* TableProtectionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4E159274386B7761D62FF53 /* TableProtectionManager.swift */; };
 		6E4163AE19D0C6697F8C664E /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB2507DAC42BC6CDA2DF39CE /* AuthManager.swift */; };
+		712CB177DFCA22F0FFF17ACB /* ConsoleOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FDE17265BB36CD42258798 /* ConsoleOutput.swift */; };
 		71419F89166E98CC7C4A3A98 /* SSHService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD23DCF3987518BDD613AA7A /* SSHService.swift */; };
 		72D058E4C987B44B3C2FE75F /* RemoteFileEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */; };
 		75DCBF9FBB526E4EE52E69DB /* DatabaseTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */; };
+		76A91937D9017A5B0D9B0BA5 /* PinnableTabBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */; };
 		790A549F1DA4887FA2EF100F /* ServersSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF87669DD8D8EEF387C64926 /* ServersSettingsTab.swift */; };
 		7CFF60E56F49FFC68A830664 /* SiteListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7BEDC81C87152DCED825A3 /* SiteListView.swift */; };
 		7EE844A0691D39F31A685114 /* ProjectSwitcherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA62EB2C6FD0532AE4CCD204 /* ProjectSwitcherView.swift */; };
+		80AFA487AED025BD2697208D /* AddToGroupMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF03155593630A42C1F341D1 /* AddToGroupMenu.swift */; };
+		80D12DD221BE19316CB0BDCA /* RemoteLogViewerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E867876A7DCD50A851E6F8D7 /* RemoteLogViewerViewModel.swift */; };
 		8327EB6B86BD82A5A8F0E466 /* ServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */; };
 		8416680F81D345B2751765CC /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A80F92FC849ACD9591EDEFE /* LoginView.swift */; };
-		894C18AC1F2D835316EBC641 /* ConfigEditorViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5947379F85955BEE0271EB64 /* ConfigEditorViewModel.swift */; };
+		85F4F94606B3D49BEFDC227F /* DeploymentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */; };
 		8ACB39F91168D33D93F5B338 /* ModuleResultsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0354F3771ED337E0EDCAC7B5 /* ModuleResultsView.swift */; };
 		8C6CA13F14113243F0E6CDC4 /* ModuleContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69348F2856AF692571BB880E /* ModuleContainerView.swift */; };
 		8CC212749235B62EEE109984 /* DatabaseBrowserViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29EDC4F278327A663263D4A7 /* DatabaseBrowserViewModel.swift */; };
 		8D62AD324E3C99747FA53FCB /* ComponentsSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830D15DCC64EB9AF17F822E0 /* ComponentsSettingsTab.swift */; };
 		8DD50D5975E4E471BDE8DB3B /* DatabaseBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DAA8DDE50178FCA20E0FD11 /* DatabaseBrowserView.swift */; };
 		90B07E3C3A53C081A0511182 /* ProjectsCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75BEE49FCF4D9DB9637C8B0E /* ProjectsCommand.swift */; };
+		91A89EAFB68B53F8D473F5AA /* SSHCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67207B29A512B7E577C66A05 /* SSHCommand.swift */; };
 		999116DB4DB5B3DF3EA9C171 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C3C30739F765981B37603DD /* SidebarView.swift */; };
 		9ACBEB5DF2D256960184C815 /* QueryEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF490ADD191341069884F61B /* QueryEditorView.swift */; };
+		A051F697BD41C8D9A5298333 /* DataTableColumn.swift in Sources */ = {isa = PBXBuildFile; fileRef = C503C8896286EA38288A139F /* DataTableColumn.swift */; };
+		A34392C1F77DDF4B0B386D8C /* DataTableConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = F915FEEAF97ADD6EAADF6E4A /* DataTableConstants.swift */; };
+		A774FB7341AC4F1A57B7E54D /* SchemaResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */; };
 		AACC7F3153886939005FC50C /* WordPressSSHModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */; };
 		AC4B413EC80B0BD0F7AABB1D /* ModuleConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F014356904A59206993DA47 /* ModuleConsoleView.swift */; };
+		AC767488EAD832187214964D /* GroupingEditorSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89BDEBBC8BE666E1D40131AB /* GroupingEditorSheet.swift */; };
 		B21C1A0F3083F2DCC260CDD6 /* MySQLService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8106225CC14632C9644AFC7C /* MySQLService.swift */; };
 		B27446E0A3706D997A75D1E9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A690A4DC66BE109010668691 /* ContentView.swift */; };
+		B7C11AD70E2F3AAE008AF79F /* AppError.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59036A328B5EEE5B0D5DF9C /* AppError.swift */; };
 		B91A02942F3B33D114C55E8A /* DeployCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F19D1A6E916AD977240F494 /* DeployCommand.swift */; };
-		B9777CE23CB8CB7F58230C82 /* WPCLITerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB64316D0D8A919666B57E02 /* WPCLITerminalView.swift */; };
 		B9C42108AC64D21BAEEE580A /* DeployableComponent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */; };
 		B9F817941BFACA4C732F7B37 /* ModuleManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 267B4789567169ABFC9AAD53 /* ModuleManifest.swift */; };
-		C34415C2350D3E883643E174 /* DebugLogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F27D2D3A4645517F606BB22 /* DebugLogsView.swift */; };
+		BBA251CB27591D879DAD4038 /* RemoteFileEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B19BDE6DDAAF5D914C29785 /* RemoteFileEditorView.swift */; };
+		BD32FAF6FB2583B8A5A24363 /* ProjectTypeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */; };
 		C3A482944D140CA374914539 /* LocalEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 076C7293F0318D0DF7C1263E /* LocalEnvironment.swift */; };
-		C3CAE2B8C0C7CE02DC122B33 /* WordPressSiteMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7F9FAB036E470D0F131257C /* WordPressSiteMap.swift */; };
-		C3ECA85620916618C2B430C2 /* MigrationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC89602CB662378E7905F7C4 /* MigrationService.swift */; };
 		C6F738277B8D48B8F03655CA /* bandcamp_scraper.cpython-314.pyc in Resources */ = {isa = PBXBuildFile; fileRef = 75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */; };
+		C727FE57ACE75A3152D4C972 /* NativeDataTable.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2800F57FE83EEBB76CC1F1A /* NativeDataTable.swift */; };
 		C7897C8689B4E0075B1CB0D6 /* ModuleViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21BD4D2024772E1CFC5F01C2 /* ModuleViewModel.swift */; };
 		C8E23E9BFFE99665244167D8 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */; };
 		CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA88D343E94C4C34E1069813 /* CodeTextView.swift */; };
+		D17F7A98F3FB9E8F40991024 /* LogContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 514BD1BE8868C181AD9401CF /* LogContentView.swift */; };
+		D1D14C90B738887ECD0265B6 /* GroupingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2A7B75D6A4B4DED5F193C64 /* GroupingManager.swift */; };
+		D21BE415813C2930A8B7519D /* ProjectTypeDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 599231AFF8DD800C0BA6DF12 /* ProjectTypeDefinition.swift */; };
 		D3D2FEA38CB8A09E0ED93B73 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A6FE3DEAD139D529B6724D8 /* APITypes.swift */; };
 		D41F41CD2CB3BC5F74E5011E /* WordPressSSHModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */; };
 		D46BD4167C16E4E3A6A1FC7C /* OutputFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A42ACE763B674FE9CEEACF7 /* OutputFormatter.swift */; };
+		D55CAE1501A30D718E45E078 /* ItemGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC24361248E8DB9D359A8C1E /* ItemGrouping.swift */; };
 		D60F895AAD01B00086E36C75 /* ServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */; };
 		D72F629CB7818A3E3829B864 /* RemoteFileBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */; };
 		DD2A1C263BA095CD1CE7B65E /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7A27F9F448DAC4DF35613F9 /* APIClient.swift */; };
 		DD3128834B4A7FF474DB3C02 /* CLIInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42B48848AAF3B2E6808ED4E9 /* CLIInstaller.swift */; };
+		E1E7D50CC935A9BB1F516C2E /* CopyButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4784FCC0B29C23649013882 /* CopyButton.swift */; };
+		E1F7C14F08E1E4D8353F8064 /* CopyableTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4406A9EEECAF8249580937A7 /* CopyableTextView.swift */; };
 		E42C3D786FD44B2818BDC539 /* ConfigurationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */; };
 		E6403DF4F6747B97ED009C1A /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */; };
 		E77C55FA6D3BBCCD6422EDBA /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC3095C66C75EB70DD73775 /* PythonRunner.swift */; };
+		E832787BA1F926FB3A085E09 /* InlineErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943FB329E82EA8D3985C41BE /* InlineErrorView.swift */; };
+		E8A0E0A1E7364CFEB6EB48AF /* SchemaResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */; };
+		EEA581470DC8B48027F54228 /* InlineWarningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */; };
 		EFAD229C7AEECA77273843D0 /* ModuleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F16DF708DA86DFB9E5B27FBC /* ModuleManager.swift */; };
 		F34BB35C6C33E774792043ED /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83B2C9499D9E9A17D32109EF /* SettingsView.swift */; };
 		F367D4B213FB832C3838FCA5 /* ArgumentParser in Frameworks */ = {isa = PBXBuildFile; productRef = CCD47A877F549D250846734E /* ArgumentParser */; };
-		F40B03988CBDB6B84734B635 /* MigrationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC89602CB662378E7905F7C4 /* MigrationService.swift */; };
+		FB914712293D43F2D7D80F80 /* CreateProjectSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */; };
 		FE865BA85263630F8BF6A608 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB2507DAC42BC6CDA2DF39CE /* AuthManager.swift */; };
 /* End PBXBuildFile section */
 
@@ -123,49 +157,62 @@
 		0A42ACE763B674FE9CEEACF7 /* OutputFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputFormatter.swift; sourceTree = "<group>"; };
 		0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEntry.swift; sourceTree = "<group>"; };
 		0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
+		0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineWarningView.swift; sourceTree = "<group>"; };
 		14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseTypes.swift; sourceTree = "<group>"; };
+		1682E9BF7F10ED915C606359 /* RemoteFileEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorViewModel.swift; sourceTree = "<group>"; };
 		1EC3095C66C75EB70DD73775 /* PythonRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonRunner.swift; sourceTree = "<group>"; };
 		1F19D1A6E916AD977240F494 /* DeployCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployCommand.swift; sourceTree = "<group>"; };
-		1F27D2D3A4645517F606BB22 /* DebugLogsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogsView.swift; sourceTree = "<group>"; };
+		20129FFBFEEBA4948B8DA194 /* WarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WarningView.swift; sourceTree = "<group>"; };
+		2026B5BAE550AC7BD82744DA /* BackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupService.swift; sourceTree = "<group>"; };
 		2050368C9E4DBD4CF400B830 /* WPCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WPCommand.swift; sourceTree = "<group>"; };
 		21BD4D2024772E1CFC5F01C2 /* ModuleViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleViewModel.swift; sourceTree = "<group>"; };
 		267B4789567169ABFC9AAD53 /* ModuleManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleManifest.swift; sourceTree = "<group>"; };
 		29EDC4F278327A663263D4A7 /* DatabaseBrowserViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseBrowserViewModel.swift; sourceTree = "<group>"; };
-		2AACC0B82A8DC4EE3AFFB4DD /* DebugLogsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogsViewModel.swift; sourceTree = "<group>"; };
 		2DA1C2F245C5FCEF82A5D2D3 /* ModuleInstallSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleInstallSheet.swift; sourceTree = "<group>"; };
 		2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileBrowser.swift; sourceTree = "<group>"; };
 		2EC7ED01925DBCB9195A8A4D /* TableDataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableDataView.swift; sourceTree = "<group>"; };
 		3A6FE3DEAD139D529B6724D8 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
 		3A80F92FC849ACD9591EDEFE /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
+		3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchemaResolver.swift; sourceTree = "<group>"; };
 		3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConfig.swift; sourceTree = "<group>"; };
 		3D06A62D2DDC840DC6A12CC7 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
 		3E42F070FBBA9AFFEE6E6F44 /* ModuleInputsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleInputsView.swift; sourceTree = "<group>"; };
 		42B48848AAF3B2E6808ED4E9 /* CLIInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstaller.swift; sourceTree = "<group>"; };
 		432441A63F12FD70294090A6 /* ModuleSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleSetupView.swift; sourceTree = "<group>"; };
+		4406A9EEECAF8249580937A7 /* CopyableTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyableTextView.swift; sourceTree = "<group>"; };
 		4C3C30739F765981B37603DD /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		514BD1BE8868C181AD9401CF /* LogContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogContentView.swift; sourceTree = "<group>"; };
 		572D0318B7820B97ABDBC10A /* ModuleActionsBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleActionsBar.swift; sourceTree = "<group>"; };
-		5947379F85955BEE0271EB64 /* ConfigEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigEditorViewModel.swift; sourceTree = "<group>"; };
+		599231AFF8DD800C0BA6DF12 /* ProjectTypeDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectTypeDefinition.swift; sourceTree = "<group>"; };
+		5A6E91E37345CFC1CFCF9AA6 /* RemoteLogViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteLogViewerView.swift; sourceTree = "<group>"; };
+		5B19BDE6DDAAF5D914C29785 /* RemoteFileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorView.swift; sourceTree = "<group>"; };
 		5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSSHModule.swift; sourceTree = "<group>"; };
 		5F014356904A59206993DA47 /* ModuleConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleConsoleView.swift; sourceTree = "<group>"; };
 		6304E63C8AC4239FBA559CC8 /* ModuleRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleRunner.swift; sourceTree = "<group>"; };
 		6668890DE94C7DC530C66125 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnableTabBar.swift; sourceTree = "<group>"; };
+		67207B29A512B7E577C66A05 /* SSHCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHCommand.swift; sourceTree = "<group>"; };
 		69348F2856AF692571BB880E /* ModuleContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleContainerView.swift; sourceTree = "<group>"; };
-		707AD9BFD9FCE94E69B79A8C /* ConfigFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigFile.swift; sourceTree = "<group>"; };
+		69F9E6767A9B6A9F4792EAE5 /* project-types */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "project-types"; path = "Homeboy/Resources/project-types"; sourceTree = SOURCE_ROOT; };
 		75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */ = {isa = PBXFileReference; path = "bandcamp_scraper.cpython-314.pyc"; sourceTree = "<group>"; };
 		75BEE49FCF4D9DB9637C8B0E /* ProjectsCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectsCommand.swift; sourceTree = "<group>"; };
-		761D933A825CF8050D3E368F /* ConfigEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigEditorView.swift; sourceTree = "<group>"; };
-		7F0F6446CD495D946BF2341A /* BackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupService.swift; sourceTree = "<group>"; };
+		7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorView.swift; sourceTree = "<group>"; };
 		8106225CC14632C9644AFC7C /* MySQLService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MySQLService.swift; sourceTree = "<group>"; };
 		830D15DCC64EB9AF17F822E0 /* ComponentsSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComponentsSettingsTab.swift; sourceTree = "<group>"; };
 		833BBA3138BAD0CFB3557D6B /* Homeboy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Homeboy.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		83B2C9499D9E9A17D32109EF /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		8974EB4ED392FD3B52D70FD3 /* GeneralSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneralSettingsTab.swift; sourceTree = "<group>"; };
+		89BDEBBC8BE666E1D40131AB /* GroupingEditorSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupingEditorSheet.swift; sourceTree = "<group>"; };
 		8F7BEDC81C87152DCED825A3 /* SiteListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SiteListView.swift; sourceTree = "<group>"; };
 		9172819247F48893F5F20EA2 /* WordPressSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSettingsTab.swift; sourceTree = "<group>"; };
+		91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateProjectSheet.swift; sourceTree = "<group>"; };
+		943FB329E82EA8D3985C41BE /* InlineErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineErrorView.swift; sourceTree = "<group>"; };
 		99F53066BAD2365203BC1A21 /* DatabaseSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseSettingsTab.swift; sourceTree = "<group>"; };
 		9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationManager.swift; sourceTree = "<group>"; };
 		9C398F35F8687FF75D86A408 /* ModulesSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModulesSettingsTab.swift; sourceTree = "<group>"; };
 		9DAA8DDE50178FCA20E0FD11 /* DatabaseBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseBrowserView.swift; sourceTree = "<group>"; };
+		A1FDE17265BB36CD42258798 /* ConsoleOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleOutput.swift; sourceTree = "<group>"; };
+		A2800F57FE83EEBB76CC1F1A /* NativeDataTable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeDataTable.swift; sourceTree = "<group>"; };
 		A5D75CB92C4916A5B3A8DE34 /* ServerEditSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerEditSheet.swift; sourceTree = "<group>"; };
 		A690A4DC66BE109010668691 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployableComponent.swift; sourceTree = "<group>"; };
@@ -173,24 +220,34 @@
 		AA7B0366D7FFE2A9A7F15384 /* ModuleInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleInstaller.swift; sourceTree = "<group>"; };
 		AB2507DAC42BC6CDA2DF39CE /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
 		AD23DCF3987518BDD613AA7A /* SSHService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHService.swift; sourceTree = "<group>"; };
+		AF03155593630A42C1F341D1 /* AddToGroupMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddToGroupMenu.swift; sourceTree = "<group>"; };
+		B4784FCC0B29C23649013882 /* CopyButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyButton.swift; sourceTree = "<group>"; };
+		B59036A328B5EEE5B0D5DF9C /* AppError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppError.swift; sourceTree = "<group>"; };
 		BA88D343E94C4C34E1069813 /* CodeTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeTextView.swift; sourceTree = "<group>"; };
-		BC89602CB662378E7905F7C4 /* MigrationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MigrationService.swift; sourceTree = "<group>"; };
 		BFEA6E42C1D9292B10447CDA /* HomeboyApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyApp.swift; sourceTree = "<group>"; };
 		C206F8FCC7B57F9E68E99A08 /* DeployerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployerViewModel.swift; sourceTree = "<group>"; };
+		C2A7B75D6A4B4DED5F193C64 /* GroupingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupingManager.swift; sourceTree = "<group>"; };
+		C489D03946456721B73D70EA /* AppWarning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppWarning.swift; sourceTree = "<group>"; };
+		C503C8896286EA38288A139F /* DataTableColumn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataTableColumn.swift; sourceTree = "<group>"; };
 		C794768AF4898995F64DB92D /* ProjectConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectConfiguration.swift; sourceTree = "<group>"; };
-		C7F9FAB036E470D0F131257C /* WordPressSiteMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSiteMap.swift; sourceTree = "<group>"; };
-		CB64316D0D8A919666B57E02 /* WPCLITerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WPCLITerminalView.swift; sourceTree = "<group>"; };
+		CC77F3DE919D687C5088735B /* ContentContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentContext.swift; sourceTree = "<group>"; };
 		CDB9CADC5E234387CF05076E /* DBCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DBCommand.swift; sourceTree = "<group>"; };
+		CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeploymentService.swift; sourceTree = "<group>"; };
 		D476C8F7828EF0FDC4996034 /* SSHTunnelService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHTunnelService.swift; sourceTree = "<group>"; };
+		D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyableContent.swift; sourceTree = "<group>"; };
+		D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectTypeManager.swift; sourceTree = "<group>"; };
 		DF490ADD191341069884F61B /* QueryEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryEditorView.swift; sourceTree = "<group>"; };
 		DF87669DD8D8EEF387C64926 /* ServersSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServersSettingsTab.swift; sourceTree = "<group>"; };
 		E134C3E1AFDFB8B9C3BFA989 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		E4E159274386B7761D62FF53 /* TableProtectionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableProtectionManager.swift; sourceTree = "<group>"; };
 		E7C2AF5C1F794564BF7DC0F4 /* RemoteFileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileBrowserView.swift; sourceTree = "<group>"; };
+		E867876A7DCD50A851E6F8D7 /* RemoteLogViewerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteLogViewerViewModel.swift; sourceTree = "<group>"; };
 		EA261ED0F098626930E89703 /* homeboy-cli */ = {isa = PBXFileReference; includeInIndex = 0; path = "homeboy-cli"; sourceTree = BUILT_PRODUCTS_DIR; };
 		EA62EB2C6FD0532AE4CCD204 /* ProjectSwitcherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectSwitcherView.swift; sourceTree = "<group>"; };
 		F16DF708DA86DFB9E5B27FBC /* ModuleManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleManager.swift; sourceTree = "<group>"; };
-		F1E46890F2B17F1D60EF39B0 /* WPCLITerminalViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WPCLITerminalViewModel.swift; sourceTree = "<group>"; };
+		F915FEEAF97ADD6EAADF6E4A /* DataTableConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataTableConstants.swift; sourceTree = "<group>"; };
 		F978C6E7F1C5288FF7303DF7 /* DeployerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployerView.swift; sourceTree = "<group>"; };
+		FC24361248E8DB9D359A8C1E /* ItemGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ItemGrouping.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -224,15 +281,6 @@
 			path = Modules;
 			sourceTree = "<group>";
 		};
-		135DC8AD7A357782464C212F /* WPCLITerminal */ = {
-			isa = PBXGroup;
-			children = (
-				714A60F54BB807218BA65788 /* Views */,
-				F1E46890F2B17F1D60EF39B0 /* WPCLITerminalViewModel.swift */,
-			);
-			path = WPCLITerminal;
-			sourceTree = "<group>";
-		};
 		26C9D5C3477F3537E1BB713A /* Deployer */ = {
 			isa = PBXGroup;
 			children = (
@@ -246,11 +294,22 @@
 			isa = PBXGroup;
 			children = (
 				FD3ABA12405D5624F39CB5B6 /* Modules */,
+				CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */,
 				2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */,
 				0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */,
 				AD23DCF3987518BDD613AA7A /* SSHService.swift */,
 			);
 			path = SSH;
+			sourceTree = "<group>";
+		};
+		2E61F67D3432F0D875C83574 /* RemoteFileEditor */ = {
+			isa = PBXGroup;
+			children = (
+				75EE510DF3652C4C817B44E5 /* Views */,
+				2026B5BAE550AC7BD82744DA /* BackupService.swift */,
+				1682E9BF7F10ED915C606359 /* RemoteFileEditorViewModel.swift */,
+			);
+			path = RemoteFileEditor;
 			sourceTree = "<group>";
 		};
 		409FAC371D89CE09220A99C2 /* Commands */ = {
@@ -259,18 +318,19 @@
 				CDB9CADC5E234387CF05076E /* DBCommand.swift */,
 				1F19D1A6E916AD977240F494 /* DeployCommand.swift */,
 				75BEE49FCF4D9DB9637C8B0E /* ProjectsCommand.swift */,
+				67207B29A512B7E577C66A05 /* SSHCommand.swift */,
 				2050368C9E4DBD4CF400B830 /* WPCommand.swift */,
 			);
 			path = Commands;
 			sourceTree = "<group>";
 		};
-		445A9E0820815A667686855B /* DebugLogs */ = {
+		426FE25E9CC2781D94562CE8 /* RemoteLogViewer */ = {
 			isa = PBXGroup;
 			children = (
-				FDDB743BFE8A539062B806B4 /* Views */,
-				2AACC0B82A8DC4EE3AFFB4DD /* DebugLogsViewModel.swift */,
+				A21C74D4FA129A0C385785D2 /* Views */,
+				E867876A7DCD50A851E6F8D7 /* RemoteLogViewerViewModel.swift */,
 			);
-			path = DebugLogs;
+			path = RemoteLogViewer;
 			sourceTree = "<group>";
 		};
 		46F743648D562B5D67158FFF /* DatabaseBrowser */ = {
@@ -286,6 +346,7 @@
 			isa = PBXGroup;
 			children = (
 				5160882C4D72CD5AA9A7A214 /* Scripts */,
+				69F9E6767A9B6A9F4792EAE5 /* project-types */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -321,14 +382,6 @@
 			path = Homeboy;
 			sourceTree = "<group>";
 		};
-		5D395059A0307156298EBFDF /* Views */ = {
-			isa = PBXGroup;
-			children = (
-				761D933A825CF8050D3E368F /* ConfigEditorView.swift */,
-			);
-			path = Views;
-			sourceTree = "<group>";
-		};
 		5D4A06815CA53FA0BD2301AC /* __pycache__ */ = {
 			isa = PBXGroup;
 			children = (
@@ -350,14 +403,6 @@
 			isa = PBXGroup;
 			children = (
 				F978C6E7F1C5288FF7303DF7 /* DeployerView.swift */,
-			);
-			path = Views;
-			sourceTree = "<group>";
-		};
-		714A60F54BB807218BA65788 /* Views */ = {
-			isa = PBXGroup;
-			children = (
-				CB64316D0D8A919666B57E02 /* WPCLITerminalView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -390,6 +435,14 @@
 			path = CLI;
 			sourceTree = "<group>";
 		};
+		75EE510DF3652C4C817B44E5 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				5B19BDE6DDAAF5D914C29785 /* RemoteFileEditorView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
 		77CD2251196962304A5A62F5 /* CLI */ = {
 			isa = PBXGroup;
 			children = (
@@ -405,8 +458,8 @@
 			children = (
 				14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */,
 				8106225CC14632C9644AFC7C /* MySQLService.swift */,
+				3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */,
 				D476C8F7828EF0FDC4996034 /* SSHTunnelService.swift */,
-				C7F9FAB036E470D0F131257C /* WordPressSiteMap.swift */,
 			);
 			path = Database;
 			sourceTree = "<group>";
@@ -437,7 +490,17 @@
 		8007D7D3CCEF3F80C36AA686 /* Components */ = {
 			isa = PBXGroup;
 			children = (
+				9255FD669F2BFF67E0F7CFE8 /* Grouping */,
+				E458125E00E4AA130D4F530D /* Table */,
 				BA88D343E94C4C34E1069813 /* CodeTextView.swift */,
+				4406A9EEECAF8249580937A7 /* CopyableTextView.swift */,
+				91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */,
+				7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */,
+				943FB329E82EA8D3985C41BE /* InlineErrorView.swift */,
+				0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */,
+				514BD1BE8868C181AD9401CF /* LogContentView.swift */,
+				66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */,
+				20129FFBFEEBA4948B8DA194 /* WarningView.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -449,7 +512,9 @@
 				52AF24DF54AAF0F3CAC1AA0B /* Auth */,
 				75DE9BEA3DBEA7C6F27C030A /* CLI */,
 				EA2D7DCF99CD5F93D88CF3E1 /* Config */,
+				951F19759C5A27A308A4C3E9 /* Copyable */,
 				7AE0A313AE35403617204739 /* Database */,
+				92BBA31716E89F440D6CDEA2 /* Grouping */,
 				03381E1786CD41871C8760AF /* Modules */,
 				F6D1CE4F29491269C0D26638 /* Process */,
 				2DE44D1E578B8119641FCA42 /* SSH */,
@@ -457,15 +522,36 @@
 			path = Core;
 			sourceTree = "<group>";
 		};
-		9F29FE78CE6D9C294DFC989A /* ConfigEditor */ = {
+		9255FD669F2BFF67E0F7CFE8 /* Grouping */ = {
 			isa = PBXGroup;
 			children = (
-				5D395059A0307156298EBFDF /* Views */,
-				7F0F6446CD495D946BF2341A /* BackupService.swift */,
-				5947379F85955BEE0271EB64 /* ConfigEditorViewModel.swift */,
-				707AD9BFD9FCE94E69B79A8C /* ConfigFile.swift */,
+				AF03155593630A42C1F341D1 /* AddToGroupMenu.swift */,
+				89BDEBBC8BE666E1D40131AB /* GroupingEditorSheet.swift */,
 			);
-			path = ConfigEditor;
+			path = Grouping;
+			sourceTree = "<group>";
+		};
+		92BBA31716E89F440D6CDEA2 /* Grouping */ = {
+			isa = PBXGroup;
+			children = (
+				C2A7B75D6A4B4DED5F193C64 /* GroupingManager.swift */,
+				FC24361248E8DB9D359A8C1E /* ItemGrouping.swift */,
+				E4E159274386B7761D62FF53 /* TableProtectionManager.swift */,
+			);
+			path = Grouping;
+			sourceTree = "<group>";
+		};
+		951F19759C5A27A308A4C3E9 /* Copyable */ = {
+			isa = PBXGroup;
+			children = (
+				B59036A328B5EEE5B0D5DF9C /* AppError.swift */,
+				C489D03946456721B73D70EA /* AppWarning.swift */,
+				A1FDE17265BB36CD42258798 /* ConsoleOutput.swift */,
+				CC77F3DE919D687C5088735B /* ContentContext.swift */,
+				D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */,
+				B4784FCC0B29C23649013882 /* CopyButton.swift */,
+			);
+			path = Copyable;
 			sourceTree = "<group>";
 		};
 		9FEB0F1E3E336D290DB4C2DE /* App */ = {
@@ -477,6 +563,14 @@
 			path = App;
 			sourceTree = "<group>";
 		};
+		A21C74D4FA129A0C385785D2 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				5A6E91E37345CFC1CFCF9AA6 /* RemoteLogViewerView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
 		DC501B7A7AB07D49F8911282 /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -486,14 +580,23 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		E458125E00E4AA130D4F530D /* Table */ = {
+			isa = PBXGroup;
+			children = (
+				C503C8896286EA38288A139F /* DataTableColumn.swift */,
+				F915FEEAF97ADD6EAADF6E4A /* DataTableConstants.swift */,
+				A2800F57FE83EEBB76CC1F1A /* NativeDataTable.swift */,
+			);
+			path = Table;
+			sourceTree = "<group>";
+		};
 		E51666A5CA18CBF6D75EBA87 /* Modules */ = {
 			isa = PBXGroup;
 			children = (
-				9F29FE78CE6D9C294DFC989A /* ConfigEditor */,
 				46F743648D562B5D67158FFF /* DatabaseBrowser */,
-				445A9E0820815A667686855B /* DebugLogs */,
 				26C9D5C3477F3537E1BB713A /* Deployer */,
-				135DC8AD7A357782464C212F /* WPCLITerminal */,
+				2E61F67D3432F0D875C83574 /* RemoteFileEditor */,
+				426FE25E9CC2781D94562CE8 /* RemoteLogViewer */,
 			);
 			path = Modules;
 			sourceTree = "<group>";
@@ -517,8 +620,9 @@
 				0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */,
 				9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */,
 				A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */,
-				BC89602CB662378E7905F7C4 /* MigrationService.swift */,
 				C794768AF4898995F64DB92D /* ProjectConfiguration.swift */,
+				599231AFF8DD800C0BA6DF12 /* ProjectTypeDefinition.swift */,
+				D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */,
 				3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */,
 			);
 			path = Config;
@@ -554,14 +658,6 @@
 				5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */,
 			);
 			path = Modules;
-			sourceTree = "<group>";
-		};
-		FDDB743BFE8A539062B806B4 /* Views */ = {
-			isa = PBXGroup;
-			children = (
-				1F27D2D3A4645517F606BB22 /* DebugLogsView.swift */,
-			);
-			path = Views;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -653,6 +749,7 @@
 			files = (
 				58782E3C2B83E467318758D3 /* Assets.xcassets in Resources */,
 				C6F738277B8D48B8F03655CA /* bandcamp_scraper.cpython-314.pyc in Resources */,
+				471FBA3C8CEB4393CFEE5091 /* project-types in Resources */,
 				6DAE472061CCB32A10D85BF8 /* homeboy-cli in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -689,16 +786,24 @@
 				DD2A1C263BA095CD1CE7B65E /* APIClient.swift in Sources */,
 				648329C427815A753D9AFBC6 /* APITypes.swift in Sources */,
 				C8E23E9BFFE99665244167D8 /* AppConfiguration.swift in Sources */,
+				B7C11AD70E2F3AAE008AF79F /* AppError.swift in Sources */,
+				4B78EEC5008E43BE7ACE09A2 /* AppWarning.swift in Sources */,
 				6E4163AE19D0C6697F8C664E /* AuthManager.swift in Sources */,
 				3C8729EDE4E9C35B6C3CD817 /* CLIInstaller.swift in Sources */,
 				E42C3D786FD44B2818BDC539 /* ConfigurationManager.swift in Sources */,
+				712CB177DFCA22F0FFF17ACB /* ConsoleOutput.swift in Sources */,
+				2758722FCCE88A4DD68D0B2E /* ContentContext.swift in Sources */,
+				E1E7D50CC935A9BB1F516C2E /* CopyButton.swift in Sources */,
+				63BC2B0238AB8471A0F42F4F /* CopyableContent.swift in Sources */,
 				0BC1FC2E1B3FC48292BF982A /* DBCommand.swift in Sources */,
 				75DCBF9FBB526E4EE52E69DB /* DatabaseTypes.swift in Sources */,
 				B91A02942F3B33D114C55E8A /* DeployCommand.swift in Sources */,
 				3217293C5F7A8E77ACE714EB /* DeployableComponent.swift in Sources */,
+				573F38B148371DC60CB6C0A7 /* DeploymentService.swift in Sources */,
+				D1D14C90B738887ECD0265B6 /* GroupingManager.swift in Sources */,
+				D55CAE1501A30D718E45E078 /* ItemGrouping.swift in Sources */,
 				37BB6A35F6B6CF8B2A5D7408 /* KeychainService.swift in Sources */,
 				C3A482944D140CA374914539 /* LocalEnvironment.swift in Sources */,
-				C3ECA85620916618C2B430C2 /* MigrationService.swift in Sources */,
 				6A8A3EB9DEF0C27DD8310EB0 /* ModuleInstaller.swift in Sources */,
 				27914A30B3E4E4A474ACE8CC /* ModuleManager.swift in Sources */,
 				B9F817941BFACA4C732F7B37 /* ModuleManifest.swift in Sources */,
@@ -706,16 +811,20 @@
 				1C661B0BF3D61D3C0D4035E5 /* MySQLService.swift in Sources */,
 				D46BD4167C16E4E3A6A1FC7C /* OutputFormatter.swift in Sources */,
 				079027CF40B8043B84F77945 /* ProjectConfiguration.swift in Sources */,
+				D21BE415813C2930A8B7519D /* ProjectTypeDefinition.swift in Sources */,
+				33BC501E3C96A4C432B65810 /* ProjectTypeManager.swift in Sources */,
 				90B07E3C3A53C081A0511182 /* ProjectsCommand.swift in Sources */,
 				52FDF39D89C383078D344296 /* PythonRunner.swift in Sources */,
 				D72F629CB7818A3E3829B864 /* RemoteFileBrowser.swift in Sources */,
 				4426ED70D0640D4D817A558F /* RemoteFileEntry.swift in Sources */,
+				91A89EAFB68B53F8D473F5AA /* SSHCommand.swift in Sources */,
 				2B8459AD77C15BBB15B16830 /* SSHService.swift in Sources */,
 				280E8263D00B0D9C5F202111 /* SSHTunnelService.swift in Sources */,
+				A774FB7341AC4F1A57B7E54D /* SchemaResolver.swift in Sources */,
 				D60F895AAD01B00086E36C75 /* ServerConfig.swift in Sources */,
+				540940CC1B9785A5EA225760 /* TableProtectionManager.swift in Sources */,
 				4A0F1AFEA41E1836E63D43FE /* WPCommand.swift in Sources */,
 				D41F41CD2CB3BC5F74E5011E /* WordPressSSHModule.swift in Sources */,
-				269E43FB717A7FF8A0BEB495 /* WordPressSiteMap.swift in Sources */,
 				42F5499F7E0F4A63AC0C66DF /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -726,32 +835,45 @@
 			files = (
 				5C04267FDCF7C82C4BE9B087 /* APIClient.swift in Sources */,
 				D3D2FEA38CB8A09E0ED93B73 /* APITypes.swift in Sources */,
+				80AFA487AED025BD2697208D /* AddToGroupMenu.swift in Sources */,
 				E6403DF4F6747B97ED009C1A /* AppConfiguration.swift in Sources */,
+				3CBF41346F060E438864152C /* AppError.swift in Sources */,
+				27D41F217F00E3A8171BEC63 /* AppWarning.swift in Sources */,
 				FE865BA85263630F8BF6A608 /* AuthManager.swift in Sources */,
-				0CD4B805E6550364EA5EEA20 /* BackupService.swift in Sources */,
+				1EBFEF675F781A40A250D009 /* BackupService.swift in Sources */,
 				DD3128834B4A7FF474DB3C02 /* CLIInstaller.swift in Sources */,
 				CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */,
 				8D62AD324E3C99747FA53FCB /* ComponentsSettingsTab.swift in Sources */,
-				6DAE40BB34A8A4EA58137566 /* ConfigEditorView.swift in Sources */,
-				894C18AC1F2D835316EBC641 /* ConfigEditorViewModel.swift in Sources */,
-				54E0906C0CD66000C5A4612D /* ConfigFile.swift in Sources */,
 				5BD322602F64CCA4E7A54FEF /* ConfigurationManager.swift in Sources */,
+				3D5278E44CF446DC733DFDF7 /* ConsoleOutput.swift in Sources */,
+				29AC5918A42B81DE1D250360 /* ContentContext.swift in Sources */,
 				B27446E0A3706D997A75D1E9 /* ContentView.swift in Sources */,
+				337BB8150B603A86CAECBE7F /* CopyButton.swift in Sources */,
+				1A164D8DD4607926F6964B95 /* CopyableContent.swift in Sources */,
+				E1F7C14F08E1E4D8353F8064 /* CopyableTextView.swift in Sources */,
+				FB914712293D43F2D7D80F80 /* CreateProjectSheet.swift in Sources */,
+				A051F697BD41C8D9A5298333 /* DataTableColumn.swift in Sources */,
+				A34392C1F77DDF4B0B386D8C /* DataTableConstants.swift in Sources */,
 				8DD50D5975E4E471BDE8DB3B /* DatabaseBrowserView.swift in Sources */,
 				8CC212749235B62EEE109984 /* DatabaseBrowserViewModel.swift in Sources */,
 				2A0D8EC80F531D2458B4F000 /* DatabaseSettingsTab.swift in Sources */,
 				53E684EC9B358CC6CF15C7C2 /* DatabaseTypes.swift in Sources */,
-				C34415C2350D3E883643E174 /* DebugLogsView.swift in Sources */,
-				0AFDF74AFB14AA2CD9C1D635 /* DebugLogsViewModel.swift in Sources */,
 				B9C42108AC64D21BAEEE580A /* DeployableComponent.swift in Sources */,
 				0FE6351E7C94950D6A459978 /* DeployerView.swift in Sources */,
 				58D7EB6E82E865D5736663C0 /* DeployerViewModel.swift in Sources */,
+				85F4F94606B3D49BEFDC227F /* DeploymentService.swift in Sources */,
+				5CA76C92A6AF0C42784FD35D /* ErrorView.swift in Sources */,
 				02AD314100925D82AE384CE8 /* GeneralSettingsTab.swift in Sources */,
+				AC767488EAD832187214964D /* GroupingEditorSheet.swift in Sources */,
+				2A2B0D75AF5291B05895FBBB /* GroupingManager.swift in Sources */,
 				57C3AE0D20A591DEE69B0FF0 /* HomeboyApp.swift in Sources */,
+				E832787BA1F926FB3A085E09 /* InlineErrorView.swift in Sources */,
+				EEA581470DC8B48027F54228 /* InlineWarningView.swift in Sources */,
+				3E503022AB80B6AEA06D0E24 /* ItemGrouping.swift in Sources */,
 				5A9B1A9B7984F57035A97D82 /* KeychainService.swift in Sources */,
 				305E5C164DFA751B1ABFE77B /* LocalEnvironment.swift in Sources */,
+				D17F7A98F3FB9E8F40991024 /* LogContentView.swift in Sources */,
 				8416680F81D345B2751765CC /* LoginView.swift in Sources */,
-				F40B03988CBDB6B84734B635 /* MigrationService.swift in Sources */,
 				36948AE7BAD67E09B8873D53 /* ModuleActionsBar.swift in Sources */,
 				AC4B413EC80B0BD0F7AABB1D /* ModuleConsoleView.swift in Sources */,
 				8C6CA13F14113243F0E6CDC4 /* ModuleContainerView.swift in Sources */,
@@ -766,15 +888,24 @@
 				C7897C8689B4E0075B1CB0D6 /* ModuleViewModel.swift in Sources */,
 				27FA9FFDA56F6C7BCAFE0296 /* ModulesSettingsTab.swift in Sources */,
 				B21C1A0F3083F2DCC260CDD6 /* MySQLService.swift in Sources */,
+				C727FE57ACE75A3152D4C972 /* NativeDataTable.swift in Sources */,
+				76A91937D9017A5B0D9B0BA5 /* PinnableTabBar.swift in Sources */,
 				023E9AE450BF036FF40C0E76 /* ProjectConfiguration.swift in Sources */,
 				7EE844A0691D39F31A685114 /* ProjectSwitcherView.swift in Sources */,
+				67B0C8541A262E38CBA8AECA /* ProjectTypeDefinition.swift in Sources */,
+				BD32FAF6FB2583B8A5A24363 /* ProjectTypeManager.swift in Sources */,
 				E77C55FA6D3BBCCD6422EDBA /* PythonRunner.swift in Sources */,
 				9ACBEB5DF2D256960184C815 /* QueryEditorView.swift in Sources */,
 				38D566E59E85DF4E4D14C48F /* RemoteFileBrowser.swift in Sources */,
 				22221233AC86561D48490886 /* RemoteFileBrowserView.swift in Sources */,
+				BBA251CB27591D879DAD4038 /* RemoteFileEditorView.swift in Sources */,
+				469CB781A5654E2EA41A3B30 /* RemoteFileEditorViewModel.swift in Sources */,
 				72D058E4C987B44B3C2FE75F /* RemoteFileEntry.swift in Sources */,
+				6DA58994C9A0D94854E44A62 /* RemoteLogViewerView.swift in Sources */,
+				80D12DD221BE19316CB0BDCA /* RemoteLogViewerViewModel.swift in Sources */,
 				71419F89166E98CC7C4A3A98 /* SSHService.swift in Sources */,
 				5F263EE965848ADD6D72A773 /* SSHTunnelService.swift in Sources */,
+				E8A0E0A1E7364CFEB6EB48AF /* SchemaResolver.swift in Sources */,
 				8327EB6B86BD82A5A8F0E466 /* ServerConfig.swift in Sources */,
 				0B1C053B8DCA686200739C43 /* ServerEditSheet.swift in Sources */,
 				790A549F1DA4887FA2EF100F /* ServersSettingsTab.swift in Sources */,
@@ -782,11 +913,10 @@
 				999116DB4DB5B3DF3EA9C171 /* SidebarView.swift in Sources */,
 				7CFF60E56F49FFC68A830664 /* SiteListView.swift in Sources */,
 				1E0233CF5AC026C74233786E /* TableDataView.swift in Sources */,
-				B9777CE23CB8CB7F58230C82 /* WPCLITerminalView.swift in Sources */,
-				2A01FB155B0D142B22505488 /* WPCLITerminalViewModel.swift in Sources */,
+				6DEC679DBFB512E99A03DC8A /* TableProtectionManager.swift in Sources */,
+				30856C36D38963CB5A540EFC /* WarningView.swift in Sources */,
 				AACC7F3153886939005FC50C /* WordPressSSHModule.swift in Sources */,
 				3188A425BBDAED4249534CE8 /* WordPressSettingsTab.swift in Sources */,
-				C3CAE2B8C0C7CE02DC122B33 /* WordPressSiteMap.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -39,10 +39,8 @@ struct LoginView: View {
             .frame(maxWidth: 300)
             
             if let error = authManager.error {
-                Text(error)
-                    .foregroundColor(.red)
-                    .font(.caption)
-                    .multilineTextAlignment(.center)
+                InlineErrorView(error)
+                    .frame(maxWidth: 300)
             }
             
             Button(action: login) {

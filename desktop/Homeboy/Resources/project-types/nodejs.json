@@ -1,0 +1,9 @@
+{
+  "id": "nodejs",
+  "displayName": "Node.js",
+  "icon": "server.rack",
+  "features": ["deployer", "debugLogs", "configEditor"],
+  "configSchema": null,
+  "defaultPinnedFiles": ["package.json", "ecosystem.config.js", ".env.example"],
+  "defaultPinnedLogs": ["logs/combined.log", "logs/err.log", "logs/out.log"]
+}

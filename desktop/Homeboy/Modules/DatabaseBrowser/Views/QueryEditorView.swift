@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// View for custom SQL query input and results display
 struct QueryEditorView: View {
@@ -6,12 +7,10 @@ struct QueryEditorView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Query input area
             queryInputSection
             
             Divider()
             
-            // Results section
             resultsSection
         }
     }
@@ -67,12 +66,10 @@ struct QueryEditorView: View {
     
     private var resultsSection: some View {
         VStack(spacing: 0) {
-            // Results header
             resultsHeader
             
             Divider()
             
-            // Results content
             if let error = viewModel.customQueryError {
                 errorView(error)
             } else if viewModel.isRunningCustomQuery {
@@ -114,23 +111,52 @@ struct QueryEditorView: View {
     // MARK: - Results Grid
     
     private var resultsGrid: some View {
-        Table(viewModel.customQueryRows, selection: $viewModel.selectedQueryRows) {
-            
-            TableColumnForEach(viewModel.customQueryColumns) { column in
-                TableColumn(column.name) { row in
-                    Text(row.value(for: column.name).isEmpty ? "NULL" : row.value(for: column.name))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(row.value(for: column.name).isEmpty ? .secondary : .primary)
+        NativeDataTable(
+            items: viewModel.customQueryRows,
+            columns: dynamicColumns,
+            selection: $viewModel.selectedQueryRows,
+            contextMenuProvider: { selectedIds in
+                createContextMenu(for: selectedIds)
+            }
+        )
+    }
+    
+    private var dynamicColumns: [DataTableColumn<TableRow>] {
+        viewModel.customQueryColumns.map { column in
+            DataTableColumn<TableRow>.custom(
+                id: column.name,
+                title: column.name,
+                width: .auto(min: 80, ideal: 150, max: 400),
+                alignment: .left,
+                sortable: true,
+                sortComparator: { lhs, rhs in
+                    let lhsValue = lhs.value(for: column.name)
+                    let rhsValue = rhs.value(for: column.name)
+                    return lhsValue.localizedStandardCompare(rhsValue)
+                },
+                cellProvider: { row in
+                    let value = row.value(for: column.name)
+                    return makeTextCell(
+                        text: value.isEmpty ? "NULL" : value,
+                        font: DataTableConstants.monospaceFont,
+                        color: value.isEmpty ? DataTableConstants.nullTextColor : DataTableConstants.primaryTextColor,
+                        alignment: .left
+                    )
                 }
-                .width(min: 80, ideal: 150)
-            }
+            )
         }
-        .contextMenu(forSelectionType: Int.self) { selectedIds in
-            Button("Copy") {
-                viewModel.copySelectedQueryRows()
-            }
-            .disabled(selectedIds.isEmpty)
-        }
+    }
+    
+    private func createContextMenu(for selectedIds: Set<Int>) -> NSMenu {
+        let menu = NSMenu()
+        
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(QueryMenuActions.copyRows), keyEquivalent: "c")
+        copyItem.target = QueryMenuActions.shared
+        copyItem.representedObject = QueryMenuActionContext(viewModel: viewModel, selectedIds: selectedIds)
+        copyItem.isEnabled = !selectedIds.isEmpty
+        menu.addItem(copyItem)
+        
+        return menu
     }
     
     // MARK: - State Views
@@ -188,23 +214,24 @@ struct QueryEditorView: View {
     }
     
     private func errorView(_ error: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 48))
-                .foregroundColor(.red)
-            
-            Text("Query Error")
-                .font(.headline)
-                .foregroundColor(.red)
-            
-            Text(error)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
-                .textSelection(.enabled)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ErrorView(error, source: "Query Editor")
+    }
+}
+
+// MARK: - Menu Action Helpers
+
+struct QueryMenuActionContext {
+    let viewModel: DatabaseBrowserViewModel
+    let selectedIds: Set<Int>
+}
+
+@MainActor
+class QueryMenuActions: NSObject {
+    static let shared = QueryMenuActions()
+    
+    @objc func copyRows(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? QueryMenuActionContext else { return }
+        context.viewModel.copySelectedQueryRows()
     }
 }
 

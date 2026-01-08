@@ -214,19 +214,56 @@ class ModuleManager: ObservableObject {
         return .ready
     }
     
-    /// Checks if a module's required components are installed
+    /// Checks if a module's requirements are satisfied (components, features, projectType)
     private func checkRequirements(manifest: ModuleManifest) -> [String]? {
-        guard let requires = manifest.requires,
-              let requiredComponents = requires.components,
-              !requiredComponents.isEmpty else {
+        guard let requires = manifest.requires else {
             return nil
         }
         
-        let installedComponentIds = Set(
-            ConfigurationManager.shared.activeProject.components.map { $0.id }
-        )
+        var missing: [String] = []
+        let project = ConfigurationManager.shared.safeActiveProject
         
-        let missing = requiredComponents.filter { !installedComponentIds.contains($0) }
+        // Check projectType requirement
+        if let requiredProjectType = requires.projectType {
+            if project.projectType != requiredProjectType {
+                let typeDef = ProjectTypeManager.shared.resolve(requiredProjectType)
+                missing.append("Project type: \(typeDef.displayName)")
+            }
+        }
+        
+        // Check feature requirements
+        if let requiredFeatures = requires.features {
+            let features = project.features
+            for feature in requiredFeatures {
+                let isSatisfied: Bool
+                switch feature {
+                case "hasDatabase":
+                    isSatisfied = features.hasDatabase
+                case "hasRemoteDeployment":
+                    isSatisfied = features.hasRemoteDeployment
+                case "hasRemoteLogs":
+                    isSatisfied = features.hasRemoteLogs
+                case "hasLocalCLI":
+                    isSatisfied = features.hasLocalCLI
+                default:
+                    isSatisfied = false
+                }
+                if !isSatisfied {
+                    missing.append(feature)
+                }
+            }
+        }
+        
+        // Check component requirements
+        if let requiredComponents = requires.components, !requiredComponents.isEmpty {
+            let installedComponentIds = Set(project.components.map { $0.id })
+            for component in requiredComponents {
+                if !installedComponentIds.contains(component) {
+                    missing.append(component)
+                }
+            }
+        }
+        
         return missing.isEmpty ? nil : missing
     }
     

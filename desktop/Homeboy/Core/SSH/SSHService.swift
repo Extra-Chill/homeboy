@@ -47,7 +47,7 @@ class SSHService: ObservableObject {
     /// Check if active project has full deployment configuration (server + SSH key + wp-content path)
     static func isConfiguredForWordPressDeployment() -> Bool {
         let project = ConfigurationManager.readCurrentProject()
-        guard project.projectType == .wordpress,
+        guard project.isWordPress,
               let wordpress = project.wordpress,
               wordpress.isConfigured else {
             return false
@@ -493,7 +493,9 @@ class SSHService: ObservableObject {
     
     /// List contents of a remote directory
     func listDirectory(_ path: String) async throws -> [RemoteFileEntry] {
-        let output = try await executeCommandSync("ls -la '\(path)'")
+        // Ensure trailing slash to list directory contents, not symlink metadata
+        let normalizedPath = path.hasSuffix("/") ? path : "\(path)/"
+        let output = try await executeCommandSync("ls -la '\(normalizedPath)'")
         let lines = output.components(separatedBy: .newlines)
         
         var entries: [RemoteFileEntry] = []

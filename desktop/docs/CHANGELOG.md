@@ -2,9 +2,49 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.4.0
+
+### New Features
+- **Copyable System**: Add error/warning/console copy system with one-click clipboard access. Includes `AppError`, `AppWarning`, `ConsoleOutput` types, `ContentContext` for metadata, `CopyButton` component, and view variants (`ErrorView`, `WarningView`, `InlineErrorView`, `InlineWarningView`).
+- **RemoteFileEditor**: New module for editing remote files over SSH with backup support, replacing ConfigEditor.
+- **RemoteLogViewer**: New module for viewing/searching remote log files with filtering, replacing DebugLogs.
+- **ProjectType System**: Extensible project type definitions via `ProjectTypeManager`. Bundled types (WordPress, Node.js) in `Resources/project-types/`. Each type defines features, default pinned files/logs, and database schema.
+- **SSH CLI Command**: Add `homeboy ssh <project> [command]` for interactive shells and single-command execution.
+- **DeploymentService**: Dedicated service for SSH deployments with build automation, upload, extraction, and permissions.
+- **SchemaResolver**: Database schema resolution for detecting WordPress table prefixes and core table suffixes.
+
+### New Components
+- **Grouping System**: `GroupingManager` and `AddToGroupMenu` for managing table groups in Database Browser with project config persistence.
+- **NativeDataTable**: Native SwiftUI table system (`NativeDataTable`, `DataTableColumn`, `DataTableConstants`) with sorting, column visibility, and row selection.
+- **CreateProjectSheet**: Project creation sheet with type selection and initial configuration.
+- **PinnableTabBar**: Tab bar with pinning support for frequently used tables/files.
+- **LogContentView**: Log content viewer with syntax highlighting and copy-to-clipboard.
+- **CopyableTextView**: Text view with integrated copy button.
+
+### Removed
+- **ConfigEditor module**: Removed `Homeboy/Modules/ConfigEditor/` (BackupService, ConfigEditorViewModel, ConfigFile, ConfigEditorView).
+- **DebugLogs module**: Removed `Homeboy/Modules/DebugLogs/` (DebugLogsViewModel, DebugLogsView).
+- **WP-CLI Terminal module**: Removed `Homeboy/Modules/WPCLITerminal/` (WPCLITerminalViewModel, WPCLITerminalView).
+- **MigrationService**: Removed legacy ExtraChillDesktop migration service.
+- **WordPressSiteMap**: Removed in favor of new Database Browser grouping system.
+
+### Refactoring
+- **Database Browser**: Complete overhaul with grouping system, native table component, SchemaResolver integration. Major updates to `SiteListView`, `TableDataView`, `QueryEditorView`.
+- **Deployer**: Refactored ViewModel and Views with improved version comparison and deployment workflow.
+- **Configuration System**: Major updates to `ConfigurationManager`, `ProjectConfiguration`, and `DeployableComponent` with validation, multisite support, and project type integration.
+- **SSH Services**: Refactored `RemoteFileBrowser`, `RemoteFileEntry`, and `WordPressSSHModule` for improved file operations.
+- **Module System**: Updated `ModuleManager`, `ModuleManifest`, `ModuleRunner`, and `ModuleViewModel`.
+
+### Build
+- Switch from ZIP to DMG for macOS distribution (`dist/Homeboy-macOS.dmg`).
+
+### Documentation
+- Add `docs/CLI.md` with full command reference.
+- Add `docs/ERROR-HANDLING.md` for Copyable system specification.
+
 ## 0.3.0
 
-- App: migrate the entire codebase from `ExtraChillDesktop/` to the new `Homeboy/` app structure.
+- App: migrate the codebase from `ExtraChillDesktop/` to the `Homeboy/` app structure.
 - CLI: add a bundled Swift CLI (`homeboy`) with argument-parser commands for projects, deployments, WP-CLI, and database access.
 - Build: replace tracked build artifacts with a reproducible Release packaging flow that outputs `dist/Homeboy-macOS.zip`.
 - Config: introduce project/server-first configuration (separate reusable SSH `ServerConfig` from per-project settings).

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Represents a file or directory entry on a remote server
-struct RemoteFileEntry: Identifiable, Hashable {
+struct RemoteFileEntry: Identifiable, Hashable, Comparable {
     var id: String { path }
     
     let name: String
@@ -75,5 +75,16 @@ struct RemoteFileEntry: Identifiable, Hashable {
             modifiedDate: nil,
             permissions: permissions
         )
+    }
+    
+    // MARK: - Comparable (directories first, then alphabetical by name)
+    
+    static func < (lhs: RemoteFileEntry, rhs: RemoteFileEntry) -> Bool {
+        // Directories always come before files
+        if lhs.isDirectory != rhs.isDirectory {
+            return lhs.isDirectory
+        }
+        // Same type: sort alphabetically by name (case-insensitive)
+        return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
     }
 }

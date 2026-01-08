@@ -5,9 +5,9 @@ import Foundation
 struct HomeboyCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "homeboy",
-        abstract: "CLI for WordPress development and deployment",
-        version: "0.3.0",
-        subcommands: [WP.self, DB.self, Deploy.self, Projects.self],
+        abstract: "CLI for project development and deployment",
+        version: "0.4.0",
+        subcommands: [WP.self, DB.self, Deploy.self, Projects.self, SSH.self],
         defaultSubcommand: nil
     )
 }

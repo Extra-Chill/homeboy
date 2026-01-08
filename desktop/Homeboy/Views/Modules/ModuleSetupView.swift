@@ -87,9 +87,7 @@ struct ModuleSetupView: View {
                 
                 if let error = viewModel.error {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundColor(.red)
+                        InlineErrorView(error)
                         
                         // Show console output if there was an error (so user can see what went wrong)
                         if !viewModel.consoleOutput.isEmpty {

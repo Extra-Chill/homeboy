@@ -17,7 +17,7 @@ class ModuleViewModel: ObservableObject {
     @Published var consoleOutput = ""
     @Published var results: [[String: AnyCodableValue]] = []
     @Published var selectedRows: Set<Int> = []
-    @Published var error: String?
+    @Published var error: AppError?
     @Published var actionResult: String?
     @Published var isPerformingAction = false
     
@@ -37,12 +37,12 @@ class ModuleViewModel: ObservableObject {
     
     /// Whether the current site is multisite (for showing network site selector)
     var isMultisite: Bool {
-        configManager.activeProject.multisite?.enabled ?? false
+        configManager.safeActiveProject.multisite?.enabled ?? false
     }
     
     /// Available network sites for WP-CLI modules
     var networkSites: [MultisiteBlog] {
-        configManager.activeProject.multisite?.blogs ?? []
+        configManager.safeActiveProject.multisite?.blogs ?? []
     }
     
     init(moduleId: String) {
@@ -110,14 +110,15 @@ class ModuleViewModel: ObservableObject {
                     consoleOutput += "\nWarnings:\n" + errors.joined(separator: "\n")
                 }
             } else {
-                error = "Script completed but reported failure"
+                var message = "Script completed but reported failure"
                 if let errors = output.errors, !errors.isEmpty {
-                    error! += ": " + errors.joined(separator: ", ")
+                    message += ": " + errors.joined(separator: ", ")
                 }
+                error = AppError(message, source: "Module: \(moduleId)")
             }
             
         case .failure(let err):
-            error = err.localizedDescription
+            error = AppError(err.localizedDescription, source: "Module: \(moduleId)")
         }
     }
     
@@ -149,8 +150,10 @@ class ModuleViewModel: ObservableObject {
                     case .success:
                         // Update module state in manager
                         ModuleManager.shared.updateModuleState(moduleId: self?.moduleId ?? "", state: .ready)
-                    case .failure(let error):
-                        self?.error = error.localizedDescription
+                    case .failure(let err):
+                        if let moduleId = self?.moduleId {
+                            self?.error = AppError(err.localizedDescription, source: "Module: \(moduleId)")
+                        }
                     }
                 }
             }
@@ -253,7 +256,7 @@ class ModuleViewModel: ObservableObject {
                 try csv.write(to: url, atomically: true, encoding: .utf8)
                 actionResult = "Exported \(selectedResults.count) rows to \(url.lastPathComponent)"
             } catch {
-                self.error = "Failed to save CSV: \(error.localizedDescription)"
+                self.error = AppError("Failed to save CSV: \(error.localizedDescription)", source: "Module: \(moduleId)")
             }
         }
     }
@@ -261,21 +264,21 @@ class ModuleViewModel: ObservableObject {
     private func performAPIAction(_ action: ActionConfig, module: LoadedModule) async {
         guard let endpoint = action.endpoint,
               let method = action.method else {
-            error = "Invalid API action configuration"
+            error = AppError("Invalid API action configuration", source: "Module: \(moduleId)")
             return
         }
         
         // Get current site's API config
-        let siteConfig = ConfigurationManager.shared.activeProject
+        let siteConfig = configManager.safeActiveProject
         guard siteConfig.api.enabled, !siteConfig.api.baseURL.isEmpty else {
-            error = "API not configured for current site. Go to Settings to configure."
+            error = AppError("API not configured for current site. Go to Settings to configure.", source: "Module: \(moduleId)")
             return
         }
         
         // Check auth if required
         if action.requiresAuth == true {
             guard await APIClient.shared.hasTokens() else {
-                error = "Not logged in. Go to Settings to authenticate."
+                error = AppError("Not logged in. Go to Settings to authenticate.", source: "Module: \(moduleId)")
                 return
             }
         }
@@ -306,7 +309,7 @@ class ModuleViewModel: ObservableObject {
             let (data, response) = try await URLSession.shared.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
-                error = "Invalid response"
+                error = AppError("Invalid response", source: "Module: \(moduleId)")
                 return
             }
             
@@ -319,11 +322,11 @@ class ModuleViewModel: ObservableObject {
                 }
             } else {
                 let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
-                error = "API error (\(httpResponse.statusCode)): \(errorText)"
+                error = AppError("API error (\(httpResponse.statusCode)): \(errorText)", source: "Module: \(moduleId)")
             }
             
         } catch {
-            self.error = "Request failed: \(error.localizedDescription)"
+            self.error = AppError("Request failed: \(error.localizedDescription)", source: "Module: \(moduleId)")
         }
     }
     
@@ -374,8 +377,8 @@ class ModuleViewModel: ObservableObject {
     // MARK: - Console
     
     func copyConsoleOutput() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(consoleOutput, forType: .string)
+        let moduleName = module?.name ?? moduleId
+        ConsoleOutput(consoleOutput, source: "Module: \(moduleName)").copyToClipboard()
     }
     
     func clearConsole() {

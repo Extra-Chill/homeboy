@@ -25,6 +25,8 @@ struct ModuleManifest: Codable, Identifiable {
 
 struct RequirementsConfig: Codable {
     let components: [String]?
+    let features: [String]?
+    let projectType: String?
 }
 
 // MARK: - Runtime Configuration

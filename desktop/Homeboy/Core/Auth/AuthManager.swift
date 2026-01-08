@@ -6,11 +6,11 @@ class AuthManager: ObservableObject {
     @Published var user: User?
     @Published var isLoading = true
     @Published var isAuthenticated = false
-    @Published var error: String?
+    @Published var error: AppError?
     
     /// Returns true if API authentication is configured for the current project
     var isAuthConfigured: Bool {
-        let config = ConfigurationManager.shared.activeProject.api
+        let config = ConfigurationManager.shared.safeActiveProject.api
         return config.enabled && !config.baseURL.isEmpty
     }
     
@@ -61,9 +61,9 @@ class AuthManager: ObservableObject {
             self.user = response.user
             self.isAuthenticated = true
         } catch let apiError as APIError {
-            self.error = apiError.message
+            self.error = AppError(apiError.message, source: "Authentication")
         } catch {
-            self.error = error.localizedDescription
+            self.error = AppError(error.localizedDescription, source: "Authentication")
         }
         
         isLoading = false

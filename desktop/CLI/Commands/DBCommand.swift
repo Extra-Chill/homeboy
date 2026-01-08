@@ -234,7 +234,7 @@ func validateWordPressProject(projectId: String) throws -> (projectConfig: Proje
         throw ExitCode.failure
     }
     
-    guard projectConfig.projectType == .wordpress,
+    guard projectConfig.isWordPress,
           let wordpress = projectConfig.wordpress,
           wordpress.isConfigured else {
         fputs("Error: WordPress deployment not configured for project '\(projectId)'\n", stderr)

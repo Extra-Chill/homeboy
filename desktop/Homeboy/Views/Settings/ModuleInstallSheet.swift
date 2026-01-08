@@ -6,7 +6,7 @@ struct ModuleInstallSheet: View {
     
     @State private var selectedPath: URL?
     @State private var isInstalling = false
-    @State private var error: String?
+    @State private var error: AppError?
     @State private var success = false
     
     var body: some View {
@@ -66,9 +66,7 @@ struct ModuleInstallSheet: View {
             
             // Error or success message
             if let error = error {
-                Text(error)
-                    .font(.caption)
-                    .foregroundColor(.red)
+                InlineErrorView(error)
             }
             
             if success {
@@ -106,14 +104,14 @@ struct ModuleInstallSheet: View {
             error = nil
             success = false
             
-            // Validate that module.json exists
-            if let path = panel.url {
-                let manifestPath = path.appendingPathComponent("module.json")
-                if !FileManager.default.fileExists(atPath: manifestPath.path) {
-                    error = "Selected folder does not contain a module.json file"
-                    selectedPath = nil
+                // Validate that module.json exists
+                if let path = panel.url {
+                    let manifestPath = path.appendingPathComponent("module.json")
+                    if !FileManager.default.fileExists(atPath: manifestPath.path) {
+                        error = AppError("Selected folder does not contain a module.json file", source: "Module Installer")
+                        selectedPath = nil
+                    }
                 }
-            }
         }
     }
     
@@ -134,7 +132,7 @@ struct ModuleInstallSheet: View {
                 dismiss()
             }
         case .failure(let err):
-            error = err.localizedDescription
+            error = AppError(err.localizedDescription, source: "Module Installer")
         }
         
         isInstalling = false

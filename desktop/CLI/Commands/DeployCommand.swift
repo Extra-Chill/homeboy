@@ -5,7 +5,7 @@ import Foundation
 struct Deploy: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "deploy",
-        abstract: "Deploy plugins and themes to production"
+        abstract: "Deploy components to production"
     )
     
     @Argument(help: "Project ID (e.g., extrachill)")
@@ -45,15 +45,11 @@ struct Deploy: ParsableCommand {
             throw ExitCode.failure
         }
         
-        // Validate WordPress config for WordPress projects
-        guard projectConfig.projectType == .wordpress,
-              let wordpress = projectConfig.wordpress,
-              wordpress.isConfigured else {
-            outputError("WordPress deployment not configured for project '\(projectId)'")
+        // Validate base path is configured
+        guard let basePath = projectConfig.basePath, !basePath.isEmpty else {
+            outputError("Remote base path not configured for project '\(projectId)'")
             throw ExitCode.failure
         }
-        
-        let wpContentPath = wordpress.wpContentPath
         
         // Ensure SSH key exists for this server
         guard SSHService.ensureKeyFileExists(forServer: serverId) else {
@@ -109,7 +105,7 @@ struct Deploy: ParsableCommand {
             remoteVersions = fetchRemoteVersions(
                 components: componentsToDeploy,
                 serverConfig: serverConfig,
-                wpContentPath: wpContentPath
+                basePath: basePath
             )
             
             // Filter based on flags
@@ -184,7 +180,7 @@ struct Deploy: ParsableCommand {
             let result = deployComponent(
                 component: component,
                 serverConfig: serverConfig,
-                wpContentPath: wpContentPath
+                basePath: basePath
             )
             
             let duration = Date().timeIntervalSince(startTime)
@@ -227,7 +223,7 @@ struct Deploy: ParsableCommand {
     private func deployComponent(
         component: DeployableComponent,
         serverConfig: ServerConfig,
-        wpContentPath: String
+        basePath: String
     ) -> (success: Bool, error: String?) {
         
         // 1. Build locally
@@ -237,13 +233,13 @@ struct Deploy: ParsableCommand {
         }
         
         // 2. Verify zip exists
-        guard FileManager.default.fileExists(atPath: component.buildOutputPath) else {
-            return (false, "Build completed but zip not found at \(component.buildOutputPath)")
+        guard FileManager.default.fileExists(atPath: component.buildArtifactPath) else {
+            return (false, "Build completed but zip not found at \(component.buildArtifactPath)")
         }
         
         // 3. Upload via SCP
         let uploadResult = executeSCPUpload(
-            localPath: component.buildOutputPath,
+            localPath: component.buildArtifactPath,
             remotePath: "tmp/\(component.id).zip",
             host: serverConfig.host,
             user: serverConfig.user,
@@ -254,7 +250,7 @@ struct Deploy: ParsableCommand {
         }
         
         // 4. Remove old version
-        let remotePath = "\(wpContentPath)/\(component.remotePath)"
+        let remotePath = "\(basePath)/\(component.remotePath)"
         let removeResult = executeSSHCommand(
             host: serverConfig.host,
             user: serverConfig.user,
@@ -265,10 +261,8 @@ struct Deploy: ParsableCommand {
             return (false, "Failed to remove old version: \(removeResult.output)")
         }
         
-        // 5. Extract
-        let targetDir = component.type == .theme
-            ? "\(wpContentPath)/themes"
-            : "\(wpContentPath)/plugins"
+        // 5. Extract - use remotePath which contains the full relative path (e.g., "plugins/my-plugin")
+        let targetDir = "\(basePath)/\((component.remotePath as NSString).deletingLastPathComponent)"
         let extractResult = executeSSHCommand(
             host: serverConfig.host,
             user: serverConfig.user,
@@ -329,14 +323,15 @@ struct Deploy: ParsableCommand {
     private func fetchRemoteVersions(
         components: [DeployableComponent],
         serverConfig: ServerConfig,
-        wpContentPath: String
+        basePath: String
     ) -> [String: String] {
         var versions: [String: String] = [:]
         
         // Build a command to grep versions from all components in one SSH call
         var versionChecks: [String] = []
         for component in components {
-            let remotePath = "\(wpContentPath)/\(component.remotePath)/\(component.mainFile)"
+            guard let versionFile = component.versionFile else { continue }
+            let remotePath = "\(basePath)/\(component.remotePath)/\(versionFile)"
             versionChecks.append("echo '\(component.id):'$(grep -m1 'Version:' \"\(remotePath)\" 2>/dev/null | sed 's/.*Version:[[:space:]]*//' | tr -d '[:space:]')")
         }
         

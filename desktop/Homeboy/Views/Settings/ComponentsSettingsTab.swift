@@ -9,16 +9,11 @@ struct ComponentsSettingsTab: View {
     @State private var componentToDelete: ComponentConfig? = nil
     @State private var showDeleteConfirmation = false
     
-    private var themes: [ComponentConfig] {
-        config.activeProject.components.filter { $0.type == .theme }
-    }
-    
-    private var networkPlugins: [ComponentConfig] {
-        config.activeProject.components.filter { $0.type == .plugin && $0.isNetwork }
-    }
-    
-    private var sitePlugins: [ComponentConfig] {
-        config.activeProject.components.filter { $0.type == .plugin && !$0.isNetwork }
+    /// Group components by their `group` field
+    private var groupedComponents: [(title: String, components: [ComponentConfig])] {
+        Dictionary(grouping: config.safeActiveProject.components, by: { $0.group ?? "Components" })
+            .sorted { $0.key < $1.key }
+            .map { (title: $0.key, components: $0.value.sorted { $0.name < $1.name }) }
     }
     
     var body: some View {
@@ -33,46 +28,16 @@ struct ComponentsSettingsTab: View {
                     }
                 }
                 
-                if config.activeProject.components.isEmpty {
+                if config.safeActiveProject.components.isEmpty {
                     Text("No components configured. Add themes and plugins to deploy.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
             
-            if !themes.isEmpty {
-                Section("Themes") {
-                    ForEach(themes) { component in
-                        ComponentRow(
-                            component: component,
-                            onEdit: { editingComponent = component },
-                            onDelete: {
-                                componentToDelete = component
-                                showDeleteConfirmation = true
-                            }
-                        )
-                    }
-                }
-            }
-            
-            if !networkPlugins.isEmpty {
-                Section("Network Plugins") {
-                    ForEach(networkPlugins) { component in
-                        ComponentRow(
-                            component: component,
-                            onEdit: { editingComponent = component },
-                            onDelete: {
-                                componentToDelete = component
-                                showDeleteConfirmation = true
-                            }
-                        )
-                    }
-                }
-            }
-            
-            if !sitePlugins.isEmpty {
-                Section("Site Plugins") {
-                    ForEach(sitePlugins) { component in
+            ForEach(groupedComponents, id: \.title) { group in
+                Section(group.title) {
+                    ForEach(group.components) { component in
                         ComponentRow(
                             component: component,
                             onEdit: { editingComponent = component },
@@ -108,7 +73,7 @@ struct ComponentsSettingsTab: View {
     }
     
     private func deleteComponent(_ component: ComponentConfig) {
-        config.activeProject.components.removeAll { $0.id == component.id }
+        config.activeProject?.components.removeAll { $0.id == component.id }
         config.saveActiveProject()
     }
 }
@@ -163,11 +128,23 @@ struct AddEditComponentSheet: View {
     @ObservedObject var config: ConfigurationManager
     let existing: ComponentConfig?
     
+    // Basic info
     @State private var localPath: String = ""
     @State private var id: String = ""
     @State private var name: String = ""
-    @State private var type: ComponentType = .plugin
+    
+    // Deployment paths
+    @State private var remotePath: String = ""
+    @State private var buildArtifact: String = ""
+    
+    // Version detection
+    @State private var versionFile: String = ""
+    @State private var versionPattern: String = "Version:\\s*([\\d.]+)"
+    
+    // Grouping
+    @State private var group: String = ""
     @State private var isNetwork: Bool = false
+    
     @State private var validationError: String? = nil
     
     @Environment(\.dismiss) private var dismiss
@@ -177,7 +154,7 @@ struct AddEditComponentSheet: View {
     }
     
     private var canSave: Bool {
-        !localPath.isEmpty && !id.isEmpty && !name.isEmpty
+        !localPath.isEmpty && !id.isEmpty && !name.isEmpty && !remotePath.isEmpty && !buildArtifact.isEmpty
     }
     
     var body: some View {
@@ -202,24 +179,30 @@ struct AddEditComponentSheet: View {
                             .textFieldStyle(.roundedBorder)
                         TextField("Display Name", text: $name)
                             .textFieldStyle(.roundedBorder)
-                        
-                        Picker("Type", selection: $type) {
-                            Text("Theme").tag(ComponentType.theme)
-                            Text("Plugin").tag(ComponentType.plugin)
-                        }
-                        .pickerStyle(.segmented)
-                        
-                        if type == .plugin {
-                            Toggle("Network Plugin", isOn: $isNetwork)
-                        }
+                        TextField("Group (e.g., Themes, Site Plugins)", text: $group)
+                            .textFieldStyle(.roundedBorder)
+                        Toggle("Network Plugin", isOn: $isNetwork)
+                    }
+                    
+                    Section("Deployment") {
+                        TextField("Remote Path (e.g., plugins/my-plugin)", text: $remotePath)
+                            .textFieldStyle(.roundedBorder)
+                        TextField("Build Artifact (e.g., build/my-plugin.zip)", text: $buildArtifact)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    
+                    Section("Version Detection (Optional)") {
+                        TextField("Version File (e.g., my-plugin.php)", text: $versionFile)
+                            .textFieldStyle(.roundedBorder)
+                        TextField("Version Pattern (regex)", text: $versionPattern)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
                     }
                 }
                 
                 if let error = validationError {
                     Section {
-                        Text(error)
-                            .foregroundColor(.red)
-                            .font(.caption)
+                        InlineErrorView(error, source: "Component Settings")
                     }
                 }
             }
@@ -244,14 +227,18 @@ struct AddEditComponentSheet: View {
             }
         }
         .padding()
-        .frame(width: 500, height: 400)
+        .frame(width: 550, height: 550)
         .onAppear {
             if let existing = existing {
                 localPath = existing.localPath
                 id = existing.id
                 name = existing.name
-                type = existing.type
-                isNetwork = existing.isNetwork
+                remotePath = existing.remotePath
+                buildArtifact = existing.buildArtifact
+                versionFile = existing.versionFile ?? ""
+                versionPattern = existing.versionPattern ?? "Version:\\s*([\\d.]+)"
+                group = existing.group ?? ""
+                isNetwork = existing.isNetwork ?? false
             }
         }
         .onChange(of: localPath) { _, newValue in
@@ -283,15 +270,49 @@ struct AddEditComponentSheet: View {
         let styleCSS = "\(localPath)/style.css"
         let mainPHP = "\(localPath)/\(slug).php"
         
+        // Detect type and set defaults
         if FileManager.default.fileExists(atPath: styleCSS) {
-            type = .theme
-            name = VersionParser.parseThemeName(from: styleCSS) ?? slug.capitalized
+            // Theme
+            name = VersionParser.parseVersion(from: (try? String(contentsOfFile: styleCSS, encoding: .utf8)) ?? "") != nil
+                ? (parseThemeName(from: styleCSS) ?? slug.capitalized)
+                : slug.capitalized
+            remotePath = "themes/\(slug)"
+            buildArtifact = "build/\(slug).zip"
+            versionFile = "style.css"
+            group = "Themes"
         } else if FileManager.default.fileExists(atPath: mainPHP) {
-            type = .plugin
-            name = VersionParser.parsePluginName(from: mainPHP) ?? slug.capitalized
+            // Plugin
+            name = parsePluginName(from: mainPHP) ?? slug.capitalized
+            remotePath = "plugins/\(slug)"
+            buildArtifact = "build/\(slug).zip"
+            versionFile = "\(slug).php"
+            group = "Site Plugins"
         } else {
+            // Generic
             name = slug.capitalized
+            remotePath = slug
+            buildArtifact = "build/\(slug).zip"
+            versionFile = ""
+            group = "Components"
         }
+    }
+    
+    private func parseThemeName(from filePath: String) -> String? {
+        guard let content = try? String(contentsOfFile: filePath, encoding: .utf8) else { return nil }
+        let pattern = "Theme Name:\\s*(.+)"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+              let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+              let range = Range(match.range(at: 1), in: content) else { return nil }
+        return String(content[range]).trimmingCharacters(in: .whitespaces)
+    }
+    
+    private func parsePluginName(from filePath: String) -> String? {
+        guard let content = try? String(contentsOfFile: filePath, encoding: .utf8) else { return nil }
+        let pattern = "Plugin Name:\\s*(.+)"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+              let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+              let range = Range(match.range(at: 1), in: content) else { return nil }
+        return String(content[range]).trimmingCharacters(in: .whitespaces)
     }
     
     private func validate() -> Bool {
@@ -300,17 +321,13 @@ struct AddEditComponentSheet: View {
             return false
         }
         
-        let mainFile = type == .theme ? "style.css" : "\(id).php"
-        let mainFilePath = "\(localPath)/\(mainFile)"
-        
-        guard FileManager.default.fileExists(atPath: mainFilePath) else {
-            validationError = "Missing \(mainFile)"
+        guard !remotePath.isEmpty else {
+            validationError = "Remote path is required"
             return false
         }
         
-        guard let content = try? String(contentsOfFile: mainFilePath, encoding: .utf8),
-              VersionParser.parseVersion(from: content) != nil else {
-            validationError = "Could not parse version from \(mainFile)"
+        guard !buildArtifact.isEmpty else {
+            validationError = "Build artifact path is required"
             return false
         }
         
@@ -322,17 +339,21 @@ struct AddEditComponentSheet: View {
         let component = ComponentConfig(
             id: id,
             name: name,
-            type: type,
             localPath: localPath,
-            isNetwork: type == .plugin ? isNetwork : false
+            remotePath: remotePath,
+            buildArtifact: buildArtifact,
+            versionFile: versionFile.isEmpty ? nil : versionFile,
+            versionPattern: versionPattern.isEmpty ? nil : versionPattern,
+            group: group.isEmpty ? nil : group,
+            isNetwork: isNetwork ? true : nil
         )
         
         if isEditing {
-            if let index = config.activeProject.components.firstIndex(where: { $0.id == existing?.id }) {
-                config.activeProject.components[index] = component
+            if let index = config.safeActiveProject.components.firstIndex(where: { $0.id == existing?.id }) {
+                config.activeProject?.components[index] = component
             }
         } else {
-            config.activeProject.components.append(component)
+            config.activeProject?.components.append(component)
         }
         
         config.saveActiveProject()

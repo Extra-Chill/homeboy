@@ -1,9 +1,9 @@
 import Foundation
 
-/// Represents a local backup of a config file
-struct ConfigBackup: Identifiable {
+/// Represents a local backup of a remote file
+struct FileBackup: Identifiable {
     let id: String
-    let file: ConfigFile
+    let filePath: String
     let date: Date
     let url: URL
     
@@ -13,9 +13,13 @@ struct ConfigBackup: Identifiable {
         formatter.timeStyle = .short
         return formatter.string(from: date)
     }
+    
+    var fileName: String {
+        URL(fileURLWithPath: filePath).lastPathComponent
+    }
 }
 
-/// Manages local backups of server configuration files.
+/// Manages local backups of server files.
 /// Backups are stored in ~/Library/Application Support/Homeboy/backups/
 class BackupService {
     static let shared = BackupService()
@@ -30,37 +34,37 @@ class BackupService {
     }
     
     private init() {
-        ensureDirectoriesExist()
+        try? fileManager.createDirectory(at: backupsDirectory, withIntermediateDirectories: true)
     }
     
-    private func ensureDirectoriesExist() {
-        for file in ConfigFile.allCases {
-            let dir = backupsDirectory.appendingPathComponent(file.rawValue)
-            try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
+    /// Creates a safe directory name from a file path
+    private func safeDirectoryName(for path: String) -> String {
+        // Replace path separators and other unsafe characters
+        path.replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
     }
     
     /// Directory for a specific file's backups
-    private func directory(for file: ConfigFile) -> URL {
-        backupsDirectory.appendingPathComponent(file.rawValue)
+    private func directory(for path: String) -> URL {
+        let safeName = safeDirectoryName(for: path)
+        let dir = backupsDirectory.appendingPathComponent(safeName)
+        try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
     }
     
     /// Saves a backup of the current server content before overwriting
-    /// - Parameters:
-    ///   - file: The config file type
-    ///   - content: The current server content to back up
-    /// - Returns: The created backup, or nil if save failed
     @discardableResult
-    func saveBackup(file: ConfigFile, content: String) -> ConfigBackup? {
+    func saveBackup(filePath: String, content: String) -> FileBackup? {
         let timestamp = ISO8601DateFormatter().string(from: Date())
-            .replacingOccurrences(of: ":", with: "-") // Filesystem-safe
+            .replacingOccurrences(of: ":", with: "-")
         let filename = "\(timestamp).txt"
-        let url = directory(for: file).appendingPathComponent(filename)
+        let url = directory(for: filePath).appendingPathComponent(filename)
         
         do {
             try content.write(to: url, atomically: true, encoding: .utf8)
-            pruneOldBackups(for: file)
-            return ConfigBackup(id: filename, file: file, date: Date(), url: url)
+            pruneOldBackups(for: filePath)
+            return FileBackup(id: filename, filePath: filePath, date: Date(), url: url)
         } catch {
             print("[BackupService] Failed to save backup: \(error)")
             return nil
@@ -68,8 +72,8 @@ class BackupService {
     }
     
     /// Returns all backups for a file, sorted by date (newest first)
-    func getBackups(for file: ConfigFile) -> [ConfigBackup] {
-        let dir = directory(for: file)
+    func getBackups(for path: String) -> [FileBackup] {
+        let dir = directory(for: path)
         
         guard let files = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.creationDateKey]) else {
             return []
@@ -77,27 +81,27 @@ class BackupService {
         
         return files
             .filter { $0.pathExtension == "txt" }
-            .compactMap { url -> ConfigBackup? in
+            .compactMap { url -> FileBackup? in
                 let filename = url.deletingPathExtension().lastPathComponent
                 guard let date = parseDate(from: filename) else { return nil }
-                return ConfigBackup(id: url.lastPathComponent, file: file, date: date, url: url)
+                return FileBackup(id: url.lastPathComponent, filePath: path, date: date, url: url)
             }
             .sorted { $0.date > $1.date }
     }
     
     /// Loads the content of a backup
-    func loadBackup(_ backup: ConfigBackup) -> String? {
+    func loadBackup(_ backup: FileBackup) -> String? {
         try? String(contentsOf: backup.url, encoding: .utf8)
     }
     
     /// Deletes a single backup
-    func deleteBackup(_ backup: ConfigBackup) {
+    func deleteBackup(_ backup: FileBackup) {
         try? fileManager.removeItem(at: backup.url)
     }
     
     /// Clears all backups for a file
-    func clearBackups(for file: ConfigFile) {
-        let dir = directory(for: file)
+    func clearBackups(for path: String) {
+        let dir = directory(for: path)
         if let files = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
             for file in files {
                 try? fileManager.removeItem(at: file)
@@ -106,8 +110,8 @@ class BackupService {
     }
     
     /// Removes oldest backups when exceeding max count
-    private func pruneOldBackups(for file: ConfigFile) {
-        let backups = getBackups(for: file)
+    private func pruneOldBackups(for path: String) {
+        let backups = getBackups(for: path)
         if backups.count > maxBackupsPerFile {
             let toDelete = backups.suffix(from: maxBackupsPerFile)
             for backup in toDelete {
@@ -118,27 +122,15 @@ class BackupService {
     
     /// Parses date from ISO8601 timestamp filename
     private func parseDate(from filename: String) -> Date? {
-        // Convert filesystem-safe format back to ISO8601
-        let iso8601 = filename.replacingOccurrences(of: "-", with: ":")
-            .replacingOccurrences(of: "T:", with: "T") // Fix the T separator
-        
-        // Try standard ISO8601 parsing
-        let formatter = ISO8601DateFormatter()
-        if let date = formatter.date(from: iso8601) {
-            return date
-        }
-        
-        // Fallback: try to parse the original format
-        // Format: 2026-01-07T14-34-22Z
         let parts = filename.components(separatedBy: "T")
         guard parts.count == 2 else { return nil }
         
-        let datePart = parts[0] // 2026-01-07
-        let timePart = parts[1].replacingOccurrences(of: "Z", with: "") // 14-34-22
+        let datePart = parts[0]
+        let timePart = parts[1].replacingOccurrences(of: "Z", with: "")
         let timeComponents = timePart.components(separatedBy: "-")
         guard timeComponents.count >= 3 else { return nil }
         
         let reconstructed = "\(datePart)T\(timeComponents[0]):\(timeComponents[1]):\(timeComponents[2])Z"
-        return formatter.date(from: reconstructed)
+        return ISO8601DateFormatter().date(from: reconstructed)
     }
 }

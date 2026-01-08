@@ -18,10 +18,28 @@ struct ProjectSwitcherView: View {
     
     // Add project form
     @State private var newProjectName = ""
-    @State private var newProjectDomain = ""
+    @State private var newProjectId = ""
+    @State private var newProjectIdWasManuallyEdited = false
+    @State private var newProjectType: String = "wordpress"
     
     private var availableProjects: [ProjectConfiguration] {
         configManager.availableProjectIds().compactMap { configManager.loadProject(id: $0) }
+    }
+    
+    private var availableProjectTypes: [ProjectTypeDefinition] {
+        ProjectTypeManager.shared.allTypes
+    }
+    
+    private var isFormValid: Bool {
+        !newProjectName.isEmpty && !newProjectId.isEmpty && configManager.isIdAvailable(newProjectId)
+    }
+    
+    private var idValidationMessage: String? {
+        guard !newProjectId.isEmpty else { return nil }
+        if !configManager.isIdAvailable(newProjectId) {
+            return "A project with this ID already exists"
+        }
+        return nil
     }
     
     var body: some View {
@@ -32,7 +50,7 @@ struct ProjectSwitcherView: View {
                     switchToProject(project.id)
                 } label: {
                     HStack {
-                        if project.id == configManager.activeProject.id {
+                        if project.id == configManager.activeProject?.id {
                             Image(systemName: "checkmark")
                         }
                         Text(project.name)
@@ -51,11 +69,11 @@ struct ProjectSwitcherView: View {
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(configManager.activeProject.name)
+                    Text(configManager.activeProject?.name ?? "No Project")
                         .font(.headline)
                         .lineLimit(1)
-                    if !configManager.activeProject.domain.isEmpty {
-                        Text(configManager.activeProject.domain)
+                    if let domain = configManager.activeProject?.domain, !domain.isEmpty {
+                        Text(domain)
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .lineLimit(1)
@@ -132,7 +150,7 @@ struct ProjectSwitcherView: View {
                     HStack {
                         VStack(alignment: .leading) {
                             Text(project.name)
-                                .fontWeight(project.id == configManager.activeProject.id ? .semibold : .regular)
+                                .fontWeight(project.id == configManager.activeProject?.id ? .semibold : .regular)
                             if !project.domain.isEmpty {
                                 Text(project.domain)
                                     .font(.caption)
@@ -142,7 +160,7 @@ struct ProjectSwitcherView: View {
                         
                         Spacer()
                         
-                        if project.id == configManager.activeProject.id {
+                        if project.id == configManager.activeProject?.id {
                             Text("Active")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -198,15 +216,36 @@ struct ProjectSwitcherView: View {
             // Form
             Form {
                 Section("Project Information") {
-                    TextField("Display Name", text: $newProjectName)
+                    TextField("Project Name", text: $newProjectName)
                         .textFieldStyle(.roundedBorder)
+                        .onChange(of: newProjectName) { _, newValue in
+                            if !newProjectIdWasManuallyEdited {
+                                newProjectId = configManager.slugFromName(newValue)
+                            }
+                        }
                     
-                    TextField("Domain (optional)", text: $newProjectDomain)
+                    TextField("Project ID", text: $newProjectId)
                         .textFieldStyle(.roundedBorder)
+                        .onChange(of: newProjectId) { _, _ in
+                            newProjectIdWasManuallyEdited = true
+                        }
                     
-                    Text("e.g., mysite.com")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if let message = idValidationMessage {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    } else if !newProjectId.isEmpty {
+                        Text("Used for CLI commands and file storage")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Picker("Project Type", selection: $newProjectType) {
+                        ForEach(availableProjectTypes) { type in
+                            Label(type.displayName, systemImage: type.icon)
+                                .tag(type.id)
+                        }
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -228,18 +267,18 @@ struct ProjectSwitcherView: View {
                     addProject()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(newProjectName.isEmpty)
+                .disabled(!isFormValid)
                 .keyboardShortcut(.defaultAction)
             }
             .padding()
         }
-        .frame(width: 400, height: 280)
+        .frame(width: 400, height: 360)
     }
     
     // MARK: - Actions
     
     private func switchToProject(_ projectId: String) {
-        guard projectId != configManager.activeProject.id else { return }
+        guard projectId != configManager.activeProject?.id else { return }
         
         // Check for unsaved work
         if let checkUnsaved = hasUnsavedWork, checkUnsaved() {
@@ -259,15 +298,10 @@ struct ProjectSwitcherView: View {
     }
     
     private func addProject() {
-        let projectId = newProjectName
-            .lowercased()
-            .replacingOccurrences(of: " ", with: "-")
-            .replacingOccurrences(of: "[^a-z0-9-]", with: "", options: .regularExpression)
-        
         let project = configManager.createProject(
-            id: projectId,
-            displayName: newProjectName.trimmingCharacters(in: .whitespacesAndNewlines),
-            domain: newProjectDomain.trimmingCharacters(in: .whitespacesAndNewlines)
+            id: newProjectId.trimmingCharacters(in: .whitespacesAndNewlines),
+            name: newProjectName.trimmingCharacters(in: .whitespacesAndNewlines),
+            projectType: newProjectType
         )
         
         resetAddProjectForm()
@@ -279,7 +313,9 @@ struct ProjectSwitcherView: View {
     
     private func resetAddProjectForm() {
         newProjectName = ""
-        newProjectDomain = ""
+        newProjectId = ""
+        newProjectIdWasManuallyEdited = false
+        newProjectType = availableProjectTypes.first?.id ?? "wordpress"
     }
 }
 

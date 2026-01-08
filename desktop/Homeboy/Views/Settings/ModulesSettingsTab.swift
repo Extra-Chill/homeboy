@@ -124,7 +124,7 @@ struct ModulesSettingsTab: View {
             Spacer()
             
             // Status badge
-            statusBadge(for: module.state)
+                        statusBadge(for: module.state, moduleName: module.name)
             
             // Remove button
             Button("Remove") {
@@ -139,7 +139,7 @@ struct ModulesSettingsTab: View {
     }
     
     @ViewBuilder
-    private func statusBadge(for state: ModuleState) -> some View {
+    private func statusBadge(for state: ModuleState, moduleName: String) -> some View {
         switch state {
         case .ready:
             Label("Ready", systemImage: "checkmark.circle.fill")
@@ -149,6 +149,14 @@ struct ModulesSettingsTab: View {
             Label("Setup Required", systemImage: "exclamationmark.circle.fill")
                 .font(.caption)
                 .foregroundColor(.orange)
+                .contextMenu {
+                    Button("Copy Warning") {
+                        AppWarning(
+                            "Setup Required",
+                            source: "Module: \(moduleName)"
+                        ).copyToClipboard()
+                    }
+                }
         case .installing:
             Label("Installing...", systemImage: "arrow.down.circle")
                 .font(.caption)
@@ -158,11 +166,27 @@ struct ModulesSettingsTab: View {
                 .font(.caption)
                 .foregroundColor(.gray)
                 .help("Requires: \(components.joined(separator: ", "))")
+                .contextMenu {
+                    Button("Copy Warning") {
+                        AppWarning(
+                            "Missing requirements: \(components.joined(separator: ", "))",
+                            source: "Module: \(moduleName)"
+                        ).copyToClipboard()
+                    }
+                }
         case .error(let message):
             Label("Error", systemImage: "xmark.circle.fill")
                 .font(.caption)
                 .foregroundColor(.red)
                 .help(message)
+                .contextMenu {
+                    Button("Copy Error") {
+                        AppError(
+                            message,
+                            source: "Module: \(moduleName)"
+                        ).copyToClipboard()
+                    }
+                }
         }
     }
     

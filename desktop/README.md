@@ -8,7 +8,7 @@ Native macOS SwiftUI application for WordPress development and deployment automa
 
 **Deployer**
 One-click deployment of WordPress plugins and themes to any SSH-accessible server.
-- SSH key authentication (RSA 4096-bit)
+- SSH key authentication
 - Build automation via `build.sh` scripts
 - Version comparison (local vs remote)
 - Per-site component registry
@@ -26,7 +26,7 @@ Browse and query remote MySQL databases over SSH tunnel.
 - Row selection and clipboard operations
 
 **Config Editor**
-Edit site configuration JSON files with syntax highlighting and backup support.
+Edit project configuration JSON files with syntax highlighting and backup support.
 
 **Debug Logs**
 View and search WordPress debug logs from remote servers.
@@ -41,12 +41,29 @@ Extend functionality with installable modules. Modules are self-contained plugin
 
 See [docs/MODULE-SPEC.md](docs/MODULE-SPEC.md) for the complete module specification.
 
+### Command Line Tool
+
+Homeboy includes a CLI (`homeboy`) for terminal access to project management, WordPress operations, database queries, and deployments.
+
+**Installation**: The app prompts to install the CLI on first launch, or install manually via **Settings > General**.
+
+**Available Commands**:
+```bash
+homeboy projects              # List configured projects
+homeboy wp <project> <cmd>    # Execute WP-CLI on production
+homeboy db <project> tables   # List database tables
+homeboy deploy <project> --all  # Deploy all components
+homeboy ssh <project>         # Open interactive SSH shell
+```
+
+Projects must be configured via Homeboy.app before using the CLI. See [docs/CLI.md](docs/CLI.md) for full documentation.
+
 ## Requirements
 
 - macOS 14.4+ (Sonoma)
 - Xcode 15.0+
 - Python 3.12+ (Homebrew) - for modules with Python scripts
-- Homebrew packages: `composer`, `wp-cli` (for deployment and WP-CLI features)
+- Homebrew packages: `wp-cli` (used by WP-CLI features)
 
 ## Setup
 
@@ -60,7 +77,7 @@ open Homeboy.xcodeproj
 
 ### 2. Build and Run
 
-Build and run from Xcode (Cmd+R). The app uses ad-hoc code signing.
+Build and run from Xcode (Cmd+R).
 
 ### 3. Configure Your WordPress Sites
 
@@ -72,7 +89,7 @@ Homeboy works with **projects** (site profiles). On first launch, configure your
 - **Components**: Plugins/themes/components for requirement checks
 - **API**: REST API base URL and authentication (used by module API actions)
 
-Project configurations are stored as JSON files at `~/Library/Application Support/Homeboy/sites/`. You can manage multiple projects and switch between them.
+Project configurations are stored as JSON files at `~/Library/Application Support/Homeboy/projects/`. You can manage multiple projects and switch between them.
 
 ## Installing Modules
 
@@ -94,7 +111,7 @@ Remote features (deployments, database tunnel, remote file browsing) require an 
 1. Go to **Settings > Servers**
 2. Click **Add Server**
 3. Fill in:
-   - **Server ID**: unique identifier (e.g. `cloudways-ec`)
+   - **Server ID**: unique identifier (e.g. `production-1`)
    - **Display Name**: any friendly name
    - **Host**: SSH host/IP
    - **Username**: SSH user
@@ -113,7 +130,9 @@ Homeboy/
 ├── Core/
 │   ├── API/                      # REST API client
 │   ├── Auth/                     # Keychain and authentication
+│   ├── CLI/                      # CLI installer
 │   ├── Config/                   # JSON configuration management
+│   ├── Copyable/                 # Error/warning copy system
 │   ├── Database/                 # MySQL and SSH tunnel services
 │   ├── Modules/                  # Module loading and execution
 │   ├── Process/                  # Python and shell runners
@@ -130,6 +149,16 @@ Homeboy/
 │   ├── Modules/                  # Dynamic module UI
 │   └── Settings/                 # Settings tabs
 └── docs/                         # Documentation
+CLI/
+├── main.swift                    # Entry point and Projects command
+├── Commands/                     # CLI command implementations
+│   ├── WPCommand.swift           # WP-CLI passthrough
+│   ├── DBCommand.swift           # Database operations
+│   ├── DeployCommand.swift       # Component deployment
+│   ├── SSHCommand.swift          # SSH command execution
+│   └── ProjectsCommand.swift     # Project listing
+└── Utilities/
+    └── OutputFormatter.swift     # Table and JSON formatting
 ```
 
 ## Configuration Storage
@@ -138,13 +167,18 @@ Site configurations are stored as JSON files:
 ```
 ~/Library/Application Support/Homeboy/
 ├── config.json                   # App-level config
-├── sites/                        # Site configurations
-│   └── <site-id>.json
+├── projects/                     # Project configurations
+│   └── <project-id>.json
+├── servers/                      # SSH server configurations
+│   └── <server-id>.json
 ├── modules/                      # Installed modules
 │   └── <module-id>/
 │       ├── module.json           # Module manifest
 │       ├── venv/                 # Python virtual environment
 │       └── config.json           # Module settings
+├── keys/                         # SSH private/public keys (per server)
+│   ├── <server-id>_id_rsa
+│   └── <server-id>_id_rsa.pub
 └── playwright-browsers/          # Shared Playwright browsers
 ```
 
@@ -153,7 +187,7 @@ Site configurations are stored as JSON files:
 The app supports JWT authentication with any WordPress site implementing standard auth endpoints:
 - Access and refresh tokens stored in macOS Keychain (per-site)
 - Auto-refresh before token expiry
-- Requires WordPress user with `manage_options` capability
+- Requires valid credentials for whatever `/auth/login` implementation your WordPress site uses
 
 Configure the API base URL in **Settings > API** for each WordPress site profile. API authentication enables module actions that interact with your WordPress REST API.
 
@@ -183,4 +217,6 @@ xcodegen generate
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version.
+
+See [LICENSE](LICENSE) for the full license text.

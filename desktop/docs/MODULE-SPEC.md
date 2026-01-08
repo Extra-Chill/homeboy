@@ -83,11 +83,13 @@ Run WP-CLI commands against the configured local WordPress installation (Local b
 
 ### Requirements Object
 
-Modules can declare dependencies on site components (plugins/themes). Modules with unmet requirements appear disabled in the sidebar with a tooltip explaining the missing dependencies.
+Modules can declare dependencies on project configuration (components, feature flags, and project type). Modules with unmet requirements appear disabled in the sidebar.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `components` | array | No | Component IDs that must exist in site config |
+| `components` | array | No | Component IDs that must exist in the active project config |
+| `features` | array | No | Required feature flags (supported: `hasDatabase`, `hasRemoteDeployment`, `hasRemoteLogs`, `hasLocalCLI`) |
+| `projectType` | string | No | Required project type (e.g. `wordpress`) |
 
 ### Input Object
 
@@ -299,11 +301,11 @@ WP-CLI modules stream all output (stdout and stderr) to the console. The success
 }
 ```
 
-## Site Configuration
+## Project Configuration Requirements
 
-### Local Development Settings
+### Local WP-CLI Settings
 
-For WP-CLI modules to work, the site configuration must include:
+For WP-CLI modules to work, the active project configuration must include `localDev` settings:
 
 ```json
 {
@@ -314,9 +316,9 @@ For WP-CLI modules to work, the site configuration must include:
 }
 ```
 
-### Multisite Configuration
+### Multisite Settings
 
-For multisite support, include the multisite configuration:
+If the local WordPress installation is multisite, include `multisite` settings:
 
 ```json
 {
@@ -331,4 +333,4 @@ For multisite support, include the multisite configuration:
 }
 ```
 
-When a WP-CLI module runs on a multisite installation, a network site selector appears in the module UI.
+When a WP-CLI module runs on a multisite installation, the module UI can display a site selector for targeting a network site.

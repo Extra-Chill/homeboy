@@ -24,11 +24,17 @@ struct ModuleContainerView: View {
                         viewModel.initializeInputValues(from: module)
                     }
             } else {
-                ContentUnavailableView(
-                    "Module Not Found",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text("The module '\(moduleId)' could not be loaded.")
-                )
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        "Module Not Found",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text("The module '\(moduleId)' could not be loaded.")
+                    )
+                    CopyButton.error(
+                        "Module '\(moduleId)' could not be loaded",
+                        source: "Module Container"
+                    )
+                }
             }
         }
     }
@@ -53,19 +59,28 @@ struct ModuleContainerView: View {
                 }
                 .padding()
                 
-            case .missingRequirements(let components):
-                ContentUnavailableView(
-                    "Missing Requirements",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text("This module requires the following components:\n\(components.joined(separator: ", "))")
-                )
+            case .missingRequirements(let requirements):
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        "Missing Requirements",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text("This module requires:\n\(requirements.joined(separator: ", "))")
+                    )
+                    CopyButton.warning(
+                        "Missing requirements: \(requirements.joined(separator: ", "))",
+                        source: "Module: \(module.name)"
+                    )
+                }
                 
             case .error(let message):
-                ContentUnavailableView(
-                    "Module Error",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text(message)
-                )
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        "Module Error",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(message)
+                    )
+                    CopyButton.error(message, source: "Module: \(module.name)")
+                }
                 
             case .ready:
                 ModuleReadyView(module: module, viewModel: viewModel)

@@ -4,8 +4,6 @@ struct ServersSettingsTab: View {
     @ObservedObject var config: ConfigurationManager
     
     @State private var servers: [ServerConfig] = []
-    @State private var isTestingConnection = false
-    @State private var connectionTestResult: (success: Bool, message: String)?
     
     // Server sheet state
     @State private var showServerSheet = false
@@ -20,21 +18,21 @@ struct ServersSettingsTab: View {
     private let addNewServerTag = "__add_new__"
     
     private var selectedServer: ServerConfig? {
-        guard let serverId = config.activeProject.serverId else { return nil }
+        guard let serverId = config.safeActiveProject.serverId else { return nil }
         return servers.first { $0.id == serverId }
     }
     
     private var hasSSHKey: Bool {
-        guard let serverId = config.activeProject.serverId else { return false }
+        guard let serverId = config.safeActiveProject.serverId else { return false }
         return KeychainService.hasSSHKey(forServer: serverId)
     }
     
     private var isWordPressProject: Bool {
-        config.activeProject.projectType == .wordpress
+        config.safeActiveProject.isWordPress
     }
     
     private var wpContentPath: String {
-        config.activeProject.wordpress?.wpContentPath ?? ""
+        config.safeActiveProject.wordpress?.wpContentPath ?? ""
     }
     
     var body: some View {
@@ -43,36 +41,32 @@ struct ServersSettingsTab: View {
                 if servers.isEmpty {
                     // No servers exist - show prominent add button
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.orange)
-                            Text("No server configured")
-                                .fontWeight(.medium)
+                        InlineWarningView(
+                            "No server configured",
+                            source: "Server Settings",
+                            actionLabel: "Add Server"
+                        ) {
+                            serverToEdit = nil
+                            showServerSheet = true
                         }
                         
                         Text("A server connection is required for remote deployments, database access, and production WP-CLI commands.")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        
-                        Button("Add Server") {
-                            serverToEdit = nil
-                            showServerSheet = true
-                        }
                     }
                 } else {
                     // Server picker with Add/Edit buttons
                     HStack {
                         Picker("Server", selection: Binding(
-                            get: { config.activeProject.serverId ?? "" },
+                            get: { config.safeActiveProject.serverId ?? "" },
                             set: { newValue in
                                 if newValue == addNewServerTag {
                                     // Reset picker and open add sheet
                                     serverToEdit = nil
                                     showServerSheet = true
                                 } else {
-                                    config.activeProject.serverId = newValue.isEmpty ? nil : newValue
+                                    config.activeProject?.serverId = newValue.isEmpty ? nil : newValue
                                     config.saveActiveProject()
-                                    connectionTestResult = nil
                                 }
                             }
                         )) {
@@ -117,18 +111,15 @@ struct ServersSettingsTab: View {
                                     .font(.caption)
                             }
                         } else {
-                            HStack {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundColor(.orange)
-                                Text("No SSH key")
-                                    .font(.caption)
-                                Button("Configure") {
-                                    serverToEdit = selectedServer
-                                    showServerSheet = true
-                                }
-                                .buttonStyle(.borderless)
-                                .font(.caption)
+                            InlineWarningView(
+                                "No SSH key configured",
+                                source: "Server Settings",
+                                actionLabel: "Configure"
+                            ) {
+                                serverToEdit = selectedServer
+                                showServerSheet = true
                             }
+                            .font(.caption)
                         }
                     } else {
                         Text("Select a server to enable remote operations.")
@@ -145,12 +136,23 @@ struct ServersSettingsTab: View {
                         TextField("wp-content path", text: Binding(
                             get: { wpContentPath },
                             set: { newValue in
-                                if config.activeProject.wordpress == nil {
-                                    config.activeProject.wordpress = WordPressConfig()
+                                if config.activeProject?.wordpress == nil {
+                                    config.activeProject?.wordpress = WordPressConfig()
                                 }
-                                config.activeProject.wordpress?.wpContentPath = newValue
+                                config.activeProject?.wordpress?.wpContentPath = newValue
                                 config.saveActiveProject()
                                 wpContentValidation = nil
+                                
+                                // Resolve symlinks for SCP compatibility
+                                if let serverId = config.safeActiveProject.serverId {
+                                    Task {
+                                        let canonicalPath = await resolveCanonicalPath(newValue, serverId: serverId)
+                                        if canonicalPath != newValue {
+                                            config.activeProject?.wordpress?.wpContentPath = canonicalPath
+                                            config.saveActiveProject()
+                                        }
+                                    }
+                                }
                             }
                         ))
                         .textFieldStyle(.roundedBorder)
@@ -192,42 +194,65 @@ struct ServersSettingsTab: View {
                 }
             }
             
-            Section("Connection Test") {
-                HStack {
-                    Button("Test Connection") {
-                        testServerConnection()
-                    }
-                    .disabled(!SSHService.isConfigured() || isTestingConnection)
-                    
-                    if isTestingConnection {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-                
-                if let result = connectionTestResult {
+            // Non-WordPress: generic base path picker
+            if !isWordPressProject {
+                Section("Remote Deployment") {
                     HStack {
-                        Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundColor(result.success ? .green : .red)
-                        Text(result.message)
-                            .font(.caption)
-                            .foregroundColor(result.success ? .green : .red)
+                        TextField("Base Path", text: Binding(
+                            get: { config.safeActiveProject.basePath ?? "" },
+                            set: { newValue in
+                                config.activeProject?.basePath = newValue.isEmpty ? nil : newValue
+                                config.saveActiveProject()
+                                
+                                // Resolve symlinks for SCP compatibility
+                                if let serverId = config.safeActiveProject.serverId, !newValue.isEmpty {
+                                    Task {
+                                        let canonicalPath = await resolveCanonicalPath(newValue, serverId: serverId)
+                                        if canonicalPath != newValue {
+                                            config.activeProject?.basePath = canonicalPath
+                                            config.saveActiveProject()
+                                        }
+                                    }
+                                }
+                            }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        
+                        Button("Browse") {
+                            showFileBrowser = true
+                        }
+                        .disabled(selectedServer == nil || !hasSSHKey)
                     }
+                    
+                    Text("Path to the project directory on the remote server where components will be deployed.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
+            
         }
         .formStyle(.grouped)
         .onAppear { loadServers() }
         .sheet(isPresented: $showFileBrowser) {
-            if let serverId = config.activeProject.serverId {
+            if let serverId = config.safeActiveProject.serverId {
                 RemoteFileBrowserView(serverId: serverId, mode: .selectPath) { selectedPath in
-                    if config.activeProject.wordpress == nil {
-                        config.activeProject.wordpress = WordPressConfig()
+                    Task {
+                        // Resolve symlinks to get canonical path for SCP compatibility
+                        let canonicalPath = await resolveCanonicalPath(selectedPath, serverId: serverId)
+                        
+                        if isWordPressProject {
+                            if config.activeProject?.wordpress == nil {
+                                config.activeProject?.wordpress = WordPressConfig()
+                            }
+                            config.activeProject?.wordpress?.wpContentPath = canonicalPath
+                            config.saveActiveProject()
+                            wpContentValidation = nil
+                            await validateWPContentPath()
+                        } else {
+                            config.activeProject?.basePath = canonicalPath
+                            config.saveActiveProject()
+                        }
                     }
-                    config.activeProject.wordpress?.wpContentPath = selectedPath
-                    config.saveActiveProject()
-                    wpContentValidation = nil
-                    Task { await validateWPContentPath() }
                 }
             }
         }
@@ -239,8 +264,8 @@ struct ServersSettingsTab: View {
                     loadServers()
                 } onDelete: {
                     // Clear selection if we deleted the active server
-                    if config.activeProject.serverId == server.id {
-                        config.activeProject.serverId = nil
+                    if config.safeActiveProject.serverId == server.id {
+                        config.activeProject?.serverId = nil
                         config.saveActiveProject()
                     }
                     config.deleteServer(id: server.id)
@@ -252,7 +277,7 @@ struct ServersSettingsTab: View {
                 ServerEditSheet(config: config) { newServer in
                     config.saveServer(newServer)
                     // Auto-select the new server
-                    config.activeProject.serverId = newServer.id
+                    config.activeProject?.serverId = newServer.id
                     config.saveActiveProject()
                     loadServers()
                 }
@@ -262,26 +287,6 @@ struct ServersSettingsTab: View {
     
     private func loadServers() {
         servers = config.availableServers()
-    }
-    
-    private func testServerConnection() {
-        guard let sshService = SSHService() else {
-            connectionTestResult = (false, "SSH not configured")
-            return
-        }
-        
-        isTestingConnection = true
-        connectionTestResult = nil
-        
-        sshService.testConnection { result in
-            isTestingConnection = false
-            switch result {
-            case .success(let output):
-                connectionTestResult = (true, output)
-            case .failure(let error):
-                connectionTestResult = (false, error.localizedDescription)
-            }
-        }
     }
     
     private func validateWPContentPath() async {
@@ -297,5 +302,22 @@ struct ServersSettingsTab: View {
         
         isValidatingWPContent = false
         wpContentValidation = status
+    }
+    
+    /// Resolve symlinks in a remote path to get the canonical filesystem path.
+    /// This ensures SCP uploads work correctly when paths contain symlinks.
+    private func resolveCanonicalPath(_ path: String, serverId: String) async -> String {
+        guard !path.isEmpty,
+              let server = ConfigurationManager.readServer(id: serverId),
+              let ssh = SSHService(server: server) else {
+            return path
+        }
+        
+        do {
+            let resolved = try await ssh.executeCommandSync("readlink -f '\(path)'")
+            return resolved.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            return path  // Fall back to original if resolution fails
+        }
     }
 }

@@ -29,9 +29,13 @@ struct DatabaseBrowserView: View {
             Button("OK") {
                 viewModel.errorMessage = nil
             }
+            Button("Copy Error") {
+                viewModel.errorMessage?.copyToClipboard()
+                viewModel.errorMessage = nil
+            }
         } message: {
             if let error = viewModel.errorMessage {
-                Text(error)
+                Text(error.body)
             }
         }
         .sheet(isPresented: $viewModel.showRowDeletionConfirm) {
@@ -271,12 +275,8 @@ struct DatabaseBrowserView: View {
             }
             
             if case .error(let message) = viewModel.connectionStatus {
-                GroupBox {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundColor(.red)
-                }
-                .frame(maxWidth: 400)
+                InlineErrorView(message, source: "Database Browser")
+                    .frame(maxWidth: 400)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

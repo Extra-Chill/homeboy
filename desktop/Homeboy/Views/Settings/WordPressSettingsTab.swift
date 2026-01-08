@@ -21,9 +21,9 @@ struct WordPressSettingsTab: View {
         Form {
             Section("WP-CLI (Local Development)") {
                 TextField("Local WP Path", text: Binding(
-                    get: { config.activeProject.localDev.wpCliPath },
+                    get: { config.safeActiveProject.localDev.wpCliPath },
                     set: { newValue in
-                        config.activeProject.localDev.wpCliPath = newValue
+                        config.activeProject?.localDev.wpCliPath = newValue
                         config.saveActiveProject()
                     }
                 ))
@@ -39,6 +39,14 @@ struct WordPressSettingsTab: View {
                     } else {
                         Text("Not detected")
                             .foregroundColor(.red)
+                            .contextMenu {
+                                Button("Copy Error") {
+                                    AppError(
+                                        "PHP not detected at configured path",
+                                        source: "WordPress Settings"
+                                    ).copyToClipboard()
+                                }
+                            }
                     }
                 }
                 
@@ -49,6 +57,14 @@ struct WordPressSettingsTab: View {
                     } else {
                         Text("Not detected")
                             .foregroundColor(.orange)
+                            .contextMenu {
+                                Button("Copy Warning") {
+                                    AppWarning(
+                                        "MySQL not detected at configured path",
+                                        source: "WordPress Settings"
+                                    ).copyToClipboard()
+                                }
+                            }
                     }
                 }
                 
@@ -64,47 +80,53 @@ struct WordPressSettingsTab: View {
                 }
                 
                 if let result = testResult {
-                    HStack {
-                        Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundColor(result.success ? .green : .red)
-                        Text(result.message)
-                            .font(.caption)
-                            .foregroundColor(result.success ? .green : .red)
+                    if result.success {
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text(result.message)
+                                .font(.caption)
+                                .foregroundColor(.green)
+                        }
+                    } else {
+                        InlineErrorView(result.message, source: "WP-CLI Test")
                     }
                 }
             }
             
+            Section("Database") {
+                TextField("Table Prefix", text: Binding(
+                    get: { config.safeActiveProject.tablePrefix ?? "wp_" },
+                    set: { newValue in
+                        config.activeProject?.tablePrefix = newValue
+                        config.saveActiveProject()
+                    }
+                ))
+                .textFieldStyle(.roundedBorder)
+                Text("Database table prefix (e.g., wp_, c8c_)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
             Section("Multisite Configuration") {
                 Toggle("Multisite Network", isOn: Binding(
-                    get: { config.activeProject.multisite?.enabled ?? false },
+                    get: { config.safeActiveProject.multisite?.enabled ?? false },
                     set: { newValue in
                         if newValue {
-                            if config.activeProject.multisite == nil {
-                                config.activeProject.multisite = MultisiteConfig(enabled: true)
+                            if config.activeProject?.multisite == nil {
+                                config.activeProject?.multisite = MultisiteConfig(enabled: true)
                             } else {
-                                config.activeProject.multisite?.enabled = true
+                                config.activeProject?.multisite?.enabled = true
                             }
                         } else {
-                            config.activeProject.multisite?.enabled = false
+                            config.activeProject?.multisite?.enabled = false
                         }
                         config.saveActiveProject()
                     }
                 ))
                 
-                if config.activeProject.multisite?.enabled == true {
-                    TextField("Table Prefix", text: Binding(
-                        get: { config.activeProject.multisite?.tablePrefix ?? "wp_" },
-                        set: { newValue in
-                            config.activeProject.multisite?.tablePrefix = newValue
-                            config.saveActiveProject()
-                        }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    Text("Database table prefix (e.g., wp_, c8c_)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    if let blogs = config.activeProject.multisite?.blogs, !blogs.isEmpty {
+                if config.safeActiveProject.multisite?.enabled == true {
+                    if let blogs = config.safeActiveProject.multisite?.blogs, !blogs.isEmpty {
                         Text("\(blogs.count) site(s) configured")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -119,7 +141,7 @@ struct WordPressSettingsTab: View {
             Section("REST API Authentication") {
                 Toggle("Enable API Authentication", isOn: $apiEnabled)
                     .onChange(of: apiEnabled) { _, newValue in
-                        config.activeProject.api.enabled = newValue
+                        config.activeProject?.api.enabled = newValue
                         config.saveActiveProject()
                     }
                 
@@ -127,7 +149,7 @@ struct WordPressSettingsTab: View {
                     TextField("API Base URL", text: $apiBaseURL)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: apiBaseURL) { _, newValue in
-                            config.activeProject.api.baseURL = newValue
+                            config.activeProject?.api.baseURL = newValue
                             config.saveActiveProject()
                         }
                     Text("e.g., https://yoursite.com/wp-json/extrachill/v1")
@@ -165,9 +187,7 @@ struct WordPressSettingsTab: View {
                         }
                         
                         if let error = loginError {
-                            Text(error)
-                                .font(.caption)
-                                .foregroundColor(.red)
+                            InlineErrorView(error, source: "WordPress Settings")
                         }
                     }
                 }
@@ -190,8 +210,8 @@ struct WordPressSettingsTab: View {
     }
     
     private func loadAPISettings() {
-        apiEnabled = config.activeProject.api.enabled
-        apiBaseURL = config.activeProject.api.baseURL
+        apiEnabled = config.safeActiveProject.api.enabled
+        apiBaseURL = config.safeActiveProject.api.baseURL
     }
     
     private func selectFolder() {
@@ -202,7 +222,7 @@ struct WordPressSettingsTab: View {
         panel.message = "Select your Local WP site's public directory"
         
         if panel.runModal() == .OK, let url = panel.url {
-            config.activeProject.localDev.wpCliPath = url.path
+            config.activeProject?.localDev.wpCliPath = url.path
             config.saveActiveProject()
         }
     }
@@ -216,7 +236,7 @@ struct WordPressSettingsTab: View {
         isTesting = true
         testResult = nil
         
-        let wpCliPath = config.activeProject.localDev.wpCliPath
+        let wpCliPath = config.safeActiveProject.localDev.wpCliPath
         
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
@@ -265,7 +285,7 @@ struct WordPressSettingsTab: View {
                 loginUsername = ""
                 loginPassword = ""
             } else {
-                loginError = authManager.error ?? "Login failed"
+                loginError = authManager.error?.body ?? "Login failed"
             }
         }
     }

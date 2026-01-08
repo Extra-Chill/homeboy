@@ -43,10 +43,7 @@ struct ModuleInputsView: View {
                 .disabled(viewModel.isRunning || viewModel.isSettingUp)
                 
                 if let error = viewModel.error {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundColor(.red)
-                        .lineLimit(2)
+                    InlineErrorView(error)
                 }
             }
         }

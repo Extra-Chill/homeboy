@@ -182,7 +182,7 @@ class ModuleRunner: ObservableObject {
             return
         }
         
-        let config = ConfigurationManager.shared.activeProject
+        let config = ConfigurationManager.shared.safeActiveProject
         
         let process = Process()
         self.process = process

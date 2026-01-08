@@ -8,8 +8,25 @@ extension Notification.Name {
     static let projectDidChange = Notification.Name("projectDidChange")
 }
 
+// MARK: - Project Rename Errors
+
+enum ProjectRenameError: LocalizedError {
+    case nameCollision(existingName: String)
+    case fileSystemError(Error)
+    
+    var errorDescription: String? {
+        switch self {
+        case .nameCollision(let existingName):
+            return "A project named \"\(existingName)\" already exists"
+        case .fileSystemError(let error):
+            return "Failed to rename project file: \(error.localizedDescription)"
+        }
+    }
+}
+
 /// Singleton manager for loading and saving JSON configuration files.
 /// Each project is stored as a separate JSON file named by ID (e.g., extrachill.json).
+/// The project ID (slug) is derived from the project name and serves as the source of truth.
 @MainActor
 class ConfigurationManager: ObservableObject {
     static let shared = ConfigurationManager()
@@ -24,24 +41,69 @@ class ConfigurationManager: ObservableObject {
         
         guard let appData = try? Data(contentsOf: appConfigPath),
               let appConfig = try? JSONDecoder().decode(AppConfiguration.self, from: appData) else {
-            return ProjectConfiguration.empty(id: "default", name: "Default", domain: "")
+            return ProjectConfiguration.empty(id: "default", name: "Default")
         }
         
         let projectPath = projectsDir.appendingPathComponent("\(appConfig.activeProjectId).json")
         guard let projectData = try? Data(contentsOf: projectPath),
               let project = try? JSONDecoder().decode(ProjectConfiguration.self, from: projectData) else {
-            return ProjectConfiguration.empty(id: appConfig.activeProjectId, name: "Default", domain: "")
+            return ProjectConfiguration.empty(id: appConfig.activeProjectId, name: "Default")
         }
         
         return project
     }
     
     @Published var appConfig: AppConfiguration
-    @Published var activeProject: ProjectConfiguration
+    @Published var activeProject: ProjectConfiguration?
+    
+    /// Whether the app needs the user to create a project (no projects exist or active project invalid)
+    @Published var needsProjectCreation: Bool = false
+    
+    /// Safe accessor that returns the active project or a default empty project.
+    /// Use this for UI bindings where you need a non-optional value.
+    /// Always check `needsProjectCreation` before using this in contexts that require a real project.
+    var safeActiveProject: ProjectConfiguration {
+        activeProject ?? ProjectConfiguration.empty(id: "none", name: "No Project")
+    }
     
     /// Thread-safe accessor for reading project configuration from any context.
-    nonisolated var currentProject: ProjectConfiguration {
-        ConfigurationManager.readCurrentProject()
+    /// Returns nil if no valid project is configured.
+    nonisolated var currentProject: ProjectConfiguration? {
+        let project = ConfigurationManager.readCurrentProject()
+        return project.id == "default" && project.name == "Default" ? nil : project
+    }
+    
+    // MARK: - Slug and Name Helpers
+    
+    /// Generate a slug from a project name (used as filename/id)
+    func slugFromName(_ name: String) -> String {
+        name.lowercased()
+            .trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: " ", with: "-")
+            .replacingOccurrences(of: "[^a-z0-9-]", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "--+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+    
+    /// Check if a project ID is available
+    func isIdAvailable(_ id: String, excludingId: String? = nil) -> Bool {
+        guard !id.isEmpty else { return false }
+        let existingIds = availableProjectIds().filter { $0 != excludingId }
+        return !existingIds.contains(id)
+    }
+    
+    /// Check if any projects exist
+    func hasProjects() -> Bool {
+        !availableProjectIds().isEmpty
+    }
+    
+    /// Check if a project name is available (case-insensitive slug comparison)
+    func isNameAvailable(_ name: String, excludingId: String? = nil) -> Bool {
+        let newSlug = slugFromName(name)
+        guard !newSlug.isEmpty else { return false }
+        
+        let existingIds = availableProjectIds().filter { $0 != excludingId }
+        return !existingIds.contains(newSlug)
     }
     
     private let fileManager = FileManager.default
@@ -73,7 +135,7 @@ class ConfigurationManager: ObservableObject {
         jsonDecoder = JSONDecoder()
         
         appConfig = AppConfiguration()
-        activeProject = ProjectConfiguration.empty(id: "default", name: "New Project", domain: "")
+        activeProject = nil
         
         ensureDirectoriesExist()
         load()
@@ -98,9 +160,8 @@ class ConfigurationManager: ObservableObject {
             loadFromJSON()
         } else {
             appConfig = AppConfiguration()
-            activeProject = ProjectConfiguration.empty(id: "default", name: "New Project", domain: "")
             saveAppConfig()
-            saveProject(activeProject)
+            checkProjectState()
         }
     }
     
@@ -115,10 +176,30 @@ class ConfigurationManager: ObservableObject {
         
         if let project = loadProject(id: appConfig.activeProjectId) {
             activeProject = project
+            needsProjectCreation = false
         } else {
-            print("[ConfigurationManager] Active project '\(appConfig.activeProjectId)' not found, creating default")
-            activeProject = ProjectConfiguration.empty(id: appConfig.activeProjectId, name: "New Project", domain: "")
-            saveProject(activeProject)
+            print("[ConfigurationManager] Active project '\(appConfig.activeProjectId)' not found")
+            activeProject = nil
+            checkProjectState()
+        }
+    }
+    
+    /// Check if user needs to create a project (no projects exist or active project invalid)
+    private func checkProjectState() {
+        if !hasProjects() {
+            needsProjectCreation = true
+        } else if activeProject == nil {
+            // Projects exist but active one is invalid - pick the first available
+            if let firstId = availableProjectIds().first, let firstProject = loadProject(id: firstId) {
+                activeProject = firstProject
+                appConfig.activeProjectId = firstId
+                saveAppConfig()
+                needsProjectCreation = false
+            } else {
+                needsProjectCreation = true
+            }
+        } else {
+            needsProjectCreation = false
         }
     }
     
@@ -144,7 +225,8 @@ class ConfigurationManager: ObservableObject {
     }
     
     func saveActiveProject() {
-        saveProject(activeProject)
+        guard let project = activeProject else { return }
+        saveProject(project)
     }
     
     // MARK: - Load Project
@@ -157,11 +239,33 @@ class ConfigurationManager: ObservableObject {
         
         do {
             let data = try Data(contentsOf: projectPath)
-            return try jsonDecoder.decode(ProjectConfiguration.self, from: data)
+            var project = try jsonDecoder.decode(ProjectConfiguration.self, from: data)
+            
+            // Migration: Generate default table groupings if empty
+            if project.tableGroupings.isEmpty {
+                project = migrateTableGroupings(project)
+                saveProject(project)
+            }
+            
+            return project
         } catch {
             print("[ConfigurationManager] Failed to load project '\(id)': \(error)")
             return nil
         }
+    }
+    
+    /// Generates default table groupings for projects that don't have them.
+    /// Uses the project type's schema definition to resolve groupings.
+    private func migrateTableGroupings(_ project: ProjectConfiguration) -> ProjectConfiguration {
+        var updated = project
+        let groupings = SchemaResolver.resolveDefaultGroupings(for: project)
+        
+        if !groupings.isEmpty {
+            updated.tableGroupings = groupings
+            print("[ConfigurationManager] Generated \(groupings.count) table groupings for project '\(project.id)'")
+        }
+        
+        return updated
     }
     
     // MARK: - Project Management
@@ -193,10 +297,26 @@ class ConfigurationManager: ObservableObject {
         NotificationCenter.default.post(name: .projectDidChange, object: nil)
     }
     
-    func createProject(id: String, displayName: String, domain: String = "") -> ProjectConfiguration {
-        let project = ProjectConfiguration.empty(id: id, name: displayName, domain: domain)
+    /// Creates a new project with the given ID, name, and type.
+    func createProject(id: String, name: String, projectType: String) -> ProjectConfiguration {
+        let project = ProjectConfiguration.empty(id: id, name: name, projectType: projectType)
         saveProject(project)
+        needsProjectCreation = false
         return project
+    }
+    
+    /// Renames a project display name. The project ID remains unchanged.
+    func renameProject(_ project: ProjectConfiguration, to newName: String) -> Result<ProjectConfiguration, ProjectRenameError> {
+        var updatedProject = project
+        updatedProject.name = newName
+        saveProject(updatedProject)
+        
+        // Update activeProject if it's the one being renamed
+        if activeProject?.id == project.id {
+            activeProject = updatedProject
+        }
+        
+        return .success(updatedProject)
     }
     
     func deleteProject(id: String) {
@@ -289,7 +409,7 @@ class ConfigurationManager: ObservableObject {
     
     /// Returns the server for the active project
     func serverForActiveProject() -> ServerConfig? {
-        guard let serverId = activeProject.serverId else { return nil }
+        guard let project = activeProject, let serverId = project.serverId else { return nil }
         return loadServer(id: serverId)
     }
 }

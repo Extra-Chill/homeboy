@@ -1,47 +1,23 @@
 import SwiftUI
+import AppKit
 
 /// Displays module results in a dynamic table based on output schema
 struct ModuleResultsView: View {
     let module: LoadedModule
     @ObservedObject var viewModel: ModuleViewModel
     
-    private var columns: [String] {
+    @State private var sortDescriptor: DataTableSortDescriptor<IndexedRow>?
+    
+    private var columnNames: [String] {
         module.manifest.output.schema.items?.keys.sorted() ?? []
     }
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
-                Text("Results (\(viewModel.results.count))")
-                    .font(.headline)
-                
-                Spacer()
-                
-                if module.manifest.output.selectable {
-                    Text("\(viewModel.selectedRows.count) selected")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    Button("Select All") {
-                        viewModel.selectAll()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    
-                    Button("Deselect All") {
-                        viewModel.deselectAll()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                }
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+            header
             
             Divider()
             
-            // Table
             if viewModel.results.isEmpty {
                 ContentUnavailableView(
                     "No Results",
@@ -49,61 +25,87 @@ struct ModuleResultsView: View {
                     description: Text("Run the module to see results")
                 )
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        // Header row
-                        HStack(spacing: 0) {
-                            if module.manifest.output.selectable {
-                                Text("")
-                                    .frame(width: 30)
-                            }
-                            ForEach(columns, id: \.self) { column in
-                                Text(column.capitalized)
-                                    .font(.headline)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.horizontal, 8)
-                            }
-                        }
-                        .padding(.vertical, 8)
-                        .background(Color(NSColor.controlBackgroundColor))
-                        
-                        Divider()
-                        
-                        // Data rows
-                        ForEach(indexedRows) { row in
-                            HStack(spacing: 0) {
-                                if module.manifest.output.selectable {
-                                    Image(systemName: viewModel.selectedRows.contains(row.index) ? "checkmark.circle.fill" : "circle")
-                                        .foregroundColor(viewModel.selectedRows.contains(row.index) ? .accentColor : .secondary)
-                                        .frame(width: 30)
-                                        .onTapGesture {
-                                            viewModel.toggleRowSelection(row.index)
-                                        }
-                                }
-                                ForEach(columns, id: \.self) { column in
-                                    Text(row.data[column]?.stringValue ?? "")
-                                        .lineLimit(2)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.horizontal, 8)
-                                }
-                            }
-                            .padding(.vertical, 6)
-                            .background(row.index % 2 == 0 ? Color.clear : Color(NSColor.controlBackgroundColor).opacity(0.5))
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                if module.manifest.output.selectable {
-                                    viewModel.toggleRowSelection(row.index)
-                                }
-                            }
-                        }
-                    }
-                }
+                resultsTable
             }
         }
     }
     
-    private var indexedRows: [IndexedRow] {
-        viewModel.results.enumerated().map { IndexedRow(index: $0.offset, data: $0.element) }
+    // MARK: - Header
+    
+    private var header: some View {
+        HStack {
+            Text("Results (\(viewModel.results.count))")
+                .font(.headline)
+            
+            Spacer()
+            
+            if module.manifest.output.selectable {
+                Text("\(viewModel.selectedRows.count) selected")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Button("Select All") {
+                    viewModel.selectAll()
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                
+                Button("Deselect All") {
+                    viewModel.deselectAll()
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+    }
+    
+    // MARK: - Results Table
+    
+    private var resultsTable: some View {
+        NativeDataTable(
+            items: sortedRows,
+            columns: dynamicColumns,
+            selection: $viewModel.selectedRows,
+            sortDescriptor: $sortDescriptor
+        )
+    }
+    
+    private var sortedRows: [IndexedRow] {
+        let rows = viewModel.results.enumerated().map { IndexedRow(index: $0.offset, data: $0.element) }
+        guard let descriptor = sortDescriptor else {
+            return rows
+        }
+        return rows.sorted { lhs, rhs in
+            descriptor.compare(lhs, rhs) == .orderedAscending
+        }
+    }
+    
+    private var dynamicColumns: [DataTableColumn<IndexedRow>] {
+        columnNames.map { columnName in
+            DataTableColumn<IndexedRow>.custom(
+                id: columnName,
+                title: columnName.capitalized,
+                width: .auto(min: 80, ideal: 150, max: 400),
+                alignment: .left,
+                sortable: true,
+                sortComparator: { lhs, rhs in
+                    let lhsValue = lhs.data[columnName]?.stringValue ?? ""
+                    let rhsValue = rhs.data[columnName]?.stringValue ?? ""
+                    return lhsValue.localizedStandardCompare(rhsValue)
+                },
+                cellProvider: { row in
+                    let value = row.data[columnName]?.stringValue ?? ""
+                    return makeTextCell(
+                        text: value.isEmpty ? "—" : value,
+                        font: DataTableConstants.defaultFont,
+                        color: value.isEmpty ? DataTableConstants.nullTextColor : DataTableConstants.primaryTextColor,
+                        alignment: .left
+                    )
+                }
+            )
+        }
     }
 }
 

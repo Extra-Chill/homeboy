@@ -1,12 +1,13 @@
 import SwiftUI
+import AppKit
 
 struct DeployerView: View {
     @StateObject private var viewModel = DeployerViewModel()
-    @State private var showCopiedFeedback = false
+    @State private var sortDescriptor: DataTableSortDescriptor<DeployableComponent>?
     
     var body: some View {
         VStack(spacing: 0) {
-            if !viewModel.hasCredentials || !viewModel.hasSSHKey || !viewModel.hasDeploymentPaths {
+            if !viewModel.hasCredentials || !viewModel.hasSSHKey || !viewModel.hasBasePath {
                 configurationRequiredView
             } else {
                 headerSection
@@ -22,7 +23,7 @@ struct DeployerView: View {
         .frame(minWidth: 800, minHeight: 600)
         .onAppear {
             viewModel.checkConfiguration()
-            if viewModel.hasCredentials && viewModel.hasSSHKey && viewModel.hasDeploymentPaths {
+            if viewModel.hasCredentials && viewModel.hasSSHKey && viewModel.hasBasePath {
                 viewModel.refreshVersions()
             }
         }
@@ -47,7 +48,7 @@ struct DeployerView: View {
             Text("Deployment")
                 .font(.title)
             
-            Text("Configure your server credentials and SSH key in Settings to enable deployment.")
+            Text("Configure your server credentials and base path in Settings to enable deployment.")
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 400)
@@ -58,9 +59,10 @@ struct DeployerView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {
-                    Text("No server linked to project")
-                        .font(.caption)
-                        .foregroundColor(.orange)
+                    InlineWarningView(
+                        "No server linked to project",
+                        source: "Deployer"
+                    )
                 }
                 
                 Divider()
@@ -76,8 +78,8 @@ struct DeployerView: View {
                     Text("SSH key configured")
                 }
                 HStack {
-                    Image(systemName: viewModel.hasDeploymentPaths ? "checkmark.circle.fill" : "circle")
-                        .foregroundColor(viewModel.hasDeploymentPaths ? .green : .secondary)
+                    Image(systemName: viewModel.hasBasePath ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(viewModel.hasBasePath ? .green : .secondary)
                     Text("Remote base path configured")
                 }
             }
@@ -139,14 +141,8 @@ struct DeployerView: View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if !viewModel.themes.isEmpty {
-                        componentTable(title: "Themes", components: viewModel.themes)
-                    }
-                    if !viewModel.networkPlugins.isEmpty {
-                        componentTable(title: "Network Plugins", components: viewModel.networkPlugins)
-                    }
-                    if !viewModel.sitePlugins.isEmpty {
-                        componentTable(title: "Site Plugins", components: viewModel.sitePlugins)
+                    ForEach(viewModel.groupedComponents, id: \.title) { group in
+                        componentTable(title: group.title, components: group.components)
                     }
                 }
                 .padding(.vertical, 8)
@@ -156,10 +152,11 @@ struct DeployerView: View {
             
             // Selection controls
             HStack {
-                Button("Select Outdated") {
-                    viewModel.selectOutdated()
+                Button("Select Deployable") {
+                    viewModel.selectDeployable()
                 }
                 .buttonStyle(.borderless)
+                .help("Select components with build artifacts that need updating")
                 
                 Button("Select All") {
                     viewModel.selectAll()
@@ -189,76 +186,76 @@ struct DeployerView: View {
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
             
-            Table(components, selection: $viewModel.selectedComponents, sortOrder: $viewModel.sortOrder) {
-                TableColumn("Component", value: \.name)
-                    .width(min: 140, ideal: 180)
-                
-                TableColumn("Local") { component in
-                    Text(viewModel.localVersions[component.id] ?? "—")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
-                .width(60)
-                
-                TableColumn("Remote") { component in
-                    Text(viewModel.remoteVersions[component.id] ?? "—")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
-                .width(60)
-                
-                TableColumn("Status") { component in
-                    statusView(for: viewModel.status(for: component))
-                }
-                .width(min: 70, ideal: 90)
-            }
-            .frame(height: CGFloat(components.count * 24 + 28))
+            NativeDataTable(
+                items: sortedComponents(components),
+                columns: deployerColumns,
+                selection: $viewModel.selectedComponents,
+                sortDescriptor: $sortDescriptor
+            )
+            .frame(height: CGFloat(components.count) * DataTableConstants.defaultRowHeight + DataTableConstants.headerHeight)
         }
     }
     
-    @ViewBuilder
-    private func statusView(for status: DeployStatus) -> some View {
-        HStack(spacing: 4) {
-            switch status {
-            case .current:
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                Text("Current")
-                    .font(.caption)
-                    .foregroundColor(.green)
-            case .needsUpdate:
-                Image(systemName: "arrow.up.circle.fill")
-                    .foregroundColor(.orange)
-                Text("Update")
-                    .font(.caption)
-                    .foregroundColor(.orange)
-            case .missing:
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.red)
-                Text("Missing")
-                    .font(.caption)
-                    .foregroundColor(.red)
-            case .unknown:
-                Image(systemName: "questionmark.circle")
-                    .foregroundColor(.gray)
-                Text("Unknown")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            case .deploying:
-                ProgressView()
-                    .controlSize(.small)
-                Text("...")
-                    .font(.caption)
-                    .foregroundColor(.blue)
-            case .failed(let msg):
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.red)
-                    .help(msg)
-                Text("Failed")
-                    .font(.caption)
-                    .foregroundColor(.red)
-            }
+    private func sortedComponents(_ components: [DeployableComponent]) -> [DeployableComponent] {
+        guard let descriptor = sortDescriptor else {
+            return components.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         }
+        return components.sorted { lhs, rhs in
+            descriptor.compare(lhs, rhs) == .orderedAscending
+        }
+    }
+    
+    private var deployerColumns: [DataTableColumn<DeployableComponent>] {
+        [
+            .text(
+                id: "name",
+                title: "Component",
+                width: .auto(min: 140, ideal: 180, max: 300),
+                keyPath: \.name
+            ),
+            .custom(
+                id: "local",
+                title: "Local",
+                width: .fixed(70),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { [viewModel] component in
+                    let version = viewModel.localVersions[component.id] ?? "—"
+                    return makeTextCell(
+                        text: version,
+                        font: DataTableConstants.monospaceFont,
+                        color: DataTableConstants.secondaryTextColor,
+                        alignment: .left
+                    )
+                }
+            ),
+            .custom(
+                id: "remote",
+                title: "Remote",
+                width: .fixed(80),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { [viewModel] component in
+                    let version = viewModel.remoteVersionDisplay(for: component)
+                    return makeTextCell(
+                        text: version,
+                        font: DataTableConstants.monospaceFont,
+                        color: DataTableConstants.secondaryTextColor,
+                        alignment: .left
+                    )
+                }
+            ),
+            .custom(
+                id: "status",
+                title: "Status",
+                width: .auto(min: 90, ideal: 110, max: 140),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { [viewModel] component in
+                    makeStatusCellForDeployStatus(viewModel.status(for: component))
+                }
+            )
+        ]
     }
     
     // MARK: - Console Section
@@ -269,18 +266,8 @@ struct DeployerView: View {
                 Text("Console Output")
                     .font(.headline)
                 Spacer()
-                Button {
-                    viewModel.copyConsoleOutput()
-                    showCopiedFeedback = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        showCopiedFeedback = false
-                    }
-                } label: {
-                    Image(systemName: showCopiedFeedback ? "checkmark" : "doc.on.doc")
-                }
-                .buttonStyle(.borderless)
-                .disabled(viewModel.consoleOutput.isEmpty)
-                .help("Copy output")
+                CopyButton.console(viewModel.consoleOutput, source: "Deployer")
+                    .disabled(viewModel.consoleOutput.isEmpty)
                 Button {
                     viewModel.consoleOutput = ""
                 } label: {
@@ -308,12 +295,31 @@ struct DeployerView: View {
             .cornerRadius(8)
             
             if let error = viewModel.error {
-                Text(error)
-                    .foregroundColor(.red)
-                    .font(.caption)
+                InlineErrorView(error)
             }
         }
         .padding()
+    }
+}
+
+// MARK: - Helper Functions
+
+private func makeStatusCellForDeployStatus(_ status: DeployStatus) -> NSView {
+    switch status {
+    case .current:
+        return makeStatusCell(text: "Current", iconName: "checkmark.circle.fill", color: .systemGreen)
+    case .needsUpdate:
+        return makeStatusCell(text: "Update", iconName: "arrow.up.circle.fill", color: .systemOrange)
+    case .notDeployed:
+        return makeStatusCell(text: "Not Deployed", iconName: "xmark.circle.fill", color: .systemRed)
+    case .buildRequired:
+        return makeStatusCell(text: "Build Required", iconName: "hammer.fill", color: .systemYellow)
+    case .unknown:
+        return makeStatusCell(text: "Unknown", iconName: "questionmark.circle", color: .systemGray)
+    case .deploying:
+        return makeLoadingCell(text: "...")
+    case .failed:
+        return makeStatusCell(text: "Failed", iconName: "exclamationmark.triangle.fill", color: .systemRed)
     }
 }
 

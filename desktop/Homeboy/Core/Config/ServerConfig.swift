@@ -2,8 +2,8 @@ import Foundation
 
 /// Configuration for a reusable SSH server connection
 struct ServerConfig: Codable, Identifiable {
-    var id: String           // Unique identifier (e.g., "cloudways-ec")
-    var name: String         // Display name (e.g., "Cloudways Extra Chill")
+    var id: String           // Unique identifier (e.g., "production-1")
+    var name: String         // Display name (e.g., "Production Server")
     var host: String         // SSH host (e.g., "178.128.155.94")
     var user: String         // SSH username (e.g., "master_xyz")
     var port: Int            // SSH port (default: 22)

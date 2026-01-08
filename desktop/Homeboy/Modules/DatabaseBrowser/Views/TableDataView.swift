@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Main content view showing table data in a grid format
 struct TableDataView: View {
@@ -6,12 +7,10 @@ struct TableDataView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header with query toggle button
             contentHeader
             
             Divider()
             
-            // Main content - either query editor or table data
             if viewModel.isQueryModeActive {
                 QueryEditorView(viewModel: viewModel)
             } else {
@@ -25,7 +24,6 @@ struct TableDataView: View {
     private var contentHeader: some View {
         HStack {
             if viewModel.isQueryModeActive {
-                // Query mode header
                 VStack(alignment: .leading, spacing: 2) {
                     Text("SQL Query")
                         .font(.headline)
@@ -35,7 +33,6 @@ struct TableDataView: View {
                         .foregroundColor(.secondary)
                 }
             } else if let table = viewModel.selectedTable {
-                // Table info header
                 VStack(alignment: .leading, spacing: 2) {
                     Text(table.name)
                         .font(.headline)
@@ -45,16 +42,13 @@ struct TableDataView: View {
                         .foregroundColor(.secondary)
                 }
             } else {
-                // No selection header
                 Text("Database Browser")
                     .font(.headline)
             }
             
             Spacer()
             
-            // Action buttons
             HStack(spacing: 8) {
-                // Query mode toggle button
                 Button(action: {
                     viewModel.toggleQueryMode()
                 }) {
@@ -62,7 +56,6 @@ struct TableDataView: View {
                 }
                 .help(viewModel.isQueryModeActive ? "View Tables" : "SQL Query")
                 
-                // Refresh button (only in table mode)
                 if !viewModel.isQueryModeActive {
                     Button(action: {
                         Task {
@@ -84,7 +77,6 @@ struct TableDataView: View {
     private var tableDataContent: some View {
         VStack(spacing: 0) {
             if let _ = viewModel.selectedTable {
-                // Data grid
                 if viewModel.isLoadingTableData {
                     loadingView
                 } else if viewModel.rows.isEmpty && viewModel.totalRows == 0 {
@@ -95,7 +87,6 @@ struct TableDataView: View {
                 
                 Divider()
                 
-                // Pagination footer
                 paginationFooter
             } else {
                 emptyStateView
@@ -106,34 +97,62 @@ struct TableDataView: View {
     // MARK: - Data Grid
     
     private var dataGrid: some View {
-        Table(viewModel.rows, selection: $viewModel.selectedRows) {
-            TableColumnForEach(viewModel.columns) { column in
-                TableColumn(column.name) { row in
-                    Text(row.value(for: column.name).isEmpty ? "NULL" : row.value(for: column.name))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(row.value(for: column.name).isEmpty ? .secondary : .primary)
+        NativeDataTable(
+            items: viewModel.rows,
+            columns: dynamicColumns,
+            selection: $viewModel.selectedRows,
+            contextMenuProvider: { selectedIds in
+                createContextMenu(for: selectedIds)
+            }
+        )
+    }
+    
+    private var dynamicColumns: [DataTableColumn<TableRow>] {
+        viewModel.columns.map { column in
+            DataTableColumn<TableRow>.custom(
+                id: column.name,
+                title: column.name,
+                width: .auto(min: 80, ideal: 150, max: 400),
+                alignment: .left,
+                sortable: true,
+                sortComparator: { lhs, rhs in
+                    let lhsValue = lhs.value(for: column.name)
+                    let rhsValue = rhs.value(for: column.name)
+                    return lhsValue.localizedStandardCompare(rhsValue)
+                },
+                cellProvider: { row in
+                    let value = row.value(for: column.name)
+                    return makeTextCell(
+                        text: value.isEmpty ? "NULL" : value,
+                        font: DataTableConstants.monospaceFont,
+                        color: value.isEmpty ? DataTableConstants.nullTextColor : DataTableConstants.primaryTextColor,
+                        alignment: .left
+                    )
                 }
-                .width(min: 80, ideal: 150)
-            }
+            )
         }
-        .contextMenu(forSelectionType: Int.self) { selectedIds in
-            Button("Copy") {
-                viewModel.copySelectedRows()
-            }
-            .disabled(selectedIds.isEmpty)
+    }
+    
+    private func createContextMenu(for selectedIds: Set<Int>) -> NSMenu {
+        let menu = NSMenu()
+        
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(DatabaseTableMenuActions.copyRows), keyEquivalent: "c")
+        copyItem.target = DatabaseTableMenuActions.shared
+        copyItem.representedObject = MenuActionContext(viewModel: viewModel, selectedIds: selectedIds)
+        copyItem.isEnabled = !selectedIds.isEmpty
+        menu.addItem(copyItem)
+        
+        if viewModel.columns.contains(where: { $0.isPrimaryKey }) {
+            menu.addItem(NSMenuItem.separator())
             
-            if viewModel.columns.contains(where: { $0.isPrimaryKey }) {
-                Divider()
-                
-                Button("Delete Row", role: .destructive) {
-                    if let firstId = selectedIds.first,
-                       let row = viewModel.rows.first(where: { $0.id == firstId }) {
-                        viewModel.requestRowDeletion(row: row)
-                    }
-                }
-                .disabled(selectedIds.count != 1)
-            }
+            let deleteItem = NSMenuItem(title: "Delete Row", action: #selector(DatabaseTableMenuActions.deleteRow), keyEquivalent: "")
+            deleteItem.target = DatabaseTableMenuActions.shared
+            deleteItem.representedObject = MenuActionContext(viewModel: viewModel, selectedIds: selectedIds)
+            deleteItem.isEnabled = selectedIds.count == 1
+            menu.addItem(deleteItem)
         }
+        
+        return menu
     }
     
     // MARK: - Pagination Footer
@@ -203,6 +222,30 @@ struct TableDataView: View {
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Menu Action Helpers
+
+struct MenuActionContext {
+    let viewModel: DatabaseBrowserViewModel
+    let selectedIds: Set<Int>
+}
+
+@MainActor
+class DatabaseTableMenuActions: NSObject {
+    static let shared = DatabaseTableMenuActions()
+    
+    @objc func copyRows(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? MenuActionContext else { return }
+        context.viewModel.copySelectedRows()
+    }
+    
+    @objc func deleteRow(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? MenuActionContext,
+              let firstId = context.selectedIds.first,
+              let row = context.viewModel.rows.first(where: { $0.id == firstId }) else { return }
+        context.viewModel.requestRowDeletion(row: row)
     }
 }
 

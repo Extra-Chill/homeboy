@@ -10,9 +10,9 @@ struct DatabaseSettingsTab: View {
         Form {
             Section("Remote Database") {
                 TextField("MySQL Username", text: Binding(
-                    get: { config.activeProject.database.user },
+                    get: { config.safeActiveProject.database.user },
                     set: { newValue in
-                        config.activeProject.database.user = newValue
+                        config.activeProject?.database.user = newValue
                         config.saveActiveProject()
                     }
                 ))
@@ -28,9 +28,9 @@ struct DatabaseSettingsTab: View {
                     }
                 
                 TextField("Database Name", text: Binding(
-                    get: { config.activeProject.database.name },
+                    get: { config.safeActiveProject.database.name },
                     set: { newValue in
-                        config.activeProject.database.name = newValue
+                        config.activeProject?.database.name = newValue
                         config.saveActiveProject()
                     }
                 ))
@@ -54,9 +54,9 @@ struct DatabaseSettingsTab: View {
     
     private func savePasswordToKeychain() {
         try? KeychainService.storeLiveMySQLCredentials(
-            username: config.activeProject.database.user,
+            username: config.safeActiveProject.database.user,
             password: liveMySQLPassword,
-            database: config.activeProject.database.name
+            database: config.safeActiveProject.database.name
         )
     }
 }

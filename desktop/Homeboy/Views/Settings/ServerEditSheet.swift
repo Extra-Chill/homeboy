@@ -63,7 +63,7 @@ struct ServerEditSheet: View {
                     if isNewServer {
                         TextField("Server ID", text: $serverId)
                             .textFieldStyle(.roundedBorder)
-                        Text("Unique identifier (e.g., cloudways-ec, digitalocean-vps)")
+                        Text("Unique identifier (e.g., production-1, staging)")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     } else {
@@ -75,7 +75,7 @@ struct ServerEditSheet: View {
                     
                     TextField("Host", text: $host)
                         .textFieldStyle(.roundedBorder)
-                    Text("SSH host (e.g., ssh.cloudways.com or 192.168.1.100)")
+                    Text("SSH host (e.g., example.com or 203.0.113.10)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     
@@ -144,12 +144,16 @@ struct ServerEditSheet: View {
                     }
                     
                     if let result = connectionTestResult {
-                        HStack {
-                            Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundColor(result.success ? .green : .red)
-                            Text(result.message)
-                                .font(.caption)
-                                .foregroundColor(result.success ? .green : .red)
+                        if result.success {
+                            HStack {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text(result.message)
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                            }
+                        } else {
+                            InlineErrorView(result.message, source: "SSH Connection Test")
                         }
                     }
                 }

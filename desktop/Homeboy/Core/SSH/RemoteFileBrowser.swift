@@ -5,6 +5,7 @@ import SwiftUI
 enum FileBrowserMode {
     case browse              // General file browsing
     case selectPath          // Selecting a directory path (e.g., wp-content picker)
+    case selectFile          // Selecting a file (e.g., Remote File Editor)
 }
 
 /// Observable class for managing remote file system browsing
@@ -13,37 +14,57 @@ class RemoteFileBrowser: ObservableObject {
     @Published var currentPath: String = ""
     @Published var entries: [RemoteFileEntry] = []
     @Published var isLoading: Bool = false
-    @Published var error: String?
+    @Published var error: AppError?
     @Published var pathHistory: [String] = []
+    @Published var selectedEntries: Set<String> = []
+    
+    /// First selected entry (for single-selection operations)
+    var selectedFile: RemoteFileEntry? {
+        guard selectedEntries.count == 1,
+              let id = selectedEntries.first else { return nil }
+        return entries.first { $0.id == id }
+    }
+    
+    /// All selected entries
+    var selectedFiles: [RemoteFileEntry] {
+        entries.filter { selectedEntries.contains($0.id) }
+    }
     
     private var ssh: SSHService?
     private let serverId: String
+    private let startingPath: String?
     
-    /// Initialize with a server ID
-    init(serverId: String) {
+    /// Initialize with a server ID and optional starting path
+    init(serverId: String, startingPath: String? = nil) {
         self.serverId = serverId
+        self.startingPath = startingPath
     }
     
-    /// Connect to the server and navigate to home directory
+    /// Connect to the server and navigate to starting path or home directory
     func connect() async {
         guard let server = ConfigurationManager.readServer(id: serverId) else {
-            error = "Server not found"
+            error = AppError("Server not found", source: "Remote File Browser")
             return
         }
         
         guard let sshService = SSHService(server: server) else {
-            error = "Failed to initialize SSH connection"
+            error = AppError("Failed to initialize SSH connection", source: "Remote File Browser")
             return
         }
         
         self.ssh = sshService
-        await goToHome()
+        
+        if let startingPath = startingPath, !startingPath.isEmpty {
+            await goToPath(startingPath)
+        } else {
+            await goToHome()
+        }
     }
     
     /// Navigate to the SSH user's home directory
     func goToHome() async {
         guard let ssh = ssh else {
-            error = "Not connected"
+            error = AppError("Not connected", source: "Remote File Browser")
             return
         }
         
@@ -54,7 +75,7 @@ class RemoteFileBrowser: ObservableObject {
             let homePath = try await ssh.getHomeDirectory()
             await goToPath(homePath)
         } catch {
-            self.error = error.localizedDescription
+            self.error = AppError(error.localizedDescription, source: "Remote File Browser")
             isLoading = false
         }
     }
@@ -62,7 +83,7 @@ class RemoteFileBrowser: ObservableObject {
     /// Navigate to a specific path
     func goToPath(_ path: String) async {
         guard let ssh = ssh else {
-            error = "Not connected"
+            error = AppError("Not connected", source: "Remote File Browser")
             return
         }
         
@@ -79,7 +100,7 @@ class RemoteFileBrowser: ObservableObject {
                 pathHistory.append(path)
             }
         } catch {
-            self.error = error.localizedDescription
+            self.error = AppError(error.localizedDescription, source: "Remote File Browser", path: path)
         }
         
         isLoading = false

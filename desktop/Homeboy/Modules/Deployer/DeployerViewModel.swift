@@ -19,37 +19,30 @@ class DeployerViewModel: ObservableObject {
     
     @Published var components: [DeployableComponent] = ComponentRegistry.all
     @Published var selectedComponents: Set<String> = []
-    @Published var sortOrder: [KeyPathComparator<DeployableComponent>] = [
-        KeyPathComparator(\.name, order: .forward)
-    ]
     
-    var themes: [DeployableComponent] {
-        components.filter { $0.type == .theme }.sorted(using: sortOrder)
+    /// Components grouped by their `group` field for display (sorting handled by view)
+    var groupedComponents: [(title: String, components: [DeployableComponent])] {
+        Dictionary(grouping: components, by: { $0.group })
+            .sorted { $0.key < $1.key }
+            .map { (title: $0.key, components: $0.value) }
     }
     
-    var networkPlugins: [DeployableComponent] {
-        components.filter { $0.type == .plugin && $0.isNetwork }.sorted(using: sortOrder)
-    }
-    
-    var sitePlugins: [DeployableComponent] {
-        components.filter { $0.type == .plugin && !$0.isNetwork }.sorted(using: sortOrder)
-    }
     @Published var localVersions: [String: String] = [:]
-    @Published var remoteVersions: [String: String] = [:]
+    @Published var remoteVersions: [String: VersionInfo] = [:]
     @Published var deploymentStatus: [String: DeployStatus] = [:]
     @Published var consoleOutput = ""
     @Published var isLoading = false
     @Published var isDeploying = false
     @Published var hasCredentials = false
     @Published var hasSSHKey = false
-    @Published var hasDeploymentPaths = false
+    @Published var hasBasePath = false
     @Published var serverName: String? = nil
-    @Published var error: String?
+    @Published var error: AppError?
     @Published var showDeployAllConfirmation = false
     @Published var deploymentProgress: (current: Int, total: Int)? = nil
     @Published var deploymentReports: [DeploymentReport] = []
     
-    private var wpModule: WordPressSSHModule?
+    private var deploymentService: DeploymentService?
     private var currentDeployTask: Task<Void, Never>?
     
     init() {
@@ -78,23 +71,17 @@ class DeployerViewModel: ObservableObject {
             hasSSHKey = false
         }
         
-        // Check 3: wp-content path configured (for WordPress projects)
-        if project.projectType == .wordpress,
-           let wordpress = project.wordpress,
-           wordpress.isConfigured {
-            hasDeploymentPaths = true
-        } else {
-            hasDeploymentPaths = false
-        }
+        // Check 3: Base path configured
+        hasBasePath = project.basePath != nil && !project.basePath!.isEmpty
         
         // Refresh component list from config
         components = ComponentRegistry.all
         
-        // Initialize WordPress module if all requirements met
-        if hasCredentials && hasSSHKey && hasDeploymentPaths {
-            wpModule = WordPressSSHModule()
+        // Initialize deployment service if all requirements met
+        if hasCredentials && hasSSHKey && hasBasePath {
+            deploymentService = DeploymentService(project: project)
         } else {
-            wpModule = nil
+            deploymentService = nil
         }
     }
     
@@ -114,8 +101,8 @@ class DeployerViewModel: ObservableObject {
     }
     
     func fetchRemoteVersions() {
-        guard let wpModule = wpModule else {
-            error = "WordPress deployment not configured"
+        guard let service = deploymentService else {
+            error = AppError("Deployment not configured", source: "Deployer")
             return
         }
         
@@ -123,37 +110,63 @@ class DeployerViewModel: ObservableObject {
         error = nil
         consoleOutput += "> Fetching remote versions...\n"
         
-        wpModule.fetchRemoteVersions(components: components) { [weak self] result in
-            self?.isLoading = false
-            switch result {
-            case .success(let versions):
-                self?.remoteVersions = versions
-                self?.consoleOutput += "> Found \(versions.count) remote versions\n"
-            case .failure(let err):
-                self?.error = err.localizedDescription
-                self?.consoleOutput += "> Error: \(err.localizedDescription)\n"
+        service.fetchRemoteVersions(components: components) { [weak self] result in
+            DispatchQueue.main.async {
+                self?.isLoading = false
+                switch result {
+                case .success(let versions):
+                    self?.remoteVersions = versions
+                    self?.consoleOutput += "> Found \(versions.count) remote versions\n"
+                case .failure(let err):
+                    self?.error = AppError(err.localizedDescription, source: "Deployer")
+                    self?.consoleOutput += "> Error: \(err.localizedDescription)\n"
+                }
             }
         }
     }
     
     func status(for component: DeployableComponent) -> DeployStatus {
+        // Check for in-progress deployment status first
         if let status = deploymentStatus[component.id] {
             return status
         }
         
-        guard let local = localVersions[component.id] else {
+        // Check if build artifact exists
+        guard component.hasBuildArtifact else {
+            return .buildRequired
+        }
+        
+        // Check local version
+        let localVersion = localVersions[component.id]
+        
+        // Check remote version
+        guard let remoteInfo = remoteVersions[component.id] else {
             return .unknown
         }
         
-        guard let remote = remoteVersions[component.id] else {
-            return .missing
+        switch remoteInfo {
+        case .notDeployed:
+            return .notDeployed
+            
+        case .version(let remoteVersion):
+            guard let local = localVersion else {
+                return .unknown
+            }
+            return local == remoteVersion ? .current : .needsUpdate
+            
+        case .timestamp:
+            // Can't compare versions with timestamps, show as unknown
+            // User can still deploy manually
+            return .unknown
         }
-        
-        if local == remote {
-            return .current
+    }
+    
+    /// Get display string for remote version
+    func remoteVersionDisplay(for component: DeployableComponent) -> String {
+        guard let info = remoteVersions[component.id] else {
+            return "—"
         }
-        
-        return .needsUpdate
+        return info.displayString
     }
     
     // MARK: - Selection
@@ -182,7 +195,16 @@ class DeployerViewModel: ObservableObject {
     func selectOutdated() {
         selectedComponents = Set(components.filter { component in
             let status = self.status(for: component)
-            return status == .needsUpdate || status == .missing
+            return status == .needsUpdate || status == .notDeployed
+        }.map { $0.id })
+    }
+    
+    func selectDeployable() {
+        // Select components that have a build artifact and aren't current
+        selectedComponents = Set(components.filter { component in
+            guard component.hasBuildArtifact else { return false }
+            let status = self.status(for: component)
+            return status != .current && status != .deploying
         }.map { $0.id })
     }
     
@@ -191,7 +213,24 @@ class DeployerViewModel: ObservableObject {
     func deploySelected() {
         let selected = components.filter { selectedComponents.contains($0.id) }
         guard !selected.isEmpty else { return }
-        startDeployment(components: selected)
+        
+        // Filter out components without build artifacts
+        let deployable = selected.filter { $0.hasBuildArtifact }
+        let skipped = selected.filter { !$0.hasBuildArtifact }
+        
+        if !skipped.isEmpty {
+            consoleOutput += "> Skipping \(skipped.count) component(s) without build artifacts:\n"
+            for component in skipped {
+                consoleOutput += ">   - \(component.name)\n"
+            }
+        }
+        
+        guard !deployable.isEmpty else {
+            error = AppError("No deployable components selected. Build artifacts are missing.", source: "Deployer")
+            return
+        }
+        
+        startDeployment(components: deployable)
     }
     
     func confirmDeployAll() {
@@ -199,7 +238,12 @@ class DeployerViewModel: ObservableObject {
     }
     
     func deployAll() {
-        startDeployment(components: components)
+        let deployable = components.filter { $0.hasBuildArtifact }
+        guard !deployable.isEmpty else {
+            error = AppError("No components have build artifacts", source: "Deployer")
+            return
+        }
+        startDeployment(components: deployable)
     }
     
     func cancelDeployment() {
@@ -212,8 +256,8 @@ class DeployerViewModel: ObservableObject {
     }
     
     private func startDeployment(components componentsToDeploy: [DeployableComponent]) {
-        guard let module = wpModule else {
-            error = "WordPress deployment not configured"
+        guard let service = deploymentService else {
+            error = AppError("Deployment not configured", source: "Deployer")
             return
         }
         
@@ -232,7 +276,7 @@ class DeployerViewModel: ObservableObject {
         currentDeployTask = Task {
             // Run entirely detached from MainActor
             let reports = await Task.detached(priority: .userInitiated) {
-                await self.executeDeployment(components: componentsToDeploy, wpModule: module)
+                await self.executeDeployment(components: componentsToDeploy, service: service)
             }.value
             
             // Back on MainActor - update UI with results
@@ -248,7 +292,7 @@ class DeployerViewModel: ObservableObject {
     /// Executes deployment entirely in background, returning reports when complete
     nonisolated private func executeDeployment(
         components: [DeployableComponent],
-        wpModule: WordPressSSHModule
+        service: DeploymentService
     ) async -> [DeploymentReport] {
         var reports: [DeploymentReport] = []
         
@@ -263,31 +307,37 @@ class DeployerViewModel: ObservableObject {
             var success = true
             var errorMessage: String? = nil
             
+            outputBuffer += "========================================\n"
+            outputBuffer += "> Deploying \(component.name)...\n"
+            outputBuffer += "========================================\n"
+            
+            // Verify artifact exists (belt and suspenders)
+            guard FileManager.default.fileExists(atPath: component.buildArtifactPath) else {
+                success = false
+                errorMessage = "Build artifact not found at \(component.buildArtifactPath)"
+                outputBuffer += "> FAILED: \(errorMessage!)\n"
+                
+                await MainActor.run {
+                    self.deploymentStatus[component.id] = .failed(errorMessage!)
+                }
+                
+                reports.append(DeploymentReport(
+                    componentId: component.id,
+                    componentName: component.name,
+                    success: false,
+                    output: outputBuffer,
+                    errorMessage: errorMessage,
+                    timestamp: startTime
+                ))
+                continue
+            }
+            
+            outputBuffer += "> Artifact: \(component.buildArtifact)\n"
+            
+            // Deploy via DeploymentService
             do {
-                // Build
-                outputBuffer += "========================================\n"
-                outputBuffer += "> Deploying \(component.name)...\n"
-                outputBuffer += "========================================\n"
-                outputBuffer += "> Building \(component.id)...\n"
-                
-                let (buildOutput, exitCode) = try await executeBuildProcess(at: component.localPath)
-                outputBuffer += buildOutput
-                
-                if exitCode != 0 {
-                    throw SSHError.commandFailed("Build failed with exit code \(exitCode)")
-                }
-                
-                let zipExists = FileManager.default.fileExists(atPath: component.buildOutputPath)
-                guard zipExists else {
-                    throw SSHError.commandFailed("Build completed but zip not found at \(component.buildOutputPath)")
-                }
-                outputBuffer += "> Build complete.\n"
-                
-                // Deploy via WordPress module
-                outputBuffer += "> Deploying to server...\n"
-                
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    wpModule.deployComponent(component, buildPath: component.buildOutputPath, onOutput: { line in
+                    service.deploy(component: component, onOutput: { line in
                         outputBuffer += line
                     }) { result in
                         switch result {
@@ -347,30 +397,6 @@ class DeployerViewModel: ObservableObject {
         output += "========================================\n"
         
         return output
-    }
-    
-    /// Executes build.sh on a background thread, returning collected output and exit status
-    nonisolated private func executeBuildProcess(at directoryPath: String) async throws -> (output: String, exitCode: Int32) {
-        let process = Process()
-        process.currentDirectoryURL = URL(fileURLWithPath: directoryPath)
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["build.sh"]
-        process.environment = [
-            "PATH": "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": FileManager.default.homeDirectoryForCurrentUser.path
-        ]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        
-        try process.run()
-        process.waitUntilExit()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        
-        return (output, process.terminationStatus)
     }
     
     // MARK: - Site Switching

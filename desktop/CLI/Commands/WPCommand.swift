@@ -39,7 +39,7 @@ struct WP: ParsableCommand {
         }
         
         // Validate WordPress config
-        guard projectConfig.projectType == .wordpress,
+        guard projectConfig.isWordPress,
               let wordpress = projectConfig.wordpress,
               wordpress.isConfigured else {
             fputs("Error: WordPress deployment not configured for project '\(projectId)'\n", stderr)
