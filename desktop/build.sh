@@ -7,9 +7,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 BUILD_DIR="$ROOT_DIR/.build"
-ARCHIVE_PATH="$BUILD_DIR/ExtraChillDesktop.xcarchive"
+ARCHIVE_PATH="$BUILD_DIR/Homeboy.xcarchive"
 EXPORT_PATH="$BUILD_DIR/export"
-ZIP_PATH="$DIST_DIR/ExtraChillDesktop-macOS.zip"
+ZIP_PATH="$DIST_DIR/Homeboy-macOS.zip"
 
 mkdir -p "$DIST_DIR" "$BUILD_DIR"
 
@@ -21,13 +21,13 @@ fi
 rm -rf "$ARCHIVE_PATH" "$EXPORT_PATH"
 
 xcodebuild \
-  -project "$ROOT_DIR/ExtraChillDesktop.xcodeproj" \
-  -scheme "ExtraChillDesktop" \
+  -project "$ROOT_DIR/Homeboy.xcodeproj" \
+  -scheme "Homeboy" \
   -configuration Release \
   -archivePath "$ARCHIVE_PATH" \
   archive
 
-APP_PATH="$ARCHIVE_PATH/Products/Applications/Extra Chill Desktop.app"
+APP_PATH="$ARCHIVE_PATH/Products/Applications/Homeboy.app"
 if [[ ! -d "$APP_PATH" ]]; then
   echo "Expected app not found in archive: $APP_PATH" >&2
   exit 1

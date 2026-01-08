@@ -1,0 +1,163 @@
+import SwiftUI
+
+/// Main container view for rendering a module based on its manifest
+struct ModuleContainerView: View {
+    let moduleId: String
+    
+    @StateObject private var viewModel: ModuleViewModel
+    @ObservedObject private var moduleManager = ModuleManager.shared
+    
+    init(moduleId: String) {
+        self.moduleId = moduleId
+        _viewModel = StateObject(wrappedValue: ModuleViewModel(moduleId: moduleId))
+    }
+    
+    private var module: LoadedModule? {
+        moduleManager.module(withId: moduleId)
+    }
+    
+    var body: some View {
+        Group {
+            if let module = module {
+                moduleContent(module)
+                    .onAppear {
+                        viewModel.initializeInputValues(from: module)
+                    }
+            } else {
+                ContentUnavailableView(
+                    "Module Not Found",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text("The module '\(moduleId)' could not be loaded.")
+                )
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func moduleContent(_ module: LoadedModule) -> some View {
+        VStack(spacing: 0) {
+            // Header
+            ModuleHeaderView(module: module, viewModel: viewModel)
+            
+            Divider()
+            
+            // Main content based on module state
+            switch module.state {
+            case .needsSetup:
+                ModuleSetupView(module: module, viewModel: viewModel)
+                
+            case .installing:
+                VStack {
+                    ProgressView("Installing dependencies...")
+                    ModuleConsoleView(output: $viewModel.consoleOutput, viewModel: viewModel)
+                }
+                .padding()
+                
+            case .missingRequirements(let components):
+                ContentUnavailableView(
+                    "Missing Requirements",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text("This module requires the following components:\n\(components.joined(separator: ", "))")
+                )
+                
+            case .error(let message):
+                ContentUnavailableView(
+                    "Module Error",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(message)
+                )
+                
+            case .ready:
+                ModuleReadyView(module: module, viewModel: viewModel)
+            }
+        }
+    }
+}
+
+// MARK: - Header View
+
+struct ModuleHeaderView: View {
+    let module: LoadedModule
+    @ObservedObject var viewModel: ModuleViewModel
+    
+    var body: some View {
+        HStack {
+            Image(systemName: module.icon)
+                .font(.title2)
+                .foregroundColor(.accentColor)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(module.name)
+                    .font(.headline)
+                Text(module.manifest.description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            if viewModel.isRunning {
+                Button("Cancel") {
+                    viewModel.cancel()
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding()
+    }
+}
+
+// MARK: - Ready State View
+
+struct ModuleReadyView: View {
+    let module: LoadedModule
+    @ObservedObject var viewModel: ModuleViewModel
+    
+    @State private var showConsole = true
+    
+    var body: some View {
+        HSplitView {
+            // Left side: Inputs + Console
+            VStack(spacing: 0) {
+                // Input form
+                ModuleInputsView(module: module, viewModel: viewModel)
+                
+                Divider()
+                
+                // Console section
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Console")
+                            .font(.headline)
+                        Spacer()
+                        Button {
+                            showConsole.toggle()
+                        } label: {
+                            Image(systemName: showConsole ? "chevron.down" : "chevron.right")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    
+                    if showConsole {
+                        ModuleConsoleView(output: $viewModel.consoleOutput, viewModel: viewModel)
+                    }
+                }
+            }
+            .frame(minWidth: 300)
+            
+            // Right side: Results (if table display)
+            if module.manifest.output.display == .table && !viewModel.results.isEmpty {
+                VStack(spacing: 0) {
+                    ModuleResultsView(module: module, viewModel: viewModel)
+                    
+                    Divider()
+                    
+                    ModuleActionsBar(module: module, viewModel: viewModel)
+                }
+                .frame(minWidth: 400)
+            }
+        }
+    }
+}

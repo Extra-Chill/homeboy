@@ -1,0 +1,291 @@
+import SwiftUI
+
+/// Project switcher dropdown for the sidebar header with project management capabilities
+struct ProjectSwitcherView: View {
+    @ObservedObject var configManager = ConfigurationManager.shared
+    @EnvironmentObject var authManager: AuthManager
+    
+    /// Optional closure to check if there's unsaved work before switching projects.
+    /// Returns true if there's unsaved work that should prompt a confirmation.
+    var hasUnsavedWork: (() -> Bool)?
+    
+    @State private var showManageProjects = false
+    @State private var showAddProject = false
+    @State private var showDeleteConfirmation = false
+    @State private var projectToDelete: String?
+    @State private var showUnsavedWorkAlert = false
+    @State private var pendingProjectSwitch: String?
+    
+    // Add project form
+    @State private var newProjectName = ""
+    @State private var newProjectDomain = ""
+    
+    private var availableProjects: [ProjectConfiguration] {
+        configManager.availableProjectIds().compactMap { configManager.loadProject(id: $0) }
+    }
+    
+    var body: some View {
+        Menu {
+            // Project list
+            ForEach(availableProjects, id: \.id) { project in
+                Button {
+                    switchToProject(project.id)
+                } label: {
+                    HStack {
+                        if project.id == configManager.activeProject.id {
+                            Image(systemName: "checkmark")
+                        }
+                        Text(project.name)
+                    }
+                }
+            }
+            
+            Divider()
+            
+            // Manage projects
+            Button {
+                showManageProjects = true
+            } label: {
+                Label("Manage Projects...", systemImage: "gear")
+            }
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(configManager.activeProject.name)
+                        .font(.headline)
+                        .lineLimit(1)
+                    if !configManager.activeProject.domain.isEmpty {
+                        Text(configManager.activeProject.domain)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(6)
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $showManageProjects) {
+            manageProjectsSheet
+        }
+        .sheet(isPresented: $showAddProject) {
+            addProjectSheet
+        }
+        .alert("Delete Project", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                projectToDelete = nil
+            }
+            Button("Delete", role: .destructive) {
+                if let id = projectToDelete {
+                    configManager.deleteProject(id: id)
+                    projectToDelete = nil
+                }
+            }
+        } message: {
+            if let id = projectToDelete, let project = configManager.loadProject(id: id) {
+                Text("Are you sure you want to delete \"\(project.name)\"? This cannot be undone.")
+            }
+        }
+        .alert("Unsaved Changes", isPresented: $showUnsavedWorkAlert) {
+            Button("Cancel", role: .cancel) {
+                pendingProjectSwitch = nil
+            }
+            Button("Discard Changes", role: .destructive) {
+                if let projectId = pendingProjectSwitch {
+                    performProjectSwitch(projectId)
+                    pendingProjectSwitch = nil
+                }
+            }
+        } message: {
+            Text("You have unsaved changes. Switching projects will discard them.")
+        }
+    }
+    
+    // MARK: - Manage Projects Sheet
+    
+    private var manageProjectsSheet: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Manage Projects")
+                    .font(.headline)
+                Spacer()
+                Button("Done") {
+                    showManageProjects = false
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding()
+            
+            Divider()
+            
+            // Project list
+            List {
+                ForEach(availableProjects, id: \.id) { project in
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(project.name)
+                                .fontWeight(project.id == configManager.activeProject.id ? .semibold : .regular)
+                            if !project.domain.isEmpty {
+                                Text(project.domain)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        
+                        Spacer()
+                        
+                        if project.id == configManager.activeProject.id {
+                            Text("Active")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2)
+                                .background(Color.accentColor.opacity(0.2))
+                                .cornerRadius(4)
+                        } else {
+                            Button(role: .destructive) {
+                                projectToDelete = project.id
+                                showDeleteConfirmation = true
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            
+            Divider()
+            
+            // Add project button
+            HStack {
+                Button {
+                    showManageProjects = false
+                    showAddProject = true
+                } label: {
+                    Label("Add Project", systemImage: "plus")
+                }
+                Spacer()
+            }
+            .padding()
+        }
+        .frame(width: 400, height: 350)
+    }
+    
+    // MARK: - Add Project Sheet
+    
+    private var addProjectSheet: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Add New Project")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding()
+            
+            Divider()
+            
+            // Form
+            Form {
+                Section("Project Information") {
+                    TextField("Display Name", text: $newProjectName)
+                        .textFieldStyle(.roundedBorder)
+                    
+                    TextField("Domain (optional)", text: $newProjectDomain)
+                        .textFieldStyle(.roundedBorder)
+                    
+                    Text("e.g., mysite.com")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            .padding()
+            
+            Divider()
+            
+            // Actions
+            HStack {
+                Button("Cancel") {
+                    resetAddProjectForm()
+                    showAddProject = false
+                }
+                .keyboardShortcut(.cancelAction)
+                
+                Spacer()
+                
+                Button("Add Project") {
+                    addProject()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(newProjectName.isEmpty)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(width: 400, height: 280)
+    }
+    
+    // MARK: - Actions
+    
+    private func switchToProject(_ projectId: String) {
+        guard projectId != configManager.activeProject.id else { return }
+        
+        // Check for unsaved work
+        if let checkUnsaved = hasUnsavedWork, checkUnsaved() {
+            pendingProjectSwitch = projectId
+            showUnsavedWorkAlert = true
+            return
+        }
+        
+        performProjectSwitch(projectId)
+    }
+    
+    private func performProjectSwitch(_ projectId: String) {
+        Task {
+            configManager.switchToProject(id: projectId)
+            await authManager.resetForProjectSwitch()
+        }
+    }
+    
+    private func addProject() {
+        let projectId = newProjectName
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+            .replacingOccurrences(of: "[^a-z0-9-]", with: "", options: .regularExpression)
+        
+        let project = configManager.createProject(
+            id: projectId,
+            displayName: newProjectName.trimmingCharacters(in: .whitespacesAndNewlines),
+            domain: newProjectDomain.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        
+        resetAddProjectForm()
+        showAddProject = false
+        
+        // Switch to the new project so user can configure it
+        switchToProject(project.id)
+    }
+    
+    private func resetAddProjectForm() {
+        newProjectName = ""
+        newProjectDomain = ""
+    }
+}
+
+#Preview {
+    ProjectSwitcherView()
+        .environmentObject(AuthManager())
+        .frame(width: 220)
+        .padding()
+}

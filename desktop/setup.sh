@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Extra Chill Desktop - Python Environment Setup
+# Homeboy - Python Environment Setup
 #
 # This script sets up the Python virtual environment required
 # for the Bandcamp scraper module.
@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/venv"
 
 echo "========================================"
-echo "Extra Chill Desktop - Python Setup"
+echo "Homeboy - Python Setup"
 echo "========================================"
 
 # Check for Python
@@ -60,5 +60,5 @@ echo "========================================"
 echo ""
 echo "To use manually:"
 echo "  source $VENV_DIR/bin/activate"
-echo "  python ExtraChillDesktop/Resources/Scripts/bandcamp_scraper.py --help"
+echo "  python Homeboy/Resources/Scripts/bandcamp_scraper.py --help"
 echo ""
