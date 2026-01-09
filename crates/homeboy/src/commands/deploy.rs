@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use homeboy_core::config::{ConfigManager, AppPaths, ServerConfiguration};
+use homeboy_core::config::{ConfigManager, AppPaths, ServerConfig};
 use homeboy_core::output::{print_success, print_error};
 
 #[derive(Args)]
@@ -398,7 +398,7 @@ fn fetch_local_version(component: &Component) -> Option<String> {
 
 fn fetch_remote_versions(
     components: &[Component],
-    server: &ServerConfiguration,
+    server: &ServerConfig,
     base_path: &str,
     key_path: &Path,
 ) -> HashMap<String, String> {

@@ -10,9 +10,7 @@ ci = "github"
 # The installers to generate for each app
 installers = ["homebrew"]
 # A GitHub repo to push Homebrew formulas to
-tap = "Extra-Chill/homeboy-cli"
-# Use GITHUB_TOKEN for same-repo tap
-tap-token = "GITHUB_TOKEN"
+tap = "Extra-Chill/homebrew-tap"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
