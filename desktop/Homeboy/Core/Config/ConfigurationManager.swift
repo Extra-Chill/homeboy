@@ -58,7 +58,13 @@ class ConfigurationManager: ObservableObject {
     
     /// Whether the app needs the user to create a project (no projects exist or active project invalid)
     @Published var needsProjectCreation: Bool = false
-    
+
+    /// Reactive list of available projects (updates when projects are added/removed via CLI)
+    @Published var availableProjects: [ProjectConfiguration] = []
+
+    /// Reactive list of available servers (updates when servers are added/removed via CLI)
+    @Published var availableServers: [ServerConfig] = []
+
     /// Safe accessor that returns the active project or a default empty project.
     /// Use this for UI bindings where you need a non-optional value.
     /// Always check `needsProjectCreation` before using this in contexts that require a real project.
@@ -113,7 +119,13 @@ class ConfigurationManager: ObservableObject {
     // File watching for external changes (CLI, text editor, etc.)
     private var projectFileSource: DispatchSourceFileSystemObject?
     private var projectFileDescriptor: Int32 = -1
-    
+
+    // Directory watching for projects and servers lists
+    private var projectsDirectorySource: DispatchSourceFileSystemObject?
+    private var projectsDirectoryDescriptor: Int32 = -1
+    private var serversDirectorySource: DispatchSourceFileSystemObject?
+    private var serversDirectoryDescriptor: Int32 = -1
+
     // Debounce to avoid rapid-fire reloads
     private var lastReloadTime: Date = .distantPast
     private let reloadDebounceInterval: TimeInterval = 0.5
@@ -141,20 +153,25 @@ class ConfigurationManager: ObservableObject {
         jsonEncoder = JSONEncoder()
         jsonEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         jsonDecoder = JSONDecoder()
-        
+
         appConfig = AppConfiguration()
         activeProject = nil
-        
+
         ensureDirectoriesExist()
         load()
+        refreshAvailableProjects()
+        refreshAvailableServers()
         startWatchingActiveProject()
+        startWatchingDirectories()
     }
     
     deinit {
         projectFileSource?.cancel()
-        if projectFileDescriptor >= 0 {
-            close(projectFileDescriptor)
-        }
+        projectsDirectorySource?.cancel()
+        serversDirectorySource?.cancel()
+        if projectFileDescriptor >= 0 { close(projectFileDescriptor) }
+        if projectsDirectoryDescriptor >= 0 { close(projectsDirectoryDescriptor) }
+        if serversDirectoryDescriptor >= 0 { close(serversDirectoryDescriptor) }
     }
     
     // MARK: - File Watching
@@ -215,7 +232,60 @@ class ConfigurationManager: ObservableObject {
             NotificationCenter.default.post(name: .projectDidChange, object: nil)
         }
     }
-    
+
+    // MARK: - Directory Watching (Projects & Servers)
+
+    private func startWatchingDirectories() {
+        startWatchingDirectory(
+            path: projectsDirectory.path,
+            source: &projectsDirectorySource,
+            descriptor: &projectsDirectoryDescriptor,
+            onChange: { [weak self] in self?.refreshAvailableProjects() }
+        )
+        startWatchingDirectory(
+            path: serversDirectory.path,
+            source: &serversDirectorySource,
+            descriptor: &serversDirectoryDescriptor,
+            onChange: { [weak self] in self?.refreshAvailableServers() }
+        )
+    }
+
+    private func startWatchingDirectory(
+        path: String,
+        source: inout DispatchSourceFileSystemObject?,
+        descriptor: inout Int32,
+        onChange: @escaping () -> Void
+    ) {
+        source?.cancel()
+        source = nil
+
+        descriptor = open(path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+
+        source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor,
+            eventMask: [.write],
+            queue: .main
+        )
+
+        source?.setEventHandler { onChange() }
+
+        let fd = descriptor
+        source?.setCancelHandler {
+            if fd >= 0 { close(fd) }
+        }
+
+        source?.resume()
+    }
+
+    private func refreshAvailableProjects() {
+        availableProjects = availableProjectIds().compactMap { loadProject(id: $0) }
+    }
+
+    private func refreshAvailableServers() {
+        availableServers = availableServerIds().compactMap { loadServer(id: $0) }
+    }
+
     // MARK: - Directory Management
     
     private func ensureDirectoriesExist() {
@@ -267,7 +337,37 @@ class ConfigurationManager: ObservableObject {
             print("[ConfigurationManager] Failed to sync project types: \(error)")
         }
     }
-    
+
+    // MARK: - Documentation Sync
+
+    private var docsDirectory: URL {
+        configDirectory.appendingPathComponent("docs")
+    }
+
+    /// Syncs bundled CLI documentation to Application Support.
+    /// Called on app launch to ensure CLI has access to CLI.md.
+    func syncDocumentation() {
+        do {
+            try fileManager.createDirectory(at: docsDirectory, withIntermediateDirectories: true)
+
+            guard let bundledDocsURL = Bundle.main.url(forResource: "CLI", withExtension: "md", subdirectory: "docs") else {
+                print("[ConfigurationManager] No bundled CLI.md found")
+                return
+            }
+
+            let destinationURL = docsDirectory.appendingPathComponent("CLI.md")
+
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+
+            try fileManager.copyItem(at: bundledDocsURL, to: destinationURL)
+            print("[ConfigurationManager] Synced CLI.md to Application Support")
+        } catch {
+            print("[ConfigurationManager] Failed to sync documentation: \(error)")
+        }
+    }
+
     // MARK: - Load Configuration
     
     private func load() {
@@ -334,6 +434,7 @@ class ConfigurationManager: ObservableObject {
         do {
             let data = try jsonEncoder.encode(project)
             try data.write(to: projectPath)
+            refreshAvailableProjects()
         } catch {
             print("[ConfigurationManager] Failed to save project '\(project.id)': \(error)")
         }
@@ -465,9 +566,10 @@ class ConfigurationManager: ObservableObject {
             print("[ConfigurationManager] Cannot delete active project")
             return
         }
-        
+
         let projectPath = projectsDirectory.appendingPathComponent("\(id).json")
         try? fileManager.removeItem(at: projectPath)
+        refreshAvailableProjects()
     }
     
     // MARK: - Server Management
@@ -500,6 +602,7 @@ class ConfigurationManager: ObservableObject {
         do {
             let data = try jsonEncoder.encode(server)
             try data.write(to: serverPath)
+            refreshAvailableServers()
         } catch {
             print("[ConfigurationManager] Failed to save server '\(server.id)': \(error)")
         }
@@ -532,7 +635,7 @@ class ConfigurationManager: ObservableObject {
         }
     }
     
-    func availableServers() -> [ServerConfig] {
+    func loadAllServers() -> [ServerConfig] {
         availableServerIds().compactMap { loadServer(id: $0) }
     }
     
@@ -546,8 +649,9 @@ class ConfigurationManager: ObservableObject {
         
         let serverPath = serversDirectory.appendingPathComponent("\(id).json")
         try? fileManager.removeItem(at: serverPath)
+        refreshAvailableServers()
     }
-    
+
     /// Returns the server for the active project
     func serverForActiveProject() -> ServerConfig? {
         guard let project = activeProject, let serverId = project.serverId else { return nil }

@@ -89,7 +89,7 @@ Modules can declare dependencies on project configuration (components, feature f
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `components` | array | No | Component IDs that must exist in the active project config |
-| `features` | array | No | Required feature flags (supported: `hasDatabase`, `hasRemoteDeployment`, `hasRemoteLogs`, `hasLocalCLI`) |
+| `features` | array | No | Required feature flags (supported: `hasDatabase`, `hasRemoteDeployment`, `hasRemoteLogs`, `hasCLI`) |
 | `projectType` | string | No | Required project type (e.g. `wordpress`) |
 
 ### Input Object
@@ -347,3 +347,5 @@ CLI modules can be executed in two ways:
 2. **Terminal**: Use `homeboy module run <module-id> [--project <project>] [args...]`
 
 The CLI execution uses the project type's command template with variable substitution for `{{sitePath}}`, `{{domain}}`, `{{cliPath}}`, and `{{args}}`.
+
+Supported template variables (CLI + modules) also include `{{projectId}}`. Some templates may still use legacy names like `{{targetDomain}}` and `{{basePath}}`.

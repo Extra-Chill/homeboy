@@ -1,12 +1,24 @@
 import ArgumentParser
 import Foundation
 
-/// SSH command: homeboy ssh <project> [command]
-/// If command is provided, executes it and returns. Otherwise opens interactive shell.
 struct SSH: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ssh",
-        abstract: "Execute SSH command on project server or open interactive shell"
+        abstract: "Open SSH shell or execute commands on project server",
+        discussion: """
+            Connect to the project's server via SSH.
+
+            Usage:
+              homeboy ssh <project>              # Interactive shell
+              homeboy ssh <project> "<command>"  # Execute and return
+
+            Examples:
+              homeboy ssh extrachill                    # Open shell
+              homeboy ssh extrachill "ls -la /var/www"  # Run command
+              homeboy ssh extrachill "df -h"            # Check disk space
+
+            Prerequisites: Server must be configured with SSH key.
+            """
     )
     
     @Argument(help: "Project ID (e.g., extrachill)")

@@ -251,16 +251,16 @@ struct FileBrowserSidebarView: View {
     }
     
     // MARK: - Context Menu
-    
+
     private func createContextMenu(for selectedIds: Set<String>) -> NSMenu? {
         guard selectedIds.count == 1,
               let entryId = selectedIds.first,
               let entry = browser.entries.first(where: { $0.id == entryId }) else {
             return nil
         }
-        
+
         let menu = NSMenu()
-        
+
         // Open action
         if entry.isDirectory {
             menu.addItem(makeMenuItem(title: "Open") { [browser] in
@@ -271,9 +271,26 @@ struct FileBrowserSidebarView: View {
                 onFileSelected(entry.path)
             })
         }
-        
+
         menu.addItem(NSMenuItem.separator())
-        
+
+        // Create options
+        menu.addItem(makeMenuItem(title: "New File Here...") {
+            DispatchQueue.main.async { [self] in
+                newItemName = ""
+                showNewFileSheet = true
+            }
+        })
+
+        menu.addItem(makeMenuItem(title: "New Folder Here...") {
+            DispatchQueue.main.async { [self] in
+                newItemName = ""
+                showNewFolderSheet = true
+            }
+        })
+
+        menu.addItem(NSMenuItem.separator())
+
         // Rename - capture the entry to trigger the sheet
         let entryForRename = entry
         menu.addItem(makeMenuItem(title: "Rename...") {
@@ -283,7 +300,7 @@ struct FileBrowserSidebarView: View {
                 showRenameSheet = true
             }
         })
-        
+
         // Delete - capture the entry to trigger confirmation
         let entryForDelete = entry
         menu.addItem(makeMenuItem(title: "Delete") {
@@ -292,7 +309,7 @@ struct FileBrowserSidebarView: View {
                 showDeleteConfirmation = true
             }
         })
-        
+
         return menu
     }
     

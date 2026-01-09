@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Sidebar view showing table groupings with expandable table lists
@@ -16,6 +17,7 @@ struct SiteListView: View {
                     tables: group.tables,
                     isExpanded: group.isExpanded,
                     selectedTable: viewModel.selectedTable,
+                    selectedTableNames: viewModel.selectedTableNames,
                     allGroupings: viewModel.groupedTables.map { $0.grouping },
                     canMoveUp: viewModel.canMoveGroupingUp(groupingId: group.grouping.id),
                     canMoveDown: viewModel.canMoveGroupingDown(groupingId: group.grouping.id),
@@ -24,6 +26,9 @@ struct SiteListView: View {
                         Task {
                             await viewModel.selectTable(table)
                         }
+                    },
+                    onToggleMultiSelect: { table in
+                        viewModel.toggleTableSelection(table.name)
                     },
                     isTableProtected: { viewModel.isTableProtected($0) },
                     isCoreProtected: { viewModel.isCoreProtectedTable($0.name) },
@@ -37,6 +42,7 @@ struct SiteListView: View {
                     onMoveGroupUp: { viewModel.moveGroupingUp(groupingId: group.grouping.id) },
                     onMoveGroupDown: { viewModel.moveGroupingDown(groupingId: group.grouping.id) },
                     onDeleteGroup: { viewModel.deleteGrouping(groupingId: group.grouping.id) },
+                    onSelectAllInGroup: { viewModel.selectAllTablesInGroup(groupingId: group.grouping.id) },
                     onAddTableToGroup: { table, grouping in
                         viewModel.addTablesToGrouping(tableNames: [table.name], groupingId: grouping.id)
                     },
@@ -55,13 +61,14 @@ struct SiteListView: View {
                     onUnlockTable: { viewModel.unlockTable($0.name) }
                 )
             }
-            
+
             // Ungrouped tables section
             if !viewModel.ungroupedTables.isEmpty {
                 UngroupedSection(
                     tables: viewModel.ungroupedTables,
                     isExpanded: viewModel.isUngroupedExpanded,
                     selectedTable: viewModel.selectedTable,
+                    selectedTableNames: viewModel.selectedTableNames,
                     allGroupings: viewModel.groupedTables.map { $0.grouping },
                     onToggle: { viewModel.toggleUngroupedExpansion() },
                     onSelectTable: { table in
@@ -69,10 +76,14 @@ struct SiteListView: View {
                             await viewModel.selectTable(table)
                         }
                     },
+                    onToggleMultiSelect: { table in
+                        viewModel.toggleTableSelection(table.name)
+                    },
                     isTableProtected: { viewModel.isTableProtected($0) },
                     isCoreProtected: { viewModel.isCoreProtectedTable($0.name) },
                     isUnlocked: { viewModel.isTableUnlocked($0.name) },
                     onDeleteTable: { viewModel.requestTableDeletion($0) },
+                    onSelectAllUngrouped: { viewModel.selectAllUngroupedTables() },
                     onAddTableToGroup: { table, grouping in
                         viewModel.addTablesToGrouping(tableNames: [table.name], groupingId: grouping.id)
                     },
@@ -88,6 +99,44 @@ struct SiteListView: View {
             }
         }
         .listStyle(.sidebar)
+        .contextMenu {
+            Button("Regenerate Default Groupings...") {
+                viewModel.requestRegenerateDefaultGroupings()
+            }
+
+            if !viewModel.selectedTableNames.isEmpty {
+                Divider()
+
+                Text("\(viewModel.selectedTableNames.count) tables selected")
+                    .foregroundColor(.secondary)
+
+                Menu("Add Selected to Group...") {
+                    ForEach(viewModel.groupedTables.map { $0.grouping }) { grouping in
+                        Button(grouping.name) {
+                            viewModel.addSelectedTablesToGrouping(groupingId: grouping.id)
+                        }
+                    }
+                }
+
+                Button("Protect Selected Tables") {
+                    viewModel.protectSelectedTables()
+                }
+
+                Button("Clear Selection") {
+                    viewModel.clearTableSelection()
+                }
+            }
+        }
+        .alert("Regenerate Default Groupings?", isPresented: $viewModel.showRegenerateGroupingsConfirm) {
+            Button("Cancel", role: .cancel) {
+                viewModel.cancelRegenerateDefaultGroupings()
+            }
+            Button("Regenerate", role: .destructive) {
+                viewModel.confirmRegenerateDefaultGroupings()
+            }
+        } message: {
+            Text("This will replace all custom groupings with defaults based on your project configuration. This cannot be undone.")
+        }
         .sheet(isPresented: $showingGroupEditor) {
             GroupingEditorSheet(mode: groupEditorMode) { name in
                 switch groupEditorMode {
@@ -112,11 +161,13 @@ struct GroupSection: View {
     let tables: [DatabaseTable]
     let isExpanded: Bool
     let selectedTable: DatabaseTable?
+    let selectedTableNames: Set<String>
     let allGroupings: [ItemGrouping]
     let canMoveUp: Bool
     let canMoveDown: Bool
     let onToggle: () -> Void
     let onSelectTable: (DatabaseTable) -> Void
+    let onToggleMultiSelect: (DatabaseTable) -> Void
     let isTableProtected: (DatabaseTable) -> Bool
     let isCoreProtected: (DatabaseTable) -> Bool
     let isUnlocked: (DatabaseTable) -> Bool
@@ -126,13 +177,14 @@ struct GroupSection: View {
     let onMoveGroupUp: () -> Void
     let onMoveGroupDown: () -> Void
     let onDeleteGroup: () -> Void
+    let onSelectAllInGroup: () -> Void
     let onAddTableToGroup: (DatabaseTable, ItemGrouping) -> Void
     let onRemoveTableFromGroup: (DatabaseTable) -> Void
     let onCreateNewGroup: (String) -> Void
     let onProtectTable: (DatabaseTable) -> Void
     let onUnprotectTable: (DatabaseTable) -> Void
     let onUnlockTable: (DatabaseTable) -> Void
-    
+
     var body: some View {
         DisclosureGroup(isExpanded: Binding(
             get: { isExpanded },
@@ -142,6 +194,7 @@ struct GroupSection: View {
                 TableRowView(
                     table: table,
                     isSelected: selectedTable?.id == table.id,
+                    isMultiSelected: selectedTableNames.contains(table.name),
                     isProtected: isTableProtected(table),
                     isCoreProtected: isCoreProtected(table),
                     isUnlocked: isUnlocked(table),
@@ -153,34 +206,45 @@ struct GroupSection: View {
                     onCreateNewGroup: { onCreateNewGroup(table.name) },
                     onProtect: { onProtectTable(table) },
                     onUnprotect: { onUnprotectTable(table) },
-                    onUnlock: { onUnlockTable(table) }
+                    onUnlock: { onUnlockTable(table) },
+                    onToggleMultiSelect: { onToggleMultiSelect(table) }
                 )
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    onSelectTable(table)
+                    if NSEvent.modifierFlags.contains(.command) {
+                        onToggleMultiSelect(table)
+                    } else {
+                        onSelectTable(table)
+                    }
                 }
             }
         } label: {
             GroupHeaderView(grouping: grouping, tableCount: tables.count)
                 .contextMenu {
+                    Button("Select All Tables") {
+                        onSelectAllInGroup()
+                    }
+
+                    Divider()
+
                     Button("Rename Group...") {
                         onRenameGroup()
                     }
-                    
+
                     Divider()
-                    
+
                     Button("Move Up") {
                         onMoveGroupUp()
                     }
                     .disabled(!canMoveUp)
-                    
+
                     Button("Move Down") {
                         onMoveGroupDown()
                     }
                     .disabled(!canMoveDown)
-                    
+
                     Divider()
-                    
+
                     Button("Delete Group", role: .destructive) {
                         onDeleteGroup()
                     }
@@ -219,19 +283,22 @@ struct UngroupedSection: View {
     let tables: [DatabaseTable]
     let isExpanded: Bool
     let selectedTable: DatabaseTable?
+    let selectedTableNames: Set<String>
     let allGroupings: [ItemGrouping]
     let onToggle: () -> Void
     let onSelectTable: (DatabaseTable) -> Void
+    let onToggleMultiSelect: (DatabaseTable) -> Void
     let isTableProtected: (DatabaseTable) -> Bool
     let isCoreProtected: (DatabaseTable) -> Bool
     let isUnlocked: (DatabaseTable) -> Bool
     let onDeleteTable: (DatabaseTable) -> Void
+    let onSelectAllUngrouped: () -> Void
     let onAddTableToGroup: (DatabaseTable, ItemGrouping) -> Void
     let onCreateNewGroup: (String) -> Void
     let onProtectTable: (DatabaseTable) -> Void
     let onUnprotectTable: (DatabaseTable) -> Void
     let onUnlockTable: (DatabaseTable) -> Void
-    
+
     var body: some View {
         DisclosureGroup(isExpanded: Binding(
             get: { isExpanded },
@@ -241,6 +308,7 @@ struct UngroupedSection: View {
                 TableRowView(
                     table: table,
                     isSelected: selectedTable?.id == table.id,
+                    isMultiSelected: selectedTableNames.contains(table.name),
                     isProtected: isTableProtected(table),
                     isCoreProtected: isCoreProtected(table),
                     isUnlocked: isUnlocked(table),
@@ -252,11 +320,16 @@ struct UngroupedSection: View {
                     onCreateNewGroup: { onCreateNewGroup(table.name) },
                     onProtect: { onProtectTable(table) },
                     onUnprotect: { onUnprotectTable(table) },
-                    onUnlock: { onUnlockTable(table) }
+                    onUnlock: { onUnlockTable(table) },
+                    onToggleMultiSelect: { onToggleMultiSelect(table) }
                 )
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    onSelectTable(table)
+                    if NSEvent.modifierFlags.contains(.command) {
+                        onToggleMultiSelect(table)
+                    } else {
+                        onSelectTable(table)
+                    }
                 }
             }
         } label: {
@@ -264,10 +337,15 @@ struct UngroupedSection: View {
                 Text("\(tables.count) ungrouped")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                
+
                 Spacer()
             }
             .padding(.vertical, 4)
+            .contextMenu {
+                Button("Select All Ungrouped") {
+                    onSelectAllUngrouped()
+                }
+            }
         }
     }
 }
@@ -276,6 +354,7 @@ struct UngroupedSection: View {
 struct TableRowView: View {
     let table: DatabaseTable
     let isSelected: Bool
+    let isMultiSelected: Bool
     let isProtected: Bool
     let isCoreProtected: Bool
     let isUnlocked: Bool
@@ -288,15 +367,31 @@ struct TableRowView: View {
     let onProtect: () -> Void
     let onUnprotect: () -> Void
     let onUnlock: () -> Void
-    
+    let onToggleMultiSelect: () -> Void
+
+    private var rowBackground: Color {
+        if isSelected {
+            return Color.accentColor.opacity(0.2)
+        } else if isMultiSelected {
+            return Color.accentColor.opacity(0.1)
+        }
+        return Color.clear
+    }
+
     var body: some View {
         HStack {
+            if isMultiSelected {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.accentColor)
+                    .font(.caption)
+            }
+
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(table.name)
                         .font(.body)
                         .lineLimit(1)
-                    
+
                     if isProtected && !isUnlocked {
                         Image(systemName: "lock.fill")
                             .font(.caption2)
@@ -309,23 +404,23 @@ struct TableRowView: View {
                             .help("Unlocked - deletion allowed")
                     }
                 }
-                
+
                 HStack(spacing: 8) {
                     Text("\(table.rowCount) rows")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
+
                     Text(table.formattedSize)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
-            
+
             Spacer()
         }
         .padding(.vertical, 2)
         .padding(.leading, 8)
-        .background(isSelected ? Color.accentColor.opacity(0.2) : Color.clear)
+        .background(rowBackground)
         .cornerRadius(4)
         .contextMenu {
             // Copy

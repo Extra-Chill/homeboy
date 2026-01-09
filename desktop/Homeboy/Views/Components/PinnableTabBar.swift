@@ -62,20 +62,19 @@ struct PinnableTabBar<Item: PinnableTabItem>: View {
                 
                 // Browse button (only shown if onBrowse is provided)
                 if let onBrowse = onBrowse {
-                    Button {
-                        onBrowse()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: browseIcon)
-                                .font(.caption)
-                            Text(browseLabel)
-                                .font(.subheadline)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .foregroundColor(.secondary)
+                    HStack(spacing: 4) {
+                        Image(systemName: browseIcon)
+                            .font(.caption)
+                        Text(browseLabel)
+                            .font(.subheadline)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .foregroundColor(.secondary)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onBrowse()
+                    }
                 }
                 
                 Spacer()
@@ -87,48 +86,46 @@ struct PinnableTabBar<Item: PinnableTabItem>: View {
     }
     
     private func tabButton(for item: Item) -> some View {
-        Button {
-            onSelect(item.id)
-        } label: {
-            HStack(spacing: 6) {
-                // Pin indicator
-                if item.isPinned {
-                    Image(systemName: "pin.fill")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                
-                Text(item.displayName)
-                    .font(.subheadline)
-                
-                // Custom indicator (e.g., unsaved changes)
-                if showIndicator(item) {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 6, height: 6)
-                }
-                
-                // Close button (only for unpinned)
-                if !item.isPinned {
-                    Button {
-                        onClose(item.id)
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
+        HStack(spacing: 6) {
+            // Pin indicator
+            if item.isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(item.id == selectedId ? Color.accentColor.opacity(0.2) : Color.clear)
-            )
-            .foregroundColor(item.id == selectedId ? .accentColor : .secondary)
+
+            Text(item.displayName)
+                .font(.subheadline)
+
+            // Custom indicator (e.g., unsaved changes)
+            if showIndicator(item) {
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 6, height: 6)
+            }
+
+            // Close button (only for unpinned)
+            if !item.isPinned {
+                Image(systemName: "xmark")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onClose(item.id)
+                    }
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(item.id == selectedId ? Color.accentColor.opacity(0.2) : Color.clear)
+        )
+        .foregroundColor(item.id == selectedId ? .accentColor : .secondary)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onSelect(item.id)
+        }
     }
     
     @ViewBuilder

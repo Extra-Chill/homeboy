@@ -2,54 +2,45 @@ import SwiftUI
 
 struct RemoteLogViewerView: View {
     @StateObject private var viewModel = RemoteLogViewerViewModel()
-    @StateObject private var browser: RemoteFileBrowser
     @State private var showCopiedFeedback = false
-    
-    init() {
-        let serverId = ConfigurationManager.shared.safeActiveProject.serverId ?? ""
-        let basePath = ConfigurationManager.shared.safeActiveProject.basePath
-        _browser = StateObject(wrappedValue: RemoteFileBrowser(serverId: serverId, startingPath: basePath))
+    @State private var showBrowser = false
+
+    private var serverId: String {
+        ConfigurationManager.shared.safeActiveProject.serverId ?? ""
     }
-    
+
+    private var basePath: String? {
+        ConfigurationManager.shared.safeActiveProject.basePath
+    }
+
     var body: some View {
-        CollapsibleSplitView(
-            orientation: .horizontal,
-            collapseSide: .leading,
-            isCollapsed: $viewModel.sidebarCollapsed,
-            panelSize: (min: 200, ideal: 260, max: 400)
-        ) {
-            // Primary content: Log viewer
-            logViewerContent
-        } secondary: {
-            // Sidebar: File browser (file operations disabled for log viewer)
-            FileBrowserSidebarView(
-                browser: browser,
-                onFileSelected: { path in
-                    openLogFromBrowser(path)
-                },
-                onCollapse: {
-                    viewModel.sidebarCollapsed = true
-                },
-                fileOperationsEnabled: false  // Read-only for log viewer
-            )
-        }
-        .frame(minWidth: 700, minHeight: 400)
-        .task {
-            await browser.connect()
-            if viewModel.selectedLogId != nil {
-                await viewModel.fetchSelectedLog()
+        logViewerContent
+            .frame(minWidth: 700, minHeight: 400)
+            .task {
+                if viewModel.selectedLogId != nil {
+                    await viewModel.fetchSelectedLog()
+                }
             }
-        }
-        .alert("Clear Log", isPresented: $viewModel.showClearConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Clear", role: .destructive) {
-                Task { await viewModel.clearSelectedLog() }
+            .sheet(isPresented: $showBrowser) {
+                RemoteFileBrowserView(
+                    serverId: serverId,
+                    startingPath: basePath,
+                    mode: .selectFile,
+                    onSelectPath: { path in
+                        openLogFromBrowser(path)
+                    }
+                )
             }
-        } message: {
-            if let log = viewModel.selectedLog {
-                Text("This will permanently delete the contents of \(log.displayName). This cannot be undone.")
+            .alert("Clear Log", isPresented: $viewModel.showClearConfirmation) {
+                Button("Cancel", role: .cancel) {}
+                Button("Clear", role: .destructive) {
+                    Task { await viewModel.clearSelectedLog() }
+                }
+            } message: {
+                if let log = viewModel.selectedLog {
+                    Text("This will permanently delete the contents of \(log.displayName). This cannot be undone.")
+                }
             }
-        }
     }
     
     // MARK: - Open Log from Browser
@@ -83,7 +74,7 @@ struct RemoteLogViewerView: View {
     }
     
     // MARK: - Tab Bar
-    
+
     private var tabBar: some View {
         PinnableTabBar(
             items: viewModel.openLogs,
@@ -94,39 +85,32 @@ struct RemoteLogViewerView: View {
             onPin: { viewModel.pinLog($0) },
             onUnpin: { viewModel.unpinLog($0) },
             onBrowse: {
-                // Toggle sidebar instead of showing modal
-                viewModel.sidebarCollapsed = false
+                showBrowser = true
             }
         )
     }
     
     // MARK: - Empty State
-    
+
     private var emptyState: some View {
         VStack(spacing: 16) {
             Image(systemName: "doc.text.magnifyingglass")
                 .font(.system(size: 48))
                 .foregroundColor(.secondary)
-            
+
             Text("No Logs Open")
                 .font(.headline)
-            
-            if viewModel.sidebarCollapsed {
-                Text("Use the sidebar to browse and open log files")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                
-                Button {
-                    viewModel.sidebarCollapsed = false
-                } label: {
-                    Label("Show Sidebar", systemImage: "sidebar.left")
-                }
-                .buttonStyle(.borderedProminent)
-            } else {
-                Text("Select a log file from the sidebar to view")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+
+            Text("Browse the server to select a log file")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+
+            Button {
+                showBrowser = true
+            } label: {
+                Label("Browse...", systemImage: "folder")
             }
+            .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

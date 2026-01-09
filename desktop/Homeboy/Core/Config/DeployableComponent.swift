@@ -103,7 +103,8 @@ enum VersionInfo: Equatable {
     case version(String)
     case timestamp(Date)
     case notDeployed
-    
+    case parseError(String)
+
     var displayString: String {
         switch self {
         case .version(let v):
@@ -115,7 +116,14 @@ enum VersionInfo: Equatable {
             return formatter.string(from: date)
         case .notDeployed:
             return "—"
+        case .parseError:
+            return "Error"
         }
+    }
+
+    var errorMessage: String? {
+        if case .parseError(let message) = self { return message }
+        return nil
     }
 }
 

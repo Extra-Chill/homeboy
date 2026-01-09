@@ -37,7 +37,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.extrachill.homeboy
         PRODUCT_NAME: Homeboy
-        MARKETING_VERSION: 0.6.0
+        MARKETING_VERSION: 0.6.1
         CURRENT_PROJECT_VERSION: 9
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools

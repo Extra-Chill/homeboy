@@ -30,6 +30,8 @@ Projects and servers can be configured via Homeboy.app or via the CLI (`project`
 
 ## Commands
 
+All commands read and write the same configuration files as Homeboy.app (see “Configuration” above). Many commands accept an optional `[subtarget]` argument for project-specific targets (WordPress multisite blogs, Node environments, etc.).
+
 ### projects
 
 List configured projects.
@@ -133,8 +135,8 @@ homeboy project set <id> [options]
 - `--dbPort` - Database port
 - `--apiEnabled` - Enable/disable API (true/false)
 - `--apiUrl` - API base URL
-- `--localWpCliPath` - Local WP-CLI path
-- `--localDomain` - Local development domain
+- `--localWpCliPath` - Local site path (legacy flag name; sets `localCLI.sitePath`)
+- `--localDomain` - Local development domain (sets `localCLI.domain`)
 
 **Examples**:
 ```bash
@@ -230,6 +232,22 @@ Outputs JSON array of subtargets.
 ```bash
 homeboy project subtarget set <project> <id> [--name <name>] [--domain <domain>] [--number <n>] [--is-default]
 ```
+
+#### project discover
+
+Discover and set `basePath` by scanning the remote server using the project type’s discovery rules.
+
+```bash
+homeboy project discover <project>
+homeboy project discover <project> --list
+homeboy project discover <project> --set <path>
+```
+
+**Flags**:
+- `--list` - Output discovered installations as JSON (does not modify config)
+
+**Options**:
+- `--set` - Set `basePath` directly (skips discovery)
 
 #### project component
 
@@ -363,7 +381,7 @@ homeboy server list
 Execute WP-CLI commands on the production server (WordPress projects only).
 
 ```bash
-homeboy wp <project> [subtarget] <command...>
+homeboy wp <project> [--local] [subtarget] <command...>
 ```
 
 **Arguments**:
@@ -372,9 +390,8 @@ homeboy wp <project> [subtarget] <command...>
 - `command` - WP-CLI command and arguments
 
 **Requirements**:
-- Project type must be `wordpress`
-- Server configured with SSH key
-- Base path configured (wp-content path)
+- Remote mode (default): project type must be `wordpress`, server configured, base path configured (wp-content path)
+- Local mode (`--local`): project must have `localCLI.sitePath` configured; project type must provide a WordPress CLI template
 
 **Examples**:
 ```bash
@@ -399,7 +416,7 @@ homeboy wp extrachill db export - > backup.sql
 Execute PM2 commands on remote Node.js servers (Node.js projects only).
 
 ```bash
-homeboy pm2 <project> [subtarget] <command...>
+homeboy pm2 <project> [--local] [subtarget] <command...>
 ```
 
 **Arguments**:
@@ -408,9 +425,8 @@ homeboy pm2 <project> [subtarget] <command...>
 - `command` - PM2 command and arguments
 
 **Requirements**:
-- Project type must be `nodejs`
-- Server configured with SSH key
-- Base path configured
+- Remote mode (default): project type must be `nodejs`, server configured, base path configured
+- Local mode (`--local`): project must have `localCLI.sitePath` configured; project type must provide a PM2 CLI template
 
 **Examples**:
 ```bash
@@ -678,8 +694,9 @@ homeboy module run my-module arg1 arg2 --flag value
 Commands that accept a `[subtarget]` argument allow targeting specific subtargets within a project. For WordPress projects, subtargets represent multisite blogs. For Node.js projects, subtargets can represent different PM2 processes or environments.
 
 **Subtarget Resolution**:
-- Subtarget IDs are matched case-insensitively
-- If no subtarget is provided or the ID doesn't match, the main project domain is used
+- Subtargets are matched case-insensitively by `id` or `name`
+- If no subtarget is provided (or no match), the default subtarget is used
+- If no default is set, the main project domain is used
 
 **Configuration**: Subtargets are managed via `homeboy project subtarget` commands or in Homeboy.app.
 

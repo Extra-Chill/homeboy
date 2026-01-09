@@ -1,11 +1,26 @@
 import ArgumentParser
 import Foundation
 
-/// Module commands: homeboy module <subcommand>
 struct Module: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "module",
-        abstract: "Manage and run Homeboy modules",
+        abstract: "Execute CLI-compatible Homeboy modules",
+        discussion: """
+            Execute CLI-compatible modules from the command line.
+
+            Subcommands:
+              list   Show available modules
+              run    Execute a module
+
+            Examples:
+              homeboy module list
+              homeboy module list --project extrachill
+              homeboy module run my-module --target_url https://example.com
+
+            Note: Only modules with 'cli' runtime type can be run from CLI.
+
+            See 'homeboy docs module' for full documentation.
+            """,
         subcommands: [ModuleRun.self, ModuleList.self],
         defaultSubcommand: ModuleList.self
     )
@@ -13,11 +28,21 @@ struct Module: ParsableCommand {
 
 // MARK: - Module Run
 
-/// Runs a module: homeboy module run <module-id> [--project <project>] [args...]
 struct ModuleRun: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "run",
-        abstract: "Run a module"
+        abstract: "Execute a CLI-compatible module",
+        discussion: """
+            Executes a CLI-compatible module.
+
+            Examples:
+              homeboy module run my-module --target_url https://example.com
+              homeboy module run my-module --project extrachill arg1 arg2
+
+            Prerequisites:
+              - Module must have 'cli' runtime type
+              - Project must have localCLI.sitePath configured
+            """
     )
     
     @Argument(help: "Module ID")
@@ -188,11 +213,17 @@ struct ModuleRun: ParsableCommand {
 
 // MARK: - Module List
 
-/// Lists available modules: homeboy module list [--project <project>]
 struct ModuleList: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "list",
-        abstract: "List available modules"
+        abstract: "Show installed modules with compatibility status",
+        discussion: """
+            Shows installed modules with compatibility status.
+
+            Examples:
+              homeboy module list                        # All modules
+              homeboy module list --project extrachill   # Show compatibility
+            """
     )
     
     @Option(name: .shortAndLong, help: "Project ID to filter compatible modules")

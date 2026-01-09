@@ -5,9 +5,9 @@ import SwiftUI
 
 /// ViewModel for managing a single module's execution state
 @MainActor
-class ModuleViewModel: ObservableObject {
-    
-    private var cancellables = Set<AnyCancellable>()
+class ModuleViewModel: ObservableObject, ConfigurationObserving {
+
+    var cancellables = Set<AnyCancellable>()
     let moduleId: String
     
     @Published var inputValues: [String: String] = [:]
@@ -47,6 +47,11 @@ class ModuleViewModel: ObservableObject {
     
     init(moduleId: String) {
         self.moduleId = moduleId
+        observeConfiguration()
+    }
+
+    func onConfigurationChange() {
+        objectWillChange.send()
     }
     
     /// Initialize input values from module manifest

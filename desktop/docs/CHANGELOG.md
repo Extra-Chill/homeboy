@@ -2,6 +2,19 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.6.1
+
+### New Features
+- **CLI Docs Command**: Added `homeboy docs [topic...]` to display bundled CLI documentation in the terminal, with optional heading-based filtering.
+- **Docs Bundling for CLI**: Homeboy.app now syncs `docs/CLI.md` into Application Support on launch so the CLI can find it reliably.
+
+### Improvements
+- **Configuration Reactivity**: Added directory watchers so the app UI updates available projects/servers when CLI edits JSON configs.
+- **Database Browser**: Added Command-click multi-select for tables, bulk protect/add-to-group actions, and a “Regenerate Default Groupings” flow.
+- **Deployer Version Checks**: Remote version fetching is throttled and reports per-component parse errors instead of failing the whole refresh.
+- **Remote Tools**: Remote file editor shows file size; log viewer browsing is now a modal file browser instead of a collapsible sidebar.
+- **UI Components**: Added context menu plumbing to `NativeDataTable`, and replaced tab-bar buttons with gesture-based targets to avoid nested button issues.
+
 ## 0.6.0
 
 ### New Features
@@ -28,7 +41,7 @@ All notable code changes to this project are documented in this file.
 - **Template Rendering**: Added `TemplateRenderer.swift` for flexible command template substitution with `{{variable}}` placeholders.
 - **PM2 Command Support**: Added `homeboy pm2 <project> [sub-target] <args...>` for Node.js project process management.
 - **CLI Configuration**: Added `CLIConfig` to project type definitions, enabling per-project-type remote CLI tools.
-- **Sub-Target Support**: Added `subTargets` computed property to `ProjectConfiguration` for generic sub-target targeting (e.g., multisite blogs, environments).
+- **Subtarget Support**: Added `subTargets` computed property to `ProjectConfiguration` for generic subtarget targeting (e.g., multisite sites, environments).
 
 ### Refactoring
 - **Remote CLI Architecture**: Refactored WP-CLI command to use shared `RemoteCLI.execute()` system with template-based command rendering.

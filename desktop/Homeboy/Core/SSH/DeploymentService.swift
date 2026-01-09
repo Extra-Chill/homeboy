@@ -141,8 +141,7 @@ class DeploymentService {
                 if let version = VersionParser.parseVersion(from: content, pattern: pattern) {
                     onComplete(.success(.version(version)))
                 } else {
-                    // Version file exists but couldn't parse - return unknown
-                    onComplete(.success(.notDeployed))
+                    onComplete(.success(.parseError("Version pattern did not match in \(remotePath)")))
                 }
                 
             case .failure(let error):
@@ -174,37 +173,41 @@ class DeploymentService {
     }
     
     // MARK: - Batch Version Fetching
-    
-    /// Fetch versions for multiple components
+
+    /// Fetch versions for multiple components with throttled SSH connections
     func fetchRemoteVersions(
         components: [DeployableComponent],
         onComplete: @escaping (Result<[String: VersionInfo], Error>) -> Void
     ) {
+        let maxConcurrent = 3
         var results: [String: VersionInfo] = [:]
+        let resultsLock = NSLock()
+        let semaphore = DispatchSemaphore(value: maxConcurrent)
         let group = DispatchGroup()
-        var firstError: Error?
-        
+
         for component in components {
             group.enter()
-            fetchRemoteVersion(component: component) { result in
-                switch result {
-                case .success(let versionInfo):
-                    results[component.id] = versionInfo
-                case .failure(let error):
-                    if firstError == nil {
-                        firstError = error
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                semaphore.wait()
+                self?.fetchRemoteVersion(component: component) { result in
+                    defer {
+                        semaphore.signal()
+                        group.leave()
                     }
+                    resultsLock.lock()
+                    switch result {
+                    case .success(let versionInfo):
+                        results[component.id] = versionInfo
+                    case .failure(let error):
+                        results[component.id] = .parseError(error.localizedDescription)
+                    }
+                    resultsLock.unlock()
                 }
-                group.leave()
             }
         }
-        
+
         group.notify(queue: .main) {
-            if let error = firstError, results.isEmpty {
-                onComplete(.failure(error))
-            } else {
-                onComplete(.success(results))
-            }
+            onComplete(.success(results))
         }
     }
 }

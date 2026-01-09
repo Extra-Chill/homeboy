@@ -156,12 +156,18 @@ struct RemoteFileEditorView: View {
                     .foregroundColor(.secondary)
                     .font(.caption)
             }
-            
+
             Text(file.path)
                 .font(.headline)
-            
+
+            if !file.formattedSize.isEmpty {
+                Text(file.formattedSize)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             Spacer()
-            
+
             if file.hasUnsavedChanges {
                 Text("Modified")
                     .font(.caption)
@@ -171,7 +177,7 @@ struct RemoteFileEditorView: View {
                     .background(Color.orange.opacity(0.1))
                     .cornerRadius(4)
             }
-            
+
             Text("Fetched: \(viewModel.lastFetchedFormatted(for: file))")
                 .font(.caption)
                 .foregroundColor(.secondary)

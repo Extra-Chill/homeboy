@@ -3,11 +3,26 @@ import Foundation
 
 // MARK: - Project Command
 
-/// Project management: homeboy project <subcommand>
 struct Project: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "project",
-        abstract: "Manage project configurations",
+        abstract: "Create and configure projects for deployment",
+        discussion: """
+            Create, update, and configure projects for deployment and remote operations.
+
+            Common Operations:
+              project create    Create a new project
+              project set       Update project settings
+              project show      Display project configuration
+              project switch    Change active project
+
+            Examples:
+              homeboy project create "My Site" --type wordpress
+              homeboy project set mysite --server production-1
+              homeboy project show mysite --field domain
+
+            See 'homeboy docs project' for full documentation.
+            """,
         subcommands: [
             ProjectCreate.self,
             ProjectShow.self,
@@ -23,11 +38,19 @@ struct Project: ParsableCommand {
 
 // MARK: - Project Create
 
-/// Create a new project: homeboy project create <name> [--id <id>] [--type wordpress]
 struct ProjectCreate: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a new project"
+        abstract: "Create a new project with specified type",
+        discussion: """
+            Creates a new project configuration file.
+
+            Examples:
+              homeboy project create "My Site" --type wordpress
+              homeboy project create "API Server" --type nodejs --id api-prod
+
+            After creation, configure server and paths with 'project set'.
+            """
     )
     
     @Argument(help: "Project name")
@@ -77,11 +100,18 @@ struct ProjectCreate: ParsableCommand {
 
 // MARK: - Project Show
 
-/// Show project configuration: homeboy project show <id> [--field <field>]
 struct ProjectShow: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "show",
-        abstract: "Show project configuration"
+        abstract: "Display project configuration as JSON",
+        discussion: """
+            Displays project configuration. Use --field for specific values.
+
+            Examples:
+              homeboy project show mysite
+              homeboy project show mysite --field domain
+              homeboy project show mysite --field database.name
+            """
     )
     
     @Argument(help: "Project ID")
@@ -177,11 +207,21 @@ struct ProjectShow: ParsableCommand {
 
 // MARK: - Project Set
 
-/// Update project fields: homeboy project set <id> <--flag value>...
 struct ProjectSet: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "set",
-        abstract: "Update project configuration fields"
+        abstract: "Update project domain, server, database, and path settings",
+        discussion: """
+            Modifies project settings. Supports dot notation for nested fields.
+
+            Examples:
+              homeboy project set mysite --domain example.com
+              homeboy project set mysite --server production-1
+              homeboy project set mysite --dbName wp_mysite --dbUser admin
+              homeboy project set mysite --basePath /var/www/html
+
+            Use 'project show <id>' to see current configuration.
+            """
     )
     
     @Argument(help: "Project ID")
@@ -323,11 +363,18 @@ struct ProjectSet: ParsableCommand {
 
 // MARK: - Project Delete
 
-/// Delete a project: homeboy project delete <id> --force
 struct ProjectDelete: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete a project"
+        abstract: "Permanently remove a project configuration",
+        discussion: """
+            Deletes a project configuration file. Requires --force flag.
+
+            Example:
+              homeboy project delete old-project --force
+
+            Note: Cannot delete the active project. Use 'project switch' first.
+            """
     )
     
     @Argument(help: "Project ID")
@@ -366,11 +413,17 @@ struct ProjectDelete: ParsableCommand {
 
 // MARK: - Project Switch
 
-/// Switch active project: homeboy project switch <id>
 struct ProjectSwitch: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "switch",
-        abstract: "Switch active project"
+        abstract: "Set the active project for subsequent commands",
+        discussion: """
+            Sets the active project for commands that don't specify a project ID.
+
+            Example:
+              homeboy project switch client-site
+              homeboy projects --current  # Verify active project
+            """
     )
     
     @Argument(help: "Project ID")
@@ -394,11 +447,20 @@ struct ProjectSwitch: ParsableCommand {
 
 // MARK: - Project Discover
 
-/// Discover remote installations: homeboy project discover <id> [--list] [--set <path>]
 struct ProjectDiscover: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "discover",
-        abstract: "Discover and set basePath from remote server"
+        abstract: "Auto-detect remote installation path via SSH",
+        discussion: """
+            Searches the remote server for installations and sets basePath.
+
+            Examples:
+              homeboy project discover mysite           # Interactive selection
+              homeboy project discover mysite --list    # List without modifying
+              homeboy project discover mysite --set /var/www/html
+
+            Prerequisite: Server must be configured with SSH key.
+            """
     )
     
     @Argument(help: "Project ID")
@@ -570,11 +632,18 @@ private func runSSHCommandDirect(server: ServerConfig, command: String, ignoreEx
 
 // MARK: - Project SubTarget
 
-/// SubTarget management: homeboy project subtarget <subcommand>
 struct ProjectSubTarget: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "subtarget",
-        abstract: "Manage project subtargets",
+        abstract: "Configure multisite blogs or environment targets",
+        discussion: """
+            Manage subtargets for WordPress multisite or multi-environment setups.
+
+            Examples:
+              homeboy project subtarget add mysite shop --name "Shop" --domain shop.example.com
+              homeboy project subtarget list mysite
+              homeboy project subtarget set mysite shop --isDefault
+            """,
         subcommands: [
             SubTargetAdd.self,
             SubTargetRemove.self,
@@ -584,7 +653,6 @@ struct ProjectSubTarget: ParsableCommand {
     )
 }
 
-/// Add a subtarget: homeboy project subtarget add <project> <id> --name <name> --domain <domain>
 struct SubTargetAdd: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "add",
@@ -648,7 +716,6 @@ struct SubTargetAdd: ParsableCommand {
     }
 }
 
-/// Remove a subtarget: homeboy project subtarget remove <project> <id> --force
 struct SubTargetRemove: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "remove",
@@ -699,7 +766,6 @@ struct SubTargetRemove: ParsableCommand {
     }
 }
 
-/// List subtargets: homeboy project subtarget list <project>
 struct SubTargetList: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "list",
@@ -722,7 +788,6 @@ struct SubTargetList: ParsableCommand {
     }
 }
 
-/// Update subtarget fields: homeboy project subtarget set <project> <id> <--flag value>...
 struct SubTargetSet: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "set",
@@ -803,11 +868,18 @@ struct SubTargetSet: ParsableCommand {
 
 // MARK: - Project Component
 
-/// Component management: homeboy project component <subcommand>
 struct ProjectComponent: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "component",
-        abstract: "Manage project components",
+        abstract: "Configure deployable plugins, themes, or packages",
+        discussion: """
+            Manage deployment components (plugins, themes, packages).
+
+            Examples:
+              homeboy project component add mysite "My Plugin" --localPath ~/plugins/my-plugin --remotePath plugins/my-plugin --buildArtifact dist/my-plugin.zip
+              homeboy project component list mysite
+              homeboy project component remove mysite my-plugin --force
+            """,
         subcommands: [
             ComponentAdd.self,
             ComponentRemove.self,
@@ -816,7 +888,6 @@ struct ProjectComponent: ParsableCommand {
     )
 }
 
-/// Add a component: homeboy project component add <project> <name> --local-path <path> ...
 struct ComponentAdd: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "add",
@@ -880,7 +951,6 @@ struct ComponentAdd: ParsableCommand {
     }
 }
 
-/// Remove a component: homeboy project component remove <project> <id> --force
 struct ComponentRemove: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "remove",
@@ -924,7 +994,6 @@ struct ComponentRemove: ParsableCommand {
     }
 }
 
-/// List components: homeboy project component list <project>
 struct ComponentList: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "list",

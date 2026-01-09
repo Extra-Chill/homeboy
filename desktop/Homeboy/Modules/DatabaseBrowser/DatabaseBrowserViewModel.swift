@@ -5,9 +5,9 @@ import SwiftUI
 
 /// ViewModel for the Database Browser module
 @MainActor
-class DatabaseBrowserViewModel: ObservableObject {
-    
-    private var cancellables = Set<AnyCancellable>()
+class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
+
+    var cancellables = Set<AnyCancellable>()
     
     // MARK: - Published State
     
@@ -51,18 +51,36 @@ class DatabaseBrowserViewModel: ObservableObject {
     @Published var showRowDeletionConfirm: Bool = false
     @Published var rowDeletionConfirmText: String = ""
     @Published var isDeletingRow: Bool = false
-    
+
     // Table deletion
     @Published var pendingTableDeletion: PendingTableDeletion? = nil
     @Published var showTableDeletionConfirm: Bool = false
     @Published var tableDeletionConfirmText: String = ""
     @Published var isDeletingTable: Bool = false
+
+    // Regenerate groupings confirmation
+    @Published var showRegenerateGroupingsConfirm: Bool = false
+
+    // Multi-selection for bulk operations
+    @Published var selectedTableNames: Set<String> = []
     
     // MARK: - Private State
     
     private var mysqlService: MySQLService?
     private var currentGroupings: [ItemGrouping] = []
-    
+
+    // MARK: - Initialization
+
+    init() {
+        observeConfiguration()
+    }
+
+    func onConfigurationChange() {
+        let project = ConfigurationManager.readCurrentProject()
+        currentGroupings = project.tableGroupings
+        refreshGroupedTables()
+    }
+
     // MARK: - Computed Properties
     
     var totalPages: Int {
@@ -618,6 +636,87 @@ class DatabaseBrowserViewModel: ObservableObject {
     /// Check if a table is in a group by explicit membership (not pattern)
     func isTableInGroupByMembership(_ tableName: String) -> Bool {
         currentGroupings.contains { $0.memberIds.contains(tableName) }
+    }
+
+    // MARK: - Regenerate Default Groupings
+
+    /// Request regeneration of default groupings (shows confirmation)
+    func requestRegenerateDefaultGroupings() {
+        showRegenerateGroupingsConfirm = true
+    }
+
+    /// Regenerate default groupings from project type definition (after confirmation)
+    func confirmRegenerateDefaultGroupings() {
+        let project = ConfigurationManager.readCurrentProject()
+        let groupings = SchemaResolver.resolveDefaultGroupings(for: project)
+        currentGroupings = groupings
+        saveGroupings()
+        refreshGroupedTables()
+        showRegenerateGroupingsConfirm = false
+    }
+
+    /// Cancel regenerate groupings confirmation
+    func cancelRegenerateDefaultGroupings() {
+        showRegenerateGroupingsConfirm = false
+    }
+
+    // MARK: - Multi-Selection Management
+
+    /// Toggle a table's selection state for bulk operations
+    func toggleTableSelection(_ tableName: String) {
+        if selectedTableNames.contains(tableName) {
+            selectedTableNames.remove(tableName)
+        } else {
+            selectedTableNames.insert(tableName)
+        }
+    }
+
+    /// Clear all table selections
+    func clearTableSelection() {
+        selectedTableNames.removeAll()
+    }
+
+    /// Select all tables in a specific group
+    func selectAllTablesInGroup(groupingId: String) {
+        if let group = groupedTables.first(where: { $0.grouping.id == groupingId }) {
+            for table in group.tables {
+                selectedTableNames.insert(table.name)
+            }
+        }
+    }
+
+    /// Select all ungrouped tables
+    func selectAllUngroupedTables() {
+        for table in ungroupedTables {
+            selectedTableNames.insert(table.name)
+        }
+    }
+
+    /// Add all selected tables to a grouping
+    func addSelectedTablesToGrouping(groupingId: String) {
+        guard !selectedTableNames.isEmpty else { return }
+        addTablesToGrouping(tableNames: Array(selectedTableNames), groupingId: groupingId)
+        selectedTableNames.removeAll()
+    }
+
+    /// Protect all selected tables
+    func protectSelectedTables() {
+        var project = ConfigurationManager.readCurrentProject()
+        for tableName in selectedTableNames {
+            TableProtectionManager.protect(tableName: tableName, in: &project)
+        }
+        ConfigurationManager.shared.saveProject(project)
+        selectedTableNames.removeAll()
+    }
+
+    /// Unprotect all selected tables
+    func unprotectSelectedTables() {
+        var project = ConfigurationManager.readCurrentProject()
+        for tableName in selectedTableNames {
+            TableProtectionManager.unprotect(tableName: tableName, in: &project)
+        }
+        ConfigurationManager.shared.saveProject(project)
+        selectedTableNames.removeAll()
     }
     
     // MARK: - Table Protection Management

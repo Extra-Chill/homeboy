@@ -1,11 +1,30 @@
 import ArgumentParser
 import Foundation
 
-/// Deploy components to production: homeboy deploy <project> [component-id...] [flags]
 struct Deploy: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "deploy",
-        abstract: "Deploy components to production"
+        abstract: "Build and upload components to production server",
+        discussion: """
+            Builds and uploads configured components to the remote server.
+
+            Usage:
+              homeboy deploy <project> <component-id>...
+              homeboy deploy <project> --all
+              homeboy deploy <project> --outdated
+
+            Examples:
+              homeboy deploy extrachill my-plugin
+              homeboy deploy extrachill --all
+              homeboy deploy extrachill --outdated --dry-run
+
+            Prerequisites:
+              - Server must be configured and linked to project
+              - SSH key must be set up in Homeboy.app
+              - Components must have build.sh scripts
+
+            See 'homeboy docs deploy' for full documentation.
+            """
     )
     
     @Argument(help: "Project ID (e.g., extrachill)")

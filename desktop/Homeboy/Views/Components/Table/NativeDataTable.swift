@@ -98,7 +98,13 @@ struct NativeDataTable<Item: Identifiable>: NSViewRepresentable where Item.ID: H
             let item = context.coordinator.parent.items[row]
             context.coordinator.parent.onKeyboardActivate?(item)
         }
-        
+
+        // Context menu (right-click)
+        let coordinator = context.coordinator
+        tableView.contextMenuHandler = { event, row in
+            coordinator.tableView(tableView, menuFor: event, row: row)
+        }
+
         // Configure columns
         for column in columns {
             let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.id))
@@ -317,11 +323,12 @@ struct NativeDataTable<Item: Identifiable>: NSViewRepresentable where Item.ID: H
     }
 }
 
-// MARK: - Custom NSTableView with Keyboard Handling
+// MARK: - Custom NSTableView with Keyboard and Context Menu Handling
 
 private class ActivatableTableView: NSTableView {
     var onKeyboardActivate: ((Int) -> Void)?
-    
+    var contextMenuHandler: ((NSEvent, Int) -> NSMenu?)?
+
     override func keyDown(with event: NSEvent) {
         // Enter or Return key activates the selected row
         if event.keyCode == 36 || event.keyCode == 76 { // Return or Enter
@@ -332,12 +339,10 @@ private class ActivatableTableView: NSTableView {
         }
         super.keyDown(with: event)
     }
-}
 
-// MARK: - NSTableViewDelegate Extension for Context Menu
-
-extension NSTableViewDelegate {
-    func tableView(_ tableView: NSTableView, menuFor event: NSEvent, row: Int) -> NSMenu? {
-        return nil
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = row(at: point)
+        return contextMenuHandler?(event, row)
     }
 }

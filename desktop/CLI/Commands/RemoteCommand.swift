@@ -3,11 +3,25 @@ import Foundation
 
 // MARK: - Tool-Specific Commands
 
-/// PM2 command: homeboy pm2 <project> [--local] [sub-target] <args...>
 struct PM2: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "pm2",
-        abstract: "Execute PM2 commands on Node.js servers"
+        abstract: "Run PM2 commands on production Node.js servers",
+        discussion: """
+            Runs PM2 commands on the project's remote server.
+
+            Usage:
+              homeboy pm2 <project> [subtarget] <command...>
+
+            Examples:
+              homeboy pm2 api-server list
+              homeboy pm2 api-server restart app
+              homeboy pm2 api-server logs --lines 100
+
+            Prerequisites: Server and base path configured.
+
+            See 'homeboy docs pm2' for full documentation.
+            """
     )
     
     @Argument(help: "Project ID")
@@ -24,11 +38,28 @@ struct PM2: ParsableCommand {
     }
 }
 
-/// WP-CLI command: homeboy wp <project> [--local] [sub-target] <args...>
 struct WP: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "wp",
-        abstract: "Execute WP-CLI commands on WordPress servers"
+        abstract: "Run WP-CLI commands on production WordPress sites",
+        discussion: """
+            Runs WP-CLI commands on the project's remote server.
+
+            Usage:
+              homeboy wp <project> [subtarget] <command...>
+              homeboy wp <project> --local [subtarget] <command...>
+
+            Examples:
+              homeboy wp extrachill plugin list
+              homeboy wp extrachill shop plugin list    # Multisite subtarget
+              homeboy wp extrachill --local plugin list # Local execution
+
+            Prerequisites:
+              Remote: Server and base path configured
+              Local: localCLI.sitePath configured in project
+
+            See 'homeboy docs wp' for full documentation.
+            """
     )
     
     @Argument(help: "Project ID")

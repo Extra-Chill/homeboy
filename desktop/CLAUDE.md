@@ -18,7 +18,7 @@ xcodegen generate
 # Open in Xcode
 open Homeboy.xcodeproj
 
-# WP-CLI on local site
+# Example: WP-CLI on a local WordPress project
 cd /path/to/your/local-wp-site/app/public
 wp core version
 ```

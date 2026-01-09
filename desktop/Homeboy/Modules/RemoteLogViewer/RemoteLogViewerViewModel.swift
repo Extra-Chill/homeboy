@@ -33,9 +33,9 @@ struct OpenLog: PinnableTabItem, Equatable {
 }
 
 @MainActor
-class RemoteLogViewerViewModel: ObservableObject {
-    
-    private var cancellables = Set<AnyCancellable>()
+class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
+
+    var cancellables = Set<AnyCancellable>()
     
     // MARK: - Published State
     
@@ -44,10 +44,7 @@ class RemoteLogViewerViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var error: AppError?
     @Published var showClearConfirmation: Bool = false
-    
-    // Sidebar state (persisted per-module)
-    @AppStorage("logViewer.sidebarCollapsed") var sidebarCollapsed: Bool = false
-    
+
     // MARK: - Services
     
     private var sshService: SSHService?
@@ -75,6 +72,12 @@ class RemoteLogViewerViewModel: ObservableObject {
         setupSSH()
         loadPinnedLogs()
         setupSiteChangeObserver()
+        observeConfiguration()
+    }
+
+    func onConfigurationChange() {
+        setupSSH()
+        loadPinnedLogs()
     }
     
     private func setupSSH() {

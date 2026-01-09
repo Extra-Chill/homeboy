@@ -31,7 +31,7 @@ The default implementation generates markdown with a context table containing ti
 
 ### ContentContext
 
-Rich metadata for debugging context, automatically populated from the active project and server configuration.
+Rich metadata for debugging context, populated from the active project and server configuration when available.
 
 ```swift
 struct ContentContext {
@@ -213,7 +213,7 @@ Database credentials not configured
 | Field | Value |
 |-------|-------|
 | Timestamp | 2026-01-08T12:34:56Z |
-| App | Homeboy 0.4.0 (Build 7) |
+| App | Homeboy <version> (Build <build>) |
 | Project | Extra Chill |
 | Server | Production (extrachill.com) |
 | Path | `/var/log/debug.log` |

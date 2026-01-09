@@ -5,8 +5,23 @@ import Foundation
 struct HomeboyCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "homeboy",
-        abstract: "CLI for project development and deployment",
-        version: "0.6.0",
+        abstract: "Homeboy CLI for deployment, remote operations, and database queries",
+        discussion: """
+            Manage projects, deploy components, and run commands on production servers.
+
+            Quick Start:
+              homeboy projects                    # List configured projects
+              homeboy wp <project> plugin list    # Run WP-CLI on server
+              homeboy deploy <project> --all      # Deploy all components
+
+            Configuration:
+              homeboy project create "My Site" --type wordpress
+              homeboy server create "Production" --host example.com --user deploy
+              homeboy project set mysite --server production-1
+
+            Use 'homeboy docs' for comprehensive documentation.
+            """,
+        version: "0.6.1",
         subcommands: [
             WP.self,
             PM2.self,
@@ -16,17 +31,24 @@ struct HomeboyCLI: ParsableCommand {
             SSH.self,
             Project.self,
             Server.self,
-            Module.self
+            Module.self,
+            Docs.self
         ],
         defaultSubcommand: nil
     )
 }
 
-/// Lists available projects or shows current project
 struct Projects: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "projects",
-        abstract: "List available projects"
+        abstract: "List configured projects and show active project",
+        discussion: """
+            Lists all configured projects, marking the active one.
+
+            Examples:
+              homeboy projects            # List all projects
+              homeboy projects --current  # Show only active project ID
+            """
     )
     
     @Flag(name: .long, help: "Show only the current active project")

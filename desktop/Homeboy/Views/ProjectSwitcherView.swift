@@ -22,11 +22,7 @@ struct ProjectSwitcherView: View {
     @State private var newProjectIdWasManuallyEdited = false
     @State private var newProjectType: String = ""
     @FocusState private var newProjectNameFieldFocused: Bool
-    
-    private var availableProjects: [ProjectConfiguration] {
-        configManager.availableProjectIds().compactMap { configManager.loadProject(id: $0) }
-    }
-    
+
     private var availableProjectTypes: [ProjectTypeDefinition] {
         ProjectTypeManager.shared.allTypes
     }
@@ -46,7 +42,7 @@ struct ProjectSwitcherView: View {
     var body: some View {
         Menu {
             // Project list
-            ForEach(availableProjects, id: \.id) { project in
+            ForEach(configManager.availableProjects, id: \.id) { project in
                 Button {
                     switchToProject(project.id)
                 } label: {
@@ -147,7 +143,7 @@ struct ProjectSwitcherView: View {
             
             // Project list
             List {
-                ForEach(availableProjects, id: \.id) { project in
+                ForEach(configManager.availableProjects, id: \.id) { project in
                     HStack {
                         VStack(alignment: .leading) {
                             Text(project.name)

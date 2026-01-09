@@ -2,9 +2,7 @@ import SwiftUI
 
 struct ServersSettingsTab: View {
     @ObservedObject var config: ConfigurationManager
-    
-    @State private var servers: [ServerConfig] = []
-    
+
     // Server sheet state
     @State private var showServerSheet = false
     @State private var serverToEdit: ServerConfig?
@@ -19,7 +17,7 @@ struct ServersSettingsTab: View {
     
     private var selectedServer: ServerConfig? {
         guard let serverId = config.safeActiveProject.serverId else { return nil }
-        return servers.first { $0.id == serverId }
+        return config.availableServers.first { $0.id == serverId }
     }
     
     private var hasSSHKey: Bool {
@@ -38,8 +36,8 @@ struct ServersSettingsTab: View {
     var body: some View {
         Form {
             Section("Server Connection") {
-                if servers.isEmpty {
-                    // No servers exist - show prominent add button
+                if config.availableServers.isEmpty {
+                    // No config.availableServers exist - show prominent add button
                     VStack(alignment: .leading, spacing: 12) {
                         InlineWarningView(
                             "No server configured",
@@ -70,7 +68,7 @@ struct ServersSettingsTab: View {
                             }
                         )) {
                             Text("Select a server...").tag("")
-                            ForEach(servers) { server in
+                            ForEach(config.availableServers) { server in
                                 Text(server.name).tag(server.id)
                             }
                             Divider()
@@ -201,7 +199,6 @@ struct ServersSettingsTab: View {
             
         }
         .formStyle(.grouped)
-        .onAppear { loadServers() }
         .sheet(isPresented: $showFileBrowser) {
             if let serverId = config.safeActiveProject.serverId {
                 RemoteFileBrowserView(serverId: serverId, mode: .selectPath) { selectedPath in
@@ -219,12 +216,11 @@ struct ServersSettingsTab: View {
                 }
             }
         }
-        .sheet(isPresented: $showServerSheet, onDismiss: { loadServers() }) {
+        .sheet(isPresented: $showServerSheet) {
             if let server = serverToEdit {
                 // Edit existing server
                 ServerEditSheet(config: config, server: server) { updatedServer in
                     config.saveServer(updatedServer)
-                    loadServers()
                 } onDelete: {
                     // Clear selection if we deleted the active server
                     if config.safeActiveProject.serverId == server.id {
@@ -232,7 +228,6 @@ struct ServersSettingsTab: View {
                     }
                     config.deleteServer(id: server.id)
                     KeychainService.clearSSHKeys(forServer: server.id)
-                    loadServers()
                 }
             } else {
                 // Add new server
@@ -240,14 +235,9 @@ struct ServersSettingsTab: View {
                     config.saveServer(newServer)
                     // Auto-select the new server
                     config.updateActiveProject { $0.serverId = newServer.id }
-                    loadServers()
                 }
             }
         }
-    }
-    
-    private func loadServers() {
-        servers = config.availableServers()
     }
     
     private func validateWPContentPath() async {

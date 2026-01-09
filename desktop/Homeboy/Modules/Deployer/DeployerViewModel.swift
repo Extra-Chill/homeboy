@@ -13,9 +13,9 @@ struct DeploymentReport {
 }
 
 @MainActor
-class DeployerViewModel: ObservableObject {
-    
-    private var cancellables = Set<AnyCancellable>()
+class DeployerViewModel: ObservableObject, ConfigurationObserving {
+
+    var cancellables = Set<AnyCancellable>()
     
     @Published var components: [DeployableComponent] = ComponentRegistry.all
     @Published var selectedComponents: Set<String> = []
@@ -47,6 +47,7 @@ class DeployerViewModel: ObservableObject {
     
     init() {
         checkConfiguration()
+        observeConfiguration()
     }
     
     func checkConfiguration() {
@@ -109,21 +110,43 @@ class DeployerViewModel: ObservableObject {
             error = AppError("Deployment not configured", source: "Deployer")
             return
         }
-        
+
         isLoading = true
         error = nil
         consoleOutput += "> Fetching remote versions...\n"
-        
+
         service.fetchRemoteVersions(components: components) { [weak self] result in
             DispatchQueue.main.async {
-                self?.isLoading = false
+                guard let self = self else { return }
+                self.isLoading = false
+
                 switch result {
                 case .success(let versions):
-                    self?.remoteVersions = versions
-                    self?.consoleOutput += "> Found \(versions.count) remote versions\n"
+                    self.remoteVersions = versions
+
+                    let errorComponents = versions.compactMap { (id, info) -> (String, String)? in
+                        if let message = info.errorMessage {
+                            let name = self.components.first { $0.id == id }?.name ?? id
+                            return (name, message)
+                        }
+                        return nil
+                    }
+
+                    if !errorComponents.isEmpty {
+                        let errorList = errorComponents.map { "\($0.0): \($0.1)" }.joined(separator: "\n")
+                        self.error = AppError(
+                            "Failed to detect version for \(errorComponents.count) component(s):\n\(errorList)",
+                            source: "Deployer",
+                            additionalInfo: ["Failed Components": String(errorComponents.count)]
+                        )
+                        self.consoleOutput += "> Warning: \(errorComponents.count) component(s) had version detection errors\n"
+                    } else {
+                        self.consoleOutput += "> Found \(versions.count) remote versions\n"
+                    }
+
                 case .failure(let err):
-                    self?.error = AppError(err.localizedDescription, source: "Deployer")
-                    self?.consoleOutput += "> Error: \(err.localizedDescription)\n"
+                    self.error = AppError(err.localizedDescription, source: "Deployer")
+                    self.consoleOutput += "> Error: \(err.localizedDescription)\n"
                 }
             }
         }
@@ -151,16 +174,17 @@ class DeployerViewModel: ObservableObject {
         switch remoteInfo {
         case .notDeployed:
             return .notDeployed
-            
+
+        case .parseError:
+            return .unknown
+
         case .version(let remoteVersion):
             guard let local = localVersion else {
                 return .unknown
             }
             return local == remoteVersion ? .current : .needsUpdate
-            
+
         case .timestamp:
-            // Can't compare versions with timestamps, show as unknown
-            // User can still deploy manually
             return .unknown
         }
     }
@@ -423,9 +447,18 @@ class DeployerViewModel: ObservableObject {
         selectedComponents = []
         deploymentReports = []
         error = nil
-        
+
         // Re-check configuration for new site
         checkConfiguration()
+    }
+
+    func onConfigurationChange() {
+        let newComponents = ComponentRegistry.all
+        if Set(newComponents.map(\.id)) != Set(components.map(\.id)) {
+            components = newComponents
+            currentGroupings = ConfigurationManager.readCurrentProject().componentGroupings
+            refreshGroupedComponents()
+        }
     }
     
     // MARK: - Grouping Management

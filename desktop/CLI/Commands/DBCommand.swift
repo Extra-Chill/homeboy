@@ -1,22 +1,45 @@
 import ArgumentParser
 import Foundation
 
-/// Database commands: homeboy db <project> [subtarget] <subcommand>
 struct DB: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "db",
-        abstract: "Database operations (read-only)",
+        abstract: "Query production databases (read-only)",
+        discussion: """
+            Query and inspect production databases via WP-CLI over SSH.
+
+            Subcommands:
+              tables     List database tables
+              describe   Show table structure
+              query      Execute SQL query (SELECT only)
+
+            Examples:
+              homeboy db extrachill tables
+              homeboy db extrachill describe wp_posts
+              homeboy db extrachill query "SELECT * FROM wp_users LIMIT 10"
+
+            Note: Write operations are blocked. Use 'homeboy wp db query' for writes.
+
+            See 'homeboy docs db' for full documentation.
+            """,
         subcommands: [DBTables.self, DBDescribe.self, DBQuery.self]
     )
 }
 
 // MARK: - DBTables
 
-/// List database tables: homeboy db <project> [blog-nickname] tables
 struct DBTables: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tables",
-        abstract: "List database tables"
+        abstract: "List all tables in the project database",
+        discussion: """
+            Lists all tables in the project's database.
+
+            Examples:
+              homeboy db extrachill tables
+              homeboy db extrachill tables --json
+              homeboy db extrachill shop tables  # Multisite subtarget
+            """
     )
     
     @Argument(help: "Project ID (e.g., extrachill)")
@@ -46,11 +69,17 @@ struct DBTables: ParsableCommand {
 
 // MARK: - DBDescribe
 
-/// Describe a table: homeboy db <project> [blog-nickname] describe <table>
 struct DBDescribe: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "describe",
-        abstract: "Show table structure"
+        abstract: "Display column definitions for a table",
+        discussion: """
+            Displays column definitions for a database table.
+
+            Examples:
+              homeboy db extrachill describe wp_posts
+              homeboy db extrachill describe wp_options --json
+            """
     )
     
     @Argument(help: "Project ID (e.g., extrachill)")
@@ -90,11 +119,21 @@ struct DBDescribe: ParsableCommand {
 
 // MARK: - DBQuery
 
-/// Execute SQL query: homeboy db <project> [blog-nickname] query "<sql>"
 struct DBQuery: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "query",
-        abstract: "Execute a SQL query (read-only)"
+        abstract: "Run SELECT queries against production database",
+        discussion: """
+            Runs a SELECT query against the production database.
+
+            Examples:
+              homeboy db extrachill query "SELECT * FROM wp_users LIMIT 10"
+              homeboy db extrachill query "SELECT post_status, COUNT(*) FROM wp_posts GROUP BY post_status"
+              homeboy db extrachill shop query "SELECT * FROM wp_2_posts LIMIT 5"
+
+            Blocked: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, REPLACE
+            For write operations, use 'homeboy wp <project> db query'.
+            """
     )
     
     @Argument(help: "Project ID (e.g., extrachill)")

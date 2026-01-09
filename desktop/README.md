@@ -79,7 +79,14 @@ cd homeboy
 open Homeboy.xcodeproj
 ```
 
-### 2. Build and Run
+### 2. Generate Project + Run
+
+This repo uses `project.yml` + XcodeGen.
+
+```bash
+xcodegen generate
+open Homeboy.xcodeproj
+```
 
 Build and run from Xcode (Cmd+R).
 

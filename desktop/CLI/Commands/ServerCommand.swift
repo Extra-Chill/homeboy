@@ -3,11 +3,22 @@ import Foundation
 
 // MARK: - Server Command
 
-/// Server management: homeboy server <subcommand>
 struct Server: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "server",
-        abstract: "Manage server configurations",
+        abstract: "Configure SSH server connections",
+        discussion: """
+            Create and configure SSH server connections for deployments.
+
+            Examples:
+              homeboy server create "Production" --host server.example.com --user deploy
+              homeboy server set production-1 --port 2222
+              homeboy server list
+
+            Note: SSH keys must be configured in Homeboy.app after server creation.
+
+            See 'homeboy docs server' for full documentation.
+            """,
         subcommands: [
             ServerCreate.self,
             ServerShow.self,
@@ -20,11 +31,18 @@ struct Server: ParsableCommand {
 
 // MARK: - Server Create
 
-/// Create a new server: homeboy server create <name> --host <host> --user <user>
 struct ServerCreate: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a new server configuration"
+        abstract: "Register a new SSH server for deployments",
+        discussion: """
+            Registers a new SSH server. The server ID is auto-generated from hostname.
+
+            Example:
+              homeboy server create "Production" --host server.example.com --user deploy
+
+            After creation, configure SSH key in Homeboy.app Settings > Servers.
+            """
     )
     
     @Argument(help: "Server name")
@@ -73,11 +91,10 @@ struct ServerCreate: ParsableCommand {
 
 // MARK: - Server Show
 
-/// Show server configuration: homeboy server show <id>
 struct ServerShow: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "show",
-        abstract: "Show server configuration"
+        abstract: "Display server configuration as JSON"
     )
     
     @Argument(help: "Server ID")
@@ -98,11 +115,17 @@ struct ServerShow: ParsableCommand {
 
 // MARK: - Server Set
 
-/// Update server fields: homeboy server set <id> <--flag value>...
 struct ServerSet: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "set",
-        abstract: "Update server configuration fields"
+        abstract: "Modify server connection settings",
+        discussion: """
+            Modifies server connection settings.
+
+            Example:
+              homeboy server set production-1 --port 2222
+              homeboy server set production-1 --user newadmin
+            """
     )
     
     @Argument(help: "Server ID")
@@ -166,11 +189,18 @@ struct ServerSet: ParsableCommand {
 
 // MARK: - Server Delete
 
-/// Delete a server: homeboy server delete <id> --force
 struct ServerDelete: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete a server configuration"
+        abstract: "Remove a server configuration",
+        discussion: """
+            Removes a server configuration. Requires --force flag.
+
+            Example:
+              homeboy server delete old-server --force
+
+            Note: Cannot delete servers that are linked to projects.
+            """
     )
     
     @Argument(help: "Server ID")
@@ -211,11 +241,10 @@ struct ServerDelete: ParsableCommand {
 
 // MARK: - Server List
 
-/// List all servers: homeboy server list
 struct ServerList: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "list",
-        abstract: "List all server configurations"
+        abstract: "Show all configured SSH servers"
     )
     
     func run() throws {

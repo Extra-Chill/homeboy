@@ -6,6 +6,7 @@ struct HomeboyApp: App {
 
     init() {
         ConfigurationManager.shared.syncBundledProjectTypes()
+        ConfigurationManager.shared.syncDocumentation()
     }
 
     var body: some Scene {

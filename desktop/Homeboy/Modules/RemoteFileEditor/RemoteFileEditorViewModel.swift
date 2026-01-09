@@ -12,21 +12,27 @@ struct OpenFile: PinnableTabItem, Equatable {
     var originalContent: String = ""
     var fileExists: Bool = true
     var lastFetched: Date?
-    
+    var fileSize: Int64?       // Size in bytes
+
     var displayName: String {
         URL(fileURLWithPath: path).lastPathComponent
     }
-    
+
     var hasUnsavedChanges: Bool {
         content != originalContent
     }
-    
+
+    var formattedSize: String {
+        guard let size = fileSize else { return "" }
+        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    }
+
     init(id: UUID = UUID(), path: String, isPinned: Bool) {
         self.id = id
         self.path = path
         self.isPinned = isPinned
     }
-    
+
     init(from pinned: PinnedRemoteFile) {
         self.id = pinned.id
         self.path = pinned.path
@@ -35,9 +41,9 @@ struct OpenFile: PinnableTabItem, Equatable {
 }
 
 @MainActor
-class RemoteFileEditorViewModel: ObservableObject {
-    
-    private var cancellables = Set<AnyCancellable>()
+class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
+
+    var cancellables = Set<AnyCancellable>()
     
     // MARK: - Published State
     
@@ -79,6 +85,12 @@ class RemoteFileEditorViewModel: ObservableObject {
         setupSSH()
         loadPinnedFiles()
         setupSiteChangeObserver()
+        observeConfiguration()
+    }
+
+    func onConfigurationChange() {
+        setupSSH()
+        loadPinnedFiles()
     }
     
     private func setupSSH() {
@@ -122,6 +134,13 @@ class RemoteFileEditorViewModel: ObservableObject {
             openFiles[index].fileExists = exists
             
             if exists {
+                // Get file size (macOS uses -f%z, Linux uses --printf='%s')
+                let sizeCommand = "stat -f%z '\(fullPath)' 2>/dev/null || stat --printf='%s' '\(fullPath)' 2>/dev/null"
+                if let sizeStr = try? await ssh.executeCommandSync(sizeCommand),
+                   let size = Int64(sizeStr.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    openFiles[index].fileSize = size
+                }
+
                 // Fetch content
                 let catCommand = "cat '\(fullPath)'"
                 let output = try await ssh.executeCommandSync(catCommand)
@@ -131,6 +150,7 @@ class RemoteFileEditorViewModel: ObservableObject {
             } else {
                 openFiles[index].content = ""
                 openFiles[index].originalContent = ""
+                openFiles[index].fileSize = nil
             }
         } catch {
             self.error = AppError(error.localizedDescription, source: "File Editor", path: file.displayName)
