@@ -6,7 +6,7 @@ CLI tool for development and deployment automation.
 
 ### Homebrew (macOS/Linux)
 ```bash
-brew tap Extra-Chill/homeboy-cli
+brew tap extra-chill/homeboy-cli https://github.com/Extra-Chill/homeboy-cli
 brew install homeboy
 ```
 

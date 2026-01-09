@@ -1,9 +1,11 @@
 use clap::Args;
+use regex::Regex;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use homeboy_core::config::{ConfigManager, AppPaths};
+use homeboy_core::config::{ConfigManager, AppPaths, ServerConfiguration};
 use homeboy_core::output::{print_success, print_error};
 
 #[derive(Args)]
@@ -42,7 +44,11 @@ struct ComponentResult {
     name: String,
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
+    duration: Option<f64>,
+    #[serde(rename = "localVersion", skip_serializing_if = "Option::is_none")]
+    local_version: Option<String>,
+    #[serde(rename = "remoteVersion", skip_serializing_if = "Option::is_none")]
+    remote_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -147,6 +153,19 @@ pub fn run(args: DeployArgs) {
         return;
     }
 
+    // Fetch local versions
+    let local_versions: HashMap<String, String> = components_to_deploy
+        .iter()
+        .filter_map(|c| fetch_local_version(c).map(|v| (c.id.clone(), v)))
+        .collect();
+
+    // Fetch remote versions for dry-run or outdated filtering
+    let remote_versions = if args.dry_run || args.outdated {
+        fetch_remote_versions(&components_to_deploy, &server, &base_path, &key_path)
+    } else {
+        HashMap::new()
+    };
+
     // Build if requested
     if args.build {
         for component in &components_to_deploy {
@@ -184,8 +203,10 @@ pub fn run(args: DeployArgs) {
             results.push(ComponentResult {
                 id: component.id.clone(),
                 name: component.name.clone(),
-                status: "dry_run".to_string(),
-                version: None,
+                status: "would_deploy".to_string(),
+                duration: None,
+                local_version: local_versions.get(&component.id).cloned(),
+                remote_version: remote_versions.get(&component.id).cloned(),
                 error: None,
             });
             succeeded += 1;
@@ -201,7 +222,9 @@ pub fn run(args: DeployArgs) {
                 id: component.id.clone(),
                 name: component.name.clone(),
                 status: "failed".to_string(),
-                version: None,
+                duration: None,
+                local_version: local_versions.get(&component.id).cloned(),
+                remote_version: None,
                 error: Some(format!("Artifact not found: {}", artifact_path)),
             });
             failed += 1;
@@ -260,8 +283,10 @@ pub fn run(args: DeployArgs) {
                 results.push(ComponentResult {
                     id: component.id.clone(),
                     name: component.name.clone(),
-                    status: "success".to_string(),
-                    version: None,
+                    status: "deployed".to_string(),
+                    duration: None,
+                    local_version: local_versions.get(&component.id).cloned(),
+                    remote_version: local_versions.get(&component.id).cloned(), // After deploy, remote = local
                     error: None,
                 });
                 succeeded += 1;
@@ -275,7 +300,9 @@ pub fn run(args: DeployArgs) {
                     id: component.id.clone(),
                     name: component.name.clone(),
                     status: "failed".to_string(),
-                    version: None,
+                    duration: None,
+                    local_version: local_versions.get(&component.id).cloned(),
+                    remote_version: None,
                     error: Some(error),
                 });
                 failed += 1;
@@ -288,7 +315,9 @@ pub fn run(args: DeployArgs) {
                     id: component.id.clone(),
                     name: component.name.clone(),
                     status: "failed".to_string(),
-                    version: None,
+                    duration: None,
+                    local_version: local_versions.get(&component.id).cloned(),
+                    remote_version: None,
                     error: Some(e.to_string()),
                 });
                 failed += 1;
@@ -315,6 +344,8 @@ struct Component {
     remote_path: String,
     build_artifact: String,
     build_command: Option<String>,
+    version_file: Option<String>,
+    version_pattern: Option<String>,
 }
 
 fn load_components(component_ids: &[String]) -> Vec<Component> {
@@ -338,10 +369,69 @@ fn load_components(component_ids: &[String]) -> Vec<Component> {
                         }
                     }).unwrap_or_default(),
                     build_command: config["buildCommand"].as_str().map(|s| s.to_string()),
+                    version_file: config["versionFile"].as_str().map(|s| s.to_string()),
+                    version_pattern: config["versionPattern"].as_str().map(|s| s.to_string()),
                 });
             }
         }
     }
 
     components
+}
+
+// MARK: - Version Parsing
+
+fn parse_version(content: &str, pattern: Option<&str>) -> Option<String> {
+    let pattern_str = pattern.unwrap_or(r"Version:\s*(\d+\.\d+\.\d+)");
+    let re = Regex::new(pattern_str).ok()?;
+    re.captures(content)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+fn fetch_local_version(component: &Component) -> Option<String> {
+    let version_file = component.version_file.as_ref()?;
+    let path = format!("{}/{}", component.local_path, version_file);
+    let content = fs::read_to_string(&path).ok()?;
+    parse_version(&content, component.version_pattern.as_deref())
+}
+
+fn fetch_remote_versions(
+    components: &[Component],
+    server: &ServerConfiguration,
+    base_path: &str,
+    key_path: &Path,
+) -> HashMap<String, String> {
+    let mut versions = HashMap::new();
+
+    for component in components {
+        if let Some(version_file) = &component.version_file {
+            let remote_path = if component.remote_path.starts_with('/') {
+                format!("{}/{}", component.remote_path, version_file)
+            } else {
+                format!("{}/{}/{}", base_path, component.remote_path, version_file)
+            };
+
+            let output = Command::new("ssh")
+                .args([
+                    "-i", &key_path.to_string_lossy(),
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "BatchMode=yes",
+                    &format!("{}@{}", server.user, server.host),
+                    &format!("cat '{}' 2>/dev/null", remote_path),
+                ])
+                .output();
+
+            if let Ok(output) = output {
+                if output.status.success() {
+                    let content = String::from_utf8_lossy(&output.stdout);
+                    if let Some(version) = parse_version(&content, component.version_pattern.as_deref()) {
+                        versions.insert(component.id.clone(), version);
+                    }
+                }
+            }
+        }
+    }
+
+    versions
 }
