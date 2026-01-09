@@ -31,8 +31,8 @@ struct ServersSettingsTab: View {
         config.safeActiveProject.isWordPress
     }
     
-    private var wpContentPath: String {
-        config.safeActiveProject.wordpress?.wpContentPath ?? ""
+    private var basePath: String {
+        config.safeActiveProject.basePath ?? ""
     }
     
     var body: some View {
@@ -50,7 +50,7 @@ struct ServersSettingsTab: View {
                             showServerSheet = true
                         }
                         
-                        Text("A server connection is required for remote deployments, database access, and production WP-CLI commands.")
+                        Text("A server connection is required for remote deployments, database access, and production CLI commands.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -65,8 +65,7 @@ struct ServersSettingsTab: View {
                                     serverToEdit = nil
                                     showServerSheet = true
                                 } else {
-                                    config.activeProject?.serverId = newValue.isEmpty ? nil : newValue
-                                    config.saveActiveProject()
+                                    config.updateActiveProject { $0.serverId = newValue.isEmpty ? nil : newValue }
                                 }
                             }
                         )) {
@@ -129,41 +128,36 @@ struct ServersSettingsTab: View {
                 }
             }
             
-            // WordPress-specific: wp-content path picker
-            if isWordPressProject {
-                Section("WordPress Deployment") {
-                    HStack {
-                        TextField("wp-content path", text: Binding(
-                            get: { wpContentPath },
-                            set: { newValue in
-                                if config.activeProject?.wordpress == nil {
-                                    config.activeProject?.wordpress = WordPressConfig()
-                                }
-                                config.activeProject?.wordpress?.wpContentPath = newValue
-                                config.saveActiveProject()
-                                wpContentValidation = nil
-                                
-                                // Resolve symlinks for SCP compatibility
-                                if let serverId = config.safeActiveProject.serverId {
-                                    Task {
-                                        let canonicalPath = await resolveCanonicalPath(newValue, serverId: serverId)
-                                        if canonicalPath != newValue {
-                                            config.activeProject?.wordpress?.wpContentPath = canonicalPath
-                                            config.saveActiveProject()
-                                        }
+            // Deployment path picker (WordPress or generic)
+            Section(isWordPressProject ? "WordPress Deployment" : "Remote Deployment") {
+                HStack {
+                    TextField("Base Path", text: Binding(
+                        get: { basePath },
+                        set: { newValue in
+                            config.updateActiveProject { $0.basePath = newValue.isEmpty ? nil : newValue }
+                            wpContentValidation = nil
+                            
+                            // Resolve symlinks for SCP compatibility
+                            if let serverId = config.safeActiveProject.serverId, !newValue.isEmpty {
+                                Task {
+                                    let canonicalPath = await resolveCanonicalPath(newValue, serverId: serverId)
+                                    if canonicalPath != newValue {
+                                        config.updateActiveProject { $0.basePath = canonicalPath }
                                     }
                                 }
                             }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                        
-                        Button("Browse") {
-                            showFileBrowser = true
                         }
-                        .disabled(selectedServer == nil || !hasSSHKey)
-                    }
+                    ))
+                    .textFieldStyle(.roundedBorder)
                     
-                    // Validation status
+                    Button("Browse") {
+                        showFileBrowser = true
+                    }
+                    .disabled(selectedServer == nil || !hasSSHKey)
+                }
+                
+                // WordPress-specific validation
+                if isWordPressProject {
                     if isValidatingWPContent {
                         HStack {
                             ProgressView()
@@ -182,12 +176,12 @@ struct ServersSettingsTab: View {
                                     .foregroundColor(.green)
                             }
                         } else {
-                            InlineErrorView(validation.message, source: "WordPress Deployment", path: wpContentPath) {
+                            InlineErrorView(validation.message, source: "WordPress Deployment", path: basePath) {
                                 wpContentValidation = nil
                             }
                             .font(.caption)
                         }
-                    } else if !wpContentPath.isEmpty {
+                    } else if !basePath.isEmpty {
                         Button("Validate wp-content") {
                             Task { await validateWPContentPath() }
                         }
@@ -195,42 +189,10 @@ struct ServersSettingsTab: View {
                         .disabled(selectedServer == nil || !hasSSHKey)
                     }
                     
-                    Text("Path to the wp-content directory on the remote server. Use Browse to select the folder.")
+                    Text("WordPress root directory on the remote server (contains wp-content, wp-admin, etc).")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                }
-            }
-            
-            // Non-WordPress: generic base path picker
-            if !isWordPressProject {
-                Section("Remote Deployment") {
-                    HStack {
-                        TextField("Base Path", text: Binding(
-                            get: { config.safeActiveProject.basePath ?? "" },
-                            set: { newValue in
-                                config.activeProject?.basePath = newValue.isEmpty ? nil : newValue
-                                config.saveActiveProject()
-                                
-                                // Resolve symlinks for SCP compatibility
-                                if let serverId = config.safeActiveProject.serverId, !newValue.isEmpty {
-                                    Task {
-                                        let canonicalPath = await resolveCanonicalPath(newValue, serverId: serverId)
-                                        if canonicalPath != newValue {
-                                            config.activeProject?.basePath = canonicalPath
-                                            config.saveActiveProject()
-                                        }
-                                    }
-                                }
-                            }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                        
-                        Button("Browse") {
-                            showFileBrowser = true
-                        }
-                        .disabled(selectedServer == nil || !hasSSHKey)
-                    }
-                    
+                } else {
                     Text("Path to the project directory on the remote server where components will be deployed.")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -247,17 +209,11 @@ struct ServersSettingsTab: View {
                         // Resolve symlinks to get canonical path for SCP compatibility
                         let canonicalPath = await resolveCanonicalPath(selectedPath, serverId: serverId)
                         
+                        config.updateActiveProject { $0.basePath = canonicalPath }
+                        
                         if isWordPressProject {
-                            if config.activeProject?.wordpress == nil {
-                                config.activeProject?.wordpress = WordPressConfig()
-                            }
-                            config.activeProject?.wordpress?.wpContentPath = canonicalPath
-                            config.saveActiveProject()
                             wpContentValidation = nil
                             await validateWPContentPath()
-                        } else {
-                            config.activeProject?.basePath = canonicalPath
-                            config.saveActiveProject()
                         }
                     }
                 }
@@ -272,8 +228,7 @@ struct ServersSettingsTab: View {
                 } onDelete: {
                     // Clear selection if we deleted the active server
                     if config.safeActiveProject.serverId == server.id {
-                        config.activeProject?.serverId = nil
-                        config.saveActiveProject()
+                        config.updateActiveProject { $0.serverId = nil }
                     }
                     config.deleteServer(id: server.id)
                     KeychainService.clearSSHKeys(forServer: server.id)
@@ -284,8 +239,7 @@ struct ServersSettingsTab: View {
                 ServerEditSheet(config: config) { newServer in
                     config.saveServer(newServer)
                     // Auto-select the new server
-                    config.activeProject?.serverId = newServer.id
-                    config.saveActiveProject()
+                    config.updateActiveProject { $0.serverId = newServer.id }
                     loadServers()
                 }
             }

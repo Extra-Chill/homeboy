@@ -3,52 +3,58 @@ import Foundation
 
 // MARK: - Tool-Specific Commands
 
-/// PM2 remote command: homeboy pm2 <project> [sub-target] <args...>
+/// PM2 command: homeboy pm2 <project> [--local] [sub-target] <args...>
 struct PM2: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "pm2",
-        abstract: "Execute PM2 commands on remote Node.js servers"
+        abstract: "Execute PM2 commands on Node.js servers"
     )
     
     @Argument(help: "Project ID")
     var projectId: String
+    
+    @Flag(name: .long, help: "Execute locally instead of on remote server")
+    var local: Bool = false
     
     @Argument(parsing: .captureForPassthrough, help: "PM2 command and arguments")
     var args: [String] = []
     
     func run() throws {
-        try RemoteCLI.execute(tool: "pm2", projectId: projectId, args: args)
+        try CLIExecutor.execute(tool: "pm2", projectId: projectId, args: args, local: local)
     }
 }
 
-/// WP-CLI remote command: homeboy wp <project> [sub-target] <args...>
+/// WP-CLI command: homeboy wp <project> [--local] [sub-target] <args...>
 struct WP: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "wp",
-        abstract: "Execute WP-CLI commands on remote WordPress servers"
+        abstract: "Execute WP-CLI commands on WordPress servers"
     )
     
     @Argument(help: "Project ID")
     var projectId: String
     
-    @Argument(parsing: .captureForPassthrough, help: "Optional blog nickname followed by WP-CLI command")
+    @Flag(name: .long, help: "Execute locally instead of on remote server")
+    var local: Bool = false
+    
+    @Argument(parsing: .captureForPassthrough, help: "Optional sub-target followed by WP-CLI command")
     var args: [String] = []
     
     func run() throws {
-        try RemoteCLI.execute(tool: "wp", projectId: projectId, args: args)
+        try CLIExecutor.execute(tool: "wp", projectId: projectId, args: args, local: local)
     }
 }
 
-// MARK: - Shared Remote CLI Logic
+// MARK: - CLI Executor
 
-/// Shared implementation for remote CLI commands.
-/// Each tool-specific command delegates to this.
-enum RemoteCLI {
+/// Unified CLI execution for both local and remote contexts.
+/// Uses project type templates with context-specific variables.
+enum CLIExecutor {
     
-    static func execute(tool: String, projectId: String, args: [String]) throws {
+    static func execute(tool: String, projectId: String, args: [String], local: Bool) throws {
         guard !args.isEmpty else {
             fputs("Error: No command provided\n", stderr)
-            fputs("Usage: homeboy \(tool) <project> [sub-target] <command...>\n", stderr)
+            fputs("Usage: homeboy \(tool) <project> [--local] [sub-target] <command...>\n", stderr)
             throw ExitCode.failure
         }
         
@@ -66,7 +72,7 @@ enum RemoteCLI {
         
         // Validate CLI tool matches project type
         guard let cliConfig = typeDefinition.cli else {
-            fputs("Error: Project type '\(typeDefinition.displayName)' does not support remote CLI\n", stderr)
+            fputs("Error: Project type '\(typeDefinition.displayName)' does not support CLI\n", stderr)
             throw ExitCode.failure
         }
         
@@ -75,18 +81,46 @@ enum RemoteCLI {
             throw ExitCode.failure
         }
         
+        if local {
+            try executeLocal(
+                projectConfig: projectConfig,
+                cliConfig: cliConfig,
+                args: args
+            )
+        } else {
+            try executeRemote(
+                projectConfig: projectConfig,
+                cliConfig: cliConfig,
+                args: args
+            )
+        }
+    }
+    
+    // MARK: - Remote Execution
+    
+    private static func executeRemote(
+        projectConfig: ProjectConfiguration,
+        cliConfig: CLIConfig,
+        args: [String]
+    ) throws {
         // Validate server is configured
         guard let serverId = projectConfig.serverId,
               let serverConfig = ConfigurationManager.readServer(id: serverId),
               !serverConfig.host.isEmpty,
               !serverConfig.user.isEmpty else {
-            fputs("Error: Server not configured for project '\(projectId)'\n", stderr)
+            fputs("Error: Server not configured for project '\(projectConfig.id)'\n", stderr)
             throw ExitCode.failure
         }
         
         // Ensure SSH key exists for this server
         guard SSHService.ensureKeyFileExists(forServer: serverId) else {
             fputs("Error: SSH key not found for server. Configure SSH in Homeboy.app first.\n", stderr)
+            throw ExitCode.failure
+        }
+        
+        // Validate basePath is configured
+        guard let basePath = projectConfig.basePath, !basePath.isEmpty else {
+            fputs("Error: Remote base path not configured for project '\(projectConfig.id)'\n", stderr)
             throw ExitCode.failure
         }
         
@@ -106,9 +140,10 @@ enum RemoteCLI {
             throw ExitCode.failure
         }
         
-        // Build template variables
-        let variables = buildTemplateVariables(
+        // Build template variables for remote context
+        let variables = buildRemoteVariables(
             projectConfig: projectConfig,
+            cliConfig: cliConfig,
             targetDomain: targetDomain,
             args: commandArgs
         )
@@ -132,62 +167,135 @@ enum RemoteCLI {
         }
     }
     
+    // MARK: - Local Execution
+    
+    private static func executeLocal(
+        projectConfig: ProjectConfiguration,
+        cliConfig: CLIConfig,
+        args: [String]
+    ) throws {
+        // Validate local CLI is configured
+        guard projectConfig.localCLI.isConfigured else {
+            fputs("Error: Local CLI not configured for project '\(projectConfig.id)'\n", stderr)
+            fputs("Configure 'Local Site Path' in Homeboy.app Settings.\n", stderr)
+            throw ExitCode.failure
+        }
+        
+        // Parse args: check if first arg is a sub-target
+        var commandArgs = args
+        let (targetDomain, wasSubTarget) = resolveSubTarget(
+            projectConfig: projectConfig,
+            potentialSubTarget: commandArgs.first ?? "",
+            useLocalDomain: true
+        )
+        
+        if wasSubTarget {
+            commandArgs.removeFirst()
+        }
+        
+        guard !commandArgs.isEmpty else {
+            fputs("Error: No command provided after sub-target '\(args[0])'\n", stderr)
+            throw ExitCode.failure
+        }
+        
+        // Build template variables for local context
+        let variables = buildLocalVariables(
+            projectConfig: projectConfig,
+            cliConfig: cliConfig,
+            targetDomain: targetDomain,
+            args: commandArgs
+        )
+        
+        // Render command from template
+        let localCommand = TemplateRenderer.render(cliConfig.commandTemplate, variables: variables)
+        
+        // Execute locally
+        let result = executeLocalCommand(localCommand)
+        
+        // Output result
+        print(result.output, terminator: "")
+        
+        if !result.success {
+            throw ExitCode.failure
+        }
+    }
+    
+    // MARK: - Sub-Target Resolution
+    
     /// Resolves a potential sub-target ID to a domain
     private static func resolveSubTarget(
         projectConfig: ProjectConfiguration,
-        potentialSubTarget: String
+        potentialSubTarget: String,
+        useLocalDomain: Bool = false
     ) -> (domain: String, wasSubTarget: Bool) {
+        let defaultDomain = useLocalDomain 
+            ? (projectConfig.localCLI.domain.isEmpty ? "localhost" : projectConfig.localCLI.domain)
+            : projectConfig.domain
+        
         let subTargets = projectConfig.subTargets
         guard !subTargets.isEmpty else {
-            return (projectConfig.domain, false)
+            return (defaultDomain, false)
         }
         
-        // Case-insensitive match against sub-target IDs
+        // Case-insensitive match against sub-target IDs or names
         if let subTarget = subTargets.first(where: {
-            $0.id.lowercased() == potentialSubTarget.lowercased()
+            $0.id.lowercased() == potentialSubTarget.lowercased() ||
+            $0.name.lowercased() == potentialSubTarget.lowercased()
         }) {
-            return (subTarget.domain, true)
+            // For local, derive domain from local domain + subtarget path
+            if useLocalDomain {
+                let baseDomain = projectConfig.localCLI.domain.isEmpty ? "localhost" : projectConfig.localCLI.domain
+                let urlPath = subTarget.isDefault ? "" : "/\(subTarget.id)"
+                return ("\(baseDomain)\(urlPath)", true)
+            } else {
+                return (subTarget.domain, true)
+            }
         }
         
-        return (projectConfig.domain, false)
+        return (defaultDomain, false)
     }
     
-    /// Builds the template variable dictionary for command rendering
-    private static func buildTemplateVariables(
+    // MARK: - Variable Building
+    
+    /// Builds template variables for remote execution
+    private static func buildRemoteVariables(
         projectConfig: ProjectConfiguration,
+        cliConfig: CLIConfig,
         targetDomain: String,
         args: [String]
     ) -> [String: String] {
         var variables: [String: String] = [
-            "projectId": projectConfig.id,
-            "domain": projectConfig.domain,
-            "targetDomain": targetDomain,
-            "args": args.joined(separator: " ")
+            TemplateRenderer.Variables.projectId: projectConfig.id,
+            TemplateRenderer.Variables.domain: targetDomain,
+            TemplateRenderer.Variables.args: args.joined(separator: " "),
+            TemplateRenderer.Variables.cliPath: cliConfig.defaultCLIPath ?? cliConfig.tool
         ]
         
-        // Add basePath if configured
+        // sitePath = basePath for remote execution
         if let basePath = projectConfig.basePath {
-            variables["basePath"] = basePath
-            
-            // appPath: for WordPress, parent of wp-content; otherwise same as basePath
-            if projectConfig.isWordPress,
-               let wordpress = projectConfig.wordpress,
-               wordpress.isConfigured {
-                variables["appPath"] = extractAppPath(from: wordpress.wpContentPath)
-            } else {
-                variables["appPath"] = basePath
-            }
+            variables[TemplateRenderer.Variables.sitePath] = basePath
+            variables[TemplateRenderer.Variables.basePath] = basePath  // Legacy compat
         }
         
         return variables
     }
     
-    /// Extracts the app path (parent of wp-content for WordPress)
-    private static func extractAppPath(from wpContentPath: String) -> String {
-        if wpContentPath.hasSuffix("/wp-content") {
-            return String(wpContentPath.dropLast("/wp-content".count))
-        }
-        return wpContentPath
+    /// Builds template variables for local execution
+    private static func buildLocalVariables(
+        projectConfig: ProjectConfiguration,
+        cliConfig: CLIConfig,
+        targetDomain: String,
+        args: [String]
+    ) -> [String: String] {
+        let cliPath = projectConfig.localCLI.cliPath ?? cliConfig.defaultCLIPath ?? cliConfig.tool
+        
+        return [
+            TemplateRenderer.Variables.projectId: projectConfig.id,
+            TemplateRenderer.Variables.domain: targetDomain,
+            TemplateRenderer.Variables.args: args.joined(separator: " "),
+            TemplateRenderer.Variables.sitePath: projectConfig.localCLI.sitePath,
+            TemplateRenderer.Variables.cliPath: cliPath
+        ]
     }
 }
 
@@ -209,44 +317,22 @@ func loadProjectConfig(id: String) -> ProjectConfiguration? {
 
 // MARK: - Project Type Loading
 
-/// Loads a project type definition from bundled or user resources.
-/// Works in CLI context where Bundle.main may not have the resources.
+/// Loads a project type definition from Application Support.
+/// Project types are synced to Application Support on app launch.
 func loadProjectTypeDefinition(id: String) -> ProjectTypeDefinition? {
     let fileManager = FileManager.default
-    let decoder = JSONDecoder()
-    
-    // Try user-defined types first
     let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let userTypePath = appSupport
-        .appendingPathComponent("Homeboy/project-types/\(id).json")
+    let typePath = appSupport.appendingPathComponent("Homeboy/project-types/\(id).json")
     
-    if let data = try? Data(contentsOf: userTypePath),
-       let type = try? decoder.decode(ProjectTypeDefinition.self, from: data) {
-        return type
+    guard let data = try? Data(contentsOf: typePath),
+          let type = try? JSONDecoder().decode(ProjectTypeDefinition.self, from: data) else {
+        return nil
     }
     
-    // Try bundled types (in the app bundle)
-    // The CLI binary is at: Homeboy.app/Contents/MacOS/homeboy-cli
-    // Resources are at: Homeboy.app/Contents/Resources/project-types/
-    if let bundleURL = Bundle.main.bundleURL.deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .appendingPathComponent("Resources/project-types/\(id).json") as URL?,
-       let data = try? Data(contentsOf: bundleURL),
-       let type = try? decoder.decode(ProjectTypeDefinition.self, from: data) {
-        return type
-    }
-    
-    // Fallback: try current bundle's resources (for development)
-    if let bundledURL = Bundle.main.url(forResource: id, withExtension: "json", subdirectory: "project-types"),
-       let data = try? Data(contentsOf: bundledURL),
-       let type = try? decoder.decode(ProjectTypeDefinition.self, from: data) {
-        return type
-    }
-    
-    return nil
+    return type
 }
 
-// MARK: - SSH Command Execution
+// MARK: - Command Execution
 
 /// Executes an SSH command and returns the result
 func executeSSHCommand(host: String, user: String, serverId: String, command: String) -> (success: Bool, output: String) {
@@ -266,6 +352,35 @@ func executeSSHCommand(host: String, user: String, serverId: String, command: St
         "\(user)@\(host)",
         command
     ]
+    
+    let outputPipe = Pipe()
+    let errorPipe = Pipe()
+    process.standardOutput = outputPipe
+    process.standardError = errorPipe
+    
+    do {
+        try process.run()
+        process.waitUntilExit()
+        
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        
+        let output = String(data: outputData, encoding: .utf8) ?? ""
+        let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
+        
+        let combinedOutput = output + errorOutput
+        
+        return (process.terminationStatus == 0, combinedOutput)
+    } catch {
+        return (false, "Error: \(error.localizedDescription)\n")
+    }
+}
+
+/// Executes a local shell command and returns the result
+func executeLocalCommand(_ command: String) -> (success: Bool, output: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/bash")
+    process.arguments = ["-c", command]
     
     let outputPipe = Pipe()
     let errorPipe = Pipe()

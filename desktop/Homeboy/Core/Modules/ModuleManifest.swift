@@ -37,15 +37,14 @@ struct RuntimeConfig: Codable {
     let dependencies: [String]?
     let playwrightBrowsers: [String]?
     
-    // WP-CLI specific fields
-    let command: String?
-    let subcommand: String?
+    // CLI module fields
+    let args: String?
     let defaultSite: String?
     
     enum RuntimeType: String, Codable {
         case python
         case shell
-        case wpcli
+        case cli
     }
 }
 

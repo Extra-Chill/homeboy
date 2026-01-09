@@ -31,14 +31,14 @@ class WordPressSSHModule {
         let project = ConfigurationManager.readCurrentProject()
         
         guard project.isWordPress,
-              let wordpress = project.wordpress,
-              wordpress.isConfigured,
+              let basePath = project.basePath,
+              !basePath.isEmpty,
               let sshService = SSHService() else {
             return nil
         }
         
         self.ssh = sshService
-        self.wpContentPath = wordpress.wpContentPath
+        self.wpContentPath = "\(basePath)/wp-content"
     }
     
     // MARK: - Validation

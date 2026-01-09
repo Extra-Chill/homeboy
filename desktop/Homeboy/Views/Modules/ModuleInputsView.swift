@@ -7,12 +7,12 @@ struct ModuleInputsView: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Network site selector for WP-CLI modules with multisite
-            if viewModel.isWPCLIModule && viewModel.isMultisite {
-                LabeledContent("Network Site") {
+            // Site selector for CLI modules with subtargets
+            if viewModel.isCLIModule && viewModel.hasSubTargets {
+                LabeledContent("Site") {
                     Picker("", selection: networkSiteBinding) {
-                        ForEach(viewModel.networkSites, id: \.blogId) { site in
-                            Text("\(site.name) (\(site.blogId))").tag(site.name.lowercased())
+                        ForEach(viewModel.subTargets) { subTarget in
+                            Text(subTarget.name).tag(subTarget.id)
                         }
                     }
                     .pickerStyle(.menu)

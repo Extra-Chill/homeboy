@@ -110,12 +110,18 @@ class DatabaseBrowserViewModel: ObservableObject {
     
     // MARK: - Connection Methods
     
-    func connect() async {
-        guard isConfigured else {
-            connectionStatus = .error("Database credentials not configured. Check Settings.")
-            return
-        }
+    /// Auto-connect when view appears, if configured and not already connected
+    func connectIfConfigured() async {
+        // Skip if already connected or connecting
+        guard connectionStatus == .disconnected else { return }
         
+        // Skip if not configured - view will show appropriate message
+        guard isConfigured else { return }
+        
+        await connect()
+    }
+    
+    private func connect() async {
         connectionStatus = .connecting
         errorMessage = nil
         
@@ -133,7 +139,14 @@ class DatabaseBrowserViewModel: ObservableObject {
         }
     }
     
-    func disconnect() {
+    /// Retry connection after an error
+    func retry() async {
+        connectionStatus = .disconnected
+        errorMessage = nil
+        await connect()
+    }
+    
+    private func disconnect() {
         mysqlService?.disconnect()
         mysqlService = nil
         connectionStatus = .disconnected

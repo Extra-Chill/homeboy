@@ -40,8 +40,7 @@ struct GeneralSettingsTab: View {
                 TextField("Domain", text: Binding(
                     get: { config.safeActiveProject.domain },
                     set: { newValue in
-                        config.activeProject?.domain = newValue
-                        config.saveActiveProject()
+                        config.updateActiveProject { $0.domain = newValue }
                     }
                 ))
                 .textFieldStyle(.roundedBorder)
@@ -49,40 +48,6 @@ struct GeneralSettingsTab: View {
                 Text("Used for display and identification (e.g., example.com)")
                     .font(.caption)
                     .foregroundColor(.secondary)
-            }
-            
-            Section("Features") {
-                Toggle("Database Browser", isOn: Binding(
-                    get: { config.safeActiveProject.features.hasDatabase },
-                    set: { newValue in
-                        config.activeProject?.features.hasDatabase = newValue
-                        config.saveActiveProject()
-                    }
-                ))
-                
-                Toggle("Remote Deployment", isOn: Binding(
-                    get: { config.safeActiveProject.features.hasRemoteDeployment },
-                    set: { newValue in
-                        config.activeProject?.features.hasRemoteDeployment = newValue
-                        config.saveActiveProject()
-                    }
-                ))
-                
-                Toggle("Remote Logs", isOn: Binding(
-                    get: { config.safeActiveProject.features.hasRemoteLogs },
-                    set: { newValue in
-                        config.activeProject?.features.hasRemoteLogs = newValue
-                        config.saveActiveProject()
-                    }
-                ))
-                
-                Toggle("Local CLI", isOn: Binding(
-                    get: { config.safeActiveProject.features.hasLocalCLI },
-                    set: { newValue in
-                        config.activeProject?.features.hasLocalCLI = newValue
-                        config.saveActiveProject()
-                    }
-                ))
             }
             
             Section("Command Line Tool") {

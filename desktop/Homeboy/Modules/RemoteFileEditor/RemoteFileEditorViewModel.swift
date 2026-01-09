@@ -46,7 +46,9 @@ class RemoteFileEditorViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var isSaving: Bool = false
     @Published var error: AppError?
-    @Published var showFileBrowser: Bool = false
+    
+    // Sidebar state (persisted per-module)
+    @AppStorage("fileEditor.sidebarCollapsed") var sidebarCollapsed: Bool = false
     
     // Confirmation dialogs
     @Published var showSaveConfirmation: Bool = false
@@ -69,10 +71,6 @@ class RemoteFileEditorViewModel: ObservableObject {
     var selectedFileIndex: Int? {
         guard let id = selectedFileId else { return nil }
         return openFiles.firstIndex { $0.id == id }
-    }
-    
-    var serverId: String? {
-        ConfigurationManager.shared.safeActiveProject.serverId
     }
     
     // MARK: - Initialization
@@ -278,8 +276,7 @@ class RemoteFileEditorViewModel: ObservableObject {
             .filter { $0.isPinned }
             .map { PinnedRemoteFile(id: $0.id, path: $0.path) }
         
-        ConfigurationManager.shared.activeProject?.remoteFiles.pinnedFiles = pinnedFiles
-        ConfigurationManager.shared.saveActiveProject()
+        ConfigurationManager.shared.updateActiveProject { $0.remoteFiles.pinnedFiles = pinnedFiles }
     }
     
     // MARK: - Content Updates
@@ -319,6 +316,53 @@ class RemoteFileEditorViewModel: ObservableObject {
         if selectedFileId != nil {
             Task {
                 await fetchSelectedFile()
+            }
+        }
+    }
+    
+    // MARK: - Sidebar File Operations
+    
+    /// Handle a file being deleted from the sidebar - close its tab if open
+    func handleFileDeleted(_ path: String) {
+        // Convert absolute path to relative if needed
+        let relativePath: String
+        if let base = basePath, path.hasPrefix(base) {
+            relativePath = String(path.dropFirst(base.count + 1))
+        } else {
+            relativePath = path
+        }
+        
+        if let file = openFiles.first(where: { $0.path == relativePath }) {
+            performClose(file.id)
+        }
+    }
+    
+    /// Handle a file being renamed from the sidebar - update the tab if open
+    func handleFileRenamed(from oldPath: String, to newPath: String) {
+        // Convert absolute paths to relative if needed
+        let oldRelative: String
+        let newRelative: String
+        
+        if let base = basePath {
+            oldRelative = oldPath.hasPrefix(base) ? String(oldPath.dropFirst(base.count + 1)) : oldPath
+            newRelative = newPath.hasPrefix(base) ? String(newPath.dropFirst(base.count + 1)) : newPath
+        } else {
+            oldRelative = oldPath
+            newRelative = newPath
+        }
+        
+        if let index = openFiles.firstIndex(where: { $0.path == oldRelative }) {
+            // Update the file path
+            let oldFile = openFiles[index]
+            openFiles[index] = OpenFile(id: oldFile.id, path: newRelative, isPinned: oldFile.isPinned)
+            openFiles[index].content = oldFile.content
+            openFiles[index].originalContent = oldFile.originalContent
+            openFiles[index].fileExists = oldFile.fileExists
+            openFiles[index].lastFetched = oldFile.lastFetched
+            
+            // Update pinned files if this was pinned
+            if oldFile.isPinned {
+                savePinnedFiles()
             }
         }
     }

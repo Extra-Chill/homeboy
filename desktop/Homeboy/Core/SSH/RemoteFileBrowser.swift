@@ -155,4 +155,60 @@ class RemoteFileBrowser: ObservableObject {
     var canGoBack: Bool {
         pathHistory.count > 1
     }
+    
+    // MARK: - File Operations
+    
+    /// Delete a file or directory (refreshes current directory after)
+    /// - Parameter entry: The file or directory to delete
+    func deleteEntry(_ entry: RemoteFileEntry) async throws {
+        guard let ssh = ssh else {
+            throw SSHError.noCredentials
+        }
+        try await ssh.deleteFile(entry.path, recursive: entry.isDirectory)
+        await refresh()
+    }
+    
+    /// Rename a file or directory
+    /// - Parameters:
+    ///   - entry: The file or directory to rename
+    ///   - newName: The new name (not full path)
+    /// - Returns: The new full path
+    @discardableResult
+    func renameEntry(_ entry: RemoteFileEntry, newName: String) async throws -> String {
+        guard let ssh = ssh else {
+            throw SSHError.noCredentials
+        }
+        let newPath = "\(entry.parentPath)/\(newName)"
+        try await ssh.renameFile(from: entry.path, to: newPath)
+        await refresh()
+        return newPath
+    }
+    
+    /// Create a new empty file in the current directory
+    /// - Parameter name: The filename
+    /// - Returns: The full path of the created file
+    @discardableResult
+    func createFile(named name: String) async throws -> String {
+        guard let ssh = ssh else {
+            throw SSHError.noCredentials
+        }
+        let path = currentPath.hasSuffix("/") ? "\(currentPath)\(name)" : "\(currentPath)/\(name)"
+        try await ssh.createFile(path)
+        await refresh()
+        return path
+    }
+    
+    /// Create a new directory in the current directory
+    /// - Parameter name: The directory name
+    /// - Returns: The full path of the created directory
+    @discardableResult
+    func createDirectory(named name: String) async throws -> String {
+        guard let ssh = ssh else {
+            throw SSHError.noCredentials
+        }
+        let path = currentPath.hasSuffix("/") ? "\(currentPath)\(name)" : "\(currentPath)/\(name)"
+        try await ssh.createDirectory(path)
+        await refresh()
+        return path
+    }
 }

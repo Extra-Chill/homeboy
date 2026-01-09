@@ -11,7 +11,7 @@ struct CreateProjectSheet: View {
     @State private var projectName = ""
     @State private var projectId = ""
     @State private var idWasManuallyEdited = false
-    @State private var projectType: String = "wordpress"
+    @State private var projectType: String = ""
     @FocusState private var nameFieldFocused: Bool
     
     var isFirstProject: Bool = false

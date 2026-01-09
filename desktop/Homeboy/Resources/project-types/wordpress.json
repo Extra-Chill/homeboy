@@ -2,19 +2,31 @@
   "id": "wordpress",
   "displayName": "WordPress",
   "icon": "w.circle.fill",
-  "features": ["deployer", "debugLogs", "configEditor", "databaseBrowser"],
   "configSchema": "wordpress",
+
+  "discovery": {
+    "findCommand": "find /home -maxdepth 5 -name 'wp-config.php' -type f 2>/dev/null",
+    "basePathTransform": "dirname",
+    "displayNameCommand": "cd {{basePath}} && wp option get blogname --skip-themes --skip-plugins 2>/dev/null || basename {{basePath}}"
+  },
 
   "cli": {
     "tool": "wp",
     "displayName": "WP-CLI",
-    "commandTemplate": "cd {{appPath}} && wp {{args}} --url={{targetDomain}}"
+    "commandTemplate": "cd {{sitePath}} && {{cliPath}} {{args}} --url={{domain}}",
+    "defaultCLIPath": "wp"
   },
 
   "defaultPinnedFiles": ["wp-config.php", ".htaccess", "robots.txt"],
   "defaultPinnedLogs": ["wp-content/debug.log"],
 
   "database": {
+    "cli": {
+      "tablesCommand": "cd {{sitePath}} && {{cliPath}} db query \"SHOW TABLE STATUS\" --format={{format}} --url={{domain}}",
+      "describeCommand": "cd {{sitePath}} && {{cliPath}} db query \"DESCRIBE {{table}}\" --format={{format}} --url={{domain}}",
+      "queryCommand": "cd {{sitePath}} && {{cliPath}} db query \"{{query}}\" --format={{format}} --url={{domain}}"
+    },
+
     "defaultTablePrefix": "wp_",
     "prefixDetectionSuffixes": ["options", "posts", "users"],
 

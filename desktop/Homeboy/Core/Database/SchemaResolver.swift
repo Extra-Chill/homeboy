@@ -36,7 +36,7 @@ struct SchemaResolver {
     // MARK: - Table Groupings
     
     /// Generate default table groupings for a project.
-    /// Uses multisite groupings if enabled, otherwise single-site grouping.
+    /// Uses subtarget groupings if subtargets exist, otherwise single-site grouping.
     static func resolveDefaultGroupings(for project: ProjectConfiguration) -> [ItemGrouping] {
         let typeDefinition = project.typeDefinition
         guard let database = typeDefinition.database else {
@@ -45,12 +45,13 @@ struct SchemaResolver {
         
         let prefix = project.tablePrefix ?? database.defaultTablePrefix ?? ""
         
-        // Check if multisite is enabled
-        if let multisite = project.multisite, multisite.enabled {
-            return resolveMultisiteGroupings(
+        // Check if project has subtargets (e.g., WordPress multisite)
+        if project.hasSubTargets {
+            return resolveSubTargetGroupings(
                 database: database,
                 prefix: prefix,
-                multisite: multisite
+                subTargets: project.subTargets,
+                sharedTables: project.sharedTables
             )
         }
         
@@ -73,11 +74,12 @@ struct SchemaResolver {
         ]
     }
     
-    /// Resolve multisite-specific groupings.
-    private static func resolveMultisiteGroupings(
+    /// Resolve subtarget-specific groupings (e.g., WordPress multisite blogs).
+    private static func resolveSubTargetGroupings(
         database: DatabaseSchemaDefinition,
         prefix: String,
-        multisite: MultisiteConfig
+        subTargets: [SubTarget],
+        sharedTables: [String]
     ) -> [ItemGrouping] {
         guard let template = database.multisiteGrouping else {
             return []
@@ -86,12 +88,12 @@ struct SchemaResolver {
         var groupings: [ItemGrouping] = []
         var sortOrder = 0
         
-        // Network tables grouping
+        // Shared/Network tables grouping
         if let networkTemplate = template.network,
            let networkSuffixes = database.tableSuffixes?["network"] {
             var patterns = networkSuffixes.map { "\(prefix)\($0)" }
-            // Add user-defined custom network tables
-            patterns.append(contentsOf: multisite.networkTables)
+            // Add user-defined custom shared tables
+            patterns.append(contentsOf: sharedTables)
             
             groupings.append(ItemGrouping(
                 id: networkTemplate.id,
@@ -103,14 +105,14 @@ struct SchemaResolver {
             sortOrder += 1
         }
         
-        // Per-site groupings
+        // Per-subtarget groupings
         if let siteTemplate = template.site {
-            for blog in multisite.blogs {
-                let sitePrefix = blog.tablePrefix(basePrefix: prefix)
-                let siteName = blog.name.isEmpty ? "Site \(blog.blogId)" : blog.name
+            for subTarget in subTargets {
+                let sitePrefix = subTarget.tablePrefix(basePrefix: prefix)
+                let siteName = subTarget.name.isEmpty ? "Site \(subTarget.number ?? 0)" : subTarget.name
                 
                 let id = siteTemplate.idTemplate
-                    .replacingOccurrences(of: "{{blogId}}", with: String(blog.blogId))
+                    .replacingOccurrences(of: "{{blogId}}", with: String(subTarget.number ?? 0))
                 let name = siteTemplate.nameTemplate
                     .replacingOccurrences(of: "{{siteName}}", with: siteName)
                 let pattern = siteTemplate.patternTemplate
@@ -195,49 +197,49 @@ struct SchemaResolver {
     
     // MARK: - Table Categorization
     
-    /// Represents a site in a multisite installation for table categorization.
+    /// Represents a site/subtarget for table categorization.
     struct ResolvedSite: Identifiable, Equatable, Hashable {
-        let blogId: Int
+        let number: Int
         let name: String
         let tablePrefix: String
         
-        var id: Int { blogId }
+        var id: Int { number }
         
         func hash(into hasher: inout Hasher) {
-            hasher.combine(blogId)
+            hasher.combine(number)
         }
     }
     
-    /// Build the list of sites from multisite configuration.
+    /// Build the list of sites from subtargets configuration.
     static func resolveSites(for project: ProjectConfiguration) -> [ResolvedSite] {
         let typeDefinition = project.typeDefinition
         let prefix = project.tablePrefix ?? typeDefinition.database?.defaultTablePrefix ?? ""
         
-        guard let multisite = project.multisite, multisite.enabled else {
+        guard project.hasSubTargets else {
             // Single site
-            return [ResolvedSite(blogId: 1, name: "Main Site", tablePrefix: prefix)]
+            return [ResolvedSite(number: 1, name: "Main Site", tablePrefix: prefix)]
         }
         
-        // Multisite - build from configured blogs
-        if multisite.blogs.isEmpty {
-            return [ResolvedSite(blogId: 1, name: "Main Site", tablePrefix: prefix)]
+        // Build from subtargets
+        if project.subTargets.isEmpty {
+            return [ResolvedSite(number: 1, name: "Main Site", tablePrefix: prefix)]
         }
         
-        return multisite.blogs.map { blog in
+        return project.subTargets.map { subTarget in
             ResolvedSite(
-                blogId: blog.blogId,
-                name: blog.name.isEmpty ? "Site \(blog.blogId)" : blog.name,
-                tablePrefix: blog.tablePrefix(basePrefix: prefix)
+                number: subTarget.number ?? 1,
+                name: subTarget.name.isEmpty ? "Site \(subTarget.number ?? 1)" : subTarget.name,
+                tablePrefix: subTarget.tablePrefix(basePrefix: prefix)
             )
         }
     }
     
-    /// Build set of network table names from type definition and multisite config.
-    static func resolveNetworkTables(for project: ProjectConfiguration) -> Set<String> {
+    /// Build set of shared/network table names from type definition and project config.
+    static func resolveSharedTables(for project: ProjectConfiguration) -> Set<String> {
         let typeDefinition = project.typeDefinition
         let prefix = project.tablePrefix ?? typeDefinition.database?.defaultTablePrefix ?? ""
         
-        guard let multisite = project.multisite, multisite.enabled,
+        guard project.hasSubTargets,
               let database = typeDefinition.database,
               let networkSuffixes = database.tableSuffixes?["network"] else {
             return []
@@ -245,13 +247,13 @@ struct SchemaResolver {
         
         var tables = Set<String>()
         
-        // Add type-defined network tables
+        // Add type-defined network/shared tables
         for suffix in networkSuffixes {
             tables.insert("\(prefix)\(suffix)")
         }
         
-        // Add user-defined custom network tables
-        for table in multisite.networkTables {
+        // Add user-defined custom shared tables
+        for table in project.sharedTables {
             tables.insert(table)
         }
         
@@ -259,16 +261,16 @@ struct SchemaResolver {
     }
     
     /// Categorize a table into its owning site.
-    /// Returns the site that owns the table, or nil if it's a network/unknown table.
+    /// Returns the site that owns the table, or nil if it's a shared/unknown table.
     static func categorizeTables(
         _ tables: [DatabaseTable],
         for project: ProjectConfiguration
-    ) -> (bySite: [ResolvedSite: [DatabaseTable]], network: [DatabaseTable], ungrouped: [DatabaseTable]) {
+    ) -> (bySite: [ResolvedSite: [DatabaseTable]], shared: [DatabaseTable], ungrouped: [DatabaseTable]) {
         let sites = resolveSites(for: project)
-        let networkTables = resolveNetworkTables(for: project)
+        let sharedTableNames = resolveSharedTables(for: project)
         
         var bySite: [ResolvedSite: [DatabaseTable]] = [:]
-        var network: [DatabaseTable] = []
+        var shared: [DatabaseTable] = []
         var ungrouped: [DatabaseTable] = []
         
         // Initialize site buckets
@@ -280,9 +282,9 @@ struct SchemaResolver {
         let sortedSites = sites.sorted { $0.tablePrefix.count > $1.tablePrefix.count }
         
         for table in tables {
-            // Check if it's a network table
-            if networkTables.contains(table.name) {
-                network.append(table)
+            // Check if it's a shared/network table
+            if sharedTableNames.contains(table.name) {
+                shared.append(table)
                 continue
             }
             
@@ -301,6 +303,6 @@ struct SchemaResolver {
             }
         }
         
-        return (bySite, network, ungrouped)
+        return (bySite, shared, ungrouped)
     }
 }

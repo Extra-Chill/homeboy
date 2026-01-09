@@ -9,11 +9,17 @@ struct ComponentsSettingsTab: View {
     @State private var componentToDelete: ComponentConfig? = nil
     @State private var showDeleteConfirmation = false
     
-    /// Group components by their `group` field
-    private var groupedComponents: [(title: String, components: [ComponentConfig])] {
-        Dictionary(grouping: config.safeActiveProject.components, by: { $0.group ?? "Components" })
-            .sorted { $0.key < $1.key }
-            .map { (title: $0.key, components: $0.value.sorted { $0.name < $1.name }) }
+    private var project: ProjectConfiguration {
+        config.safeActiveProject
+    }
+    
+    /// Group components using the componentGroupings system
+    private var categorizedComponents: GroupedItems<ComponentConfig> {
+        GroupingManager.categorize(
+            items: project.components,
+            groupings: project.componentGroupings,
+            idExtractor: { $0.id }
+        )
     }
     
     var body: some View {
@@ -28,18 +34,37 @@ struct ComponentsSettingsTab: View {
                     }
                 }
                 
-                if config.safeActiveProject.components.isEmpty {
-                    Text("No components configured. Add themes and plugins to deploy.")
+                if project.components.isEmpty {
+                    Text("No components configured. Add components to deploy.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
             
-            ForEach(groupedComponents, id: \.title) { group in
-                Section(group.title) {
-                    ForEach(group.components) { component in
+            // Grouped components
+            ForEach(categorizedComponents.grouped, id: \.grouping.id) { group in
+                Section(group.grouping.name) {
+                    ForEach(group.items.sorted { $0.name < $1.name }) { component in
                         ComponentRow(
                             component: component,
+                            groupName: group.grouping.name,
+                            onEdit: { editingComponent = component },
+                            onDelete: {
+                                componentToDelete = component
+                                showDeleteConfirmation = true
+                            }
+                        )
+                    }
+                }
+            }
+            
+            // Ungrouped components
+            if !categorizedComponents.ungrouped.isEmpty {
+                Section("Components") {
+                    ForEach(categorizedComponents.ungrouped.sorted { $0.name < $1.name }) { component in
+                        ComponentRow(
+                            component: component,
+                            groupName: nil,
                             onEdit: { editingComponent = component },
                             onDelete: {
                                 componentToDelete = component
@@ -73,8 +98,13 @@ struct ComponentsSettingsTab: View {
     }
     
     private func deleteComponent(_ component: ComponentConfig) {
-        config.activeProject?.components.removeAll { $0.id == component.id }
-        config.saveActiveProject()
+        config.updateActiveProject { project in
+            project.components.removeAll { $0.id == component.id }
+            // Also remove from any groupings
+            for i in project.componentGroupings.indices {
+                project.componentGroupings[i].memberIds.removeAll { $0 == component.id }
+            }
+        }
     }
 }
 
@@ -82,6 +112,7 @@ struct ComponentsSettingsTab: View {
 
 struct ComponentRow: View {
     let component: ComponentConfig
+    let groupName: String?
     let onEdit: () -> Void
     let onDelete: () -> Void
     
@@ -141,8 +172,8 @@ struct AddEditComponentSheet: View {
     @State private var versionFile: String = ""
     @State private var versionPattern: String = "Version:\\s*([\\d.]+)"
     
-    // Grouping
-    @State private var group: String = ""
+    // Grouping - now uses picker for existing groups
+    @State private var selectedGroupId: String? = nil
     @State private var isNetwork: Bool = false
     
     @State private var validationError: String? = nil
@@ -155,6 +186,10 @@ struct AddEditComponentSheet: View {
     
     private var canSave: Bool {
         !localPath.isEmpty && !id.isEmpty && !name.isEmpty && !remotePath.isEmpty && !buildArtifact.isEmpty
+    }
+    
+    private var availableGroups: [ItemGrouping] {
+        config.safeActiveProject.componentGroupings.sorted { $0.sortOrder < $1.sortOrder }
     }
     
     var body: some View {
@@ -179,20 +214,30 @@ struct AddEditComponentSheet: View {
                             .textFieldStyle(.roundedBorder)
                         TextField("Display Name", text: $name)
                             .textFieldStyle(.roundedBorder)
-                        TextField("Group (e.g., Themes, Site Plugins)", text: $group)
-                            .textFieldStyle(.roundedBorder)
-                        Toggle("Network Plugin", isOn: $isNetwork)
+                        
+                        // Group picker
+                        Picker("Group", selection: $selectedGroupId) {
+                            Text("None").tag(nil as String?)
+                            ForEach(availableGroups) { group in
+                                Text(group.name).tag(group.id as String?)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        
+                        if config.safeActiveProject.isWordPress {
+                            Toggle("Network Plugin", isOn: $isNetwork)
+                        }
                     }
                     
                     Section("Deployment") {
-                        TextField("Remote Path (e.g., plugins/my-plugin)", text: $remotePath)
+                        TextField("Remote Path", text: $remotePath)
                             .textFieldStyle(.roundedBorder)
-                        TextField("Build Artifact (e.g., build/my-plugin.zip)", text: $buildArtifact)
+                        TextField("Build Artifact (e.g., build/my-app.zip)", text: $buildArtifact)
                             .textFieldStyle(.roundedBorder)
                     }
                     
                     Section("Version Detection (Optional)") {
-                        TextField("Version File (e.g., my-plugin.php)", text: $versionFile)
+                        TextField("Version File", text: $versionFile)
                             .textFieldStyle(.roundedBorder)
                         TextField("Version Pattern (regex)", text: $versionPattern)
                             .textFieldStyle(.roundedBorder)
@@ -237,8 +282,11 @@ struct AddEditComponentSheet: View {
                 buildArtifact = existing.buildArtifact
                 versionFile = existing.versionFile ?? ""
                 versionPattern = existing.versionPattern ?? "Version:\\s*([\\d.]+)"
-                group = existing.group ?? ""
                 isNetwork = existing.isNetwork ?? false
+                
+                // Find current group for this component
+                selectedGroupId = config.safeActiveProject.componentGroupings
+                    .first { $0.memberIds.contains(existing.id) }?.id
             }
         }
         .onChange(of: localPath) { _, newValue in
@@ -253,7 +301,7 @@ struct AddEditComponentSheet: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.message = "Select a theme or plugin folder"
+        panel.message = "Select a component folder"
         
         if panel.runModal() == .OK, let url = panel.url {
             localPath = url.path
@@ -279,21 +327,18 @@ struct AddEditComponentSheet: View {
             remotePath = "themes/\(slug)"
             buildArtifact = "build/\(slug).zip"
             versionFile = "style.css"
-            group = "Themes"
         } else if FileManager.default.fileExists(atPath: mainPHP) {
             // Plugin
             name = parsePluginName(from: mainPHP) ?? slug.capitalized
             remotePath = "plugins/\(slug)"
             buildArtifact = "build/\(slug).zip"
             versionFile = "\(slug).php"
-            group = "Site Plugins"
         } else {
             // Generic
             name = slug.capitalized
             remotePath = slug
             buildArtifact = "build/\(slug).zip"
             versionFile = ""
-            group = "Components"
         }
     }
     
@@ -344,18 +389,33 @@ struct AddEditComponentSheet: View {
             buildArtifact: buildArtifact,
             versionFile: versionFile.isEmpty ? nil : versionFile,
             versionPattern: versionPattern.isEmpty ? nil : versionPattern,
-            group: group.isEmpty ? nil : group,
             isNetwork: isNetwork ? true : nil
         )
         
-        if isEditing {
-            if let index = config.safeActiveProject.components.firstIndex(where: { $0.id == existing?.id }) {
-                config.activeProject?.components[index] = component
-            }
-        } else {
-            config.activeProject?.components.append(component)
-        }
+        let existingId = existing?.id
+        let newGroupId = selectedGroupId
         
-        config.saveActiveProject()
+        config.updateActiveProject { project in
+            // Update or add the component
+            if isEditing {
+                if let index = project.components.firstIndex(where: { $0.id == existingId }) {
+                    project.components[index] = component
+                }
+                // Remove from old groupings
+                for i in project.componentGroupings.indices {
+                    project.componentGroupings[i].memberIds.removeAll { $0 == id }
+                }
+            } else {
+                project.components.append(component)
+            }
+            
+            // Add to new group if selected
+            if let groupId = newGroupId,
+               let groupIndex = project.componentGroupings.firstIndex(where: { $0.id == groupId }) {
+                if !project.componentGroupings[groupIndex].memberIds.contains(id) {
+                    project.componentGroupings[groupIndex].memberIds.append(id)
+                }
+            }
+        }
     }
 }

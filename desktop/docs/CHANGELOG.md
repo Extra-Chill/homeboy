@@ -2,6 +2,25 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.6.0
+
+### New Features
+- **Module CLI Command**: Added `homeboy module` command for terminal-based module management and execution.
+  - `homeboy module list [--project <id>]` - List available modules with optional project compatibility filtering
+  - `homeboy module run <module-id> [--project <id>] [args...]` - Run CLI modules locally
+- **Generic CLI Runtime Type**: Added `cli` runtime type for modules, enabling project-type-agnostic CLI execution via command templates.
+
+### Removed
+- **Legacy `wpcli` Runtime Type**: Removed the `wpcli` runtime type alias. Modules should use `cli` runtime type exclusively.
+- **Legacy Module Fields**: Removed `command` and `subcommand` fields from RuntimeConfig. CLI modules use the `args` field for command templates.
+
+### Refactoring
+- **LocalCLIConfig**: Renamed `localDev` to `localCLI` in project configuration with updated field names (`sitePath` instead of legacy `wpCliPath`). Migration support reads legacy keys.
+
+### CLI
+- Added `ModuleCommand.swift` with `ModuleList` and `ModuleRun` commands for CLI module execution.
+- Module execution uses project type's command template with variable substitution (`{{sitePath}}`, `{{domain}}`, `{{cliPath}}`, `{{args}}`).
+
 ## 0.5.0
 
 ### New Features

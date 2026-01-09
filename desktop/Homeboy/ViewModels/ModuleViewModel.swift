@@ -30,19 +30,19 @@ class ModuleViewModel: ObservableObject {
         ModuleManager.shared.module(withId: moduleId)
     }
     
-    /// Whether this module is a WP-CLI module with multisite support
-    var isWPCLIModule: Bool {
-        module?.manifest.runtime.type == .wpcli
+    /// Whether this module is a CLI module with subtarget support
+    var isCLIModule: Bool {
+        module?.manifest.runtime.type == .cli
     }
     
-    /// Whether the current site is multisite (for showing network site selector)
-    var isMultisite: Bool {
-        configManager.safeActiveProject.multisite?.enabled ?? false
+    /// Whether the current project has subtargets (for showing site selector)
+    var hasSubTargets: Bool {
+        configManager.safeActiveProject.hasSubTargets
     }
     
-    /// Available network sites for WP-CLI modules
-    var networkSites: [MultisiteBlog] {
-        configManager.safeActiveProject.multisite?.blogs ?? []
+    /// Available subtargets for CLI modules (e.g., multisite blogs)
+    var subTargets: [SubTarget] {
+        configManager.safeActiveProject.subTargets
     }
     
     init(moduleId: String) {
@@ -51,8 +51,8 @@ class ModuleViewModel: ObservableObject {
     
     /// Initialize input values from module manifest
     func initializeInputValues(from module: LoadedModule) {
-        // Set default network site for WP-CLI modules
-        if module.manifest.runtime.type == .wpcli {
+        // Set default network site for CLI modules
+        if module.manifest.runtime.type == .cli {
             selectedNetworkSite = module.manifest.runtime.defaultSite ?? "main"
         }
         

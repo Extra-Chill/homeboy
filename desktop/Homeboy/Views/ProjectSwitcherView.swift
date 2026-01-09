@@ -20,7 +20,7 @@ struct ProjectSwitcherView: View {
     @State private var newProjectName = ""
     @State private var newProjectId = ""
     @State private var newProjectIdWasManuallyEdited = false
-    @State private var newProjectType: String = "wordpress"
+    @State private var newProjectType: String = ""
     @FocusState private var newProjectNameFieldFocused: Bool
     
     private var availableProjects: [ProjectConfiguration] {
@@ -321,7 +321,7 @@ struct ProjectSwitcherView: View {
         newProjectName = ""
         newProjectId = ""
         newProjectIdWasManuallyEdited = false
-        newProjectType = availableProjectTypes.first?.id ?? "wordpress"
+        newProjectType = availableProjectTypes.first?.id ?? ""
     }
 }
 

@@ -1,13 +1,13 @@
 # Homeboy
 
-Native macOS SwiftUI application for WordPress development and deployment automation. Configure multiple WordPress sites and extend functionality with installable modules.
+Native macOS SwiftUI application for development and deployment automation. Supports WordPress, Node.js, and custom project types via extensible JSON definitions. Configure multiple sites and extend functionality with installable modules.
 
 ## Features
 
 ### Core Tools
 
 **Deployer**
-One-click deployment of WordPress plugins and themes to any SSH-accessible server.
+One-click deployment of components (plugins, themes, packages) to any SSH-accessible server.
 - SSH key authentication
 - Build automation via `build.sh` scripts
 - Version comparison (local vs remote)
@@ -15,7 +15,7 @@ One-click deployment of WordPress plugins and themes to any SSH-accessible serve
 
 **Database Browser**
 Browse and query remote MySQL databases over SSH tunnel.
-- Table listing with WordPress multisite support
+- Table listing with multisite support (WordPress projects)
 - Table grouping system for organization
 - Query editor with native table results display
 - Row selection and clipboard operations
@@ -38,7 +38,7 @@ Extend functionality with installable modules. Modules are self-contained plugin
 - Dynamic UI generation from manifest
 - API action support for WordPress REST endpoints
 
-See [docs/MODULE-SPEC.md](docs/MODULE-SPEC.md) for the complete module specification.
+See docs/MODULE-SPEC.md for the complete module specification.
 
 ### Command Line Tool
 
@@ -48,14 +48,20 @@ Homeboy includes a CLI (`homeboy`) for terminal access to project management, Wo
 
 **Available Commands**:
 ```bash
-homeboy projects              # List configured projects
-homeboy wp <project> <cmd>    # Execute WP-CLI on production
-homeboy db <project> tables   # List database tables
-homeboy deploy <project> --all  # Deploy all components
-homeboy ssh <project>         # Open interactive SSH shell
+homeboy projects                                    # List configured projects
+homeboy project create "My Site" --type wordpress  # Create a new project (--type required)
+homeboy project show extrachill                    # Show project configuration
+homeboy server create "Prod" --host server.example.com --user deploy
+homeboy wp extrachill plugin list                  # Execute WP-CLI on production
+homeboy pm2 api-server list                        # Execute PM2 on Node.js servers
+homeboy db extrachill tables                       # List database tables
+homeboy deploy extrachill --all                    # Deploy all components
+homeboy ssh extrachill                             # Open interactive SSH shell
+homeboy module list                                # List available modules
+homeboy module run <module-id>                     # Run a CLI module locally
 ```
 
-Projects must be configured via Homeboy.app before using the CLI. See [docs/CLI.md](docs/CLI.md) for full documentation.
+Projects must be configured via Homeboy.app before using the CLI. See docs/CLI.md for full documentation.
 
 ## Requirements
 
@@ -77,17 +83,21 @@ open Homeboy.xcodeproj
 
 Build and run from Xcode (Cmd+R).
 
-### 3. Configure Your WordPress Sites
+### 3. Configure Your Projects
 
 Homeboy works with **projects** (site profiles). On first launch, configure your project in **Settings**:
-- **General**: Project name and local domain
+- **General**: Project name, type, and local domain
 - **Servers**: Add an SSH server (host/user/port) and generate an SSH key
-- **WordPress**: Set the remote `wp-content` path (used by Deployer and remote file browsing)
+- **Project Settings**: Set the remote base path (used by Deployer and remote file browsing)
 - **Database**: MySQL connection details (used by Database Browser over SSH tunnel)
-- **Components**: Plugins/themes/components for requirement checks
+- **Components**: Plugins, themes, or packages for deployment
 - **API**: REST API base URL and authentication (used by module API actions)
 
 Project configurations are stored as JSON files at `~/Library/Application Support/Homeboy/projects/`. You can manage multiple projects and switch between them.
+
+### Project Types
+
+Homeboy ships with built-in definitions for WordPress and Node.js projects. Custom project types can be added via JSON files in `~/Library/Application Support/Homeboy/project-types/`.
 
 ## Installing Modules
 
@@ -118,7 +128,7 @@ Remote features (deployments, database tunnel, remote file browsing) require an 
 5. Click **Show** to copy the public key and add it to the server’s `~/.ssh/authorized_keys`
 6. Click **Test SSH Connection** to verify
 
-For WordPress projects, set **WordPress Deployment → wp-content path** in the same tab (you can use **Browse** and then **Validate wp-content**).
+For WordPress projects, set the **wp-content path** in project settings (you can use **Browse** to discover installations on the server).
 
 ## Project Structure
 
@@ -150,13 +160,17 @@ Homeboy/
 CLI/
 ├── main.swift                    # Entry point and Projects command
 ├── Commands/                     # CLI command implementations
-│   ├── WPCommand.swift           # WP-CLI passthrough
 │   ├── DBCommand.swift           # Database operations
 │   ├── DeployCommand.swift       # Component deployment
-│   ├── SSHCommand.swift          # SSH command execution
-│   └── ProjectsCommand.swift     # Project listing
+│   ├── ModuleCommand.swift       # Module listing and execution
+│   ├── ProjectCommand.swift      # Project CRUD and management
+│   ├── ProjectsCommand.swift     # Project listing
+│   ├── RemoteCommand.swift       # WP-CLI and PM2 passthrough
+│   ├── ServerCommand.swift       # Server configuration
+│   └── SSHCommand.swift          # SSH command execution
 └── Utilities/
-    └── OutputFormatter.swift     # Table and JSON formatting
+    ├── OutputFormatter.swift     # Table and JSON formatting
+    └── TemplateRenderer.swift    # Command template rendering
 ```
 
 ## Configuration Storage
@@ -182,16 +196,16 @@ Site configurations are stored as JSON files:
 
 ## API Authentication
 
-The app supports JWT authentication with any WordPress site implementing standard auth endpoints:
+The app supports JWT authentication with REST APIs:
 - Access and refresh tokens stored in macOS Keychain (per-site)
 - Auto-refresh before token expiry
-- Requires valid credentials for whatever `/auth/login` implementation your WordPress site uses
+- Requires valid credentials for the configured `/auth/login` endpoint
 
-Configure the API base URL in **Settings > API** for each WordPress site profile. API authentication enables module actions that interact with your WordPress REST API.
+Configure the API base URL in **Settings > API** for each project. API authentication enables module actions that interact with your REST API.
 
 ## Creating Modules
 
-Modules follow a JSON manifest contract. See [docs/MODULE-SPEC.md](docs/MODULE-SPEC.md) for:
+Modules follow a JSON manifest contract. See docs/MODULE-SPEC.md for:
 - Manifest schema
 - Input types (text, stepper, toggle, select)
 - Output display options

@@ -44,12 +44,12 @@ class SSHService: ObservableObject {
         return KeychainService.hasSSHKey(forServer: serverId)
     }
     
-    /// Check if active project has full deployment configuration (server + SSH key + wp-content path)
+    /// Check if active project has full deployment configuration (server + SSH key + base path)
     static func isConfiguredForWordPressDeployment() -> Bool {
         let project = ConfigurationManager.readCurrentProject()
         guard project.isWordPress,
-              let wordpress = project.wordpress,
-              wordpress.isConfigured else {
+              let basePath = project.basePath,
+              !basePath.isEmpty else {
             return false
         }
         return isConfigured()
@@ -532,5 +532,36 @@ class SSHService: ObservableObject {
         } catch {
             return false
         }
+    }
+    
+    // MARK: - File Operations
+    
+    /// Delete a file or directory
+    /// - Parameters:
+    ///   - path: Full path to the file or directory
+    ///   - recursive: If true, deletes directories recursively (required for non-empty directories)
+    func deleteFile(_ path: String, recursive: Bool = false) async throws {
+        let flags = recursive ? "-rf" : "-f"
+        _ = try await executeCommandSync("rm \(flags) '\(path)'")
+    }
+    
+    /// Rename or move a file/directory
+    /// - Parameters:
+    ///   - oldPath: Current full path
+    ///   - newPath: New full path
+    func renameFile(from oldPath: String, to newPath: String) async throws {
+        _ = try await executeCommandSync("mv '\(oldPath)' '\(newPath)'")
+    }
+    
+    /// Create an empty file
+    /// - Parameter path: Full path for the new file
+    func createFile(_ path: String) async throws {
+        _ = try await executeCommandSync("touch '\(path)'")
+    }
+    
+    /// Create a directory (creates parent directories if needed)
+    /// - Parameter path: Full path for the new directory
+    func createDirectory(_ path: String) async throws {
+        _ = try await executeCommandSync("mkdir -p '\(path)'")
     }
 }

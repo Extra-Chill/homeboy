@@ -6,10 +6,11 @@ struct DatabaseBrowserView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Top toolbar
-            toolbar
-            
-            Divider()
+            // Top toolbar (only shown when connected)
+            if viewModel.connectionStatus.isConnected {
+                toolbar
+                Divider()
+            }
             
             // Main content
             if viewModel.connectionStatus.isConnected {
@@ -25,18 +26,8 @@ struct DatabaseBrowserView: View {
                 disconnectedView
             }
         }
-        .alert("Error", isPresented: .constant(viewModel.errorMessage != nil)) {
-            Button("OK") {
-                viewModel.errorMessage = nil
-            }
-            Button("Copy Error") {
-                viewModel.errorMessage?.copyToClipboard()
-                viewModel.errorMessage = nil
-            }
-        } message: {
-            if let error = viewModel.errorMessage {
-                Text(error.body)
-            }
+        .onAppear {
+            Task { await viewModel.connectIfConfigured() }
         }
         .sheet(isPresented: $viewModel.showRowDeletionConfirm) {
             rowDeletionConfirmSheet
@@ -121,12 +112,12 @@ struct DatabaseBrowserView: View {
                     VStack(spacing: 12) {
                         HStack {
                             Image(systemName: "lock.fill")
-                            Text("This is a protected WordPress core table")
+                            Text("This is a protected core table")
                         }
                         .foregroundColor(.red)
                         .font(.headline)
                         
-                        Text("Dropping this table would break your WordPress installation. This action is not allowed.")
+                        Text("Dropping this table would break your installation. This action is not allowed.")
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
                     }
@@ -204,27 +195,11 @@ struct DatabaseBrowserView: View {
                     .foregroundColor(.secondary)
             }
             
-            if viewModel.connectionStatus.isConnected {
-                Text("\(viewModel.totalTableCount) tables")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+            Text("\(viewModel.totalTableCount) tables")
+                .font(.caption)
+                .foregroundColor(.secondary)
             
             Spacer()
-            
-            // Connect/Disconnect button
-            if viewModel.connectionStatus.isConnected {
-                Button("Disconnect") {
-                    viewModel.disconnect()
-                }
-            } else {
-                Button("Connect") {
-                    Task {
-                        await viewModel.connect()
-                    }
-                }
-                .disabled(!viewModel.isConfigured || viewModel.connectionStatus == .connecting)
-            }
         }
         .padding()
     }
@@ -253,30 +228,52 @@ struct DatabaseBrowserView: View {
             Text("Database Browser")
                 .font(.title2)
             
-            if !viewModel.isConfigured {
-                VStack(spacing: 8) {
-                    Text("Database credentials not configured")
-                        .foregroundColor(.secondary)
-                    
-                    Text("Go to Settings to configure your remote database credentials and SSH key.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-            } else {
-                VStack(spacing: 8) {
-                    Text("Not connected")
-                        .foregroundColor(.secondary)
-                    
-                    Text("Click Connect to browse your remote database.")
-                        .font(.caption)
+            // Show appropriate message based on state
+            switch viewModel.connectionStatus {
+            case .connecting:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Connecting...")
                         .foregroundColor(.secondary)
                 }
-            }
-            
-            if case .error(let message) = viewModel.connectionStatus {
-                InlineErrorView(message, source: "Database Browser")
-                    .frame(maxWidth: 400)
+                
+            case .error(let message):
+                VStack(spacing: 12) {
+                    ErrorView(
+                        AppError(message, source: "Database Browser"),
+                        onRetry: {
+                            Task { await viewModel.retry() }
+                        }
+                    )
+                    .frame(maxWidth: 500)
+                }
+                
+            case .disconnected:
+                if !viewModel.isConfigured {
+                    VStack(spacing: 8) {
+                        Text("Database not configured")
+                            .foregroundColor(.secondary)
+                        
+                        Text("Configure your database credentials in Settings → Database to browse your remote database.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 400)
+                    }
+                } else {
+                    // Configured but disconnected - should auto-connect, show spinner
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Connecting...")
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+            case .connected:
+                // Shouldn't reach here, but handle gracefully
+                EmptyView()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

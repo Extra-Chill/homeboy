@@ -2,9 +2,70 @@ import SwiftUI
 
 struct RemoteLogViewerView: View {
     @StateObject private var viewModel = RemoteLogViewerViewModel()
+    @StateObject private var browser: RemoteFileBrowser
     @State private var showCopiedFeedback = false
     
+    init() {
+        let serverId = ConfigurationManager.shared.safeActiveProject.serverId ?? ""
+        let basePath = ConfigurationManager.shared.safeActiveProject.basePath
+        _browser = StateObject(wrappedValue: RemoteFileBrowser(serverId: serverId, startingPath: basePath))
+    }
+    
     var body: some View {
+        CollapsibleSplitView(
+            orientation: .horizontal,
+            collapseSide: .leading,
+            isCollapsed: $viewModel.sidebarCollapsed,
+            panelSize: (min: 200, ideal: 260, max: 400)
+        ) {
+            // Primary content: Log viewer
+            logViewerContent
+        } secondary: {
+            // Sidebar: File browser (file operations disabled for log viewer)
+            FileBrowserSidebarView(
+                browser: browser,
+                onFileSelected: { path in
+                    openLogFromBrowser(path)
+                },
+                onCollapse: {
+                    viewModel.sidebarCollapsed = true
+                },
+                fileOperationsEnabled: false  // Read-only for log viewer
+            )
+        }
+        .frame(minWidth: 700, minHeight: 400)
+        .task {
+            await browser.connect()
+            if viewModel.selectedLogId != nil {
+                await viewModel.fetchSelectedLog()
+            }
+        }
+        .alert("Clear Log", isPresented: $viewModel.showClearConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear", role: .destructive) {
+                Task { await viewModel.clearSelectedLog() }
+            }
+        } message: {
+            if let log = viewModel.selectedLog {
+                Text("This will permanently delete the contents of \(log.displayName). This cannot be undone.")
+            }
+        }
+    }
+    
+    // MARK: - Open Log from Browser
+    
+    private func openLogFromBrowser(_ path: String) {
+        // Convert absolute path to relative from basePath
+        let basePath = ConfigurationManager.shared.safeActiveProject.basePath ?? ""
+        let relativePath = path.hasPrefix(basePath)
+            ? String(path.dropFirst(basePath.count + 1))
+            : path
+        viewModel.openLog(path: relativePath)
+    }
+    
+    // MARK: - Log Viewer Content
+    
+    private var logViewerContent: some View {
         VStack(spacing: 0) {
             tabBar
             Divider()
@@ -17,38 +78,6 @@ struct RemoteLogViewerView: View {
                 toolbarSection(log: log)
                 Divider()
                 logContentSection(log: log)
-            }
-        }
-        .frame(minWidth: 600, minHeight: 400)
-        .task {
-            if viewModel.selectedLogId != nil {
-                await viewModel.fetchSelectedLog()
-            }
-        }
-        .sheet(isPresented: $viewModel.showFileBrowser) {
-            if let serverId = viewModel.serverId {
-                RemoteFileBrowserView(
-                    serverId: serverId,
-                    startingPath: ConfigurationManager.shared.safeActiveProject.basePath,
-                    mode: .selectFile
-                ) { selectedPath in
-                    // Extract relative path from basePath
-                    let basePath = ConfigurationManager.shared.safeActiveProject.basePath ?? ""
-                    let relativePath = selectedPath.hasPrefix(basePath)
-                        ? String(selectedPath.dropFirst(basePath.count + 1))
-                        : selectedPath
-                    viewModel.openLog(path: relativePath)
-                }
-            }
-        }
-        .alert("Clear Log", isPresented: $viewModel.showClearConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Clear", role: .destructive) {
-                Task { await viewModel.clearSelectedLog() }
-            }
-        } message: {
-            if let log = viewModel.selectedLog {
-                Text("This will permanently delete the contents of \(log.displayName). This cannot be undone.")
             }
         }
     }
@@ -64,7 +93,10 @@ struct RemoteLogViewerView: View {
             onClose: { viewModel.closeLog($0) },
             onPin: { viewModel.pinLog($0) },
             onUnpin: { viewModel.unpinLog($0) },
-            onBrowse: { viewModel.showFileBrowser = true }
+            onBrowse: {
+                // Toggle sidebar instead of showing modal
+                viewModel.sidebarCollapsed = false
+            }
         )
     }
     
@@ -79,16 +111,22 @@ struct RemoteLogViewerView: View {
             Text("No Logs Open")
                 .font(.headline)
             
-            Text("Click \"Browse...\" to open a log file from the server")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            
-            Button {
-                viewModel.showFileBrowser = true
-            } label: {
-                Label("Browse Files", systemImage: "folder")
+            if viewModel.sidebarCollapsed {
+                Text("Use the sidebar to browse and open log files")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                
+                Button {
+                    viewModel.sidebarCollapsed = false
+                } label: {
+                    Label("Show Sidebar", systemImage: "sidebar.left")
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Text("Select a log file from the sidebar to view")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
             }
-            .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

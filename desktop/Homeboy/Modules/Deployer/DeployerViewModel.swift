@@ -20,12 +20,12 @@ class DeployerViewModel: ObservableObject {
     @Published var components: [DeployableComponent] = ComponentRegistry.all
     @Published var selectedComponents: Set<String> = []
     
-    /// Components grouped by their `group` field for display (sorting handled by view)
-    var groupedComponents: [(title: String, components: [DeployableComponent])] {
-        Dictionary(grouping: components, by: { $0.group })
-            .sorted { $0.key < $1.key }
-            .map { (title: $0.key, components: $0.value) }
-    }
+    // Component groupings (universal system)
+    @Published var groupedComponents: [(grouping: ItemGrouping, components: [DeployableComponent], isExpanded: Bool)] = []
+    @Published var ungroupedComponents: [DeployableComponent] = []
+    @Published var isUngroupedExpanded: Bool = true
+    
+    private var currentGroupings: [ItemGrouping] = []
     
     @Published var localVersions: [String: String] = [:]
     @Published var remoteVersions: [String: VersionInfo] = [:]
@@ -76,6 +76,10 @@ class DeployerViewModel: ObservableObject {
         
         // Refresh component list from config
         components = ComponentRegistry.all
+        
+        // Load groupings from config
+        currentGroupings = project.componentGroupings
+        refreshGroupedComponents()
         
         // Initialize deployment service if all requirements met
         if hasCredentials && hasSSHKey && hasBasePath {
@@ -422,5 +426,135 @@ class DeployerViewModel: ObservableObject {
         
         // Re-check configuration for new site
         checkConfiguration()
+    }
+    
+    // MARK: - Grouping Management
+    
+    /// Create a new grouping from component IDs
+    func createGrouping(name: String, fromComponentIds componentIds: [String]) {
+        let newGrouping = GroupingManager.createGrouping(
+            name: name,
+            fromIds: componentIds,
+            existingGroupings: currentGroupings
+        )
+        currentGroupings.append(newGrouping)
+        saveGroupings()
+        refreshGroupedComponents()
+    }
+    
+    /// Add components to an existing grouping
+    func addComponentsToGrouping(componentIds: [String], groupingId: String) {
+        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
+        currentGroupings[index] = GroupingManager.addMembers(componentIds, to: currentGroupings[index])
+        saveGroupings()
+        refreshGroupedComponents()
+    }
+    
+    /// Remove components from a grouping
+    func removeComponentsFromGrouping(componentIds: [String], groupingId: String) {
+        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
+        currentGroupings[index] = GroupingManager.removeMembers(componentIds, from: currentGroupings[index])
+        saveGroupings()
+        refreshGroupedComponents()
+    }
+    
+    /// Rename a grouping
+    func renameGrouping(groupingId: String, newName: String) {
+        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
+        currentGroupings[index].name = newName
+        saveGroupings()
+        refreshGroupedComponents()
+    }
+    
+    /// Delete a grouping (components become ungrouped)
+    func deleteGrouping(groupingId: String) {
+        currentGroupings = GroupingManager.deleteGrouping(id: groupingId, from: currentGroupings)
+        saveGroupings()
+        refreshGroupedComponents()
+    }
+    
+    /// Move a grouping up in the list
+    func moveGroupingUp(groupingId: String) {
+        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
+        guard let index = sorted.firstIndex(where: { $0.id == groupingId }),
+              index > 0 else { return }
+        currentGroupings = GroupingManager.moveGrouping(in: currentGroupings, fromIndex: index, toIndex: index - 1)
+        saveGroupings()
+        refreshGroupedComponents()
+    }
+    
+    /// Move a grouping down in the list
+    func moveGroupingDown(groupingId: String) {
+        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
+        guard let index = sorted.firstIndex(where: { $0.id == groupingId }),
+              index < sorted.count - 1 else { return }
+        currentGroupings = GroupingManager.moveGrouping(in: currentGroupings, fromIndex: index, toIndex: index + 1)
+        saveGroupings()
+        refreshGroupedComponents()
+    }
+    
+    /// Check if a grouping can be moved up
+    func canMoveGroupingUp(groupingId: String) -> Bool {
+        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
+        guard let index = sorted.firstIndex(where: { $0.id == groupingId }) else { return false }
+        return index > 0
+    }
+    
+    /// Check if a grouping can be moved down
+    func canMoveGroupingDown(groupingId: String) -> Bool {
+        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
+        guard let index = sorted.firstIndex(where: { $0.id == groupingId }) else { return false }
+        return index < sorted.count - 1
+    }
+    
+    /// Toggle expansion state for a grouping
+    func toggleGroupExpansion(groupingId: String) {
+        guard let index = groupedComponents.firstIndex(where: { $0.grouping.id == groupingId }) else { return }
+        groupedComponents[index].isExpanded.toggle()
+    }
+    
+    /// Toggle expansion state for ungrouped section
+    func toggleUngroupedExpansion() {
+        isUngroupedExpanded.toggle()
+    }
+    
+    /// Find which grouping a component belongs to (by explicit membership)
+    func groupingForComponent(_ componentId: String) -> ItemGrouping? {
+        currentGroupings.first { $0.memberIds.contains(componentId) }
+    }
+    
+    /// Check if a component is in a group by explicit membership
+    func isComponentInGroupByMembership(_ componentId: String) -> Bool {
+        currentGroupings.contains { $0.memberIds.contains(componentId) }
+    }
+    
+    /// Get all available groupings for adding components
+    var availableGroupings: [ItemGrouping] {
+        currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
+    }
+    
+    // MARK: - Private Helpers
+    
+    private func saveGroupings() {
+        var project = ConfigurationManager.readCurrentProject()
+        project.componentGroupings = currentGroupings
+        ConfigurationManager.shared.saveProject(project)
+    }
+    
+    private func refreshGroupedComponents() {
+        let result = GroupingManager.categorize(
+            items: components,
+            groupings: currentGroupings,
+            idExtractor: { $0.id }
+        )
+        
+        // Preserve expansion state where possible
+        let oldExpansionState = Dictionary(uniqueKeysWithValues: groupedComponents.map { ($0.grouping.id, $0.isExpanded) })
+        
+        groupedComponents = result.grouped.map { (grouping, items) in
+            let wasExpanded = oldExpansionState[grouping.id] ?? true
+            return (grouping: grouping, components: items, isExpanded: wasExpanded)
+        }
+        ungroupedComponents = result.ungrouped
     }
 }

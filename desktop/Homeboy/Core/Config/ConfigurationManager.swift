@@ -110,6 +110,14 @@ class ConfigurationManager: ObservableObject {
     private let jsonEncoder: JSONEncoder
     private let jsonDecoder: JSONDecoder
     
+    // File watching for external changes (CLI, text editor, etc.)
+    private var projectFileSource: DispatchSourceFileSystemObject?
+    private var projectFileDescriptor: Int32 = -1
+    
+    // Debounce to avoid rapid-fire reloads
+    private var lastReloadTime: Date = .distantPast
+    private let reloadDebounceInterval: TimeInterval = 0.5
+    
     private var configDirectory: URL {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("Homeboy")
@@ -139,6 +147,73 @@ class ConfigurationManager: ObservableObject {
         
         ensureDirectoriesExist()
         load()
+        startWatchingActiveProject()
+    }
+    
+    deinit {
+        projectFileSource?.cancel()
+        if projectFileDescriptor >= 0 {
+            close(projectFileDescriptor)
+        }
+    }
+    
+    // MARK: - File Watching
+    
+    /// Starts watching the active project's JSON file for external changes.
+    /// Called on init and when switching projects.
+    private func startWatchingActiveProject() {
+        stopWatchingProject()
+        
+        guard let projectId = activeProject?.id else { return }
+        let projectPath = projectsDirectory.appendingPathComponent("\(projectId).json")
+        
+        projectFileDescriptor = open(projectPath.path, O_EVTONLY)
+        guard projectFileDescriptor >= 0 else {
+            print("[ConfigurationManager] Failed to open file for watching: \(projectPath.path)")
+            return
+        }
+        
+        projectFileSource = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: projectFileDescriptor,
+            eventMask: [.write, .extend, .rename],
+            queue: .main
+        )
+        
+        projectFileSource?.setEventHandler { [weak self] in
+            self?.handleProjectFileChange()
+        }
+        
+        projectFileSource?.setCancelHandler { [weak self] in
+            if let fd = self?.projectFileDescriptor, fd >= 0 {
+                close(fd)
+            }
+            self?.projectFileDescriptor = -1
+        }
+        
+        projectFileSource?.resume()
+        print("[ConfigurationManager] Watching project file: \(projectPath.lastPathComponent)")
+    }
+    
+    /// Stops watching the current project file.
+    private func stopWatchingProject() {
+        projectFileSource?.cancel()
+        projectFileSource = nil
+    }
+    
+    /// Handles external changes to the active project file.
+    /// Debounced to avoid rapid-fire reloads from multiple filesystem events.
+    private func handleProjectFileChange() {
+        let now = Date()
+        guard now.timeIntervalSince(lastReloadTime) > reloadDebounceInterval else { return }
+        lastReloadTime = now
+        
+        guard let currentId = activeProject?.id else { return }
+        
+        if let freshProject = loadProject(id: currentId) {
+            activeProject = freshProject
+            print("[ConfigurationManager] Reloaded project from disk: \(currentId)")
+            NotificationCenter.default.post(name: .projectDidChange, object: nil)
+        }
     }
     
     // MARK: - Directory Management
@@ -150,6 +225,46 @@ class ConfigurationManager: ObservableObject {
             try fileManager.createDirectory(at: serversDirectory, withIntermediateDirectories: true)
         } catch {
             print("[ConfigurationManager] Failed to create directories: \(error)")
+        }
+    }
+    
+    // MARK: - Project Type Sync
+    
+    private var projectTypesDirectory: URL {
+        configDirectory.appendingPathComponent("project-types")
+    }
+    
+    /// Syncs bundled project types to Application Support.
+    /// Called on app launch to ensure CLI has access to project type definitions.
+    /// Bundled types are always overwritten (they are the canonical "core" versions).
+    func syncBundledProjectTypes() {
+        do {
+            // Ensure project-types directory exists
+            try fileManager.createDirectory(at: projectTypesDirectory, withIntermediateDirectories: true)
+            
+            // Find bundled project types
+            guard let bundledTypeURLs = Bundle.main.urls(forResourcesWithExtension: "json", subdirectory: "project-types") else {
+                print("[ConfigurationManager] No bundled project types found")
+                return
+            }
+            
+            // Copy each bundled type to Application Support (overwrite existing)
+            for bundledURL in bundledTypeURLs {
+                let filename = bundledURL.lastPathComponent
+                let destinationURL = projectTypesDirectory.appendingPathComponent(filename)
+                
+                // Remove existing file if present
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    try fileManager.removeItem(at: destinationURL)
+                }
+                
+                // Copy bundled file
+                try fileManager.copyItem(at: bundledURL, to: destinationURL)
+            }
+            
+            print("[ConfigurationManager] Synced \(bundledTypeURLs.count) project type(s) to Application Support")
+        } catch {
+            print("[ConfigurationManager] Failed to sync project types: \(error)")
         }
     }
     
@@ -229,6 +344,30 @@ class ConfigurationManager: ObservableObject {
         saveProject(project)
     }
     
+    /// Updates the active project with a mutation closure, safely merging with disk.
+    /// This prevents overwriting external changes (from CLI, text editor, etc.) by:
+    /// 1. Reading fresh project data from disk
+    /// 2. Applying the mutation to the fresh data
+    /// 3. Saving the result and updating in-memory state
+    ///
+    /// Use this instead of directly modifying `activeProject` and calling `saveActiveProject()`.
+    func updateActiveProject(_ mutation: (inout ProjectConfiguration) -> Void) {
+        guard let projectId = activeProject?.id else { return }
+        
+        // Read fresh from disk to avoid overwriting external changes
+        guard var freshProject = loadProject(id: projectId) else {
+            print("[ConfigurationManager] Failed to load project for update: \(projectId)")
+            return
+        }
+        
+        // Apply the mutation to fresh data
+        mutation(&freshProject)
+        
+        // Save and update in-memory state
+        saveProject(freshProject)
+        activeProject = freshProject
+    }
+    
     // MARK: - Load Project
     
     func loadProject(id: String) -> ProjectConfiguration? {
@@ -293,6 +432,8 @@ class ConfigurationManager: ObservableObject {
         activeProject = project
         appConfig.activeProjectId = id
         saveAppConfig()
+        
+        startWatchingActiveProject()
         
         NotificationCenter.default.post(name: .projectDidChange, object: nil)
     }

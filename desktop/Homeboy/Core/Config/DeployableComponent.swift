@@ -42,7 +42,6 @@ struct DeployableComponent: Identifiable, Hashable {
     let buildArtifact: String
     let versionFile: String?
     let versionPattern: String?
-    let group: String
     let isNetwork: Bool
     
     var buildArtifactPath: String {
@@ -65,12 +64,10 @@ struct DeployableComponent: Identifiable, Hashable {
     /// Auto-detect if this is a network plugin by parsing the plugin header.
     /// Returns the stored isNetwork value if detection fails or for non-plugins.
     var isNetworkPlugin: Bool {
-        // If we have a version file, try to detect from header
         if let versionPath = versionFilePath {
             let detected = VersionParser.parseNetworkFlag(from: versionPath)
             if detected { return true }
         }
-        // Fall back to stored value (from config)
         return isNetwork
     }
     
@@ -82,7 +79,6 @@ struct DeployableComponent: Identifiable, Hashable {
         self.buildArtifact = config.buildArtifact
         self.versionFile = config.versionFile
         self.versionPattern = config.versionPattern
-        self.group = config.group ?? "Components"
         self.isNetwork = config.isNetwork ?? false
     }
     
@@ -98,13 +94,6 @@ struct DeployableComponent: Identifiable, Hashable {
 struct ComponentRegistry {
     static var all: [DeployableComponent] {
         ConfigurationManager.readCurrentProject().components.map { DeployableComponent(from: $0) }
-    }
-    
-    static func grouped() -> [(title: String, components: [DeployableComponent])] {
-        let allComponents = all
-        return Dictionary(grouping: allComponents, by: { $0.group })
-            .sorted { $0.key < $1.key }
-            .map { (title: $0.key, components: $0.value.sorted { $0.name < $1.name }) }
     }
 }
 

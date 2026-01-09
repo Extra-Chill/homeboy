@@ -2,13 +2,28 @@
   "id": "nodejs",
   "displayName": "Node.js",
   "icon": "server.rack",
-  "features": ["deployer", "debugLogs", "configEditor"],
   "configSchema": null,
+
+  "discovery": {
+    "findCommand": "find /home -name 'package.json' -type f 2>/dev/null | xargs grep -l '\"main\"' 2>/dev/null",
+    "basePathTransform": "dirname",
+    "displayNameCommand": "cd {{basePath}} && node -e \"console.log(require('./package.json').name)\" 2>/dev/null || basename {{basePath}}"
+  },
+
   "cli": {
     "tool": "pm2",
     "displayName": "PM2",
-    "commandTemplate": "pm2 {{args}} {{projectId}}"
+    "commandTemplate": "{{cliPath}} {{args}} {{projectId}}",
+    "defaultCLIPath": "pm2"
   },
   "defaultPinnedFiles": ["package.json", "ecosystem.config.js", ".env.example"],
-  "defaultPinnedLogs": ["logs/combined.log", "logs/err.log", "logs/out.log"]
+  "defaultPinnedLogs": ["logs/combined.log", "logs/err.log", "logs/out.log"],
+
+  "database": {
+    "cli": {
+      "tablesCommand": "MYSQL_PWD='{{dbPassword}}' mysql -u{{dbUser}} -h{{dbHost}} {{dbName}} -e 'SHOW TABLE STATUS'",
+      "describeCommand": "MYSQL_PWD='{{dbPassword}}' mysql -u{{dbUser}} -h{{dbHost}} {{dbName}} -e 'DESCRIBE {{table}}'",
+      "queryCommand": "MYSQL_PWD='{{dbPassword}}' mysql -u{{dbUser}} -h{{dbHost}} {{dbName}} -e '{{query}}'"
+    }
+  }
 }

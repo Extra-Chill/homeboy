@@ -13,7 +13,9 @@
 		0B1C053B8DCA686200739C43 /* ServerEditSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5D75CB92C4916A5B3A8DE34 /* ServerEditSheet.swift */; };
 		0BB5245A79F8709EBD8C5269 /* ModuleInstallSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA1C2F245C5FCEF82A5D2D3 /* ModuleInstallSheet.swift */; };
 		0BC1FC2E1B3FC48292BF982A /* DBCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDB9CADC5E234387CF05076E /* DBCommand.swift */; };
+		0EC3AEF5BE4B805C48A28679 /* ServerCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 928BF04EE7644D1347C7614C /* ServerCommand.swift */; };
 		0FE6351E7C94950D6A459978 /* DeployerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F978C6E7F1C5288FF7303DF7 /* DeployerView.swift */; };
+		15BD48174528F35F493B4B1D /* ProjectCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55AF05D68C929E55F56A26AF /* ProjectCommand.swift */; };
 		1A164D8DD4607926F6964B95 /* CopyableContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */; };
 		1C661B0BF3D61D3C0D4035E5 /* MySQLService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8106225CC14632C9644AFC7C /* MySQLService.swift */; };
 		1E0233CF5AC026C74233786E /* TableDataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EC7ED01925DBCB9195A8A4D /* TableDataView.swift */; };
@@ -30,6 +32,7 @@
 		2A0D8EC80F531D2458B4F000 /* DatabaseSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99F53066BAD2365203BC1A21 /* DatabaseSettingsTab.swift */; };
 		2A2B0D75AF5291B05895FBBB /* GroupingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2A7B75D6A4B4DED5F193C64 /* GroupingManager.swift */; };
 		2B8459AD77C15BBB15B16830 /* SSHService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD23DCF3987518BDD613AA7A /* SSHService.swift */; };
+		2C977161D5F1C1518B1AAE6A /* ModuleCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6023FF9AACBA4EDDE6AAD204 /* ModuleCommand.swift */; };
 		305E5C164DFA751B1ABFE77B /* LocalEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 076C7293F0318D0DF7C1263E /* LocalEnvironment.swift */; };
 		30856C36D38963CB5A540EFC /* WarningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20129FFBFEEBA4948B8DA194 /* WarningView.swift */; };
 		3188A425BBDAED4249534CE8 /* WordPressSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9172819247F48893F5F20EA2 /* WordPressSettingsTab.swift */; };
@@ -54,12 +57,14 @@
 		52FDF39D89C383078D344296 /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC3095C66C75EB70DD73775 /* PythonRunner.swift */; };
 		53E684EC9B358CC6CF15C7C2 /* DatabaseTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */; };
 		540940CC1B9785A5EA225760 /* TableProtectionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4E159274386B7761D62FF53 /* TableProtectionManager.swift */; };
+		5724ADBBD83934015A0383D2 /* DeployerComponentContextMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBC7AF862A7B02E0B062D8EB /* DeployerComponentContextMenu.swift */; };
 		573F38B148371DC60CB6C0A7 /* DeploymentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */; };
 		57C3AE0D20A591DEE69B0FF0 /* HomeboyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFEA6E42C1D9292B10447CDA /* HomeboyApp.swift */; };
 		58782E3C2B83E467318758D3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E134C3E1AFDFB8B9C3BFA989 /* Assets.xcassets */; };
 		58D7EB6E82E865D5736663C0 /* DeployerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C206F8FCC7B57F9E68E99A08 /* DeployerViewModel.swift */; };
 		5A9B1A9B7984F57035A97D82 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D06A62D2DDC840DC6A12CC7 /* KeychainService.swift */; };
 		5AAC8C88082027144361696A /* ModuleManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 267B4789567169ABFC9AAD53 /* ModuleManifest.swift */; };
+		5B3425AA6A8A9C4C9EF5E29F /* FileBrowserSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD70F8136E9691D7528CB581 /* FileBrowserSidebarView.swift */; };
 		5BD322602F64CCA4E7A54FEF /* ConfigurationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */; };
 		5C04267FDCF7C82C4BE9B087 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7A27F9F448DAC4DF35613F9 /* APIClient.swift */; };
 		5CA76C92A6AF0C42784FD35D /* ErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */; };
@@ -80,6 +85,7 @@
 		790A549F1DA4887FA2EF100F /* ServersSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF87669DD8D8EEF387C64926 /* ServersSettingsTab.swift */; };
 		7CFF60E56F49FFC68A830664 /* SiteListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7BEDC81C87152DCED825A3 /* SiteListView.swift */; };
 		7EE844A0691D39F31A685114 /* ProjectSwitcherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA62EB2C6FD0532AE4CCD204 /* ProjectSwitcherView.swift */; };
+		807E4729F90F95A12FAB99B7 /* CollapsibleSplitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4ED098FFBF749CD6DD355B1B /* CollapsibleSplitView.swift */; };
 		80AFA487AED025BD2697208D /* AddToGroupMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF03155593630A42C1F341D1 /* AddToGroupMenu.swift */; };
 		80D12DD221BE19316CB0BDCA /* RemoteLogViewerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E867876A7DCD50A851E6F8D7 /* RemoteLogViewerViewModel.swift */; };
 		8327EB6B86BD82A5A8F0E466 /* ServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */; };
@@ -181,13 +187,16 @@
 		432441A63F12FD70294090A6 /* ModuleSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleSetupView.swift; sourceTree = "<group>"; };
 		4406A9EEECAF8249580937A7 /* CopyableTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyableTextView.swift; sourceTree = "<group>"; };
 		4C3C30739F765981B37603DD /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		4ED098FFBF749CD6DD355B1B /* CollapsibleSplitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollapsibleSplitView.swift; sourceTree = "<group>"; };
 		514BD1BE8868C181AD9401CF /* LogContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogContentView.swift; sourceTree = "<group>"; };
+		55AF05D68C929E55F56A26AF /* ProjectCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectCommand.swift; sourceTree = "<group>"; };
 		572D0318B7820B97ABDBC10A /* ModuleActionsBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleActionsBar.swift; sourceTree = "<group>"; };
 		599231AFF8DD800C0BA6DF12 /* ProjectTypeDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectTypeDefinition.swift; sourceTree = "<group>"; };
 		5A6E91E37345CFC1CFCF9AA6 /* RemoteLogViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteLogViewerView.swift; sourceTree = "<group>"; };
 		5B19BDE6DDAAF5D914C29785 /* RemoteFileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorView.swift; sourceTree = "<group>"; };
 		5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSSHModule.swift; sourceTree = "<group>"; };
 		5F014356904A59206993DA47 /* ModuleConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleConsoleView.swift; sourceTree = "<group>"; };
+		6023FF9AACBA4EDDE6AAD204 /* ModuleCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleCommand.swift; sourceTree = "<group>"; };
 		6146119051BC060D7F272D08 /* RemoteCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteCommand.swift; sourceTree = "<group>"; };
 		6304E63C8AC4239FBA559CC8 /* ModuleRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleRunner.swift; sourceTree = "<group>"; };
 		6668890DE94C7DC530C66125 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -208,6 +217,7 @@
 		8F7BEDC81C87152DCED825A3 /* SiteListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SiteListView.swift; sourceTree = "<group>"; };
 		9172819247F48893F5F20EA2 /* WordPressSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSettingsTab.swift; sourceTree = "<group>"; };
 		91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateProjectSheet.swift; sourceTree = "<group>"; };
+		928BF04EE7644D1347C7614C /* ServerCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerCommand.swift; sourceTree = "<group>"; };
 		943FB329E82EA8D3985C41BE /* InlineErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineErrorView.swift; sourceTree = "<group>"; };
 		99F53066BAD2365203BC1A21 /* DatabaseSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseSettingsTab.swift; sourceTree = "<group>"; };
 		9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationManager.swift; sourceTree = "<group>"; };
@@ -222,6 +232,7 @@
 		AA7B0366D7FFE2A9A7F15384 /* ModuleInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleInstaller.swift; sourceTree = "<group>"; };
 		AB2507DAC42BC6CDA2DF39CE /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
 		AD23DCF3987518BDD613AA7A /* SSHService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHService.swift; sourceTree = "<group>"; };
+		AD70F8136E9691D7528CB581 /* FileBrowserSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBrowserSidebarView.swift; sourceTree = "<group>"; };
 		AF03155593630A42C1F341D1 /* AddToGroupMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddToGroupMenu.swift; sourceTree = "<group>"; };
 		B4784FCC0B29C23649013882 /* CopyButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyButton.swift; sourceTree = "<group>"; };
 		B59036A328B5EEE5B0D5DF9C /* AppError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppError.swift; sourceTree = "<group>"; };
@@ -238,6 +249,7 @@
 		D476C8F7828EF0FDC4996034 /* SSHTunnelService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHTunnelService.swift; sourceTree = "<group>"; };
 		D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyableContent.swift; sourceTree = "<group>"; };
 		D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectTypeManager.swift; sourceTree = "<group>"; };
+		DBC7AF862A7B02E0B062D8EB /* DeployerComponentContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployerComponentContextMenu.swift; sourceTree = "<group>"; };
 		DF490ADD191341069884F61B /* QueryEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryEditorView.swift; sourceTree = "<group>"; };
 		DF87669DD8D8EEF387C64926 /* ServersSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServersSettingsTab.swift; sourceTree = "<group>"; };
 		E134C3E1AFDFB8B9C3BFA989 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -320,8 +332,11 @@
 			children = (
 				CDB9CADC5E234387CF05076E /* DBCommand.swift */,
 				1F19D1A6E916AD977240F494 /* DeployCommand.swift */,
+				6023FF9AACBA4EDDE6AAD204 /* ModuleCommand.swift */,
+				55AF05D68C929E55F56A26AF /* ProjectCommand.swift */,
 				75BEE49FCF4D9DB9637C8B0E /* ProjectsCommand.swift */,
 				6146119051BC060D7F272D08 /* RemoteCommand.swift */,
+				928BF04EE7644D1347C7614C /* ServerCommand.swift */,
 				67207B29A512B7E577C66A05 /* SSHCommand.swift */,
 			);
 			path = Commands;
@@ -405,6 +420,7 @@
 		6E9CEE5EDBA41A6C361A2074 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				DBC7AF862A7B02E0B062D8EB /* DeployerComponentContextMenu.swift */,
 				F978C6E7F1C5288FF7303DF7 /* DeployerView.swift */,
 			);
 			path = Views;
@@ -496,9 +512,11 @@
 				9255FD669F2BFF67E0F7CFE8 /* Grouping */,
 				E458125E00E4AA130D4F530D /* Table */,
 				BA88D343E94C4C34E1069813 /* CodeTextView.swift */,
+				4ED098FFBF749CD6DD355B1B /* CollapsibleSplitView.swift */,
 				4406A9EEECAF8249580937A7 /* CopyableTextView.swift */,
 				91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */,
 				7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */,
+				AD70F8136E9691D7528CB581 /* FileBrowserSidebarView.swift */,
 				943FB329E82EA8D3985C41BE /* InlineErrorView.swift */,
 				0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */,
 				514BD1BE8868C181AD9401CF /* LogContentView.swift */,
@@ -807,12 +825,14 @@
 				D55CAE1501A30D718E45E078 /* ItemGrouping.swift in Sources */,
 				37BB6A35F6B6CF8B2A5D7408 /* KeychainService.swift in Sources */,
 				C3A482944D140CA374914539 /* LocalEnvironment.swift in Sources */,
+				2C977161D5F1C1518B1AAE6A /* ModuleCommand.swift in Sources */,
 				6A8A3EB9DEF0C27DD8310EB0 /* ModuleInstaller.swift in Sources */,
 				27914A30B3E4E4A474ACE8CC /* ModuleManager.swift in Sources */,
 				B9F817941BFACA4C732F7B37 /* ModuleManifest.swift in Sources */,
 				1F8E8F33D5C287B10A7460C8 /* ModuleRunner.swift in Sources */,
 				1C661B0BF3D61D3C0D4035E5 /* MySQLService.swift in Sources */,
 				D46BD4167C16E4E3A6A1FC7C /* OutputFormatter.swift in Sources */,
+				15BD48174528F35F493B4B1D /* ProjectCommand.swift in Sources */,
 				079027CF40B8043B84F77945 /* ProjectConfiguration.swift in Sources */,
 				D21BE415813C2930A8B7519D /* ProjectTypeDefinition.swift in Sources */,
 				33BC501E3C96A4C432B65810 /* ProjectTypeManager.swift in Sources */,
@@ -825,6 +845,7 @@
 				2B8459AD77C15BBB15B16830 /* SSHService.swift in Sources */,
 				280E8263D00B0D9C5F202111 /* SSHTunnelService.swift in Sources */,
 				A774FB7341AC4F1A57B7E54D /* SchemaResolver.swift in Sources */,
+				0EC3AEF5BE4B805C48A28679 /* ServerCommand.swift in Sources */,
 				D60F895AAD01B00086E36C75 /* ServerConfig.swift in Sources */,
 				540940CC1B9785A5EA225760 /* TableProtectionManager.swift in Sources */,
 				95D9D11A7A1F2C47430CF88C /* TemplateRenderer.swift in Sources */,
@@ -847,6 +868,7 @@
 				1EBFEF675F781A40A250D009 /* BackupService.swift in Sources */,
 				DD3128834B4A7FF474DB3C02 /* CLIInstaller.swift in Sources */,
 				CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */,
+				807E4729F90F95A12FAB99B7 /* CollapsibleSplitView.swift in Sources */,
 				8D62AD324E3C99747FA53FCB /* ComponentsSettingsTab.swift in Sources */,
 				5BD322602F64CCA4E7A54FEF /* ConfigurationManager.swift in Sources */,
 				3D5278E44CF446DC733DFDF7 /* ConsoleOutput.swift in Sources */,
@@ -863,10 +885,12 @@
 				2A0D8EC80F531D2458B4F000 /* DatabaseSettingsTab.swift in Sources */,
 				53E684EC9B358CC6CF15C7C2 /* DatabaseTypes.swift in Sources */,
 				B9C42108AC64D21BAEEE580A /* DeployableComponent.swift in Sources */,
+				5724ADBBD83934015A0383D2 /* DeployerComponentContextMenu.swift in Sources */,
 				0FE6351E7C94950D6A459978 /* DeployerView.swift in Sources */,
 				58D7EB6E82E865D5736663C0 /* DeployerViewModel.swift in Sources */,
 				85F4F94606B3D49BEFDC227F /* DeploymentService.swift in Sources */,
 				5CA76C92A6AF0C42784FD35D /* ErrorView.swift in Sources */,
+				5B3425AA6A8A9C4C9EF5E29F /* FileBrowserSidebarView.swift in Sources */,
 				02AD314100925D82AE384CE8 /* GeneralSettingsTab.swift in Sources */,
 				AC767488EAD832187214964D /* GroupingEditorSheet.swift in Sources */,
 				2A2B0D75AF5291B05895FBBB /* GroupingManager.swift in Sources */,
@@ -1015,7 +1039,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Homeboy;
@@ -1026,7 +1050,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 0.5.0;
+				MARKETING_VERSION = 0.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
 				PRODUCT_NAME = Homeboy;
 				SDKROOT = macosx;
@@ -1058,7 +1082,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Homeboy;
@@ -1069,7 +1093,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 0.5.0;
+				MARKETING_VERSION = 0.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
 				PRODUCT_NAME = Homeboy;
 				SDKROOT = macosx;

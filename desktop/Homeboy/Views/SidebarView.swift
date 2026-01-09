@@ -93,24 +93,11 @@ struct SidebarView: View {
         }
     }
     
-    /// Core tools filtered by project features (settings shown in separate section)
+    /// Core tools to display in the sidebar.
+    /// All tools are universal - Database Browser shows config prompt if not configured.
+    /// Settings is shown in a separate section below.
     private var coreTools: [CoreTool] {
-        let features = config.safeActiveProject.features
-        
-        return CoreTool.allCases.filter { tool in
-            switch tool {
-            case .deployer:
-                return features.hasRemoteDeployment
-            case .databaseBrowser:
-                return features.hasDatabase
-            case .remoteLogViewer:
-                return features.hasRemoteLogs
-            case .remoteFileEditor:
-                return true
-            case .settings:
-                return false
-            }
-        }
+        CoreTool.allCases.filter { $0 != .settings }
     }
 }
 

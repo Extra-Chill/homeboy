@@ -43,8 +43,10 @@ class RemoteLogViewerViewModel: ObservableObject {
     @Published var selectedLogId: UUID?
     @Published var isLoading: Bool = false
     @Published var error: AppError?
-    @Published var showFileBrowser: Bool = false
     @Published var showClearConfirmation: Bool = false
+    
+    // Sidebar state (persisted per-module)
+    @AppStorage("logViewer.sidebarCollapsed") var sidebarCollapsed: Bool = false
     
     // MARK: - Services
     
@@ -65,10 +67,6 @@ class RemoteLogViewerViewModel: ObservableObject {
     var selectedLogIndex: Int? {
         guard let id = selectedLogId else { return nil }
         return openLogs.firstIndex { $0.id == id }
-    }
-    
-    var serverId: String? {
-        ConfigurationManager.shared.safeActiveProject.serverId
     }
     
     // MARK: - Initialization
@@ -265,8 +263,7 @@ class RemoteLogViewerViewModel: ObservableObject {
             .filter { $0.isPinned }
             .map { PinnedRemoteLog(id: $0.id, path: $0.path, tailLines: $0.tailLines) }
         
-        ConfigurationManager.shared.activeProject?.remoteLogs.pinnedLogs = pinnedLogs
-        ConfigurationManager.shared.saveActiveProject()
+        ConfigurationManager.shared.updateActiveProject { $0.remoteLogs.pinnedLogs = pinnedLogs }
     }
     
     // MARK: - Utility

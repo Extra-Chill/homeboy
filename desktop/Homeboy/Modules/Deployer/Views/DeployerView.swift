@@ -1,9 +1,13 @@
 import SwiftUI
 import AppKit
+import SwiftUI
 
 struct DeployerView: View {
     @StateObject private var viewModel = DeployerViewModel()
     @State private var sortDescriptor: DataTableSortDescriptor<DeployableComponent>?
+    @State private var showingGroupEditor = false
+    @State private var groupEditorMode: GroupingEditorSheet.Mode = .create
+
     
     var body: some View {
         VStack(spacing: 0) {
@@ -34,6 +38,17 @@ struct DeployerView: View {
             }
         } message: {
             Text("This will deploy all \(viewModel.components.count) components to production. This may take several minutes.")
+        }
+        .sheet(isPresented: $showingGroupEditor) {
+            GroupingEditorSheet(mode: groupEditorMode) { name in
+                switch groupEditorMode {
+                case .create:
+                    viewModel.createGrouping(name: name, fromComponentIds: Array(viewModel.selectedComponents))
+
+                case .rename(let grouping):
+                    viewModel.renameGrouping(groupingId: grouping.id, newName: name)
+                }
+            }
         }
     }
     
@@ -140,9 +155,60 @@ struct DeployerView: View {
     private var componentListSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    ForEach(viewModel.groupedComponents, id: \.title) { group in
-                        componentTable(title: group.title, components: group.components)
+                VStack(alignment: .leading, spacing: 12) {
+                    // Grouped components
+                    ForEach(viewModel.groupedComponents, id: \.grouping.id) { group in
+                        ComponentGroupSection(
+                            grouping: group.grouping,
+                            components: group.components,
+                            isExpanded: group.isExpanded,
+                            canMoveUp: viewModel.canMoveGroupingUp(groupingId: group.grouping.id),
+                            canMoveDown: viewModel.canMoveGroupingDown(groupingId: group.grouping.id),
+                            allGroupings: viewModel.availableGroupings,
+                            selectedComponents: $viewModel.selectedComponents,
+                            sortDescriptor: $sortDescriptor,
+                            viewModel: viewModel,
+                            onToggle: { viewModel.toggleGroupExpansion(groupingId: group.grouping.id) },
+                            onRenameGroup: {
+                                groupEditorMode = .rename(group.grouping)
+                                showingGroupEditor = true
+                            },
+                            onMoveGroupUp: { viewModel.moveGroupingUp(groupingId: group.grouping.id) },
+                            onMoveGroupDown: { viewModel.moveGroupingDown(groupingId: group.grouping.id) },
+                            onDeleteGroup: { viewModel.deleteGrouping(groupingId: group.grouping.id) },
+                            onCreateGroupFromSelection: { selectedIds in
+                                viewModel.selectedComponents = selectedIds
+                                groupEditorMode = .create
+                                showingGroupEditor = true
+                            },
+                            onAddSelectionToGroup: { selectedIds, grouping in
+                                viewModel.addComponentsToGrouping(componentIds: Array(selectedIds), groupingId: grouping.id)
+                            },
+                            onRemoveSelectionFromGroup: { selectedIds in
+                                viewModel.removeComponentsFromGrouping(componentIds: Array(selectedIds), groupingId: group.grouping.id)
+                            }
+                        )
+                    }
+                    
+                    // Ungrouped components ("Components" section)
+                    if !viewModel.ungroupedComponents.isEmpty {
+                        UngroupedComponentSection(
+                            components: viewModel.ungroupedComponents,
+                            isExpanded: viewModel.isUngroupedExpanded,
+                            allGroupings: viewModel.availableGroupings,
+                            selectedComponents: $viewModel.selectedComponents,
+                            sortDescriptor: $sortDescriptor,
+                            viewModel: viewModel,
+                            onToggle: { viewModel.toggleUngroupedExpansion() },
+                            onCreateGroupFromSelection: { selectedIds in
+                                viewModel.selectedComponents = selectedIds
+                                groupEditorMode = .create
+                                showingGroupEditor = true
+                            },
+                            onAddSelectionToGroup: { selectedIds, grouping in
+                                viewModel.addComponentsToGrouping(componentIds: Array(selectedIds), groupingId: grouping.id)
+                            }
+                        )
                     }
                 }
                 .padding(.vertical, 8)
@@ -177,85 +243,6 @@ struct DeployerView: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
-    }
-    
-    private func componentTable(title: String, components: [DeployableComponent]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title.uppercased())
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 8)
-            
-            NativeDataTable(
-                items: sortedComponents(components),
-                columns: deployerColumns,
-                selection: $viewModel.selectedComponents,
-                sortDescriptor: $sortDescriptor
-            )
-            .frame(height: CGFloat(components.count) * DataTableConstants.defaultRowHeight + DataTableConstants.headerHeight)
-        }
-    }
-    
-    private func sortedComponents(_ components: [DeployableComponent]) -> [DeployableComponent] {
-        guard let descriptor = sortDescriptor else {
-            return components.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        }
-        return components.sorted { lhs, rhs in
-            descriptor.compare(lhs, rhs) == .orderedAscending
-        }
-    }
-    
-    private var deployerColumns: [DataTableColumn<DeployableComponent>] {
-        [
-            .text(
-                id: "name",
-                title: "Component",
-                width: .auto(min: 140, ideal: 180, max: 300),
-                keyPath: \.name
-            ),
-            .custom(
-                id: "local",
-                title: "Local",
-                width: .fixed(70),
-                alignment: .left,
-                sortable: false,
-                cellProvider: { [viewModel] component in
-                    let version = viewModel.localVersions[component.id] ?? "—"
-                    return makeTextCell(
-                        text: version,
-                        font: DataTableConstants.monospaceFont,
-                        color: DataTableConstants.secondaryTextColor,
-                        alignment: .left
-                    )
-                }
-            ),
-            .custom(
-                id: "remote",
-                title: "Remote",
-                width: .fixed(80),
-                alignment: .left,
-                sortable: false,
-                cellProvider: { [viewModel] component in
-                    let version = viewModel.remoteVersionDisplay(for: component)
-                    return makeTextCell(
-                        text: version,
-                        font: DataTableConstants.monospaceFont,
-                        color: DataTableConstants.secondaryTextColor,
-                        alignment: .left
-                    )
-                }
-            ),
-            .custom(
-                id: "status",
-                title: "Status",
-                width: .auto(min: 90, ideal: 110, max: 140),
-                alignment: .left,
-                sortable: false,
-                cellProvider: { [viewModel] component in
-                    makeStatusCellForDeployStatus(viewModel.status(for: component))
-                }
-            )
-        ]
     }
     
     // MARK: - Console Section
@@ -300,6 +287,312 @@ struct DeployerView: View {
         }
         .padding()
     }
+}
+
+// MARK: - Component Group Section
+
+struct ComponentGroupSection: View {
+
+    let grouping: ItemGrouping
+    let components: [DeployableComponent]
+    let isExpanded: Bool
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let allGroupings: [ItemGrouping]
+    @Binding var selectedComponents: Set<String>
+    @Binding var sortDescriptor: DataTableSortDescriptor<DeployableComponent>?
+    let viewModel: DeployerViewModel
+    let onToggle: () -> Void
+    let onRenameGroup: () -> Void
+    let onMoveGroupUp: () -> Void
+    let onMoveGroupDown: () -> Void
+    let onDeleteGroup: () -> Void
+    let onCreateGroupFromSelection: (Set<String>) -> Void
+    let onAddSelectionToGroup: (Set<String>, ItemGrouping) -> Void
+    let onRemoveSelectionFromGroup: (Set<String>) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Group header with context menu
+            Button(action: onToggle) {
+                HStack {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 12)
+                    
+                    Text(grouping.name.uppercased())
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    
+                    Text("(\(components.count))")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.7))
+                    
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                GroupingContextMenuItems(
+                    grouping: grouping,
+                    canMoveUp: canMoveUp,
+                    canMoveDown: canMoveDown,
+                    onRename: onRenameGroup,
+                    onMoveUp: onMoveGroupUp,
+                    onMoveDown: onMoveGroupDown,
+                    onDelete: onDeleteGroup
+                )
+            }
+            
+            // Component table (collapsible)
+            if isExpanded {
+                componentTable
+            }
+        }
+    }
+    
+    private var componentTable: some View {
+        NativeDataTable(
+            items: sortedComponents(components),
+            columns: makeColumns(),
+            selection: $selectedComponents,
+            sortDescriptor: $sortDescriptor,
+            contextMenuProvider: { selectedIds in
+                makeDeployerComponentContextMenu(
+                    selectedIds: selectedIds,
+                    groupingContext: .grouped(grouping: grouping),
+                    allGroupings: allGroupings,
+                    onCreateGroupFromSelection: {
+                        onCreateGroupFromSelection($0)
+                    },
+                    onAddSelectionToGroup: { ids, grouping in
+                        onAddSelectionToGroup(ids, grouping)
+                    },
+                    onRemoveSelectionFromGroup: {
+                        onRemoveSelectionFromGroup($0)
+                    },
+                    onDeploySelected: { ids in
+                        selectedComponents = ids
+                        viewModel.deploySelected()
+                    },
+                    onRefreshVersions: {
+                        viewModel.refreshVersions()
+                    }
+                )
+            }
+        )
+        .frame(height: CGFloat(components.count) * DataTableConstants.defaultRowHeight + DataTableConstants.headerHeight)
+    }
+    
+    private func sortedComponents(_ components: [DeployableComponent]) -> [DeployableComponent] {
+        guard let descriptor = sortDescriptor else {
+            return components.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
+        return components.sorted { lhs, rhs in
+            descriptor.compare(lhs, rhs) == .orderedAscending
+        }
+    }
+    
+    private func makeColumns() -> [DataTableColumn<DeployableComponent>] {
+        [
+            .text(
+                id: "name",
+                title: "Component",
+                width: .auto(min: 140, ideal: 180, max: 300),
+                keyPath: \.name
+            ),
+            .custom(
+                id: "local",
+                title: "Local",
+                width: .fixed(70),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { component in
+                    let version = viewModel.localVersions[component.id] ?? "—"
+                    return makeTextCell(
+                        text: version,
+                        font: DataTableConstants.monospaceFont,
+                        color: DataTableConstants.secondaryTextColor,
+                        alignment: .left
+                    )
+                }
+            ),
+            .custom(
+                id: "remote",
+                title: "Remote",
+                width: .fixed(80),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { component in
+                    let version = viewModel.remoteVersionDisplay(for: component)
+                    return makeTextCell(
+                        text: version,
+                        font: DataTableConstants.monospaceFont,
+                        color: DataTableConstants.secondaryTextColor,
+                        alignment: .left
+                    )
+                }
+            ),
+            .custom(
+                id: "status",
+                title: "Status",
+                width: .auto(min: 90, ideal: 110, max: 140),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { component in
+                    makeStatusCellForDeployStatus(viewModel.status(for: component))
+                }
+            )
+        ]
+    }
+    
+
+}
+
+// MARK: - Ungrouped Component Section
+
+struct UngroupedComponentSection: View {
+    
+    let components: [DeployableComponent]
+    let isExpanded: Bool
+    let allGroupings: [ItemGrouping]
+    @Binding var selectedComponents: Set<String>
+    @Binding var sortDescriptor: DataTableSortDescriptor<DeployableComponent>?
+    let viewModel: DeployerViewModel
+    let onToggle: () -> Void
+    let onCreateGroupFromSelection: (Set<String>) -> Void
+    let onAddSelectionToGroup: (Set<String>, ItemGrouping) -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Section header
+            Button(action: onToggle) {
+                HStack {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 12)
+                    
+                    Text("COMPONENTS")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    
+                    Text("(\(components.count))")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.7))
+                    
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            
+            // Component table (collapsible)
+            if isExpanded {
+                componentTable
+            }
+        }
+    }
+    
+    private var componentTable: some View {
+        NativeDataTable(
+            items: sortedComponents(components),
+            columns: makeColumns(),
+            selection: $selectedComponents,
+            sortDescriptor: $sortDescriptor,
+            contextMenuProvider: { selectedIds in
+                makeDeployerComponentContextMenu(
+                    selectedIds: selectedIds,
+                    groupingContext: .ungrouped,
+                    allGroupings: allGroupings,
+                    onCreateGroupFromSelection: {
+                        onCreateGroupFromSelection($0)
+                    },
+                    onAddSelectionToGroup: { ids, grouping in
+                        onAddSelectionToGroup(ids, grouping)
+                    },
+                    onRemoveSelectionFromGroup: { _ in },
+                    onDeploySelected: { ids in
+                        selectedComponents = ids
+                        viewModel.deploySelected()
+                    },
+                    onRefreshVersions: {
+                        viewModel.refreshVersions()
+                    }
+                )
+            }
+        )
+        .frame(height: CGFloat(components.count) * DataTableConstants.defaultRowHeight + DataTableConstants.headerHeight)
+    }
+    
+    private func sortedComponents(_ components: [DeployableComponent]) -> [DeployableComponent] {
+        guard let descriptor = sortDescriptor else {
+            return components.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
+        return components.sorted { lhs, rhs in
+            descriptor.compare(lhs, rhs) == .orderedAscending
+        }
+    }
+    
+    private func makeColumns() -> [DataTableColumn<DeployableComponent>] {
+        [
+            .text(
+                id: "name",
+                title: "Component",
+                width: .auto(min: 140, ideal: 180, max: 300),
+                keyPath: \.name
+            ),
+            .custom(
+                id: "local",
+                title: "Local",
+                width: .fixed(70),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { component in
+                    let version = viewModel.localVersions[component.id] ?? "—"
+                    return makeTextCell(
+                        text: version,
+                        font: DataTableConstants.monospaceFont,
+                        color: DataTableConstants.secondaryTextColor,
+                        alignment: .left
+                    )
+                }
+            ),
+            .custom(
+                id: "remote",
+                title: "Remote",
+                width: .fixed(80),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { component in
+                    let version = viewModel.remoteVersionDisplay(for: component)
+                    return makeTextCell(
+                        text: version,
+                        font: DataTableConstants.monospaceFont,
+                        color: DataTableConstants.secondaryTextColor,
+                        alignment: .left
+                    )
+                }
+            ),
+            .custom(
+                id: "status",
+                title: "Status",
+                width: .auto(min: 90, ideal: 110, max: 140),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { component in
+                    makeStatusCellForDeployStatus(viewModel.status(for: component))
+                }
+            )
+        ]
+    }
+    
 }
 
 // MARK: - Helper Functions

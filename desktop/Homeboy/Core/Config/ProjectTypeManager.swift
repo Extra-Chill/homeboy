@@ -24,6 +24,12 @@ final class ProjectTypeManager {
         Array(cachedTypes.values).sorted { $0.displayName < $1.displayName }
     }
     
+    /// The default project type ID (first available type).
+    /// Returns nil if no types are loaded.
+    var defaultTypeId: String? {
+        allTypes.first?.id
+    }
+    
     /// Lookup a project type by ID
     func type(for id: String) -> ProjectTypeDefinition? {
         cachedTypes[id]

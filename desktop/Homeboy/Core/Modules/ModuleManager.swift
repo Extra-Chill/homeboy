@@ -204,13 +204,6 @@ class ModuleManager: ObservableObject {
             }
         }
         
-        // For WP-CLI modules, check command exists
-        if manifest.runtime.type == .wpcli {
-            guard manifest.runtime.command != nil else {
-                return .error("Missing command in manifest for wpcli module")
-            }
-        }
-        
         return .ready
     }
     
@@ -232,19 +225,18 @@ class ModuleManager: ObservableObject {
         }
         
         // Check feature requirements
+        // Most features are now universal (always available):
+        // - hasDatabase, hasDeployer, hasRemoteLogs, hasRemoteFileEditor: always true
+        // - hasCLI: true if project type has CLI config
         if let requiredFeatures = requires.features {
-            let features = project.features
+            let typeDefinition = project.typeDefinition
             for feature in requiredFeatures {
                 let isSatisfied: Bool
                 switch feature {
-                case "hasDatabase":
-                    isSatisfied = features.hasDatabase
-                case "hasRemoteDeployment":
-                    isSatisfied = features.hasRemoteDeployment
-                case "hasRemoteLogs":
-                    isSatisfied = features.hasRemoteLogs
-                case "hasLocalCLI":
-                    isSatisfied = features.hasLocalCLI
+                case "hasCLI":
+                    isSatisfied = typeDefinition.hasCLI
+                case "hasDatabase", "hasDeployer", "hasRemoteDeployment", "hasRemoteLogs", "hasRemoteFileEditor":
+                    isSatisfied = true  // Universal features, always available
                 default:
                     isSatisfied = false
                 }

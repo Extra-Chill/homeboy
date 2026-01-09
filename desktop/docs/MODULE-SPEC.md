@@ -34,8 +34,10 @@ Run Python scripts in an isolated virtual environment. Dependencies are installe
 ### Shell Modules
 Run shell scripts directly.
 
-### WP-CLI Modules
-Run WP-CLI commands against the configured local WordPress installation (Local by Flywheel). Supports multisite via `--url=` selection.
+### CLI Modules
+Run CLI commands against the configured local project installation using the project type's command template. Supports multisite via URL targeting.
+
+CLI modules can be executed from the terminal via `homeboy module run <module-id>`.
 
 ## Manifest Schema
 
@@ -63,7 +65,7 @@ Run WP-CLI commands against the configured local WordPress installation (Local b
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | string | Yes | `"python"`, `"shell"`, or `"wpcli"` |
+| `type` | string | Yes | `"python"`, `"shell"`, or `"cli"` |
 
 #### Python/Shell Runtime
 
@@ -73,13 +75,12 @@ Run WP-CLI commands against the configured local WordPress installation (Local b
 | `dependencies` | array | No | Python package names (Python only) |
 | `playwrightBrowsers` | array | No | Browsers to install (e.g., `["chromium"]`) |
 
-#### WP-CLI Runtime
+#### CLI Runtime
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `command` | string | Yes | WP-CLI command (e.g., `"datamachine-events"`) |
-| `subcommand` | string | No | WP-CLI subcommand (e.g., `"test-scraper"`) |
-| `defaultSite` | string | No | Default network site ID for multisite (lowercase) |
+| `args` | string | No | Args template passed to CLI (e.g., `"datamachine-events test-scraper"`) |
+| `defaultSite` | string | No | Default subtarget ID for multisite projects (lowercase) |
 
 ### Requirements Object
 
@@ -180,9 +181,9 @@ Scripts must output to:
 
 The `results` array must match the schema defined in `output.schema.items`.
 
-### WP-CLI Modules
+### CLI Modules
 
-WP-CLI modules stream all output (stdout and stderr) to the console. The success/failure is determined by the command's exit code.
+CLI modules stream all output (stdout and stderr) to the console. The success/failure is determined by the command's exit code.
 
 ## Examples
 
@@ -254,7 +255,7 @@ WP-CLI modules stream all output (stdout and stderr) to the console. The success
 }
 ```
 
-### WP-CLI Module (Scraper Tester)
+### CLI Module (Scraper Tester)
 
 ```json
 {
@@ -267,14 +268,14 @@ WP-CLI modules stream all output (stdout and stderr) to the console. The success
   "homepage": "https://github.com/Extra-Chill/data-machine",
 
   "runtime": {
-    "type": "wpcli",
-    "command": "datamachine-events",
-    "subcommand": "test-scraper",
+    "type": "cli",
+    "args": "datamachine-events test-scraper",
     "defaultSite": "events"
   },
 
   "requires": {
-    "components": ["datamachine-events"]
+    "components": ["datamachine-events"],
+    "projectType": "wordpress"
   },
 
   "inputs": [
@@ -303,34 +304,46 @@ WP-CLI modules stream all output (stdout and stderr) to the console. The success
 
 ## Project Configuration Requirements
 
-### Local WP-CLI Settings
+### Local CLI Settings
 
-For WP-CLI modules to work, the active project configuration must include `localDev` settings:
+For CLI modules to work, the active project configuration must include `localCLI` settings:
 
 ```json
 {
-  "localDev": {
-    "wpCliPath": "/path/to/wordpress/public",
-    "domain": "your-site.local"
+  "localCLI": {
+    "sitePath": "/path/to/project/root",
+    "domain": "your-site.local",
+    "cliPath": "/optional/path/to/cli"
   }
 }
 ```
 
-### Multisite Settings
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sitePath` | string | Yes | Path to local project root (e.g., WordPress public directory) |
+| `domain` | string | No | Local development domain (e.g., `testing-grounds.local`) |
+| `cliPath` | string | No | Explicit path to CLI binary (uses project type default if omitted) |
 
-If the local WordPress installation is multisite, include `multisite` settings:
+### Subtarget Settings
+
+For projects with multiple targets (e.g., WordPress multisite), configure `subTargets`:
 
 ```json
 {
-  "multisite": {
-    "enabled": true,
-    "tablePrefix": "wp_",
-    "blogs": [
-      { "blogId": 1, "name": "Main", "domain": "example.com" },
-      { "blogId": 2, "name": "Blog", "domain": "blog.example.com" }
-    ]
-  }
+  "subTargets": [
+    { "id": "main", "name": "Main Site", "domain": "example.com", "number": 1, "isDefault": true },
+    { "id": "blog", "name": "Blog", "domain": "blog.example.com", "number": 2, "isDefault": false }
+  ]
 }
 ```
 
-When a WP-CLI module runs on a multisite installation, the module UI can display a site selector for targeting a network site.
+When a CLI module runs on a project with subtargets, the module UI displays a site selector for targeting a specific subtarget.
+
+### CLI Module Execution
+
+CLI modules can be executed in two ways:
+
+1. **Homeboy.app GUI**: Select a module from the sidebar, configure inputs, and click Run
+2. **Terminal**: Use `homeboy module run <module-id> [--project <project>] [args...]`
+
+The CLI execution uses the project type's command template with variable substitution for `{{sitePath}}`, `{{domain}}`, `{{cliPath}}`, and `{{args}}`.

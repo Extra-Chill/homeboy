@@ -18,7 +18,37 @@ struct PinnableTabBar<Item: PinnableTabItem>: View {
     let onClose: (UUID) -> Void
     let onPin: (UUID) -> Void
     let onUnpin: (UUID) -> Void
-    let onBrowse: () -> Void
+    let onBrowse: (() -> Void)?
+    
+    /// Custom label for the browse button (defaults to "Browse...")
+    let browseLabel: String
+    
+    /// Custom icon for the browse button (defaults to "plus")
+    let browseIcon: String
+    
+    init(
+        items: [Item],
+        selectedId: UUID?,
+        showIndicator: @escaping (Item) -> Bool,
+        onSelect: @escaping (UUID) -> Void,
+        onClose: @escaping (UUID) -> Void,
+        onPin: @escaping (UUID) -> Void,
+        onUnpin: @escaping (UUID) -> Void,
+        onBrowse: (() -> Void)? = nil,
+        browseLabel: String = "Browse...",
+        browseIcon: String = "plus"
+    ) {
+        self.items = items
+        self.selectedId = selectedId
+        self.showIndicator = showIndicator
+        self.onSelect = onSelect
+        self.onClose = onClose
+        self.onPin = onPin
+        self.onUnpin = onUnpin
+        self.onBrowse = onBrowse
+        self.browseLabel = browseLabel
+        self.browseIcon = browseIcon
+    }
     
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -30,21 +60,23 @@ struct PinnableTabBar<Item: PinnableTabItem>: View {
                         }
                 }
                 
-                // Browse button
-                Button {
-                    onBrowse()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "plus")
-                            .font(.caption)
-                        Text("Browse...")
-                            .font(.subheadline)
+                // Browse button (only shown if onBrowse is provided)
+                if let onBrowse = onBrowse {
+                    Button {
+                        onBrowse()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: browseIcon)
+                                .font(.caption)
+                            Text(browseLabel)
+                                .font(.subheadline)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .foregroundColor(.secondary)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .foregroundColor(.secondary)
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
                 
                 Spacer()
             }

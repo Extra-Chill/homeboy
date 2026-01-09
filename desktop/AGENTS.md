@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Native macOS SwiftUI application for WordPress development and deployment automation. Supports configurable site profiles for managing multiple WordPress installations with an extensible module system for custom automation.
+Native macOS SwiftUI application for development and deployment automation. Project-type agnostic architecture supports WordPress, Node.js, and custom project types via extensible JSON definitions. Configurable site profiles manage multiple installations with an extensible module system for custom automation.
 
 **Platform**: macOS 14.4+ (Sonoma)
 **Minimum Xcode**: 15.0+
@@ -63,13 +63,17 @@ Homeboy/
 CLI/
 ├── main.swift                    # Entry point, HomeboyCLI, Projects command
 ├── Commands/
-│   ├── WPCommand.swift           # WP-CLI passthrough to remote servers
 │   ├── DBCommand.swift           # Database operations (tables, describe, query)
 │   ├── DeployCommand.swift       # Component deployment with build automation
-│   ├── SSHCommand.swift          # SSH command execution and interactive shell
-│   └── ProjectsCommand.swift     # Reserved for future subcommands
+│   ├── ModuleCommand.swift       # Module listing and local execution
+│   ├── ProjectCommand.swift      # Project CRUD and subtarget/component management
+│   ├── ProjectsCommand.swift     # Reserved for future subcommands
+│   ├── RemoteCommand.swift       # WP-CLI and PM2 passthrough to remote servers
+│   ├── ServerCommand.swift       # Server configuration management
+│   └── SSHCommand.swift          # SSH command execution and interactive shell
 └── Utilities/
-    └── OutputFormatter.swift     # Table and JSON formatting utilities
+    ├── OutputFormatter.swift     # Table and JSON formatting utilities
+    └── TemplateRenderer.swift    # Command template variable substitution
 ```
 
 ## Module Plugin System
@@ -129,14 +133,14 @@ See `docs/ERROR-HANDLING.md` for the complete Copyable system specification.
 ## Core Tools
 
 ### Deployer
-SSH/SCP deployment of WordPress plugins and themes.
+SSH/SCP deployment of components (plugins, themes, packages).
 - Component registry defined in JSON site config
 - Build script execution via DeploymentService
 - Version comparison
 
 ### Database Browser
 Browse remote MySQL databases over SSH tunnel.
-- WordPress multisite table categorization via SchemaResolver
+- Table categorization via SchemaResolver (multisite support for WordPress projects)
 - Grouping system for organizing tables
 - Query editor with NativeDataTable results
 - Row selection and clipboard
@@ -157,10 +161,15 @@ Bundled command-line tool for terminal access to Homeboy functionality.
 
 ### Commands
 - `projects` - List configured projects (`--current` for active only)
-- `wp <project> [blog] <args>` - WP-CLI passthrough to production
-- `db <project> [blog] <subcommand>` - Database operations (tables, describe, query)
-- `deploy <project> [components]` - Deploy plugins/themes with build automation
+- `project <subcommand>` - Project configuration management (create, show, set, delete, switch, subtarget, component)
+- `server <subcommand>` - Server configuration management (create, show, set, delete, list)
+- `wp <project> [subtarget] <args>` - WP-CLI passthrough to production (WordPress projects)
+- `pm2 <project> [subtarget] <args>` - PM2 passthrough to remote servers (Node.js projects)
+- `db <project> [subtarget] <subcommand>` - Database operations (tables, describe, query)
+- `deploy <project> [components]` - Deploy components with build automation
 - `ssh <project> [command]` - SSH access (interactive or single command)
+- `module list [--project <id>]` - List available modules (optionally filter by project compatibility)
+- `module run <module-id> [--project <id>] [args]` - Run a CLI module locally
 
 ### Build Configuration
 - Target: `homeboy-cli` (type: tool) in project.yml

@@ -7,11 +7,14 @@ enum NavigationItem: Hashable {
 }
 
 /// Built-in core tools (not modules)
+/// Order: Deployer, File Editor, Log Viewer are universal.
+/// Database Browser is shown if project type supports it.
+/// Settings is shown in a separate section.
 enum CoreTool: String, CaseIterable, Identifiable {
     case deployer = "Deployer"
-    case databaseBrowser = "Database"
-    case remoteLogViewer = "Log Viewer"
     case remoteFileEditor = "File Editor"
+    case remoteLogViewer = "Log Viewer"
+    case databaseBrowser = "Database"
     case settings = "Settings"
     
     var id: String { rawValue }
@@ -19,9 +22,9 @@ enum CoreTool: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .deployer: return "arrow.up.to.line"
-        case .databaseBrowser: return "cylinder.split.1x2"
-        case .remoteLogViewer: return "doc.text.magnifyingglass"
         case .remoteFileEditor: return "doc.badge.gearshape"
+        case .remoteLogViewer: return "doc.text.magnifyingglass"
+        case .databaseBrowser: return "cylinder.split.1x2"
         case .settings: return "gear"
         }
     }

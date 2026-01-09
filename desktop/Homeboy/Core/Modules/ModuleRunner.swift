@@ -9,7 +9,6 @@ class ModuleRunner: ObservableObject {
     
     private var process: Process?
     private let systemPythonPath = "/opt/homebrew/bin/python3"
-    private let wpCliPath = "/opt/homebrew/bin/wp"
     
     /// Shared Playwright browsers location
     private var playwrightBrowsersPath: String {
@@ -44,8 +43,8 @@ class ModuleRunner: ObservableObject {
             runPythonModule(module: module, inputValues: inputValues, onOutput: onOutput, onComplete: onComplete)
         case .shell:
             runShellModule(module: module, inputValues: inputValues, onOutput: onOutput, onComplete: onComplete)
-        case .wpcli:
-            runWPCLIModule(module: module, inputValues: inputValues, selectedNetworkSite: selectedNetworkSite, onOutput: onOutput, onComplete: onComplete)
+        case .cli:
+            runCLIModule(module: module, inputValues: inputValues, selectedNetworkSite: selectedNetworkSite, onOutput: onOutput, onComplete: onComplete)
         }
     }
     
@@ -166,68 +165,91 @@ class ModuleRunner: ObservableObject {
         runProcessWithConsoleOutput(process: process, onOutput: onOutput, onComplete: onComplete)
     }
     
-    // MARK: - WP-CLI Modules
+    // MARK: - CLI Modules
     
-    private func runWPCLIModule(
+    private func runCLIModule(
         module: LoadedModule,
         inputValues: [String: String],
         selectedNetworkSite: String?,
         onOutput: @escaping (String) -> Void,
         onComplete: @escaping (Result<ScriptOutput, Error>) -> Void
     ) {
-        guard let environment = LocalEnvironment.buildEnvironment() else {
+        let config = ConfigurationManager.shared.safeActiveProject
+        let typeDefinition = config.typeDefinition
+        
+        // Validate CLI config exists for project type
+        guard let cliConfig = typeDefinition.cli else {
             isRunning = false
-            onOutput("Error: Local by Flywheel PHP not detected.\n")
-            onComplete(.failure(ModuleRunnerError.executionFailed("Local by Flywheel PHP not detected")))
+            onOutput("Error: Project type '\(typeDefinition.displayName)' does not support CLI.\n")
+            onComplete(.failure(ModuleRunnerError.executionFailed("Project type does not support CLI")))
             return
         }
         
-        let config = ConfigurationManager.shared.safeActiveProject
-        
-        let process = Process()
-        self.process = process
-        
-        process.currentDirectoryURL = URL(fileURLWithPath: config.localDev.wpCliPath)
-        process.executableURL = URL(fileURLWithPath: wpCliPath)
-        process.environment = environment
-        
-        // Build WP-CLI command
-        var arguments: [String] = []
-        
-        // Add command and subcommand
-        if let command = module.manifest.runtime.command {
-            arguments.append(command)
-        }
-        if let subcommand = module.manifest.runtime.subcommand {
-            arguments.append(subcommand)
+        // Validate local CLI is configured
+        guard config.localCLI.isConfigured else {
+            isRunning = false
+            onOutput("Error: Local CLI not configured. Set 'Local Site Path' in Settings.\n")
+            onComplete(.failure(ModuleRunnerError.executionFailed("Local CLI not configured")))
+            return
         }
         
+        // Build module args
+        var moduleArgs: [String] = []
+
+        // Add args template if present
+        if let argsTemplate = module.manifest.runtime.args {
+            moduleArgs.append(argsTemplate)
+        }
+
         // Add input arguments
         for input in module.manifest.inputs {
             if let value = inputValues[input.id], !value.isEmpty {
-                arguments.append("\(input.arg)=\(value)")
+                moduleArgs.append("\(input.arg)=\(value)")
             }
         }
         
-        // Add --url flag for multisite
-        if let multisite = config.multisite, multisite.enabled {
+        // Build domain with subtarget support
+        var targetDomain = config.localCLI.domain.isEmpty ? "localhost" : config.localCLI.domain
+        if config.hasSubTargets {
             let siteId = selectedNetworkSite ?? module.manifest.runtime.defaultSite ?? "main"
-            let localDomain = config.localDev.domain.isEmpty ? "localhost" : config.localDev.domain
-            
-            if let blog = multisite.blogs.first(where: { $0.name.lowercased() == siteId.lowercased() }) {
-                let urlPath = blog.blogId == 1 ? "" : "/\(blog.name.lowercased())"
-                arguments.append("--url=\(localDomain)\(urlPath)")
-            } else {
-                // Default to main site
-                arguments.append("--url=\(localDomain)")
+            if let subTarget = config.subTargets.first(where: { 
+                $0.id.lowercased() == siteId.lowercased() || $0.name.lowercased() == siteId.lowercased() 
+            }) {
+                let urlPath = subTarget.isDefault ? "" : "/\(subTarget.id)"
+                targetDomain = "\(targetDomain)\(urlPath)"
             }
         }
         
-        process.arguments = arguments
+        // Build template variables
+        let cliPath = config.localCLI.cliPath ?? cliConfig.defaultCLIPath ?? cliConfig.tool
+        let variables: [String: String] = [
+            "projectId": config.id,
+            "domain": targetDomain,
+            "sitePath": config.localCLI.sitePath,
+            "cliPath": cliPath,
+            "args": moduleArgs.joined(separator: " ")
+        ]
+        
+        // Render command from template
+        var command = cliConfig.commandTemplate
+        for (key, value) in variables {
+            command = command.replacingOccurrences(of: "{{\(key)}}", with: value)
+        }
         
         // Log the command being run
-        let commandString = "wp \(arguments.joined(separator: " "))"
-        onOutput("$ \(commandString)\n\n")
+        onOutput("$ \(command)\n\n")
+        
+        // Execute via bash (to handle cd and other shell constructs in template)
+        let process = Process()
+        self.process = process
+        
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", command]
+        
+        // Optionally add Local by Flywheel environment if available (for backward compat)
+        if let environment = LocalEnvironment.buildEnvironment() {
+            process.environment = environment
+        }
         
         runProcessWithConsoleOutput(process: process, onOutput: onOutput, onComplete: onComplete)
     }
@@ -268,7 +290,7 @@ class ModuleRunner: ObservableObject {
                 self?.isRunning = false
                 self?.process = nil
                 
-                // For console-output modules (shell, wpcli), return success with empty results
+                // For console-output modules (shell, cli), return success with empty results
                 let success = proc.terminationStatus == 0
                 let result = ScriptOutput(success: success, results: nil, errors: success ? nil : [self?.output ?? ""])
                 onComplete(.success(result))

@@ -19,16 +19,15 @@ struct WordPressSettingsTab: View {
     
     var body: some View {
         Form {
-            Section("WP-CLI (Local Development)") {
-                TextField("Local WP Path", text: Binding(
-                    get: { config.safeActiveProject.localDev.wpCliPath },
+            Section("Local CLI") {
+                TextField("Local Site Path", text: Binding(
+                    get: { config.safeActiveProject.localCLI.sitePath },
                     set: { newValue in
-                        config.activeProject?.localDev.wpCliPath = newValue
-                        config.saveActiveProject()
+                        config.updateActiveProject { $0.localCLI.sitePath = newValue }
                     }
                 ))
                 .textFieldStyle(.roundedBorder)
-                Text("Path to your Local WP site's public directory")
+                Text("Path to your local site's root directory")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
@@ -98,8 +97,7 @@ struct WordPressSettingsTab: View {
                 TextField("Table Prefix", text: Binding(
                     get: { config.safeActiveProject.tablePrefix ?? "wp_" },
                     set: { newValue in
-                        config.activeProject?.tablePrefix = newValue
-                        config.saveActiveProject()
+                        config.updateActiveProject { $0.tablePrefix = newValue }
                     }
                 ))
                 .textFieldStyle(.roundedBorder)
@@ -109,48 +107,47 @@ struct WordPressSettingsTab: View {
             }
             
             Section("Multisite Configuration") {
-                Toggle("Multisite Network", isOn: Binding(
-                    get: { config.safeActiveProject.multisite?.enabled ?? false },
-                    set: { newValue in
-                        if newValue {
-                            if config.activeProject?.multisite == nil {
-                                config.activeProject?.multisite = MultisiteConfig(enabled: true)
-                            } else {
-                                config.activeProject?.multisite?.enabled = true
-                            }
-                        } else {
-                            config.activeProject?.multisite?.enabled = false
-                        }
-                        config.saveActiveProject()
-                    }
-                ))
-                
-                if config.safeActiveProject.multisite?.enabled == true {
-                    if let blogs = config.safeActiveProject.multisite?.blogs, !blogs.isEmpty {
-                        Text("\(blogs.count) site(s) configured")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                if config.safeActiveProject.hasSubTargets {
+                    Text("\(config.safeActiveProject.subTargets.count) site(s) configured")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     
-                    Text("Edit multisite blogs in the JSON config file for now.")
+                    ForEach(config.safeActiveProject.subTargets) { subTarget in
+                        HStack {
+                            if subTarget.isDefault {
+                                Image(systemName: "star.fill")
+                                    .foregroundColor(.yellow)
+                                    .font(.caption)
+                            }
+                            Text(subTarget.name)
+                            Spacer()
+                            Text(subTarget.domain)
+                                .foregroundColor(.secondary)
+                                .font(.caption)
+                        }
+                    }
+                } else {
+                    Text("No multisite configured")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+                
+                Text("Use the CLI to manage subtargets: homeboy project subtarget add")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             
             Section("REST API Authentication") {
                 Toggle("Enable API Authentication", isOn: $apiEnabled)
                     .onChange(of: apiEnabled) { _, newValue in
-                        config.activeProject?.api.enabled = newValue
-                        config.saveActiveProject()
+                        config.updateActiveProject { $0.api.enabled = newValue }
                     }
                 
                 if apiEnabled {
                     TextField("API Base URL", text: $apiBaseURL)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: apiBaseURL) { _, newValue in
-                            config.activeProject?.api.baseURL = newValue
-                            config.saveActiveProject()
+                            config.updateActiveProject { $0.api.baseURL = newValue }
                         }
                     Text("e.g., https://yoursite.com/wp-json/extrachill/v1")
                         .font(.caption)
@@ -219,11 +216,10 @@ struct WordPressSettingsTab: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Select your Local WP site's public directory"
+        panel.message = "Select your local site's root directory"
         
         if panel.runModal() == .OK, let url = panel.url {
-            config.activeProject?.localDev.wpCliPath = url.path
-            config.saveActiveProject()
+            config.updateActiveProject { $0.localCLI.sitePath = url.path }
         }
     }
     
@@ -236,11 +232,11 @@ struct WordPressSettingsTab: View {
         isTesting = true
         testResult = nil
         
-        let wpCliPath = config.safeActiveProject.localDev.wpCliPath
+        let sitePath = config.safeActiveProject.localCLI.sitePath
         
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
-            process.currentDirectoryURL = URL(fileURLWithPath: wpCliPath)
+            process.currentDirectoryURL = URL(fileURLWithPath: sitePath)
             process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/wp")
             process.arguments = ["core", "version"]
             process.environment = environment

@@ -4,6 +4,10 @@ import SwiftUI
 struct HomeboyApp: App {
     @StateObject private var authManager = AuthManager()
 
+    init() {
+        ConfigurationManager.shared.syncBundledProjectTypes()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
