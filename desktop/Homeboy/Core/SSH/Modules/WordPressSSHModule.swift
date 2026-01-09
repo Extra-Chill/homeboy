@@ -4,58 +4,58 @@ import Foundation
 /// Self-contained module used by the WP-CLI Terminal.
 class WordPressSSHModule {
     private let ssh: SSHService
-    private let wpContentPath: String
-    
+    private let pathResolver: RemotePathResolver
+
+    /// Path to wp-content directory
+    var wpContentPath: String { pathResolver.wpContentPath }
+
     /// Path to themes directory
-    var themesPath: String { "\(wpContentPath)/themes" }
-    
+    var themesPath: String { pathResolver.themesPath }
+
     /// Path to plugins directory
-    var pluginsPath: String { "\(wpContentPath)/plugins" }
-    
-    /// WordPress root directory (parent of wp-content)
-    var wpRootPath: String {
-        (wpContentPath as NSString).deletingLastPathComponent
-    }
-    
+    var pluginsPath: String { pathResolver.pluginsPath }
+
+    /// WordPress root directory
+    var wpRootPath: String { pathResolver.wpRootPath }
+
     // MARK: - Initialization
-    
-    /// Initialize with an SSHService and wp-content path
-    init?(ssh: SSHService, wpContentPath: String) {
-        guard !wpContentPath.isEmpty else { return nil }
+
+    /// Initialize with an SSHService and base path
+    init?(ssh: SSHService, basePath: String) {
+        guard !basePath.isEmpty else { return nil }
         self.ssh = ssh
-        self.wpContentPath = wpContentPath
+        self.pathResolver = RemotePathResolver(basePath: basePath)
     }
-    
+
     /// Initialize from active project configuration
     init?() {
         let project = ConfigurationManager.readCurrentProject()
-        
+
         guard project.isWordPress,
-              let basePath = project.basePath,
-              !basePath.isEmpty,
+              let resolver = RemotePathResolver(project: project),
               let sshService = SSHService() else {
             return nil
         }
-        
+
         self.ssh = sshService
-        self.wpContentPath = "\(basePath)/wp-content"
+        self.pathResolver = resolver
     }
-    
+
     // MARK: - Validation
-    
+
     /// Validate that the wp-content path is a valid WordPress wp-content directory
     func validateWPContentPath() async throws -> Bool {
         let themesExists = try await ssh.isDirectory(themesPath)
         let pluginsExists = try await ssh.isDirectory(pluginsPath)
         return themesExists && pluginsExists
     }
-    
+
     /// Get validation status with details
     func getValidationStatus() async -> WPContentValidationStatus {
         do {
             let themesExists = try await ssh.isDirectory(themesPath)
             let pluginsExists = try await ssh.isDirectory(pluginsPath)
-            
+
             if themesExists && pluginsExists {
                 return .valid
             } else if !themesExists && !pluginsExists {
@@ -69,9 +69,9 @@ class WordPressSSHModule {
             return .error(error.localizedDescription)
         }
     }
-    
+
     // MARK: - WP-CLI
-    
+
     /// Execute a WP-CLI command on the remote server
     func executeWPCLI(
         _ command: String,
@@ -81,7 +81,7 @@ class WordPressSSHModule {
         let fullCommand = "cd '\(wpRootPath)' && wp \(command)"
         ssh.executeCommand(fullCommand, onOutput: onOutput, onComplete: onComplete)
     }
-    
+
     /// Get WordPress version via WP-CLI
     func getWordPressVersion(onComplete: @escaping (Result<String, Error>) -> Void) {
         executeWPCLI("core version") { result in
@@ -101,12 +101,12 @@ enum WPContentValidationStatus {
     case valid
     case invalid(String)
     case error(String)
-    
+
     var isValid: Bool {
         if case .valid = self { return true }
         return false
     }
-    
+
     var message: String {
         switch self {
         case .valid: return "Valid wp-content directory"

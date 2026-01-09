@@ -4,9 +4,9 @@ import Foundation
 struct Deploy: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "deploy",
-        abstract: "Build and upload components to production server",
+        abstract: "Upload pre-built components to production server",
         discussion: """
-            Builds and uploads configured components to the remote server.
+            Uploads pre-built components to the remote server.
 
             Usage:
               homeboy deploy <project> <component-id>...
@@ -21,7 +21,7 @@ struct Deploy: ParsableCommand {
             Prerequisites:
               - Server must be configured and linked to project
               - SSH key must be set up in Homeboy.app
-              - Components must have build.sh scripts
+              - Build artifacts must exist (run build.sh first)
 
             See 'homeboy docs deploy' for full documentation.
             """
@@ -50,7 +50,7 @@ struct Deploy: ParsableCommand {
     
     func run() throws {
         // Load project configuration
-        guard let projectConfig = loadProjectConfig(id: projectId) else {
+        guard let projectConfig = ConfigurationManager.readProject(id: projectId) else {
             outputError("Project '\(projectId)' not found")
             throw ExitCode.failure
         }
@@ -58,8 +58,7 @@ struct Deploy: ParsableCommand {
         // Validate server is configured
         guard let serverId = projectConfig.serverId,
               let serverConfig = ConfigurationManager.readServer(id: serverId),
-              !serverConfig.host.isEmpty,
-              !serverConfig.user.isEmpty else {
+              serverConfig.isValid else {
             outputError("Server not configured for project '\(projectId)'")
             throw ExitCode.failure
         }
@@ -188,36 +187,78 @@ struct Deploy: ParsableCommand {
             return
         }
         
+        // Initialize deployment service
+        guard let deploymentService = DeploymentService(project: projectConfig) else {
+            outputError("Failed to initialize deployment service")
+            throw ExitCode.failure
+        }
+
         // Execute deployment
         var results: [ComponentResult] = []
         var succeeded = 0
         var failed = 0
-        
+
         for component in componentsToDeploy {
             let startTime = Date()
-            
-            let result = deployComponent(
-                component: component,
-                serverConfig: serverConfig,
-                basePath: basePath
-            )
-            
-            let duration = Date().timeIntervalSince(startTime)
-            
-            results.append(ComponentResult(
-                id: component.id,
-                name: component.name,
-                status: result.success ? "deployed" : "failed",
-                duration: duration,
-                localVersion: localVersions[component.id],
-                remoteVersion: remoteVersions[component.id],
-                error: result.error
-            ))
-            
-            if result.success {
-                succeeded += 1
-            } else {
+
+            // Deploy-only pattern: check artifact exists first
+            guard FileManager.default.fileExists(atPath: component.buildArtifactPath) else {
+                results.append(ComponentResult(
+                    id: component.id,
+                    name: component.name,
+                    status: "failed",
+                    duration: nil,
+                    localVersion: localVersions[component.id],
+                    remoteVersion: remoteVersions[component.id],
+                    error: "Build artifact not found. Run build first: cd \(component.localPath) && ./build.sh"
+                ))
                 failed += 1
+                continue
+            }
+
+            // Use DeploymentService via semaphore for sync execution
+            let semaphore = DispatchSemaphore(value: 0)
+            var deployError: Error?
+
+            deploymentService.deploy(component: component, onOutput: { line in
+                fputs(line, stdout)
+                fflush(stdout)
+            }) { result in
+                switch result {
+                case .success:
+                    break
+                case .failure(let error):
+                    deployError = error
+                }
+                semaphore.signal()
+            }
+
+            semaphore.wait()
+
+            let duration = Date().timeIntervalSince(startTime)
+
+            if let error = deployError {
+                results.append(ComponentResult(
+                    id: component.id,
+                    name: component.name,
+                    status: "failed",
+                    duration: duration,
+                    localVersion: localVersions[component.id],
+                    remoteVersion: remoteVersions[component.id],
+                    error: error.localizedDescription
+                ))
+                failed += 1
+            } else {
+                results.append(ComponentResult(
+                    id: component.id,
+                    name: component.name,
+                    status: "deployed",
+                    duration: duration,
+                    localVersion: localVersions[component.id],
+                    remoteVersion: remoteVersions[component.id],
+                    error: nil
+                ))
+                succeeded += 1
             }
         }
         
@@ -237,145 +278,35 @@ struct Deploy: ParsableCommand {
         }
     }
     
-    // MARK: - Deployment Logic
-    
-    private func deployComponent(
-        component: DeployableComponent,
-        serverConfig: ServerConfig,
-        basePath: String
-    ) -> (success: Bool, error: String?) {
-        
-        // 1. Build locally
-        let buildResult = executeBuild(at: component.localPath)
-        guard buildResult.success else {
-            return (false, "Build failed: \(buildResult.error ?? "Unknown error")")
-        }
-        
-        // 2. Verify zip exists
-        guard FileManager.default.fileExists(atPath: component.buildArtifactPath) else {
-            return (false, "Build completed but zip not found at \(component.buildArtifactPath)")
-        }
-        
-        // 3. Upload via SCP
-        let uploadResult = executeSCPUpload(
-            localPath: component.buildArtifactPath,
-            remotePath: "tmp/\(component.id).zip",
-            host: serverConfig.host,
-            user: serverConfig.user,
-            serverId: serverConfig.id
-        )
-        guard uploadResult.success else {
-            return (false, "Upload failed: \(uploadResult.error ?? "Unknown error")")
-        }
-        
-        // 4. Remove old version
-        let remotePath = "\(basePath)/\(component.remotePath)"
-        let removeResult = executeSSHCommand(
-            host: serverConfig.host,
-            user: serverConfig.user,
-            serverId: serverConfig.id,
-            command: "rm -rf \"\(remotePath)\""
-        )
-        guard removeResult.success else {
-            return (false, "Failed to remove old version: \(removeResult.output)")
-        }
-        
-        // 5. Extract - use remotePath which contains the full relative path (e.g., "plugins/my-plugin")
-        let targetDir = "\(basePath)/\((component.remotePath as NSString).deletingLastPathComponent)"
-        let extractResult = executeSSHCommand(
-            host: serverConfig.host,
-            user: serverConfig.user,
-            serverId: serverConfig.id,
-            command: "unzip -o ~/tmp/\(component.id).zip -d \"\(targetDir)\" && chmod -R 755 \"\(targetDir)/\(component.id)\""
-        )
-        guard extractResult.success else {
-            return (false, "Extraction failed: \(extractResult.output)")
-        }
-        
-        // 6. Cleanup
-        _ = executeSSHCommand(
-            host: serverConfig.host,
-            user: serverConfig.user,
-            serverId: serverConfig.id,
-            command: "rm -f ~/tmp/\(component.id).zip"
-        )
-        
-        return (true, nil)
-    }
-    
-    private func executeBuild(at directoryPath: String) -> (success: Bool, error: String?) {
-        let buildScriptPath = "\(directoryPath)/build.sh"
-        
-        guard FileManager.default.fileExists(atPath: buildScriptPath) else {
-            return (false, "build.sh not found at \(buildScriptPath)")
-        }
-        
-        let process = Process()
-        process.currentDirectoryURL = URL(fileURLWithPath: directoryPath)
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["build.sh"]
-        process.environment = [
-            "PATH": "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": FileManager.default.homeDirectoryForCurrentUser.path
-        ]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            if process.terminationStatus == 0 {
-                return (true, nil)
-            } else {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                return (false, "Exit code \(process.terminationStatus): \(output)")
-            }
-        } catch {
-            return (false, error.localizedDescription)
-        }
-    }
-    
+    // MARK: - Version Fetching
+
     private func fetchRemoteVersions(
         components: [DeployableComponent],
         serverConfig: ServerConfig,
         basePath: String
     ) -> [String: String] {
         var versions: [String: String] = [:]
-        
-        // Build a command to grep versions from all components in one SSH call
-        var versionChecks: [String] = []
+        let resolver = RemotePathResolver(basePath: basePath)
+
         for component in components {
-            guard let versionFile = component.versionFile else { continue }
-            let remotePath = "\(basePath)/\(component.remotePath)/\(versionFile)"
-            versionChecks.append("echo '\(component.id):'$(grep -m1 'Version:' \"\(remotePath)\" 2>/dev/null | sed 's/.*Version:[[:space:]]*//' | tr -d '[:space:]')")
-        }
-        
-        let command = versionChecks.joined(separator: " && ")
-        let result = executeSSHCommand(
-            host: serverConfig.host,
-            user: serverConfig.user,
-            serverId: serverConfig.id,
-            command: command
-        )
-        
-        if result.success {
-            let lines = result.output.components(separatedBy: .newlines)
-            for line in lines {
-                let parts = line.split(separator: ":", maxSplits: 1)
-                if parts.count == 2 {
-                    let id = String(parts[0])
-                    let version = String(parts[1]).trimmingCharacters(in: .whitespaces)
-                    if !version.isEmpty {
-                        versions[id] = version
-                    }
+            guard let versionFilePath = resolver.versionFilePath(for: component) else { continue }
+
+            // Fetch file content via SSH
+            let result = executeSSHCommand(
+                host: serverConfig.host,
+                user: serverConfig.user,
+                serverId: serverConfig.id,
+                command: "cat '\(versionFilePath)' 2>/dev/null"
+            )
+
+            if result.success, !result.output.isEmpty {
+                // Use VersionParser with component's custom pattern
+                if let version = VersionParser.parseVersion(from: result.output, pattern: component.versionPattern) {
+                    versions[component.id] = version
                 }
             }
         }
-        
+
         return versions
     }
     
@@ -445,46 +376,6 @@ struct Deploy: ParsableCommand {
         output += "| \(result.summary.succeeded) | \(result.summary.failed) | \(result.summary.skipped) |\n"
         
         return output
-    }
-}
-
-// MARK: - SCP Helper
-
-func executeSCPUpload(localPath: String, remotePath: String, host: String, user: String, serverId: String) -> (success: Bool, error: String?) {
-    let keyPath = SSHService.keyPath(forServer: serverId)
-    
-    // Ensure key file exists
-    guard SSHService.ensureKeyFileExists(forServer: serverId) else {
-        return (false, "SSH key not found for server \(serverId)")
-    }
-    
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
-    process.arguments = [
-        "-i", keyPath,
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "BatchMode=yes",
-        localPath,
-        "\(user)@\(host):\(remotePath)"
-    ]
-    
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-    
-    do {
-        try process.run()
-        process.waitUntilExit()
-        
-        if process.terminationStatus == 0 {
-            return (true, nil)
-        } else {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return (false, output)
-        }
-    } catch {
-        return (false, error.localizedDescription)
     }
 }
 

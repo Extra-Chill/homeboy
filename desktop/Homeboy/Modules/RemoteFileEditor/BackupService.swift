@@ -29,8 +29,7 @@ class BackupService {
     
     /// Base directory for backups
     private var backupsDirectory: URL {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("Homeboy").appendingPathComponent("backups")
+        AppPaths.backups
     }
     
     private init() {

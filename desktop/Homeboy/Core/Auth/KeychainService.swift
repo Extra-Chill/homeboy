@@ -154,12 +154,7 @@ struct KeychainService {
     
     /// Get the file path for a server's SSH private key
     static func sshKeyPath(forServer serverId: String) -> String {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("Homeboy")
-            .appendingPathComponent("keys")
-            .appendingPathComponent("\(serverId)_id_rsa")
-            .path
+        AppPaths.key(forServer: serverId).path
     }
     
     /// Get the file path for a server's SSH public key

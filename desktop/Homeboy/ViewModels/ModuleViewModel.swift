@@ -50,8 +50,24 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         observeConfiguration()
     }
 
-    func onConfigurationChange() {
-        objectWillChange.send()
+    // MARK: - Configuration Observation
+
+    func handleConfigChange(_ change: ConfigurationChangeType) {
+        switch change {
+        case .projectDidSwitch:
+            // Full reset on project switch
+            results = []
+            selectedRows = []
+            consoleOutput = ""
+            error = nil
+            actionResult = nil
+            selectedNetworkSite = nil
+        case .projectModified:
+            // Trigger UI refresh for subtarget changes
+            objectWillChange.send()
+        default:
+            break
+        }
     }
     
     /// Initialize input values from module manifest
@@ -390,25 +406,4 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         consoleOutput = ""
     }
     
-    // MARK: - Site Switching
-    
-    func setupSiteChangeObserver() {
-        NotificationCenter.default.publisher(for: .projectDidChange)
-            .sink { [weak self] _ in
-                self?.resetForSiteSwitch()
-            }
-            .store(in: &cancellables)
-    }
-    
-    private func resetForSiteSwitch() {
-        // Clear results and output
-        results = []
-        selectedRows = []
-        consoleOutput = ""
-        error = nil
-        actionResult = nil
-        
-        // Reset network site selection
-        selectedNetworkSite = nil
-    }
 }

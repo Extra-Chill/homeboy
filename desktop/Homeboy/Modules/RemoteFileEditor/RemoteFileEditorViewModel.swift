@@ -63,9 +63,10 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
     @Published var pendingCloseFileId: UUID?
     
     // MARK: - Services
-    
+
     private var sshService: SSHService?
     private var basePath: String?
+    private var pathResolver: RemotePathResolver?
     
     // MARK: - Computed Properties
     
@@ -84,18 +85,44 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
     init() {
         setupSSH()
         loadPinnedFiles()
-        setupSiteChangeObserver()
         observeConfiguration()
     }
 
-    func onConfigurationChange() {
-        setupSSH()
-        loadPinnedFiles()
+    // MARK: - Configuration Observation
+
+    func handleConfigChange(_ change: ConfigurationChangeType) {
+        switch change {
+        case .projectDidSwitch:
+            // Full reset on project switch
+            openFiles = []
+            selectedFileId = nil
+            error = nil
+            setupSSH()
+            loadPinnedFiles()
+            if selectedFileId != nil {
+                Task {
+                    await fetchSelectedFile()
+                }
+            }
+        case .projectModified(_, let fields):
+            // Reload pinned files if remoteFiles changed
+            if fields.contains(.remoteFiles) {
+                loadPinnedFiles()
+            }
+            // Reconnect SSH if server or basePath changed
+            if fields.contains(.server) || fields.contains(.basePath) {
+                setupSSH()
+            }
+        default:
+            break
+        }
     }
     
     private func setupSSH() {
+        let project = ConfigurationManager.shared.safeActiveProject
         sshService = SSHService()
-        basePath = ConfigurationManager.shared.safeActiveProject.basePath
+        basePath = project.basePath
+        pathResolver = RemotePathResolver(project: project)
     }
     
     private func loadPinnedFiles() {
@@ -122,8 +149,8 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
         error = nil
         
         let file = openFiles[index]
-        let fullPath = "\(base)/\(file.path)"
-        
+        let fullPath = pathResolver?.filePath(file.path) ?? RemotePathResolver.join(base, file.path)
+
         // Check if file exists
         let checkCommand = "test -f '\(fullPath)' && echo 'EXISTS' || echo 'NOTFOUND'"
         
@@ -171,8 +198,8 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
         error = nil
         
         let file = openFiles[index]
-        let fullPath = "\(base)/\(file.path)"
-        
+        let fullPath = pathResolver?.filePath(file.path) ?? RemotePathResolver.join(base, file.path)
+
         do {
             // Write content using heredoc
             let writeCommand = "cat > '\(fullPath)' << 'FILEEDITOREOF'\n\(file.content)\nFILEEDITOREOF"
@@ -312,32 +339,6 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
         guard let file = selectedFile else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(file.content, forType: .string)
-    }
-    
-    // MARK: - Site Switching
-    
-    private func setupSiteChangeObserver() {
-        NotificationCenter.default.publisher(for: .projectDidChange)
-            .sink { [weak self] _ in
-                self?.resetForSiteSwitch()
-            }
-            .store(in: &cancellables)
-    }
-    
-    private func resetForSiteSwitch() {
-        openFiles = []
-        selectedFileId = nil
-        error = nil
-        
-        setupSSH()
-        loadPinnedFiles()
-        
-        // Fetch first file
-        if selectedFileId != nil {
-            Task {
-                await fetchSelectedFile()
-            }
-        }
     }
     
     // MARK: - Sidebar File Operations

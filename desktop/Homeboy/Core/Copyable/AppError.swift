@@ -25,3 +25,28 @@ struct AppError: CopyableContent {
         self.context = context
     }
 }
+
+// MARK: - Module-Specific Factory Methods
+
+extension AppError {
+
+    static func deployer(_ message: String, path: String? = nil) -> AppError {
+        AppError(message, source: "Deployer", path: path)
+    }
+
+    static func logViewer(_ message: String, path: String? = nil) -> AppError {
+        AppError(message, source: "Log Viewer", path: path)
+    }
+
+    static func fileEditor(_ message: String, path: String? = nil) -> AppError {
+        AppError(message, source: "File Editor", path: path)
+    }
+
+    static func databaseBrowser(_ message: String, path: String? = nil) -> AppError {
+        AppError(message, source: "Database Browser", path: path)
+    }
+
+    static func module(_ moduleId: String, _ message: String) -> AppError {
+        AppError(message, source: "Module: \(moduleId)")
+    }
+}

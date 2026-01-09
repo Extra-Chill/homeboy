@@ -12,8 +12,7 @@ class ModuleRunner: ObservableObject {
     
     /// Shared Playwright browsers location
     private var playwrightBrowsersPath: String {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("Homeboy/playwright-browsers").path
+        AppPaths.playwrightBrowsers.path
     }
     
     /// Runs a module's script with the given input values

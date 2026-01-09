@@ -49,6 +49,46 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
         checkConfiguration()
         observeConfiguration()
     }
+
+    // MARK: - Configuration Observation
+
+    func handleConfigChange(_ change: ConfigurationChangeType) {
+        switch change {
+        case .projectDidSwitch:
+            // Full reset on project switch
+            currentDeployTask?.cancel()
+            currentDeployTask = nil
+            isDeploying = false
+            deploymentProgress = nil
+            localVersions = [:]
+            remoteVersions = [:]
+            deploymentStatus = [:]
+            consoleOutput = ""
+            selectedComponents = []
+            deploymentReports = []
+            error = nil
+            checkConfiguration()
+            if hasCredentials && hasSSHKey && hasBasePath {
+                refreshVersions()
+            }
+        case .projectModified(_, let fields):
+            // Check if components or groupings changed
+            if fields.contains(.components) || fields.contains(.componentGroupings) {
+                let newComponents = ComponentRegistry.all
+                if Set(newComponents.map(\.id)) != Set(components.map(\.id)) {
+                    components = newComponents
+                }
+                currentGroupings = ConfigurationManager.readCurrentProject().componentGroupings
+                refreshGroupedComponents()
+            }
+            // Re-check credentials if server or basePath changed
+            if fields.contains(.server) || fields.contains(.basePath) {
+                checkConfiguration()
+            }
+        default:
+            break
+        }
+    }
     
     func checkConfiguration() {
         let project = ConfigurationManager.readCurrentProject()
@@ -56,8 +96,7 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
         // Check 1: Server credentials (host + user configured)
         if let serverId = project.serverId,
            let server = ConfigurationManager.readServer(id: serverId),
-           !server.host.isEmpty,
-           !server.user.isEmpty {
+           server.isValid {
             hasCredentials = true
             serverName = server.name
         } else {
@@ -428,39 +467,6 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
         return output
     }
     
-    // MARK: - Site Switching
-    
-    func setupSiteChangeObserver() {
-        NotificationCenter.default.publisher(for: .projectDidChange)
-            .sink { [weak self] _ in
-                self?.resetForSiteSwitch()
-            }
-            .store(in: &cancellables)
-    }
-    
-    private func resetForSiteSwitch() {
-        // Clear cached data
-        localVersions = [:]
-        remoteVersions = [:]
-        deploymentStatus = [:]
-        consoleOutput = ""
-        selectedComponents = []
-        deploymentReports = []
-        error = nil
-
-        // Re-check configuration for new site
-        checkConfiguration()
-    }
-
-    func onConfigurationChange() {
-        let newComponents = ComponentRegistry.all
-        if Set(newComponents.map(\.id)) != Set(components.map(\.id)) {
-            components = newComponents
-            currentGroupings = ConfigurationManager.readCurrentProject().componentGroupings
-            refreshGroupedComponents()
-        }
-    }
-    
     // MARK: - Grouping Management
     
     /// Create a new grouping from component IDs
@@ -569,9 +575,10 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
     // MARK: - Private Helpers
     
     private func saveGroupings() {
-        var project = ConfigurationManager.readCurrentProject()
-        project.componentGroupings = currentGroupings
-        ConfigurationManager.shared.saveProject(project)
+        let groupings = currentGroupings
+        ConfigurationManager.shared.updateActiveProject { project in
+            project.componentGroupings = groupings
+        }
     }
     
     private func refreshGroupedComponents() {

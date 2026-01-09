@@ -25,7 +25,7 @@ class SSHTunnelService: ObservableObject, @unchecked Sendable {
     
     /// Initialize with explicit ServerConfig
     init?(server: ServerConfig) {
-        guard !server.host.isEmpty, !server.user.isEmpty else {
+        guard server.isValid else {
             return nil
         }
         
@@ -38,10 +38,8 @@ class SSHTunnelService: ObservableObject, @unchecked Sendable {
     
     /// Initialize from active project's server
     init?() {
-        guard let server = ConfigurationManager.readCurrentServer() else {
-            return nil
-        }
-        guard !server.host.isEmpty, !server.user.isEmpty else {
+        guard let server = ConfigurationManager.readCurrentServer(),
+              server.isValid else {
             return nil
         }
         
@@ -61,7 +59,7 @@ class SSHTunnelService: ObservableObject, @unchecked Sendable {
         }
         
         // Kill any stale tunnel on our port
-        if let error = killStaleTunnel() {
+        if let error = await killStaleTunnel() {
             return .failure(error)
         }
         
@@ -91,20 +89,20 @@ class SSHTunnelService: ObservableObject, @unchecked Sendable {
                 do {
                     try process.run()
                     self.tunnelProcess = process
-                    
-                    // Wait for tunnel to establish (SSH needs time to negotiate)
-                    Thread.sleep(forTimeInterval: 3.0)
-                    
-                    // Check if process is still running (tunnel established)
-                    if process.isRunning {
-                        DispatchQueue.main.async {
-                            self.isConnected = true
+
+                    // Non-blocking wait for tunnel to establish (SSH needs time to negotiate)
+                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 3.0) {
+                        // Check if process is still running (tunnel established)
+                        if process.isRunning {
+                            DispatchQueue.main.async {
+                                self.isConnected = true
+                            }
+                            continuation.resume(returning: .success(()))
+                        } else {
+                            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                            let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+                            continuation.resume(returning: .failure(.tunnelFailed(errorOutput.trimmingCharacters(in: .whitespacesAndNewlines))))
                         }
-                        continuation.resume(returning: .success(()))
-                    } else {
-                        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                        let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-                        continuation.resume(returning: .failure(.tunnelFailed(errorOutput.trimmingCharacters(in: .whitespacesAndNewlines))))
                     }
                 } catch {
                     continuation.resume(returning: .failure(.tunnelFailed(error.localizedDescription)))
@@ -126,7 +124,7 @@ class SSHTunnelService: ObservableObject, @unchecked Sendable {
     
     /// Kills any stale SSH tunnel process on our port from a previous session.
     /// Returns nil if port is free or stale tunnel was killed, error if port is in use by non-SSH process.
-    private func killStaleTunnel() -> MySQLError? {
+    private func killStaleTunnel() async -> MySQLError? {
         // Get PID of process using our port
         let lsofProcess = Process()
         lsofProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
@@ -161,8 +159,8 @@ class SSHTunnelService: ObservableObject, @unchecked Sendable {
         do {
             try killProcess.run()
             killProcess.waitUntilExit()
-            // Wait briefly for port to free up
-            Thread.sleep(forTimeInterval: 0.5)
+            // Wait briefly for port to free up (non-blocking)
+            try? await Task.sleep(for: .milliseconds(500))
         } catch {
             // Kill failed, but try to proceed anyway
         }

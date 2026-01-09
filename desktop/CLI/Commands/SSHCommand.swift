@@ -29,7 +29,7 @@ struct SSH: ParsableCommand {
     
     func run() throws {
         // Load project configuration
-        guard let projectConfig = loadProjectConfig(id: projectId) else {
+        guard let projectConfig = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -37,8 +37,7 @@ struct SSH: ParsableCommand {
         // Validate server is configured
         guard let serverId = projectConfig.serverId,
               let serverConfig = ConfigurationManager.readServer(id: serverId),
-              !serverConfig.host.isEmpty,
-              !serverConfig.user.isEmpty else {
+              serverConfig.isValid else {
             fputs("Error: Server not configured for project '\(projectId)'\n", stderr)
             throw ExitCode.failure
         }

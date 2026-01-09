@@ -14,9 +14,7 @@ final class ProjectTypeManager {
     
     /// Directory for user-defined project types
     private var userTypesDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Homeboy")
-            .appendingPathComponent("project-types")
+        AppPaths.projectTypes
     }
     
     /// All available project types (built-in + user-defined)

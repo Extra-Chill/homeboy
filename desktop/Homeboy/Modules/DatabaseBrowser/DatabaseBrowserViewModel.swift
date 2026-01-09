@@ -75,10 +75,23 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         observeConfiguration()
     }
 
-    func onConfigurationChange() {
-        let project = ConfigurationManager.readCurrentProject()
-        currentGroupings = project.tableGroupings
-        refreshGroupedTables()
+    // MARK: - Configuration Observation
+
+    func handleConfigChange(_ change: ConfigurationChangeType) {
+        switch change {
+        case .projectWillSwitch:
+            // Disconnect before project switch to prevent connection leaks
+            disconnect()
+        case .projectModified(_, let fields):
+            // Only reload groupings if tableGroupings changed
+            if fields.contains(.tableGroupings) {
+                let project = ConfigurationManager.readCurrentProject()
+                currentGroupings = project.tableGroupings
+                refreshGroupedTables()
+            }
+        default:
+            break
+        }
     }
 
     // MARK: - Computed Properties
@@ -539,16 +552,6 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         return output
     }
     
-    // MARK: - Site Switching
-    
-    func setupSiteChangeObserver() {
-        NotificationCenter.default.publisher(for: .projectWillChange)
-            .sink { [weak self] _ in
-                self?.disconnect()
-            }
-            .store(in: &cancellables)
-    }
-    
     // MARK: - Grouping Management
     
     /// Create a new grouping from table names
@@ -701,45 +704,47 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
 
     /// Protect all selected tables
     func protectSelectedTables() {
-        var project = ConfigurationManager.readCurrentProject()
-        for tableName in selectedTableNames {
-            TableProtectionManager.protect(tableName: tableName, in: &project)
+        let tablesToProtect = selectedTableNames
+        ConfigurationManager.shared.updateActiveProject { project in
+            for tableName in tablesToProtect {
+                TableProtectionManager.protect(tableName: tableName, in: &project)
+            }
         }
-        ConfigurationManager.shared.saveProject(project)
         selectedTableNames.removeAll()
     }
 
     /// Unprotect all selected tables
     func unprotectSelectedTables() {
-        var project = ConfigurationManager.readCurrentProject()
-        for tableName in selectedTableNames {
-            TableProtectionManager.unprotect(tableName: tableName, in: &project)
+        let tablesToUnprotect = selectedTableNames
+        ConfigurationManager.shared.updateActiveProject { project in
+            for tableName in tablesToUnprotect {
+                TableProtectionManager.unprotect(tableName: tableName, in: &project)
+            }
         }
-        ConfigurationManager.shared.saveProject(project)
         selectedTableNames.removeAll()
     }
     
     // MARK: - Table Protection Management
-    
+
     /// Protect a table from deletion
     func protectTable(_ tableName: String) {
-        var project = ConfigurationManager.readCurrentProject()
-        TableProtectionManager.protect(tableName: tableName, in: &project)
-        ConfigurationManager.shared.saveProject(project)
+        ConfigurationManager.shared.updateActiveProject { project in
+            TableProtectionManager.protect(tableName: tableName, in: &project)
+        }
     }
-    
+
     /// Remove protection from a table
     func unprotectTable(_ tableName: String) {
-        var project = ConfigurationManager.readCurrentProject()
-        TableProtectionManager.unprotect(tableName: tableName, in: &project)
-        ConfigurationManager.shared.saveProject(project)
+        ConfigurationManager.shared.updateActiveProject { project in
+            TableProtectionManager.unprotect(tableName: tableName, in: &project)
+        }
     }
-    
+
     /// Unlock a core protected table (allows deletion)
     func unlockTable(_ tableName: String) {
-        var project = ConfigurationManager.readCurrentProject()
-        TableProtectionManager.unlock(tableName: tableName, in: &project)
-        ConfigurationManager.shared.saveProject(project)
+        ConfigurationManager.shared.updateActiveProject { project in
+            TableProtectionManager.unlock(tableName: tableName, in: &project)
+        }
     }
     
     /// Check if a table is a core protected table
@@ -757,9 +762,10 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     // MARK: - Private Helpers
     
     private func saveGroupings() {
-        var project = ConfigurationManager.readCurrentProject()
-        project.tableGroupings = currentGroupings
-        ConfigurationManager.shared.saveProject(project)
+        let groupings = currentGroupings
+        ConfigurationManager.shared.updateActiveProject { project in
+            project.tableGroupings = groupings
+        }
     }
     
     private func refreshGroupedTables() {

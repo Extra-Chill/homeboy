@@ -1,13 +1,6 @@
 import Foundation
 import SwiftUI
 
-// MARK: - Project Change Notifications
-
-extension Notification.Name {
-    static let projectWillChange = Notification.Name("projectWillChange")
-    static let projectDidChange = Notification.Name("projectDidChange")
-}
-
 // MARK: - Project Rename Errors
 
 enum ProjectRenameError: LocalizedError {
@@ -33,26 +26,28 @@ class ConfigurationManager: ObservableObject {
     
     /// Thread-safe static accessor for reading project configuration from any context.
     nonisolated static func readCurrentProject() -> ProjectConfiguration {
-        let fileManager = FileManager.default
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let configDir = appSupport.appendingPathComponent("Homeboy")
-        let appConfigPath = configDir.appendingPathComponent("config.json")
-        let projectsDir = configDir.appendingPathComponent("projects")
-        
-        guard let appData = try? Data(contentsOf: appConfigPath),
+        guard let appData = try? Data(contentsOf: AppPaths.config),
               let appConfig = try? JSONDecoder().decode(AppConfiguration.self, from: appData) else {
             return ProjectConfiguration.empty(id: "default", name: "Default")
         }
-        
-        let projectPath = projectsDir.appendingPathComponent("\(appConfig.activeProjectId).json")
-        guard let projectData = try? Data(contentsOf: projectPath),
+
+        guard let projectData = try? Data(contentsOf: AppPaths.project(id: appConfig.activeProjectId)),
               let project = try? JSONDecoder().decode(ProjectConfiguration.self, from: projectData) else {
             return ProjectConfiguration.empty(id: appConfig.activeProjectId, name: "Default")
         }
-        
+
         return project
     }
-    
+
+    /// Thread-safe static accessor for reading any project by ID.
+    nonisolated static func readProject(id: String) -> ProjectConfiguration? {
+        guard let data = try? Data(contentsOf: AppPaths.project(id: id)),
+              let config = try? JSONDecoder().decode(ProjectConfiguration.self, from: data) else {
+            return nil
+        }
+        return config
+    }
+
     @Published var appConfig: AppConfiguration
     @Published var activeProject: ProjectConfiguration?
     
@@ -82,7 +77,7 @@ class ConfigurationManager: ObservableObject {
     // MARK: - Slug and Name Helpers
     
     /// Generate a slug from a project name (used as filename/id)
-    func slugFromName(_ name: String) -> String {
+    nonisolated static func slugFromName(_ name: String) -> String {
         name.lowercased()
             .trimmingCharacters(in: .whitespaces)
             .replacingOccurrences(of: " ", with: "-")
@@ -105,7 +100,7 @@ class ConfigurationManager: ObservableObject {
     
     /// Check if a project name is available (case-insensitive slug comparison)
     func isNameAvailable(_ name: String, excludingId: String? = nil) -> Bool {
-        let newSlug = slugFromName(name)
+        let newSlug = Self.slugFromName(name)
         guard !newSlug.isEmpty else { return false }
         
         let existingIds = availableProjectIds().filter { $0 != excludingId }
@@ -131,20 +126,19 @@ class ConfigurationManager: ObservableObject {
     private let reloadDebounceInterval: TimeInterval = 0.5
     
     private var configDirectory: URL {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("Homeboy")
+        AppPaths.homeboy
     }
-    
+
     private var projectsDirectory: URL {
-        configDirectory.appendingPathComponent("projects")
+        AppPaths.projects
     }
-    
+
     private var serversDirectory: URL {
-        configDirectory.appendingPathComponent("servers")
+        AppPaths.servers
     }
-    
+
     private var appConfigPath: URL {
-        configDirectory.appendingPathComponent("config.json")
+        AppPaths.config
     }
     
     // MARK: - Initialization
@@ -219,17 +213,18 @@ class ConfigurationManager: ObservableObject {
     
     /// Handles external changes to the active project file.
     /// Debounced to avoid rapid-fire reloads from multiple filesystem events.
+    /// Note: ConfigurationObserver handles detailed field detection; this just reloads data.
     private func handleProjectFileChange() {
         let now = Date()
         guard now.timeIntervalSince(lastReloadTime) > reloadDebounceInterval else { return }
         lastReloadTime = now
-        
+
         guard let currentId = activeProject?.id else { return }
-        
+
         if let freshProject = loadProject(id: currentId) {
             activeProject = freshProject
             print("[ConfigurationManager] Reloaded project from disk: \(currentId)")
-            NotificationCenter.default.post(name: .projectDidChange, object: nil)
+            // ConfigurationObserver detects and publishes changes via its own file watching
         }
     }
 
@@ -299,9 +294,9 @@ class ConfigurationManager: ObservableObject {
     }
     
     // MARK: - Project Type Sync
-    
+
     private var projectTypesDirectory: URL {
-        configDirectory.appendingPathComponent("project-types")
+        AppPaths.projectTypes
     }
     
     /// Syncs bundled project types to Application Support.
@@ -341,7 +336,7 @@ class ConfigurationManager: ObservableObject {
     // MARK: - Documentation Sync
 
     private var docsDirectory: URL {
-        configDirectory.appendingPathComponent("docs")
+        AppPaths.homeboy.appendingPathComponent("docs")
     }
 
     /// Syncs bundled CLI documentation to Application Support.
@@ -527,16 +522,20 @@ class ConfigurationManager: ObservableObject {
             print("[ConfigurationManager] Cannot switch to project '\(id)': not found")
             return
         }
-        
-        NotificationCenter.default.post(name: .projectWillChange, object: nil)
-        
+
+        let oldId = activeProject?.id
+
+        // Publish willSwitch via ConfigurationObserver
+        ConfigurationObserver.shared.publish(.projectWillSwitch(from: oldId, to: id))
+
         activeProject = project
         appConfig.activeProjectId = id
         saveAppConfig()
-        
+
         startWatchingActiveProject()
-        
-        NotificationCenter.default.post(name: .projectDidChange, object: nil)
+
+        // Publish didSwitch via ConfigurationObserver
+        ConfigurationObserver.shared.publish(.projectDidSwitch(projectId: id))
     }
     
     /// Creates a new project with the given ID, name, and type.
@@ -576,14 +575,7 @@ class ConfigurationManager: ObservableObject {
     
     /// Thread-safe static accessor for reading a server configuration from any context.
     nonisolated static func readServer(id: String) -> ServerConfig? {
-        let fileManager = FileManager.default
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let serverPath = appSupport
-            .appendingPathComponent("Homeboy")
-            .appendingPathComponent("servers")
-            .appendingPathComponent("\(id).json")
-        
-        guard let data = try? Data(contentsOf: serverPath),
+        guard let data = try? Data(contentsOf: AppPaths.server(id: id)),
               let server = try? JSONDecoder().decode(ServerConfig.self, from: data) else {
             return nil
         }

@@ -5,21 +5,22 @@ import Foundation
 class DeploymentService {
     private let ssh: SSHService
     private let basePath: String
-    
+    private let pathResolver: RemotePathResolver
+
     init?(project: ProjectConfiguration) {
         guard let serverId = project.serverId,
-              let _ = ConfigurationManager.readServer(id: serverId),
-              let basePath = project.basePath,
-              !basePath.isEmpty,
-              let ssh = SSHService() else {
+              let server = ConfigurationManager.readServer(id: serverId),
+              let resolver = RemotePathResolver(project: project),
+              let ssh = SSHService(server: server, basePath: resolver.basePath) else {
             return nil
         }
         self.ssh = ssh
-        self.basePath = basePath
+        self.basePath = resolver.basePath
+        self.pathResolver = resolver
     }
-    
+
     // MARK: - Deployment
-    
+
     /// Deploy a pre-built artifact to the remote server using atomic swap pattern.
     /// 1. Upload artifact
     /// 2. Extract to temp directory
@@ -32,85 +33,105 @@ class DeploymentService {
         onComplete: @escaping (Result<Void, Error>) -> Void
     ) {
         let localArtifact = component.buildArtifactPath
-        let remoteDir = "\(basePath)/\(component.remotePath)".replacingOccurrences(of: "//", with: "/")
-        let remoteParent = (remoteDir as NSString).deletingLastPathComponent
-        let artifactName = (component.buildArtifact as NSString).lastPathComponent
-        let remoteArtifact = "\(remoteParent)/\(artifactName)"
-        let tempDir = "\(remoteParent)/__temp_deploy__"
-        
-        // Determine extraction command based on file type
+        let remoteParent = pathResolver.componentParent(for: component)
+        let artifactName = RemotePathResolver.filename(of: component.buildArtifact)
+        let stagingPath = pathResolver.stagingUploadPath(for: component)
+        let tempDir = pathResolver.tempDeployPath(for: component)
+
+        // Determine extraction command based on file type (extract from staging path)
         let extractCommand: String
         switch component.artifactExtension {
         case "zip":
-            extractCommand = "unzip -o '\(remoteArtifact)' -d '\(tempDir)'"
+            extractCommand = "unzip -o ~/'\(stagingPath)' -d '\(tempDir)'"
         case "gz", "tgz":
-            extractCommand = "mkdir -p '\(tempDir)' && tar -xzf '\(remoteArtifact)' -C '\(tempDir)'"
+            extractCommand = "mkdir -p '\(tempDir)' && tar -xzf ~/'\(stagingPath)' -C '\(tempDir)'"
         default:
             onComplete(.failure(DeploymentError.unsupportedArtifactType(component.artifactExtension)))
             return
         }
-        
-        // Upload artifact
+
+        // Ensure staging directory exists, then upload artifact
         onOutput?("> Uploading \(artifactName)...\n")
-        ssh.uploadFile(localPath: localArtifact, remotePath: remoteArtifact, onOutput: onOutput) { [weak self] result in
+        ssh.executeCommand("mkdir -p ~/tmp") { [weak self] _ in
             guard let self = self else { return }
-            
-            switch result {
-            case .success:
-                onOutput?("> Upload complete. Extracting...\n")
-                
-                // Atomic deploy: extract to temp, swap, cleanup
-                let deployCommand = """
-                    cd '\(remoteParent)' && \
-                    rm -rf '\(tempDir)' && \
-                    \(extractCommand) && \
-                    rm -rf '\(component.id)' && \
-                    mv '\(tempDir)/\(component.id)' '\(component.id)' && \
-                    rm -rf '\(tempDir)' && \
-                    rm '\(artifactName)'
-                    """
-                
-                self.ssh.executeCommand(deployCommand, onOutput: onOutput) { deployResult in
-                    switch deployResult {
-                    case .success:
-                        onOutput?("> Deploy complete.\n")
-                        onComplete(.success(()))
-                    case .failure(let error):
-                        onComplete(.failure(error))
+
+            self.ssh.uploadFile(localPath: localArtifact, remotePath: stagingPath, onOutput: onOutput) { [weak self] result in
+                guard let self = self else { return }
+
+                switch result {
+                case .success:
+                    onOutput?("> Upload complete. Extracting...\n")
+
+                    // Atomic deploy: extract from staging to temp, swap, cleanup
+                    let deployCommand = """
+                        cd '\(remoteParent)' && \
+                        rm -rf '\(tempDir)' && \
+                        \(extractCommand) && \
+                        rm -rf '\(component.id)' && \
+                        mv '\(tempDir)/\(component.id)' '\(component.id)' && \
+                        rm -rf '\(tempDir)' && \
+                        rm ~/'\(stagingPath)'
+                        """
+
+                    self.ssh.executeCommand(deployCommand, onOutput: onOutput) { deployResult in
+                        switch deployResult {
+                        case .success:
+                            onOutput?("> Deploy complete.\n")
+                            onComplete(.success(()))
+                        case .failure(let error):
+                            onComplete(.failure(error))
+                        }
                     }
+
+                case .failure(let error):
+                    onComplete(.failure(error))
                 }
-                
-            case .failure(let error):
-                onComplete(.failure(error))
             }
         }
     }
-    
+
+    /// Synchronous deployment wrapper for CLI use.
+    func deploySync(
+        component: DeployableComponent,
+        onOutput: ((String) -> Void)? = nil
+    ) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            deploy(component: component, onOutput: onOutput) { result in
+                switch result {
+                case .success:
+                    continuation.resume()
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     // MARK: - Version Detection
-    
+
     /// Fetch remote version for a component.
     /// Falls back to file timestamp if version detection isn't configured.
     func fetchRemoteVersion(
         component: DeployableComponent,
         onComplete: @escaping (Result<VersionInfo, Error>) -> Void
     ) {
-        let remoteDir = "\(basePath)/\(component.remotePath)".replacingOccurrences(of: "//", with: "/")
-        
+        let remoteDir = pathResolver.componentDirectory(for: component)
+
         // First check if the remote directory exists
         ssh.executeCommand("test -d '\(remoteDir)' && echo 'exists' || echo 'missing'") { [weak self] result in
             guard let self = self else { return }
-            
+
             switch result {
             case .success(let output):
                 if output.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
                     onComplete(.success(.notDeployed))
                     return
                 }
-                
+
                 // Try version file detection if configured
-                if let versionFile = component.versionFile {
+                if let versionFilePath = self.pathResolver.versionFilePath(for: component) {
                     self.fetchVersionFromFile(
-                        remotePath: "\(remoteDir)/\(versionFile)",
+                        remotePath: versionFilePath,
                         pattern: component.versionPattern,
                         onComplete: onComplete
                     )
@@ -118,13 +139,13 @@ class DeploymentService {
                     // Fall back to directory timestamp
                     self.fetchDirectoryTimestamp(remotePath: remoteDir, onComplete: onComplete)
                 }
-                
+
             case .failure(let error):
                 onComplete(.failure(error))
             }
         }
     }
-    
+
     private func fetchVersionFromFile(
         remotePath: String,
         pattern: String?,
@@ -137,19 +158,19 @@ class DeploymentService {
                     onComplete(.success(.notDeployed))
                     return
                 }
-                
+
                 if let version = VersionParser.parseVersion(from: content, pattern: pattern) {
                     onComplete(.success(.version(version)))
                 } else {
                     onComplete(.success(.parseError("Version pattern did not match in \(remotePath)")))
                 }
-                
+
             case .failure(let error):
                 onComplete(.failure(error))
             }
         }
     }
-    
+
     private func fetchDirectoryTimestamp(
         remotePath: String,
         onComplete: @escaping (Result<VersionInfo, Error>) -> Void
@@ -165,13 +186,13 @@ class DeploymentService {
                 } else {
                     onComplete(.success(.notDeployed))
                 }
-                
+
             case .failure(let error):
                 onComplete(.failure(error))
             }
         }
     }
-    
+
     // MARK: - Batch Version Fetching
 
     /// Fetch versions for multiple components with throttled SSH connections
@@ -218,7 +239,7 @@ enum DeploymentError: LocalizedError {
     case artifactNotFound(String)
     case unsupportedArtifactType(String)
     case notConfigured
-    
+
     var errorDescription: String? {
         switch self {
         case .artifactNotFound(let path):

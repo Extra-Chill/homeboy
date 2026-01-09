@@ -64,17 +64,14 @@ struct ModuleRun: ParsableCommand {
         }
         
         // Load project configuration
-        guard let projectConfig = loadProjectConfig(id: projectId) else {
+        guard let projectConfig = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
         
         // Load project type definition
-        guard let typeDefinition = loadProjectTypeDefinition(id: projectConfig.projectType) else {
-            fputs("Error: Unknown project type '\(projectConfig.projectType)'\n", stderr)
-            throw ExitCode.failure
-        }
-        
+        let typeDefinition = ProjectTypeManager.shared.resolve(projectConfig.projectType)
+
         // Load module manifest
         guard let module = loadModule(id: moduleId) else {
             fputs("Error: Module '\(moduleId)' not found\n", stderr)
@@ -241,7 +238,7 @@ struct ModuleList: ParsableCommand {
         // Optionally filter by project compatibility
         let projectConfig: ProjectConfiguration?
         if let projectId = project {
-            projectConfig = loadProjectConfig(id: projectId)
+            projectConfig = ConfigurationManager.readProject(id: projectId)
         } else {
             projectConfig = nil
         }
@@ -289,7 +286,7 @@ struct ModuleList: ParsableCommand {
 
         // Check features
         if let requiredFeatures = requires.features {
-            let typeDefinition = loadProjectTypeDefinition(id: project.projectType) ?? .fallbackGeneric
+            let typeDefinition = ProjectTypeManager.shared.resolve( project.projectType) ?? .fallbackGeneric
             for feature in requiredFeatures {
                 let isSatisfied: Bool
                 switch feature {
@@ -314,29 +311,23 @@ struct ModuleList: ParsableCommand {
 
 /// Loads a module manifest by ID
 func loadModule(id: String) -> ModuleManifest? {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let modulePath = appSupport.appendingPathComponent("Homeboy/modules/\(id)/module.json")
-    
+    let modulePath = AppPaths.module(id: id).appendingPathComponent("module.json")
+
     guard let data = try? Data(contentsOf: modulePath),
           var module = try? JSONDecoder().decode(ModuleManifest.self, from: data) else {
         return nil
     }
-    
+
     module.modulePath = modulePath.deletingLastPathComponent().path
     return module
 }
 
 /// Loads all installed modules
 func loadAllModules() -> [ModuleManifest] {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let modulesDir = appSupport.appendingPathComponent("Homeboy/modules")
-    
-    guard let contents = try? fileManager.contentsOfDirectory(at: modulesDir, includingPropertiesForKeys: nil) else {
+    guard let contents = try? FileManager.default.contentsOfDirectory(at: AppPaths.modules, includingPropertiesForKeys: nil) else {
         return []
     }
-    
+
     return contents.compactMap { dir -> ModuleManifest? in
         let manifestPath = dir.appendingPathComponent("module.json")
         guard let data = try? Data(contentsOf: manifestPath),
@@ -350,11 +341,7 @@ func loadAllModules() -> [ModuleManifest] {
 
 /// Gets the active project ID from app config
 func getActiveProjectId() -> String? {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let configPath = appSupport.appendingPathComponent("Homeboy/config.json")
-
-    guard let data = try? Data(contentsOf: configPath),
+    guard let data = try? Data(contentsOf: AppPaths.config),
           let config = try? JSONDecoder().decode(AppConfiguration.self, from: data) else {
         return nil
     }
@@ -364,11 +351,7 @@ func getActiveProjectId() -> String? {
 
 /// Loads all project configurations
 func loadAllProjectConfigs() -> [ProjectConfiguration] {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let projectsDir = appSupport.appendingPathComponent("Homeboy/projects")
-
-    guard let files = try? fileManager.contentsOfDirectory(at: projectsDir, includingPropertiesForKeys: nil) else {
+    guard let files = try? FileManager.default.contentsOfDirectory(at: AppPaths.projects, includingPropertiesForKeys: nil) else {
         return []
     }
 
@@ -405,7 +388,7 @@ func findCompatibleProjects(for module: ModuleManifest) -> [String] {
 
         // Check features
         if let requiredFeatures = requires.features {
-            let typeDefinition = loadProjectTypeDefinition(id: project.projectType) ?? .fallbackGeneric
+            let typeDefinition = ProjectTypeManager.shared.resolve( project.projectType) ?? .fallbackGeneric
             for feature in requiredFeatures {
                 let isSatisfied: Bool
                 switch feature {

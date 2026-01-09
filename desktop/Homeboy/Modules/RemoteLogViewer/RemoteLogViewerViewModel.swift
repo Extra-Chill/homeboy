@@ -46,9 +46,10 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
     @Published var showClearConfirmation: Bool = false
 
     // MARK: - Services
-    
+
     private var sshService: SSHService?
     private var basePath: String?
+    private var pathResolver: RemotePathResolver?
     
     // MARK: - Tail Options
     
@@ -71,18 +72,44 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
     init() {
         setupSSH()
         loadPinnedLogs()
-        setupSiteChangeObserver()
         observeConfiguration()
     }
 
-    func onConfigurationChange() {
-        setupSSH()
-        loadPinnedLogs()
+    // MARK: - Configuration Observation
+
+    func handleConfigChange(_ change: ConfigurationChangeType) {
+        switch change {
+        case .projectDidSwitch:
+            // Full reset on project switch
+            openLogs = []
+            selectedLogId = nil
+            error = nil
+            setupSSH()
+            loadPinnedLogs()
+            if selectedLogId != nil {
+                Task {
+                    await fetchSelectedLog()
+                }
+            }
+        case .projectModified(_, let fields):
+            // Reload pinned logs if remoteLogs changed
+            if fields.contains(.remoteLogs) {
+                loadPinnedLogs()
+            }
+            // Reconnect SSH if server or basePath changed
+            if fields.contains(.server) || fields.contains(.basePath) {
+                setupSSH()
+            }
+        default:
+            break
+        }
     }
     
     private func setupSSH() {
+        let project = ConfigurationManager.shared.safeActiveProject
         sshService = SSHService()
-        basePath = ConfigurationManager.shared.safeActiveProject.basePath
+        basePath = project.basePath
+        pathResolver = RemotePathResolver(project: project)
     }
     
     private func loadPinnedLogs() {
@@ -109,17 +136,17 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         error = nil
         
         let log = openLogs[index]
-        let fullPath = "\(base)/\(log.path)"
-        
+        let fullPath = pathResolver?.logPath(log.path) ?? RemotePathResolver.join(base, log.path)
+
         // Check if file exists
         let checkCommand = "test -f '\(fullPath)' && echo 'EXISTS' || echo 'NOTFOUND'"
-        
+
         do {
             let checkResult = try await ssh.executeCommandSync(checkCommand)
             let exists = checkResult.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
-            
+
             openLogs[index].fileExists = exists
-            
+
             if exists {
                 // Fetch content with tail or cat
                 let fetchCommand: String
@@ -154,8 +181,8 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         error = nil
         
         let log = openLogs[index]
-        let fullPath = "\(base)/\(log.path)"
-        
+        let fullPath = pathResolver?.logPath(log.path) ?? RemotePathResolver.join(base, log.path)
+
         do {
             // Truncate the file (safer than rm)
             let clearCommand = "> '\(fullPath)'"
@@ -291,29 +318,4 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         return formatter.localizedString(for: date, relativeTo: Date())
     }
     
-    // MARK: - Site Switching
-    
-    private func setupSiteChangeObserver() {
-        NotificationCenter.default.publisher(for: .projectDidChange)
-            .sink { [weak self] _ in
-                self?.resetForSiteSwitch()
-            }
-            .store(in: &cancellables)
-    }
-    
-    private func resetForSiteSwitch() {
-        openLogs = []
-        selectedLogId = nil
-        error = nil
-        
-        setupSSH()
-        loadPinnedLogs()
-        
-        // Fetch first log
-        if selectedLogId != nil {
-            Task {
-                await fetchSelectedLog()
-            }
-        }
-    }
 }

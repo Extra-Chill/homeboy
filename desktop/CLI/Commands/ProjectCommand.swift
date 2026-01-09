@@ -64,7 +64,7 @@ struct ProjectCreate: ParsableCommand {
     
     func run() throws {
         // Validate project type exists
-        guard loadProjectTypeDefinition(id: type) != nil else {
+        guard ProjectTypeManager.shared.type(for: type) != nil else {
             let available = getAvailableProjectTypeIds()
             fputs("Error: Unknown project type '\(type)'\n", stderr)
             if available.isEmpty {
@@ -75,10 +75,10 @@ struct ProjectCreate: ParsableCommand {
             throw ExitCode.failure
         }
         
-        let projectId = id ?? slugFromName(name)
+        let projectId = id ?? ConfigurationManager.slugFromName(name)
         
         // Check if project already exists
-        if loadProjectConfig(id: projectId) != nil {
+        if ConfigurationManager.readProject(id: projectId) != nil {
             fputs("Error: Project '\(projectId)' already exists\n", stderr)
             throw ExitCode.failure
         }
@@ -121,7 +121,7 @@ struct ProjectShow: ParsableCommand {
     var field: String?
     
     func run() throws {
-        guard let project = loadProjectConfig(id: projectId) else {
+        guard let project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -267,7 +267,7 @@ struct ProjectSet: ParsableCommand {
     var localDomain: String?
     
     func run() throws {
-        guard var project = loadProjectConfig(id: projectId) else {
+        guard var project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -389,7 +389,7 @@ struct ProjectDelete: ParsableCommand {
             throw ExitCode.failure
         }
         
-        guard loadProjectConfig(id: projectId) != nil else {
+        guard ConfigurationManager.readProject(id: projectId) != nil else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -430,7 +430,7 @@ struct ProjectSwitch: ParsableCommand {
     var projectId: String
     
     func run() throws {
-        guard loadProjectConfig(id: projectId) != nil else {
+        guard ConfigurationManager.readProject(id: projectId) != nil else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -473,7 +473,7 @@ struct ProjectDiscover: ParsableCommand {
     var set: String?
     
     func run() throws {
-        guard var project = loadProjectConfig(id: projectId) else {
+        guard var project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -499,14 +499,14 @@ struct ProjectDiscover: ParsableCommand {
         }
         
         // Load project type definition
-        let typeDefinition = loadProjectTypeDefinition(id: project.projectType)
-        guard let discovery = typeDefinition?.discovery else {
+        let typeDefinition = ProjectTypeManager.shared.resolve(project.projectType)
+        guard let discovery = typeDefinition.discovery else {
             fputs("Error: Discovery not supported for project type '\(project.projectType)'\n", stderr)
             throw ExitCode.failure
         }
-        
+
         // Execute find command via SSH
-        fputs("Searching for \(typeDefinition?.displayName ?? project.projectType) installations...\n", stderr)
+        fputs("Searching for \(typeDefinition.displayName) installations...\n", stderr)
         
         let findOutput = try runSSHCommandDirect(server: server, command: discovery.findCommand, ignoreExitCode: true)
         
@@ -678,7 +678,7 @@ struct SubTargetAdd: ParsableCommand {
     var isDefault: Bool = false
     
     func run() throws {
-        guard var project = loadProjectConfig(id: projectId) else {
+        guard var project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -737,7 +737,7 @@ struct SubTargetRemove: ParsableCommand {
             throw ExitCode.failure
         }
         
-        guard var project = loadProjectConfig(id: projectId) else {
+        guard var project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -776,7 +776,7 @@ struct SubTargetList: ParsableCommand {
     var projectId: String
     
     func run() throws {
-        guard let project = loadProjectConfig(id: projectId) else {
+        guard let project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -813,7 +813,7 @@ struct SubTargetSet: ParsableCommand {
     var isDefault: Bool = false
     
     func run() throws {
-        guard var project = loadProjectConfig(id: projectId) else {
+        guard var project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -916,12 +916,12 @@ struct ComponentAdd: ParsableCommand {
     var versionPattern: String?
     
     func run() throws {
-        guard var project = loadProjectConfig(id: projectId) else {
+        guard var project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
         
-        let id = slugFromName(name)
+        let id = ConfigurationManager.slugFromName(name)
         
         // Check if component already exists
         if project.components.contains(where: { $0.id == id }) {
@@ -972,7 +972,7 @@ struct ComponentRemove: ParsableCommand {
             throw ExitCode.failure
         }
         
-        guard var project = loadProjectConfig(id: projectId) else {
+        guard var project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -1004,7 +1004,7 @@ struct ComponentList: ParsableCommand {
     var projectId: String
     
     func run() throws {
-        guard let project = loadProjectConfig(id: projectId) else {
+        guard let project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -1018,54 +1018,33 @@ struct ComponentList: ParsableCommand {
 
 // MARK: - Helper Functions
 
-/// Generate a slug from a name
-private func slugFromName(_ name: String) -> String {
-    name.lowercased()
-        .trimmingCharacters(in: .whitespaces)
-        .replacingOccurrences(of: " ", with: "-")
-        .replacingOccurrences(of: "[^a-z0-9-]", with: "", options: .regularExpression)
-        .replacingOccurrences(of: "--+", with: "-", options: .regularExpression)
-        .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-}
-
 /// Save project configuration to disk
 private func saveProjectConfig(_ project: ProjectConfiguration) throws {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let projectPath = appSupport.appendingPathComponent("Homeboy/projects/\(project.id).json")
-    
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     let data = try encoder.encode(project)
-    try data.write(to: projectPath)
+    try data.write(to: AppPaths.project(id: project.id))
 }
 
 /// Delete project configuration from disk
 private func deleteProjectConfig(id: String) throws {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let projectPath = appSupport.appendingPathComponent("Homeboy/projects/\(id).json")
-    try fileManager.removeItem(at: projectPath)
+    try FileManager.default.removeItem(at: AppPaths.project(id: id))
 }
 
 /// Set active project in app config
 private func setActiveProject(id: String) throws {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let configPath = appSupport.appendingPathComponent("Homeboy/config.json")
-    
     var config = AppConfiguration()
-    if let data = try? Data(contentsOf: configPath),
+    if let data = try? Data(contentsOf: AppPaths.config),
        let existing = try? JSONDecoder().decode(AppConfiguration.self, from: data) {
         config = existing
     }
-    
+
     config.activeProjectId = id
-    
+
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     let data = try encoder.encode(config)
-    try data.write(to: configPath)
+    try data.write(to: AppPaths.config)
 }
 
 /// Format dictionary as JSON string
@@ -1079,14 +1058,10 @@ private func formatJSON(_ dict: [String: Any]) -> String {
 
 /// Get available project type IDs from Application Support
 private func getAvailableProjectTypeIds() -> [String] {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let typesDir = appSupport.appendingPathComponent("Homeboy/project-types")
-    
-    guard let files = try? fileManager.contentsOfDirectory(at: typesDir, includingPropertiesForKeys: nil) else {
+    guard let files = try? FileManager.default.contentsOfDirectory(at: AppPaths.projectTypes, includingPropertiesForKeys: nil) else {
         return []
     }
-    
+
     return files
         .filter { $0.pathExtension == "json" }
         .map { $0.deletingPathExtension().lastPathComponent }

@@ -20,7 +20,12 @@ struct ServerConfig: Codable, Identifiable {
     var keychainServiceName: String {
         "com.extrachill.homeboy.ssh.\(id)"
     }
-    
+
+    /// Whether the server has minimum required configuration for SSH connection
+    var isValid: Bool {
+        !host.isEmpty && !user.isEmpty
+    }
+
     /// Creates a default empty server configuration
     static func empty(id: String = "", name: String = "") -> ServerConfig {
         ServerConfig(id: id, name: name, host: "", user: "", port: 22)

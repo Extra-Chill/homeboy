@@ -21,7 +21,7 @@ struct HomeboyCLI: ParsableCommand {
 
             Use 'homeboy docs' for comprehensive documentation.
             """,
-        version: "0.6.1",
+        version: "0.6.2",
         subcommands: [
             WP.self,
             PM2.self,
@@ -73,14 +73,10 @@ struct Projects: ParsableCommand {
     }
     
     private func getAvailableProjectIds() -> [String] {
-        let fileManager = FileManager.default
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let projectsDir = appSupport.appendingPathComponent("Homeboy/projects")
-        
-        guard let files = try? fileManager.contentsOfDirectory(at: projectsDir, includingPropertiesForKeys: nil) else {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: AppPaths.projects, includingPropertiesForKeys: nil) else {
             return []
         }
-        
+
         return files
             .filter { $0.pathExtension == "json" }
             .map { $0.deletingPathExtension().lastPathComponent }

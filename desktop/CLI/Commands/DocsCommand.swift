@@ -42,10 +42,8 @@ struct Docs: ParsableCommand {
     }
 
     private func loadDocumentation() throws -> String {
-        let fileManager = FileManager.default
         let paths = [
-            fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-                .appendingPathComponent("Homeboy/docs/CLI.md").path,
+            AppPaths.homeboy.appendingPathComponent("docs/CLI.md").path,
             Bundle.main.resourceURL?.appendingPathComponent("docs/CLI.md").path
         ].compactMap { $0 }
 

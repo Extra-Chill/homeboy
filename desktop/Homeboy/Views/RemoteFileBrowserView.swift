@@ -203,9 +203,7 @@ struct RemoteFileBrowserView: View {
             // For selectFile: always use the highlighted file
             // For selectPath: use highlighted directory if one is selected
             if mode == .selectFile || (mode == .selectPath && file.isDirectory) {
-                return browser.currentPath.hasSuffix("/")
-                    ? "\(browser.currentPath)\(file.name)"
-                    : "\(browser.currentPath)/\(file.name)"
+                return RemotePathResolver.join(browser.currentPath, file.name)
             }
         }
         return browser.currentPath

@@ -65,7 +65,7 @@ struct CreateProjectSheet: View {
                         .onChange(of: nameFieldFocused) { _, isFocused in
                             // Auto-generate ID when name field loses focus
                             if !isFocused && !idWasManuallyEdited && projectId.isEmpty {
-                                projectId = configManager.slugFromName(projectName)
+                                projectId = ConfigurationManager.slugFromName(projectName)
                             }
                         }
                     

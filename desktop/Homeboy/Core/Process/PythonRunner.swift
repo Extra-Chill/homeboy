@@ -10,8 +10,7 @@ class PythonRunner: ObservableObject {
     private let pythonPath = "/opt/homebrew/bin/python3"
     
     var venvPath: String {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("Homeboy/venv").path
+        AppPaths.venv.path
     }
     
     var venvPythonPath: String {
@@ -23,11 +22,8 @@ class PythonRunner: ObservableObject {
     }
     
     private func ensureAppSupportDirectoryExists() {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = appSupport.appendingPathComponent("Homeboy")
-        
-        if !FileManager.default.fileExists(atPath: appDir.path) {
-            try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: AppPaths.homeboy.path) {
+            try? FileManager.default.createDirectory(at: AppPaths.homeboy, withIntermediateDirectories: true)
         }
     }
     

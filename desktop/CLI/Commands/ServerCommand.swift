@@ -223,7 +223,7 @@ struct ServerDelete: ParsableCommand {
         // Check if any project uses this server
         let projectIds = getAvailableProjectIds()
         for projectId in projectIds {
-            if let project = loadProjectConfig(id: projectId), project.serverId == serverId {
+            if let project = ConfigurationManager.readProject(id: projectId), project.serverId == serverId {
                 fputs("Error: Server is used by project '\(projectId)'. Update or delete the project first.\n", stderr)
                 throw ExitCode.failure
             }
@@ -271,14 +271,10 @@ struct ServerList: ParsableCommand {
 
 /// Get available project IDs
 private func getAvailableProjectIds() -> [String] {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let projectsDir = appSupport.appendingPathComponent("Homeboy/projects")
-    
-    guard let files = try? fileManager.contentsOfDirectory(at: projectsDir, includingPropertiesForKeys: nil) else {
+    guard let files = try? FileManager.default.contentsOfDirectory(at: AppPaths.projects, includingPropertiesForKeys: nil) else {
         return []
     }
-    
+
     return files
         .filter { $0.pathExtension == "json" }
         .map { $0.deletingPathExtension().lastPathComponent }
@@ -287,14 +283,10 @@ private func getAvailableProjectIds() -> [String] {
 
 /// Get available server IDs
 private func getAvailableServerIds() -> [String] {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let serversDir = appSupport.appendingPathComponent("Homeboy/servers")
-    
-    guard let files = try? fileManager.contentsOfDirectory(at: serversDir, includingPropertiesForKeys: nil) else {
+    guard let files = try? FileManager.default.contentsOfDirectory(at: AppPaths.servers, includingPropertiesForKeys: nil) else {
         return []
     }
-    
+
     return files
         .filter { $0.pathExtension == "json" }
         .map { $0.deletingPathExtension().lastPathComponent }
@@ -303,27 +295,18 @@ private func getAvailableServerIds() -> [String] {
 
 /// Save server configuration to disk
 private func saveServerConfig(_ server: ServerConfig) throws {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let serversDir = appSupport.appendingPathComponent("Homeboy/servers")
-    
     // Ensure directory exists
-    try fileManager.createDirectory(at: serversDir, withIntermediateDirectories: true)
-    
-    let serverPath = serversDir.appendingPathComponent("\(server.id).json")
-    
+    try FileManager.default.createDirectory(at: AppPaths.servers, withIntermediateDirectories: true)
+
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     let data = try encoder.encode(server)
-    try data.write(to: serverPath)
+    try data.write(to: AppPaths.server(id: server.id))
 }
 
 /// Delete server configuration from disk
 private func deleteServerConfig(id: String) throws {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let serverPath = appSupport.appendingPathComponent("Homeboy/servers/\(id).json")
-    try fileManager.removeItem(at: serverPath)
+    try FileManager.default.removeItem(at: AppPaths.server(id: id))
 }
 
 /// Format dictionary as JSON string

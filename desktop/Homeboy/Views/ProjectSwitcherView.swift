@@ -219,7 +219,7 @@ struct ProjectSwitcherView: View {
                         .onChange(of: newProjectNameFieldFocused) { _, isFocused in
                             // Auto-generate ID when name field loses focus
                             if !isFocused && !newProjectIdWasManuallyEdited && newProjectId.isEmpty {
-                                newProjectId = configManager.slugFromName(newProjectName)
+                                newProjectId = ConfigurationManager.slugFromName(newProjectName)
                             }
                         }
                     

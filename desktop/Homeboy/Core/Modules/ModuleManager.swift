@@ -52,10 +52,10 @@ struct LoadedModule: Identifiable {
 
 /// Singleton manager for discovering, loading, and managing modules
 @MainActor
-class ModuleManager: ObservableObject {
+class ModuleManager: ObservableObject, ConfigurationObserving {
     static let shared = ModuleManager()
-    
-    private var cancellables = Set<AnyCancellable>()
+
+    var cancellables = Set<AnyCancellable>()
     
     @Published var modules: [LoadedModule] = []
     @Published var isLoading = false
@@ -82,21 +82,25 @@ class ModuleManager: ObservableObject {
         jsonDecoder = JSONDecoder()
         jsonEncoder = JSONEncoder()
         jsonEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        
+
         ensureDirectoriesExist()
         loadModules()
-        setupSiteChangeObserver()
+        observeConfiguration()
     }
-    
-    // MARK: - Site Switching
-    
-    private func setupSiteChangeObserver() {
-        NotificationCenter.default.publisher(for: .projectDidChange)
-            .sink { [weak self] _ in
-                // Re-evaluate module requirements for new site
-                self?.loadModules()
-            }
-            .store(in: &cancellables)
+
+    // MARK: - Configuration Observation
+
+    func handleConfigChange(_ change: ConfigurationChangeType) {
+        switch change {
+        case .projectDidSwitch:
+            // Re-evaluate module requirements for new project
+            loadModules()
+        case .moduleAdded, .moduleRemoved, .moduleModified:
+            // Refresh module list when modules change
+            loadModules()
+        default:
+            break
+        }
     }
     
     // MARK: - Directory Management

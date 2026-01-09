@@ -90,17 +90,14 @@ enum CLIExecutor {
         }
         
         // Load project configuration
-        guard let projectConfig = loadProjectConfig(id: projectId) else {
+        guard let projectConfig = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
         
         // Load project type definition to get CLI config
-        guard let typeDefinition = loadProjectTypeDefinition(id: projectConfig.projectType) else {
-            fputs("Error: Unknown project type '\(projectConfig.projectType)'\n", stderr)
-            throw ExitCode.failure
-        }
-        
+        let typeDefinition = ProjectTypeManager.shared.resolve(projectConfig.projectType)
+
         // Validate CLI tool matches project type
         guard let cliConfig = typeDefinition.cli else {
             fputs("Error: Project type '\(typeDefinition.displayName)' does not support CLI\n", stderr)
@@ -328,39 +325,6 @@ enum CLIExecutor {
             TemplateRenderer.Variables.cliPath: cliPath
         ]
     }
-}
-
-// MARK: - Project Configuration Loading
-
-/// Loads project configuration from disk
-func loadProjectConfig(id: String) -> ProjectConfiguration? {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let projectPath = appSupport.appendingPathComponent("Homeboy/projects/\(id).json")
-    
-    guard let data = try? Data(contentsOf: projectPath),
-          let config = try? JSONDecoder().decode(ProjectConfiguration.self, from: data) else {
-        return nil
-    }
-    
-    return config
-}
-
-// MARK: - Project Type Loading
-
-/// Loads a project type definition from Application Support.
-/// Project types are synced to Application Support on app launch.
-func loadProjectTypeDefinition(id: String) -> ProjectTypeDefinition? {
-    let fileManager = FileManager.default
-    let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let typePath = appSupport.appendingPathComponent("Homeboy/project-types/\(id).json")
-    
-    guard let data = try? Data(contentsOf: typePath),
-          let type = try? JSONDecoder().decode(ProjectTypeDefinition.self, from: data) else {
-        return nil
-    }
-    
-    return type
 }
 
 // MARK: - Command Execution

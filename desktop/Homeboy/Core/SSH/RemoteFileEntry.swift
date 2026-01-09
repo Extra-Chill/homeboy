@@ -41,7 +41,7 @@ struct RemoteFileEntry: Identifiable, Hashable, Comparable {
     
     /// Parent directory path
     var parentPath: String {
-        (path as NSString).deletingLastPathComponent
+        RemotePathResolver.parent(of: path)
     }
     
     /// Creates entry from ls -la output line
@@ -65,7 +65,7 @@ struct RemoteFileEntry: Identifiable, Hashable, Comparable {
         // Handle symlinks (name -> target)
         let actualName = name.components(separatedBy: " -> ").first ?? name
         
-        let path = basePath.hasSuffix("/") ? "\(basePath)\(actualName)" : "\(basePath)/\(actualName)"
+        let path = RemotePathResolver.join(basePath, actualName)
         
         return RemoteFileEntry(
             name: actualName,

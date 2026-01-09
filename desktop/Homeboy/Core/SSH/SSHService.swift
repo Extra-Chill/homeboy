@@ -37,8 +37,7 @@ class SSHService: ObservableObject {
         let project = ConfigurationManager.readCurrentProject()
         guard let serverId = project.serverId,
               let server = ConfigurationManager.readServer(id: serverId),
-              !server.host.isEmpty,
-              !server.user.isEmpty else {
+              server.isValid else {
             return false
         }
         return KeychainService.hasSSHKey(forServer: serverId)
@@ -58,8 +57,7 @@ class SSHService: ObservableObject {
     /// Check if a specific server has valid SSH configuration
     static func isConfigured(forServer serverId: String) -> Bool {
         guard let server = ConfigurationManager.readServer(id: serverId),
-              !server.host.isEmpty,
-              !server.user.isEmpty else {
+              server.isValid else {
             return false
         }
         return KeychainService.hasSSHKey(forServer: serverId)
@@ -69,7 +67,7 @@ class SSHService: ObservableObject {
     
     /// Initialize with a ServerConfig and optional base path
     init?(server: ServerConfig, basePath: String? = nil) {
-        guard !server.host.isEmpty, !server.user.isEmpty else {
+        guard server.isValid else {
             return nil
         }
         
@@ -87,11 +85,10 @@ class SSHService: ObservableObject {
         
         guard let serverId = projectConfig.serverId,
               let server = ConfigurationManager.readServer(id: serverId),
-              !server.host.isEmpty,
-              !server.user.isEmpty else {
+              server.isValid else {
             return nil
         }
-        
+
         self.host = server.host
         self.username = server.user
         self.port = server.port
@@ -101,11 +98,10 @@ class SSHService: ObservableObject {
     }
     
     // MARK: - Legacy Key Path (CLI Compatibility)
-    
+
     /// Default key path for legacy/CLI usage
     static var defaultKeyPath: String {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("Homeboy/id_rsa").path
+        AppPaths.keys.appendingPathComponent("id_rsa").path
     }
     
     /// Ensure legacy SSH key file exists (for CLI commands)
@@ -127,8 +123,7 @@ class SSHService: ObservableObject {
     
     /// Keys directory
     static var keysDirectory: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("Homeboy").appendingPathComponent("keys")
+        AppPaths.keys
     }
     
     // MARK: - SSH Key Generation (Per-Server)
@@ -494,7 +489,7 @@ class SSHService: ObservableObject {
     /// List contents of a remote directory
     func listDirectory(_ path: String) async throws -> [RemoteFileEntry] {
         // Ensure trailing slash to list directory contents, not symlink metadata
-        let normalizedPath = path.hasSuffix("/") ? path : "\(path)/"
+        let normalizedPath = RemotePathResolver.withTrailingSlash(path)
         let output = try await executeCommandSync("ls -la '\(normalizedPath)'")
         let lines = output.components(separatedBy: .newlines)
         

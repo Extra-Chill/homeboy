@@ -2,29 +2,26 @@ import Combine
 import Foundation
 
 /// Protocol for ViewModels that need to react to configuration changes.
-/// Provides standardized observation of ConfigurationManager.activeProject.
-///
-/// All conforming ViewModels already have `cancellables` - this protocol
-/// reuses that existing property for consistency.
+/// Uses ConfigurationObserver for typed change events across all config files.
 protocol ConfigurationObserving: AnyObject {
     /// Existing cancellables set (all ViewModels already have this)
     var cancellables: Set<AnyCancellable> { get set }
 
-    /// Called when the active project configuration changes.
-    /// Implementations should refresh any cached configuration data.
-    func onConfigurationChange()
+    /// Handle a typed configuration change.
+    /// Implementations choose which changes to react to via switch statement.
+    func handleConfigChange(_ change: ConfigurationChangeType)
 }
 
 extension ConfigurationObserving {
-    /// Sets up observation of ConfigurationManager.activeProject changes.
+    /// Sets up observation of all configuration changes via ConfigurationObserver.
     /// Call this in init() after initial configuration load.
     @MainActor
     func observeConfiguration() {
-        ConfigurationManager.shared.$activeProject
-            .dropFirst()
+        ConfigurationObserver.shared.$lastChange
+            .compactMap { $0 }
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.onConfigurationChange()
+            .sink { [weak self] change in
+                self?.handleConfigChange(change)
             }
             .store(in: &cancellables)
     }

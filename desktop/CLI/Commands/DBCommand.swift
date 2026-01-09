@@ -212,7 +212,7 @@ enum DatabaseCLI {
         json: Bool
     ) throws -> Context {
         // Load project
-        guard let project = loadProjectConfig(id: projectId) else {
+        guard let project = ConfigurationManager.readProject(id: projectId) else {
             fputs("Error: Project '\(projectId)' not found\n", stderr)
             throw ExitCode.failure
         }
@@ -220,8 +220,7 @@ enum DatabaseCLI {
         // Validate server configuration
         guard let serverId = project.serverId,
               let server = ConfigurationManager.readServer(id: serverId),
-              !server.host.isEmpty,
-              !server.user.isEmpty else {
+              server.isValid else {
             fputs("Error: Server not configured for project '\(projectId)'. Configure in Homeboy.app Settings.\n", stderr)
             throw ExitCode.failure
         }

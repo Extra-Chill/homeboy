@@ -108,7 +108,7 @@ class RemoteFileBrowser: ObservableObject {
     
     /// Navigate to parent directory
     func goUp() async {
-        let parentPath = (currentPath as NSString).deletingLastPathComponent
+        let parentPath = RemotePathResolver.parent(of: currentPath)
         guard !parentPath.isEmpty, parentPath != currentPath else { return }
         await goToPath(parentPath)
     }
@@ -178,7 +178,7 @@ class RemoteFileBrowser: ObservableObject {
         guard let ssh = ssh else {
             throw SSHError.noCredentials
         }
-        let newPath = "\(entry.parentPath)/\(newName)"
+        let newPath = RemotePathResolver.join(entry.parentPath, newName)
         try await ssh.renameFile(from: entry.path, to: newPath)
         await refresh()
         return newPath
@@ -192,7 +192,7 @@ class RemoteFileBrowser: ObservableObject {
         guard let ssh = ssh else {
             throw SSHError.noCredentials
         }
-        let path = currentPath.hasSuffix("/") ? "\(currentPath)\(name)" : "\(currentPath)/\(name)"
+        let path = RemotePathResolver.join(currentPath, name)
         try await ssh.createFile(path)
         await refresh()
         return path
@@ -206,7 +206,7 @@ class RemoteFileBrowser: ObservableObject {
         guard let ssh = ssh else {
             throw SSHError.noCredentials
         }
-        let path = currentPath.hasSuffix("/") ? "\(currentPath)\(name)" : "\(currentPath)/\(name)"
+        let path = RemotePathResolver.join(currentPath, name)
         try await ssh.createDirectory(path)
         await refresh()
         return path

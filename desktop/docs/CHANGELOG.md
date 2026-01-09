@@ -2,6 +2,21 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.6.2
+
+### Improvements
+- **Centralized App Paths**: Added `AppPaths` and updated the app + CLI to use it for Application Support locations (projects, servers, modules, docs, keys, backups).
+- **Typed Configuration Change Events**: Replaced NotificationCenter project-change notifications with `ConfigurationObserver` + `ConfigurationChangeType`, and updated observing ViewModels to react only to relevant field changes.
+- **Remote Path Normalization**: Added `RemotePathResolver` (plus WordPress-specific helpers) and refactored SSH file/log browsing + module paths to avoid slash-joining edge cases.
+- **Non-Blocking SSH Tunnel Startup**: Updated `SSHTunnelService` to avoid `Thread.sleep` during tunnel establishment and stale tunnel cleanup.
+
+### CLI
+- **Deploy Is Now Deploy-Only**: `homeboy deploy` no longer runs `build.sh`; it requires an existing build artifact and deploys via `DeploymentService`.
+- **Config + Project Type Resolution Cleanup**: CLI commands now use `ConfigurationManager.readProject`/`readServer` and `ProjectTypeManager.shared.resolve(...)` with shared path helpers.
+
+### SSH / Deployment
+- **Staged Uploads + Resolver-Based Paths**: `DeploymentService` now stages artifacts under `~/tmp` and uses `RemotePathResolver` for component paths and version-file lookups.
+
 ## 0.6.1
 
 ### New Features
