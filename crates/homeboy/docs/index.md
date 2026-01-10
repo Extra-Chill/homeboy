@@ -27,6 +27,7 @@ homeboy docs project
 - `pin` - Pin frequently used items
 - `module` - Module runner
 - `git` - Git helpers
+- `version` - Manage component versions
 
 For full CLI help for any command, you can also use:
 

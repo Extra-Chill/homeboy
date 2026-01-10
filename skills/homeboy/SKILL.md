@@ -1,12 +1,12 @@
 ---
 name: homeboy
 description: Use this skill when deploying code to production, executing WP-CLI or PM2 commands on remote servers, querying production databases, managing project/server configurations, performing component-scoped git operations, or when the user mentions Homeboy, deployment, or remote server operations.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Homeboy CLI
 
-CLI for project development and deployment. Provides terminal access to project management, remote CLI operations (WP-CLI, PM2), database queries, deployments, and component-scoped git operations.
+CLI for project development and deployment. Provides terminal access to project management, remote CLI operations (WP-CLI, PM2), database queries, deployments, and component-scoped git/build operations.
 
 **CLI documentation**: run `homeboy docs` (and `homeboy docs <topic>`).
 
@@ -19,6 +19,8 @@ CLI for project development and deployment. Provides terminal access to project 
 | `component` | Manage standalone component configurations |
 | `server` | Manage server configurations (create, show, set, delete, list) |
 | `git` | Component-scoped git operations (status, commit, push, pull, tag) |
+| `version` | Component-scoped version management (show, bump) |
+| `build` | Component-scoped builds |
 | `wp` | Execute WP-CLI commands on remote WordPress servers |
 | `pm2` | Execute PM2 commands on remote Node.js servers |
 | `db` | Database operations - read-only (tables, describe, query) |
@@ -42,6 +44,14 @@ homeboy help <command>              # Get detailed help for any command
 4. **PM2**: `restart` affects live services - confirm intent before executing
 
 ## Common Patterns
+
+### Local Development Pipeline
+```bash
+homeboy version bump <component> patch   # Bump version
+homeboy git commit <component> "msg"     # Stage all and commit
+homeboy git push <component>             # Push to remote
+homeboy build <component>                # Run build command
+```
 
 ### Remote WordPress Operations
 ```bash
@@ -76,7 +86,21 @@ homeboy git tag <component> v1.0.0          # Create lightweight tag
 homeboy git tag <component> v1.0.0 -m "msg" # Create annotated tag
 ```
 
-### Release Workflow (Dogfooding)
+### Version Management (Component-Scoped)
+```bash
+homeboy version show <component>            # Display current version
+homeboy version bump <component> patch      # 0.1.2 → 0.1.3
+homeboy version bump <component> minor      # 0.1.2 → 0.2.0
+homeboy version bump <component> major      # 0.1.2 → 1.0.0
+```
+
+### Build (Component-Scoped)
+```bash
+homeboy build <component>                   # Run component's build_command
+homeboy build <component> --json            # JSON output for automation
+```
+
+### Release Workflow
 ```bash
 homeboy git commit <component> "Release v1.0.0"
 homeboy git tag <component> v1.0.0

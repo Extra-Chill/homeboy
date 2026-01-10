@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 mod commands;
 mod docs;
 
-use commands::{projects, project, ssh, wp, pm2, server, db, file, logs, deploy, component, pin, module, docs as docs_command, git};
+use commands::{projects, project, ssh, wp, pm2, server, db, file, logs, deploy, component, pin, module, docs as docs_command, git, version, build};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -48,6 +48,10 @@ enum Commands {
     Docs(docs_command::DocsArgs),
     /// Git operations for components
     Git(git::GitArgs),
+    /// Version management for components
+    Version(version::VersionArgs),
+    /// Build a component
+    Build(build::BuildArgs),
 }
 
 fn main() {
@@ -69,5 +73,7 @@ fn main() {
         Commands::Module(args) => module::run(args),
         Commands::Docs(args) => docs_command::run(args),
         Commands::Git(args) => git::run(args),
+        Commands::Version(args) => version::run(args),
+        Commands::Build(args) => build::run(args),
     }
 }

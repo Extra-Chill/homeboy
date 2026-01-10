@@ -2,6 +2,26 @@
 
 All notable changes to Homeboy CLI are documented in this file.
 
+## 0.1.4
+
+### New Features
+- **Build Command**: New `homeboy build <component>` for component-scoped builds
+  - Runs component's configured `build_command` in its `local_path`
+  - JSON output support with `--json` flag
+
+### Improvements
+- **Version Utilities**: Refactored version parsing to shared `homeboy-core` library
+  - `parse_version`, `default_pattern_for_file`, `increment_version` now in core
+  - Enables future reuse across CLI components
+
+## 0.1.3
+
+### New Features
+- **Version Command**: New `homeboy version` command for component-scoped version management
+  - `show` - Display current version from component's version_file
+  - `bump` - Increment version (patch/minor/major) and write back to file
+  - Auto-detects patterns for .toml, .json, .php files
+
 ## 0.1.2
 
 ### New Features

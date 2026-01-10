@@ -1,5 +1,4 @@
 use clap::Args;
-use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
@@ -7,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 use homeboy_core::config::{ConfigManager, AppPaths, ServerConfig};
 use homeboy_core::output::{print_success, print_error};
+use homeboy_core::version::parse_version;
 
 #[derive(Args)]
 pub struct DeployArgs {
@@ -383,26 +383,20 @@ fn load_components(component_ids: &[String]) -> Vec<Component> {
 
 // MARK: - Version Parsing
 
-fn parse_version(content: &str, pattern: Option<&str>) -> Option<String> {
+fn parse_component_version(content: &str, pattern: Option<&str>) -> Option<String> {
     let default_pattern = r"Version:\s*(\d+\.\d+\.\d+)";
     let pattern_str = match pattern {
-        Some(p) => {
-            // Handle double-escaped patterns from JSON (\\s -> \s, \\d -> \d, etc.)
-            p.replace("\\\\", "\\")
-        }
+        Some(p) => p.replace("\\\\", "\\"), // Handle double-escaped patterns from JSON
         None => default_pattern.to_string(),
     };
-    let re = Regex::new(&pattern_str).ok()?;
-    re.captures(content)
-        .and_then(|caps| caps.get(1))
-        .map(|m| m.as_str().to_string())
+    parse_version(content, &pattern_str)
 }
 
 fn fetch_local_version(component: &Component) -> Option<String> {
     let version_file = component.version_file.as_ref()?;
     let path = format!("{}/{}", component.local_path, version_file);
     let content = fs::read_to_string(&path).ok()?;
-    parse_version(&content, component.version_pattern.as_deref())
+    parse_component_version(&content, component.version_pattern.as_deref())
 }
 
 fn fetch_remote_versions(
@@ -424,7 +418,7 @@ fn fetch_remote_versions(
             let output = client.execute(&format!("cat '{}' 2>/dev/null", remote_path));
 
             if output.success {
-                if let Some(version) = parse_version(&output.stdout, component.version_pattern.as_deref()) {
+                if let Some(version) = parse_component_version(&output.stdout, component.version_pattern.as_deref()) {
                     versions.insert(component.id.clone(), version);
                 }
             }

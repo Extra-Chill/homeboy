@@ -14,7 +14,7 @@ This installs the **Homeboy CLI** (`homeboy`). It does not install the macOS des
 
 ### Cargo (requires Rust)
 ```bash
-cargo install homeboy
+cargo install --path crates/homeboy
 ```
 
 ### Direct Download
@@ -35,6 +35,7 @@ Download from [GitHub Releases](https://github.com/Extra-Chill/homeboy-cli/relea
 | `file` | Remote file operations |
 | `logs` | Remote log viewing |
 | `deploy` | Deploy components to remote server |
+| `version` | Manage component versions |
 | `pin` | Manage pinned files and logs |
 | `module` | Execute CLI-compatible modules |
 | `docs` | Display CLI documentation |
@@ -67,7 +68,11 @@ Configuration is stored in the Homeboy data directory (via `dirs::data_dir()`):
 - **macOS**: `~/Library/Application Support/Homeboy/`
 - **Linux**: `~/.local/share/Homeboy/` (exact path varies by distribution)
 
+The CLI binary is installed to `/usr/local/bin/homeboy` (system) or `/opt/homebrew/bin/homeboy` (Homebrew ARM).
+
 The macOS desktop app (if installed) uses the same directory and JSON structure, but it is not required for CLI usage.
+
+Run `homeboy docs` or view the [CLI documentation](crates/homeboy/docs/index.md) for detailed information.
 
 ```
 Homeboy/
