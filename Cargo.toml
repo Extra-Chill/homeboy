@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.2"
 edition = "2021"
 license = "MIT"
-authors = ["Chris Huber <chris@extrachill.com>"]
+authors = ["Chris Huber <chubes@extrachill.com>"]
 
 [workspace.dependencies]
 # Shared dependencies
