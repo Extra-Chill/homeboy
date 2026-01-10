@@ -1,6 +1,6 @@
 # Homeboy CLI
 
-CLI tool for development and deployment automation.
+CLI tool for development and deployment automation. Component-scoped operations for the entire local dev pipeline.
 
 ## Installation
 
@@ -28,17 +28,42 @@ Download from [GitHub Releases](https://github.com/Extra-Chill/homeboy-cli/relea
 | `project` | Manage project configuration |
 | `server` | Manage SSH server configurations |
 | `component` | Manage standalone component configurations |
+| `git` | Component-scoped git operations |
+| `version` | Component-scoped version management |
+| `build` | Component-scoped builds |
+| `deploy` | Deploy components to remote server |
 | `ssh` | SSH into project server |
 | `wp` | Run WP-CLI commands on WordPress projects |
 | `pm2` | Run PM2 commands on Node.js projects |
 | `db` | Database operations |
 | `file` | Remote file operations |
 | `logs` | Remote log viewing |
-| `deploy` | Deploy components to remote server |
-| `version` | Manage component versions |
 | `pin` | Manage pinned files and logs |
 | `module` | Execute CLI-compatible modules |
 | `docs` | Display CLI documentation |
+
+## Local Dev Pipeline
+
+Homeboy provides a unified interface for component-scoped local development - no more `cd` ceremony:
+
+```bash
+# Version management
+homeboy version show my-plugin           # Display current version
+homeboy version bump my-plugin patch     # 0.1.2 → 0.1.3
+
+# Git operations
+homeboy git status my-plugin             # Show git status
+homeboy git commit my-plugin "message"   # Stage all and commit
+homeboy git push my-plugin               # Push to remote
+homeboy git tag my-plugin v1.0.0         # Create tag
+homeboy git push my-plugin --tags        # Push with tags
+
+# Build
+homeboy build my-plugin                  # Run component's build_command
+
+# Deploy
+homeboy deploy myproject my-plugin       # Deploy to remote server
+```
 
 ## Usage
 
