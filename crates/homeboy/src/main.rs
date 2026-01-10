@@ -1,8 +1,9 @@
 use clap::{Parser, Subcommand};
 
 mod commands;
+mod docs;
 
-use commands::{projects, project, ssh, wp, pm2, server, db, file, logs, deploy, component, pin, module, docs};
+use commands::{projects, project, ssh, wp, pm2, server, db, file, logs, deploy, component, pin, module, docs as docs_command, git};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -44,7 +45,9 @@ enum Commands {
     /// Execute CLI-compatible modules
     Module(module::ModuleArgs),
     /// Display CLI documentation
-    Docs(docs::DocsArgs),
+    Docs(docs_command::DocsArgs),
+    /// Git operations for components
+    Git(git::GitArgs),
 }
 
 fn main() {
@@ -64,6 +67,7 @@ fn main() {
         Commands::Component(args) => component::run(args),
         Commands::Pin(args) => pin::run(args),
         Commands::Module(args) => module::run(args),
-        Commands::Docs(args) => docs::run(args),
+        Commands::Docs(args) => docs_command::run(args),
+        Commands::Git(args) => git::run(args),
     }
 }

@@ -12,3 +12,4 @@ pub mod component;
 pub mod pin;
 pub mod module;
 pub mod docs;
+pub mod git;

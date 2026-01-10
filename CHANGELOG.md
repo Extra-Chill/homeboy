@@ -2,6 +2,19 @@
 
 All notable changes to Homeboy CLI are documented in this file.
 
+## 0.1.2
+
+### New Features
+- **Git Command**: New `homeboy git` command for component-scoped git operations
+  - `status` - Show git status for a component
+  - `commit` - Stage all changes and commit with message
+  - `push` - Push local commits to remote (with `--tags` flag support)
+  - `pull` - Pull remote changes
+  - `tag` - Create git tags (lightweight or annotated with `-m`)
+
+### Improvements
+- **Dogfooding Support**: Homeboy can now manage its own releases via git commands
+
 ## 0.1.1
 
 ### Breaking Changes

@@ -1,7 +1,6 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use std::process::{Command, Stdio};
-use homeboy_core::config::{ConfigManager, AppPaths};
+use homeboy_core::config::ConfigManager;
 use homeboy_core::ssh::SshClient;
 use homeboy_core::output::{print_success, print_error};
 

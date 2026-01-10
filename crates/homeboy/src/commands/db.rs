@@ -1,10 +1,8 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use std::collections::HashMap;
 use std::process::{Command, Stdio};
-use homeboy_core::config::{ConfigManager, ProjectTypeManager, AppPaths};
+use homeboy_core::config::{ConfigManager, ProjectTypeManager};
 use homeboy_core::ssh::SshClient;
-use homeboy_core::template::{render, TemplateVars};
 use homeboy_core::output::{print_success, print_error};
 
 #[derive(Args)]
@@ -111,7 +109,6 @@ struct DbContext {
     base_path: String,
     domain: String,
     cli_path: String,
-    format: String,
 }
 
 fn build_context(project_id: &str, args: &[String], json: bool) -> Option<(DbContext, Vec<String>)> {
@@ -196,10 +193,29 @@ fn build_context(project_id: &str, args: &[String], json: bool) -> Option<(DbCon
             base_path,
             domain,
             cli_path,
-            format: if json { "json".to_string() } else { "table".to_string() },
         },
         remaining_args,
     ))
+}
+
+fn parse_wp_db_tables_csv(csv: &str) -> Vec<String> {
+    csv.split(',')
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_wp_db_tables_csv_trims_and_filters() {
+        let csv = "wp_posts, wp_options,,\nwp_users\n";
+        let tables = parse_wp_db_tables_csv(csv);
+        assert_eq!(tables, vec!["wp_posts", "wp_options", "wp_users"]);
+    }
 }
 
 fn tables(project_id: &str, args: &[String], json: bool) {
@@ -208,9 +224,26 @@ fn tables(project_id: &str, args: &[String], json: bool) {
         None => return,
     };
 
+    if json {
+        let command = format!(
+            "cd '{}' && {} db tables --format=csv",
+            ctx.base_path, ctx.cli_path
+        );
+
+        let output = ctx.client.execute(&command);
+        if !output.success {
+            print_error("WP_CLI_ERROR", &output.stderr);
+            std::process::exit(output.exit_code);
+        }
+
+        let tables = parse_wp_db_tables_csv(&output.stdout);
+        print_success(tables);
+        return;
+    }
+
     let command = format!(
-        "cd '{}' && {} db tables --format={}",
-        ctx.base_path, ctx.cli_path, ctx.format
+        "cd '{}' && {} db tables --format=list",
+        ctx.base_path, ctx.cli_path
     );
 
     let output = ctx.client.execute(&command);
@@ -245,7 +278,10 @@ fn describe(project_id: &str, args: &[String], json: bool) {
 
     let command = format!(
         "cd '{}' && {} db columns {} --format={}",
-        ctx.base_path, ctx.cli_path, table_name, ctx.format
+        ctx.base_path,
+        ctx.cli_path,
+        table_name,
+        if json { "json" } else { "table" }
     );
 
     let output = ctx.client.execute(&command);
@@ -294,7 +330,11 @@ fn query(project_id: &str, args: &[String], json: bool) {
     let escaped_sql = sql.replace('"', "\\\"");
     let command = format!(
         "cd '{}' && {} db query \"{}\" --format={} --url='{}'",
-        ctx.base_path, ctx.cli_path, escaped_sql, ctx.format, ctx.domain
+        ctx.base_path,
+        ctx.cli_path,
+        escaped_sql,
+        if json { "json" } else { "table" },
+        ctx.domain
     );
 
     let output = ctx.client.execute(&command);
@@ -529,7 +569,7 @@ fn tunnel(project_id: &str, local_port: Option<u16>, json: bool) {
     args.push(format!("{}:{}:{}", bind_port, remote_host, remote_port));
     args.push(format!("{}@{}", server.user, server.host));
 
-    let status = Command::new("/usr/bin/ssh")
+    let status = Command::new("ssh")
         .args(&args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
