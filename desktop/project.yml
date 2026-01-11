@@ -6,11 +6,6 @@ options:
   createIntermediateGroups: true
   groupSortPosition: top
 
-packages:
-  ArgumentParser:
-    url: https://github.com/apple/swift-argument-parser
-    from: "1.3.0"
-
 targets:
   Homeboy:
     type: application
@@ -26,19 +21,12 @@ targets:
         buildPhase: resources
         type: folder
       - path: Homeboy/Assets.xcassets
-    dependencies:
-      - target: homeboy-cli
-    postBuildScripts:
-      - name: "Copy CLI to App Bundle"
-        script: |
-          cp "${BUILT_PRODUCTS_DIR}/homeboy" "${BUILT_PRODUCTS_DIR}/Homeboy.app/Contents/MacOS/homeboy-cli"
-        basedOnDependencyAnalysis: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.extrachill.homeboy
         PRODUCT_NAME: Homeboy
-        MARKETING_VERSION: 0.6.2
-        CURRENT_PROJECT_VERSION: 10
+        MARKETING_VERSION: 0.7.1
+        CURRENT_PROJECT_VERSION: 12
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Extra Chill. All rights reserved."
@@ -48,19 +36,3 @@ targets:
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-
-  homeboy-cli:
-    type: tool
-    platform: macOS
-    sources:
-      - path: CLI
-      - path: Homeboy/Core
-    dependencies:
-      - package: ArgumentParser
-    settings:
-      base:
-        PRODUCT_NAME: homeboy
-        SWIFT_VERSION: "5.9"
-        MACOSX_DEPLOYMENT_TARGET: "14.4"
-        CODE_SIGN_STYLE: Automatic
-        OTHER_SWIFT_FLAGS: "-parse-as-library"

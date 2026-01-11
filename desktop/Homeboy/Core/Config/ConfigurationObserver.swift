@@ -367,7 +367,7 @@ final class ConfigurationObserver: ObservableObject {
         if !isEqual(oldConfig.database, newConfig.database) {
             fields.insert(.database)
         }
-        if !isEqual(oldConfig.components, newConfig.components) {
+        if oldConfig.componentIds != newConfig.componentIds {
             fields.insert(.components)
         }
         if oldConfig.subTargets != newConfig.subTargets {
@@ -391,8 +391,8 @@ final class ConfigurationObserver: ObservableObject {
         if !isEqual(oldConfig.tools, newConfig.tools) {
             fields.insert(.tools)
         }
-        if !isEqual(oldConfig.localCLI, newConfig.localCLI) {
-            fields.insert(.localCLI)
+        if !isEqual(oldConfig.localEnvironment, newConfig.localEnvironment) {
+            fields.insert(.localEnvironment)
         }
 
         return fields

@@ -33,7 +33,7 @@ class SSHTunnelService: ObservableObject, @unchecked Sendable {
         self.username = server.user
         self.port = server.port
         self.serverId = server.id
-        self.privateKeyPath = SSHService.keyPath(forServer: server.id)
+        self.privateKeyPath = SSHKeyManager.privateKeyPath(forServer: server.id)
     }
     
     /// Initialize from active project's server
@@ -47,14 +47,14 @@ class SSHTunnelService: ObservableObject, @unchecked Sendable {
         self.username = server.user
         self.port = server.port
         self.serverId = server.id
-        self.privateKeyPath = SSHService.keyPath(forServer: server.id)
+        self.privateKeyPath = SSHKeyManager.privateKeyPath(forServer: server.id)
     }
     
     /// Starts the SSH tunnel
     /// - Returns: Result indicating success or error
     func connect() async -> Result<Void, MySQLError> {
         // Ensure SSH key exists on disk for this server
-        guard SSHService.ensureKeyFileExists(forServer: serverId) else {
+        guard SSHKeyManager.restoreFromKeychainIfNeeded(forServer: serverId) else {
             return .failure(.tunnelFailed("SSH key not configured for server"))
         }
         

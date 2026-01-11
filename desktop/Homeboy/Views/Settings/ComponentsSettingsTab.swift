@@ -3,20 +3,25 @@ import AppKit
 
 struct ComponentsSettingsTab: View {
     @ObservedObject var config: ConfigurationManager
-    
+
     @State private var showingAddSheet = false
-    @State private var editingComponent: ComponentConfig? = nil
-    @State private var componentToDelete: ComponentConfig? = nil
+    @State private var editingComponent: ComponentConfiguration? = nil
+    @State private var componentToDelete: ComponentConfiguration? = nil
     @State private var showDeleteConfirmation = false
-    
+
     private var project: ProjectConfiguration {
         config.safeActiveProject
     }
-    
+
+    /// Load components for the current project from standalone component files
+    private var projectComponents: [ComponentConfiguration] {
+        config.loadComponentsForProject(project)
+    }
+
     /// Group components using the componentGroupings system
-    private var categorizedComponents: GroupedItems<ComponentConfig> {
+    private var categorizedComponents: GroupedItems<ComponentConfiguration> {
         GroupingManager.categorize(
-            items: project.components,
+            items: projectComponents,
             groupings: project.componentGroupings,
             idExtractor: { $0.id }
         )
@@ -34,7 +39,7 @@ struct ComponentsSettingsTab: View {
                     }
                 }
                 
-                if project.components.isEmpty {
+                if projectComponents.isEmpty {
                     Text("No components configured. Add components to deploy.")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -97,9 +102,9 @@ struct ComponentsSettingsTab: View {
         }
     }
     
-    private func deleteComponent(_ component: ComponentConfig) {
+    private func deleteComponent(_ component: ComponentConfiguration) {
         config.updateActiveProject { project in
-            project.components.removeAll { $0.id == component.id }
+            project.componentIds.removeAll { $0 == component.id }
             // Also remove from any groupings
             for i in project.componentGroupings.indices {
                 project.componentGroupings[i].memberIds.removeAll { $0 == component.id }
@@ -111,7 +116,7 @@ struct ComponentsSettingsTab: View {
 // MARK: - Component Row
 
 struct ComponentRow: View {
-    let component: ComponentConfig
+    let component: ComponentConfiguration
     let groupName: String?
     let onEdit: () -> Void
     let onDelete: () -> Void
@@ -157,7 +162,7 @@ struct ComponentRow: View {
 
 struct AddEditComponentSheet: View {
     @ObservedObject var config: ConfigurationManager
-    let existing: ComponentConfig?
+    let existing: ComponentConfiguration?
     
     // Basic info
     @State private var localPath: String = ""
@@ -381,7 +386,7 @@ struct AddEditComponentSheet: View {
     }
     
     private func save() {
-        let component = ComponentConfig(
+        let component = ComponentConfiguration(
             id: id,
             name: name,
             localPath: localPath,
@@ -395,20 +400,23 @@ struct AddEditComponentSheet: View {
         let existingId = existing?.id
         let newGroupId = selectedGroupId
         
+        // Save the component to its standalone file
+        config.saveComponent(component)
+
         config.updateActiveProject { project in
-            // Update or add the component
+            // Update componentIds reference
             if isEditing {
-                if let index = project.components.firstIndex(where: { $0.id == existingId }) {
-                    project.components[index] = component
-                }
                 // Remove from old groupings
                 for i in project.componentGroupings.indices {
                     project.componentGroupings[i].memberIds.removeAll { $0 == id }
                 }
             } else {
-                project.components.append(component)
+                // Add new component reference if not already present
+                if !project.componentIds.contains(id) {
+                    project.componentIds.append(id)
+                }
             }
-            
+
             // Add to new group if selected
             if let groupId = newGroupId,
                let groupIndex = project.componentGroupings.firstIndex(where: { $0.id == groupId }) {

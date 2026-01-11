@@ -14,7 +14,7 @@ enum ProjectField: String, CaseIterable {
     case remoteLogs
     case api
     case tools
-    case localCLI
+    case localEnvironment
 }
 
 /// Typed configuration changes with associated context.

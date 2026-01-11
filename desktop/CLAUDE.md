@@ -13,17 +13,17 @@ Native macOS SwiftUI application for development and deployment automation. Proj
 
 ```bash
 # Regenerate Xcode project after adding/removing files or changing project.yml settings
-xcodegen generate
+xcodegen generate --spec homeboy-desktop/project.yml
 
 # Open in Xcode
-open Homeboy.xcodeproj
+open homeboy-desktop/Homeboy.xcodeproj
 
 # Example: WP-CLI on a local WordPress project
 cd /path/to/your/local-wp-site/app/public
 wp core version
 ```
 
-**Important:** When changing version numbers (`MARKETING_VERSION`, `CURRENT_PROJECT_VERSION`) in `project.yml`, you must run `xcodegen generate` to update the Xcode project, then do a clean build. Otherwise the old version will remain baked into the app's Info.plist.
+**Important:** When changing version numbers (`MARKETING_VERSION`, `CURRENT_PROJECT_VERSION`) in `project.yml`, run `xcodegen generate` to update the Xcode project, then do a clean build. Otherwise the old version remains baked into the app’s Info.plist.
 
 ## Code Style
 
@@ -41,7 +41,7 @@ Homeboy/
 ├── Core/
 │   ├── API/                      # HTTP client and types
 │   ├── Auth/                     # Keychain and auth management
-│   ├── CLI/                      # CLI installer (CLIInstaller.swift)
+│   ├── CLI/                      # CLI bridge + version checking (CLIBridge.swift, CLIVersionChecker.swift)
 │   ├── Config/                   # JSON config, ProjectTypeManager, ProjectTypeDefinition
 │   ├── Copyable/                 # Error/warning/output copy system
 │   ├── Database/                 # MySQL, SSH tunnel, SchemaResolver
@@ -60,20 +60,13 @@ Homeboy/
 │   ├── Modules/                  # Dynamic module UI harness
 │   └── Settings/                 # Settings tabs
 └── docs/                         # Documentation
-CLI/
-├── main.swift                    # Entry point, HomeboyCLI, Projects command
-├── Commands/
-│   ├── DBCommand.swift           # Database operations (tables, describe, query)
-│   ├── DeployCommand.swift       # Component deployment with build automation
-│   ├── ModuleCommand.swift       # Module listing and local execution
-│   ├── ProjectCommand.swift      # Project CRUD and subtarget/component management
-│   ├── ProjectsCommand.swift     # Reserved for future subcommands
-│   ├── RemoteCommand.swift       # WP-CLI and PM2 passthrough to remote servers
-│   ├── ServerCommand.swift       # Server configuration management
-│   └── SSHCommand.swift          # SSH command execution and interactive shell
-└── Utilities/
-    ├── OutputFormatter.swift     # Table and JSON formatting utilities
-    └── TemplateRenderer.swift    # Command template variable substitution
+(Legacy Swift CLI sources are removed.)
+
+The desktop app shells out to the system-installed `homeboy` binary via:
+- `Homeboy/Core/CLI/CLIBridge.swift` (command execution)
+- `Homeboy/Core/CLI/CLIVersionChecker.swift` (CLI discovery, installed/latest version checks)
+
+CLI discovery checks these paths in order: `/opt/homebrew/bin/homeboy` (Apple Silicon), `/usr/local/bin/homeboy` (Intel), `~/.cargo/bin/homeboy` (Cargo).
 ```
 
 ## Module Plugin System
@@ -134,8 +127,8 @@ See `docs/ERROR-HANDLING.md` for the complete Copyable system specification.
 
 ### Deployer
 SSH/SCP deployment of components (plugins, themes, packages).
-- Component registry defined in JSON site config
-- Build script execution via DeploymentService
+- Component registry defined in JSON project config
+- Deploys prebuilt artifacts (the CLI deploy command does not run `build.sh`)
 - Version comparison
 
 ### Database Browser
@@ -157,33 +150,13 @@ View and search remote log files over SSH.
 
 ## CLI Tool
 
-Bundled command-line tool for terminal access to Homeboy functionality.
-
-### Commands
-- `projects` - List configured projects (`--current` for active only)
-- `project <subcommand>` - Project configuration management (create, show, set, delete, switch, subtarget, component)
-- `server <subcommand>` - Server configuration management (create, show, set, delete, list)
-- `wp <project> [subtarget] <args>` - WP-CLI passthrough to production (WordPress projects)
-- `pm2 <project> [subtarget] <args>` - PM2 passthrough to remote servers (Node.js projects)
-- `db <project> [subtarget] <subcommand>` - Database operations (tables, describe, query)
-- `deploy <project> [components]` - Deploy components with build automation
-- `ssh <project> [command]` - SSH access (interactive or single command)
-- `module list [--project <id>]` - List available modules (optionally filter by project compatibility)
-- `module run <module-id> [--project <id>] [args]` - Run a CLI module locally
-
-### Build Configuration
-- Target: `homeboy-cli` (type: tool) in project.yml
-- Dependencies: swift-argument-parser 1.3.0+
-- Sources: `CLI/` directory + `Homeboy/Core` (shared services)
-- Post-build script copies CLI binary to app bundle as `homeboy-cli`
-- Installed via symlink to `/usr/local/bin/homeboy`
+The desktop app uses the decoupled `homeboy` CLI. CLIVersionChecker discovers the CLI at known installation paths (Apple Silicon Homebrew, Intel Homebrew, Cargo) and CLIBridge delegates to it for command execution.
 
 ### Key Files
-- `CLI/main.swift` - Entry point with HomeboyCLI and Projects command
-- `CLI/Commands/*.swift` - Individual command implementations
-- `Core/CLI/CLIInstaller.swift` - Install/uninstall via osascript admin privileges
+- `Homeboy/Core/CLI/CLIVersionChecker.swift` - CLI discovery, path caching, installed/latest version checks
+- `Homeboy/Core/CLI/CLIBridge.swift` - Executes CLI commands and decodes JSON results
 
-See `docs/CLI.md` for the complete CLI reference.
+Run `homeboy docs` for the canonical CLI documentation.
 
 ## Configuration
 
@@ -225,7 +198,7 @@ Module-defined API actions can call any endpoint on the configured site.
 
 ## Migration
 
-Homeboy does not run an automatic migration from ExtraChillDesktop in the current implementation.
+Homeboy does not run an automatic migration from the legacy ExtraChillDesktop app.
 
 - The Keychain service is `com.extrachill.homeboy`.
-- `KeychainService.clearLegacyTokens()` removes the legacy, non-namespaced token keys (`accessToken`, `refreshToken`) if needed.
+- `KeychainService.clearLegacyTokens()` removes legacy, non-namespaced token keys (`accessToken`, `refreshToken`) if needed.

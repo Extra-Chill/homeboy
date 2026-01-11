@@ -40,7 +40,7 @@ class SSHService: ObservableObject {
               server.isValid else {
             return false
         }
-        return KeychainService.hasSSHKey(forServer: serverId)
+        return SSHKeyManager.hasKeyFile(forServer: serverId)
     }
     
     /// Check if active project has full deployment configuration (server + SSH key + base path)
@@ -60,7 +60,7 @@ class SSHService: ObservableObject {
               server.isValid else {
             return false
         }
-        return KeychainService.hasSSHKey(forServer: serverId)
+        return SSHKeyManager.hasKeyFile(forServer: serverId)
     }
     
     // MARK: - Initializers
@@ -76,7 +76,7 @@ class SSHService: ObservableObject {
         self.port = server.port
         self.basePath = basePath
         self.serverId = server.id
-        self.privateKeyPath = SSHService.keyPath(forServer: server.id)
+        self.privateKeyPath = SSHKeyManager.privateKeyPath(forServer: server.id)
     }
     
     /// Initialize from active project configuration
@@ -94,36 +94,7 @@ class SSHService: ObservableObject {
         self.port = server.port
         self.basePath = projectConfig.basePath
         self.serverId = serverId
-        self.privateKeyPath = SSHService.keyPath(forServer: serverId)
-    }
-    
-    // MARK: - Legacy Key Path (CLI Compatibility)
-
-    /// Default key path for legacy/CLI usage
-    static var defaultKeyPath: String {
-        AppPaths.keys.appendingPathComponent("id_rsa").path
-    }
-    
-    /// Ensure legacy SSH key file exists (for CLI commands)
-    static func ensureKeyFileExists() -> Bool {
-        FileManager.default.fileExists(atPath: defaultKeyPath)
-    }
-    
-    // MARK: - Key Paths (Per-Server)
-    
-    /// Key path for a specific server
-    static func keyPath(forServer serverId: String) -> String {
-        KeychainService.sshKeyPath(forServer: serverId)
-    }
-    
-    /// Public key path for a specific server
-    static func publicKeyPath(forServer serverId: String) -> String {
-        KeychainService.sshPublicKeyPath(forServer: serverId)
-    }
-    
-    /// Keys directory
-    static var keysDirectory: URL {
-        AppPaths.keys
+        self.privateKeyPath = SSHKeyManager.privateKeyPath(forServer: serverId)
     }
     
     // MARK: - SSH Key Generation (Per-Server)
@@ -132,22 +103,20 @@ class SSHService: ObservableObject {
     static func generateSSHKeyPair(forServer serverId: String, onComplete: @escaping (Result<(privateKey: String, publicKey: String), Error>) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // Ensure keys directory exists
-                try FileManager.default.createDirectory(at: keysDirectory, withIntermediateDirectories: true)
+                try SSHKeyManager.ensureKeysDirectoryExists()
             } catch {
                 DispatchQueue.main.async {
                     onComplete(.failure(SSHError.keyGenerationFailed("Failed to create keys directory: \(error.localizedDescription)")))
                 }
                 return
             }
-            
-            let keyPath = self.keyPath(forServer: serverId)
-            let pubKeyPath = self.publicKeyPath(forServer: serverId)
-            
+
+            let keyPath = SSHKeyManager.privateKeyPath(forServer: serverId)
+            let pubKeyPath = SSHKeyManager.publicKeyPath(forServer: serverId)
+
             // Remove existing keys for this server
-            try? FileManager.default.removeItem(atPath: keyPath)
-            try? FileManager.default.removeItem(atPath: pubKeyPath)
-            
+            SSHKeyManager.deleteKeyFiles(forServer: serverId)
+
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
             process.arguments = [
@@ -157,25 +126,25 @@ class SSHService: ObservableObject {
                 "-N", "",  // Empty passphrase
                 "-C", "homeboy-\(serverId)"
             ]
-            
+
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = pipe
-            
+
             do {
                 try process.run()
                 process.waitUntilExit()
-                
+
                 if process.terminationStatus == 0 {
                     let privateKey = try String(contentsOfFile: keyPath, encoding: .utf8)
                     let publicKey = try String(contentsOfFile: pubKeyPath, encoding: .utf8)
-                    
+
                     // Store in keychain (per-server)
                     try KeychainService.storeSSHKeyPair(forServer: serverId, privateKey: privateKey, publicKey: publicKey)
-                    
+
                     // Set proper permissions on private key
                     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyPath)
-                    
+
                     DispatchQueue.main.async {
                         onComplete(.success((privateKey, publicKey)))
                     }
@@ -195,34 +164,15 @@ class SSHService: ObservableObject {
     }
     
     // MARK: - Ensure Key File Exists (Per-Server)
-    
+
     /// Ensure SSH key file exists for a specific server (restores from keychain if missing)
     static func ensureKeyFileExists(forServer serverId: String) -> Bool {
-        let keyPath = self.keyPath(forServer: serverId)
-        
-        // Check if file exists
-        if FileManager.default.fileExists(atPath: keyPath) {
-            return true
-        }
-        
-        // Try to restore from keychain
-        guard let privateKey = KeychainService.getSSHKeyPair(forServer: serverId).privateKey else {
-            return false
-        }
-        
-        do {
-            try FileManager.default.createDirectory(at: keysDirectory, withIntermediateDirectories: true)
-            try privateKey.write(toFile: keyPath, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyPath)
-            return true
-        } catch {
-            return false
-        }
+        SSHKeyManager.restoreFromKeychainIfNeeded(forServer: serverId)
     }
-    
+
     /// Instance method: Ensure key file exists for this service's server
     func ensureKeyFileExists() -> Bool {
-        SSHService.ensureKeyFileExists(forServer: serverId)
+        SSHKeyManager.restoreFromKeychainIfNeeded(forServer: serverId)
     }
     
     // MARK: - Connection Test

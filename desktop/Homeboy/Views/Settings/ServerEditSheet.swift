@@ -216,7 +216,7 @@ struct ServerEditSheet: View {
             host = server.host
             username = server.user
             port = String(server.port)
-            hasSSHKey = KeychainService.hasSSHKey(forServer: server.id)
+            hasSSHKey = SSHKeyManager.hasKeyFile(forServer: server.id)
         }
     }
     
@@ -251,7 +251,7 @@ struct ServerEditSheet: View {
     }
     
     private func showPublicKey() {
-        publicKey = KeychainService.getSSHKeyPair(forServer: serverId).publicKey
+        publicKey = try? SSHKeyManager.readPublicKey(forServer: serverId)
     }
     
     private func testConnection() {
@@ -270,18 +270,18 @@ struct ServerEditSheet: View {
         
         DispatchQueue.global(qos: .userInitiated).async {
             // Ensure key file exists
-            guard SSHService.ensureKeyFileExists(forServer: serverId) else {
+            guard SSHKeyManager.restoreFromKeychainIfNeeded(forServer: serverId) else {
                 DispatchQueue.main.async {
                     isTestingConnection = false
                     connectionTestResult = (false, "SSH key not found")
                 }
                 return
             }
-            
+
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
             process.arguments = [
-                "-i", SSHService.keyPath(forServer: serverId),
+                "-i", SSHKeyManager.privateKeyPath(forServer: serverId),
                 "-p", String(testServer.port),
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "BatchMode=yes",

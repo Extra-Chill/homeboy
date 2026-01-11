@@ -40,50 +40,71 @@ struct OpenFile: PinnableTabItem, Equatable {
     }
 }
 
+// MARK: - CLI Response Types
+
+private struct CLIResponse<T: Decodable>: Decodable {
+    let success: Bool
+    let data: T?
+}
+
+/// Response from `file read --json`
+private struct FileReadResponse: Decodable {
+    let path: String
+    let size: Int64?
+    let content: String
+}
+
+/// Response from `file write --json`
+private struct FileWriteResponse: Decodable {
+    let path: String
+    let bytesWritten: Int
+}
+
 @MainActor
 class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
     var cancellables = Set<AnyCancellable>()
-    
+
     // MARK: - Published State
-    
+
     @Published var openFiles: [OpenFile] = []
     @Published var selectedFileId: UUID?
     @Published var isLoading: Bool = false
     @Published var isSaving: Bool = false
     @Published var error: AppError?
-    
+
     // Sidebar state (persisted per-module)
     @AppStorage("fileEditor.sidebarCollapsed") var sidebarCollapsed: Bool = false
-    
+
     // Confirmation dialogs
     @Published var showSaveConfirmation: Bool = false
     @Published var showCloseConfirmation: Bool = false
     @Published var showDiscardChangesAlert: Bool = false
     @Published var pendingCloseFileId: UUID?
-    
-    // MARK: - Services
 
-    private var sshService: SSHService?
-    private var basePath: String?
-    private var pathResolver: RemotePathResolver?
-    
+    // MARK: - CLI Bridge
+
+    private let cli = CLIBridge.shared
+
+    private var projectId: String {
+        ConfigurationManager.shared.safeActiveProject.id
+    }
+
     // MARK: - Computed Properties
-    
+
     var selectedFile: OpenFile? {
         guard let id = selectedFileId else { return nil }
         return openFiles.first { $0.id == id }
     }
-    
+
     var selectedFileIndex: Int? {
         guard let id = selectedFileId else { return nil }
         return openFiles.firstIndex { $0.id == id }
     }
-    
+
     // MARK: - Initialization
-    
+
     init() {
-        setupSSH()
         loadPinnedFiles()
         observeConfiguration()
     }
@@ -97,7 +118,6 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
             openFiles = []
             selectedFileId = nil
             error = nil
-            setupSSH()
             loadPinnedFiles()
             if selectedFileId != nil {
                 Task {
@@ -109,111 +129,100 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
             if fields.contains(.remoteFiles) {
                 loadPinnedFiles()
             }
-            // Reconnect SSH if server or basePath changed
-            if fields.contains(.server) || fields.contains(.basePath) {
-                setupSSH()
-            }
         default:
             break
         }
     }
-    
-    private func setupSSH() {
-        let project = ConfigurationManager.shared.safeActiveProject
-        sshService = SSHService()
-        basePath = project.basePath
-        pathResolver = RemotePathResolver(project: project)
-    }
-    
+
     private func loadPinnedFiles() {
         let config = ConfigurationManager.shared.safeActiveProject
         openFiles = config.remoteFiles.pinnedFiles.map { OpenFile(from: $0) }
-        
+
         // Select first file if available
         if let first = openFiles.first {
             selectedFileId = first.id
         }
     }
-    
+
     // MARK: - File Operations
-    
-    /// Fetches the currently selected file from the server
+
+    /// Fetches the currently selected file from the server via CLI
     func fetchSelectedFile() async {
         guard let index = selectedFileIndex else { return }
-        guard let ssh = sshService, let base = basePath, !base.isEmpty else {
-            error = AppError("SSH or base path not configured. Check Settings.", source: "File Editor")
+        guard cli.isInstalled else {
+            error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "File Editor")
             return
         }
-        
+
         isLoading = true
         error = nil
-        
+
         let file = openFiles[index]
-        let fullPath = pathResolver?.filePath(file.path) ?? RemotePathResolver.join(base, file.path)
 
-        // Check if file exists
-        let checkCommand = "test -f '\(fullPath)' && echo 'EXISTS' || echo 'NOTFOUND'"
-        
         do {
-            let checkResult = try await ssh.executeCommandSync(checkCommand)
-            let exists = checkResult.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
-            
-            openFiles[index].fileExists = exists
-            
-            if exists {
-                // Get file size (macOS uses -f%z, Linux uses --printf='%s')
-                let sizeCommand = "stat -f%z '\(fullPath)' 2>/dev/null || stat --printf='%s' '\(fullPath)' 2>/dev/null"
-                if let sizeStr = try? await ssh.executeCommandSync(sizeCommand),
-                   let size = Int64(sizeStr.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                    openFiles[index].fileSize = size
-                }
+            // homeboy file read <project> <path> --json
+            let args = ["file", "read", projectId, file.path]
+            let response = try await cli.execute(args, timeout: 60)
 
-                // Fetch content
-                let catCommand = "cat '\(fullPath)'"
-                let output = try await ssh.executeCommandSync(catCommand)
-                openFiles[index].content = output
-                openFiles[index].originalContent = output
-                openFiles[index].lastFetched = Date()
+            if response.success {
+                // Parse JSON response through CLIResponse wrapper
+                if let data = response.output.data(using: .utf8),
+                   let wrapper = try? JSONDecoder().decode(CLIResponse<FileReadResponse>.self, from: data),
+                   let fileContent = wrapper.data {
+                    openFiles[index].content = fileContent.content
+                    openFiles[index].originalContent = fileContent.content
+                    openFiles[index].fileSize = fileContent.size
+                    openFiles[index].fileExists = true
+                    openFiles[index].lastFetched = Date()
+                }
             } else {
-                openFiles[index].content = ""
-                openFiles[index].originalContent = ""
-                openFiles[index].fileSize = nil
+                // Check if error indicates file not found
+                if response.errorOutput.contains("not found") || response.errorOutput.contains("No such file") {
+                    openFiles[index].fileExists = false
+                    openFiles[index].content = ""
+                    openFiles[index].originalContent = ""
+                    openFiles[index].fileSize = nil
+                } else {
+                    self.error = AppError(response.errorOutput, source: "File Editor", path: file.displayName)
+                }
             }
         } catch {
             self.error = AppError(error.localizedDescription, source: "File Editor", path: file.displayName)
         }
-        
+
         isLoading = false
     }
-    
-    /// Saves the currently selected file to the server
+
+    /// Saves the currently selected file to the server via CLI
     func saveSelectedFile() async {
         guard let index = selectedFileIndex else { return }
-        guard let ssh = sshService, let base = basePath, !base.isEmpty else {
-            error = AppError("SSH or base path not configured. Check Settings.", source: "File Editor")
+        guard cli.isInstalled else {
+            error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "File Editor")
             return
         }
-        
+
         isSaving = true
         error = nil
-        
+
         let file = openFiles[index]
-        let fullPath = pathResolver?.filePath(file.path) ?? RemotePathResolver.join(base, file.path)
 
         do {
-            // Write content using heredoc
-            let writeCommand = "cat > '\(fullPath)' << 'FILEEDITOREOF'\n\(file.content)\nFILEEDITOREOF"
-            _ = try await ssh.executeCommandSync(writeCommand)
-            
-            // Update state
-            openFiles[index].originalContent = file.content
-            openFiles[index].fileExists = true
-            openFiles[index].lastFetched = Date()
-            
+            // homeboy file write <project> <path> --json (content via stdin)
+            let args = ["file", "write", projectId, file.path]
+            let response = try await cli.executeWithStdin(args, stdin: file.content, timeout: 60)
+
+            if response.success {
+                // Update state
+                openFiles[index].originalContent = file.content
+                openFiles[index].fileExists = true
+                openFiles[index].lastFetched = Date()
+            } else {
+                self.error = AppError("Failed to save: \(response.errorOutput)", source: "File Editor", path: file.displayName)
+            }
         } catch {
             self.error = AppError("Failed to save: \(error.localizedDescription)", source: "File Editor", path: file.displayName)
         }
-        
+
         isSaving = false
     }
     
@@ -290,40 +299,70 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
     }
     
     // MARK: - Pin/Unpin
-    
-    /// Pins a temporary file (persists to config)
+
+    /// Pins a temporary file (persists to config via CLI)
     func pinFile(_ id: UUID) {
         guard let index = openFiles.firstIndex(where: { $0.id == id }) else { return }
-        
-        openFiles[index].isPinned = true
-        savePinnedFiles()
+        guard cli.isInstalled else {
+            error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "File Editor")
+            return
+        }
+
+        let file = openFiles[index]
+
+        Task {
+            do {
+                // homeboy pin add <project> <path> --type file --json
+                let args = ["pin", "add", projectId, file.path, "--type", "file"]
+                let response = try await cli.execute(args, timeout: 30)
+
+                if response.success {
+                    openFiles[index].isPinned = true
+                } else {
+                    self.error = AppError("Failed to pin file: \(response.errorOutput)", source: "File Editor")
+                }
+            } catch {
+                self.error = AppError("Failed to pin file: \(error.localizedDescription)", source: "File Editor")
+            }
+        }
     }
-    
-    /// Unpins a file (removes from config, tab stays open as temporary)
+
+    /// Unpins a file (removes from config via CLI, tab stays open as temporary)
     func unpinFile(_ id: UUID) {
         guard let index = openFiles.firstIndex(where: { $0.id == id }) else { return }
-        
-        openFiles[index].isPinned = false
-        savePinnedFiles()
+        guard cli.isInstalled else {
+            error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "File Editor")
+            return
+        }
+
+        let file = openFiles[index]
+
+        Task {
+            do {
+                // homeboy pin remove <project> <path> --type file --json
+                let args = ["pin", "remove", projectId, file.path, "--type", "file"]
+                let response = try await cli.execute(args, timeout: 30)
+
+                if response.success {
+                    openFiles[index].isPinned = false
+                } else {
+                    self.error = AppError("Failed to unpin file: \(response.errorOutput)", source: "File Editor")
+                }
+            } catch {
+                self.error = AppError("Failed to unpin file: \(error.localizedDescription)", source: "File Editor")
+            }
+        }
     }
-    
+
     /// Toggles pin state
     func togglePin(_ id: UUID) {
         guard let file = openFiles.first(where: { $0.id == id }) else { return }
-        
+
         if file.isPinned {
             unpinFile(id)
         } else {
             pinFile(id)
         }
-    }
-    
-    private func savePinnedFiles() {
-        let pinnedFiles = openFiles
-            .filter { $0.isPinned }
-            .map { PinnedRemoteFile(id: $0.id, path: $0.path) }
-        
-        ConfigurationManager.shared.updateActiveProject { $0.remoteFiles.pinnedFiles = pinnedFiles }
     }
     
     // MARK: - Content Updates
@@ -342,28 +381,30 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
     }
     
     // MARK: - Sidebar File Operations
-    
+
     /// Handle a file being deleted from the sidebar - close its tab if open
     func handleFileDeleted(_ path: String) {
         // Convert absolute path to relative if needed
+        let basePath = ConfigurationManager.shared.safeActiveProject.basePath
         let relativePath: String
         if let base = basePath, path.hasPrefix(base) {
             relativePath = String(path.dropFirst(base.count + 1))
         } else {
             relativePath = path
         }
-        
+
         if let file = openFiles.first(where: { $0.path == relativePath }) {
             performClose(file.id)
         }
     }
-    
+
     /// Handle a file being renamed from the sidebar - update the tab if open
     func handleFileRenamed(from oldPath: String, to newPath: String) {
         // Convert absolute paths to relative if needed
+        let basePath = ConfigurationManager.shared.safeActiveProject.basePath
         let oldRelative: String
         let newRelative: String
-        
+
         if let base = basePath {
             oldRelative = oldPath.hasPrefix(base) ? String(oldPath.dropFirst(base.count + 1)) : oldPath
             newRelative = newPath.hasPrefix(base) ? String(newPath.dropFirst(base.count + 1)) : newPath
@@ -371,7 +412,7 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
             oldRelative = oldPath
             newRelative = newPath
         }
-        
+
         if let index = openFiles.firstIndex(where: { $0.path == oldRelative }) {
             // Update the file path
             let oldFile = openFiles[index]
@@ -380,10 +421,24 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
             openFiles[index].originalContent = oldFile.originalContent
             openFiles[index].fileExists = oldFile.fileExists
             openFiles[index].lastFetched = oldFile.lastFetched
-            
-            // Update pinned files if this was pinned
-            if oldFile.isPinned {
-                savePinnedFiles()
+
+            // Update pinned files via CLI if this was pinned
+            if oldFile.isPinned && cli.isInstalled {
+                Task {
+                    do {
+                        // Remove old pin
+                        let removeArgs = ["pin", "remove", projectId, oldRelative, "--type", "file"]
+                        let removeResponse = try await cli.execute(removeArgs, timeout: 30)
+
+                        if removeResponse.success {
+                            // Add new pin
+                            let addArgs = ["pin", "add", projectId, newRelative, "--type", "file"]
+                            _ = try await cli.execute(addArgs, timeout: 30)
+                        }
+                    } catch {
+                        // Non-critical error - file is still renamed locally
+                    }
+                }
             }
         }
     }

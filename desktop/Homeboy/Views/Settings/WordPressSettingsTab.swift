@@ -3,9 +3,7 @@ import SwiftUI
 struct WordPressSettingsTab: View {
     @ObservedObject var config: ConfigurationManager
     @EnvironmentObject var authManager: AuthManager
-    
-    @State private var phpVersion: String?
-    @State private var mysqlVersion: String?
+
     @State private var testResult: (success: Bool, message: String)?
     @State private var isTesting = false
     
@@ -21,61 +19,25 @@ struct WordPressSettingsTab: View {
         Form {
             Section("Local CLI") {
                 TextField("Local Site Path", text: Binding(
-                    get: { config.safeActiveProject.localCLI.sitePath },
+                    get: { config.safeActiveProject.localEnvironment.sitePath },
                     set: { newValue in
-                        config.updateActiveProject { $0.localCLI.sitePath = newValue }
+                        config.updateActiveProject { $0.localEnvironment.sitePath = newValue }
                     }
                 ))
                 .textFieldStyle(.roundedBorder)
                 Text("Path to your local site's root directory")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                
-                LabeledContent("PHP Version") {
-                    if let version = phpVersion {
-                        Text(version)
-                            .foregroundColor(.secondary)
-                    } else {
-                        Text("Not detected")
-                            .foregroundColor(.red)
-                            .contextMenu {
-                                Button("Copy Error") {
-                                    AppError(
-                                        "PHP not detected at configured path",
-                                        source: "WordPress Settings"
-                                    ).copyToClipboard()
-                                }
-                            }
-                    }
-                }
-                
-                LabeledContent("MySQL Version") {
-                    if let version = mysqlVersion {
-                        Text(version)
-                            .foregroundColor(.secondary)
-                    } else {
-                        Text("Not detected")
-                            .foregroundColor(.orange)
-                            .contextMenu {
-                                Button("Copy Warning") {
-                                    AppWarning(
-                                        "MySQL not detected at configured path",
-                                        source: "WordPress Settings"
-                                    ).copyToClipboard()
-                                }
-                            }
-                    }
-                }
-                
+
                 HStack {
                     Button("Browse...") {
                         selectFolder()
                     }
-                    
-                    Button("Test Connection") {
+
+                    Button("Test WP-CLI") {
                         testWPCLI()
                     }
-                    .disabled(isTesting || phpVersion == nil)
+                    .disabled(isTesting || config.safeActiveProject.localEnvironment.sitePath.isEmpty)
                 }
                 
                 if let result = testResult {
@@ -196,16 +158,10 @@ struct WordPressSettingsTab: View {
         }
         .formStyle(.grouped)
         .onAppear {
-            detectLocalPaths()
             loadAPISettings()
         }
     }
-    
-    private func detectLocalPaths() {
-        phpVersion = LocalEnvironment.detectedPHPVersion()
-        mysqlVersion = LocalEnvironment.detectedMySQLVersion()
-    }
-    
+
     private func loadAPISettings() {
         apiEnabled = config.safeActiveProject.api.enabled
         apiBaseURL = config.safeActiveProject.api.baseURL
@@ -219,39 +175,33 @@ struct WordPressSettingsTab: View {
         panel.message = "Select your local site's root directory"
         
         if panel.runModal() == .OK, let url = panel.url {
-            config.updateActiveProject { $0.localCLI.sitePath = url.path }
+            config.updateActiveProject { $0.localEnvironment.sitePath = url.path }
         }
     }
     
     private func testWPCLI() {
-        guard let environment = LocalEnvironment.buildEnvironment() else {
-            testResult = (false, "PHP not detected")
-            return
-        }
-        
         isTesting = true
         testResult = nil
-        
-        let sitePath = config.safeActiveProject.localCLI.sitePath
-        
+
+        let sitePath = config.safeActiveProject.localEnvironment.sitePath
+
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: sitePath)
             process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/wp")
             process.arguments = ["core", "version"]
-            process.environment = environment
-            
+
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = pipe
-            
+
             do {
                 try process.run()
                 process.waitUntilExit()
-                
+
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                
+
                 DispatchQueue.main.async {
                     isTesting = false
                     if process.terminationStatus == 0 {

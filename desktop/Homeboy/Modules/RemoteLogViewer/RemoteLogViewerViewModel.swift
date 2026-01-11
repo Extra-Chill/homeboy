@@ -12,18 +12,18 @@ struct OpenLog: PinnableTabItem, Equatable {
     var fileExists: Bool = true
     var lastFetched: Date?
     var tailLines: Int
-    
+
     var displayName: String {
         URL(fileURLWithPath: path).lastPathComponent
     }
-    
+
     init(id: UUID = UUID(), path: String, isPinned: Bool, tailLines: Int = 100) {
         self.id = id
         self.path = path
         self.isPinned = isPinned
         self.tailLines = tailLines
     }
-    
+
     init(from pinned: PinnedRemoteLog) {
         self.id = pinned.id
         self.path = pinned.path
@@ -32,45 +32,62 @@ struct OpenLog: PinnableTabItem, Equatable {
     }
 }
 
+// MARK: - CLI Response Types
+
+/// Response from `logs list --json`
+private struct LogsListResponse: Decodable {
+    let label: String
+    let path: String
+    let tailLines: Int
+}
+
+/// Response from `logs clear --json`
+private struct LogsClearResponse: Decodable {
+    let success: Bool
+    let path: String
+    let label: String
+}
+
 @MainActor
 class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
 
     var cancellables = Set<AnyCancellable>()
-    
+
     // MARK: - Published State
-    
+
     @Published var openLogs: [OpenLog] = []
     @Published var selectedLogId: UUID?
     @Published var isLoading: Bool = false
     @Published var error: AppError?
     @Published var showClearConfirmation: Bool = false
 
-    // MARK: - Services
+    // MARK: - CLI Bridge
 
-    private var sshService: SSHService?
-    private var basePath: String?
-    private var pathResolver: RemotePathResolver?
-    
+    private let cli = CLIBridge.shared
+
+    private var projectId: String {
+        ConfigurationManager.shared.safeActiveProject.id
+    }
+
     // MARK: - Tail Options
-    
+
     static let tailOptions = [50, 100, 500, 1000, 0]  // 0 = All
-    
+
     // MARK: - Computed Properties
-    
+
     var selectedLog: OpenLog? {
         guard let id = selectedLogId else { return nil }
         return openLogs.first { $0.id == id }
     }
-    
+
     var selectedLogIndex: Int? {
         guard let id = selectedLogId else { return nil }
         return openLogs.firstIndex { $0.id == id }
     }
-    
+
     // MARK: - Initialization
-    
+
     init() {
-        setupSSH()
         loadPinnedLogs()
         observeConfiguration()
     }
@@ -84,7 +101,6 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
             openLogs = []
             selectedLogId = nil
             error = nil
-            setupSSH()
             loadPinnedLogs()
             if selectedLogId != nil {
                 Task {
@@ -96,106 +112,95 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
             if fields.contains(.remoteLogs) {
                 loadPinnedLogs()
             }
-            // Reconnect SSH if server or basePath changed
-            if fields.contains(.server) || fields.contains(.basePath) {
-                setupSSH()
-            }
         default:
             break
         }
     }
-    
-    private func setupSSH() {
-        let project = ConfigurationManager.shared.safeActiveProject
-        sshService = SSHService()
-        basePath = project.basePath
-        pathResolver = RemotePathResolver(project: project)
-    }
-    
+
     private func loadPinnedLogs() {
+        // Load pinned logs from config (still uses ConfigurationManager for initial data)
         let config = ConfigurationManager.shared.safeActiveProject
         openLogs = config.remoteLogs.pinnedLogs.map { OpenLog(from: $0) }
-        
+
         // Select first log if available
         if let first = openLogs.first {
             selectedLogId = first.id
         }
     }
-    
+
     // MARK: - Log Operations
-    
-    /// Fetches the currently selected log from the server
+
+    /// Fetches the currently selected log from the server via CLI
     func fetchSelectedLog() async {
         guard let index = selectedLogIndex else { return }
-        guard let ssh = sshService, let base = basePath, !base.isEmpty else {
-            error = AppError("SSH or base path not configured. Check Settings.", source: "Log Viewer")
+        guard cli.isInstalled else {
+            error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "Log Viewer")
             return
         }
-        
+
         isLoading = true
         error = nil
-        
-        let log = openLogs[index]
-        let fullPath = pathResolver?.logPath(log.path) ?? RemotePathResolver.join(base, log.path)
 
-        // Check if file exists
-        let checkCommand = "test -f '\(fullPath)' && echo 'EXISTS' || echo 'NOTFOUND'"
+        let log = openLogs[index]
 
         do {
-            let checkResult = try await ssh.executeCommandSync(checkCommand)
-            let exists = checkResult.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
+            // Build command: homeboy logs show <project> <logName> -n <lines>
+            var args = ["logs", "show", projectId, log.displayName]
+            if log.tailLines > 0 {
+                args.append(contentsOf: ["-n", String(log.tailLines)])
+            }
 
-            openLogs[index].fileExists = exists
+            let response = try await cli.execute(args, timeout: 60)
 
-            if exists {
-                // Fetch content with tail or cat
-                let fetchCommand: String
-                if log.tailLines > 0 {
-                    fetchCommand = "tail -n \(log.tailLines) '\(fullPath)'"
-                } else {
-                    fetchCommand = "cat '\(fullPath)'"
-                }
-                
-                let output = try await ssh.executeCommandSync(fetchCommand)
-                openLogs[index].content = output
+            if response.success {
+                openLogs[index].content = response.output
+                openLogs[index].fileExists = true
                 openLogs[index].lastFetched = Date()
             } else {
-                openLogs[index].content = ""
+                // Check if error indicates file not found
+                if response.errorOutput.contains("not found") || response.errorOutput.contains("No such file") {
+                    openLogs[index].fileExists = false
+                    openLogs[index].content = ""
+                } else {
+                    self.error = AppError(response.errorOutput, source: "Log Viewer", path: log.displayName)
+                }
             }
         } catch {
             self.error = AppError(error.localizedDescription, source: "Log Viewer", path: log.displayName)
         }
-        
+
         isLoading = false
     }
-    
-    /// Clears (deletes) the currently selected log file
+
+    /// Clears the currently selected log file via CLI
     func clearSelectedLog() async {
         guard let index = selectedLogIndex else { return }
-        guard let ssh = sshService, let base = basePath, !base.isEmpty else {
-            error = AppError("SSH or base path not configured. Check Settings.", source: "Log Viewer")
+        guard cli.isInstalled else {
+            error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "Log Viewer")
             return
         }
-        
+
         isLoading = true
         error = nil
-        
+
         let log = openLogs[index]
-        let fullPath = pathResolver?.logPath(log.path) ?? RemotePathResolver.join(base, log.path)
 
         do {
-            // Truncate the file (safer than rm)
-            let clearCommand = "> '\(fullPath)'"
-            _ = try await ssh.executeCommandSync(clearCommand)
-            
-            // Update state
-            openLogs[index].content = ""
-            openLogs[index].lastFetched = Date()
-            
+            // homeboy logs clear <project> <logName> --json
+            let args = ["logs", "clear", projectId, log.displayName]
+            let response = try await cli.execute(args, timeout: 30)
+
+            if response.success {
+                // Update state
+                openLogs[index].content = ""
+                openLogs[index].lastFetched = Date()
+            } else {
+                self.error = AppError("Failed to clear log: \(response.errorOutput)", source: "Log Viewer", path: log.displayName)
+            }
         } catch {
             self.error = AppError("Failed to clear log: \(error.localizedDescription)", source: "Log Viewer", path: log.displayName)
         }
-        
+
         isLoading = false
     }
     
@@ -253,17 +258,45 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
     }
     
     // MARK: - Tail Lines
-    
+
     /// Updates tail lines for the selected log
     func setTailLines(_ lines: Int) {
         guard let index = selectedLogIndex else { return }
+        let oldLines = openLogs[index].tailLines
         openLogs[index].tailLines = lines
-        
-        // If pinned, update config
-        if openLogs[index].isPinned {
-            savePinnedLogs()
+
+        // If pinned, update config via CLI (remove and re-add with new tail lines)
+        if openLogs[index].isPinned && cli.isInstalled {
+            let log = openLogs[index]
+            Task {
+                do {
+                    // Remove old pin
+                    let removeArgs = ["pin", "remove", projectId, log.path, "--type", "log"]
+                    let removeResponse = try await cli.execute(removeArgs, timeout: 30)
+
+                    if removeResponse.success {
+                        // Re-add with new tail lines
+                        let addArgs = ["pin", "add", projectId, log.path, "--type", "log", "--tail", String(lines)]
+                        let addResponse = try await cli.execute(addArgs, timeout: 30)
+
+                        if !addResponse.success {
+                            // Rollback local state
+                            openLogs[index].tailLines = oldLines
+                            self.error = AppError("Failed to update tail lines: \(addResponse.errorOutput)", source: "Log Viewer")
+                        }
+                    } else {
+                        // Rollback local state
+                        openLogs[index].tailLines = oldLines
+                        self.error = AppError("Failed to update tail lines: \(removeResponse.errorOutput)", source: "Log Viewer")
+                    }
+                } catch {
+                    // Rollback local state
+                    openLogs[index].tailLines = oldLines
+                    self.error = AppError("Failed to update tail lines: \(error.localizedDescription)", source: "Log Viewer")
+                }
+            }
         }
-        
+
         // Refresh with new tail count
         Task {
             await fetchSelectedLog()
@@ -271,29 +304,59 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
     }
     
     // MARK: - Pin/Unpin
-    
-    /// Pins a temporary log (persists to config)
+
+    /// Pins a temporary log (persists to config via CLI)
     func pinLog(_ id: UUID) {
         guard let index = openLogs.firstIndex(where: { $0.id == id }) else { return }
-        
-        openLogs[index].isPinned = true
-        savePinnedLogs()
+        guard cli.isInstalled else {
+            error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "Log Viewer")
+            return
+        }
+
+        let log = openLogs[index]
+
+        Task {
+            do {
+                // homeboy pin add <project> <path> --type log --tail <lines> --json
+                let args = ["pin", "add", projectId, log.path, "--type", "log", "--tail", String(log.tailLines)]
+                let response = try await cli.execute(args, timeout: 30)
+
+                if response.success {
+                    openLogs[index].isPinned = true
+                } else {
+                    self.error = AppError("Failed to pin log: \(response.errorOutput)", source: "Log Viewer")
+                }
+            } catch {
+                self.error = AppError("Failed to pin log: \(error.localizedDescription)", source: "Log Viewer")
+            }
+        }
     }
-    
-    /// Unpins a log (removes from config, tab stays open as temporary)
+
+    /// Unpins a log (removes from config via CLI, tab stays open as temporary)
     func unpinLog(_ id: UUID) {
         guard let index = openLogs.firstIndex(where: { $0.id == id }) else { return }
-        
-        openLogs[index].isPinned = false
-        savePinnedLogs()
-    }
-    
-    private func savePinnedLogs() {
-        let pinnedLogs = openLogs
-            .filter { $0.isPinned }
-            .map { PinnedRemoteLog(id: $0.id, path: $0.path, tailLines: $0.tailLines) }
-        
-        ConfigurationManager.shared.updateActiveProject { $0.remoteLogs.pinnedLogs = pinnedLogs }
+        guard cli.isInstalled else {
+            error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "Log Viewer")
+            return
+        }
+
+        let log = openLogs[index]
+
+        Task {
+            do {
+                // homeboy pin remove <project> <path> --type log --json
+                let args = ["pin", "remove", projectId, log.path, "--type", "log"]
+                let response = try await cli.execute(args, timeout: 30)
+
+                if response.success {
+                    openLogs[index].isPinned = false
+                } else {
+                    self.error = AppError("Failed to unpin log: \(response.errorOutput)", source: "Log Viewer")
+                }
+            } catch {
+                self.error = AppError("Failed to unpin log: \(error.localizedDescription)", source: "Log Viewer")
+            }
+        }
     }
     
     // MARK: - Utility

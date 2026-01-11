@@ -108,11 +108,7 @@ struct RemoteFileEditorView: View {
             onSelect: { viewModel.selectFile($0) },
             onClose: { viewModel.closeFile($0) },
             onPin: { viewModel.pinFile($0) },
-            onUnpin: { viewModel.unpinFile($0) },
-            onBrowse: {
-                // Toggle sidebar instead of showing modal
-                viewModel.sidebarCollapsed = false
-            }
+            onUnpin: { viewModel.unpinFile($0) }
         )
     }
     

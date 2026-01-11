@@ -24,6 +24,10 @@ enum AppPaths {
         homeboy.appendingPathComponent("servers")
     }
 
+    static var components: URL {
+        homeboy.appendingPathComponent("components")
+    }
+
     static var modules: URL {
         homeboy.appendingPathComponent("modules")
     }
@@ -54,6 +58,10 @@ enum AppPaths {
 
     static func server(id: String) -> URL {
         servers.appendingPathComponent("\(id).json")
+    }
+
+    static func component(id: String) -> URL {
+        components.appendingPathComponent("\(id).json")
     }
 
     static func module(id: String) -> URL {

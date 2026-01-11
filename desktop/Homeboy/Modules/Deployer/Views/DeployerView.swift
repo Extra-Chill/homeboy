@@ -39,6 +39,17 @@ struct DeployerView: View {
         } message: {
             Text("This will deploy all \(viewModel.components.count) components to production. This may take several minutes.")
         }
+        .alert("Build Required", isPresented: $viewModel.showBuildConfirmation) {
+            Button("Cancel", role: .cancel) {
+                viewModel.cancelBuild()
+            }
+            Button("Build & Deploy") {
+                viewModel.confirmBuildAndDeploy()
+            }
+        } message: {
+            let names = viewModel.componentsNeedingBuild.map { $0.name }.joined(separator: ", ")
+            Text("The following components have source/artifact version mismatches and need to be built:\n\n\(names)")
+        }
         .sheet(isPresented: $showingGroupEditor) {
             GroupingEditorSheet(mode: groupEditorMode) { name in
                 switch groupEditorMode {
@@ -113,13 +124,13 @@ struct DeployerView: View {
                 viewModel.deploySelected()
             }
             .buttonStyle(.borderedProminent)
-            .disabled(viewModel.selectedComponents.isEmpty || viewModel.isDeploying)
-            
+            .disabled(viewModel.selectedComponents.isEmpty || viewModel.isDeploying || viewModel.isBuilding)
+
             Button("Deploy All") {
                 viewModel.confirmDeployAll()
             }
             .buttonStyle(.bordered)
-            .disabled(viewModel.isDeploying)
+            .disabled(viewModel.isDeploying || viewModel.isBuilding)
             
             Spacer()
             
@@ -128,6 +139,15 @@ struct DeployerView: View {
                     .controlSize(.small)
                 Text("Loading...")
                     .foregroundColor(.secondary)
+            } else if viewModel.isBuilding {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Building...")
+                    .foregroundColor(.secondary)
+                Button("Cancel") {
+                    viewModel.cancelBuild()
+                }
+                .buttonStyle(.bordered)
             } else if viewModel.isDeploying {
                 ProgressView()
                     .controlSize(.small)
@@ -386,8 +406,9 @@ struct ComponentGroupSection: View {
             }
         )
         .frame(height: CGFloat(components.count) * DataTableConstants.defaultRowHeight + DataTableConstants.headerHeight)
+        .id(viewModel.versionDataHash)
     }
-    
+
     private func sortedComponents(_ components: [DeployableComponent]) -> [DeployableComponent] {
         guard let descriptor = sortDescriptor else {
             return components.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -396,7 +417,7 @@ struct ComponentGroupSection: View {
             descriptor.compare(lhs, rhs) == .orderedAscending
         }
     }
-    
+
     private func makeColumns() -> [DataTableColumn<DeployableComponent>] {
         [
             .text(
@@ -406,13 +427,13 @@ struct ComponentGroupSection: View {
                 keyPath: \.name
             ),
             .custom(
-                id: "local",
-                title: "Local",
-                width: .fixed(70),
+                id: "source",
+                title: "Source",
+                width: .fixed(60),
                 alignment: .left,
                 sortable: false,
                 cellProvider: { component in
-                    let version = viewModel.localVersions[component.id] ?? "—"
+                    let version = viewModel.sourceVersionDisplay(for: component)
                     return makeTextCell(
                         text: version,
                         font: DataTableConstants.monospaceFont,
@@ -422,9 +443,28 @@ struct ComponentGroupSection: View {
                 }
             ),
             .custom(
+                id: "artifact",
+                title: "Artifact",
+                width: .fixed(60),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { component in
+                    let version = viewModel.artifactVersionDisplay(for: component)
+                    let sourceVersion = viewModel.sourceVersionDisplay(for: component)
+                    // Highlight mismatch in orange
+                    let isMismatch = sourceVersion != "—" && version != "—" && sourceVersion != version
+                    return makeTextCell(
+                        text: version,
+                        font: DataTableConstants.monospaceFont,
+                        color: isMismatch ? .systemOrange : DataTableConstants.secondaryTextColor,
+                        alignment: .left
+                    )
+                }
+            ),
+            .custom(
                 id: "remote",
                 title: "Remote",
-                width: .fixed(80),
+                width: .fixed(60),
                 alignment: .left,
                 sortable: false,
                 cellProvider: { component in
@@ -449,7 +489,7 @@ struct ComponentGroupSection: View {
             )
         ]
     }
-    
+
 
 }
 
@@ -529,8 +569,9 @@ struct UngroupedComponentSection: View {
             }
         )
         .frame(height: CGFloat(components.count) * DataTableConstants.defaultRowHeight + DataTableConstants.headerHeight)
+        .id(viewModel.versionDataHash)
     }
-    
+
     private func sortedComponents(_ components: [DeployableComponent]) -> [DeployableComponent] {
         guard let descriptor = sortDescriptor else {
             return components.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -539,7 +580,7 @@ struct UngroupedComponentSection: View {
             descriptor.compare(lhs, rhs) == .orderedAscending
         }
     }
-    
+
     private func makeColumns() -> [DataTableColumn<DeployableComponent>] {
         [
             .text(
@@ -549,13 +590,13 @@ struct UngroupedComponentSection: View {
                 keyPath: \.name
             ),
             .custom(
-                id: "local",
-                title: "Local",
-                width: .fixed(70),
+                id: "source",
+                title: "Source",
+                width: .fixed(60),
                 alignment: .left,
                 sortable: false,
                 cellProvider: { component in
-                    let version = viewModel.localVersions[component.id] ?? "—"
+                    let version = viewModel.sourceVersionDisplay(for: component)
                     return makeTextCell(
                         text: version,
                         font: DataTableConstants.monospaceFont,
@@ -565,9 +606,28 @@ struct UngroupedComponentSection: View {
                 }
             ),
             .custom(
+                id: "artifact",
+                title: "Artifact",
+                width: .fixed(60),
+                alignment: .left,
+                sortable: false,
+                cellProvider: { component in
+                    let version = viewModel.artifactVersionDisplay(for: component)
+                    let sourceVersion = viewModel.sourceVersionDisplay(for: component)
+                    // Highlight mismatch in orange
+                    let isMismatch = sourceVersion != "—" && version != "—" && sourceVersion != version
+                    return makeTextCell(
+                        text: version,
+                        font: DataTableConstants.monospaceFont,
+                        color: isMismatch ? .systemOrange : DataTableConstants.secondaryTextColor,
+                        alignment: .left
+                    )
+                }
+            ),
+            .custom(
                 id: "remote",
                 title: "Remote",
-                width: .fixed(80),
+                width: .fixed(60),
                 alignment: .left,
                 sortable: false,
                 cellProvider: { component in
@@ -592,7 +652,7 @@ struct UngroupedComponentSection: View {
             )
         ]
     }
-    
+
 }
 
 // MARK: - Helper Functions

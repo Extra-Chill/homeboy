@@ -1,7 +1,6 @@
 import Foundation
 
 /// Executes MySQL queries via CLI through SSH tunnel to remote server.
-/// Uses Local by Flywheel's bundled MySQL binary or Homebrew mysql-client.
 class MySQLService: @unchecked Sendable {
     
     private let username: String
@@ -94,17 +93,8 @@ class MySQLService: @unchecked Sendable {
     
     // MARK: - Private Methods
     
-    /// Finds the MySQL binary (Local by Flywheel or Homebrew)
+    /// Finds the MySQL binary from common installation paths
     private func findMySQLBinary() -> String? {
-        // Try Local by Flywheel first
-        if let localBin = LocalEnvironment.detectMySQLBinDirectory() {
-            let localMysql = "\(localBin)/mysql"
-            if FileManager.default.fileExists(atPath: localMysql) {
-                return localMysql
-            }
-        }
-        
-        // Try Homebrew mysql-client
         let homebrewPaths = [
             "/opt/homebrew/opt/mysql-client/bin/mysql",  // Apple Silicon
             "/usr/local/opt/mysql-client/bin/mysql",     // Intel
@@ -145,12 +135,7 @@ class MySQLService: @unchecked Sendable {
                 ]
                 
                 process.arguments = arguments
-                
-                // Set up environment for Local by Flywheel (if using their mysql binary)
-                if let env = LocalEnvironment.buildEnvironment() {
-                    process.environment = env
-                }
-                
+
                 let outputPipe = Pipe()
                 let errorPipe = Pipe()
                 process.standardOutput = outputPipe
@@ -335,26 +320,21 @@ class MySQLService: @unchecked Sendable {
                 ]
                 
                 process.arguments = arguments
-                
-                if let env = LocalEnvironment.buildEnvironment() {
-                    process.environment = env
-                }
-                
+
                 let outputPipe = Pipe()
                 let errorPipe = Pipe()
                 process.standardOutput = outputPipe
                 process.standardError = errorPipe
-                
+
                 do {
                     try process.run()
                     process.waitUntilExit()
-                    
+
                     let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
                     let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                    
+
                     let output = String(data: outputData, encoding: .utf8) ?? ""
                     let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
-                    
 
                     if process.terminationStatus == 0 {
                         // Parse output: first line is column headers, rest are data rows

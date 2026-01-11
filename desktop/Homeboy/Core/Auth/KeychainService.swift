@@ -50,15 +50,7 @@ struct KeychainService {
         try? delete(key: "\(Keys.refreshToken)_\(siteId)")
         UserDefaults.standard.removeObject(forKey: "\(UserDefaultsKeys.accessExpiresAt)_\(siteId)")
     }
-    
-    // MARK: - Legacy Token Methods (for migration/cleanup)
-    
-    static func clearLegacyTokens() {
-        try? delete(key: Keys.accessToken)
-        try? delete(key: Keys.refreshToken)
-        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.accessExpiresAt)
-    }
-    
+
     // MARK: - Device ID (UserDefaults - not sensitive)
     
     static func getOrCreateDeviceId() -> String {
@@ -146,29 +138,11 @@ struct KeychainService {
         return (privateKey, publicKey)
     }
     
-    /// Check if SSH key exists for a specific server
-    static func hasSSHKey(forServer serverId: String) -> Bool {
-        let keyPath = sshKeyPath(forServer: serverId)
-        return FileManager.default.fileExists(atPath: keyPath)
-    }
-    
-    /// Get the file path for a server's SSH private key
-    static func sshKeyPath(forServer serverId: String) -> String {
-        AppPaths.key(forServer: serverId).path
-    }
-    
-    /// Get the file path for a server's SSH public key
-    static func sshPublicKeyPath(forServer serverId: String) -> String {
-        sshKeyPath(forServer: serverId) + ".pub"
-    }
-    
-    /// Clear SSH keys for a specific server
+    /// Clear SSH keys for a specific server (Keychain + UserDefaults + disk files)
     static func clearSSHKeys(forServer serverId: String) {
         try? delete(key: "\(Keys.sshPrivateKey)_\(serverId)")
         UserDefaults.standard.removeObject(forKey: "\(UserDefaultsKeys.sshPublicKey)_\(serverId)")
-        // Also remove key files
-        try? FileManager.default.removeItem(atPath: sshKeyPath(forServer: serverId))
-        try? FileManager.default.removeItem(atPath: sshPublicKeyPath(forServer: serverId))
+        SSHKeyManager.deleteKeyFiles(forServer: serverId)
     }
     
     // MARK: - Live MySQL Credentials
@@ -202,7 +176,6 @@ struct KeychainService {
     
     static func clearAll(for siteId: String) {
         clearTokens(for: siteId)
-        clearLegacyTokens()
         clearLiveMySQLCredentials()
         UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.deviceId)
     }

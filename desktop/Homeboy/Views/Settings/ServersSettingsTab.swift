@@ -22,7 +22,7 @@ struct ServersSettingsTab: View {
     
     private var hasSSHKey: Bool {
         guard let serverId = config.safeActiveProject.serverId else { return false }
-        return KeychainService.hasSSHKey(forServer: serverId)
+        return SSHKeyManager.hasKeyFile(forServer: serverId)
     }
     
     private var isWordPressProject: Bool {

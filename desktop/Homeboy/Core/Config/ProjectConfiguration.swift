@@ -88,27 +88,23 @@ struct ProjectConfiguration: Codable, Identifiable {
     var remoteFiles: RemoteFileConfig
     var remoteLogs: RemoteLogConfig
     var database: DatabaseConfig
-    var localCLI: LocalCLIConfig
+    var localEnvironment: LocalEnvironmentConfig
     var tools: ToolsConfig
     var api: APIConfig
     var subTargets: [SubTarget]
     var sharedTables: [String]
-    var components: [ComponentConfig]
+    var componentIds: [String]
     var tableGroupings: [ItemGrouping]
     var componentGroupings: [ItemGrouping]
     var protectedTablePatterns: [String]
     var unlockedTablePatterns: [String]
-    
-    /// Custom CodingKeys that includes legacy keys for migration
+
     private enum CodingKeys: String, CodingKey {
         case id, name, domain, projectType
         case serverId, basePath, tablePrefix
-        case remoteFiles, remoteLogs, database, localCLI, tools, api
-        case localDev  // Legacy key for migration only (not encoded)
-        case subTargets, sharedTables, components
+        case remoteFiles, remoteLogs, database, localEnvironment, tools, api
+        case subTargets, sharedTables, componentIds
         case tableGroupings, componentGroupings, protectedTablePatterns, unlockedTablePatterns
-        case multisite   // Legacy key for migration only (not encoded)
-        case wordpress   // Legacy key for migration only (not encoded)
     }
     
     /// Resolved project type definition from ProjectTypeManager
@@ -144,12 +140,12 @@ struct ProjectConfiguration: Codable, Identifiable {
         remoteFiles: RemoteFileConfig,
         remoteLogs: RemoteLogConfig,
         database: DatabaseConfig,
-        localCLI: LocalCLIConfig,
+        localEnvironment: LocalEnvironmentConfig,
         tools: ToolsConfig,
         api: APIConfig,
         subTargets: [SubTarget] = [],
         sharedTables: [String] = [],
-        components: [ComponentConfig],
+        componentIds: [String] = [],
         tableGroupings: [ItemGrouping] = [],
         componentGroupings: [ItemGrouping] = [],
         protectedTablePatterns: [String] = [],
@@ -165,12 +161,12 @@ struct ProjectConfiguration: Codable, Identifiable {
         self.remoteFiles = remoteFiles
         self.remoteLogs = remoteLogs
         self.database = database
-        self.localCLI = localCLI
+        self.localEnvironment = localEnvironment
         self.tools = tools
         self.api = api
         self.subTargets = subTargets
         self.sharedTables = sharedTables
-        self.components = components
+        self.componentIds = componentIds
         self.tableGroupings = tableGroupings
         self.componentGroupings = componentGroupings
         self.protectedTablePatterns = protectedTablePatterns
@@ -192,12 +188,12 @@ struct ProjectConfiguration: Codable, Identifiable {
             remoteFiles: .defaults(for: projectType),
             remoteLogs: .defaults(for: projectType),
             database: DatabaseConfig(),
-            localCLI: LocalCLIConfig(),
+            localEnvironment: LocalEnvironmentConfig(),
             tools: ToolsConfig(),
             api: APIConfig(),
             subTargets: [],
             sharedTables: [],
-            components: [],
+            componentIds: [],
             tableGroupings: [],
             componentGroupings: [],
             protectedTablePatterns: [],
@@ -205,94 +201,40 @@ struct ProjectConfiguration: Codable, Identifiable {
         )
     }
     
-    /// Custom decoder to handle migration from configs without new fields
+    /// Custom decoder with defaults for optional fields
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        
+
         id = try container.decode(String.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
         domain = try container.decode(String.self, forKey: .domain)
         projectType = try container.decode(String.self, forKey: .projectType)
-        
-        // Note: Legacy 'features' field is ignored (backward compatibility)
-        
+
         serverId = try container.decodeIfPresent(String.self, forKey: .serverId)
         basePath = try container.decodeIfPresent(String.self, forKey: .basePath)
-        
-        // Migration: Convert legacy multisite config to subTargets and sharedTables
-        if let legacyMultisite = try container.decodeIfPresent(LegacyMultisiteConfig.self, forKey: .multisite),
-           legacyMultisite.enabled {
-            // Convert blogs to subtargets
-            subTargets = legacyMultisite.blogs.map { blog in
-                SubTarget(
-                    id: blog.name.lowercased().replacingOccurrences(of: " ", with: "-"),
-                    name: blog.name,
-                    domain: blog.domain,
-                    number: blog.blogId,
-                    isDefault: blog.blogId == 1
-                )
-            }
-            sharedTables = legacyMultisite.networkTables
-            
-            // Migrate tablePrefix from legacy multisite location if not at project level
-            if let explicitPrefix = try container.decodeIfPresent(String.self, forKey: .tablePrefix) {
-                tablePrefix = explicitPrefix
-            } else if let legacyPrefix = legacyMultisite.legacyTablePrefix {
-                tablePrefix = legacyPrefix
-            } else {
-                tablePrefix = nil
-            }
-        } else {
-            // New format: read subTargets and sharedTables directly
-            subTargets = try container.decodeIfPresent([SubTarget].self, forKey: .subTargets) ?? []
-            sharedTables = try container.decodeIfPresent([String].self, forKey: .sharedTables) ?? []
-            tablePrefix = try container.decodeIfPresent(String.self, forKey: .tablePrefix)
-        }
-        
-        // Migration: default remoteFiles based on projectType if missing
+        tablePrefix = try container.decodeIfPresent(String.self, forKey: .tablePrefix)
+
+        subTargets = try container.decodeIfPresent([SubTarget].self, forKey: .subTargets) ?? []
+        sharedTables = try container.decodeIfPresent([String].self, forKey: .sharedTables) ?? []
+
         remoteFiles = try container.decodeIfPresent(RemoteFileConfig.self, forKey: .remoteFiles)
             ?? .defaults(for: projectType)
-        
-        // Migration: default remoteLogs based on projectType if missing
         remoteLogs = try container.decodeIfPresent(RemoteLogConfig.self, forKey: .remoteLogs)
             ?? .defaults(for: projectType)
-        
+
         database = try container.decode(DatabaseConfig.self, forKey: .database)
-        
-        // Migration: derive basePath from legacy wordpress.wpContentPath if basePath not set
-        if basePath == nil || basePath?.isEmpty == true {
-            if let legacyWordpress = try container.decodeIfPresent(LegacyWordPressConfig.self, forKey: .wordpress),
-               !legacyWordpress.wpContentPath.isEmpty {
-                // Strip /wp-content suffix to get the WordPress root
-                let wpPath = legacyWordpress.wpContentPath
-                if wpPath.hasSuffix("/wp-content") {
-                    basePath = String(wpPath.dropLast("/wp-content".count))
-                } else {
-                    basePath = (wpPath as NSString).deletingLastPathComponent
-                }
-            }
-        }
-        
-        // Migration: read from localCLI or legacy localDev key
-        if let cli = try container.decodeIfPresent(LocalCLIConfig.self, forKey: .localCLI) {
-            localCLI = cli
-        } else if let legacyCli = try container.decodeIfPresent(LocalCLIConfig.self, forKey: .localDev) {
-            localCLI = legacyCli
-        } else {
-            localCLI = LocalCLIConfig()
-        }
+        localEnvironment = try container.decodeIfPresent(LocalEnvironmentConfig.self, forKey: .localEnvironment) ?? LocalEnvironmentConfig()
         tools = try container.decode(ToolsConfig.self, forKey: .tools)
         api = try container.decode(APIConfig.self, forKey: .api)
-        components = try container.decode([ComponentConfig].self, forKey: .components)
-        
-        // Migration: default to empty groupings if missing
+
+        componentIds = try container.decodeIfPresent([String].self, forKey: .componentIds) ?? []
         tableGroupings = try container.decodeIfPresent([ItemGrouping].self, forKey: .tableGroupings) ?? []
         componentGroupings = try container.decodeIfPresent([ItemGrouping].self, forKey: .componentGroupings) ?? []
         protectedTablePatterns = try container.decodeIfPresent([String].self, forKey: .protectedTablePatterns) ?? []
         unlockedTablePatterns = try container.decodeIfPresent([String].self, forKey: .unlockedTablePatterns) ?? []
     }
-    
-    /// Custom encoder that writes the new format (excludes legacy multisite key)
+
+    /// Custom encoder
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         
@@ -308,19 +250,18 @@ struct ProjectConfiguration: Codable, Identifiable {
         try container.encode(remoteFiles, forKey: .remoteFiles)
         try container.encode(remoteLogs, forKey: .remoteLogs)
         try container.encode(database, forKey: .database)
-        try container.encode(localCLI, forKey: .localCLI)
+        try container.encode(localEnvironment, forKey: .localEnvironment)
         try container.encode(tools, forKey: .tools)
         try container.encode(api, forKey: .api)
         
         try container.encode(subTargets, forKey: .subTargets)
         try container.encode(sharedTables, forKey: .sharedTables)
-        try container.encode(components, forKey: .components)
+        try container.encode(componentIds, forKey: .componentIds)
         try container.encode(tableGroupings, forKey: .tableGroupings)
         try container.encode(componentGroupings, forKey: .componentGroupings)
         try container.encode(protectedTablePatterns, forKey: .protectedTablePatterns)
         try container.encode(unlockedTablePatterns, forKey: .unlockedTablePatterns)
         
-        // Note: multisite is NOT encoded - it's migrated to subTargets/sharedTables
     }
 }
 
@@ -342,11 +283,11 @@ struct DatabaseConfig: Codable {
     }
 }
 
-// MARK: - Local CLI Configuration
+// MARK: - Local Environment Configuration
 
-/// Configuration for local CLI execution (e.g., WP-CLI, PM2, Artisan).
+/// Configuration for local environment execution (e.g., WP-CLI, PM2, Artisan).
 /// Used by modules and the --local flag for CLI commands.
-struct LocalCLIConfig: Codable {
+struct LocalEnvironmentConfig: Codable {
     var sitePath: String      // Path to local project root
     var domain: String        // Local dev domain (e.g., testing-grounds.local)
     var cliPath: String?      // Optional: explicit path to CLI binary (uses project type default if nil)
@@ -360,37 +301,6 @@ struct LocalCLIConfig: Codable {
     /// Whether local CLI is configured (has a site path)
     var isConfigured: Bool {
         !sitePath.isEmpty
-    }
-    
-    private enum CodingKeys: String, CodingKey {
-        case sitePath
-        case domain
-        case cliPath
-        case wpCliPath  // Legacy key for migration
-    }
-    
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        
-        // Migration: read from sitePath or legacy wpCliPath
-        if let path = try container.decodeIfPresent(String.self, forKey: .sitePath) {
-            sitePath = path
-        } else if let legacyPath = try container.decodeIfPresent(String.self, forKey: .wpCliPath) {
-            sitePath = legacyPath
-        } else {
-            sitePath = ""
-        }
-        
-        domain = try container.decodeIfPresent(String.self, forKey: .domain) ?? ""
-        cliPath = try container.decodeIfPresent(String.self, forKey: .cliPath)
-    }
-    
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(sitePath, forKey: .sitePath)
-        try container.encode(domain, forKey: .domain)
-        try container.encodeIfPresent(cliPath, forKey: .cliPath)
-        // Note: wpCliPath is NOT encoded - migrated to sitePath
     }
 }
 
@@ -442,63 +352,29 @@ struct SubTarget: Codable, Identifiable, Equatable {
     }
 }
 
-// MARK: - Legacy Multisite Configuration (Migration Only)
-
-/// Legacy multisite configuration for reading old JSON configs.
-/// New projects use `subTargets` and `sharedTables` directly on ProjectConfiguration.
-private struct LegacyMultisiteConfig: Decodable {
-    let enabled: Bool
-    let blogs: [LegacyMultisiteBlog]
-    let networkTables: [String]
-    let legacyTablePrefix: String?
-    
-    private enum CodingKeys: String, CodingKey {
-        case enabled
-        case blogs
-        case networkTables
-        case tablePrefix
-    }
-    
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try container.decode(Bool.self, forKey: .enabled)
-        blogs = try container.decodeIfPresent([LegacyMultisiteBlog].self, forKey: .blogs) ?? []
-        networkTables = try container.decodeIfPresent([String].self, forKey: .networkTables) ?? []
-        legacyTablePrefix = try container.decodeIfPresent(String.self, forKey: .tablePrefix)
-    }
-}
-
-/// Legacy multisite blog for reading old JSON configs.
-private struct LegacyMultisiteBlog: Decodable {
-    let blogId: Int
-    let name: String
-    let domain: String
-}
-
-/// Legacy WordPress config for reading old JSON configs (migration only).
-/// basePath is now derived from wpContentPath during migration.
-private struct LegacyWordPressConfig: Decodable {
-    let wpContentPath: String
-}
-
 // MARK: - Component Configuration
 
+/// Legacy component configuration embedded in project JSON.
+/// Used for migration to standalone ComponentConfiguration files.
 struct ComponentConfig: Codable, Identifiable {
     var id: String
     var name: String
     var localPath: String
-    
+
     // Deployment paths - explicit
     var remotePath: String              // Relative to basePath (e.g., "plugins/my-plugin")
     var buildArtifact: String           // Relative to localPath (e.g., "build/my-plugin.zip")
-    
+
     // Version detection - optional
     var versionFile: String?            // Relative to localPath (e.g., "my-plugin.php")
     var versionPattern: String?         // Regex with capture group
-    
+
+    // Build integration - optional
+    var buildCommand: String?           // Command to run in localPath (e.g., "./build.sh")
+
     // Legacy WordPress compat
     var isNetwork: Bool?
-    
+
     init(
         id: String,
         name: String,
@@ -507,6 +383,7 @@ struct ComponentConfig: Codable, Identifiable {
         buildArtifact: String,
         versionFile: String? = nil,
         versionPattern: String? = nil,
+        buildCommand: String? = nil,
         isNetwork: Bool? = nil
     ) {
         self.id = id
@@ -516,7 +393,23 @@ struct ComponentConfig: Codable, Identifiable {
         self.buildArtifact = buildArtifact
         self.versionFile = versionFile
         self.versionPattern = versionPattern
+        self.buildCommand = buildCommand
         self.isNetwork = isNetwork
+    }
+
+    /// Convert to standalone ComponentConfiguration
+    func toComponentConfiguration() -> ComponentConfiguration {
+        ComponentConfiguration(
+            id: id,
+            name: name,
+            localPath: localPath,
+            remotePath: remotePath,
+            buildArtifact: buildArtifact,
+            versionFile: versionFile,
+            versionPattern: versionPattern,
+            buildCommand: buildCommand,
+            isNetwork: isNetwork
+        )
     }
 }
 

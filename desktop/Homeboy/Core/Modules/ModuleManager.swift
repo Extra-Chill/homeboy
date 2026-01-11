@@ -252,7 +252,7 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
         
         // Check component requirements
         if let requiredComponents = requires.components, !requiredComponents.isEmpty {
-            let installedComponentIds = Set(project.components.map { $0.id })
+            let installedComponentIds = Set(project.componentIds)
             for component in requiredComponents {
                 if !installedComponentIds.contains(component) {
                     missing.append(component)

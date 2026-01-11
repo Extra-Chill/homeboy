@@ -306,11 +306,11 @@ CLI modules stream all output (stdout and stderr) to the console. The success/fa
 
 ### Local CLI Settings
 
-For CLI modules to work, the active project configuration must include `localCLI` settings:
+For CLI modules to work, the active project configuration must include `localEnvironment` settings:
 
 ```json
 {
-  "localCLI": {
+  "localEnvironment": {
     "sitePath": "/path/to/project/root",
     "domain": "your-site.local",
     "cliPath": "/optional/path/to/cli"
@@ -348,4 +348,4 @@ CLI modules can be executed in two ways:
 
 The CLI execution uses the project type's command template with variable substitution for `{{sitePath}}`, `{{domain}}`, `{{cliPath}}`, and `{{args}}`.
 
-Supported template variables (CLI + modules) also include `{{projectId}}`. Some templates may still use legacy names like `{{targetDomain}}` and `{{basePath}}`.
+Supported template variables (CLI + modules) include `{{projectId}}`.

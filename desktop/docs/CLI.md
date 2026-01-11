@@ -1,24 +1,39 @@
-# Homeboy CLI Reference
+# Homeboy Desktop  CLI Integration
 
-Command-line interface for Homeboy, providing terminal access to project management, remote CLI operations (WP-CLI, PM2), database queries, and deployments.
+Homeboy Desktop shells out to the standalone `homeboy` CLI binary for all core operations.
 
-## Installation
+## Installation Notes
 
-The CLI binary is bundled inside the Homeboy app at `Homeboy.app/Contents/MacOS/homeboy-cli`.
+The CLI is now maintained as a standalone project (`homeboy-cli/`) and also bundled inside the desktop app for convenience.
 
-**First Launch**: Homeboy prompts to install the CLI on first launch. This creates a symlink at `/usr/local/bin/homeboy`.
+### CLI Binary Location
 
-**Manual Installation**: Go to **Settings > General** and click **Install CLI**.
+The CLI is maintained as a standalone project (`homeboy-cli/`). The desktop app shells out to the `homeboy` CLI binary installed on your system.
+
+**Supported Paths**:
+- `/usr/local/bin/homeboy` (Standard Intel/System path)
+- `/opt/homebrew/bin/homeboy` (Apple Silicon Homebrew path)
+
+The app checks for these paths in order. If `homeboy` is not found, the desktop app will prompt you to install it.
+
+Verify installation:
+```bash
+homeboy --version
+```
+
+### CLI Source
+
+The CLI source lives in `homeboy-cli/`.
 
 **Verify Installation**:
 ```bash
 homeboy --version
-# homeboy 0.6.0
+# homeboy 0.1.4
 ```
 
 ## Configuration
 
-The CLI uses the same configuration as the GUI app stored at:
+The CLI uses the same configuration as the desktop app stored at:
 ```
 ~/Library/Application Support/Homeboy/
 ├── config.json           # Active project ID
@@ -26,11 +41,31 @@ The CLI uses the same configuration as the GUI app stored at:
 └── servers/              # SSH server configurations
 ```
 
-Projects and servers can be configured via Homeboy.app or via the CLI (`project` and `server` commands).
+Projects and servers can be configured via Homeboy.app or via the CLI.
 
 ## Commands
 
-All commands read and write the same configuration files as Homeboy.app (see “Configuration” above). Many commands accept an optional `[subtarget]` argument for project-specific targets (WordPress multisite blogs, Node environments, etc.).
+### JSON output contract
+
+When a command supports `--json`, it returns a `CLIResponse<T>` envelope:
+
+```json
+{
+  "success": true,
+  "data": {}
+}
+```
+
+- `success`: boolean
+- `data`: `T` on success, or `null` when there is no payload (including some failures)
+
+`T` varies by command. On failure, `success` is `false` and `data` can be `null`.
+
+Note: Some commands also print human-readable output without `--json`.
+
+All commands read and write the same configuration files as Homeboy.app (see “Configuration” above). Many commands accept an optional `[subtarget]` argument for project-specific targets (WordPress multisite sites, Node environments, etc.).
+
+Because the CLI is decoupled, this file documents the `homeboy` command-line interface as used by the desktop app and in the terminal.
 
 ### projects
 
@@ -135,8 +170,8 @@ homeboy project set <id> [options]
 - `--dbPort` - Database port
 - `--apiEnabled` - Enable/disable API (true/false)
 - `--apiUrl` - API base URL
-- `--localWpCliPath` - Local site path (legacy flag name; sets `localCLI.sitePath`)
-- `--localDomain` - Local development domain (sets `localCLI.domain`)
+- `--localWpCliPath` - Local site path (legacy flag name; sets `localEnvironment.sitePath`)
+- `--localDomain` - Local development domain (sets `localEnvironment.domain`)
 
 **Examples**:
 ```bash
@@ -253,38 +288,28 @@ homeboy project discover <project> --set <path>
 
 Manage project components (plugins, themes, packages).
 
+##### project component
+
+Projects reference shared **components** by ID.
+
 ##### project component add
 
+Add one or more component IDs to a project.
+
 ```bash
-homeboy project component add <project> <name> --local-path <path> --remote-path <path> --build-artifact <path> [--version-file <file>] [--version-pattern <regex>] [--group <group>]
+homeboy project component add <project> <component-id...> [--skip-errors]
 ```
-
-**Arguments**:
-- `project` - Project ID
-- `name` - Component name
-
-**Options**:
-- `--local-path` - Local path to component source (required)
-- `--remote-path` - Remote path relative to basePath (required)
-- `--build-artifact` - Build artifact path relative to localPath (required)
-- `--version-file` - Version file relative to localPath
-- `--version-pattern` - Version regex pattern
-- `--group` - Component group
 
 **Examples**:
 ```bash
-homeboy project component add extrachill my-plugin \
-  --local-path ~/Developer/my-plugin \
-  --remote-path plugins/my-plugin \
-  --build-artifact build/my-plugin.zip \
-  --version-file my-plugin.php \
-  --version-pattern "Version:\\s*([0-9.]+)"
+homeboy project component add extrachill my-plugin
+homeboy project component add extrachill plugin-a plugin-b plugin-c
 ```
 
 ##### project component remove
 
 ```bash
-homeboy project component remove <project> <id> --force
+homeboy project component remove <project> <component-id> --force
 ```
 
 ##### project component list
@@ -293,7 +318,7 @@ homeboy project component remove <project> <id> --force
 homeboy project component list <project>
 ```
 
-Outputs JSON array of components.
+Outputs JSON showing the project’s referenced component IDs.
 
 ### server
 
@@ -364,15 +389,18 @@ homeboy server list
 **Output**:
 ```json
 {
-  "servers": [
-    {
-      "id": "production-1",
-      "name": "Production",
-      "host": "server.example.com",
-      "user": "deploy",
-      "port": 22
-    }
-  ]
+  "success": true,
+  "data": {
+    "servers": [
+      {
+        "id": "production-1",
+        "name": "Production",
+        "host": "server.example.com",
+        "user": "deploy",
+        "port": 22
+      }
+    ]
+  }
 }
 ```
 
@@ -391,7 +419,7 @@ homeboy wp <project> [--local] [subtarget] <command...>
 
 **Requirements**:
 - Remote mode (default): project type must be `wordpress`, server configured, base path configured (wp-content path)
-- Local mode (`--local`): project must have `localCLI.sitePath` configured; project type must provide a WordPress CLI template
+- Local mode (`--local`): project must have `localEnvironment.sitePath` configured; project type must provide a WordPress CLI template
 
 **Examples**:
 ```bash
@@ -426,7 +454,7 @@ homeboy pm2 <project> [--local] [subtarget] <command...>
 
 **Requirements**:
 - Remote mode (default): project type must be `nodejs`, server configured, base path configured
-- Local mode (`--local`): project must have `localCLI.sitePath` configured; project type must provide a PM2 CLI template
+- Local mode (`--local`): project must have `localEnvironment.sitePath` configured; project type must provide a PM2 CLI template
 
 **Examples**:
 ```bash
@@ -445,7 +473,9 @@ homeboy pm2 api-server staging restart app
 
 ### db
 
-Database operations (read-only). Uses WP-CLI over SSH.
+Database operations. Supports read-only queries plus limited destructive operations with explicit confirmation.
+
+WordPress projects run queries via WP-CLI over SSH; non-WordPress projects use `mysql` over SSH.
 
 ```bash
 homeboy db <project> [subtarget] <subcommand>
@@ -499,7 +529,7 @@ homeboy db extrachill describe wp_options --json
 
 #### db query
 
-Execute a SQL query (read-only).
+Execute a SQL query.
 
 ```bash
 homeboy db <project> query "<sql>" [--json]
@@ -511,7 +541,8 @@ homeboy db <project> query "<sql>" [--json]
 **Flags**:
 - `--json` - Output as JSON instead of table
 
-**Read-Only Enforcement**: The following operations are blocked: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, REPLACE, GRANT, REVOKE. For write operations, use `homeboy wp <project> db query`.
+**Notes**:
+- For destructive operations, use the dedicated subcommands (`delete-row`, `drop-table`) which require `--confirm`.
 
 **Examples**:
 ```bash
@@ -530,7 +561,7 @@ homeboy db extrachill shop query "SELECT * FROM wp_2_posts LIMIT 5"
 
 ### deploy
 
-Deploy plugins and themes to production.
+Deploy configured components to the project server.
 
 ```bash
 homeboy deploy <project> [component-id...] [flags]
@@ -543,20 +574,18 @@ homeboy deploy <project> [component-id...] [flags]
 **Flags**:
 - `--all` - Deploy all configured components
 - `--outdated` - Deploy only components where local version differs from remote
-- `--skip-missing` - Skip components not installed on the remote server
+- `--build` - Build components before deploying
 - `--dry-run` - Show what would be deployed without executing
-- `--markdown` - Output as markdown instead of JSON
+- `--json` - Output as JSON
 
 **Deployment Process**:
-1. Execute `build.sh` in the component's local directory
-2. Upload the generated zip file via SCP
-3. Remove the old version on the remote server
-4. Extract the new version
-5. Set permissions (755)
+1. (Optional) Run `buildCommand` if `--build` is passed.
+2. Upload the configured build artifact via SCP.
+3. If the artifact is a `.zip`, it is extracted on the remote server and the zip file is removed.
 
 **Requirements**:
-- Components configured in project settings with local path and remote path
-- Each component must have a `build.sh` script that creates a zip file
+- Components configured with `localPath`, `remotePath`, and `buildArtifact`
+- Build artifacts are created by your build tooling (Homeboy does not run `build.sh` during deploy)
 - Server configured with SSH key
 
 **Examples**:
@@ -578,24 +607,29 @@ homeboy deploy extrachill my-plugin --markdown
 ```
 
 **Output Format (JSON)**:
+
+JSON output is a top-level response envelope:
+
 ```json
 {
   "success": true,
-  "components": [
-    {
-      "id": "my-plugin",
-      "name": "My Plugin",
-      "status": "deployed",
-      "duration": 12.5,
-      "localVersion": "1.2.0",
-      "remoteVersion": "1.1.0",
-      "error": null
+  "data": {
+    "components": [
+      {
+        "id": "my-plugin",
+        "name": "My Plugin",
+        "status": "deployed",
+        "duration": 12.5,
+        "localVersion": "1.2.0",
+        "remoteVersion": "1.1.0",
+        "error": null
+      }
+    ],
+    "summary": {
+      "succeeded": 1,
+      "failed": 0,
+      "skipped": 0
     }
-  ],
-  "summary": {
-    "succeeded": 1,
-    "failed": 0,
-    "skipped": 0
   }
 }
 ```
@@ -629,6 +663,46 @@ homeboy ssh extrachill "df -h"
 
 # View recent logs
 homeboy ssh extrachill "tail -50 ~/logs/error.log"
+```
+
+### git
+
+Git helper commands for components.
+
+```bash
+homeboy git <subcommand> <component-id>
+```
+
+**Subcommands**:
+- `status` - Show git status
+- `commit` - Stage all and commit with message
+- `push` - Push commits to remote
+- `pull` - Pull changes from remote
+- `tag` - Create a git tag
+
+**Examples**:
+```bash
+homeboy git status my-plugin
+homeboy git commit my-plugin "feat: add new feature"
+homeboy git push my-plugin --tags
+```
+
+### version
+
+Manage component versions.
+
+```bash
+homeboy version <subcommand> <component-id>
+```
+
+**Subcommands**:
+- `show` - Show current version
+- `bump` - Increment version (patch, minor, major)
+
+**Examples**:
+```bash
+homeboy version show my-plugin
+homeboy version bump my-plugin patch
 ```
 
 ### module
@@ -674,7 +748,7 @@ homeboy module run <module-id> [--project <project>] [args...]
 
 **Requirements**:
 - Module must have `cli` runtime type
-- Project must have local CLI configured (`localCLI.sitePath`)
+- Project must have local environment configured (`localEnvironment.sitePath`)
 - Project type must support CLI (has `cli` configuration in type definition)
 
 **Examples**:
@@ -732,6 +806,46 @@ homeboy wp extrachill shop plugin list
 homeboy wp extrachill SHOP plugin list
 ```
 
+### component
+
+Manage reusable component configurations.
+
+```bash
+homeboy component <subcommand>
+```
+
+### logs
+
+Remote log operations via SSH.
+
+```bash
+homeboy logs <subcommand>
+```
+
+### file
+
+Remote file operations via SSH.
+
+```bash
+homeboy file <subcommand>
+```
+
+### pin
+
+Manage pinned files/logs on a per-project basis.
+
+```bash
+homeboy pin <subcommand>
+```
+
+### docs
+
+Display the bundled CLI reference.
+
+```bash
+homeboy docs [topic ...]
+```
+
 ## Exit Codes
 
 | Code | Meaning |
@@ -741,20 +855,10 @@ homeboy wp extrachill SHOP plugin list
 
 ## Error Messages
 
-Common errors and solutions:
-
-| Error | Solution |
-|-------|----------|
-| Project 'x' not found | Create the project with `homeboy project create` or configure in Homeboy.app |
-| Server not configured | Link a server with `homeboy project set <id> --server <server-id>` |
-| Server 'x' not found | Create the server with `homeboy server create` |
-| SSH key not found | Generate SSH key in Homeboy.app Settings > Servers |
-| Project type does not support remote CLI | Use a project type that supports CLI (wordpress, nodejs) |
-| No components configured | Add components with `homeboy project component add` |
-| Write operations not allowed | Use `homeboy wp <project> db query` for writes |
-| Cannot delete active project | Switch to another project first with `homeboy project switch` |
-| Server is used by project | Update or delete the project before deleting the server |
-| Module 'x' not found | Use `homeboy module list` to see available modules |
-| Module has runtime type 'x' which is not supported by CLI | Only modules with `cli` runtime type can be run from CLI |
-| Local CLI not configured for project | Configure `Local Site Path` in Homeboy.app Settings |
-| Project type does not support CLI | Use a project type with CLI configuration (wordpress, nodejs) |
+| Error | Notes |
+|-------|-------|
+| Project not found | Create the project (CLI) or configure it in the desktop app |
+| Server not configured | Link a server on the project configuration |
+| SSH key not found | Generate an SSH key for the server in the desktop app |
+| Cannot delete active project | Switch active project, then delete |
+| Module not found | List installed modules and verify the module ID |

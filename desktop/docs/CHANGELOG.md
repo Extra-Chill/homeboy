@@ -2,6 +2,45 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.7.0
+
+This release completes the CLI/Desktop split. The bundled Swift CLI has been removed; the desktop app now uses a standalone Rust CLI installed via Homebrew.
+
+### Breaking Changes
+- **CLI Decoupled**: The bundled Swift CLI is removed. Install the CLI separately via `brew tap extra-chill/tap && brew install homeboy`.
+- **Config**: Project configuration uses `localEnvironment`.
+
+### New Features
+- **CLIBridge**: Added `CLIBridge.swift` for shelling out to external `homeboy` CLI.
+- **CLIVersionChecker**: Checks CLI installation status and updates from GitHub releases (1-hour cache).
+- **CLI Setup Sheet**: Non-blocking setup sheet on app launch when CLI is not installed.
+- **GeneralSettingsTab CLI Status**: Shows CLI version, installation instructions, and upgrade prompts.
+
+### Removed
+- **CLIInstaller**: Removed - CLI installation is now via Homebrew.
+- **Bundled Swift CLI**: Removed all files in `CLI/` directory (~4500 lines).
+
+## 0.6.3
+
+This release begins the CLI/Desktop split: the CLI is gaining functionality that can be installed/used independently, while still sharing the same configuration directory with the desktop app.
+
+### New Features
+- **Logs CLI Command**: Added `homeboy logs` for remote log file operations (list, show, pin, unpin, clear).
+- **Component CLI Command**: Added `homeboy component` for managing shared component configurations across projects.
+- **SSH Key Manager**: Added `SSHKeyManager` for per-server SSH key file management with Keychain integration.
+- **Artifact Version Parser**: Added `ArtifactVersionParser` for detecting versions from build artifacts (ZIP/TAR headers, package.json, plugin headers).
+- **Component Configuration**: Added `ComponentConfiguration` as a standalone config type for sharing component definitions across projects.
+
+### Improvements
+- **Server CLI Enhancements**: Added `homeboy server key` subcommand for SSH key generation and management.
+- **Deployer Version Tracking**: Deployer now tracks three version sources (source, artifact, remote) with improved comparison logic.
+- **Project Configuration Refactor**: Simplified `ProjectConfiguration` by extracting component definitions to `ComponentConfiguration`.
+
+### CLI
+- Added `LogsCommand.swift` with list, show, pin, unpin, clear subcommands.
+- Added `ComponentCommand.swift` with create, show, set, delete, list subcommands.
+- Enhanced `ServerCommand.swift` with SSH key management via `key` subcommand.
+
 ## 0.6.2
 
 ### Improvements
@@ -21,7 +60,7 @@ All notable code changes to this project are documented in this file.
 
 ### New Features
 - **CLI Docs Command**: Added `homeboy docs [topic...]` to display bundled CLI documentation in the terminal, with optional heading-based filtering.
-- **Docs Bundling for CLI**: Homeboy.app now syncs `docs/CLI.md` into Application Support on launch so the CLI can find it reliably.
+- **Docs Bundling for CLI**: Removed; CLI docs are embedded in the Rust CLI binary.
 
 ### Improvements
 - **Configuration Reactivity**: Added directory watchers so the app UI updates available projects/servers when CLI edits JSON configs.
@@ -43,7 +82,7 @@ All notable code changes to this project are documented in this file.
 - **Legacy Module Fields**: Removed `command` and `subcommand` fields from RuntimeConfig. CLI modules use the `args` field for command templates.
 
 ### Refactoring
-- **LocalCLIConfig**: Renamed `localDev` to `localCLI` in project configuration with updated field names (`sitePath` instead of legacy `wpCliPath`). Migration support reads legacy keys.
+- **LocalEnvironmentConfig**: Renamed `localDev`/`localCLI` to `localEnvironment` in project configuration with updated field names (`sitePath` instead of legacy `wpCliPath`). Migration support was removed; configs must be updated manually.
 
 ### CLI
 - Added `ModuleCommand.swift` with `ModuleList` and `ModuleRun` commands for CLI module execution.
@@ -117,7 +156,7 @@ All notable code changes to this project are documented in this file.
 - Switch from ZIP to DMG for macOS distribution (`dist/Homeboy-macOS.dmg`).
 
 ### Documentation
-- Add `docs/CLI.md` with full command reference.
+- Add `docs/CLI.md` with desktop/CLI integration notes (CLI reference docs now live in the CLI binary via `homeboy docs`).
 - Add `docs/ERROR-HANDLING.md` for Copyable system specification.
 
 ## 0.3.0

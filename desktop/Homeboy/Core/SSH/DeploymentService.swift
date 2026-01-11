@@ -62,11 +62,13 @@ class DeploymentService {
                 case .success:
                     onOutput?("> Upload complete. Extracting...\n")
 
-                    // Atomic deploy: extract from staging to temp, swap, cleanup
+                    // Atomic deploy: extract from staging to temp, fix permissions, swap, cleanup
                     let deployCommand = """
                         cd '\(remoteParent)' && \
                         rm -rf '\(tempDir)' && \
                         \(extractCommand) && \
+                        find '\(tempDir)/\(component.id)' -type f -exec chmod 644 {} \\; && \
+                        find '\(tempDir)/\(component.id)' -type d -exec chmod 755 {} \\; && \
                         rm -rf '\(component.id)' && \
                         mv '\(tempDir)/\(component.id)' '\(component.id)' && \
                         rm -rf '\(tempDir)' && \

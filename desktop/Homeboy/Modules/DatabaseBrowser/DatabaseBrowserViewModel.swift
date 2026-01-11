@@ -8,30 +8,30 @@ import SwiftUI
 class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
 
     var cancellables = Set<AnyCancellable>()
-    
+
     // MARK: - Published State
-    
+
     @Published var connectionStatus: DatabaseConnectionStatus = .disconnected
-    
+
     // Table groupings (universal system)
     @Published var groupedTables: [(grouping: ItemGrouping, tables: [DatabaseTable], isExpanded: Bool)] = []
     @Published var ungroupedTables: [DatabaseTable] = []
     @Published var isUngroupedExpanded: Bool = true
-    
+
     // Selected table
     @Published var selectedTable: DatabaseTable?
     @Published var columns: [DatabaseColumn] = []
     @Published var rows: [TableRow] = []
     @Published var selectedRows: Set<Int> = []
-    
+
     // Pagination
     @Published var currentPage: Int = 1
     @Published var rowsPerPage: Int = 100
     @Published var totalRows: Int = 0
-    
+
     // Loading state
     @Published var isLoadingTableData: Bool = false
-    
+
     // Query mode
     @Published var isQueryModeActive: Bool = false
     @Published var customQueryText: String = ""
@@ -42,10 +42,10 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     @Published var isRunningCustomQuery: Bool = false
     @Published var customQueryRowCount: Int = 0
     @Published var hasExecutedQuery: Bool = false
-    
+
     // Error handling
     @Published var errorMessage: AppError?
-    
+
     // Row deletion
     @Published var pendingRowDeletion: PendingRowDeletion? = nil
     @Published var showRowDeletionConfirm: Bool = false
@@ -63,10 +63,17 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
 
     // Multi-selection for bulk operations
     @Published var selectedTableNames: Set<String> = []
-    
+
+    // MARK: - CLI Bridge
+
+    private let cli = CLIBridge.shared
+
+    private var projectId: String {
+        ConfigurationManager.shared.safeActiveProject.id
+    }
+
     // MARK: - Private State
-    
-    private var mysqlService: MySQLService?
+
     private var currentGroupings: [ItemGrouping] = []
 
     // MARK: - Initialization
@@ -80,7 +87,7 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     func handleConfigChange(_ change: ConfigurationChangeType) {
         switch change {
         case .projectWillSwitch:
-            // Disconnect before project switch to prevent connection leaks
+            // Reset state on project switch
             disconnect()
         case .projectModified(_, let fields):
             // Only reload groupings if tableGroupings changed
@@ -95,19 +102,19 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     }
 
     // MARK: - Computed Properties
-    
+
     var totalPages: Int {
         max(1, Int(ceil(Double(totalRows) / Double(rowsPerPage))))
     }
-    
+
     var canGoBack: Bool {
         currentPage > 1
     }
-    
+
     var canGoForward: Bool {
         currentPage < totalPages
     }
-    
+
     var pageInfo: String {
         let start = (currentPage - 1) * rowsPerPage + 1
         let end = min(currentPage * rowsPerPage, totalRows)
@@ -116,178 +123,178 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         }
         return "Showing \(start)-\(end) of \(totalRows)"
     }
-    
+
     var isConfigured: Bool {
-        SSHService.isConfigured() && KeychainService.hasLiveMySQLCredentials()
+        cli.isInstalled
     }
-    
+
     var totalTableCount: Int {
         groupedTables.reduce(0) { $0 + $1.tables.count } + ungroupedTables.count
     }
-    
+
     var canConfirmRowDeletion: Bool {
         rowDeletionConfirmText.lowercased() == "delete"
     }
-    
+
     var canConfirmTableDeletion: Bool {
         guard let pending = pendingTableDeletion else { return false }
         return tableDeletionConfirmText == pending.table.name
     }
-    
+
     func isTableProtected(_ table: DatabaseTable) -> Bool {
         let project = ConfigurationManager.readCurrentProject()
         return TableProtectionManager.isProtected(tableName: table.name, config: project)
     }
-    
+
     // MARK: - Connection Methods
-    
+
     /// Auto-connect when view appears, if configured and not already connected
     func connectIfConfigured() async {
         // Skip if already connected or connecting
         guard connectionStatus == .disconnected else { return }
-        
-        // Skip if not configured - view will show appropriate message
+
+        // Skip if CLI not installed
         guard isConfigured else { return }
-        
+
         await connect()
     }
-    
+
     private func connect() async {
         connectionStatus = .connecting
         errorMessage = nil
-        
+
+        // Test connection by fetching tables
         do {
-            mysqlService = try MySQLService()
-            try await mysqlService?.connect()
-            connectionStatus = .connected
-            
-            // Fetch tables after connecting
-            await fetchTables()
-        } catch {
-            connectionStatus = .error(error.localizedDescription)
-            errorMessage = AppError(error.localizedDescription, source: "Database Browser")
-            mysqlService = nil
-        }
-    }
-    
-    /// Retry connection after an error
-    func retry() async {
-        connectionStatus = .disconnected
-        errorMessage = nil
-        await connect()
-    }
-    
-    private func disconnect() {
-        mysqlService?.disconnect()
-        mysqlService = nil
-        connectionStatus = .disconnected
-        
-        // Clear state
-        groupedTables = []
-        ungroupedTables = []
-        currentGroupings = []
-        selectedTable = nil
-        columns = []
-        rows = []
-        currentPage = 1
-        totalRows = 0
-        errorMessage = nil
-    }
-    
-    // MARK: - Group Expansion
-    
-    func toggleGroupExpansion(groupingId: String) {
-        if let index = groupedTables.firstIndex(where: { $0.grouping.id == groupingId }) {
-            groupedTables[index].isExpanded.toggle()
-        }
-    }
-    
-    func toggleUngroupedExpansion() {
-        isUngroupedExpanded.toggle()
-    }
-    
-    // MARK: - Data Methods
-    
-    private func fetchTables() async {
-        guard let service = mysqlService else { return }
-        
-        do {
-            let allTables = try await service.fetchTables()
-            let project = ConfigurationManager.readCurrentProject()
-            
-            // Load groupings from project config
-            currentGroupings = project.tableGroupings
-            
-            // Categorize tables using the universal grouping system
-            let result = GroupingManager.categorize(
-            
-                items: allTables,
-                groupings: currentGroupings,
-                idExtractor: { $0.name }
-            )
-            
-            // Convert to view-friendly format with expansion state
-            groupedTables = result.grouped.map { (grouping, items) in
-                (grouping: grouping, tables: items, isExpanded: false)
+            let describeArgs = ["db", "describe", projectId, table.name]
+            let describeResponse = try await cli.execute(describeArgs, timeout: 30)
+
+            if describeResponse.success {
+                columns = parseColumns(from: describeResponse.output)
             }
-            ungroupedTables = result.ungrouped
-            
-            // Auto-expand first group if only one exists
-            if groupedTables.count == 1 {
-                groupedTables[0].isExpanded = true
+
+            // Fetch row count
+            let countQuery = "SELECT COUNT(*) as count FROM \(table.name)"
+            let countArgs = ["db", "query", projectId, countQuery]
+            let countResponse = try await cli.execute(countArgs, timeout: 30)
+
+            if countResponse.success {
+                totalRows = parseRowCount(from: countResponse.output)
             }
-            
-        } catch {
-            errorMessage = AppError("Failed to fetch tables: \(error.localizedDescription)", source: "Database Browser")
-        }
-    }
-    
-    func selectTable(_ table: DatabaseTable) async {
-        isQueryModeActive = false
-        selectedTable = table
-        currentPage = 1
-        rows = []
-        columns = []
-        totalRows = 0
-        selectedRows = []
-        isLoadingTableData = true
-        
-        guard let service = mysqlService else {
-            isLoadingTableData = false
-            return
-        }
-        
-        do {
-            columns = try await service.fetchColumns(table: table.name)
-            totalRows = try await service.getRowCount(table: table.name)
-            rows = try await service.fetchRowsWithColumns(
-                table: table.name,
-                columns: columns,
-                limit: rowsPerPage,
-                offset: 0
-            )
+
+            // Fetch first page of rows
+            let columnNames = columns.map { $0.name }.joined(separator: ", ")
+            let selectQuery = "SELECT \(columnNames.isEmpty ? "*" : columnNames) FROM \(table.name) LIMIT \(rowsPerPage) OFFSET 0"
+            let selectArgs = ["db", "query", projectId, selectQuery, ""]
+            let selectResponse = try await cli.execute(selectArgs, timeout: 60)
+
+            if selectResponse.success {
+                rows = parseRows(from: selectResponse.output, columns: columns)
+            }
         } catch {
             errorMessage = AppError("Failed to load table: \(error.localizedDescription)", source: "Database Browser")
         }
-        
+
         isLoadingTableData = false
     }
-    
+
     func fetchCurrentPage() async {
-        guard let service = mysqlService,
-              let table = selectedTable else { return }
-        
+        guard cli.isInstalled, let table = selectedTable else { return }
+
         let offset = (currentPage - 1) * rowsPerPage
-        
+
         do {
-            rows = try await service.fetchRowsWithColumns(
-                table: table.name,
-                columns: columns,
-                limit: rowsPerPage,
-                offset: offset
-            )
+            let columnNames = columns.map { $0.name }.joined(separator: ", ")
+            let selectQuery = "SELECT \(columnNames.isEmpty ? "*" : columnNames) FROM \(table.name) LIMIT \(rowsPerPage) OFFSET \(offset)"
+            let selectArgs = ["db", "query", projectId, selectQuery, ""]
+            let selectResponse = try await cli.execute(selectArgs, timeout: 60)
+
+            if selectResponse.success {
+                rows = parseRows(from: selectResponse.output, columns: columns)
+            } else {
+                errorMessage = AppError("Failed to fetch rows: \(selectResponse.errorOutput)", source: "Database Browser")
+            }
         } catch {
             errorMessage = AppError("Failed to fetch rows: \(error.localizedDescription)", source: "Database Browser")
+        }
+    }
+
+    // MARK: - JSON Parsing Helpers
+
+    /// Parse columns from WP-CLI describe output
+    private func parseColumns(from jsonOutput: String) -> [DatabaseColumn] {
+        // WP-CLI describe returns array of column objects
+        guard let data = jsonOutput.data(using: .utf8) else { return [] }
+
+        struct WPColumn: Decodable {
+            let Field: String
+            let ColumnType: String
+            let Null: String?
+            let Key: String?
+            let Default: String?
+
+            enum CodingKeys: String, CodingKey {
+                case Field
+                case ColumnType = "Type"
+                case Null
+                case Key
+                case Default
+            }
+        }
+
+        guard let wpColumns = try? JSONDecoder().decode([WPColumn].self, from: data) else { return [] }
+
+        return wpColumns.map { col in
+            DatabaseColumn(
+                name: col.Field,
+                type: col.ColumnType,
+                isNullable: col.Null == "YES",
+                isPrimaryKey: col.Key == "PRI",
+                defaultValue: col.Default
+            )
+        }
+    }
+
+    /// Parse row count from query result
+    private func parseRowCount(from jsonOutput: String) -> Int {
+        guard let data = jsonOutput.data(using: .utf8) else { return 0 }
+
+        // WP-CLI query returns array of row objects
+        struct CountResult: Decodable {
+            let count: String
+        }
+
+        guard let results = try? JSONDecoder().decode([CountResult].self, from: data),
+              let first = results.first,
+              let count = Int(first.count) else { return 0 }
+
+        return count
+    }
+
+    /// Parse rows from query result
+    private func parseRows(from jsonOutput: String, columns: [DatabaseColumn]) -> [TableRow] {
+        guard let data = jsonOutput.data(using: .utf8) else { return [] }
+
+        // WP-CLI query returns array of dictionaries
+        guard let rowDicts = try? JSONDecoder().decode([[String: String?]].self, from: data) else {
+            // Try parsing as string values (WP-CLI sometimes returns all strings)
+            guard let rowDictsStr = try? JSONDecoder().decode([[String: String]].self, from: data) else {
+                return []
+            }
+            return rowDictsStr.enumerated().map { (index, dict) in
+                var values: [String: String?] = [:]
+                for (key, value) in dict {
+                    values[key] = value == "NULL" ? nil : value
+                }
+                return TableRow(id: index, values: values)
+            }
+        }
+
+        return rowDicts.enumerated().map { (index, dict) in
+            var values: [String: String?] = [:]
+            for (key, value) in dict {
+                values[key] = value
+            }
+            return TableRow(id: index, values: values)
         }
     }
     
@@ -331,120 +338,33 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
             customQueryError = "Enter a query to run"
             return
         }
-        
-        guard let service = mysqlService else {
-            customQueryError = "Not connected to database"
+
+        guard cli.isInstalled else {
+            customQueryError = "Homeboy CLI is not installed"
             return
         }
-        
+
         isRunningCustomQuery = true
         customQueryError = nil
         customQueryColumns = []
         customQueryRows = []
         selectedQueryRows = []
         customQueryRowCount = 0
-        
+
         do {
-            print("[Query Debug] Executing query: \(query.prefix(100))")
-            let (columnNames, rowData) = try await service.executeCustomQuery(query)
-            print("[Query Debug] Received \(columnNames.count) columns, \(rowData.count) rows")
-            
-            // Convert column names to DatabaseColumn objects
-            customQueryColumns = columnNames.map { name in
-                DatabaseColumn(
-                    name: name,
-                    type: "",
-                    isNullable: true,
-                    isPrimaryKey: false,
-                    defaultValue: nil
-                )
+            let args = ["db", "tables", projectId]
+            let response = try await cli.execute(args, timeout: 30)
+
+            if response.success {
+                // Refresh current view
+                await refresh()
+            } else {
+                errorMessage = AppError("Delete failed: \(response.errorOutput)", source: "Database Browser")
             }
-            
-            // Convert row data to TableRow objects
-            customQueryRows = rowData.enumerated().map { (index, values) in
-                var rowValues: [String: String?] = [:]
-                for (colIndex, column) in customQueryColumns.enumerated() {
-                    if colIndex < values.count {
-                        let value = values[colIndex]
-                        rowValues[column.name] = value == "NULL" ? nil : value
-                    }
-                }
-                return TableRow(id: index, values: rowValues)
-            }
-            
-            customQueryRowCount = customQueryRows.count
-        } catch {
-            customQueryError = error.localizedDescription
-        }
-        
-        hasExecutedQuery = true
-        isRunningCustomQuery = false
-    }
-    
-    func clearCustomQuery() {
-        customQueryText = ""
-        customQueryColumns = []
-        customQueryRows = []
-        selectedQueryRows = []
-        customQueryError = nil
-        customQueryRowCount = 0
-        hasExecutedQuery = false
-    }
-    
-    // MARK: - Row Deletion
-    
-    func requestRowDeletion(row: TableRow) {
-        guard let table = selectedTable,
-              let primaryKey = columns.first(where: { $0.isPrimaryKey }) else {
-            errorMessage = AppError("Cannot delete: no primary key found", source: "Database Browser")
-            return
-        }
-        
-        guard let pkValue = row.values[primaryKey.name], pkValue != nil else {
-            errorMessage = AppError("Cannot delete: primary key value is null", source: "Database Browser")
-            return
-        }
-        
-        // Build row preview from first 3 non-null values
-        let preview = columns.prefix(3)
-            .compactMap { col -> String? in
-                if let val = row.values[col.name], let unwrapped = val {
-                    return unwrapped
-                }
-                return nil
-            }
-            .joined(separator: ", ")
-        
-        pendingRowDeletion = PendingRowDeletion(
-            table: table.name,
-            primaryKeyColumn: primaryKey.name,
-            primaryKeyValue: pkValue!,
-            rowPreview: preview
-        )
-        rowDeletionConfirmText = ""
-        showRowDeletionConfirm = true
-    }
-    
-    func confirmRowDeletion() async {
-        guard let pending = pendingRowDeletion,
-              canConfirmRowDeletion,
-              let service = mysqlService else { return }
-        
-        isDeletingRow = true
-        
-        do {
-            try await service.deleteRow(
-                table: pending.table,
-                primaryKeyColumn: pending.primaryKeyColumn,
-                primaryKeyValue: pending.primaryKeyValue
-            )
-            
-            // Refresh current view
-            await refresh()
         } catch {
             errorMessage = AppError("Delete failed: \(error.localizedDescription)", source: "Database Browser")
         }
-        
+
         isDeletingRow = false
         showRowDeletionConfirm = false
         pendingRowDeletion = nil
@@ -474,26 +394,32 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         guard let pending = pendingTableDeletion,
               !pending.isProtected,
               canConfirmTableDeletion,
-              let service = mysqlService else { return }
-        
+              cli.isInstalled else { return }
+
         isDeletingTable = true
-        
+
         do {
-            try await service.dropTable(table: pending.table.name)
-            
-            // Clear selection if we dropped the selected table
-            if selectedTable?.name == pending.table.name {
-                selectedTable = nil
-                columns = []
-                rows = []
+            // homeboy db drop-table <project> <table> --confirm 
+            let args = ["db", "drop-table", projectId, pending.table.name, "--confirm", ""]
+            let response = try await cli.execute(args, timeout: 30)
+
+            if response.success {
+                // Clear selection if we dropped the selected table
+                if selectedTable?.name == pending.table.name {
+                    selectedTable = nil
+                    columns = []
+                    rows = []
+                }
+
+                // Refresh table list
+                await fetchTables()
+            } else {
+                errorMessage = AppError("Drop table failed: \(response.errorOutput)", source: "Database Browser")
             }
-            
-            // Refresh table list
-            await fetchTables()
         } catch {
             errorMessage = AppError("Drop table failed: \(error.localizedDescription)", source: "Database Browser")
         }
-        
+
         isDeletingTable = false
         showTableDeletionConfirm = false
         pendingTableDeletion = nil

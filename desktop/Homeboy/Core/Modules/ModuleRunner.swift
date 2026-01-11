@@ -184,11 +184,11 @@ class ModuleRunner: ObservableObject {
             return
         }
         
-        // Validate local CLI is configured
-        guard config.localCLI.isConfigured else {
+        // Validate local environment is configured
+        guard config.localEnvironment.isConfigured else {
             isRunning = false
-            onOutput("Error: Local CLI not configured. Set 'Local Site Path' in Settings.\n")
-            onComplete(.failure(ModuleRunnerError.executionFailed("Local CLI not configured")))
+            onOutput("Error: Local environment not configured. Set 'Local Site Path' in Settings.\n")
+            onComplete(.failure(ModuleRunnerError.executionFailed("Local environment not configured")))
             return
         }
         
@@ -208,7 +208,7 @@ class ModuleRunner: ObservableObject {
         }
         
         // Build domain with subtarget support
-        var targetDomain = config.localCLI.domain.isEmpty ? "localhost" : config.localCLI.domain
+        var targetDomain = config.localEnvironment.domain.isEmpty ? "localhost" : config.localEnvironment.domain
         if config.hasSubTargets {
             let siteId = selectedNetworkSite ?? module.manifest.runtime.defaultSite ?? "main"
             if let subTarget = config.subTargets.first(where: { 
@@ -220,11 +220,11 @@ class ModuleRunner: ObservableObject {
         }
         
         // Build template variables
-        let cliPath = config.localCLI.cliPath ?? cliConfig.defaultCLIPath ?? cliConfig.tool
+        let cliPath = config.localEnvironment.cliPath ?? cliConfig.defaultCLIPath ?? cliConfig.tool
         let variables: [String: String] = [
             "projectId": config.id,
             "domain": targetDomain,
-            "sitePath": config.localCLI.sitePath,
+            "sitePath": config.localEnvironment.sitePath,
             "cliPath": cliPath,
             "args": moduleArgs.joined(separator: " ")
         ]
@@ -244,12 +244,7 @@ class ModuleRunner: ObservableObject {
         
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = ["-c", command]
-        
-        // Optionally add Local by Flywheel environment if available (for backward compat)
-        if let environment = LocalEnvironment.buildEnvironment() {
-            process.environment = environment
-        }
-        
+
         runProcessWithConsoleOutput(process: process, onOutput: onOutput, onComplete: onComplete)
     }
     

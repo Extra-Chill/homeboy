@@ -42,35 +42,49 @@ struct DeployableComponent: Identifiable, Hashable {
     let buildArtifact: String
     let versionFile: String?
     let versionPattern: String?
+    let buildCommand: String?
     let isNetwork: Bool
-    
+
     var buildArtifactPath: String {
         "\(localPath)/\(buildArtifact)"
     }
-    
+
     var versionFilePath: String? {
         guard let vf = versionFile else { return nil }
         return "\(localPath)/\(vf)"
     }
-    
+
     var artifactExtension: String {
         (buildArtifact as NSString).pathExtension.lowercased()
     }
-    
+
     var hasBuildArtifact: Bool {
         FileManager.default.fileExists(atPath: buildArtifactPath)
     }
-    
-    /// Auto-detect if this is a network plugin by parsing the plugin header.
-    /// Returns the stored isNetwork value if detection fails or for non-plugins.
-    var isNetworkPlugin: Bool {
-        if let versionPath = versionFilePath {
-            let detected = VersionParser.parseNetworkFlag(from: versionPath)
-            if detected { return true }
-        }
-        return isNetwork
+
+    var hasBuildCommand: Bool {
+        buildCommand != nil && !buildCommand!.isEmpty
     }
-    
+
+    /// Whether this is a network-activated plugin (from config)
+    var isNetworkPlugin: Bool {
+        isNetwork
+    }
+
+    /// Initialize from standalone ComponentConfiguration (new format)
+    init(from config: ComponentConfiguration) {
+        self.id = config.id
+        self.name = config.name
+        self.localPath = config.localPath
+        self.remotePath = config.remotePath
+        self.buildArtifact = config.buildArtifact
+        self.versionFile = config.versionFile
+        self.versionPattern = config.versionPattern
+        self.buildCommand = config.buildCommand
+        self.isNetwork = config.isNetwork ?? false
+    }
+
+    /// Initialize from legacy embedded ComponentConfig (migration support)
     init(from config: ComponentConfig) {
         self.id = config.id
         self.name = config.name
@@ -79,21 +93,16 @@ struct DeployableComponent: Identifiable, Hashable {
         self.buildArtifact = config.buildArtifact
         self.versionFile = config.versionFile
         self.versionPattern = config.versionPattern
+        self.buildCommand = config.buildCommand
         self.isNetwork = config.isNetwork ?? false
     }
-    
+
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
-    
+
     static func == (lhs: DeployableComponent, rhs: DeployableComponent) -> Bool {
         lhs.id == rhs.id
-    }
-}
-
-struct ComponentRegistry {
-    static var all: [DeployableComponent] {
-        ConfigurationManager.readCurrentProject().components.map { DeployableComponent(from: $0) }
     }
 }
 
@@ -127,53 +136,3 @@ enum VersionInfo: Equatable {
     }
 }
 
-// MARK: - Version Parsing
-
-struct VersionParser {
-    
-    /// Default WordPress version pattern
-    static let wordPressVersionPattern = "Version:\\s*([0-9]+\\.[0-9]+\\.?[0-9]*)"
-    
-    /// Parse version from local file for a component
-    static func parseLocalVersion(for component: DeployableComponent) -> String? {
-        guard let filePath = component.versionFilePath,
-              let content = try? String(contentsOfFile: filePath, encoding: .utf8) else {
-            return nil
-        }
-        return parseVersion(from: content, pattern: component.versionPattern)
-    }
-    
-    /// Parse version from content using optional custom pattern
-    static func parseVersion(from content: String, pattern: String? = nil) -> String? {
-        let regexPattern = pattern ?? wordPressVersionPattern
-        guard let regex = try? NSRegularExpression(pattern: regexPattern, options: .caseInsensitive) else {
-            return nil
-        }
-        
-        let range = NSRange(content.startIndex..., in: content)
-        guard let match = regex.firstMatch(in: content, options: [], range: range),
-              match.numberOfRanges > 1,
-              let versionRange = Range(match.range(at: 1), in: content) else {
-            return nil
-        }
-        
-        return String(content[versionRange]).trimmingCharacters(in: .whitespaces)
-    }
-    
-    /// Parse WordPress plugin header for "Network: true" flag.
-    /// This indicates the plugin is network-activated in WordPress multisite.
-    static func parseNetworkFlag(from filePath: String) -> Bool {
-        guard let content = try? String(contentsOfFile: filePath, encoding: .utf8) else {
-            return false
-        }
-        
-        // Look for "Network: true" or "Network: True" in plugin header
-        let pattern = "Network:\\s*(true|yes)"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
-            return false
-        }
-        
-        let range = NSRange(content.startIndex..., in: content)
-        return regex.firstMatch(in: content, options: [], range: range) != nil
-    }
-}

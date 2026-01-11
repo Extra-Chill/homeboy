@@ -6,13 +6,32 @@ import SwiftUI
 enum ProjectRenameError: LocalizedError {
     case nameCollision(existingName: String)
     case fileSystemError(Error)
-    
+
     var errorDescription: String? {
         switch self {
         case .nameCollision(let existingName):
             return "A project named \"\(existingName)\" already exists"
         case .fileSystemError(let error):
             return "Failed to rename project file: \(error.localizedDescription)"
+        }
+    }
+}
+
+// MARK: - Component Errors
+
+enum ComponentError: LocalizedError {
+    case projectNotFound(String)
+    case componentNotFound(String)
+    case duplicateId(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .projectNotFound(let id):
+            return "Project '\(id)' not found"
+        case .componentNotFound(let id):
+            return "Component '\(id)' not found"
+        case .duplicateId(let id):
+            return "Component with ID '\(id)' already exists"
         }
     }
 }
@@ -155,6 +174,7 @@ class ConfigurationManager: ObservableObject {
         load()
         refreshAvailableProjects()
         refreshAvailableServers()
+        refreshAvailableComponents()
         startWatchingActiveProject()
         startWatchingDirectories()
     }
@@ -288,6 +308,7 @@ class ConfigurationManager: ObservableObject {
             try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
             try fileManager.createDirectory(at: projectsDirectory, withIntermediateDirectories: true)
             try fileManager.createDirectory(at: serversDirectory, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: componentsDirectory, withIntermediateDirectories: true)
         } catch {
             print("[ConfigurationManager] Failed to create directories: \(error)")
         }
@@ -333,35 +354,6 @@ class ConfigurationManager: ObservableObject {
         }
     }
 
-    // MARK: - Documentation Sync
-
-    private var docsDirectory: URL {
-        AppPaths.homeboy.appendingPathComponent("docs")
-    }
-
-    /// Syncs bundled CLI documentation to Application Support.
-    /// Called on app launch to ensure CLI has access to CLI.md.
-    func syncDocumentation() {
-        do {
-            try fileManager.createDirectory(at: docsDirectory, withIntermediateDirectories: true)
-
-            guard let bundledDocsURL = Bundle.main.url(forResource: "CLI", withExtension: "md", subdirectory: "docs") else {
-                print("[ConfigurationManager] No bundled CLI.md found")
-                return
-            }
-
-            let destinationURL = docsDirectory.appendingPathComponent("CLI.md")
-
-            if fileManager.fileExists(atPath: destinationURL.path) {
-                try fileManager.removeItem(at: destinationURL)
-            }
-
-            try fileManager.copyItem(at: bundledDocsURL, to: destinationURL)
-            print("[ConfigurationManager] Synced CLI.md to Application Support")
-        } catch {
-            print("[ConfigurationManager] Failed to sync documentation: \(error)")
-        }
-    }
 
     // MARK: - Load Configuration
     
@@ -570,7 +562,83 @@ class ConfigurationManager: ObservableObject {
         try? fileManager.removeItem(at: projectPath)
         refreshAvailableProjects()
     }
-    
+
+    // MARK: - Component Management
+
+    /// Get a specific component from a project
+    nonisolated static func getComponent(projectId: String, componentId: String) -> ComponentConfiguration? {
+        guard let project = readProject(id: projectId) else { return nil }
+        guard project.componentIds.contains(componentId) else { return nil }
+        return readComponent(id: componentId)
+    }
+
+    /// Add a component to a project (thread-safe)
+    nonisolated static func addComponent(projectId: String, _ component: ComponentConfiguration) throws {
+        guard var project = readProject(id: projectId) else {
+            throw ComponentError.projectNotFound(projectId)
+        }
+
+        guard !project.componentIds.contains(component.id) else {
+            throw ComponentError.duplicateId(component.id)
+        }
+
+        // Save component file
+        try saveComponentConfig(component)
+
+        // Update project componentIds
+        project.componentIds.append(component.id)
+        try saveProjectConfig(project)
+    }
+
+    /// Update an existing component (thread-safe)
+    nonisolated static func updateComponent(projectId: String, _ component: ComponentConfiguration) throws {
+        guard let project = readProject(id: projectId) else {
+            throw ComponentError.projectNotFound(projectId)
+        }
+
+        guard project.componentIds.contains(component.id) else {
+            throw ComponentError.componentNotFound(component.id)
+        }
+
+        try saveComponentConfig(component)
+    }
+
+    /// Remove a component from a project (thread-safe)
+    nonisolated static func removeComponent(projectId: String, componentId: String) throws {
+        guard var project = readProject(id: projectId) else {
+            throw ComponentError.projectNotFound(projectId)
+        }
+
+        guard let index = project.componentIds.firstIndex(of: componentId) else {
+            throw ComponentError.componentNotFound(componentId)
+        }
+
+        project.componentIds.remove(at: index)
+        try saveProjectConfig(project)
+    }
+
+    /// Thread-safe component file save
+    nonisolated private static func saveComponentConfig(_ component: ComponentConfiguration) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(component)
+        try data.write(to: AppPaths.component(id: component.id))
+    }
+
+    /// Thread-safe project save for CLI/background use
+    nonisolated private static func saveProjectConfig(_ project: ProjectConfiguration) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(project)
+        try data.write(to: AppPaths.project(id: project.id))
+    }
+
+    /// Thread-safe static method to update and save a project configuration.
+    /// Used by CLI commands to modify project settings (e.g., pinning logs).
+    nonisolated static func updateProject(_ project: ProjectConfiguration) throws {
+        try saveProjectConfig(project)
+    }
+
     // MARK: - Server Management
     
     /// Thread-safe static accessor for reading a server configuration from any context.
@@ -648,5 +716,95 @@ class ConfigurationManager: ObservableObject {
     func serverForActiveProject() -> ServerConfig? {
         guard let project = activeProject, let serverId = project.serverId else { return nil }
         return loadServer(id: serverId)
+    }
+
+    // MARK: - Component Management
+
+    private var componentsDirectory: URL {
+        AppPaths.components
+    }
+
+    /// Reactive list of available components (updates when components are added/removed)
+    @Published var availableComponents: [ComponentConfiguration] = []
+
+    /// Thread-safe static accessor for reading a component configuration from any context.
+    nonisolated static func readComponent(id: String) -> ComponentConfiguration? {
+        guard let data = try? Data(contentsOf: AppPaths.component(id: id)),
+              let component = try? JSONDecoder().decode(ComponentConfiguration.self, from: data) else {
+            return nil
+        }
+        return component
+    }
+
+    func saveComponent(_ component: ComponentConfiguration) {
+        let componentPath = componentsDirectory.appendingPathComponent("\(component.id).json")
+        do {
+            let data = try jsonEncoder.encode(component)
+            try data.write(to: componentPath)
+            refreshAvailableComponents()
+        } catch {
+            print("[ConfigurationManager] Failed to save component '\(component.id)': \(error)")
+        }
+    }
+
+    func loadComponent(id: String) -> ComponentConfiguration? {
+        let componentPath = componentsDirectory.appendingPathComponent("\(id).json")
+        guard fileManager.fileExists(atPath: componentPath.path) else {
+            return nil
+        }
+
+        do {
+            let data = try Data(contentsOf: componentPath)
+            return try jsonDecoder.decode(ComponentConfiguration.self, from: data)
+        } catch {
+            print("[ConfigurationManager] Failed to load component '\(id)': \(error)")
+            return nil
+        }
+    }
+
+    func availableComponentIds() -> [String] {
+        do {
+            let files = try fileManager.contentsOfDirectory(at: componentsDirectory, includingPropertiesForKeys: nil)
+            return files
+                .filter { $0.pathExtension == "json" }
+                .map { $0.deletingPathExtension().lastPathComponent }
+        } catch {
+            print("[ConfigurationManager] Failed to list components: \(error)")
+            return []
+        }
+    }
+
+    func loadAllComponents() -> [ComponentConfiguration] {
+        availableComponentIds().compactMap { loadComponent(id: $0) }
+    }
+
+    /// Load components for a project by resolving componentIds to ComponentConfiguration objects.
+    func loadComponentsForProject(_ project: ProjectConfiguration) -> [ComponentConfiguration] {
+        project.componentIds.compactMap { loadComponent(id: $0) }
+    }
+
+    /// Thread-safe version for loading components for a project
+    nonisolated static func loadComponentsForProject(_ project: ProjectConfiguration) -> [ComponentConfiguration] {
+        project.componentIds.compactMap { readComponent(id: $0) }
+    }
+
+    func deleteComponent(id: String) {
+        // Check if any project references this component
+        let projectsUsingComponent = availableProjectIds()
+            .compactMap { loadProject(id: $0) }
+            .filter { $0.componentIds.contains(id) }
+
+        guard projectsUsingComponent.isEmpty else {
+            print("[ConfigurationManager] Cannot delete component '\(id)': used by \(projectsUsingComponent.count) project(s)")
+            return
+        }
+
+        let componentPath = componentsDirectory.appendingPathComponent("\(id).json")
+        try? fileManager.removeItem(at: componentPath)
+        refreshAvailableComponents()
+    }
+
+    private func refreshAvailableComponents() {
+        availableComponents = availableComponentIds().compactMap { loadComponent(id: $0) }
     }
 }
