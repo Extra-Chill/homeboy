@@ -12,6 +12,28 @@ use homeboy_core::template;
 
 use crate::commands::CmdResult;
 
+struct ModuleExecContext {
+    module_id: String,
+    project_id: Option<String>,
+    component_id: Option<String>,
+    settings_json: String,
+}
+
+fn apply_module_exec_context(command: &mut Command, context: &ModuleExecContext) {
+    command
+        .env("HOMEBOY_EXEC_CONTEXT_VERSION", "1")
+        .env("HOMEBOY_MODULE_ID", &context.module_id)
+        .env("HOMEBOY_SETTINGS_JSON", &context.settings_json);
+
+    if let Some(ref project_id) = context.project_id {
+        command.env("HOMEBOY_PROJECT_ID", project_id);
+    }
+
+    if let Some(ref component_id) = context.component_id {
+        command.env("HOMEBOY_COMPONENT_ID", component_id);
+    }
+}
+
 /// Find system Python by checking PATH first, then common locations (cross-platform)
 fn find_system_python() -> Option<String> {
     // Platform-specific lookup command and Python names
@@ -277,10 +299,45 @@ fn run_module(
     let input_values: HashMap<String, String> = inputs.into_iter().collect();
 
     let mut resolved_project_id: Option<String> = None;
+    let mut resolved_component_id: Option<String> = None;
 
     let (runtime_type, code) = match module.runtime.runtime_type {
-        RuntimeType::Python => ("python", run_python_module(&module, input_values)?),
-        RuntimeType::Shell => ("shell", run_shell_module(&module, input_values)?),
+        RuntimeType::Python => {
+            let effective_settings =
+                ModuleScope::effective_settings(module_id, installed_module, None, None);
+            let settings_json = serde_json::to_string(&effective_settings)
+                .map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+
+            let exec_context = ModuleExecContext {
+                module_id: module_id.to_string(),
+                project_id: None,
+                component_id: None,
+                settings_json,
+            };
+
+            (
+                "python",
+                run_python_module(&module, input_values, &exec_context)?,
+            )
+        }
+        RuntimeType::Shell => {
+            let effective_settings =
+                ModuleScope::effective_settings(module_id, installed_module, None, None);
+            let settings_json = serde_json::to_string(&effective_settings)
+                .map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+
+            let exec_context = ModuleExecContext {
+                module_id: module_id.to_string(),
+                project_id: None,
+                component_id: None,
+                settings_json,
+            };
+
+            (
+                "shell",
+                run_shell_module(&module, input_values, &exec_context)?,
+            )
+        }
         RuntimeType::Cli => {
             let requires_project = module.requires.is_some();
 
@@ -303,51 +360,54 @@ fn run_module(
 
             resolved_project_id = project_id.clone();
 
-            let _component_id = if let (Some(ref project_config), Some(_project_id)) =
+            if let (Some(ref project_config), Some(_project_id)) =
                 (project_config.as_ref(), project_id.as_ref())
             {
-                let resolved_component = ModuleScope::resolve_component_scope(
+                resolved_component_id = ModuleScope::resolve_component_scope(
                     &module,
                     project_config,
                     component.as_deref(),
                 )?;
+            }
 
-                if let Some(ref component_id) = resolved_component {
-                    let component = ConfigManager::load_component(component_id).map_err(|_| {
-                        homeboy_core::Error::config(format!(
-                            "Component '{}' required by module '{}' is not configured",
-                            component_id, module.id
-                        ))
-                    })?;
-
-                    let _effective_settings = ModuleScope::effective_settings(
-                        module_id,
-                        installed_module,
-                        Some(project_config),
-                        Some(&component),
-                    );
-
-                    Some(component_id.clone())
-                } else {
-                    let _effective_settings = ModuleScope::effective_settings(
-                        module_id,
-                        installed_module,
-                        Some(project_config),
-                        None,
-                    );
-
-                    None
-                }
+            let component_config = if let Some(ref component_id) = resolved_component_id {
+                Some(ConfigManager::load_component(component_id).map_err(|_| {
+                    homeboy_core::Error::config(format!(
+                        "Component '{}' required by module '{}' is not configured",
+                        component_id, module.id
+                    ))
+                })?)
             } else {
-                let _effective_settings =
-                    ModuleScope::effective_settings(module_id, installed_module, None, None);
-
                 None
+            };
+
+            let effective_settings = ModuleScope::effective_settings(
+                module_id,
+                installed_module,
+                project_config.as_ref(),
+                component_config.as_ref(),
+            );
+
+            let settings_json = serde_json::to_string(&effective_settings)
+                .map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+
+            let exec_context = ModuleExecContext {
+                module_id: module_id.to_string(),
+                project_id: project_id.clone(),
+                component_id: resolved_component_id.clone(),
+                settings_json,
             };
 
             (
                 "cli",
-                run_cli_module(&module, project_id, input_values, args)?,
+                run_cli_module(
+                    &module,
+                    project_config.as_ref(),
+                    project_id.as_deref(),
+                    input_values,
+                    args,
+                    &exec_context,
+                )?,
             )
         }
     };
@@ -370,6 +430,7 @@ fn run_module(
 fn run_python_module(
     module: &ModuleManifest,
     input_values: HashMap<String, String>,
+    exec_context: &ModuleExecContext,
 ) -> homeboy_core::Result<i32> {
     let module_path = module
         .module_path
@@ -422,13 +483,17 @@ fn run_python_module(
         .to_string_lossy()
         .to_string();
 
-    let status = Command::new(python_path)
+    let mut command = Command::new(python_path);
+    command
         .args(&arguments)
         .env("PLAYWRIGHT_BROWSERS_PATH", &playwright_path)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status();
+        .stderr(Stdio::inherit());
+
+    apply_module_exec_context(&mut command, exec_context);
+
+    let status = command.status();
 
     let status = status.map_err(|e| homeboy_core::Error::other(e.to_string()))?;
     Ok(status.code().unwrap_or(1))
@@ -437,6 +502,7 @@ fn run_python_module(
 fn run_shell_module(
     module: &ModuleManifest,
     input_values: HashMap<String, String>,
+    exec_context: &ModuleExecContext,
 ) -> homeboy_core::Result<i32> {
     let module_path = module
         .module_path
@@ -465,21 +531,28 @@ fn run_shell_module(
     }
 
     #[cfg(windows)]
-    let status = Command::new("cmd")
-        .arg("/C")
-        .args(&arguments)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status();
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.arg("/C");
+        command
+    };
 
     #[cfg(not(windows))]
-    let status = Command::new("sh")
+    let mut command = Command::new("sh");
+
+    command
         .args(&arguments)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status();
+        .stderr(Stdio::inherit());
+
+    apply_module_exec_context(&mut command, exec_context);
+
+    #[cfg(windows)]
+    let status = command.status();
+
+    #[cfg(not(windows))]
+    let status = command.status();
 
     let status = status.map_err(|e| homeboy_core::Error::other(e.to_string()))?;
     Ok(status.code().unwrap_or(1))
@@ -487,9 +560,11 @@ fn run_shell_module(
 
 fn run_cli_module(
     module: &ModuleManifest,
-    project: Option<String>,
+    project_config: Option<&ProjectConfiguration>,
+    project_id: Option<&str>,
     input_values: HashMap<String, String>,
     extra_args: Vec<String>,
+    exec_context: &ModuleExecContext,
 ) -> homeboy_core::Result<i32> {
     let command_template = match &module.runtime.args {
         Some(args) if !args.trim().is_empty() => args.as_str(),
@@ -506,32 +581,26 @@ fn run_cli_module(
         || template::is_present(command_template, "cliPath")
         || template::is_present(command_template, "domain");
 
-    let (project_config, project_id) = if requires_project {
-        let project_id = project
-            .or_else(|| {
-                ConfigManager::load_app_config()
-                    .ok()
-                    .and_then(|c| c.active_project_id)
-            })
-            .ok_or_else(|| {
-                homeboy_core::Error::other(
-                    "This module requires a project; pass --project <id>".to_string(),
-                )
-            })?;
+    if requires_project {
+        let project_config = project_config.ok_or_else(|| {
+            homeboy_core::Error::other(
+                "This module requires a project; pass --project <id>".to_string(),
+            )
+        })?;
 
-        let project_config = ConfigManager::load_project(&project_id)?;
-
-        if !project_config.local_environment.is_configured() {
-            return Err(homeboy_core::Error::other(format!(
-                 "Local environment not configured for project '{}'. Configure 'Local Site Path' in Homeboy.app Settings.",
-                 project_id
-            )));
+        if project_id.is_none() {
+            return Err(homeboy_core::Error::other(
+                "This module requires a project; pass --project <id>".to_string(),
+            ));
         }
 
-        (Some(project_config), Some(project_id))
-    } else {
-        (None, None)
-    };
+        if !project_config.local_environment.is_configured() {
+            return Err(homeboy_core::Error::other(
+                "Local environment not configured for project. Configure 'Local Site Path' in Homeboy.app Settings."
+                    .to_string(),
+            ));
+        }
+    }
 
     let mut argv = Vec::new();
 
@@ -550,7 +619,13 @@ fn run_cli_module(
     let local_domain: String;
     let cli_path: String;
 
-    let vars = if let Some(ref project_config) = project_config {
+    let vars = if requires_project {
+        let Some(project_config) = project_config else {
+            return Err(homeboy_core::Error::other(
+                "This module requires a project; pass --project <id>".to_string(),
+            ));
+        };
+
         local_domain = if project_config.local_environment.domain.is_empty() {
             "localhost".to_string()
         } else {
@@ -564,7 +639,7 @@ fn run_cli_module(
             .unwrap_or("wp".to_string());
 
         vec![
-            ("projectId", project_id.as_deref().unwrap_or("")),
+            ("projectId", project_id.unwrap_or("")),
             ("domain", local_domain.as_str()),
             (
                 "sitePath",
@@ -580,20 +655,27 @@ fn run_cli_module(
     let command = template::render(command_template, &vars);
 
     #[cfg(windows)]
-    let status = Command::new("cmd")
-        .args(["/C", &command])
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status();
+    let mut command = {
+        let mut shell_command = Command::new("cmd");
+        shell_command.args(["/C", &command]);
+        shell_command
+    };
 
     #[cfg(not(windows))]
-    let status = Command::new("sh")
-        .args(["-c", &command])
+    let mut command = {
+        let mut shell_command = Command::new("sh");
+        shell_command.args(["-c", &command]);
+        shell_command
+    };
+
+    command
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status();
+        .stderr(Stdio::inherit());
+
+    apply_module_exec_context(&mut command, exec_context);
+
+    let status = command.status();
 
     let status = status.map_err(|e| homeboy_core::Error::other(e.to_string()))?;
     Ok(status.code().unwrap_or(1))
