@@ -18,6 +18,7 @@
 		1EBFEF675F781A40A250D009 /* BackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2026B5BAE550AC7BD82744DA /* BackupService.swift */; };
 		22221233AC86561D48490886 /* RemoteFileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7C2AF5C1F794564BF7DC0F4 /* RemoteFileBrowserView.swift */; };
 		2453E7963F678EA067547AEF /* ModuleRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6304E63C8AC4239FBA559CC8 /* ModuleRunner.swift */; };
+		278021F9D228BBDA95267231 /* HomeboyCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */; };
 		27D41F217F00E3A8171BEC63 /* AppWarning.swift in Sources */ = {isa = PBXBuildFile; fileRef = C489D03946456721B73D70EA /* AppWarning.swift */; };
 		27FA9FFDA56F6C7BCAFE0296 /* ModulesSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C398F35F8687FF75D86A408 /* ModulesSettingsTab.swift */; };
 		29AC5918A42B81DE1D250360 /* ContentContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC77F3DE919D687C5088735B /* ContentContext.swift */; };
@@ -69,7 +70,9 @@
 		8327EB6B86BD82A5A8F0E466 /* ServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */; };
 		8416680F81D345B2751765CC /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A80F92FC849ACD9591EDEFE /* LoginView.swift */; };
 		85F4F94606B3D49BEFDC227F /* DeploymentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */; };
+		86C712A03FB9FC626DC46371 /* ArtifactVersionParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60913533AA72054F3D79625C /* ArtifactVersionParser.swift */; };
 		8ACB39F91168D33D93F5B338 /* ModuleResultsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0354F3771ED337E0EDCAC7B5 /* ModuleResultsView.swift */; };
+		8B8811A6AB7570F644C36FC5 /* VersionParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F8D60E3516F29F554438A0 /* VersionParser.swift */; };
 		8C6CA13F14113243F0E6CDC4 /* ModuleContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69348F2856AF692571BB880E /* ModuleContainerView.swift */; };
 		8CC212749235B62EEE109984 /* DatabaseBrowserViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29EDC4F278327A663263D4A7 /* DatabaseBrowserViewModel.swift */; };
 		8D62AD324E3C99747FA53FCB /* ComponentsSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830D15DCC64EB9AF17F822E0 /* ComponentsSettingsTab.swift */; };
@@ -115,6 +118,7 @@
 		0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEntry.swift; sourceTree = "<group>"; };
 		0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
 		0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineWarningView.swift; sourceTree = "<group>"; };
+		13F8D60E3516F29F554438A0 /* VersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionParser.swift; sourceTree = "<group>"; };
 		14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseTypes.swift; sourceTree = "<group>"; };
 		1682E9BF7F10ED915C606359 /* RemoteFileEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorViewModel.swift; sourceTree = "<group>"; };
 		1EC3095C66C75EB70DD73775 /* PythonRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonRunner.swift; sourceTree = "<group>"; };
@@ -146,6 +150,7 @@
 		5B19BDE6DDAAF5D914C29785 /* RemoteFileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorView.swift; sourceTree = "<group>"; };
 		5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSSHModule.swift; sourceTree = "<group>"; };
 		5F014356904A59206993DA47 /* ModuleConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleConsoleView.swift; sourceTree = "<group>"; };
+		60913533AA72054F3D79625C /* ArtifactVersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactVersionParser.swift; sourceTree = "<group>"; };
 		6304E63C8AC4239FBA559CC8 /* ModuleRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleRunner.swift; sourceTree = "<group>"; };
 		66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnableTabBar.swift; sourceTree = "<group>"; };
 		69348F2856AF692571BB880E /* ModuleContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleContainerView.swift; sourceTree = "<group>"; };
@@ -196,6 +201,7 @@
 		D4847DDB6175D9E32C423C8C /* ConfigurationChangeType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationChangeType.swift; sourceTree = "<group>"; };
 		D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyableContent.swift; sourceTree = "<group>"; };
 		D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectTypeManager.swift; sourceTree = "<group>"; };
+		D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyCLI.swift; sourceTree = "<group>"; };
 		DBC7AF862A7B02E0B062D8EB /* DeployerComponentContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployerComponentContextMenu.swift; sourceTree = "<group>"; };
 		DF490ADD191341069884F61B /* QueryEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryEditorView.swift; sourceTree = "<group>"; };
 		DF87669DD8D8EEF387C64926 /* ServersSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServersSettingsTab.swift; sourceTree = "<group>"; };
@@ -368,6 +374,7 @@
 				40736E67E0624C5F3AA5913C /* CLIBridge.swift */,
 				42B48848AAF3B2E6808ED4E9 /* CLIInstaller.swift */,
 				811079398986364AA0E0542A /* CLIVersionChecker.swift */,
+				D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */,
 			);
 			path = CLI;
 			sourceTree = "<group>";
@@ -547,6 +554,7 @@
 			children = (
 				0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */,
 				F3C840B787B398287BC5EEE6 /* AppPaths.swift */,
+				60913533AA72054F3D79625C /* ArtifactVersionParser.swift */,
 				3E609811240E56A3A71CA778 /* ComponentConfiguration.swift */,
 				D4847DDB6175D9E32C423C8C /* ConfigurationChangeType.swift */,
 				9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */,
@@ -557,6 +565,7 @@
 				599231AFF8DD800C0BA6DF12 /* ProjectTypeDefinition.swift */,
 				D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */,
 				3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */,
+				13F8D60E3516F29F554438A0 /* VersionParser.swift */,
 			);
 			path = Config;
 			sourceTree = "<group>";
@@ -672,6 +681,7 @@
 				3CBF41346F060E438864152C /* AppError.swift in Sources */,
 				61876E7ACDA5C3D7A5D2E40F /* AppPaths.swift in Sources */,
 				27D41F217F00E3A8171BEC63 /* AppWarning.swift in Sources */,
+				86C712A03FB9FC626DC46371 /* ArtifactVersionParser.swift in Sources */,
 				FE865BA85263630F8BF6A608 /* AuthManager.swift in Sources */,
 				1EBFEF675F781A40A250D009 /* BackupService.swift in Sources */,
 				D067D1266FD0989BC9E07C43 /* CLIBridge.swift in Sources */,
@@ -709,6 +719,7 @@
 				AC767488EAD832187214964D /* GroupingEditorSheet.swift in Sources */,
 				2A2B0D75AF5291B05895FBBB /* GroupingManager.swift in Sources */,
 				57C3AE0D20A591DEE69B0FF0 /* HomeboyApp.swift in Sources */,
+				278021F9D228BBDA95267231 /* HomeboyCLI.swift in Sources */,
 				E832787BA1F926FB3A085E09 /* InlineErrorView.swift in Sources */,
 				EEA581470DC8B48027F54228 /* InlineWarningView.swift in Sources */,
 				3E503022AB80B6AEA06D0E24 /* ItemGrouping.swift in Sources */,
@@ -759,6 +770,7 @@
 				7CFF60E56F49FFC68A830664 /* SiteListView.swift in Sources */,
 				1E0233CF5AC026C74233786E /* TableDataView.swift in Sources */,
 				6DEC679DBFB512E99A03DC8A /* TableProtectionManager.swift in Sources */,
+				8B8811A6AB7570F644C36FC5 /* VersionParser.swift in Sources */,
 				30856C36D38963CB5A540EFC /* WarningView.swift in Sources */,
 				AACC7F3153886939005FC50C /* WordPressSSHModule.swift in Sources */,
 				3188A425BBDAED4249534CE8 /* WordPressSettingsTab.swift in Sources */,

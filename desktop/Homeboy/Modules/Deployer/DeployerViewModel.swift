@@ -44,7 +44,7 @@ private struct CLIDeploymentResult: Decodable {
     let summary: CLIDeploymentSummary
 }
 
-private struct CLIComponentResult: Decodable {
+fileprivate struct CLIComponentResult: Decodable {
     let id: String
     let name: String
     let status: String
@@ -77,7 +77,11 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
     private var currentGroupings: [ItemGrouping] = []
 
     // Version tracking - single source of truth from CLI
-    @Published var componentData: [String: CLIComponentResult] = [:]
+    @Published fileprivate var componentData: [String: CLIComponentResult] = [:]
+
+    @Published var sourceVersions: [String: String] = [:]
+    @Published var artifactVersions: [String: String] = [:]
+    @Published var remoteVersions: [String: String] = [:]
 
     @Published var deploymentStatus: [String: DeployStatus] = [:]
     @Published var consoleOutput = ""
@@ -121,9 +125,6 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
             isDeploying = false
             isBuilding = false
             deploymentProgress = nil
-            sourceVersions = [:]
-            artifactVersions = [:]
-            remoteVersions = [:]
             deploymentStatus = [:]
             consoleOutput = ""
             selectedComponents = []
@@ -298,21 +299,6 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
         componentData[component.id]?.artifactVersion ?? "—"
     }
 
-    /// Check if source and artifact versions match for a component
-    func versionsMatch(for component: DeployableComponent) -> Bool {
-        guard let data = componentData[component.id],
-              let source = data.sourceVersion,
-              let artifact = data.artifactVersion else {
-            return true  // If we can't detect, assume match
-        }
-        return source == artifact
-    }
-
-    /// Get components that have version mismatches (source != artifact)
-    func componentsMismatchedVersions(_ selectedComponents: [DeployableComponent]) -> [DeployableComponent] {
-        selectedComponents.filter { !versionsMatch(for: $0) }
-    }
-
     // MARK: - Selection
     
     func toggleSelection(_ componentId: String) {
@@ -374,77 +360,8 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
             return
         }
 
-        // Check for version mismatches (source != artifact)
-        let mismatched = componentsMismatchedVersions(deployable)
-
-        if mismatched.isEmpty {
-            // All versions match, deploy directly
-            startDeployment(components: deployable)
-        } else {
-            // Version mismatch detected - check if components have build commands
-            let withoutBuildCommand = mismatched.filter { !$0.hasBuildCommand }
-
-            if !withoutBuildCommand.isEmpty {
-                // Block deployment with error - no build command configured
-                let names = withoutBuildCommand.map { $0.name }.joined(separator: ", ")
-                error = AppError(
-                    "Cannot deploy: Version mismatch for \(names) but no build command configured. Rebuild manually or add buildCommand to component config.",
-                    source: "Deployer"
-                )
-                return
-            }
-
-            // All mismatched components have build commands - show confirmation
-            componentsNeedingBuild = mismatched
-            showBuildConfirmation = true
-        }
-    }
-
-    /// Called when user confirms build before deploy
-    func confirmBuildAndDeploy() {
-        showBuildConfirmation = false
-
-        Task {
-            isBuilding = true
-            consoleOutput += "> Building \(componentsNeedingBuild.count) component(s)...\n"
-
-            for component in componentsNeedingBuild {
-                consoleOutput += "> Building \(component.name)...\n"
-                do {
-                    try await buildComponent(component) { [weak self] line in
-                        Task { @MainActor in
-                            self?.consoleOutput += line
-                        }
-                    }
-                    consoleOutput += "> Build complete for \(component.name)\n"
-                } catch {
-                    self.error = AppError("Build failed for \(component.name): \(error.localizedDescription)", source: "Deployer")
-                    isBuilding = false
-                    componentsNeedingBuild = []
-                    return
-                }
-            }
-
-            isBuilding = false
-
-            // Reload artifact versions after build
-            loadArtifactVersions()
-
-            // Verify versions now match
-            let stillMismatched = componentsMismatchedVersions(componentsNeedingBuild)
-            if !stillMismatched.isEmpty {
-                let names = stillMismatched.map { $0.name }.joined(separator: ", ")
-                error = AppError("Build did not update artifact versions for: \(names)", source: "Deployer")
-                componentsNeedingBuild = []
-                return
-            }
-
-            // Proceed with deployment
-            let selected = components.filter { selectedComponents.contains($0.id) }
-            let deployable = selected.filter { $0.hasBuildArtifact }
-            componentsNeedingBuild = []
-            startDeployment(components: deployable)
-        }
+        // Deploy directly - CLI handles version checks
+        startDeployment(components: deployable)
     }
 
     func cancelBuild() {
@@ -620,7 +537,7 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
         for comp in result.components {
             report += "========================================\n"
             report += "> \(comp.name): \(comp.status.uppercased())\n"
-            if let local = comp.localVersion, let remote = comp.remoteVersion {
+            if let local = comp.sourceVersion, let remote = comp.remoteVersion {
                 report += "> Version: \(remote) → \(local)\n"
             }
             if let duration = comp.duration {

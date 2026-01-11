@@ -17,92 +17,69 @@ class RemoteFileBrowser: ObservableObject {
     @Published var error: AppError?
     @Published var pathHistory: [String] = []
     @Published var selectedEntries: Set<String> = []
-    
+
     /// First selected entry (for single-selection operations)
     var selectedFile: RemoteFileEntry? {
         guard selectedEntries.count == 1,
               let id = selectedEntries.first else { return nil }
         return entries.first { $0.id == id }
     }
-    
+
     /// All selected entries
     var selectedFiles: [RemoteFileEntry] {
         entries.filter { selectedEntries.contains($0.id) }
     }
-    
-    private var ssh: SSHService?
-    private let serverId: String
+
+    private let projectId: String
     private let startingPath: String?
-    
-    /// Initialize with a server ID and optional starting path
+    private let cli = HomeboyCLI.shared
+
+    /// Initialize with a project ID and optional starting path
     init(serverId: String, startingPath: String? = nil) {
-        self.serverId = serverId
+        self.projectId = serverId
         self.startingPath = startingPath
     }
-    
-    /// Connect to the server and navigate to starting path or home directory
+
+    /// Connect and navigate to starting path or root
     func connect() async {
-        guard let server = ConfigurationManager.readServer(id: serverId) else {
-            error = AppError("Server not found", source: "Remote File Browser")
-            return
-        }
-        
-        guard let sshService = SSHService(server: server) else {
-            error = AppError("Failed to initialize SSH connection", source: "Remote File Browser")
-            return
-        }
-        
-        self.ssh = sshService
-        
         if let startingPath = startingPath, !startingPath.isEmpty {
             await goToPath(startingPath)
         } else {
-            await goToHome()
+            await goToPath("/")
         }
     }
-    
-    /// Navigate to the SSH user's home directory
+
+    /// Navigate to the remote root directory
     func goToHome() async {
-        guard let ssh = ssh else {
-            error = AppError("Not connected", source: "Remote File Browser")
-            return
-        }
-        
-        isLoading = true
-        error = nil
-        
-        do {
-            let homePath = try await ssh.getHomeDirectory()
-            await goToPath(homePath)
-        } catch {
-            self.error = AppError(error.localizedDescription, source: "Remote File Browser")
-            isLoading = false
-        }
+        await goToPath("/")
     }
-    
+
     /// Navigate to a specific path
     func goToPath(_ path: String) async {
-        guard let ssh = ssh else {
-            error = AppError("Not connected", source: "Remote File Browser")
-            return
-        }
-        
         isLoading = true
         error = nil
-        
+
         do {
-            let newEntries = try await ssh.listDirectory(path)
+            let output = try await cli.fileList(projectId: projectId, path: path)
             currentPath = path
-            entries = newEntries
-            
-            // Add to history if not already the last item
+            entries = (output.entries ?? []).map { entry in
+                RemoteFileEntry(
+                    name: entry.name,
+                    path: entry.path,
+                    isDirectory: entry.isDirectory,
+                    size: entry.size,
+                    modifiedDate: nil,
+                    permissions: entry.permissions
+                )
+            }
+
             if pathHistory.last != path {
                 pathHistory.append(path)
             }
         } catch {
             self.error = AppError(error.localizedDescription, source: "Remote File Browser", path: path)
         }
-        
+
         isLoading = false
     }
     
@@ -157,17 +134,14 @@ class RemoteFileBrowser: ObservableObject {
     }
     
     // MARK: - File Operations
-    
+
     /// Delete a file or directory (refreshes current directory after)
     /// - Parameter entry: The file or directory to delete
     func deleteEntry(_ entry: RemoteFileEntry) async throws {
-        guard let ssh = ssh else {
-            throw SSHError.noCredentials
-        }
-        try await ssh.deleteFile(entry.path, recursive: entry.isDirectory)
+        _ = try await cli.fileDelete(projectId: projectId, path: entry.path, recursive: entry.isDirectory)
         await refresh()
     }
-    
+
     /// Rename a file or directory
     /// - Parameters:
     ///   - entry: The file or directory to rename
@@ -175,40 +149,33 @@ class RemoteFileBrowser: ObservableObject {
     /// - Returns: The new full path
     @discardableResult
     func renameEntry(_ entry: RemoteFileEntry, newName: String) async throws -> String {
-        guard let ssh = ssh else {
-            throw SSHError.noCredentials
-        }
         let newPath = RemotePathResolver.join(entry.parentPath, newName)
-        try await ssh.renameFile(from: entry.path, to: newPath)
+        _ = try await cli.fileRename(projectId: projectId, oldPath: entry.path, newPath: newPath)
         await refresh()
         return newPath
     }
-    
+
     /// Create a new empty file in the current directory
     /// - Parameter name: The filename
     /// - Returns: The full path of the created file
     @discardableResult
     func createFile(named name: String) async throws -> String {
-        guard let ssh = ssh else {
-            throw SSHError.noCredentials
-        }
         let path = RemotePathResolver.join(currentPath, name)
-        try await ssh.createFile(path)
+        _ = try await cli.fileWrite(projectId: projectId, path: path, content: "")
         await refresh()
         return path
     }
-    
-    /// Create a new directory in the current directory
-    /// - Parameter name: The directory name
-    /// - Returns: The full path of the created directory
+
+    /// Create a new directory in the current directory.
+    ///
+    /// Not currently supported: the Homeboy CLI does not expose a mkdir-style command.
+    /// UI should disable folder creation until the CLI supports it.
     @discardableResult
     func createDirectory(named name: String) async throws -> String {
-        guard let ssh = ssh else {
-            throw SSHError.noCredentials
-        }
-        let path = RemotePathResolver.join(currentPath, name)
-        try await ssh.createDirectory(path)
-        await refresh()
-        return path
+        throw NSError(
+            domain: "Homeboy.RemoteFileBrowser",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Directory creation is not supported by the Homeboy CLI"]
+        )
     }
 }

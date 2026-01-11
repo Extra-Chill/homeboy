@@ -2,6 +2,13 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.7.1
+
+### Improvements
+- **Xcode Project**: Regenerated Xcode project with updated CLI integration files.
+- **CLIInstaller**: Added back for manual CLI installation fallback.
+- **LocalEnvironment**: Added to Process directory for environment type handling.
+
 ## 0.7.0
 
 This release completes the CLI/Desktop split. The bundled Swift CLI has been removed; the desktop app now uses a standalone Rust CLI installed via Homebrew.

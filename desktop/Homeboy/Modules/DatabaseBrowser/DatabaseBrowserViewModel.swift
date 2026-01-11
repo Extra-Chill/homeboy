@@ -162,8 +162,54 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     private func connect() async {
         connectionStatus = .connecting
         errorMessage = nil
+    }
 
-        // Test connection by fetching tables
+    func fetchTables() async {
+        guard cli.isInstalled else { return }
+
+        connectionStatus = .connecting
+        errorMessage = nil
+        isLoadingTableData = true
+
+        do {
+            let describeArgs = ["db", "describe", projectId]
+            let describeResponse = try await cli.execute(describeArgs, timeout: 30)
+
+            if describeResponse.success {
+                let allTables = parseTables(from: describeResponse.output)
+
+                currentGroupings = ConfigurationManager.readCurrentProject().tableGroupings
+
+                let grouped = currentGroupings.map { grouping in
+                    let groupingTables = allTables.filter { table in
+                        grouping.memberIds.contains(table.name)
+                    }
+                    return (grouping: grouping, tables: groupingTables, isExpanded: false)
+                }
+
+                let ungrouped = allTables.filter { table in
+                    !currentGroupings.contains(where: { $0.memberIds.contains(table.name) })
+                }
+
+                groupedTables = grouped
+                ungroupedTables = ungrouped
+            } else {
+                errorMessage = AppError("Failed to fetch tables: \(describeResponse.errorOutput)", source: "Database Browser")
+            }
+        } catch {
+            errorMessage = AppError("Failed to fetch tables: \(error.localizedDescription)", source: "Database Browser")
+        }
+
+        isLoadingTableData = false
+    }
+
+    func selectTable(_ table: DatabaseTable) async {
+        guard cli.isInstalled else { return }
+
+        connectionStatus = .connecting
+        errorMessage = nil
+        isLoadingTableData = true
+
         do {
             let describeArgs = ["db", "describe", projectId, table.name]
             let describeResponse = try await cli.execute(describeArgs, timeout: 30)
@@ -172,7 +218,6 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
                 columns = parseColumns(from: describeResponse.output)
             }
 
-            // Fetch row count
             let countQuery = "SELECT COUNT(*) as count FROM \(table.name)"
             let countArgs = ["db", "query", projectId, countQuery]
             let countResponse = try await cli.execute(countArgs, timeout: 30)
@@ -181,7 +226,6 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
                 totalRows = parseRowCount(from: countResponse.output)
             }
 
-            // Fetch first page of rows
             let columnNames = columns.map { $0.name }.joined(separator: ", ")
             let selectQuery = "SELECT \(columnNames.isEmpty ? "*" : columnNames) FROM \(table.name) LIMIT \(rowsPerPage) OFFSET 0"
             let selectArgs = ["db", "query", projectId, selectQuery, ""]
@@ -219,6 +263,27 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     }
 
     // MARK: - JSON Parsing Helpers
+
+    private func parseTables(from jsonOutput: String) -> [DatabaseTable] {
+        guard let data = jsonOutput.data(using: .utf8) else { return [] }
+
+        struct WPTable: Decodable {
+            let Name: String
+            let Rows: String?
+            let Engine: String?
+        }
+
+        guard let wpTables = try? JSONDecoder().decode([WPTable].self, from: data) else { return [] }
+
+        return wpTables.map { wpTable in
+            DatabaseTable(
+                name: wpTable.Name,
+                rowCount: Int(wpTable.Rows ?? "0") ?? 0,
+                engine: wpTable.Engine ?? "InnoDB",
+                dataLength: 0
+            )
+        }
+    }
 
     /// Parse columns from WP-CLI describe output
     private func parseColumns(from jsonOutput: String) -> [DatabaseColumn] {
@@ -331,7 +396,65 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     func toggleQueryMode() {
         isQueryModeActive.toggle()
     }
-    
+
+    func clearCustomQuery() {
+        customQueryText = ""
+        customQueryColumns = []
+        customQueryRows = []
+        customQueryRowCount = 0
+        customQueryError = nil
+        hasExecutedQuery = false
+    }
+
+    func toggleGroupExpansion(groupingId: String) {
+        if let index = groupedTables.firstIndex(where: { $0.grouping.id == groupingId }) {
+            groupedTables[index].isExpanded.toggle()
+        }
+    }
+
+    func requestRowDeletion(row: TableRow) {
+        pendingRowDeletion = PendingRowDeletion(
+            table: selectedTable?.name ?? "",
+            primaryKeyColumn: columns.first?.name ?? "id",
+            primaryKeyValue: row.values.first?.value ?? "",
+            rowPreview: row.values.prefix(3).map { "\($0.key): \(String(describing: $0.value))" }.joined(separator: ", ")
+        )
+        rowDeletionConfirmText = ""
+        showRowDeletionConfirm = true
+    }
+
+    func confirmRowDeletion() async {
+        guard canConfirmRowDeletion,
+              let pending = pendingRowDeletion,
+              cli.isInstalled else { return }
+
+        isDeletingRow = true
+
+        do {
+            let args = ["db", "delete-row", projectId, pending.table, pending.primaryKeyValue, "--confirm", ""]
+            let response = try await cli.execute(args, timeout: 30)
+
+            if response.success {
+                await refresh()
+            } else {
+                errorMessage = AppError("Delete row failed: \(response.errorOutput)", source: "Database Browser")
+            }
+        } catch {
+            errorMessage = AppError("Delete row failed: \(error.localizedDescription)", source: "Database Browser")
+        }
+
+        isDeletingRow = false
+        showRowDeletionConfirm = false
+        pendingRowDeletion = nil
+        rowDeletionConfirmText = ""
+    }
+
+    func cancelRowDeletion() {
+        showRowDeletionConfirm = false
+        pendingRowDeletion = nil
+        rowDeletionConfirmText = ""
+    }
+
     func runCustomQuery() async {
         let query = customQueryText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
@@ -351,30 +474,23 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         selectedQueryRows = []
         customQueryRowCount = 0
 
-        do {
-            let args = ["db", "tables", projectId]
-            let response = try await cli.execute(args, timeout: 30)
-
-            if response.success {
-                // Refresh current view
-                await refresh()
-            } else {
-                errorMessage = AppError("Delete failed: \(response.errorOutput)", source: "Database Browser")
-            }
-        } catch {
-            errorMessage = AppError("Delete failed: \(error.localizedDescription)", source: "Database Browser")
+        defer {
+            isRunningCustomQuery = false
         }
 
-        isDeletingRow = false
-        showRowDeletionConfirm = false
-        pendingRowDeletion = nil
-        rowDeletionConfirmText = ""
-    }
-    
-    func cancelRowDeletion() {
-        showRowDeletionConfirm = false
-        pendingRowDeletion = nil
-        rowDeletionConfirmText = ""
+        do {
+            let args = ["db", "query", projectId, query, "--json"]
+            let response = try await cli.execute(args, timeout: 60)
+
+            if response.success {
+                customQueryRows = parseRows(from: response.output, columns: customQueryColumns)
+                hasExecutedQuery = true
+            } else {
+                customQueryError = response.errorOutput
+            }
+        } catch {
+            customQueryError = error.localizedDescription
+        }
     }
     
     // MARK: - Table Deletion
@@ -616,9 +732,21 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
 
     /// Select all ungrouped tables
     func selectAllUngroupedTables() {
-        for table in ungroupedTables {
-            selectedTableNames.insert(table.name)
+        selectedRows = []
+    }
+
+    func retry() async {
+        if let table = selectedTable {
+            await selectTable(table)
         }
+    }
+
+     func disconnect() {
+        connectionStatus = .disconnected
+        selectedTable = nil
+        columns = []
+        rows = []
+        customQueryRows = []
     }
 
     /// Add all selected tables to a grouping

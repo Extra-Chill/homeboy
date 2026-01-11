@@ -43,12 +43,15 @@ struct DeployerView: View {
             Button("Cancel", role: .cancel) {
                 viewModel.cancelBuild()
             }
-            Button("Build & Deploy") {
-                viewModel.confirmBuildAndDeploy()
+            Button("Deploy") {
+                let deployable = viewModel.selectedComponents
+                    .filter { viewModel.selectedComponents.contains($0.id) }
+                    .filter { $0.hasBuildArtifact }
+                viewModel.startDeployment(components: deployable)
             }
         } message: {
             let names = viewModel.componentsNeedingBuild.map { $0.name }.joined(separator: ", ")
-            Text("The following components have source/artifact version mismatches and need to be built:\n\n\(names)")
+            Text("The following components need to be deployed:\n\n\(names)")
         }
         .sheet(isPresented: $showingGroupEditor) {
             GroupingEditorSheet(mode: groupEditorMode) { name in

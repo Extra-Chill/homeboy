@@ -66,11 +66,13 @@ struct SiteListView: View {
             if !viewModel.ungroupedTables.isEmpty {
                 UngroupedSection(
                     tables: viewModel.ungroupedTables,
-                    isExpanded: viewModel.isUngroupedExpanded,
-                    selectedTable: viewModel.selectedTable,
-                    selectedTableNames: viewModel.selectedTableNames,
-                    allGroupings: viewModel.groupedTables.map { $0.grouping },
-                    onToggle: { viewModel.toggleUngroupedExpansion() },
+                     isExpanded: viewModel.isUngroupedExpanded,
+                     selectedTable: viewModel.selectedTable,
+                     selectedTableNames: viewModel.selectedTableNames,
+                     allGroupings: viewModel.groupedTables.map { $0.grouping },
+                     canMoveUp: viewModel.canMoveGroupingUp(groupingId: group.grouping.id),
+                     canMoveDown: viewModel.canMoveGroupingDown(groupingId: group.grouping.id),
+                     onToggle: { viewModel.toggleGroupExpansion(groupingId: group.grouping.id) },
                     onSelectTable: { table in
                         Task {
                             await viewModel.selectTable(table)
