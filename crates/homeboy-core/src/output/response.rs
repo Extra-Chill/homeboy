@@ -1,5 +1,5 @@
-use serde::Serialize;
 use crate::Error;
+use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct CliResponse<T: Serialize> {

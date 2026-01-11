@@ -1,9 +1,8 @@
 use clap::{Args, Subcommand};
-use serde::Serialize;
-use std::io::{self, Read};
 use homeboy_core::config::ConfigManager;
 use homeboy_core::ssh::SshClient;
-use homeboy_core::output::{print_success, print_error};
+use serde::Serialize;
+use std::io::{self, Read};
 
 #[derive(Args)]
 pub struct FileArgs {
@@ -19,9 +18,6 @@ enum FileCommand {
         project_id: String,
         /// Remote directory path
         path: String,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Read file content
     Read {
@@ -29,9 +25,6 @@ enum FileCommand {
         project_id: String,
         /// Remote file path
         path: String,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Write content to file (from stdin)
     Write {
@@ -39,9 +32,6 @@ enum FileCommand {
         project_id: String,
         /// Remote file path
         path: String,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Delete a file or directory
     Delete {
@@ -52,9 +42,6 @@ enum FileCommand {
         /// Delete directories recursively
         #[arg(short, long)]
         recursive: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Rename or move a file
     Rename {
@@ -64,172 +51,156 @@ enum FileCommand {
         old_path: String,
         /// New path
         new_path: String,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
 }
 
-pub fn run(args: FileArgs) {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOutput {
+    command: String,
+    project_id: String,
+    base_path: Option<String>,
+    path: Option<String>,
+    old_path: Option<String>,
+    new_path: Option<String>,
+    recursive: Option<bool>,
+    entries: Option<Vec<FileEntry>>,
+    content: Option<String>,
+    bytes_written: Option<usize>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    exit_code: i32,
+    success: bool,
+}
+
+pub fn run(args: FileArgs) -> homeboy_core::Result<(FileOutput, i32)> {
     match args.command {
-        FileCommand::List { project_id, path, json } => list(&project_id, &path, json),
-        FileCommand::Read { project_id, path, json } => read(&project_id, &path, json),
-        FileCommand::Write { project_id, path, json } => write(&project_id, &path, json),
-        FileCommand::Delete { project_id, path, recursive, json } => {
-            delete(&project_id, &path, recursive, json)
-        }
-        FileCommand::Rename { project_id, old_path, new_path, json } => {
-            rename(&project_id, &old_path, &new_path, json)
-        }
+        FileCommand::List { project_id, path } => list(&project_id, &path),
+        FileCommand::Read { project_id, path } => read(&project_id, &path),
+        FileCommand::Write { project_id, path } => write(&project_id, &path),
+        FileCommand::Delete {
+            project_id,
+            path,
+            recursive,
+        } => delete(&project_id, &path, recursive),
+        FileCommand::Rename {
+            project_id,
+            old_path,
+            new_path,
+        } => rename(&project_id, &old_path, &new_path),
     }
 }
 
 struct FileContext {
     client: SshClient,
-    base_path: String,
+    base_path: Option<String>,
 }
 
-fn build_context(project_id: &str, json: bool) -> Option<FileContext> {
-    let project = match ConfigManager::load_project(project_id) {
-        Ok(p) => p,
-        Err(e) => {
-            if json { print_error(e.code(), &e.to_string()); }
-            else { eprintln!("Error: {}", e); }
-            return None;
-        }
-    };
+fn build_context(project_id: &str) -> homeboy_core::Result<FileContext> {
+    let project = ConfigManager::load_project(project_id)?;
 
-    let server_id = match &project.server_id {
-        Some(id) => id,
-        None => {
-            let msg = format!("Server not configured for project '{}'", project_id);
-            if json { print_error("SERVER_NOT_CONFIGURED", &msg); }
-            else { eprintln!("Error: {}", msg); }
-            return None;
-        }
-    };
+    let server_id = project.server_id.ok_or_else(|| {
+        homeboy_core::Error::Config(format!(
+            "Server not configured for project '{}'",
+            project_id
+        ))
+    })?;
 
-    let server = match ConfigManager::load_server(server_id) {
-        Ok(s) => s,
-        Err(e) => {
-            if json { print_error(e.code(), &e.to_string()); }
-            else { eprintln!("Error: {}", e); }
-            return None;
-        }
-    };
+    let server = ConfigManager::load_server(&server_id)?;
+    let client = SshClient::from_server(&server, &server_id)
+        .map_err(|e| homeboy_core::Error::Ssh(e.to_string()))?;
 
-    let client = match SshClient::from_server(&server, server_id) {
-        Ok(c) => c,
-        Err(e) => {
-            if json { print_error("SSH_ERROR", &e.to_string()); }
-            else { eprintln!("Error: {}", e); }
-            return None;
-        }
-    };
-
-    Some(FileContext {
+    Ok(FileContext {
         client,
-        base_path: project.base_path.unwrap_or_default(),
+        base_path: project.base_path,
     })
 }
 
-fn resolve_path(path: &str, base_path: &str) -> String {
-    if path.starts_with('/') {
-        path.to_string()
-    } else if base_path.is_empty() {
-        path.to_string()
-    } else if base_path.ends_with('/') {
-        format!("{}{}", base_path, path)
-    } else {
-        format!("{}/{}", base_path, path)
-    }
-}
+fn list(project_id: &str, path: &str) -> homeboy_core::Result<(FileOutput, i32)> {
+    let ctx = build_context(project_id)?;
 
-fn list(project_id: &str, path: &str, json: bool) {
-    let ctx = match build_context(project_id, json) {
-        Some(c) => c,
-        None => return,
-    };
-
-    let full_path = resolve_path(path, &ctx.base_path);
+    let full_path = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let command = format!("ls -la '{}'", full_path);
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        if json {
-            print_error("LIST_FAILED", &output.stderr);
-        } else {
-            eprintln!("Error: {}", output.stderr);
-        }
-        return;
+        return Err(homeboy_core::Error::Other(format!(
+            "LIST_FAILED: {}",
+            output.stderr
+        )));
     }
 
-    if json {
-        let entries = parse_ls_output(&output.stdout, &full_path);
-        print_success(entries);
-    } else {
-        print!("{}", output.stdout);
-    }
+    let entries = parse_ls_output(&output.stdout, &full_path);
+
+    Ok((
+        FileOutput {
+            command: "file.list".to_string(),
+            project_id: project_id.to_string(),
+            base_path: ctx.base_path.clone(),
+            path: Some(full_path),
+            old_path: None,
+            new_path: None,
+            recursive: None,
+            entries: Some(entries),
+            content: None,
+            bytes_written: None,
+            stdout: None,
+            stderr: None,
+            exit_code: 0,
+            success: true,
+        },
+        0,
+    ))
 }
 
-fn read(project_id: &str, path: &str, json: bool) {
-    let ctx = match build_context(project_id, json) {
-        Some(c) => c,
-        None => return,
-    };
+fn read(project_id: &str, path: &str) -> homeboy_core::Result<(FileOutput, i32)> {
+    let ctx = build_context(project_id)?;
 
-    let full_path = resolve_path(path, &ctx.base_path);
+    let full_path = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let command = format!("cat '{}'", full_path);
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        if json {
-            print_error("READ_FAILED", &output.stderr);
-        } else {
-            eprintln!("Error: {}", output.stderr);
-        }
-        return;
+        return Err(homeboy_core::Error::Other(format!(
+            "READ_FAILED: {}",
+            output.stderr
+        )));
     }
 
-    if json {
-        #[derive(Serialize)]
-        struct FileContent {
-            path: String,
-            content: String,
-        }
-
-        print_success(FileContent {
-            path: full_path,
-            content: output.stdout,
-        });
-    } else {
-        print!("{}", output.stdout);
-    }
+    Ok((
+        FileOutput {
+            command: "file.read".to_string(),
+            project_id: project_id.to_string(),
+            base_path: ctx.base_path.clone(),
+            path: Some(full_path),
+            old_path: None,
+            new_path: None,
+            recursive: None,
+            entries: None,
+            content: Some(output.stdout),
+            bytes_written: None,
+            stdout: None,
+            stderr: None,
+            exit_code: 0,
+            success: true,
+        },
+        0,
+    ))
 }
 
-fn write(project_id: &str, path: &str, json: bool) {
-    let ctx = match build_context(project_id, json) {
-        Some(c) => c,
-        None => return,
-    };
+fn write(project_id: &str, path: &str) -> homeboy_core::Result<(FileOutput, i32)> {
+    let ctx = build_context(project_id)?;
 
-    // Read content from stdin
     let mut content = String::new();
-    if let Err(e) = io::stdin().read_to_string(&mut content) {
-        if json {
-            print_error("STDIN_ERROR", &e.to_string());
-        } else {
-            eprintln!("Error reading stdin: {}", e);
-        }
-        return;
-    }
+    io::stdin()
+        .read_to_string(&mut content)
+        .map_err(|e| homeboy_core::Error::Other(format!("STDIN_ERROR: {}", e)))?;
 
-    // Remove trailing newline if present
     if content.ends_with('\n') {
         content.pop();
     }
 
-    let full_path = resolve_path(path, &ctx.base_path);
+    let full_path = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let command = format!(
         "cat > '{}' << 'HOMEBOYEOF'\n{}\nHOMEBOYEOF",
         full_path, content
@@ -237,98 +208,111 @@ fn write(project_id: &str, path: &str, json: bool) {
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        if json {
-            print_error("WRITE_FAILED", &output.stderr);
-        } else {
-            eprintln!("Error: {}", output.stderr);
-        }
-        return;
+        return Err(homeboy_core::Error::Other(format!(
+            "WRITE_FAILED: {}",
+            output.stderr
+        )));
     }
 
-    if json {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct WriteResult {
-            path: String,
-            bytes_written: usize,
-        }
-
-        print_success(WriteResult {
-            path: full_path,
-            bytes_written: content.len(),
-        });
-    } else {
-        println!("Written {} bytes to {}", content.len(), full_path);
-    }
+    Ok((
+        FileOutput {
+            command: "file.write".to_string(),
+            project_id: project_id.to_string(),
+            base_path: ctx.base_path.clone(),
+            path: Some(full_path),
+            old_path: None,
+            new_path: None,
+            recursive: None,
+            entries: None,
+            content: None,
+            bytes_written: Some(content.len()),
+            stdout: None,
+            stderr: None,
+            exit_code: 0,
+            success: true,
+        },
+        0,
+    ))
 }
 
-fn delete(project_id: &str, path: &str, recursive: bool, json: bool) {
-    let ctx = match build_context(project_id, json) {
-        Some(c) => c,
-        None => return,
-    };
+fn delete(
+    project_id: &str,
+    path: &str,
+    recursive: bool,
+) -> homeboy_core::Result<(FileOutput, i32)> {
+    let ctx = build_context(project_id)?;
 
-    let full_path = resolve_path(path, &ctx.base_path);
+    let full_path = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let flags = if recursive { "-rf" } else { "-f" };
     let command = format!("rm {} '{}'", flags, full_path);
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        if json {
-            print_error("DELETE_FAILED", &output.stderr);
-        } else {
-            eprintln!("Error: {}", output.stderr);
-        }
-        return;
+        return Err(homeboy_core::Error::Other(format!(
+            "DELETE_FAILED: {}",
+            output.stderr
+        )));
     }
 
-    if json {
-        #[derive(Serialize)]
-        struct DeleteResult {
-            path: String,
-        }
-
-        print_success(DeleteResult { path: full_path });
-    } else {
-        println!("Deleted: {}", full_path);
-    }
+    Ok((
+        FileOutput {
+            command: "file.delete".to_string(),
+            project_id: project_id.to_string(),
+            base_path: ctx.base_path.clone(),
+            path: Some(full_path),
+            old_path: None,
+            new_path: None,
+            recursive: Some(recursive),
+            entries: None,
+            content: None,
+            bytes_written: None,
+            stdout: None,
+            stderr: None,
+            exit_code: 0,
+            success: true,
+        },
+        0,
+    ))
 }
 
-fn rename(project_id: &str, old_path: &str, new_path: &str, json: bool) {
-    let ctx = match build_context(project_id, json) {
-        Some(c) => c,
-        None => return,
-    };
+fn rename(
+    project_id: &str,
+    old_path: &str,
+    new_path: &str,
+) -> homeboy_core::Result<(FileOutput, i32)> {
+    let ctx = build_context(project_id)?;
 
-    let full_old = resolve_path(old_path, &ctx.base_path);
-    let full_new = resolve_path(new_path, &ctx.base_path);
+    let full_old = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), old_path)?;
+    let full_new = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), new_path)?;
     let command = format!("mv '{}' '{}'", full_old, full_new);
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        if json {
-            print_error("RENAME_FAILED", &output.stderr);
-        } else {
-            eprintln!("Error: {}", output.stderr);
-        }
-        return;
+        return Err(homeboy_core::Error::Other(format!(
+            "RENAME_FAILED: {}",
+            output.stderr
+        )));
     }
 
-    if json {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct RenameResult {
-            old_path: String,
-            new_path: String,
-        }
-
-        print_success(RenameResult {
-            old_path: full_old,
-            new_path: full_new,
-        });
-    } else {
-        println!("Renamed: {} → {}", full_old, full_new);
-    }
+    Ok((
+        FileOutput {
+            command: "file.rename".to_string(),
+            project_id: project_id.to_string(),
+            base_path: ctx.base_path.clone(),
+            path: None,
+            old_path: Some(full_old),
+            new_path: Some(full_new),
+            recursive: None,
+            entries: None,
+            content: None,
+            bytes_written: None,
+            stdout: None,
+            stderr: None,
+            exit_code: 0,
+            success: true,
+        },
+        0,
+    ))
 }
 
 #[derive(Serialize)]
@@ -383,7 +367,7 @@ fn parse_ls_output(output: &str, base_path: &str) -> Vec<FileEntry> {
         if a.is_directory != b.is_directory {
             return b.is_directory.cmp(&a.is_directory);
         }
-        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        homeboy_core::token::cmp_case_insensitive(&a.name, &b.name)
     });
 
     entries

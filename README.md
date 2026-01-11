@@ -84,7 +84,7 @@ homeboy deploy myproject my-plugin
 homeboy ssh myproject
 
 # View logs
-homeboy logs show myproject debug.log -f
+homeboy logs show myproject debug.log --follow
 ```
 
 ## Configuration

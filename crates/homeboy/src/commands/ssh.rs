@@ -1,6 +1,9 @@
 use clap::Args;
 use homeboy_core::config::ConfigManager;
 use homeboy_core::ssh::SshClient;
+use serde::Serialize;
+
+use super::CmdResult;
 
 #[derive(Args)]
 pub struct SshArgs {
@@ -11,44 +14,36 @@ pub struct SshArgs {
     pub command: Option<String>,
 }
 
-pub fn run(args: SshArgs) {
-    let project = match ConfigManager::load_project(&args.project_id) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+#[derive(Serialize)]
+pub struct SshOutput {
+    pub project_id: String,
+    pub command: Option<String>,
+}
 
-    let server_id = match &project.server_id {
-        Some(id) => id,
-        None => {
-            eprintln!("Error: Server not configured for project '{}'", args.project_id);
-            std::process::exit(1);
-        }
-    };
+pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
+    let project = ConfigManager::load_project(&args.project_id)?;
 
-    let server = match ConfigManager::load_server(server_id) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let server_id = project.server_id.ok_or_else(|| {
+        homeboy_core::Error::Other("Server not configured for project".to_string())
+    })?;
+
+    let server = ConfigManager::load_server(&server_id)?;
 
     if !server.is_valid() {
-        eprintln!("Error: Server '{}' is not properly configured", server_id);
-        std::process::exit(1);
+        return Err(homeboy_core::Error::Other(
+            "Server is not properly configured".to_string(),
+        ));
     }
 
-    let client = match SshClient::from_server(&server, server_id) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let client = SshClient::from_server(&server, &server_id)?;
 
     let exit_code = client.execute_interactive(args.command.as_deref());
-    std::process::exit(exit_code);
+
+    Ok((
+        SshOutput {
+            project_id: args.project_id,
+            command: args.command,
+        },
+        exit_code,
+    ))
 }

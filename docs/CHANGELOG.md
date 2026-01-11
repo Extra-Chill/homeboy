@@ -2,12 +2,16 @@
 
 All notable changes to Homeboy CLI are documented in this file.
 
+## 0.1.5
+
+### Improvements
+- **Docs**: Expanded local development pipeline documentation in `README.md`
+
 ## 0.1.4
 
 ### New Features
 - **Build Command**: New `homeboy build <component>` for component-scoped builds
   - Runs component's configured `build_command` in its `local_path`
-  - JSON output support with `--json` flag
 
 ### Improvements
 - **Version Utilities**: Refactored version parsing to shared `homeboy-core` library

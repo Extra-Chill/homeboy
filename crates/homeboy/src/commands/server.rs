@@ -2,8 +2,31 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::fs;
 use std::process::Command;
-use homeboy_core::config::{ConfigManager, ServerConfig, AppPaths};
-use homeboy_core::output::{print_success, print_error};
+
+use homeboy_core::config::{AppPaths, ConfigManager, ServerConfig};
+use homeboy_core::Error;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerOutput {
+    command: String,
+    server_id: Option<String>,
+    server: Option<ServerConfig>,
+    servers: Option<Vec<ServerConfig>>,
+    updated: Option<Vec<String>>,
+    deleted: Option<Vec<String>>,
+    key: Option<ServerKeyOutput>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerKeyOutput {
+    action: String,
+    server_id: String,
+    public_key: Option<String>,
+    identity_file: Option<String>,
+    imported: Option<String>,
+}
 
 #[derive(Args)]
 pub struct ServerArgs {
@@ -80,9 +103,6 @@ enum KeyCommand {
     Show {
         /// Server ID
         server_id: String,
-        /// Output raw key only (no JSON)
-        #[arg(long)]
-        raw: bool,
     },
     /// Import an existing SSH private key and set it for this server
     Import {
@@ -105,35 +125,54 @@ enum KeyCommand {
     },
 }
 
-pub fn run(args: ServerArgs) {
+pub fn run(args: ServerArgs) -> homeboy_core::Result<(ServerOutput, i32)> {
     match args.command {
-        ServerCommand::Create { name, host, user, port } => create(&name, &host, &user, port),
+        ServerCommand::Create {
+            name,
+            host,
+            user,
+            port,
+        } => create(&name, &host, &user, port),
         ServerCommand::Show { server_id } => show(&server_id),
-        ServerCommand::Set { server_id, name, host, user, port } => {
-            set(&server_id, name, host, user, port)
-        }
+        ServerCommand::Set {
+            server_id,
+            name,
+            host,
+            user,
+            port,
+        } => set(&server_id, name, host, user, port),
         ServerCommand::Delete { server_id, force } => delete(&server_id, force),
         ServerCommand::List => list(),
         ServerCommand::Key(key_args) => run_key(key_args),
     }
 }
 
-fn run_key(args: KeyArgs) {
+fn run_key(args: KeyArgs) -> homeboy_core::Result<(ServerOutput, i32)> {
     match args.command {
         KeyCommand::Generate { server_id } => key_generate(&server_id),
-        KeyCommand::Show { server_id, raw } => key_show(&server_id, raw),
-        KeyCommand::Import { server_id, private_key_path } => key_import(&server_id, &private_key_path),
-        KeyCommand::Use { server_id, private_key_path } => key_use(&server_id, &private_key_path),
+        KeyCommand::Show { server_id } => key_show(&server_id),
+        KeyCommand::Import {
+            server_id,
+            private_key_path,
+        } => key_import(&server_id, &private_key_path),
+        KeyCommand::Use {
+            server_id,
+            private_key_path,
+        } => key_use(&server_id, &private_key_path),
         KeyCommand::Unset { server_id } => key_unset(&server_id),
     }
 }
 
-fn create(name: &str, host: &str, user: &str, port: u16) {
+fn create(
+    name: &str,
+    host: &str,
+    user: &str,
+    port: u16,
+) -> homeboy_core::Result<(ServerOutput, i32)> {
     let id = ServerConfig::generate_id(host);
 
     if ConfigManager::load_server(&id).is_ok() {
-        print_error("SERVER_EXISTS", &format!("Server '{}' already exists", id));
-        return;
+        return Err(Error::Other(format!("Server '{}' already exists", id)));
     }
 
     let server = ServerConfig {
@@ -145,378 +184,352 @@ fn create(name: &str, host: &str, user: &str, port: u16) {
         identity_file: None,
     };
 
-    if let Err(e) = ConfigManager::save_server(&server) {
-        print_error("SAVE_ERROR", &e.to_string());
-        return;
-    }
+    ConfigManager::save_server(&server)?;
 
-    #[derive(Serialize)]
-    struct CreateResult {
-        id: String,
-        name: String,
-        host: String,
-        user: String,
-        port: u16,
-        note: String,
-    }
-
-    print_success(CreateResult {
-        id: id.clone(),
-        name: name.to_string(),
-        host: host.to_string(),
-        user: user.to_string(),
-        port,
-        note: format!("Run 'homeboy server key generate {}' to create SSH key", id),
-    });
+    Ok((
+        ServerOutput {
+            command: "server.create".to_string(),
+            server_id: Some(id),
+            server: Some(server),
+            servers: None,
+            updated: Some(vec!["created".to_string()]),
+            deleted: None,
+            key: None,
+        },
+        0,
+    ))
 }
 
-fn show(server_id: &str) {
-    match ConfigManager::load_server(server_id) {
-        Ok(server) => print_success(&server),
-        Err(e) => print_error(e.code(), &e.to_string()),
-    }
+fn show(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
+    let server = ConfigManager::load_server(server_id)?;
+
+    Ok((
+        ServerOutput {
+            command: "server.show".to_string(),
+            server_id: Some(server_id.to_string()),
+            server: Some(server),
+            servers: None,
+            updated: None,
+            deleted: None,
+            key: None,
+        },
+        0,
+    ))
 }
 
-fn set(server_id: &str, name: Option<String>, host: Option<String>, user: Option<String>, port: Option<u16>) {
-    let mut server = match ConfigManager::load_server(server_id) {
-        Ok(s) => s,
-        Err(e) => {
-            print_error(e.code(), &e.to_string());
-            return;
-        }
-    };
+fn set(
+    server_id: &str,
+    name: Option<String>,
+    host: Option<String>,
+    user: Option<String>,
+    port: Option<u16>,
+) -> homeboy_core::Result<(ServerOutput, i32)> {
+    let mut server = ConfigManager::load_server(server_id)?;
 
     let mut changes = Vec::new();
 
     if let Some(n) = name {
         server.name = n;
-        changes.push("name");
+        changes.push("name".to_string());
     }
     if let Some(h) = host {
         server.host = h;
-        changes.push("host");
+        changes.push("host".to_string());
     }
     if let Some(u) = user {
         server.user = u;
-        changes.push("user");
+        changes.push("user".to_string());
     }
     if let Some(p) = port {
         server.port = p;
-        changes.push("port");
+        changes.push("port".to_string());
     }
 
     if changes.is_empty() {
-        print_error("NO_CHANGES", "No changes specified");
-        return;
+        return Err(Error::Other("No changes specified".to_string()));
     }
 
-    if let Err(e) = ConfigManager::save_server(&server) {
-        print_error("SAVE_ERROR", &e.to_string());
-        return;
-    }
+    ConfigManager::save_server(&server)?;
 
-    #[derive(Serialize)]
-    struct SetResult {
-        id: String,
-        updated: Vec<String>,
-    }
-
-    print_success(SetResult {
-        id: server_id.to_string(),
-        updated: changes.iter().map(|s| s.to_string()).collect(),
-    });
+    Ok((
+        ServerOutput {
+            command: "server.set".to_string(),
+            server_id: Some(server_id.to_string()),
+            server: Some(server),
+            servers: None,
+            updated: Some(changes),
+            deleted: None,
+            key: None,
+        },
+        0,
+    ))
 }
 
-fn delete(server_id: &str, force: bool) {
+fn delete(server_id: &str, force: bool) -> homeboy_core::Result<(ServerOutput, i32)> {
     if !force {
-        print_error("CONFIRM_REQUIRED", "Use --force to confirm deletion");
-        return;
+        return Err(Error::Other("Use --force to confirm deletion".to_string()));
     }
 
-    if ConfigManager::load_server(server_id).is_err() {
-        print_error("SERVER_NOT_FOUND", &format!("Server '{}' not found", server_id));
-        return;
-    }
+    ConfigManager::load_server(server_id)?;
 
-    // Check if any project uses this server
-    if let Ok(projects) = ConfigManager::list_projects() {
-        for project in projects {
-            if project.server_id.as_deref() == Some(server_id) {
-                print_error(
-                    "SERVER_IN_USE",
-                    &format!("Server is used by project '{}'. Update or delete the project first.", project.id),
-                );
-                return;
-            }
+    let projects = ConfigManager::list_projects()?;
+    for project in projects {
+        if project.server_id.as_deref() == Some(server_id) {
+            return Err(Error::Other(format!(
+                "Server is used by project '{}'. Update or delete the project first.",
+                project.id
+            )));
         }
     }
 
-    if let Err(e) = ConfigManager::delete_server(server_id) {
-        print_error("DELETE_ERROR", &e.to_string());
-        return;
-    }
+    ConfigManager::delete_server(server_id)?;
 
-    #[derive(Serialize)]
-    struct DeleteResult {
-        deleted: String,
-    }
-
-    print_success(DeleteResult {
-        deleted: server_id.to_string(),
-    });
+    Ok((
+        ServerOutput {
+            command: "server.delete".to_string(),
+            server_id: Some(server_id.to_string()),
+            server: None,
+            servers: None,
+            updated: None,
+            deleted: Some(vec![server_id.to_string()]),
+            key: None,
+        },
+        0,
+    ))
 }
 
-fn list() {
-    match ConfigManager::list_servers() {
-        Ok(servers) => {
-            #[derive(Serialize)]
-            struct ListResult {
-                servers: Vec<ServerConfig>,
-            }
-            print_success(ListResult { servers });
-        }
-        Err(e) => print_error(e.code(), &e.to_string()),
-    }
+fn list() -> homeboy_core::Result<(ServerOutput, i32)> {
+    let servers = ConfigManager::list_servers()?;
+
+    Ok((
+        ServerOutput {
+            command: "server.list".to_string(),
+            server_id: None,
+            server: None,
+            servers: Some(servers),
+            updated: None,
+            deleted: None,
+            key: None,
+        },
+        0,
+    ))
 }
 
-fn key_generate(server_id: &str) {
-    if ConfigManager::load_server(server_id).is_err() {
-        print_error("SERVER_NOT_FOUND", &format!("Server '{}' not found", server_id));
-        return;
-    }
+fn key_generate(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
+    ConfigManager::load_server(server_id)?;
 
     let key_path = AppPaths::key(server_id);
-    let key_path_str = key_path.to_string_lossy();
+    let key_path_str = key_path.to_string_lossy().to_string();
 
-    // Ensure keys directory exists
     if let Some(parent) = key_path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)?;
     }
 
-    // Remove existing key if present
     let _ = fs::remove_file(&key_path);
     let _ = fs::remove_file(format!("{}.pub", key_path_str));
 
-    // Generate new key pair
-    let status = Command::new("ssh-keygen")
+    let output = Command::new("ssh-keygen")
         .args([
-            "-t", "rsa",
-            "-b", "4096",
-            "-f", &key_path_str,
-            "-N", "",  // Empty passphrase
-            "-C", &format!("homeboy-{}", server_id),
+            "-t",
+            "rsa",
+            "-b",
+            "4096",
+            "-f",
+            &key_path_str,
+            "-N",
+            "",
+            "-C",
+            &format!("homeboy-{}", server_id),
         ])
-        .output();
+        .output()?;
 
-    match status {
-        Ok(output) if output.status.success() => {
-            if let Ok(mut server) = ConfigManager::load_server(server_id) {
-                server.identity_file = Some(key_path_str.to_string());
-                let _ = ConfigManager::save_server(&server);
-            }
-
-            // Read the public key
-            let pub_key_path = format!("{}.pub", key_path_str);
-            match fs::read_to_string(&pub_key_path) {
-                Ok(public_key) => {
-                    #[derive(Serialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct KeyResult {
-                        server_id: String,
-                        public_key: String,
-                        note: String,
-                    }
-
-                    print_success(KeyResult {
-                        server_id: server_id.to_string(),
-                        public_key: public_key.trim().to_string(),
-                        note: "Add this public key to ~/.ssh/authorized_keys on the server".to_string(),
-                    });
-                }
-                Err(e) => print_error("READ_ERROR", &format!("Failed to read public key: {}", e)),
-            }
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            print_error("KEYGEN_ERROR", &format!("ssh-keygen failed: {}", stderr));
-        }
-        Err(e) => print_error("KEYGEN_ERROR", &format!("Failed to run ssh-keygen: {}", e)),
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Ssh(format!("ssh-keygen failed: {}", stderr)));
     }
+
+    let mut server = ConfigManager::load_server(server_id)?;
+    server.identity_file = Some(key_path_str.clone());
+    ConfigManager::save_server(&server)?;
+
+    let pub_key_path = format!("{}.pub", key_path_str);
+    let public_key = fs::read_to_string(&pub_key_path)?;
+
+    Ok((
+        ServerOutput {
+            command: "server.key.generate".to_string(),
+            server_id: Some(server_id.to_string()),
+            server: Some(server),
+            servers: None,
+            updated: Some(vec!["identity_file".to_string()]),
+            deleted: None,
+            key: Some(ServerKeyOutput {
+                action: "generate".to_string(),
+                server_id: server_id.to_string(),
+                public_key: Some(public_key.trim().to_string()),
+                identity_file: Some(key_path_str),
+                imported: None,
+            }),
+        },
+        0,
+    ))
 }
 
-fn key_show(server_id: &str, raw: bool) {
+fn key_show(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
+    ConfigManager::load_server(server_id)?;
+
     let key_path = AppPaths::key(server_id);
     let pub_key_path = format!("{}.pub", key_path.to_string_lossy());
 
-    match fs::read_to_string(&pub_key_path) {
-        Ok(public_key) => {
-            if raw {
-                println!("{}", public_key.trim());
-            } else {
-                #[derive(Serialize)]
-                #[serde(rename_all = "camelCase")]
-                struct KeyShowResult {
-                    server_id: String,
-                    public_key: String,
-                }
+    let public_key = fs::read_to_string(&pub_key_path)
+        .map_err(|_| Error::Other(format!("No SSH key configured for server '{}'", server_id)))?;
 
-                print_success(KeyShowResult {
-                    server_id: server_id.to_string(),
-                    public_key: public_key.trim().to_string(),
-                });
-            }
-        }
-        Err(_) => {
-            print_error("KEY_NOT_FOUND", &format!("No SSH key configured for server '{}'", server_id));
-        }
-    }
+    Ok((
+        ServerOutput {
+            command: "server.key.show".to_string(),
+            server_id: Some(server_id.to_string()),
+            server: None,
+            servers: None,
+            updated: None,
+            deleted: None,
+            key: Some(ServerKeyOutput {
+                action: "show".to_string(),
+                server_id: server_id.to_string(),
+                public_key: Some(public_key.trim().to_string()),
+                identity_file: None,
+                imported: None,
+            }),
+        },
+        0,
+    ))
 }
 
-fn key_use(server_id: &str, private_key_path: &str) {
-    let mut server = match ConfigManager::load_server(server_id) {
-        Ok(s) => s,
-        Err(_) => {
-            print_error("SERVER_NOT_FOUND", &format!("Server '{}' not found", server_id));
-            return;
-        }
-    };
+fn key_use(server_id: &str, private_key_path: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
+    let mut server = ConfigManager::load_server(server_id)?;
 
     let expanded_path = shellexpand::tilde(private_key_path).to_string();
 
     if !std::path::Path::new(&expanded_path).exists() {
-        print_error("KEY_NOT_FOUND", &format!("SSH identity file not found: {}", expanded_path));
-        return;
+        return Err(Error::Other(format!(
+            "SSH identity file not found: {}",
+            expanded_path
+        )));
     }
 
     server.identity_file = Some(expanded_path.clone());
+    ConfigManager::save_server(&server)?;
 
-    if let Err(e) = ConfigManager::save_server(&server) {
-        print_error("SAVE_ERROR", &e.to_string());
-        return;
-    }
-
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct UseResult {
-        server_id: String,
-        identity_file: String,
-    }
-
-    print_success(UseResult {
-        server_id: server_id.to_string(),
-        identity_file: expanded_path,
-    });
+    Ok((
+        ServerOutput {
+            command: "server.key.use".to_string(),
+            server_id: Some(server_id.to_string()),
+            server: Some(server),
+            servers: None,
+            updated: Some(vec!["identity_file".to_string()]),
+            deleted: None,
+            key: Some(ServerKeyOutput {
+                action: "use".to_string(),
+                server_id: server_id.to_string(),
+                public_key: None,
+                identity_file: Some(expanded_path),
+                imported: None,
+            }),
+        },
+        0,
+    ))
 }
 
-fn key_unset(server_id: &str) {
-    let mut server = match ConfigManager::load_server(server_id) {
-        Ok(s) => s,
-        Err(_) => {
-            print_error("SERVER_NOT_FOUND", &format!("Server '{}' not found", server_id));
-            return;
-        }
-    };
+fn key_unset(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
+    let mut server = ConfigManager::load_server(server_id)?;
 
     server.identity_file = None;
+    ConfigManager::save_server(&server)?;
 
-    if let Err(e) = ConfigManager::save_server(&server) {
-        print_error("SAVE_ERROR", &e.to_string());
-        return;
-    }
-
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct UnsetResult {
-        server_id: String,
-        identity_file: Option<String>,
-    }
-
-    print_success(UnsetResult {
-        server_id: server_id.to_string(),
-        identity_file: None,
-    });
+    Ok((
+        ServerOutput {
+            command: "server.key.unset".to_string(),
+            server_id: Some(server_id.to_string()),
+            server: Some(server),
+            servers: None,
+            updated: Some(vec!["identity_file".to_string()]),
+            deleted: None,
+            key: Some(ServerKeyOutput {
+                action: "unset".to_string(),
+                server_id: server_id.to_string(),
+                public_key: None,
+                identity_file: None,
+                imported: None,
+            }),
+        },
+        0,
+    ))
 }
 
-fn key_import(server_id: &str, private_key_path: &str) {
-    if ConfigManager::load_server(server_id).is_err() {
-        print_error("SERVER_NOT_FOUND", &format!("Server '{}' not found", server_id));
-        return;
-    }
+fn key_import(
+    server_id: &str,
+    private_key_path: &str,
+) -> homeboy_core::Result<(ServerOutput, i32)> {
+    ConfigManager::load_server(server_id)?;
 
-    // Expand tilde
     let expanded_path = shellexpand::tilde(private_key_path).to_string();
 
-    // Read private key
-    let private_key = match fs::read_to_string(&expanded_path) {
-        Ok(k) => k,
-        Err(e) => {
-            print_error("READ_ERROR", &format!("Failed to read key file: {}", e));
-            return;
-        }
-    };
+    let private_key = fs::read_to_string(&expanded_path)?;
 
-    // Validate it looks like an SSH key
     if !private_key.contains("-----BEGIN") || !private_key.contains("PRIVATE KEY-----") {
-        print_error("INVALID_KEY", "File doesn't appear to be a valid SSH private key");
-        return;
+        return Err(Error::Other(
+            "File doesn't appear to be a valid SSH private key".to_string(),
+        ));
     }
 
-    // Derive public key using ssh-keygen
     let output = Command::new("ssh-keygen")
         .args(["-y", "-f", &expanded_path])
-        .output();
+        .output()?;
 
-    let public_key = match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        }
-        _ => {
-            print_error("KEYGEN_ERROR", "Failed to derive public key from private key");
-            return;
-        }
-    };
+    if !output.status.success() {
+        return Err(Error::Ssh(
+            "Failed to derive public key from private key".to_string(),
+        ));
+    }
 
-    // Write keys to Homeboy's key directory
+    let public_key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
     let key_path = AppPaths::key(server_id);
-    let key_path_str = key_path.to_string_lossy();
+    let key_path_str = key_path.to_string_lossy().to_string();
 
     if let Some(parent) = key_path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)?;
     }
 
-    if let Err(e) = fs::write(&key_path, &private_key) {
-        print_error("WRITE_ERROR", &format!("Failed to write private key: {}", e));
-        return;
-    }
+    fs::write(&key_path, &private_key)?;
 
-    // Set permissions on private key (readable only by owner)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
     }
 
-    if let Err(e) = fs::write(format!("{}.pub", key_path_str), &public_key) {
-        print_error("WRITE_ERROR", &format!("Failed to write public key: {}", e));
-        return;
-    }
+    fs::write(format!("{}.pub", key_path_str), &public_key)?;
 
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ImportResult {
-        server_id: String,
-        imported: String,
-        public_key: String,
-    }
+    let mut server = ConfigManager::load_server(server_id)?;
+    server.identity_file = Some(key_path_str.clone());
+    ConfigManager::save_server(&server)?;
 
-    if let Ok(mut server) = ConfigManager::load_server(server_id) {
-        server.identity_file = Some(key_path_str.to_string());
-        let _ = ConfigManager::save_server(&server);
-    }
-
-    print_success(ImportResult {
-        server_id: server_id.to_string(),
-        imported: expanded_path,
-        public_key,
-    });
+    Ok((
+        ServerOutput {
+            command: "server.key.import".to_string(),
+            server_id: Some(server_id.to_string()),
+            server: Some(server),
+            servers: None,
+            updated: Some(vec!["identity_file".to_string()]),
+            deleted: None,
+            key: Some(ServerKeyOutput {
+                action: "import".to_string(),
+                server_id: server_id.to_string(),
+                public_key: Some(public_key),
+                identity_file: Some(key_path_str),
+                imported: Some(expanded_path),
+            }),
+        },
+        0,
+    ))
 }

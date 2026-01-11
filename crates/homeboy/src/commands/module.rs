@@ -3,10 +3,12 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use homeboy_core::config::{ConfigManager, AppPaths, ProjectConfiguration};
-use homeboy_core::module::{load_module, load_all_modules, ModuleManifest, RuntimeType};
-use homeboy_core::output::{print_success, print_error};
+
+use homeboy_core::config::{AppPaths, ConfigManager, ProjectConfiguration};
+use homeboy_core::module::{load_all_modules, load_module, ModuleManifest, RuntimeType};
 use homeboy_core::template;
+
+use crate::commands::CmdResult;
 
 const SYSTEM_PYTHON_PATH: &str = "/opt/homebrew/bin/python3";
 
@@ -23,9 +25,6 @@ enum ModuleCommand {
         /// Project ID to filter compatible modules
         #[arg(short, long)]
         project: Option<String>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Execute a module (Python, Shell, or CLI)
     Run {
@@ -49,116 +48,123 @@ enum ModuleCommand {
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {
-    let pos = s.find('=').ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
-pub fn run(args: ModuleArgs) {
+pub fn run(args: ModuleArgs) -> CmdResult<ModuleOutput> {
     match args.command {
-        ModuleCommand::List { project, json } => list(project, json),
-        ModuleCommand::Run { module_id, project, input, args } => {
-            run_module(&module_id, project, input, args)
-        }
+        ModuleCommand::List { project } => list(project),
+        ModuleCommand::Run {
+            module_id,
+            project,
+            input,
+            args,
+        } => run_module(&module_id, project, input, args),
         ModuleCommand::Setup { module_id } => setup_module(&module_id),
     }
 }
 
-fn list(project: Option<String>, json: bool) {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleOutput {
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modules: Option<Vec<ModuleEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_type: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleEntry {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub runtime: String,
+    pub compatible: bool,
+    pub ready: bool,
+}
+
+fn list(project: Option<String>) -> CmdResult<ModuleOutput> {
     let modules = load_all_modules();
 
-    if modules.is_empty() {
-        if json {
-            print_success::<Vec<()>>(vec![]);
-        } else {
-            println!("No modules installed.");
-            println!("Modules are installed at: {}", AppPaths::modules().display());
-        }
-        return;
-    }
+    let project_config: Option<ProjectConfiguration> = project
+        .as_ref()
+        .and_then(|id| ConfigManager::load_project(id).ok());
 
-    let project_config: Option<ProjectConfiguration> = project.as_ref().and_then(|id| {
-        ConfigManager::load_project(id).ok()
-    });
-
-    if json {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct ModuleEntry {
-            id: String,
-            name: String,
-            version: String,
-            description: String,
-            runtime: String,
-            compatible: bool,
-            ready: bool,
-        }
-
-        let entries: Vec<ModuleEntry> = modules
-            .iter()
-            .map(|m| {
-                let ready = is_module_ready(m);
-                ModuleEntry {
-                    id: m.id.clone(),
-                    name: m.name.clone(),
-                    version: m.version.clone(),
-                    description: m.description.lines().next().unwrap_or("").to_string(),
-                    runtime: format!("{:?}", m.runtime.runtime_type).to_lowercase(),
-                    compatible: is_module_compatible(m, project_config.as_ref()),
-                    ready,
-                }
-            })
-            .collect();
-
-        print_success(entries);
-    } else {
-        println!("Available modules:\n");
-        for m in &modules {
-            let compatible = is_module_compatible(m, project_config.as_ref());
-            let ready = is_module_ready(m);
-            let compat_marker = if compatible { "✓" } else { "✗" };
-            let ready_marker = if ready { "" } else { " (needs setup)" };
-            let runtime = format!("{:?}", m.runtime.runtime_type).to_lowercase();
-
-            println!("  {} {}{}", compat_marker, m.id, ready_marker);
-            println!("    {} (v{})", m.name, m.version);
-            println!("    Runtime: {}", runtime);
-            if let Some(first_line) = m.description.lines().next() {
-                println!("    {}", first_line);
+    let entries: Vec<ModuleEntry> = modules
+        .iter()
+        .map(|module| {
+            let ready = is_module_ready(module);
+            ModuleEntry {
+                id: module.id.clone(),
+                name: module.name.clone(),
+                version: module.version.clone(),
+                description: module.description.lines().next().unwrap_or("").to_string(),
+                runtime: format!("{:?}", module.runtime.runtime_type).to_lowercase(),
+                compatible: is_module_compatible(module, project_config.as_ref()),
+                ready,
             }
-            println!();
-        }
+        })
+        .collect();
 
-        if project_config.is_some() {
-            println!("✓ = compatible with project, ✗ = not compatible");
-        }
-        println!("\nModules needing setup can be initialized with: homeboy module setup <id>");
-    }
+    Ok((
+        ModuleOutput {
+            command: "module.list".to_string(),
+            project_id: project,
+            module_id: None,
+            modules: Some(entries),
+            runtime_type: None,
+        },
+        0,
+    ))
 }
 
-fn run_module(module_id: &str, project: Option<String>, inputs: Vec<(String, String)>, args: Vec<String>) {
-    let module = match load_module(module_id) {
-        Some(m) => m,
-        None => {
-            print_error("MODULE_NOT_FOUND", &format!(
-                "Module '{}' not found. Use 'homeboy module list' to see available modules.",
-                module_id
-            ));
-            return;
-        }
-    };
+fn run_module(
+    module_id: &str,
+    project: Option<String>,
+    inputs: Vec<(String, String)>,
+    args: Vec<String>,
+) -> CmdResult<ModuleOutput> {
+    let module = load_module(module_id)
+        .ok_or_else(|| homeboy_core::Error::Other(format!("Module '{}' not found", module_id)))?;
 
-    // Convert inputs to HashMap for easier lookup
     let input_values: HashMap<String, String> = inputs.into_iter().collect();
 
-    match module.runtime.runtime_type {
-        RuntimeType::Python => run_python_module(&module, input_values),
-        RuntimeType::Shell => run_shell_module(&module, input_values),
-        RuntimeType::Cli => run_cli_module(&module, project, input_values, args),
-    }
+    let (runtime_type, code) = match module.runtime.runtime_type {
+        RuntimeType::Python => ("python", run_python_module(&module, input_values)?),
+        RuntimeType::Shell => ("shell", run_shell_module(&module, input_values)?),
+        RuntimeType::Cli => ("cli", run_cli_module(&module, project, input_values, args)?),
+    };
+
+    Ok((
+        ModuleOutput {
+            command: "module.run".to_string(),
+            project_id: None,
+            module_id: Some(module_id.to_string()),
+            modules: None,
+            runtime_type: Some(runtime_type.to_string()),
+        },
+        code,
+    ))
 }
 
-fn run_python_module(module: &ModuleManifest, input_values: HashMap<String, String>) {
-    let module_path = module.module_path.as_ref().expect("module_path not set");
+fn run_python_module(
+    module: &ModuleManifest,
+    input_values: HashMap<String, String>,
+) -> homeboy_core::Result<i32> {
+    let module_path = module
+        .module_path
+        .as_ref()
+        .ok_or_else(|| homeboy_core::Error::Other("module_path not set".to_string()))?;
     let venv_path = format!("{}/venv", module_path);
     let venv_python = format!("{}/bin/python3", venv_path);
 
@@ -166,19 +172,20 @@ fn run_python_module(module: &ModuleManifest, input_values: HashMap<String, Stri
     let python_path = if Path::new(&venv_python).exists() {
         &venv_python
     } else if Path::new(SYSTEM_PYTHON_PATH).exists() {
-        eprintln!("Warning: Using system Python. Run 'homeboy module setup {}' for isolated environment.", module.id);
         SYSTEM_PYTHON_PATH
     } else {
-        print_error("PYTHON_NOT_FOUND", "Python not found. Install Python or run module setup.");
-        return;
+        return Err(homeboy_core::Error::Other(
+            "Python not found. Install Python or run module setup.".to_string(),
+        ));
     };
 
     // Build entrypoint path
     let entrypoint = match &module.runtime.entrypoint {
         Some(e) => format!("{}/{}", module_path, e),
         None => {
-            print_error("NO_ENTRYPOINT", "Module has no entrypoint defined");
-            return;
+            return Err(homeboy_core::Error::Other(
+                "Module has no entrypoint defined".to_string(),
+            ));
         }
     };
 
@@ -194,10 +201,9 @@ fn run_python_module(module: &ModuleManifest, input_values: HashMap<String, Stri
     }
 
     // Set environment for Playwright
-    let playwright_path = AppPaths::playwright_browsers().to_string_lossy().to_string();
-
-    eprintln!("$ {} {}", python_path, arguments.join(" "));
-    eprintln!();
+    let playwright_path = AppPaths::playwright_browsers()
+        .to_string_lossy()
+        .to_string();
 
     let status = Command::new(python_path)
         .args(&arguments)
@@ -207,22 +213,26 @@ fn run_python_module(module: &ModuleManifest, input_values: HashMap<String, Stri
         .stderr(Stdio::inherit())
         .status();
 
-    if let Ok(s) = status {
-        if !s.success() {
-            std::process::exit(s.code().unwrap_or(1));
-        }
-    }
+    let status = status.map_err(|e| homeboy_core::Error::Other(e.to_string()))?;
+    Ok(status.code().unwrap_or(1))
 }
 
-fn run_shell_module(module: &ModuleManifest, input_values: HashMap<String, String>) {
-    let module_path = module.module_path.as_ref().expect("module_path not set");
+fn run_shell_module(
+    module: &ModuleManifest,
+    input_values: HashMap<String, String>,
+) -> homeboy_core::Result<i32> {
+    let module_path = module
+        .module_path
+        .as_ref()
+        .ok_or_else(|| homeboy_core::Error::Other("module_path not set".to_string()))?;
 
     // Build entrypoint path
     let entrypoint = match &module.runtime.entrypoint {
         Some(e) => format!("{}/{}", module_path, e),
         None => {
-            print_error("NO_ENTRYPOINT", "Module has no entrypoint defined");
-            return;
+            return Err(homeboy_core::Error::Other(
+                "Module has no entrypoint defined".to_string(),
+            ));
         }
     };
 
@@ -237,9 +247,6 @@ fn run_shell_module(module: &ModuleManifest, input_values: HashMap<String, Strin
         }
     }
 
-    eprintln!("$ /bin/bash {}", arguments.join(" "));
-    eprintln!();
-
     let status = Command::new("/bin/bash")
         .args(&arguments)
         .stdin(Stdio::inherit())
@@ -247,11 +254,8 @@ fn run_shell_module(module: &ModuleManifest, input_values: HashMap<String, Strin
         .stderr(Stdio::inherit())
         .status();
 
-    if let Ok(s) = status {
-        if !s.success() {
-            std::process::exit(s.code().unwrap_or(1));
-        }
-    }
+    let status = status.map_err(|e| homeboy_core::Error::Other(e.to_string()))?;
+    Ok(status.code().unwrap_or(1))
 }
 
 fn run_cli_module(
@@ -259,12 +263,13 @@ fn run_cli_module(
     project: Option<String>,
     input_values: HashMap<String, String>,
     extra_args: Vec<String>,
-) {
+) -> homeboy_core::Result<i32> {
     let command_template = match &module.runtime.args {
         Some(args) if !args.trim().is_empty() => args.as_str(),
         _ => {
-            print_error("NO_COMMAND", "CLI module has no runtime.args command template");
-            return;
+            return Err(homeboy_core::Error::Other(
+                "CLI module has no runtime.args command template".to_string(),
+            ));
         }
     };
 
@@ -275,33 +280,25 @@ fn run_cli_module(
         || template::is_present(command_template, "domain");
 
     let project_config = if requires_project {
-        let project_id = match project.or_else(|| {
-            ConfigManager::load_app_config().ok().and_then(|c| c.active_project_id)
-        }) {
-            Some(id) => id,
-            None => {
-                print_error("NO_PROJECT", "This module requires a project; pass --project <id>");
-                return;
-            }
-        };
+        let project_id = project
+            .or_else(|| {
+                ConfigManager::load_app_config()
+                    .ok()
+                    .and_then(|c| c.active_project_id)
+            })
+            .ok_or_else(|| {
+                homeboy_core::Error::Other(
+                    "This module requires a project; pass --project <id>".to_string(),
+                )
+            })?;
 
-        let project_config = match ConfigManager::load_project(&project_id) {
-            Ok(p) => p,
-            Err(e) => {
-                print_error(e.code(), &e.to_string());
-                return;
-            }
-        };
+        let project_config = ConfigManager::load_project(&project_id)?;
 
         if !project_config.local_environment.is_configured() {
-            print_error(
-                "LOCAL_ENVIRONMENT_NOT_CONFIGURED",
-                &format!(
-                    "Local environment not configured for project '{}'. Configure 'Local Site Path' in Homeboy.app Settings.",
-                    project_id
-                ),
-            );
-            return;
+            return Err(homeboy_core::Error::Other(format!(
+                "Local environment not configured for project '{}'. Configure 'Local Site Path' in Homeboy.app Settings.",
+                project_id
+            )));
         }
 
         Some(project_config)
@@ -337,12 +334,15 @@ fn run_cli_module(
             .local_environment
             .cli_path
             .clone()
-            .unwrap_or_else(|| "wp".to_string());
+            .unwrap_or("wp".to_string());
 
         vec![
             ("projectId", project_config.id.as_str()),
             ("domain", local_domain.as_str()),
-            ("sitePath", project_config.local_environment.site_path.as_str()),
+            (
+                "sitePath",
+                project_config.local_environment.site_path.as_str(),
+            ),
             ("cliPath", cli_path.as_str()),
             ("args", args_str.as_str()),
         ]
@@ -352,9 +352,6 @@ fn run_cli_module(
 
     let command = template::render(command_template, &vars);
 
-    eprintln!("$ {}", command);
-    eprintln!();
-
     let status = Command::new("sh")
         .args(["-c", &command])
         .stdin(Stdio::inherit())
@@ -362,58 +359,50 @@ fn run_cli_module(
         .stderr(Stdio::inherit())
         .status();
 
-    if let Ok(s) = status {
-        if !s.success() {
-            std::process::exit(s.code().unwrap_or(1));
-        }
-    }
+    let status = status.map_err(|e| homeboy_core::Error::Other(e.to_string()))?;
+    Ok(status.code().unwrap_or(1))
 }
 
-fn setup_module(module_id: &str) {
-    let module = match load_module(module_id) {
-        Some(m) => m,
-        None => {
-            print_error("MODULE_NOT_FOUND", &format!("Module '{}' not found", module_id));
-            return;
-        }
-    };
+fn setup_module(module_id: &str) -> CmdResult<ModuleOutput> {
+    let module = load_module(module_id)
+        .ok_or_else(|| homeboy_core::Error::Other(format!("Module '{}' not found", module_id)))?;
 
     if module.runtime.runtime_type != RuntimeType::Python {
-        println!("Module '{}' is a {:?} module and doesn't require setup.", module_id, module.runtime.runtime_type);
-        return;
+        return Ok((
+            ModuleOutput {
+                command: "module.setup".to_string(),
+                project_id: None,
+                module_id: Some(module_id.to_string()),
+                modules: None,
+                runtime_type: Some(format!("{:?}", module.runtime.runtime_type).to_lowercase()),
+            },
+            0,
+        ));
     }
 
-    let module_path = module.module_path.as_ref().expect("module_path not set");
+    let module_path = module
+        .module_path
+        .as_ref()
+        .ok_or_else(|| homeboy_core::Error::Other("module_path not set".to_string()))?;
+
     let venv_path = format!("{}/venv", module_path);
 
-    println!("Setting up module: {}", module.name);
-    println!();
-
-    // Step 1: Create venv
-    println!("Creating virtual environment...");
     let venv_status = Command::new(SYSTEM_PYTHON_PATH)
         .args(["-m", "venv", "--copies", &venv_path])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .status();
+        .status()
+        .map_err(|e| homeboy_core::Error::Other(e.to_string()))?;
 
-    if let Ok(s) = venv_status {
-        if !s.success() {
-            print_error("VENV_FAILED", "Failed to create virtual environment");
-            return;
-        }
-    } else {
-        print_error("VENV_FAILED", "Failed to run Python venv command");
-        return;
+    if !venv_status.success() {
+        return Err(homeboy_core::Error::Other(
+            "Failed to create virtual environment".to_string(),
+        ));
     }
 
-    // Step 2: Install dependencies
-    if let Some(ref deps) = module.runtime.dependencies {
+    if let Some(deps) = module.runtime.dependencies.as_ref() {
         if !deps.is_empty() {
-            println!();
-            println!("Installing dependencies...");
-
             let pip_path = format!("{}/bin/pip", venv_path);
             let mut pip_args = vec!["install".to_string()];
             pip_args.extend(deps.clone());
@@ -423,30 +412,29 @@ fn setup_module(module_id: &str) {
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
-                .status();
+                .status()
+                .map_err(|e| homeboy_core::Error::Other(e.to_string()))?;
 
-            if let Ok(s) = pip_status {
-                if !s.success() {
-                    print_error("PIP_FAILED", "Failed to install dependencies");
-                    return;
-                }
-            } else {
-                print_error("PIP_FAILED", "Failed to run pip command");
-                return;
+            if !pip_status.success() {
+                return Err(homeboy_core::Error::Other(
+                    "Failed to install dependencies".to_string(),
+                ));
             }
         }
     }
 
-    // Step 3: Install Playwright browsers if needed
-    if let Some(ref browsers) = module.runtime.playwright_browsers {
+    if let Some(browsers) = module.runtime.playwright_browsers.as_ref() {
         if !browsers.is_empty() {
-            println!();
-            println!("Installing Playwright browsers...");
-
             let venv_python = format!("{}/bin/python3", venv_path);
-            let playwright_path = AppPaths::playwright_browsers().to_string_lossy().to_string();
+            let playwright_path = AppPaths::playwright_browsers()
+                .to_string_lossy()
+                .to_string();
 
-            let mut pw_args = vec!["-m".to_string(), "playwright".to_string(), "install".to_string()];
+            let mut pw_args = vec![
+                "-m".to_string(),
+                "playwright".to_string(),
+                "install".to_string(),
+            ];
             pw_args.extend(browsers.clone());
 
             let pw_status = Command::new(&venv_python)
@@ -455,22 +443,27 @@ fn setup_module(module_id: &str) {
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
-                .status();
+                .status()
+                .map_err(|e| homeboy_core::Error::Other(e.to_string()))?;
 
-            if let Ok(s) = pw_status {
-                if !s.success() {
-                    print_error("PLAYWRIGHT_FAILED", "Failed to install Playwright browsers");
-                    return;
-                }
-            } else {
-                print_error("PLAYWRIGHT_FAILED", "Failed to run Playwright install command");
-                return;
+            if !pw_status.success() {
+                return Err(homeboy_core::Error::Other(
+                    "Failed to install Playwright browsers".to_string(),
+                ));
             }
         }
     }
 
-    println!();
-    println!("Setup complete! Run with: homeboy module run {}", module_id);
+    Ok((
+        ModuleOutput {
+            command: "module.setup".to_string(),
+            project_id: None,
+            module_id: Some(module_id.to_string()),
+            modules: None,
+            runtime_type: Some("python".to_string()),
+        },
+        0,
+    ))
 }
 
 fn is_module_ready(module: &ModuleManifest) -> bool {
@@ -514,7 +507,8 @@ fn is_module_compatible(module: &ModuleManifest, project: Option<&ProjectConfigu
     }
 
     // For CLI modules, check local environment is configured
-    if module.runtime.runtime_type == RuntimeType::Cli && !project.local_environment.is_configured() {
+    if module.runtime.runtime_type == RuntimeType::Cli && !project.local_environment.is_configured()
+    {
         return false;
     }
 

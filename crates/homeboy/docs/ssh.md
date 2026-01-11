@@ -1,12 +1,10 @@
 # ssh
 
-SSH utilities for managing keys and connections.
+SSH into a project server or execute commands remotely.
 
 ```bash
-homeboy ssh keygen
-homeboy ssh setup
-homeboy ssh test <server>
-homeboy ssh exec <server> -- <command>
+homeboy ssh <project-id>
+homeboy ssh <project-id> <command>
 ```
 
 Use `homeboy help ssh` for the authoritative flag list.

@@ -1,10 +1,14 @@
 # component
 
-Manage deployable components for a project.
+Manage standalone component configurations.
 
 ```bash
-homeboy component list <project>
-homeboy component show <project> <component>
+homeboy component create <id>
+homeboy component show <id>
+homeboy component set <id>
+homeboy component delete <id> --force
+homeboy component list
+homeboy component import <json>
 ```
 
 Use `homeboy help component` for the authoritative flag list.

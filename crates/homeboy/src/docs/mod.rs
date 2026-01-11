@@ -1,61 +1,58 @@
-pub const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/index.md"));
+use std::fs;
+use std::path::{Path, PathBuf};
 
-pub const PROJECTS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/projects.md"));
-pub const PROJECT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/project.md"));
-pub const PROJECT_SUBCOMMANDS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/project-subcommands.md"));
+use homeboy_core::token;
 
-pub const SERVER: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/server.md"));
-pub const SSH: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/ssh.md"));
-pub const WP: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/wp.md"));
-pub const PM2: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/pm2.md"));
-pub const DB: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/db.md"));
-pub const DEPLOY: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/deploy.md"));
-pub const COMPONENT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/component.md"));
-pub const FILE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/file.md"));
-pub const LOGS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/logs.md"));
-pub const PIN: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/pin.md"));
-pub const MODULE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/module.md"));
-pub const GIT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/git.md"));
+fn docs_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("docs")
+}
 
-pub fn resolve(topic: &[String]) -> (&'static str, &'static str) {
+pub fn resolve(topic: &[String]) -> (String, String) {
+    let doc_path = topic_to_doc_path(topic);
+    let label = topic.join(" ");
+
+    let content = fs::read_to_string(&doc_path).unwrap_or_default();
+
+    let topic_label = if topic.is_empty() {
+        "index".to_string()
+    } else if label.is_empty() {
+        "unknown".to_string()
+    } else {
+        label
+    };
+
+    (topic_label, content)
+}
+
+fn topic_to_doc_path(topic: &[String]) -> PathBuf {
     if topic.is_empty() {
-        return ("index", INDEX);
+        return docs_root().join("index.md");
     }
 
-    let normalized: Vec<String> = topic
-        .iter()
-        .map(|t| t.to_lowercase())
-        .collect();
+    let mut segments: Vec<String> = Vec::new();
 
-    if normalized.len() == 1 {
-        if let Some(key) = normalized.first() {
-            return match key.as_str() {
-                "projects" => ("projects", PROJECTS),
-                "project" => ("project", PROJECT),
-                "server" => ("server", SERVER),
-                "ssh" => ("ssh", SSH),
-                "wp" => ("wp", WP),
-                "pm2" => ("pm2", PM2),
-                "db" => ("db", DB),
-                "deploy" => ("deploy", DEPLOY),
-                "component" => ("component", COMPONENT),
-                "file" => ("file", FILE),
-                "logs" => ("logs", LOGS),
-                "pin" => ("pin", PIN),
-                "module" => ("module", MODULE),
-                "git" => ("git", GIT),
-                _ => ("unknown", ""),
-            };
+    for raw in topic {
+        for part in raw.split('/') {
+            let segment = token::normalize_doc_segment(part);
+            if !segment.is_empty() {
+                segments.push(segment);
+            }
         }
     }
 
-    if normalized.len() >= 2 && normalized[0] == "project" {
-        return ("project subcommands", PROJECT_SUBCOMMANDS);
+    if segments.is_empty() {
+        return docs_root().join("index.md");
     }
 
-    ("unknown", "")
+    let mut path = docs_root();
+    for segment in segments {
+        path = path.join(segment);
+    }
+
+    path.set_extension("md");
+    path
 }
 
 pub fn available_topics() -> &'static str {
-    "index, projects, project, project subcommands, server, ssh, wp, pm2, db, deploy, component, file, logs, pin, module, git"
+    "Use path tokens like: `homeboy docs`, `homeboy docs cli server`, `homeboy docs cli/server`, `homeboy docs config app-config`"
 }

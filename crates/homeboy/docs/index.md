@@ -20,14 +20,15 @@ homeboy docs project
 - `wp` - WP-CLI helpers
 - `pm2` - PM2 helpers
 - `db` - Database helpers
+- `build` - Component-scoped builds
 - `deploy` - Deploy components
 - `component` - Component management
 - `file` - Remote file operations
 - `logs` - Log viewing
 - `pin` - Pin frequently used items
 - `module` - Module runner
-- `git` - Git helpers
-- `version` - Manage component versions
+- `git` - Component-scoped git operations
+- `version` - Component-scoped version management
 
 For full CLI help for any command, you can also use:
 

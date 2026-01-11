@@ -1,16 +1,16 @@
+mod app;
+mod component;
 mod paths;
 mod project;
-mod server;
-mod app;
 mod project_type;
-mod component;
+mod server;
 
+pub use app::*;
+pub use component::*;
 pub use paths::AppPaths;
 pub use project::*;
-pub use server::*;
-pub use app::*;
 pub use project_type::*;
-pub use component::*;
+pub use server::*;
 
 use crate::{Error, Result};
 use std::fs;

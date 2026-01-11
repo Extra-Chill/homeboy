@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use crate::Result;
+use std::path::PathBuf;
 
 pub struct AppPaths;
 

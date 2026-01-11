@@ -3,7 +3,10 @@ use clap::{Parser, Subcommand};
 mod commands;
 mod docs;
 
-use commands::{projects, project, ssh, wp, pm2, server, db, file, logs, deploy, component, pin, module, docs as docs_command, git, version, build};
+use commands::{
+    build, component, db, deploy, docs as docs_command, file, git, logs, module, pin, pm2, project,
+    projects, server, ssh, version, wp,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -54,26 +57,319 @@ enum Commands {
     Build(build::BuildArgs),
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Projects(args) => projects::run(args),
-        Commands::Project(args) => project::run(args),
-        Commands::Ssh(args) => ssh::run(args),
-        Commands::Wp(args) => wp::run(args),
-        Commands::Pm2(args) => pm2::run(args),
-        Commands::Server(args) => server::run(args),
-        Commands::Db(args) => db::run(args),
-        Commands::File(args) => file::run(args),
-        Commands::Logs(args) => logs::run(args),
-        Commands::Deploy(args) => deploy::run(args),
-        Commands::Component(args) => component::run(args),
-        Commands::Pin(args) => pin::run(args),
-        Commands::Module(args) => module::run(args),
-        Commands::Docs(args) => docs_command::run(args),
-        Commands::Git(args) => git::run(args),
-        Commands::Version(args) => version::run(args),
-        Commands::Build(args) => build::run(args),
+    let (result, exit_code) = match cli.command {
+        Commands::Projects(args) => {
+            let result = projects::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Project(args) => {
+            let result = project::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Ssh(args) => {
+            let result = ssh::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Wp(args) => {
+            let result = wp::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Pm2(args) => {
+            let result = pm2::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Server(args) => {
+            let result = server::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Db(args) => {
+            let result = db::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::File(args) => {
+            let result = file::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Logs(args) => {
+            let result = logs::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Deploy(args) => {
+            let result = deploy::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Component(args) => {
+            let result = component::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Pin(args) => {
+            let result = pin::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Module(args) => {
+            let result = module::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Docs(args) => {
+            let result = docs_command::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Git(args) => {
+            let result = git::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Version(args) => {
+            let result = version::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Build(args) => {
+            let result = build::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+    };
+
+    homeboy_core::output::print_result(result);
+
+    std::process::ExitCode::from(exit_code_to_u8(exit_code))
+}
+
+fn extract_exit_code<T>(result: &homeboy_core::Result<(T, i32)>) -> i32 {
+    match result {
+        Ok((_, code)) => *code,
+        Err(_) => 1,
+    }
+}
+
+fn exit_code_to_u8(code: i32) -> u8 {
+    if code <= 0 {
+        0
+    } else if code >= 255 {
+        255
+    } else {
+        code as u8
     }
 }

@@ -11,14 +11,11 @@ homeboy version bump <component-id> <bump-type>
 
 ### show
 
-Show the current version of a component.
+Show current version of a component.
 
 ```bash
 homeboy version show <component-id>
 ```
-
-**Options**:
-- `--json` - Output as JSON
 
 ### bump
 
@@ -31,9 +28,6 @@ homeboy version bump <component-id> <bump-type>
 **Arguments**:
 - `component-id` - The ID of the component to bump
 - `bump-type` - One of: `patch`, `minor`, `major`
-
-**Options**:
-- `--json` - Output as JSON
 
 ## Requirements
 

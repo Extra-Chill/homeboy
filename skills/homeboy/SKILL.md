@@ -15,15 +15,15 @@ CLI for project development and deployment. Provides terminal access to project 
 | Command | Purpose |
 |---------|---------|
 | `projects` | List configured projects |
-| `project` | Manage project configurations (create, show, set, delete, switch, subtarget, component) |
+| `project` | Manage project configurations (show, switch) |
 | `component` | Manage standalone component configurations |
-| `server` | Manage server configurations (create, show, set, delete, list) |
+| `server` | Manage server configurations (create, show, set, delete, list, key) |
 | `git` | Component-scoped git operations (status, commit, push, pull, tag) |
 | `version` | Component-scoped version management (show, bump) |
 | `build` | Component-scoped builds |
-| `wp` | Execute WP-CLI commands on remote WordPress servers |
-| `pm2` | Execute PM2 commands on remote Node.js servers |
-| `db` | Database operations - read-only (tables, describe, query) |
+| `wp` | Execute WP-CLI commands on WordPress projects |
+| `pm2` | Execute PM2 commands on Node.js projects |
+| `db` | Database operations (tables, describe, query, delete-row, drop-table, tunnel) |
 | `deploy` | Deploy components to production |
 | `ssh` | Execute SSH commands or open interactive shell |
 | `module` | Manage and run Homeboy modules |
@@ -39,7 +39,7 @@ homeboy help <command>              # Get detailed help for any command
 ## Safety Guidelines
 
 1. **Deploy**: Always run with `--dry-run` first to preview changes
-2. **Database**: All `db` queries are read-only by design. For write operations, use `homeboy wp <project> db query`
+2. **Database**: Most `db` operations are read-only (tables, describe, query). Write operations exist (delete-row, drop-table) but require explicit confirmation.
 3. **SSH**: Exercise caution with destructive commands on production servers
 4. **PM2**: `restart` affects live services - confirm intent before executing
 
@@ -97,7 +97,6 @@ homeboy version bump <component> major      # 0.1.2 → 1.0.0
 ### Build (Component-Scoped)
 ```bash
 homeboy build <component>                   # Run component's build_command
-homeboy build <component> --json            # JSON output for automation
 ```
 
 ### Release Workflow

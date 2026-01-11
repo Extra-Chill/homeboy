@@ -1,9 +1,11 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::process::{Command, Stdio};
+
 use homeboy_core::config::{ConfigManager, ProjectTypeManager};
+use homeboy_core::shell;
 use homeboy_core::ssh::SshClient;
-use homeboy_core::output::{print_success, print_error};
+use homeboy_core::token;
 
 #[derive(Args)]
 pub struct DbArgs {
@@ -20,9 +22,6 @@ enum DbCommand {
         /// Optional subtarget followed by other args
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Show table structure
     Describe {
@@ -31,9 +30,6 @@ enum DbCommand {
         /// Optional subtarget and table name
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Execute SELECT query
     Query {
@@ -42,9 +38,6 @@ enum DbCommand {
         /// Optional subtarget and SQL query
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Delete a row from a table
     DeleteRow {
@@ -56,9 +49,6 @@ enum DbCommand {
         /// Confirm destructive operation
         #[arg(long)]
         confirm: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Drop a database table
     DropTable {
@@ -70,9 +60,6 @@ enum DbCommand {
         /// Confirm destructive operation
         #[arg(long)]
         confirm: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Open SSH tunnel to database
     Tunnel {
@@ -81,96 +68,111 @@ enum DbCommand {
         /// Local port to bind
         #[arg(long)]
         local_port: Option<u16>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
 }
 
-pub fn run(args: DbArgs) {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbOutput {
+    pub command: String,
+    pub project_id: String,
+    pub base_path: Option<String>,
+    pub domain: Option<String>,
+    pub cli_path: Option<String>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub exit_code: i32,
+    pub success: bool,
+    pub tables: Option<Vec<String>>,
+    pub table: Option<String>,
+    pub sql: Option<String>,
+    pub tunnel: Option<DbTunnelInfo>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbTunnelInfo {
+    pub local_port: u16,
+    pub remote_host: String,
+    pub remote_port: u16,
+    pub database: String,
+    pub user: String,
+}
+
+pub fn run(args: DbArgs) -> homeboy_core::Result<(DbOutput, i32)> {
     match args.command {
-        DbCommand::Tables { project_id, args, json } => tables(&project_id, &args, json),
-        DbCommand::Describe { project_id, args, json } => describe(&project_id, &args, json),
-        DbCommand::Query { project_id, args, json } => query(&project_id, &args, json),
-        DbCommand::DeleteRow { project_id, args, confirm, json } => {
-            delete_row(&project_id, &args, confirm, json)
-        }
-        DbCommand::DropTable { project_id, args, confirm, json } => {
-            drop_table(&project_id, &args, confirm, json)
-        }
-        DbCommand::Tunnel { project_id, local_port, json } => tunnel(&project_id, local_port, json),
+        DbCommand::Tables { project_id, args } => tables(&project_id, &args),
+        DbCommand::Describe { project_id, args } => describe(&project_id, &args),
+        DbCommand::Query { project_id, args } => query(&project_id, &args),
+        DbCommand::DeleteRow {
+            project_id,
+            args,
+            confirm,
+        } => delete_row(&project_id, &args, confirm),
+        DbCommand::DropTable {
+            project_id,
+            args,
+            confirm,
+        } => drop_table(&project_id, &args, confirm),
+        DbCommand::Tunnel {
+            project_id,
+            local_port,
+        } => tunnel(&project_id, local_port),
     }
 }
 
 struct DbContext {
     project_id: String,
-    server_id: String,
     client: SshClient,
     base_path: String,
     domain: String,
     cli_path: String,
 }
 
-fn build_context(project_id: &str, args: &[String], json: bool) -> Option<(DbContext, Vec<String>)> {
-    let project = match ConfigManager::load_project(project_id) {
-        Ok(p) => p,
-        Err(e) => {
-            if json {
-                print_error(e.code(), &e.to_string());
-            } else {
-                eprintln!("Error: {}", e);
-            }
-            return None;
-        }
-    };
+fn build_context(
+    project_id: &str,
+    args: &[String],
+) -> homeboy_core::Result<(DbContext, Vec<String>)> {
+    let project = ConfigManager::load_project(project_id)?;
 
-    let server_id = match &project.server_id {
-        Some(id) => id.clone(),
-        None => {
-            let msg = format!("Server not configured for project '{}'", project_id);
-            if json { print_error("SERVER_NOT_CONFIGURED", &msg); }
-            else { eprintln!("Error: {}", msg); }
-            return None;
-        }
-    };
+    let server_id = project.server_id.clone().ok_or_else(|| {
+        homeboy_core::Error::Config(format!(
+            "Server not configured for project '{}'",
+            project_id
+        ))
+    })?;
 
-    let server = match ConfigManager::load_server(&server_id) {
-        Ok(s) => s,
-        Err(e) => {
-            if json { print_error(e.code(), &e.to_string()); }
-            else { eprintln!("Error: {}", e); }
-            return None;
-        }
-    };
+    let server = ConfigManager::load_server(&server_id)?;
 
-    let base_path = match &project.base_path {
-        Some(p) if !p.is_empty() => p.clone(),
-        _ => {
-            let msg = format!("Base path not configured for project '{}'", project_id);
-            if json { print_error("BASE_PATH_NOT_CONFIGURED", &msg); }
-            else { eprintln!("Error: {}", msg); }
-            return None;
-        }
-    };
+    let base_path = project.base_path.clone().ok_or_else(|| {
+        homeboy_core::Error::Config(format!(
+            "Base path not configured for project '{}'",
+            project_id
+        ))
+    })?;
 
-    let client = match SshClient::from_server(&server, &server_id) {
-        Ok(c) => c,
-        Err(e) => {
-            if json { print_error("SSH_ERROR", &e.to_string()); }
-            else { eprintln!("Error: {}", e); }
-            return None;
-        }
-    };
+    if base_path.is_empty() {
+        return Err(homeboy_core::Error::Config(format!(
+            "Base path not configured for project '{}'",
+            project_id
+        )));
+    }
 
-    // Resolve subtarget
+    let client = SshClient::from_server(&server, &server_id)
+        .map_err(|e| homeboy_core::Error::Other(e.to_string()))?;
+
     let mut remaining_args = args.to_vec();
-    let domain = if !project.sub_targets.is_empty() && !args.is_empty() {
-        let potential = args[0].to_lowercase();
-        if let Some(st) = project.sub_targets.iter().find(|t| {
-            t.id.to_lowercase() == potential || t.name.to_lowercase() == potential
-        }) {
-            remaining_args.remove(0);
-            st.domain.clone()
+    let domain = if !project.sub_targets.is_empty() {
+        if let Some(sub_id) = args.first() {
+            if let Some(subtarget) = project.sub_targets.iter().find(|target| {
+                token::identifier_eq(&target.id, sub_id)
+                    || token::identifier_eq(&target.name, sub_id)
+            }) {
+                remaining_args.remove(0);
+                subtarget.domain.clone()
+            } else {
+                project.domain.clone()
+            }
         } else {
             project.domain.clone()
         }
@@ -182,13 +184,12 @@ fn build_context(project_id: &str, args: &[String], json: bool) -> Option<(DbCon
     let cli_path = type_def
         .cli
         .as_ref()
-        .and_then(|c| c.default_cli_path.clone())
+        .and_then(|cli| cli.default_cli_path.clone())
         .unwrap_or_else(|| "wp".to_string());
 
-    Some((
+    Ok((
         DbContext {
             project_id: project_id.to_string(),
-            server_id,
             client,
             base_path,
             domain,
@@ -218,368 +219,319 @@ mod tests {
     }
 }
 
-fn tables(project_id: &str, args: &[String], json: bool) {
-    let (ctx, _) = match build_context(project_id, args, json) {
-        Some(c) => c,
-        None => return,
-    };
+fn tables(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i32)> {
+    let (ctx, _) = build_context(project_id, args)?;
 
-    if json {
-        let command = format!(
-            "cd '{}' && {} db tables --format=csv",
-            ctx.base_path, ctx.cli_path
-        );
-
-        let output = ctx.client.execute(&command);
-        if !output.success {
-            print_error("WP_CLI_ERROR", &output.stderr);
-            std::process::exit(output.exit_code);
-        }
-
-        let tables = parse_wp_db_tables_csv(&output.stdout);
-        print_success(tables);
-        return;
-    }
-
-    let command = format!(
-        "cd '{}' && {} db tables --format=list",
-        ctx.base_path, ctx.cli_path
-    );
+    let command = shell::cd_and(
+        &ctx.base_path,
+        &format!("{} db tables --format=csv", ctx.cli_path),
+    )?;
 
     let output = ctx.client.execute(&command);
-    print!("{}", output.stdout);
-    if !output.stderr.is_empty() {
-        eprint!("{}", output.stderr);
-    }
+    let exit_code = output.exit_code;
+    let success = output.success;
+    let tables = if success {
+        Some(parse_wp_db_tables_csv(&output.stdout))
+    } else {
+        None
+    };
 
-    if !output.success {
-        std::process::exit(output.exit_code);
-    }
+    Ok((
+        DbOutput {
+            command: "db.tables".to_string(),
+            project_id: ctx.project_id,
+            base_path: Some(ctx.base_path),
+            domain: Some(ctx.domain),
+            cli_path: Some(ctx.cli_path),
+            stdout: Some(output.stdout),
+            stderr: Some(output.stderr),
+            exit_code,
+            success,
+            tables,
+            table: None,
+            sql: None,
+            tunnel: None,
+        },
+        exit_code,
+    ))
 }
 
-fn describe(project_id: &str, args: &[String], json: bool) {
-    let (ctx, remaining) = match build_context(project_id, args, json) {
-        Some(c) => c,
-        None => return,
-    };
+fn describe(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i32)> {
+    let (ctx, remaining) = build_context(project_id, args)?;
 
-    let table_name = match remaining.first() {
-        Some(t) => t,
-        None => {
-            if json {
-                print_error("MISSING_TABLE", "Table name required");
-            } else {
-                eprintln!("Error: Table name required");
-                eprintln!("Usage: homeboy db <project> describe <table>");
-            }
-            return;
-        }
-    };
+    let table_name = remaining
+        .first()
+        .ok_or_else(|| homeboy_core::Error::Config("Table name required".to_string()))?;
 
-    let command = format!(
-        "cd '{}' && {} db columns {} --format={}",
-        ctx.base_path,
-        ctx.cli_path,
-        table_name,
-        if json { "json" } else { "table" }
-    );
+    let command = shell::cd_and(
+        &ctx.base_path,
+        &format!("{} db columns {} --format=json", ctx.cli_path, table_name),
+    )?;
 
     let output = ctx.client.execute(&command);
-    print!("{}", output.stdout);
-    if !output.stderr.is_empty() {
-        eprint!("{}", output.stderr);
-    }
+    let exit_code = output.exit_code;
 
-    if !output.success {
-        std::process::exit(output.exit_code);
-    }
+    Ok((
+        DbOutput {
+            command: "db.describe".to_string(),
+            project_id: ctx.project_id,
+            base_path: Some(ctx.base_path),
+            domain: Some(ctx.domain),
+            cli_path: Some(ctx.cli_path),
+            stdout: Some(output.stdout),
+            stderr: Some(output.stderr),
+            exit_code,
+            success: output.success,
+            tables: None,
+            table: Some(table_name.to_string()),
+            sql: None,
+            tunnel: None,
+        },
+        exit_code,
+    ))
 }
 
-fn query(project_id: &str, args: &[String], json: bool) {
-    let (ctx, remaining) = match build_context(project_id, args, json) {
-        Some(c) => c,
-        None => return,
-    };
+fn query(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i32)> {
+    let (ctx, remaining) = build_context(project_id, args)?;
 
     let sql = remaining.join(" ");
-    if sql.is_empty() {
-        if json {
-            print_error("MISSING_QUERY", "SQL query required");
-        } else {
-            eprintln!("Error: SQL query required");
-            eprintln!("Usage: homeboy db <project> query \"SELECT * FROM table\"");
-        }
-        return;
+    if sql.trim().is_empty() {
+        return Err(homeboy_core::Error::Config(
+            "SQL query required".to_string(),
+        ));
     }
 
-    // Validate read-only
-    let forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "REPLACE", "GRANT", "REVOKE"];
+    let forbidden_prefixes = [
+        "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "REPLACE", "GRANT",
+        "REVOKE",
+    ];
+
     let upper_sql = sql.to_uppercase();
-    for keyword in forbidden {
-        if upper_sql.trim_start().starts_with(keyword) {
-            if json {
-                print_error("WRITE_NOT_ALLOWED", "Write operations not allowed via 'db query'. Use 'homeboy wp <project> db query' for writes.");
-            } else {
-                eprintln!("Error: Write operations not allowed via 'db query'.");
-                eprintln!("Use 'homeboy wp <project> db query' for write operations.");
-            }
-            return;
-        }
+    let trimmed_sql = upper_sql.trim_start();
+    if forbidden_prefixes
+        .iter()
+        .any(|keyword| trimmed_sql.starts_with(keyword))
+    {
+        return Err(homeboy_core::Error::Config(
+            "Write operations not allowed via 'db query'. Use 'homeboy wp <project> db query' for writes.".to_string(),
+        ));
     }
 
     let escaped_sql = sql.replace('"', "\\\"");
-    let command = format!(
-        "cd '{}' && {} db query \"{}\" --format={} --url='{}'",
-        ctx.base_path,
-        ctx.cli_path,
-        escaped_sql,
-        if json { "json" } else { "table" },
-        ctx.domain
-    );
+
+    let command = shell::cd_and(
+        &ctx.base_path,
+        &format!(
+            "{} db query \"{}\" --format=json --url='{}'",
+            ctx.cli_path, escaped_sql, ctx.domain
+        ),
+    )?;
 
     let output = ctx.client.execute(&command);
-    print!("{}", output.stdout);
-    if !output.stderr.is_empty() {
-        eprint!("{}", output.stderr);
-    }
+    let exit_code = output.exit_code;
 
-    if !output.success {
-        std::process::exit(output.exit_code);
-    }
+    Ok((
+        DbOutput {
+            command: "db.query".to_string(),
+            project_id: ctx.project_id,
+            base_path: Some(ctx.base_path),
+            domain: Some(ctx.domain),
+            cli_path: Some(ctx.cli_path),
+            stdout: Some(output.stdout),
+            stderr: Some(output.stderr),
+            exit_code,
+            success: output.success,
+            tables: None,
+            table: None,
+            sql: Some(sql),
+            tunnel: None,
+        },
+        exit_code,
+    ))
 }
 
-fn delete_row(project_id: &str, args: &[String], confirm: bool, json: bool) {
+fn delete_row(
+    project_id: &str,
+    args: &[String],
+    confirm: bool,
+) -> homeboy_core::Result<(DbOutput, i32)> {
     if !confirm {
-        if json {
-            print_error("CONFIRM_REQUIRED", "Use --confirm to execute destructive operations");
-        } else {
-            eprintln!("Error: Use --confirm flag to execute destructive operations");
-        }
-        return;
+        return Err(homeboy_core::Error::Config(
+            "Use --confirm to execute destructive operations".to_string(),
+        ));
     }
 
-    let (ctx, remaining) = match build_context(project_id, args, json) {
-        Some(c) => c,
-        None => return,
-    };
+    let (ctx, remaining) = build_context(project_id, args)?;
 
     if remaining.len() < 2 {
-        if json {
-            print_error("MISSING_ARGS", "Table name and row ID required");
-        } else {
-            eprintln!("Error: Table name and row ID required");
-            eprintln!("Usage: homeboy db <project> delete-row <table> <id> --confirm");
-        }
-        return;
+        return Err(homeboy_core::Error::Config(
+            "Table name and row ID required".to_string(),
+        ));
     }
 
     let table_name = &remaining[0];
     let row_id = &remaining[1];
 
-    if row_id.parse::<i64>().is_err() {
-        if json {
-            print_error("INVALID_ID", "Row ID must be numeric");
-        } else {
-            eprintln!("Error: Row ID must be numeric");
-        }
-        return;
-    }
+    row_id
+        .parse::<i64>()
+        .map_err(|_| homeboy_core::Error::Config("Row ID must be numeric".to_string()))?;
 
     let delete_sql = format!("DELETE FROM {} WHERE ID = {} LIMIT 1", table_name, row_id);
-    let command = format!(
-        "cd '{}' && {} db query \"{}\" --url='{}'",
-        ctx.base_path, ctx.cli_path, delete_sql, ctx.domain
-    );
+
+    let command = shell::cd_and(
+        &ctx.base_path,
+        &format!("{} db query \"{}\" --url='{}'", ctx.cli_path, delete_sql, ctx.domain),
+    )?;
 
     let output = ctx.client.execute(&command);
+    let exit_code = output.exit_code;
 
-    if output.success {
-        if json {
-            #[derive(Serialize)]
-            struct DeleteResult {
-                table: String,
-                #[serde(rename = "rowId")]
-                row_id: String,
-            }
-            print_success(DeleteResult {
-                table: table_name.clone(),
-                row_id: row_id.clone(),
-            });
-        } else {
-            println!("Deleted row {} from {}", row_id, table_name);
-        }
-    } else {
-        if json {
-            print_error("DELETE_FAILED", &output.stderr);
-        } else {
-            eprintln!("Error: {}", output.stderr);
-        }
-        std::process::exit(output.exit_code);
-    }
+    Ok((
+        DbOutput {
+            command: "db.deleteRow".to_string(),
+            project_id: ctx.project_id,
+            base_path: Some(ctx.base_path),
+            domain: Some(ctx.domain),
+            cli_path: Some(ctx.cli_path),
+            stdout: Some(output.stdout),
+            stderr: Some(output.stderr),
+            exit_code,
+            success: output.success,
+            tables: None,
+            table: Some(table_name.to_string()),
+            sql: Some(delete_sql),
+            tunnel: None,
+        },
+        exit_code,
+    ))
 }
 
-fn drop_table(project_id: &str, args: &[String], confirm: bool, json: bool) {
+fn drop_table(
+    project_id: &str,
+    args: &[String],
+    confirm: bool,
+) -> homeboy_core::Result<(DbOutput, i32)> {
     if !confirm {
-        if json {
-            print_error("CONFIRM_REQUIRED", "Use --confirm to execute destructive operations");
-        } else {
-            eprintln!("Error: Use --confirm flag to execute destructive operations");
-        }
-        return;
+        return Err(homeboy_core::Error::Config(
+            "Use --confirm to execute destructive operations".to_string(),
+        ));
     }
 
-    let (ctx, remaining) = match build_context(project_id, args, json) {
-        Some(c) => c,
-        None => return,
-    };
+    let (ctx, remaining) = build_context(project_id, args)?;
 
-    let table_name = match remaining.first() {
-        Some(t) => t,
-        None => {
-            if json {
-                print_error("MISSING_TABLE", "Table name required");
-            } else {
-                eprintln!("Error: Table name required");
-                eprintln!("Usage: homeboy db <project> drop-table <table> --confirm");
-            }
-            return;
-        }
-    };
+    let table_name = remaining
+        .first()
+        .ok_or_else(|| homeboy_core::Error::Config("Table name required".to_string()))?;
 
     let drop_sql = format!("DROP TABLE {}", table_name);
-    let command = format!(
-        "cd '{}' && {} db query \"{}\" --url='{}'",
-        ctx.base_path, ctx.cli_path, drop_sql, ctx.domain
-    );
+
+    let command = shell::cd_and(
+        &ctx.base_path,
+        &format!("{} db query \"{}\" --url='{}'", ctx.cli_path, drop_sql, ctx.domain),
+    )?;
 
     let output = ctx.client.execute(&command);
+    let exit_code = output.exit_code;
 
-    if output.success {
-        if json {
-            #[derive(Serialize)]
-            struct DropResult {
-                table: String,
-            }
-            print_success(DropResult {
-                table: table_name.clone(),
-            });
-        } else {
-            println!("Dropped table: {}", table_name);
-        }
-    } else {
-        if json {
-            print_error("DROP_FAILED", &output.stderr);
-        } else {
-            eprintln!("Error: {}", output.stderr);
-        }
-        std::process::exit(output.exit_code);
-    }
+    Ok((
+        DbOutput {
+            command: "db.dropTable".to_string(),
+            project_id: ctx.project_id,
+            base_path: Some(ctx.base_path),
+            domain: Some(ctx.domain),
+            cli_path: Some(ctx.cli_path),
+            stdout: Some(output.stdout),
+            stderr: Some(output.stderr),
+            exit_code,
+            success: output.success,
+            tables: None,
+            table: Some(table_name.to_string()),
+            sql: Some(drop_sql),
+            tunnel: None,
+        },
+        exit_code,
+    ))
 }
 
-fn tunnel(project_id: &str, local_port: Option<u16>, json: bool) {
-    let project = match ConfigManager::load_project(project_id) {
-        Ok(p) => p,
-        Err(e) => {
-            if json { print_error(e.code(), &e.to_string()); }
-            else { eprintln!("Error: {}", e); }
-            return;
-        }
-    };
+fn tunnel(project_id: &str, local_port: Option<u16>) -> homeboy_core::Result<(DbOutput, i32)> {
+    let project = ConfigManager::load_project(project_id)?;
 
-    let server_id = match &project.server_id {
-        Some(id) => id,
-        None => {
-            let msg = format!("Server not configured for project '{}'", project_id);
-            if json { print_error("SERVER_NOT_CONFIGURED", &msg); }
-            else { eprintln!("Error: {}", msg); }
-            return;
-        }
-    };
+    let server_id = project.server_id.clone().ok_or_else(|| {
+        homeboy_core::Error::Config(format!(
+            "Server not configured for project '{}'",
+            project_id
+        ))
+    })?;
 
-    let server = match ConfigManager::load_server(server_id) {
-        Ok(s) => s,
-        Err(e) => {
-            if json { print_error(e.code(), &e.to_string()); }
-            else { eprintln!("Error: {}", e); }
-            return;
-        }
-    };
+    let server = ConfigManager::load_server(&server_id)?;
 
-    let client = match homeboy_core::ssh::SshClient::from_server(&server, server_id) {
-        Ok(c) => c,
-        Err(e) => {
-            if json { print_error("SSH_ERROR", &e.to_string()); }
-            else { eprintln!("Error: {}", e); }
-            return;
-        }
-    };
+    let client = homeboy_core::ssh::SshClient::from_server(&server, &server_id)
+        .map_err(|e| homeboy_core::Error::Other(e.to_string()))?;
 
     let remote_host = if project.database.host.is_empty() {
-        "127.0.0.1"
+        "127.0.0.1".to_string()
     } else {
-        &project.database.host
+        project.database.host.clone()
     };
+
     let remote_port = project.database.port;
     let bind_port = local_port.unwrap_or(33306);
 
-    if json {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct TunnelInfo {
-            local_port: u16,
-            remote_host: String,
-            remote_port: u16,
-            database: String,
-            user: String,
-        }
-        print_success(TunnelInfo {
-            local_port: bind_port,
-            remote_host: remote_host.to_string(),
-            remote_port,
-            database: project.database.name.clone(),
-            user: project.database.user.clone(),
-        });
-    } else {
-        println!("Opening SSH tunnel to {}...", project.database.name);
-        println!("Local:  127.0.0.1:{}", bind_port);
-        println!("Remote: {}:{}", remote_host, remote_port);
-        println!();
-        println!(
-            "Connect with: mysql -h 127.0.0.1 -P {} -u {} -p {}",
-            bind_port, project.database.user, project.database.name
-        );
-        println!();
-        println!("Press Ctrl+C to close the tunnel.");
-    }
+    let tunnel_info = DbTunnelInfo {
+        local_port: bind_port,
+        remote_host: remote_host.clone(),
+        remote_port,
+        database: project.database.name.clone(),
+        user: project.database.user.clone(),
+    };
 
-    let mut args = Vec::new();
+    let mut ssh_args = Vec::new();
 
     if let Some(identity_file) = &client.identity_file {
-        args.push("-i".to_string());
-        args.push(identity_file.clone());
+        ssh_args.push("-i".to_string());
+        ssh_args.push(identity_file.clone());
     }
 
     if server.port != 22 {
-        args.push("-p".to_string());
-        args.push(server.port.to_string());
+        ssh_args.push("-p".to_string());
+        ssh_args.push(server.port.to_string());
     }
 
-    args.push("-N".to_string());
-    args.push("-L".to_string());
-    args.push(format!("{}:{}:{}", bind_port, remote_host, remote_port));
-    args.push(format!("{}@{}", server.user, server.host));
+    ssh_args.push("-N".to_string());
+    ssh_args.push("-L".to_string());
+    ssh_args.push(format!("{}:{}:{}", bind_port, remote_host, remote_port));
+    ssh_args.push(format!("{}@{}", server.user, server.host));
 
     let status = Command::new("ssh")
-        .args(&args)
+        .args(&ssh_args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status();
 
-    if let Ok(s) = status {
-        let code = s.code().unwrap_or(0);
-        if code != 0 && code != 130 {
-            std::process::exit(code);
-        }
-    }
+    let exit_code = match status {
+        Ok(s) => s.code().unwrap_or(0),
+        Err(e) => return Err(homeboy_core::Error::Other(e.to_string())),
+    };
+
+    let success = exit_code == 0 || exit_code == 130;
+
+    Ok((
+        DbOutput {
+            command: "db.tunnel".to_string(),
+            project_id: project_id.to_string(),
+            base_path: project.base_path.clone(),
+            domain: Some(project.domain.clone()),
+            cli_path: None,
+            stdout: None,
+            stderr: None,
+            exit_code,
+            success,
+            tables: None,
+            table: None,
+            sql: None,
+            tunnel: Some(tunnel_info),
+        },
+        exit_code,
+    ))
 }

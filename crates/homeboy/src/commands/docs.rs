@@ -1,8 +1,9 @@
 use clap::Args;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use serde::Serialize;
 
 use crate::docs;
+
+use super::CmdResult;
 
 #[derive(Args)]
 pub struct DocsArgs {
@@ -11,53 +12,32 @@ pub struct DocsArgs {
     topic: Vec<String>,
 }
 
-pub fn run(args: DocsArgs) {
+#[derive(Serialize)]
+pub struct DocsOutput {
+    pub topic: String,
+    pub topic_label: String,
+    pub content: String,
+    pub available_topics: String,
+}
+
+pub fn run(args: DocsArgs) -> CmdResult<DocsOutput> {
     let (topic_label, content) = docs::resolve(&args.topic);
 
     if content.is_empty() {
-        let search_topic = args.topic.join(" ");
-        eprintln!("No documentation found for '{}'.", search_topic);
-        eprintln!("Available topics: {}", docs::available_topics());
-        return;
+        return Err(homeboy_core::Error::Other(format!(
+            "No documentation found for '{}' (available: {})",
+            args.topic.join(" "),
+            docs::available_topics()
+        )));
     }
 
-    if args.topic.is_empty() {
-        display_with_pager(content);
-        return;
-    }
-
-    if topic_label == "index" {
-        display_with_pager(content);
-        return;
-    }
-
-    println!("{}", content);
+    Ok((
+        DocsOutput {
+            topic: args.topic.join(" "),
+            topic_label,
+            content,
+            available_topics: docs::available_topics().to_string(),
+        },
+        0,
+    ))
 }
-
-fn display_with_pager(content: &str) {
-    // Check if stdout is a terminal
-    if !atty::is(atty::Stream::Stdout) {
-        println!("{}", content);
-        return;
-    }
-
-    // Try to use less pager
-    let less = Command::new("less")
-        .arg("-R")
-        .stdin(Stdio::piped())
-        .spawn();
-
-    match less {
-        Ok(mut child) => {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(content.as_bytes());
-            }
-            let _ = child.wait();
-        }
-        Err(_) => {
-            // Fallback to plain output
-            println!("{}", content);
-        }
-    }
-}
-

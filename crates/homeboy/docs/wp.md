@@ -1,10 +1,12 @@
 # wp
 
-Run WP-CLI commands against a configured project/server.
+Run WP-CLI commands on WordPress projects.
 
 ```bash
-homeboy wp <project> <server> -- <wp-cli args...>
-homeboy wp <project> <server> --url <site-url> -- <wp-cli args...>
+homeboy wp <project-id> [args...]
+homeboy wp <project-id> --local [args...]
 ```
+
+The first argument after `<project-id>` may be a subtarget for multisite installations.
 
 Use `homeboy help wp` for the authoritative flag list.

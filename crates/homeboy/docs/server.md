@@ -1,13 +1,14 @@
 # server
 
-Manage configured servers.
+Manage SSH server configurations.
 
 ```bash
 homeboy server list
 homeboy server show <id>
-homeboy server add <id>
-homeboy server set <id> [options]
-homeboy server remove <id> --force
+homeboy server create <id>
+homeboy server set <id>
+homeboy server delete <id> --force
+homeboy server key <subcommand>
 ```
 
 Use `homeboy help server` for the authoritative flag list.

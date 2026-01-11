@@ -1,92 +1,58 @@
 use clap::Args;
 use serde::Serialize;
 use std::process::Command;
+
 use homeboy_core::config::ConfigManager;
-use homeboy_core::output::{print_success, print_error};
+
+use crate::commands::CmdResult;
 
 #[derive(Args)]
 pub struct BuildArgs {
     /// Component ID
     pub component_id: String,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
-pub fn run(args: BuildArgs) {
-    let component = match ConfigManager::load_component(&args.component_id) {
-        Ok(c) => c,
-        Err(e) => {
-            if args.json { print_error(e.code(), &e.to_string()); }
-            else { eprintln!("Error: {}", e); }
-            return;
-        }
-    };
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildOutput {
+    pub command: String,
+    pub component_id: String,
+    pub build_command: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+}
 
-    let build_cmd = match &component.build_command {
-        Some(cmd) => cmd,
-        None => {
-            let msg = format!("Component '{}' has no build_command configured", args.component_id);
-            if args.json { print_error("NO_BUILD_COMMAND", &msg); }
-            else { eprintln!("Error: {}", msg); }
-            return;
-        }
-    };
+pub fn run(args: BuildArgs) -> CmdResult<BuildOutput> {
+    let component = ConfigManager::load_component(&args.component_id)?;
 
-    if !args.json {
-        println!("Building {}...", component.name);
-    }
+    let build_cmd = component.build_command.ok_or_else(|| {
+        homeboy_core::Error::Other(format!(
+            "Component '{}' has no build_command configured",
+            args.component_id
+        ))
+    })?;
 
-    let output = match Command::new("sh")
-        .args(["-c", build_cmd])
+    let output = Command::new("sh")
+        .args(["-c", &build_cmd])
         .current_dir(&component.local_path)
         .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            if args.json { print_error("BUILD_ERROR", &e.to_string()); }
-            else { eprintln!("Error: {}", e); }
-            return;
-        }
-    };
+        .map_err(|e| homeboy_core::Error::Other(e.to_string()))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let code = output.status.code().unwrap_or(1);
+    let success = output.status.success();
 
-    if args.json {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct BuildResult {
-            component_id: String,
-            success: bool,
-            build_command: String,
-            stdout: String,
-            stderr: String,
-        }
-
-        if output.status.success() {
-            print_success(BuildResult {
-                component_id: args.component_id,
-                success: true,
-                build_command: build_cmd.to_string(),
-                stdout,
-                stderr,
-            });
-        } else {
-            print_error("BUILD_FAILED", &stderr);
-        }
-    } else {
-        if !stdout.is_empty() {
-            print!("{}", stdout);
-        }
-        if !stderr.is_empty() {
-            eprint!("{}", stderr);
-        }
-
-        if output.status.success() {
-            println!("Build complete.");
-        } else {
-            eprintln!("Build failed.");
-        }
-    }
+    Ok((
+        BuildOutput {
+            command: "build".to_string(),
+            component_id: args.component_id,
+            build_command: build_cmd,
+            stdout,
+            stderr,
+            success,
+        },
+        code,
+    ))
 }

@@ -20,9 +20,6 @@ Show git status for a component.
 homeboy git status <component-id>
 ```
 
-**Options**:
-- `--json` - Output as JSON
-
 ### commit
 
 Stage all changes and commit.
@@ -30,9 +27,6 @@ Stage all changes and commit.
 ```bash
 homeboy git commit <component-id> "Commit message"
 ```
-
-**Options**:
-- `--json` - Output as JSON
 
 ### push
 
@@ -43,9 +37,6 @@ homeboy git push <component-id>
 homeboy git push <component-id> --tags
 ```
 
-**Options**:
-- `--json` - Output as JSON
-
 ### pull
 
 Pull remote changes.
@@ -53,9 +44,6 @@ Pull remote changes.
 ```bash
 homeboy git pull <component-id>
 ```
-
-**Options**:
-- `--json` - Output as JSON
 
 ### tag
 
@@ -65,6 +53,3 @@ Create a git tag for a component.
 homeboy git tag <component-id> v1.0.0
 homeboy git tag <component-id> v1.0.0 --message "Release v1.0.0"
 ```
-
-**Options**:
-- `--json` - Output as JSON

@@ -1,6 +1,6 @@
 # project
 
-Project configuration is shared between Homeboy CLI and Homeboy Desktop.
+Manage project configuration. Configuration is shared between Homeboy CLI and Homeboy Desktop.
 
 ## What a project is
 
@@ -14,8 +14,7 @@ A project represents a remote (and optionally local) environment with:
 
 ```bash
 homeboy projects
-homeboy project show <id>
-homeboy project set <id> --domain example.com
+homeboy project show [id]
 homeboy project switch <id>
 ```
 

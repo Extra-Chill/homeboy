@@ -1,6 +1,6 @@
+use crate::config::AppPaths;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use crate::config::AppPaths;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,7 +96,8 @@ impl ProjectTypeDefinition {
                 default_cli_path: Some("pm2".to_string()),
             }),
             discovery: Some(DiscoveryConfig {
-                find_command: "find /home -name 'package.json' -type f 2>/dev/null | head -20".to_string(),
+                find_command: "find /home -name 'package.json' -type f 2>/dev/null | head -20"
+                    .to_string(),
                 base_path_transform: "dirname".to_string(),
                 display_name_command: None,
             }),
@@ -185,12 +186,10 @@ pub struct DiscoveryConfig {
 impl DiscoveryConfig {
     pub fn transform_to_base_path(&self, path: &str) -> String {
         match self.base_path_transform.as_str() {
-            "dirname" => {
-                std::path::Path::new(path)
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.to_string())
-            }
+            "dirname" => std::path::Path::new(path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string()),
             _ => path.to_string(),
         }
     }

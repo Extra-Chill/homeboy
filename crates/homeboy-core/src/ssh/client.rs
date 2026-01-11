@@ -1,6 +1,6 @@
-use std::process::{Command, Stdio};
 use crate::config::ServerConfig;
 use crate::Result;
+use std::process::{Command, Stdio};
 
 pub struct SshClient {
     pub host: String,
@@ -108,9 +108,7 @@ impl SshClient {
 }
 
 pub fn execute_local_command(command: &str) -> CommandOutput {
-    let output = Command::new("/bin/bash")
-        .args(["-c", command])
-        .output();
+    let output = Command::new("/bin/bash").args(["-c", command]).output();
 
     match output {
         Ok(out) => CommandOutput {

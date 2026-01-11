@@ -12,7 +12,6 @@ homeboy deploy <project-id> [component-ids...] [flags]
 - `--outdated` - Only deploy components where the local version is newer than the remote version.
 - `--build` - Run the component's `buildCommand` before deploying.
 - `--dry-run` - Show what would be deployed without executing the deployment.
-- `--json` - Output result as JSON.
 
 ## Requirements
 

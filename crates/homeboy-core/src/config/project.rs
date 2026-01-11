@@ -55,7 +55,10 @@ impl ProjectConfiguration {
     }
 
     pub fn default_sub_target(&self) -> Option<&SubTarget> {
-        self.sub_targets.iter().find(|t| t.is_default).or_else(|| self.sub_targets.first())
+        self.sub_targets
+            .iter()
+            .find(|t| t.is_default)
+            .or_else(|| self.sub_targets.first())
     }
 
     pub fn find_sub_target(&self, id: &str) -> Option<&SubTarget> {
@@ -81,9 +84,9 @@ pub struct PinnedRemoteFile {
 
 impl PinnedRemoteFile {
     pub fn display_name(&self) -> &str {
-        self.label.as_deref().unwrap_or_else(|| {
-            self.path.rsplit('/').next().unwrap_or(&self.path)
-        })
+        self.label
+            .as_deref()
+            .unwrap_or_else(|| self.path.rsplit('/').next().unwrap_or(&self.path))
     }
 }
 
@@ -111,9 +114,9 @@ fn default_tail_lines() -> u32 {
 
 impl PinnedRemoteLog {
     pub fn display_name(&self) -> &str {
-        self.label.as_deref().unwrap_or_else(|| {
-            self.path.rsplit('/').next().unwrap_or(&self.path)
-        })
+        self.label
+            .as_deref()
+            .unwrap_or_else(|| self.path.rsplit('/').next().unwrap_or(&self.path))
     }
 }
 

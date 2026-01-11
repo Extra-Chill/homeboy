@@ -1,7 +1,9 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use homeboy_core::config::{ConfigManager, ComponentConfiguration};
-use homeboy_core::output::{print_success, print_error};
+
+use homeboy_core::config::{ComponentConfiguration, ConfigManager};
+
+use super::CmdResult;
 
 #[derive(Args)]
 pub struct ComponentArgs {
@@ -48,7 +50,7 @@ enum ComponentCommand {
         #[arg(long)]
         skip_existing: bool,
     },
-    /// Display component configuration as JSON
+    /// Display component configuration
     Show {
         /// Component ID
         id: String,
@@ -94,14 +96,24 @@ enum ComponentCommand {
         force: bool,
     },
     /// List all available components
-    List {
-        /// Output as JSON array
-        #[arg(long)]
-        json: bool,
-    },
+    List,
 }
 
-pub fn run(args: ComponentArgs) {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentOutput {
+    pub action: String,
+    pub component_id: Option<String>,
+    pub success: bool,
+    pub updated_fields: Vec<String>,
+    pub created: Vec<String>,
+    pub skipped: Vec<String>,
+    pub errors: Vec<String>,
+    pub component: Option<ComponentConfiguration>,
+    pub components: Vec<ComponentConfiguration>,
+}
+
+pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
     match args.command {
         ComponentCommand::Create {
             id,
@@ -124,7 +136,10 @@ pub fn run(args: ComponentArgs) {
             build_command,
             is_network,
         ),
-        ComponentCommand::Import { json, skip_existing } => import(&json, skip_existing),
+        ComponentCommand::Import {
+            json,
+            skip_existing,
+        } => import(&json, skip_existing),
         ComponentCommand::Show { id } => show(&id),
         ComponentCommand::Set {
             id,
@@ -150,7 +165,7 @@ pub fn run(args: ComponentArgs) {
             not_network,
         ),
         ComponentCommand::Delete { id, force } => delete(&id, force),
-        ComponentCommand::List { json } => list(json),
+        ComponentCommand::List => list(),
     }
 }
 
@@ -164,10 +179,12 @@ fn create(
     version_pattern: Option<String>,
     build_command: Option<String>,
     is_network: bool,
-) {
+) -> CmdResult<ComponentOutput> {
     if ConfigManager::load_component(id).is_ok() {
-        print_error("COMPONENT_EXISTS", &format!("Component '{}' already exists", id));
-        return;
+        return Err(homeboy_core::Error::Other(format!(
+            "Component '{}' already exists",
+            id
+        )));
     }
 
     let expanded_path = shellexpand::tilde(local_path).to_string();
@@ -175,7 +192,7 @@ fn create(
     let mut component = ComponentConfiguration::new(
         id.to_string(),
         name.to_string(),
-        expanded_path.clone(),
+        expanded_path,
         remote_path.to_string(),
         build_artifact.to_string(),
     );
@@ -184,101 +201,93 @@ fn create(
     component.build_command = build_command;
     component.is_network = if is_network { Some(true) } else { None };
 
-    if let Err(e) = ConfigManager::save_component(&component) {
-        print_error(e.code(), &e.to_string());
-        return;
-    }
+    ConfigManager::save_component(&component)?;
 
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct CreateResult {
-        id: String,
-        name: String,
-        local_path: String,
-        remote_path: String,
-        build_artifact: String,
-    }
-
-    print_success(CreateResult {
-        id: id.to_string(),
-        name: name.to_string(),
-        local_path: expanded_path,
-        remote_path: remote_path.to_string(),
-        build_artifact: build_artifact.to_string(),
-    });
+    Ok((
+        ComponentOutput {
+            action: "create".to_string(),
+            component_id: Some(id.to_string()),
+            success: true,
+            updated_fields: vec![],
+            created: vec![],
+            skipped: vec![],
+            errors: vec![],
+            component: Some(component),
+            components: vec![],
+        },
+        0,
+    ))
 }
 
-fn import(json_str: &str, skip_existing: bool) {
-    let components: Vec<ComponentConfiguration> = match serde_json::from_str(json_str) {
-        Ok(c) => c,
-        Err(e) => {
-            print_error("JSON_PARSE_ERROR", &format!("Failed to parse JSON - {}", e));
-            return;
-        }
-    };
+fn import(json_str: &str, skip_existing: bool) -> CmdResult<ComponentOutput> {
+    let mut components: Vec<ComponentConfiguration> = serde_json::from_str(json_str)
+        .map_err(|e| homeboy_core::Error::Other(format!("Failed to parse JSON - {}", e)))?;
 
     if components.is_empty() {
-        print_error("NO_COMPONENTS", "No components in JSON array");
-        return;
+        return Err(homeboy_core::Error::Other(
+            "No components in JSON array".to_string(),
+        ));
     }
 
-    let mut created: Vec<String> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
+    let mut created: Vec<String> = vec![];
+    let mut skipped: Vec<String> = vec![];
+    let mut errors: Vec<String> = vec![];
 
-    for mut component in components {
+    for component in components.iter_mut() {
         component.local_path = shellexpand::tilde(&component.local_path).to_string();
 
         if ConfigManager::load_component(&component.id).is_ok() {
             if skip_existing {
                 skipped.push(component.id.clone());
                 continue;
-            } else {
-                errors.push(format!("{}: already exists", component.id));
-                continue;
             }
+
+            errors.push(format!("{}: already exists", component.id));
+            continue;
         }
 
-        if let Err(e) = ConfigManager::save_component(&component) {
+        if let Err(e) = ConfigManager::save_component(component) {
             errors.push(format!("{}: {}", component.id, e));
         } else {
             created.push(component.id.clone());
         }
     }
 
-    #[derive(Serialize)]
-    struct ImportResult {
-        success: bool,
-        created: Vec<String>,
-        skipped: Vec<String>,
-        errors: Vec<String>,
-    }
+    let exit_code = if errors.is_empty() { 0 } else { 1 };
 
-    let result = ImportResult {
-        success: errors.is_empty(),
-        created,
-        skipped,
-        errors,
-    };
-
-    if result.success {
-        print_success(result);
-    } else {
-        let json = serde_json::to_string_pretty(&result).unwrap();
-        println!("{}", json);
-    }
+    Ok((
+        ComponentOutput {
+            action: "import".to_string(),
+            component_id: None,
+            success: errors.is_empty(),
+            updated_fields: vec![],
+            created,
+            skipped,
+            errors,
+            component: None,
+            components: vec![],
+        },
+        exit_code,
+    ))
 }
 
-fn show(id: &str) {
-    let component = match ConfigManager::load_component(id) {
-        Ok(c) => c,
-        Err(e) => {
-            print_error(e.code(), &e.to_string());
-            return;
-        }
-    };
+fn show(id: &str) -> CmdResult<ComponentOutput> {
+    let component = ConfigManager::load_component(id)?;
 
-    print_success(component);
+    Ok((
+        ComponentOutput {
+            action: "show".to_string(),
+            component_id: Some(id.to_string()),
+            success: true,
+            updated_fields: vec![],
+            created: vec![],
+            skipped: vec![],
+            errors: vec![],
+            component: Some(component),
+            components: vec![],
+        },
+        0,
+    ))
 }
 
 fn set(
@@ -292,80 +301,86 @@ fn set(
     build_command: Option<String>,
     is_network: bool,
     not_network: bool,
-) {
-    let mut component = match ConfigManager::load_component(id) {
-        Ok(c) => c,
-        Err(e) => {
-            print_error(e.code(), &e.to_string());
-            return;
-        }
-    };
+) -> CmdResult<ComponentOutput> {
+    let mut component = ConfigManager::load_component(id)?;
 
-    let mut updated: Vec<String> = Vec::new();
+    let mut updated_fields: Vec<String> = vec![];
 
-    if let Some(v) = name {
-        component.name = v;
-        updated.push("name".to_string());
+    if let Some(value) = name {
+        component.name = value;
+        updated_fields.push("name".to_string());
     }
-    if let Some(v) = local_path {
-        component.local_path = shellexpand::tilde(&v).to_string();
-        updated.push("localPath".to_string());
+
+    if let Some(value) = local_path {
+        component.local_path = shellexpand::tilde(&value).to_string();
+        updated_fields.push("localPath".to_string());
     }
-    if let Some(v) = remote_path {
-        component.remote_path = v;
-        updated.push("remotePath".to_string());
+
+    if let Some(value) = remote_path {
+        component.remote_path = value;
+        updated_fields.push("remotePath".to_string());
     }
-    if let Some(v) = build_artifact {
-        component.build_artifact = v;
-        updated.push("buildArtifact".to_string());
+
+    if let Some(value) = build_artifact {
+        component.build_artifact = value;
+        updated_fields.push("buildArtifact".to_string());
     }
-    if let Some(v) = version_file {
-        component.version_file = Some(v);
-        updated.push("versionFile".to_string());
+
+    if let Some(value) = version_file {
+        component.version_file = Some(value);
+        updated_fields.push("versionFile".to_string());
     }
-    if let Some(v) = version_pattern {
-        component.version_pattern = Some(v);
-        updated.push("versionPattern".to_string());
+
+    if let Some(value) = version_pattern {
+        component.version_pattern = Some(value);
+        updated_fields.push("versionPattern".to_string());
     }
-    if let Some(v) = build_command {
-        component.build_command = Some(v);
-        updated.push("buildCommand".to_string());
+
+    if let Some(value) = build_command {
+        component.build_command = Some(value);
+        updated_fields.push("buildCommand".to_string());
     }
+
     if is_network {
         component.is_network = Some(true);
-        updated.push("isNetwork".to_string());
+        updated_fields.push("isNetwork".to_string());
     }
+
     if not_network {
         component.is_network = None;
-        updated.push("isNetwork".to_string());
+        updated_fields.push("isNetwork".to_string());
     }
 
-    if updated.is_empty() {
-        print_error("NO_FIELDS", "No fields specified to update");
-        return;
+    if updated_fields.is_empty() {
+        return Err(homeboy_core::Error::Other(
+            "No fields specified to update".to_string(),
+        ));
     }
 
-    if let Err(e) = ConfigManager::save_component(&component) {
-        print_error(e.code(), &e.to_string());
-        return;
-    }
+    ConfigManager::save_component(&component)?;
 
-    #[derive(Serialize)]
-    struct SetResult {
-        id: String,
-        updated: Vec<String>,
-    }
-
-    print_success(SetResult {
-        id: id.to_string(),
-        updated,
-    });
+    Ok((
+        ComponentOutput {
+            action: "set".to_string(),
+            component_id: Some(id.to_string()),
+            success: true,
+            updated_fields,
+            created: vec![],
+            skipped: vec![],
+            errors: vec![],
+            component: Some(component),
+            components: vec![],
+        },
+        0,
+    ))
 }
 
-fn delete(id: &str, force: bool) {
+fn delete(id: &str, force: bool) -> CmdResult<ComponentOutput> {
     if ConfigManager::load_component(id).is_err() {
-        print_error("COMPONENT_NOT_FOUND", &format!("Component '{}' not found", id));
-        return;
+        return Err(homeboy_core::Error::Other(format!(
+            "Component '{}' not found",
+            id
+        )));
     }
 
     if !force {
@@ -377,87 +392,47 @@ fn delete(id: &str, force: bool) {
             .collect();
 
         if !using.is_empty() {
-            print_error(
-                "COMPONENT_IN_USE",
-                &format!(
-                    "Component '{}' is used by projects: {}. Use --force to delete anyway.",
-                    id,
-                    using.join(", ")
-                ),
-            );
-            return;
+            return Err(homeboy_core::Error::Other(format!(
+                "Component '{}' is used by projects: {}. Use --force to delete anyway.",
+                id,
+                using.join(", ")
+            )));
         }
     }
 
-    if let Err(e) = ConfigManager::delete_component(id) {
-        print_error(e.code(), &e.to_string());
-        return;
-    }
+    ConfigManager::delete_component(id)?;
 
-    #[derive(Serialize)]
-    struct DeleteResult {
-        deleted: String,
-    }
-
-    print_success(DeleteResult {
-        deleted: id.to_string(),
-    });
+    Ok((
+        ComponentOutput {
+            action: "delete".to_string(),
+            component_id: Some(id.to_string()),
+            success: true,
+            updated_fields: vec![],
+            created: vec![],
+            skipped: vec![],
+            errors: vec![],
+            component: None,
+            components: vec![],
+        },
+        0,
+    ))
 }
 
-fn list(json: bool) {
-    let components = match ConfigManager::list_components() {
-        Ok(c) => c,
-        Err(e) => {
-            if json {
-                print_error(e.code(), &e.to_string());
-            } else {
-                eprintln!("Error: {}", e);
-            }
-            return;
-        }
-    };
+fn list() -> CmdResult<ComponentOutput> {
+    let components = ConfigManager::list_components()?;
 
-    if json {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct ComponentEntry {
-            id: String,
-            name: String,
-            local_path: String,
-            remote_path: String,
-            build_artifact: String,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            build_command: Option<String>,
-        }
-
-        let entries: Vec<ComponentEntry> = components
-            .into_iter()
-            .map(|c| ComponentEntry {
-                id: c.id,
-                name: c.name,
-                local_path: c.local_path,
-                remote_path: c.remote_path,
-                build_artifact: c.build_artifact,
-                build_command: c.build_command,
-            })
-            .collect();
-
-        print_success(entries);
-    } else {
-        if components.is_empty() {
-            println!("No components configured.");
-            println!("Create one with: homeboy component create <id> --name <name> --local-path <path> --remote-path <path> --build-artifact <path>");
-        } else {
-            println!("Components:");
-            for c in components {
-                println!("  {}", c.id);
-                println!("    Name: {}", c.name);
-                println!("    Local: {}", c.local_path);
-                println!("    Remote: {}", c.remote_path);
-                if let Some(bc) = c.build_command {
-                    println!("    Build: {}", bc);
-                }
-            }
-        }
-    }
+    Ok((
+        ComponentOutput {
+            action: "list".to_string(),
+            component_id: None,
+            success: true,
+            updated_fields: vec![],
+            created: vec![],
+            skipped: vec![],
+            errors: vec![],
+            component: None,
+            components,
+        },
+        0,
+    ))
 }
