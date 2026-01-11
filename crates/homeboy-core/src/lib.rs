@@ -15,3 +15,5 @@ pub mod version;
 pub mod build;
 
 pub use homeboy_error::{Error, ErrorCode, Result};
+
+pub use homeboy_error::{ErrorHelp, ErrorHelpSummary};

@@ -17,8 +17,8 @@ mod commands;
 mod docs;
 
 use commands::{
-    build, changelog, component, config, db, deploy, docs as docs_command, doctor, file, git, logs,
-    module, pm2, project, server, ssh, version, wp,
+    build, changelog, component, config, db, deploy, docs as docs_command, doctor, error, file,
+    git, logs, module, pm2, project, server, ssh, version, wp,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -73,6 +73,8 @@ enum Commands {
     Build(build::BuildArgs),
     /// Diagnose configuration problems
     Doctor(doctor::DoctorArgs),
+    /// Error code registry and explanations
+    Error(error::ErrorArgs),
 }
 
 fn main() -> std::process::ExitCode {
@@ -86,32 +88,63 @@ fn main() -> std::process::ExitCode {
     }
 
     let (json_result, exit_code) = match cli.command {
-        Commands::Project(args) => homeboy_core::output::map_cmd_result_to_json(project::run(args)),
-        Commands::Ssh(args) => homeboy_core::output::map_cmd_result_to_json(ssh::run(args)),
-        Commands::Wp(args) => homeboy_core::output::map_cmd_result_to_json(wp::run(args)),
-        Commands::Pm2(args) => homeboy_core::output::map_cmd_result_to_json(pm2::run(args)),
-        Commands::Server(args) => homeboy_core::output::map_cmd_result_to_json(server::run(args)),
-        Commands::Db(args) => homeboy_core::output::map_cmd_result_to_json(db::run(args)),
-        Commands::File(args) => homeboy_core::output::map_cmd_result_to_json(file::run(args)),
-        Commands::Logs(args) => homeboy_core::output::map_cmd_result_to_json(logs::run(args)),
-        Commands::Deploy(args) => homeboy_core::output::map_cmd_result_to_json(deploy::run(args)),
+        Commands::Project(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(project::run(args))
+        }
+        Commands::Ssh(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(ssh::run(args))
+        }
+        Commands::Wp(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(wp::run(args))
+        }
+        Commands::Pm2(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(pm2::run(args))
+        }
+        Commands::Server(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(server::run(args))
+        }
+        Commands::Db(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(db::run(args))
+        }
+        Commands::File(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(file::run(args))
+        }
+        Commands::Logs(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(logs::run(args))
+        }
+        Commands::Deploy(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(deploy::run(args))
+        }
         Commands::Component(args) => {
-            homeboy_core::output::map_cmd_result_to_json(component::run(args))
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(component::run(args))
         }
-        Commands::Config(args) => homeboy_core::output::map_cmd_result_to_json(config::run(args)),
-        Commands::Module(args) => homeboy_core::output::map_cmd_result_to_json(module::run(args)),
+        Commands::Config(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(config::run(args))
+        }
+        Commands::Module(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(module::run(args))
+        }
         Commands::Docs(args) => {
-            homeboy_core::output::map_cmd_result_to_json(docs_command::run(args))
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(docs_command::run(args))
         }
-        Commands::Changelog(args) => {
-            homeboy_core::output::map_cmd_result_to_json(changelog::run(args, cli.json.as_deref()))
+        Commands::Changelog(args) => homeboy_core::output::map_cmd_result_to_json_with_warnings(
+            changelog::run(args, cli.json.as_deref()),
+        ),
+        Commands::Git(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(git::run(args))
         }
-        Commands::Git(args) => homeboy_core::output::map_cmd_result_to_json(git::run(args)),
         Commands::Version(args) => {
             homeboy_core::output::map_cmd_result_to_json_with_warnings(version::run(args))
         }
-        Commands::Build(args) => homeboy_core::output::map_cmd_result_to_json(build::run(args)),
-        Commands::Doctor(args) => homeboy_core::output::map_cmd_result_to_json(doctor::run(args)),
+        Commands::Build(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(build::run(args))
+        }
+        Commands::Doctor(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(doctor::run(args))
+        }
+        Commands::Error(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(error::run(args))
+        }
     };
 
     homeboy_core::output::print_json_result(json_result);

@@ -3,8 +3,10 @@
 - [build](build.md)
 - [changelog](changelog.md)
 - [component](component.md)
+- [error](error.md)
 - [config](config.md)
 - [db](db.md)
+- [init](init.md)
 
 - [deploy](deploy.md)
 - [docs](docs.md)

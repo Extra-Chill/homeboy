@@ -21,6 +21,7 @@ Shows the embedded Homeboy CLI changelog documentation (from `docs/changelog.md`
 ```sh
 homeboy changelog add <componentId> <message> [--project-id <projectId>]
 homeboy changelog add --json <spec>
+# Note: `--json` is a global flag but currently only supported for `homeboy changelog`.
 ```
 
 Adds one or more changelog items to the configured "next" section in the component's changelog file.

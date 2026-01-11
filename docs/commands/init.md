@@ -1,11 +1,12 @@
 # `homeboy init`
 
+## Status
+
 `homeboy init` is not implemented in the current CLI.
 
-This repository still contains an `init` documentation page, but there is no `init` subcommand in `crates/homeboy/src/main.rs`.
+This page remains because `docs/` is embedded into the binary for `homeboy docs`, and some published links may still refer to `commands/init`.
 
-Related:
+## Related
 
 - [Commands index](commands-index.md)
-- [JSON output contract](../json-output/json-output-contract.md)
 - [Root command](../cli/homeboy-root-command.md)

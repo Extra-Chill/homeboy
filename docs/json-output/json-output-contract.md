@@ -4,7 +4,7 @@ Homeboy prints JSON to stdout for both success and error results.
 
 ## Top-level envelope
 
-Homeboy prints a `homeboy_core::output::response::CliResponse<T>` object.
+Homeboy prints a `homeboy_core::output::CliResponse<T>` object.
 
 Success:
 
@@ -48,11 +48,11 @@ Notes:
 
 ## Error fields
 
-`error` is a `homeboy_core::output::response::CliError`.
+`error` is a `homeboy_core::output::CliError`.
 
 ## Warning fields
 
-Each item in `warnings` is a `homeboy_core::output::response::CliWarning`.
+Each item in `warnings` is a `homeboy_core::output::CliWarning`.
 
 - `code` (string): stable error code (see `homeboy_error::ErrorCode::as_str()`).
 - `message` (string): human-readable message.

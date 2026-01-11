@@ -3,7 +3,7 @@
 ## Synopsis
 
 ```sh
-homeboy <COMMAND>
+homeboy [--json <spec>] <COMMAND>
 ```
 
 ## Description
@@ -16,6 +16,12 @@ These are provided by clap:
 
 - `--version` / `-V`: print version and exit
 - `--help` / `-h`: print help and exit
+
+Homeboy also defines:
+
+- `--json <spec>`: enable JSON input mode for a command.
+  - Currently supported only for `homeboy changelog`.
+  - For all other commands, using `--json` returns a `validation.invalid_argument` error.
 
 ## Subcommands
 
