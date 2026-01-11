@@ -35,7 +35,7 @@ Notes:
 
 Adds one or more changelog items to the configured "next" section in the component's changelog file.
 
-`--json` is global and may be used with any command.
+`--json` is global, but not every command supports JSON input. (For example, `homeboy version` rejects `--json`.)
 
 Configuration / defaults:
 

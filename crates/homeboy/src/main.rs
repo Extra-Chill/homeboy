@@ -89,7 +89,7 @@ enum Commands {
 
 fn response_mode(command: &Commands) -> ResponseMode {
     match command {
-        Commands::Ssh(args) if args.command.is_none() => {
+        Commands::Ssh(args) if args.subcommand.is_none() && args.command.is_none() => {
             ResponseMode::Raw(RawOutputMode::InteractivePassthrough)
         }
         Commands::Logs(args) if logs::is_interactive(args) => {

@@ -1,4 +1,4 @@
-use clap::Args;
+use clap::{Args, Subcommand};
 use homeboy_core::config::{ConfigManager, ProjectConfiguration, ProjectRecord, ServerConfig};
 use homeboy_core::ssh::SshClient;
 use serde::Serialize;
@@ -8,6 +8,7 @@ use super::CmdResult;
 #[derive(Args)]
 pub struct SshArgs {
     /// Project ID or server ID (project wins when both exist)
+    #[arg(conflicts_with_all = ["project", "server"])]
     pub id: Option<String>,
 
     /// Force project resolution
@@ -20,24 +21,62 @@ pub struct SshArgs {
 
     /// Command to execute (omit for interactive shell)
     pub command: Option<String>,
+
+    #[command(subcommand)]
+    pub subcommand: Option<SshSubcommand>,
+}
+
+#[derive(Subcommand)]
+pub enum SshSubcommand {
+    /// List configured SSH server targets
+    List,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum SshOutput {
+    Connect(SshConnectOutput),
+    List(SshListOutput),
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SshOutput {
+pub struct SshConnectOutput {
     pub resolved_type: String,
     pub project_id: Option<String>,
     pub server_id: String,
     pub command: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshListOutput {
+    pub servers: Vec<ServerConfig>,
+}
+
 pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<SshOutput> {
-    run_with_loaders_and_executor(
-        args,
-        ConfigManager::load_project_record,
-        ConfigManager::load_server,
-        execute_interactive,
-    )
+    match args.subcommand {
+        Some(SshSubcommand::List) => {
+            let servers = ConfigManager::list_servers()?;
+            Ok((SshOutput::List(SshListOutput { servers }), 0))
+        }
+        None => {
+            if args.id.is_none() && args.project.is_none() && args.server.is_none() {
+                return Err(homeboy_core::Error::validation_missing_argument(vec![
+                    "<id>".to_string(),
+                    "--project".to_string(),
+                    "--server".to_string(),
+                ]));
+            }
+
+            run_with_loaders_and_executor(
+                args,
+                ConfigManager::load_project_record,
+                ConfigManager::load_server,
+                execute_interactive,
+            )
+        }
+    }
 }
 
 fn run_with_loaders_and_executor(
@@ -67,12 +106,12 @@ fn run_with_loaders_and_executor(
     let exit_code = executor(&server, &server_id, args.command.as_deref())?;
 
     Ok((
-        SshOutput {
+        SshOutput::Connect(SshConnectOutput {
             resolved_type,
             project_id,
             server_id,
             command: args.command,
-        },
+        }),
         exit_code,
     ))
 }
@@ -149,9 +188,9 @@ fn resolve_from_loaded_project(
 mod tests {
     use super::*;
 
-    fn server(_id: &str) -> ServerConfig {
+    fn server(id: &str) -> ServerConfig {
         ServerConfig {
-            id: "test".to_string(),
+            id: id.to_string(),
             name: "Test".to_string(),
             host: "example.com".to_string(),
             user: "user".to_string(),
@@ -205,6 +244,7 @@ mod tests {
             project: None,
             server: None,
             command: Some("pwd".to_string()),
+            subcommand: None,
         };
 
         let result = run_with_loaders_and_executor(
@@ -218,9 +258,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.0.resolved_type, "project");
-        assert_eq!(result.0.project_id.as_deref(), Some("alpha"));
-        assert_eq!(result.0.server_id, "alpha");
+        let data = match result.0 {
+            SshOutput::Connect(data) => data,
+            _ => panic!("expected connect output"),
+        };
+
+        assert_eq!(data.resolved_type, "project");
+        assert_eq!(data.project_id.as_deref(), Some("alpha"));
+        assert_eq!(data.server_id, "alpha");
     }
 
     #[test]
@@ -230,6 +275,7 @@ mod tests {
             project: None,
             server: None,
             command: None,
+            subcommand: None,
         };
 
         let result = run_with_loaders_and_executor(
@@ -243,9 +289,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.0.resolved_type, "server");
-        assert!(result.0.project_id.is_none());
-        assert_eq!(result.0.server_id, "cloudways");
+        let data = match result.0 {
+            SshOutput::Connect(data) => data,
+            _ => panic!("expected connect output"),
+        };
+
+        assert_eq!(data.resolved_type, "server");
+        assert!(data.project_id.is_none());
+        assert_eq!(data.server_id, "cloudways");
     }
 
     #[test]
@@ -255,6 +306,7 @@ mod tests {
             project: None,
             server: Some("alpha".to_string()),
             command: Some("uptime".to_string()),
+            subcommand: None,
         };
 
         let result = run_with_loaders_and_executor(
@@ -265,9 +317,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.0.resolved_type, "server");
-        assert!(result.0.project_id.is_none());
-        assert_eq!(result.0.server_id, "alpha");
+        let data = match result.0 {
+            SshOutput::Connect(data) => data,
+            _ => panic!("expected connect output"),
+        };
+
+        assert_eq!(data.resolved_type, "server");
+        assert!(data.project_id.is_none());
+        assert_eq!(data.server_id, "alpha");
     }
 
     #[test]
@@ -277,6 +334,7 @@ mod tests {
             project: None,
             server: None,
             command: None,
+            subcommand: None,
         };
 
         let error = run_with_loaders_and_executor(
@@ -288,5 +346,16 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    }
+
+    #[test]
+    fn list_output_serializes_servers() {
+        let output = SshOutput::List(SshListOutput {
+            servers: vec![server("alpha"), server("beta")],
+        });
+
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["action"], "list");
+        assert_eq!(value["servers"].as_array().unwrap().len(), 2);
     }
 }

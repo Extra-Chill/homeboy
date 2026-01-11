@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.2.12
+
+- Refactor command implementations to reduce boilerplate
+- Add new CLI flags support
+- Fix changelog formatting
+
 ## 0.2.10
 
 - Clean up version show JSON output

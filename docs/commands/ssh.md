@@ -3,10 +3,23 @@
 ## Synopsis
 
 ```sh
+# non-interactive discovery:
+homeboy ssh list
+
+# connect:
 homeboy ssh [id] [command]
-# or:
 homeboy ssh --project <projectId> [command]
 homeboy ssh --server <serverId> [command]
+```
+
+## Subcommands
+
+### `list`
+
+Lists configured SSH server targets. This is safe for CI/headless usage.
+
+```sh
+homeboy ssh list
 ```
 
 ## Arguments and flags

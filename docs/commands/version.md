@@ -38,7 +38,7 @@ homeboy --dry-run version bump <componentId> <patch|minor|major> \
 - `command`: `version.show`
 - `componentId`
 - `version` (detected current version)
-- `targets`: array of `{ versionFile, versionPattern, fullPath, matchCount }`
+- `targets`: array of `{ file, pattern, fullPath, matchCount }`
 
 `homeboy version bump` data payload:
 
@@ -46,7 +46,7 @@ homeboy --dry-run version bump <componentId> <patch|minor|major> \
 - `componentId`
 - `version` (detected current version before bump)
 - `newVersion` (version after bump)
-- `targets`: array of `{ versionFile, versionPattern, fullPath, matchCount }`
+- `targets`: array of `{ file, pattern, fullPath, matchCount }`
 - `changelogPath` (when `--changelog-add` is used and a changelog is available)
 - `changelogItemsAdded` (when `--changelog-add` is used)
 - `changelogFinalized` (when `--changelog-add` is used and a changelog is available)
@@ -60,8 +60,8 @@ homeboy --dry-run version bump <componentId> <patch|minor|major> \
 
 ## Notes
 
-- Components must have `version_file` configured.
-- `version_pattern` is optional; when omitted, a default pattern is selected based on the configured `version_file` name.
+- Components must have `versionTargets` configured (non-empty). Homeboy uses the first target as the primary version source.
+- Each `versionTargets[]` entry has `file` and optional `pattern`. When `pattern` is omitted, a default pattern is selected based on the `file` name.
 
 ## Related
 

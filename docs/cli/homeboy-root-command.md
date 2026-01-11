@@ -3,7 +3,7 @@
 ## Synopsis
 
 ```sh
-homeboy [--json <spec>] <COMMAND>
+homeboy [--json <spec>] [--dry-run] <COMMAND>
 ```
 
 ## Description
@@ -19,9 +19,12 @@ These are provided by clap:
 
 Homeboy also defines:
 
-- `--json <spec>`: JSON input spec override for a command.
+- `--json <spec>`: JSON input spec override.
   - Use `-` to read from stdin, `@file.json` to read from a file, or provide an inline JSON string.
-  - `--json` is a global flag and should come before the subcommand (e.g. `homeboy --json @payload.json changelog add`).
+  - `--json` is global and comes before the subcommand (e.g. `homeboy --json @payload.json changelog add`).
+- `--dry-run`: global dry-run mode.
+  - Commands that support dry-run avoid writing local files and avoid remote side effects where applicable.
+  - Some commands also have their own `--dry-run` flag for command-specific behavior (for example `deploy`, and `doctor cleanup`).
 
 ## Subcommands
 

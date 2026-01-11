@@ -9,7 +9,6 @@ This directory contains the markdown docs embedded into the `homeboy` binary and
 - JSON output envelope: [JSON output contract](json-output/json-output-contract.md)
 - Embedded docs behavior: [Embedded docs topic resolution](embedded-docs/embedded-docs-topic-resolution.md)
 - Changelog content: [Changelog](changelog.md)
-
 ## Configuration
 
 Configuration and state live under the OS config directory (`dirs::config_dir()/homeboy/`):
@@ -34,9 +33,3 @@ Additional (not created by default):
 - `playwright-browsers/` (used when running Python Playwright modules; see `PLAYWRIGHT_BROWSERS_PATH`)
 - `docs/` (reserved for cached/generated documentation)
 
-## Documentation
-
-- Commands: [Commands index](commands/commands-index.md)
-- JSON output contract: [JSON output contract](json-output/json-output-contract.md)
-- Embedded docs behavior: [Embedded docs topic resolution](embedded-docs/embedded-docs-topic-resolution.md)
-- Changelog: [Changelog](changelog.md)
