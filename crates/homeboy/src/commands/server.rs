@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::fs;
 use std::process::Command;
 
-use homeboy_core::config::{AppPaths, ConfigManager, ServerConfig};
+use homeboy_core::config::{slugify_id, AppPaths, ConfigManager, ServerConfig};
 use homeboy_core::Error;
 
 #[derive(Serialize)]
@@ -169,14 +169,13 @@ fn create(
     user: &str,
     port: u16,
 ) -> homeboy_core::Result<(ServerOutput, i32)> {
-    let id = ServerConfig::generate_id(host);
+    let id = slugify_id(name)?;
 
     if ConfigManager::load_server(&id).is_ok() {
         return Err(Error::Other(format!("Server '{}' already exists", id)));
     }
 
     let server = ServerConfig {
-        id: id.clone(),
         name: name.to_string(),
         host: host.to_string(),
         user: user.to_string(),
@@ -184,7 +183,7 @@ fn create(
         identity_file: None,
     };
 
-    ConfigManager::save_server(&server)?;
+    ConfigManager::save_server(&id, &server)?;
 
     Ok((
         ServerOutput {
@@ -249,7 +248,7 @@ fn set(
         return Err(Error::Other("No changes specified".to_string()));
     }
 
-    ConfigManager::save_server(&server)?;
+    ConfigManager::save_server(server_id, &server)?;
 
     Ok((
         ServerOutput {
@@ -274,7 +273,7 @@ fn delete(server_id: &str, force: bool) -> homeboy_core::Result<(ServerOutput, i
 
     let projects = ConfigManager::list_projects()?;
     for project in projects {
-        if project.project.server_id.as_deref() == Some(server_id) {
+        if project.config.server_id.as_deref() == Some(server_id) {
             return Err(Error::Other(format!(
                 "Server is used by project '{}'. Update or delete the project first.",
                 project.id
@@ -350,7 +349,7 @@ fn key_generate(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
 
     let mut server = ConfigManager::load_server(server_id)?;
     server.identity_file = Some(key_path_str.clone());
-    ConfigManager::save_server(&server)?;
+    ConfigManager::save_server(server_id, &server)?;
 
     let pub_key_path = format!("{}.pub", key_path_str);
     let public_key = fs::read_to_string(&pub_key_path)?;
@@ -417,7 +416,7 @@ fn key_use(server_id: &str, private_key_path: &str) -> homeboy_core::Result<(Ser
     }
 
     server.identity_file = Some(expanded_path.clone());
-    ConfigManager::save_server(&server)?;
+    ConfigManager::save_server(server_id, &server)?;
 
     Ok((
         ServerOutput {
@@ -443,7 +442,7 @@ fn key_unset(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
     let mut server = ConfigManager::load_server(server_id)?;
 
     server.identity_file = None;
-    ConfigManager::save_server(&server)?;
+    ConfigManager::save_server(server_id, &server)?;
 
     Ok((
         ServerOutput {
@@ -512,7 +511,7 @@ fn key_import(
 
     let mut server = ConfigManager::load_server(server_id)?;
     server.identity_file = Some(key_path_str.clone());
-    ConfigManager::save_server(&server)?;
+    ConfigManager::save_server(server_id, &server)?;
 
     Ok((
         ServerOutput {

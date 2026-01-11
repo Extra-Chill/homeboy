@@ -11,7 +11,7 @@ homeboy db <COMMAND>
 ### `tables`
 
 ```sh
-homeboy db tables <project_id> [<subtarget?> ...]
+homeboy db tables <project_id> [<subtarget?> <args...>]
 ```
 
 ### `describe`

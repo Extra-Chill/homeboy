@@ -255,9 +255,9 @@ fn list(current: bool) -> homeboy_core::Result<(ProjectOutput, i32)> {
         .map(|record| ProjectListItem {
             active: active_id.as_ref().is_some_and(|a| a == &record.id),
             id: record.id,
-            name: record.project.name,
-            domain: record.project.domain,
-            project_type: record.project.project_type,
+            name: record.config.name,
+            domain: record.config.domain,
+            project_type: record.config.project_type,
         })
         .collect();
 

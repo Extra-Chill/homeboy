@@ -18,21 +18,21 @@ homeboy wp <project_id> [--local] <args...>
 
 ```json
 {
-  "project_id": "<id>",
+  "projectId": "<id>",
   "local": false,
   "args": ["plugin", "list"],
-  "target_domain": "<domain>",
+  "targetDomain": "<domain>|null",
   "command": "<rendered command string>",
   "stdout": "<stdout>",
   "stderr": "<stderr>",
-  "exit_code": 0
+  "exitCode": 0
 }
 ```
 
 Notes:
 
 - The command errors if no args are provided.
-- For projects with subtargets, the first arg may be a subtarget identifier; `target_domain` reflects the resolved domain.
+- For projects with subtargets, the first arg may be a subtarget identifier. Matching prefers `subtarget.slug_id()` (and falls back to identifier/name matching); `targetDomain` reflects the resolved domain.
 
 ## Exit code
 

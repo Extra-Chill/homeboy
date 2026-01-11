@@ -1,13 +1,13 @@
 use std::fs;
 
-use super::{slugify_project_id, AppPaths, ConfigManager, ProjectConfiguration};
+use super::{slugify_id, AppPaths, ConfigManager, ProjectConfiguration};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct RenameResult {
     pub old_id: String,
     pub new_id: String,
-    pub project: ProjectConfiguration,
+    pub config: ProjectConfiguration,
 }
 
 pub struct ProjectManager;
@@ -21,7 +21,7 @@ impl ProjectManager {
         base_path: Option<String>,
         table_prefix: Option<String>,
     ) -> Result<(String, ProjectConfiguration)> {
-        let id = slugify_project_id(name)?;
+        let id = slugify_id(name)?;
         let path = AppPaths::project(&id);
         if path.exists() {
             return Err(Error::Config(format!("Project '{id}' already exists")));
@@ -58,16 +58,16 @@ impl ProjectManager {
 
     pub fn rename_project(id: &str, new_name: &str) -> Result<RenameResult> {
         let record = ConfigManager::load_project_record(id)?;
-        let mut project = record.project;
-        project.name = new_name.to_string();
+        let mut config = record.config;
+        config.name = new_name.to_string();
 
-        let new_id = slugify_project_id(&project.name)?;
+        let new_id = slugify_id(&config.name)?;
         if new_id == id {
-            ConfigManager::save_project(id, &project)?;
+            ConfigManager::save_project(id, &config)?;
             return Ok(RenameResult {
                 old_id: id.to_string(),
                 new_id,
-                project,
+                config,
             });
         }
 
@@ -83,7 +83,7 @@ impl ProjectManager {
         AppPaths::ensure_directories()?;
         fs::rename(&old_path, &new_path)?;
 
-        if let Err(error) = ConfigManager::save_project(&new_id, &project) {
+        if let Err(error) = ConfigManager::save_project(&new_id, &config) {
             let _ = fs::rename(&new_path, &old_path);
             return Err(error);
         }
@@ -97,7 +97,7 @@ impl ProjectManager {
         Ok(RenameResult {
             old_id: id.to_string(),
             new_id,
-            project,
+            config,
         })
     }
 
@@ -108,14 +108,14 @@ impl ProjectManager {
         }
 
         let content = fs::read_to_string(&path)?;
-        let project: ProjectConfiguration = serde_json::from_str(&content)?;
-        let expected_id = slugify_project_id(&project.name)?;
+        let config: ProjectConfiguration = serde_json::from_str(&content)?;
+        let expected_id = slugify_id(&config.name)?;
 
         if expected_id == id {
             return Ok(RenameResult {
                 old_id: id.to_string(),
                 new_id: id.to_string(),
-                project,
+                config,
             });
         }
 
@@ -138,7 +138,7 @@ impl ProjectManager {
         Ok(RenameResult {
             old_id: id.to_string(),
             new_id: expected_id,
-            project,
+            config,
         })
     }
 }

@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::process::{Command, Stdio};
 
-use homeboy_core::config::{ConfigManager, ProjectTypeManager};
+use homeboy_core::config::{ConfigManager, ProjectTypeManager, SlugIdentifiable};
 use homeboy_core::context::{resolve_project_ssh, resolve_project_ssh_with_base_path};
 use homeboy_core::shell;
 use homeboy_core::ssh::SshClient;
@@ -138,25 +138,25 @@ fn build_context(
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
 
     let mut remaining_args = args.to_vec();
-    let domain = if !project.project.sub_targets.is_empty() {
+    let domain = if !project.config.sub_targets.is_empty() {
         if let Some(sub_id) = args.first() {
-            if let Some(subtarget) = project.project.sub_targets.iter().find(|target| {
-                token::identifier_eq(&target.id, sub_id)
+            if let Some(subtarget) = project.config.sub_targets.iter().find(|target| {
+                target.slug_id().ok().as_deref() == Some(sub_id)
                     || token::identifier_eq(&target.name, sub_id)
             }) {
                 remaining_args.remove(0);
                 subtarget.domain.clone()
             } else {
-                project.project.domain.clone()
+                project.config.domain.clone()
             }
         } else {
-            project.project.domain.clone()
+            project.config.domain.clone()
         }
     } else {
-        project.project.domain.clone()
+        project.config.domain.clone()
     };
 
-    let type_def = ProjectTypeManager::resolve(&project.project.project_type);
+    let type_def = ProjectTypeManager::resolve(&project.config.project_type);
     let cli_path = type_def
         .cli
         .as_ref()
@@ -441,21 +441,21 @@ fn tunnel(project_id: &str, local_port: Option<u16>) -> homeboy_core::Result<(Db
     let server = ctx.server;
     let client = ctx.client;
 
-    let remote_host = if project.project.database.host.is_empty() {
+    let remote_host = if project.config.database.host.is_empty() {
         "127.0.0.1".to_string()
     } else {
-        project.project.database.host.clone()
+        project.config.database.host.clone()
     };
 
-    let remote_port = project.project.database.port;
+    let remote_port = project.config.database.port;
     let bind_port = local_port.unwrap_or(33306);
 
     let tunnel_info = DbTunnelInfo {
         local_port: bind_port,
         remote_host: remote_host.clone(),
         remote_port,
-        database: project.project.database.name.clone(),
-        user: project.project.database.user.clone(),
+        database: project.config.database.name.clone(),
+        user: project.config.database.user.clone(),
     };
 
     let mut ssh_args = Vec::new();
@@ -493,8 +493,8 @@ fn tunnel(project_id: &str, local_port: Option<u16>) -> homeboy_core::Result<(Db
         DbOutput {
             command: "db.tunnel".to_string(),
             project_id: project_id.to_string(),
-            base_path: project.project.base_path.clone(),
-            domain: Some(project.project.domain.clone()),
+            base_path: project.config.base_path.clone(),
+            domain: Some(project.config.domain.clone()),
             cli_path: None,
             stdout: None,
             stderr: None,

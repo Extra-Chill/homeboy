@@ -16,7 +16,7 @@ fn reset_test_scp_call_count() {
     TEST_SCP_CALL_COUNT.store(0, Ordering::Relaxed);
 }
 
-use homeboy_core::config::{ConfigManager, ServerConfig};
+use homeboy_core::config::{ConfigManager, ServerConfig, SlugIdentifiable};
 use homeboy_core::context::resolve_project_ssh_with_base_path;
 use homeboy_core::ssh::{CommandOutput, SshClient};
 use homeboy_core::version::parse_version;
@@ -94,7 +94,7 @@ pub fn run(args: DeployArgs) -> CmdResult<DeployOutput> {
     let server = ctx.server;
     let client = ctx.client;
 
-    let all_components = load_components(&project.project.component_ids);
+    let all_components = load_components(&project.config.component_ids);
     if all_components.is_empty() {
         return Err(homeboy_core::Error::Other(
             "No components configured for project".to_string(),
@@ -757,7 +757,7 @@ fn load_components(component_ids: &[String]) -> Vec<Component> {
             });
 
             components.push(Component {
-                id: component.id,
+                id: id.clone(),
                 name: component.name,
                 local_path,
                 remote_path: component.remote_path,
@@ -801,7 +801,6 @@ fn deploy_component_artifact_for_test(
     component: &Component,
 ) -> (Option<i32>, Option<String>) {
     let server = ServerConfig {
-        id: "test".to_string(),
         name: "Test".to_string(),
         host: "example.com".to_string(),
         user: "user".to_string(),

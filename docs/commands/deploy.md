@@ -37,8 +37,8 @@ homeboy deploy <project_id> [<component_ids...>] [--all] [--outdated] [--build] 
       "artifactPath": "<path>|null",
       "remotePath": "<path>|null",
       "buildCommand": "<cmd>|null",
-      "buildExitCode": 0,
-      "uploadExitCode": 0
+      "buildExitCode": "<int>|null",
+      "scpExitCode": "<int>|null"
     }
   ],
   "summary": { "succeeded": 0, "failed": 0, "skipped": 0 }

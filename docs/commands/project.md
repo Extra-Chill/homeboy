@@ -24,7 +24,10 @@ JSON output:
 {
   "command": "project.create",
   "projectId": "<id>",
-  "project": { }
+  "project": {
+    "id": "<id>",
+    "config": { }
+  }
 }
 ```
 
@@ -42,7 +45,10 @@ JSON output:
 {
   "command": "project.set",
   "projectId": "<id>",
-  "project": { },
+  "project": {
+    "id": "<id>",
+    "config": { }
+  },
   "updated": ["domain", "serverId"]
 }
 ```
@@ -63,7 +69,10 @@ JSON output:
 {
   "command": "project.repair",
   "projectId": "<id>",
-  "project": { },
+  "project": {
+    "id": "<id>",
+    "config": { }
+  },
   "updated": ["id"]
 }
 ```
@@ -122,11 +131,14 @@ JSON output:
 {
   "command": "project.show",
   "projectId": "<id>",
-  "project": { }
+  "project": {
+    "id": "<id>",
+    "config": { }
+  }
 }
 ```
 
-`project` is the serialized `ProjectConfiguration`.
+`project` is the serialized `ProjectRecord` (`{ id, config }`).
 
 ### `switch`
 
@@ -142,7 +154,10 @@ JSON output:
 {
   "command": "project.switch",
   "projectId": "<id>",
-  "project": { }
+  "project": {
+    "id": "<id>",
+    "config": { }
+  }
 }
 ```
 

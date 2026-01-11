@@ -1,6 +1,6 @@
 use clap::Args;
 use homeboy_core::config::{
-    ConfigManager, ProjectConfiguration, ProjectRecord, ProjectTypeManager,
+    ConfigManager, ProjectConfiguration, ProjectRecord, ProjectTypeManager, SlugIdentifiable,
 };
 use homeboy_core::context::resolve_project_ssh;
 use homeboy_core::ssh::{execute_local_command, CommandOutput};
@@ -58,7 +58,7 @@ fn run_with_loader_and_executor(
 
     let project = project_loader(&args.project_id)?;
 
-    let type_def = ProjectTypeManager::resolve(&project.project.project_type);
+    let type_def = ProjectTypeManager::resolve(&project.config.project_type);
 
     let cli_config = type_def.cli.ok_or_else(|| {
         homeboy_core::Error::Other(format!(
@@ -108,12 +108,12 @@ fn build_command(
     use_local_domain: bool,
 ) -> homeboy_core::Result<(String, String)> {
     let base_path = if use_local_domain {
-        if !project.project.local_environment.is_configured() {
+        if !project.config.local_environment.is_configured() {
             return Err(homeboy_core::Error::Other(
                 "Local environment not configured for project".to_string(),
             ));
         }
-        project.project.local_environment.site_path.clone()
+        project.config.local_environment.site_path.clone()
     } else {
         project
             .project
@@ -187,7 +187,7 @@ fn resolve_subtarget(
     if let Some(subtarget) = project
         .sub_targets
         .iter()
-        .find(|t| token::identifier_eq(&t.id, sub_id) || token::identifier_eq(&t.name, sub_id))
+        .find(|t| t.slug_id().ok().as_deref() == Some(sub_id) || token::identifier_eq(&t.name, sub_id))
     {
         let domain = if use_local_domain {
             let base_domain = if project.local_environment.domain.is_empty() {
@@ -198,7 +198,8 @@ fn resolve_subtarget(
             if subtarget.is_default {
                 base_domain.to_string()
             } else {
-                format!("{}/{}", base_domain, subtarget.id)
+                let slug = subtarget.slug_id().unwrap_or_default();
+                format!("{}/{}", base_domain, slug)
             }
         } else {
             subtarget.domain.clone()
@@ -216,7 +217,7 @@ mod tests {
     fn fake_project_loader(project_id: &str) -> homeboy_core::Result<ProjectRecord> {
         Ok(ProjectRecord {
             id: project_id.to_string(),
-            project: ProjectConfiguration {
+            config: ProjectConfiguration {
                 name: "Sarai Chinwag".to_string(),
                 domain: "example.com".to_string(),
                 project_type: "wordpress".to_string(),

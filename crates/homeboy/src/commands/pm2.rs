@@ -40,7 +40,7 @@ pub fn run(args: Pm2Args) -> CmdResult<Pm2Output> {
 
     let project = ConfigManager::load_project_record(&args.project_id)?;
 
-    let type_def = ProjectTypeManager::resolve(&project.project.project_type);
+    let type_def = ProjectTypeManager::resolve(&project.config.project_type);
 
     let cli_config = type_def.cli.ok_or_else(|| {
         homeboy_core::Error::Other(format!(
@@ -85,12 +85,12 @@ fn build_command(
     local: bool,
 ) -> homeboy_core::Result<String> {
     let site_path = if local {
-        if !project.project.local_environment.is_configured() {
+        if !project.config.local_environment.is_configured() {
             return Err(homeboy_core::Error::Other(
                 "Local environment not configured for project".to_string(),
             ));
         }
-        project.project.local_environment.site_path.clone()
+        project.config.local_environment.site_path.clone()
     } else {
         project
             .project
@@ -122,9 +122,9 @@ fn build_command(
     variables.insert(
         TemplateVars::DOMAIN.to_string(),
         if local {
-            project.project.local_environment.domain.clone()
+            project.config.local_environment.domain.clone()
         } else {
-            project.project.domain.clone()
+            project.config.domain.clone()
         },
     );
     variables.insert(TemplateVars::ARGS.to_string(), args.join(" "));

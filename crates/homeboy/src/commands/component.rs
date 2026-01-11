@@ -1,7 +1,9 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy_core::config::{ComponentConfiguration, ConfigManager, VersionTarget};
+use homeboy_core::config::{
+    slugify_id, ComponentConfiguration, ConfigManager, SlugIdentifiable, VersionTarget,
+};
 
 use super::CmdResult;
 
@@ -37,10 +39,7 @@ pub struct ComponentArgs {
 enum ComponentCommand {
     /// Create a new component configuration
     Create {
-        /// Component ID (used for referencing)
-        id: String,
-        /// Display name
-        #[arg(long)]
+        /// Display name (ID derived from name)
         name: String,
         /// Absolute path to local source directory
         #[arg(long)]
@@ -132,7 +131,6 @@ pub struct ComponentOutput {
 pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
     match args.command {
         ComponentCommand::Create {
-            id,
             name,
             local_path,
             remote_path,
@@ -141,7 +139,6 @@ pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
             build_command,
             is_network,
         } => create(
-            &id,
             &name,
             &local_path,
             &remote_path,
@@ -182,7 +179,6 @@ pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
 }
 
 fn create(
-    id: &str,
     name: &str,
     local_path: &str,
     remote_path: &str,
@@ -191,7 +187,9 @@ fn create(
     build_command: Option<String>,
     is_network: bool,
 ) -> CmdResult<ComponentOutput> {
-    if ConfigManager::load_component(id).is_ok() {
+    let id = slugify_id(name)?;
+
+    if ConfigManager::load_component(&id).is_ok() {
         return Err(homeboy_core::Error::Other(format!(
             "Component '{}' already exists",
             id
@@ -201,7 +199,6 @@ fn create(
     let expanded_path = shellexpand::tilde(local_path).to_string();
 
     let mut component = ComponentConfiguration::new(
-        id.to_string(),
         name.to_string(),
         expanded_path,
         remote_path.to_string(),
@@ -213,7 +210,7 @@ fn create(
     component.build_command = build_command;
     component.is_network = if is_network { Some(true) } else { None };
 
-    ConfigManager::save_component(&component)?;
+    ConfigManager::save_component(&id, &component)?;
 
     Ok((
         ComponentOutput {
@@ -248,20 +245,28 @@ fn import(json_str: &str, skip_existing: bool) -> CmdResult<ComponentOutput> {
     for component in components.iter_mut() {
         component.local_path = shellexpand::tilde(&component.local_path).to_string();
 
-        if ConfigManager::load_component(&component.id).is_ok() {
+        let id = match component.slug_id() {
+            Ok(id) => id,
+            Err(e) => {
+                errors.push(format!("{}: {}", component.name, e));
+                continue;
+            }
+        };
+
+        if ConfigManager::load_component(&id).is_ok() {
             if skip_existing {
-                skipped.push(component.id.clone());
+                skipped.push(id);
                 continue;
             }
 
-            errors.push(format!("{}: already exists", component.id));
+            errors.push(format!("{}: already exists", id));
             continue;
         }
 
-        if let Err(e) = ConfigManager::save_component(component) {
-            errors.push(format!("{}: {}", component.id, e));
+        if let Err(e) = ConfigManager::save_component(&id, component) {
+            errors.push(format!("{}: {}", id, e));
         } else {
-            created.push(component.id.clone());
+            created.push(id);
         }
     }
 
@@ -363,7 +368,7 @@ fn set(
         ));
     }
 
-    ConfigManager::save_component(&component)?;
+    ConfigManager::save_component(id, &component)?;
 
     Ok((
         ComponentOutput {
@@ -393,7 +398,7 @@ fn delete(id: &str, force: bool) -> CmdResult<ComponentOutput> {
         let projects = ConfigManager::list_projects().unwrap_or_default();
         let using: Vec<String> = projects
             .iter()
-            .filter(|p| p.project.component_ids.contains(&id.to_string()))
+            .filter(|p| p.config.component_ids.contains(&id.to_string()))
             .map(|p| p.id.clone())
             .collect();
 

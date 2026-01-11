@@ -14,6 +14,8 @@ homeboy server <COMMAND>
 homeboy server create <name> --host <host> --user <user> [--port <port>]
 ```
 
+`server_id` is derived from `slugify_id(<name>)`.
+
 ### `show`
 
 ```sh

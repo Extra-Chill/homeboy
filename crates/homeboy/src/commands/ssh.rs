@@ -84,7 +84,7 @@ fn resolve_context(
 ) -> homeboy_core::Result<(String, Option<String>, String, ServerConfig)> {
     if let Some(project_id) = &args.project {
         let record = project_loader(project_id)?;
-        let (server_id, server) = resolve_from_loaded_project(&record.project, server_loader)?;
+        let (server_id, server) = resolve_from_loaded_project(&record.config, server_loader)?;
         return Ok(("project".to_string(), Some(record.id), server_id, server));
     }
 
@@ -98,7 +98,7 @@ fn resolve_context(
     })?;
 
     if let Ok(record) = project_loader(id) {
-        let (server_id, server) = resolve_from_loaded_project(&record.project, server_loader)?;
+        let (server_id, server) = resolve_from_loaded_project(&record.config, server_loader)?;
         return Ok(("project".to_string(), Some(record.id), server_id, server));
     }
 
@@ -129,9 +129,8 @@ fn resolve_from_loaded_project(
 mod tests {
     use super::*;
 
-    fn server(id: &str) -> ServerConfig {
+    fn server(_id: &str) -> ServerConfig {
         ServerConfig {
-            id: id.to_string(),
             name: "Test".to_string(),
             host: "example.com".to_string(),
             user: "user".to_string(),
@@ -143,7 +142,7 @@ mod tests {
     fn project(id: &str, server_id: Option<&str>) -> ProjectRecord {
         ProjectRecord {
             id: id.to_string(),
-            project: ProjectConfiguration {
+            config: ProjectConfiguration {
                 name: String::new(),
                 domain: String::new(),
                 project_type: "wordpress".to_string(),
