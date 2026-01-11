@@ -184,18 +184,6 @@ fn parse_wp_db_tables_csv(csv: &str) -> Vec<String> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_wp_db_tables_csv_trims_and_filters() {
-        let csv = "wp_posts, wp_options,,\nwp_users\n";
-        let tables = parse_wp_db_tables_csv(csv);
-        assert_eq!(tables, vec!["wp_posts", "wp_options", "wp_users"]);
-    }
-}
-
 fn tables(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i32)> {
     let (ctx, _) = build_context(project_id, args)?;
 
@@ -510,4 +498,16 @@ fn tunnel(project_id: &str, local_port: Option<u16>) -> homeboy_core::Result<(Db
         },
         exit_code,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_wp_db_tables_csv_trims_and_filters() {
+        let csv = "wp_posts, wp_options,,\nwp_users\n";
+        let tables = parse_wp_db_tables_csv(csv);
+        assert_eq!(tables, vec!["wp_posts", "wp_options", "wp_users"]);
+    }
 }

@@ -14,6 +14,7 @@
 - [git](git.md)
 - [logs](logs.md)
 - [module](module.md)
+- [homeboy-init](homeboy-init.md)
 - [pm2](pm2.md)
 - [project](project.md)
 - [server](server.md)

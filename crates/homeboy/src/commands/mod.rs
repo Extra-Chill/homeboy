@@ -11,6 +11,7 @@ pub mod doctor;
 pub mod error;
 pub mod file;
 pub mod git;
+pub mod init;
 pub mod logs;
 pub mod module;
 pub mod pm2;

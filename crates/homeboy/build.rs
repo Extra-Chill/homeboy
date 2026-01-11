@@ -47,7 +47,7 @@ fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn generate_docs_rs(docs_root: &Path, doc_paths: &[PathBuf]) -> String {
     let mut out = String::new();
-    out.push_str("pub static GENERATED_DOCS: &[(&'static str, &'static str)] = &[\n");
+    out.push_str("pub static GENERATED_DOCS: &[(&str, &str)] = &[\n");
 
     for path in doc_paths {
         let key = key_for_path(docs_root, path);

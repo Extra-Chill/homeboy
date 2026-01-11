@@ -9,7 +9,7 @@ pub struct ProjectServerContext {
 }
 
 pub enum ResolvedTarget {
-    Project(ProjectServerContext),
+    Project(Box<ProjectServerContext>),
     Server {
         server_id: String,
         server: ServerConfig,
@@ -37,13 +37,11 @@ pub fn require_project_base_path(
     project_id: &str,
     project: &ProjectConfiguration,
 ) -> Result<String> {
-    Ok(project
+    project
         .base_path
         .clone()
         .filter(|p| !p.is_empty())
-        .ok_or_else(|| {
-            Error::config_missing_key("project.basePath", Some(project_id.to_string()))
-        })?)
+        .ok_or_else(|| Error::config_missing_key("project.basePath", Some(project_id.to_string())))
 }
 
 pub fn resolve_project_server_with_base_path(
@@ -56,7 +54,7 @@ pub fn resolve_project_server_with_base_path(
 
 pub fn resolve_project_or_server_id(id: &str) -> Result<ResolvedTarget> {
     if let Ok(ctx) = resolve_project_server(id) {
-        return Ok(ResolvedTarget::Project(ctx));
+        return Ok(ResolvedTarget::Project(Box::new(ctx)));
     }
 
     let server =

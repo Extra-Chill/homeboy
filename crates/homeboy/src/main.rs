@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand};
-use serde_json;
 
 #[derive(Debug, Clone, Copy)]
 enum ResponseMode {
@@ -18,7 +17,7 @@ mod docs;
 
 use commands::{
     build, changelog, component, config, db, deploy, docs as docs_command, doctor, error, file,
-    git, logs, module, pm2, project, server, ssh, version, wp,
+    git, init, logs, module, pm2, project, server, ssh, version, wp,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -64,6 +63,8 @@ enum Commands {
     Config(config::ConfigArgs),
     /// Execute CLI-compatible modules
     Module(module::ModuleArgs),
+    /// Initialize a repo for use with Homeboy
+    Init(init::InitArgs),
     /// Display CLI documentation
     Docs(docs_command::DocsArgs),
     /// Changelog operations
@@ -89,6 +90,7 @@ fn response_mode(command: &Commands) -> ResponseMode {
             ResponseMode::Raw(RawOutputMode::InteractivePassthrough)
         }
         Commands::Docs(args) if !args.list => ResponseMode::Raw(RawOutputMode::Markdown),
+        Commands::Init(_) => ResponseMode::Raw(RawOutputMode::Markdown),
         Commands::Changelog(args) if changelog::is_show_markdown(args) => {
             ResponseMode::Raw(RawOutputMode::Markdown)
         }
@@ -121,6 +123,7 @@ fn main() -> std::process::ExitCode {
     if let ResponseMode::Raw(RawOutputMode::Markdown) = mode {
         let markdown_result: homeboy_core::Result<(String, i32)> = match cli.command {
             Commands::Docs(args) => docs_command::run_markdown(args),
+            Commands::Init(args) => init::run_markdown(args),
             Commands::Changelog(args) => changelog::run_markdown(args),
             _ => Err(homeboy_core::Error::other(
                 "Invalid raw markdown response mode".to_string(),
@@ -140,6 +143,10 @@ fn main() -> std::process::ExitCode {
     }
 
     let (json_result, exit_code) = match cli.command {
+        Commands::Init(_) => {
+            let err = homeboy_core::Error::other("Init uses markdown output mode".to_string());
+            homeboy_core::output::map_cmd_result_to_json::<serde_json::Value>(Err(err))
+        }
         Commands::Project(args) => homeboy_core::output::map_cmd_result_to_json(
             project::run(args, cli.json.as_deref())
                 .map(|(data, exit_code)| (data, vec![], exit_code)),

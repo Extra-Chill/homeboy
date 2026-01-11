@@ -43,10 +43,7 @@ pub enum LogsCommand {
 }
 
 pub fn is_interactive(args: &LogsArgs) -> bool {
-    match &args.command {
-        LogsCommand::Show { follow: true, .. } => true,
-        _ => false,
-    }
+    matches!(&args.command, LogsCommand::Show { follow: true, .. })
 }
 
 pub fn run(args: LogsArgs, _json_spec: Option<&str>) -> CmdResult<LogsOutput> {

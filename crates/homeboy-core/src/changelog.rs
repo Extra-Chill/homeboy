@@ -455,7 +455,7 @@ fn ensure_next_section(content: &str, aliases: &[String]) -> Result<(String, boo
         }
         out.push_str("## ");
         out.push_str(default_label);
-        out.push_str("\n");
+        out.push('\n');
     }
 
     Ok((out, true))
