@@ -31,7 +31,7 @@ pub struct SshOutput {
     pub command: Option<String>,
 }
 
-pub fn run(args: SshArgs, _json_spec: Option<&str>) -> CmdResult<SshOutput> {
+pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<SshOutput> {
     run_with_loaders_and_executor(
         args,
         ConfigManager::load_project_record,

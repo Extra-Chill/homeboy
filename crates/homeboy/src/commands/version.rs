@@ -99,9 +99,10 @@ pub struct VersionBumpOutput {
 
 pub fn run(
     args: VersionArgs,
-    json_spec: Option<&str>,
-    dry_run: bool,
+    global: &crate::commands::GlobalArgs,
 ) -> homeboy_core::output::CmdResult {
+    let json_spec = global.json_spec();
+
     if json_spec.is_some() {
         return Err(homeboy_core::Error::other(
             "json input spec is not supported for version commands".to_string(),
@@ -125,7 +126,7 @@ pub fn run(
             bump_type,
             &changelog_add,
             project_id.as_deref(),
-            dry_run,
+            global.dry_run,
         ),
     }
 }

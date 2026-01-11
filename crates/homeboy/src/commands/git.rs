@@ -63,7 +63,7 @@ pub struct GitOutput {
     stderr: String,
 }
 
-pub fn run(args: GitArgs, _json_spec: Option<&str>) -> CmdResult<GitOutput> {
+pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<GitOutput> {
     match args.command {
         GitCommand::Status { component_id } => status(&component_id),
         GitCommand::Commit {

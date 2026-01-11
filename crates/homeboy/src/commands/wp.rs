@@ -37,7 +37,7 @@ pub struct WpOutput {
     pub exit_code: i32,
 }
 
-pub fn run(args: WpArgs, _json_spec: Option<&str>) -> CmdResult<WpOutput> {
+pub fn run(args: WpArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<WpOutput> {
     run_with_loader_and_executor(
         args,
         ConfigManager::load_project_record,

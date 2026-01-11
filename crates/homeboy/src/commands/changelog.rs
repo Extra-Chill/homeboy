@@ -86,7 +86,11 @@ pub fn is_show_markdown(args: &ChangelogArgs) -> bool {
     args.command.is_none()
 }
 
-pub fn run(args: ChangelogArgs, json_spec: Option<&str>) -> CmdResult<ChangelogOutput> {
+pub fn run(
+    args: ChangelogArgs,
+    global: &crate::commands::GlobalArgs,
+) -> CmdResult<ChangelogOutput> {
+    let json_spec = global.json_spec();
     match args.command {
         None => {
             let (out, code) = show_json()?;

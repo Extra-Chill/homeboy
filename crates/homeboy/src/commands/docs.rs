@@ -64,7 +64,7 @@ pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
     Ok((resolved.content, 0))
 }
 
-pub fn run(args: DocsArgs, _json_spec: Option<&str>) -> CmdResult<DocsOutput> {
+pub fn run(args: DocsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DocsOutput> {
     if args.list {
         return Ok((
             DocsOutput::List(DocsListOutput {

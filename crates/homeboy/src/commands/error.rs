@@ -34,7 +34,7 @@ pub struct ErrorExplainOutput {
     pub help: homeboy_error::ErrorHelp,
 }
 
-pub fn run(args: ErrorArgs, _json_spec: Option<&str>) -> CmdResult<serde_json::Value> {
+pub fn run(args: ErrorArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<serde_json::Value> {
     match args.command {
         ErrorCommand::Codes => {
             let codes = homeboy_error::list();

@@ -100,7 +100,10 @@ pub struct DbTunnelInfo {
     pub user: String,
 }
 
-pub fn run(args: DbArgs, _json_spec: Option<&str>) -> homeboy_core::Result<(DbOutput, i32)> {
+pub fn run(
+    args: DbArgs,
+    _global: &crate::commands::GlobalArgs,
+) -> homeboy_core::Result<(DbOutput, i32)> {
     match args.command {
         DbCommand::Tables { project_id, args } => tables(&project_id, &args),
         DbCommand::Describe { project_id, args } => describe(&project_id, &args),

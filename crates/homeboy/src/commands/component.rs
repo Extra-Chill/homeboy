@@ -128,7 +128,10 @@ pub struct ComponentOutput {
     pub components: Vec<ComponentConfiguration>,
 }
 
-pub fn run(args: ComponentArgs, _json_spec: Option<&str>) -> CmdResult<ComponentOutput> {
+pub fn run(
+    args: ComponentArgs,
+    _global: &crate::commands::GlobalArgs,
+) -> CmdResult<ComponentOutput> {
     match args.command {
         ComponentCommand::Create {
             name,

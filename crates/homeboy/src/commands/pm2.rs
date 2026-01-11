@@ -31,7 +31,7 @@ pub struct Pm2Output {
     pub command: String,
 }
 
-pub fn run(args: Pm2Args, _json_spec: Option<&str>) -> CmdResult<Pm2Output> {
+pub fn run(args: Pm2Args, _global: &crate::commands::GlobalArgs) -> CmdResult<Pm2Output> {
     if args.args.is_empty() {
         return Err(homeboy_core::Error::other(
             "No command provided".to_string(),

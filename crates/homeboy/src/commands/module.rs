@@ -156,7 +156,7 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
-pub fn run(args: ModuleArgs, _json_spec: Option<&str>) -> CmdResult<ModuleOutput> {
+pub fn run(args: ModuleArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ModuleOutput> {
     match args.command {
         ModuleCommand::List { project } => list(project),
         ModuleCommand::Run {

@@ -187,7 +187,7 @@ pub struct ProjectOutput {
 
 pub fn run(
     args: ProjectArgs,
-    _json_spec: Option<&str>,
+    _global: &crate::commands::GlobalArgs,
 ) -> homeboy_core::Result<(ProjectOutput, i32)> {
     match args.command {
         ProjectCommand::List { current } => list(current),

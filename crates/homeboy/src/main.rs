@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+use commands::GlobalArgs;
+
 #[derive(Debug, Clone, Copy)]
 enum ResponseMode {
     Json,
@@ -16,8 +18,8 @@ mod commands;
 mod docs;
 
 use commands::{
-    build, changelog, component, config, db, deploy, docs as docs_command, doctor, error, file,
-    git, init, logs, module, pm2, project, server, ssh, version, wp,
+    build, changelog, component, config, db, deploy, doctor, error, file, git, init, logs, module,
+    pm2, project, server, ssh, version, wp,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -70,7 +72,7 @@ enum Commands {
     /// Initialize a repo for use with Homeboy
     Init(init::InitArgs),
     /// Display CLI documentation
-    Docs(docs_command::DocsArgs),
+    Docs(crate::commands::docs::DocsArgs),
     /// Changelog operations
     Changelog(changelog::ChangelogArgs),
     /// Git operations for components
@@ -124,15 +126,13 @@ fn main() -> std::process::ExitCode {
         ResponseMode::Raw(RawOutputMode::Markdown) => {}
     }
 
+    let global = GlobalArgs {
+        json_spec: cli.json,
+        dry_run: cli.dry_run,
+    };
+
     if let ResponseMode::Raw(RawOutputMode::Markdown) = mode {
-        let markdown_result: homeboy_core::Result<(String, i32)> = match cli.command {
-            Commands::Docs(args) => docs_command::run_markdown(args),
-            Commands::Init(args) => init::run_markdown(args),
-            Commands::Changelog(args) => changelog::run_markdown(args),
-            _ => Err(homeboy_core::Error::other(
-                "Invalid raw markdown response mode".to_string(),
-            )),
-        };
+        let markdown_result = commands::run_markdown(cli.command, &global);
 
         match markdown_result {
             Ok((content, exit_code)) => {
@@ -146,82 +146,7 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    let (json_result, exit_code) = match cli.command {
-        Commands::Init(_) => {
-            let err = homeboy_core::Error::other("Init uses markdown output mode".to_string());
-            homeboy_core::output::map_cmd_result_to_json::<serde_json::Value>(Err(err))
-        }
-        Commands::Project(args) => homeboy_core::output::map_cmd_result_to_json(
-            project::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Ssh(args) => homeboy_core::output::map_cmd_result_to_json(
-            ssh::run(args, cli.json.as_deref()).map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Wp(args) => homeboy_core::output::map_cmd_result_to_json(
-            wp::run(args, cli.json.as_deref()).map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Pm2(args) => homeboy_core::output::map_cmd_result_to_json(
-            pm2::run(args, cli.json.as_deref()).map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Server(args) => homeboy_core::output::map_cmd_result_to_json(
-            server::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Db(args) => homeboy_core::output::map_cmd_result_to_json(
-            db::run(args, cli.json.as_deref()).map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::File(args) => homeboy_core::output::map_cmd_result_to_json(
-            file::run(args, cli.json.as_deref()).map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Logs(args) => homeboy_core::output::map_cmd_result_to_json(
-            logs::run(args, cli.json.as_deref()).map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Deploy(args) => homeboy_core::output::map_cmd_result_to_json(
-            deploy::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Component(args) => homeboy_core::output::map_cmd_result_to_json(
-            component::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Config(args) => homeboy_core::output::map_cmd_result_to_json(
-            config::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Module(args) => homeboy_core::output::map_cmd_result_to_json(
-            module::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Docs(args) => homeboy_core::output::map_cmd_result_to_json(
-            docs_command::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Changelog(args) => homeboy_core::output::map_cmd_result_to_json(
-            changelog::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Git(args) => homeboy_core::output::map_cmd_result_to_json(
-            git::run(args, cli.json.as_deref()).map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Version(args) => homeboy_core::output::map_cmd_result_to_json(version::run(
-            args,
-            cli.json.as_deref(),
-            cli.dry_run,
-        )),
-        Commands::Build(args) => homeboy_core::output::map_cmd_result_to_json(
-            build::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Doctor(args) => homeboy_core::output::map_cmd_result_to_json(
-            doctor::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        Commands::Error(args) => homeboy_core::output::map_cmd_result_to_json(
-            error::run(args, cli.json.as_deref())
-                .map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-    };
+    let (json_result, exit_code) = commands::run_json(cli.command, &global);
 
     match mode {
         ResponseMode::Json => homeboy_core::output::print_json_result(json_result),

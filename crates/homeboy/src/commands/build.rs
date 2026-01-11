@@ -23,7 +23,7 @@ pub struct BuildOutput {
     pub success: bool,
 }
 
-pub fn run(args: BuildArgs, _json_spec: Option<&str>) -> CmdResult<BuildOutput> {
+pub fn run(args: BuildArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<BuildOutput> {
     let component = ConfigManager::load_component(&args.component_id)?;
 
     let build_cmd = component.build_command.clone().or_else(|| {

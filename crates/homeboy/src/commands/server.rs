@@ -127,7 +127,7 @@ enum KeyCommand {
 
 pub fn run(
     args: ServerArgs,
-    _json_spec: Option<&str>,
+    _global: &crate::commands::GlobalArgs,
 ) -> homeboy_core::Result<(ServerOutput, i32)> {
     match args.command {
         ServerCommand::Create {

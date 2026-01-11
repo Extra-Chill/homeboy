@@ -84,7 +84,7 @@ pub struct DoctorCleanupOutput {
 
 pub fn run(
     args: DoctorArgs,
-    _json_spec: Option<&str>,
+    _global: &crate::commands::GlobalArgs,
 ) -> homeboy_core::Result<(serde_json::Value, i32)> {
     match args.command {
         DoctorCommand::Scan(args) => {

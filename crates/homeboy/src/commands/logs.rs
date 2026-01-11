@@ -46,7 +46,7 @@ pub fn is_interactive(args: &LogsArgs) -> bool {
     matches!(&args.command, LogsCommand::Show { follow: true, .. })
 }
 
-pub fn run(args: LogsArgs, _json_spec: Option<&str>) -> CmdResult<LogsOutput> {
+pub fn run(args: LogsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<LogsOutput> {
     match args.command {
         LogsCommand::List { project_id } => list(&project_id),
         LogsCommand::Show {

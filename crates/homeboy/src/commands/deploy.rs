@@ -88,7 +88,7 @@ pub struct DeployOutput {
     pub summary: DeploySummary,
 }
 
-pub fn run(args: DeployArgs, _json_spec: Option<&str>) -> CmdResult<DeployOutput> {
+pub fn run(args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DeployOutput> {
     let project = ConfigManager::load_project_record(&args.project_id)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(&args.project_id)?;
     let server = ctx.server;
