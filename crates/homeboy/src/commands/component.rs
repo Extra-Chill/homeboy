@@ -162,8 +162,8 @@ pub fn run(args: ComponentArgs, _json_spec: Option<&str>) -> CmdResult<Component
             build_command,
             is_network,
             not_network,
-        } => set(
-            &id,
+        } => set(SetComponentArgs {
+            id,
             name,
             local_path,
             remote_path,
@@ -172,7 +172,7 @@ pub fn run(args: ComponentArgs, _json_spec: Option<&str>) -> CmdResult<Component
             build_command,
             is_network,
             not_network,
-        ),
+        }),
         ComponentCommand::Delete { id, force } => delete(&id, force),
         ComponentCommand::List => list(),
     }
@@ -308,8 +308,8 @@ fn show(id: &str) -> CmdResult<ComponentOutput> {
     ))
 }
 
-fn set(
-    id: &str,
+struct SetComponentArgs {
+    id: String,
     name: Option<String>,
     local_path: Option<String>,
     remote_path: Option<String>,
@@ -318,8 +318,22 @@ fn set(
     build_command: Option<String>,
     is_network: bool,
     not_network: bool,
-) -> CmdResult<ComponentOutput> {
-    let mut component = ConfigManager::load_component(id)?;
+}
+
+fn set(args: SetComponentArgs) -> CmdResult<ComponentOutput> {
+    let SetComponentArgs {
+        id,
+        name,
+        local_path,
+        remote_path,
+        build_artifact,
+        version_targets,
+        build_command,
+        is_network,
+        not_network,
+    } = args;
+
+    let mut component = ConfigManager::load_component(&id)?;
 
     let mut updated_fields: Vec<String> = vec![];
 
@@ -369,12 +383,12 @@ fn set(
         ));
     }
 
-    ConfigManager::save_component(id, &component)?;
+    ConfigManager::save_component(&id, &component)?;
 
     Ok((
         ComponentOutput {
             action: "set".to_string(),
-            component_id: Some(id.to_string()),
+            component_id: Some(id.clone()),
             success: true,
             updated_fields,
             created: vec![],

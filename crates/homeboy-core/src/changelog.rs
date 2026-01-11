@@ -302,73 +302,6 @@ pub fn finalize_next_section(
     Ok((out, true))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn add_next_section_items_appends_multiple_in_order() {
-        let content = "# Changelog\n\n## Unreleased\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
-        let messages = vec!["First".to_string(), "Second".to_string()];
-
-        let (out, changed, items_added) =
-            add_next_section_items(content, &aliases, &messages).unwrap();
-        assert!(changed);
-        assert_eq!(items_added, 2);
-        assert!(out.contains("## Unreleased\n\n- First\n- Second\n"));
-    }
-
-    #[test]
-    fn add_next_section_items_dedupes_exact_bullets() {
-        let content = "# Changelog\n\n## Unreleased\n\n- First\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
-        let messages = vec!["First".to_string(), "Second".to_string()];
-
-        let (out, changed, items_added) =
-            add_next_section_items(content, &aliases, &messages).unwrap();
-        assert!(changed);
-        assert_eq!(items_added, 1);
-        assert!(out.contains("- First"));
-        assert!(out.contains("- Second"));
-    }
-
-    #[test]
-    fn finalize_moves_body_to_new_version_and_resets_next_section() {
-        let content = "# Changelog\n\n## Unreleased\n\n- First\n- Second\n\n## 0.1.0\n\n- Old\n";
-        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
-        let (out, changed) = finalize_next_section(content, &aliases, "0.2.0", false).unwrap();
-        assert!(changed);
-        // ## Unreleased should be at the top (before ## 0.2.0)
-        let unreleased_pos = out.find("## Unreleased").unwrap();
-        let version_pos = out.find("## 0.2.0").unwrap();
-        assert!(
-            unreleased_pos < version_pos,
-            "## Unreleased should come before ## 0.2.0"
-        );
-        assert!(out.contains("## 0.2.0\n\n- First\n- Second"));
-        assert!(out.contains("## 0.1.0"));
-    }
-
-    #[test]
-    fn finalize_errors_on_empty_next_section_by_default() {
-        let content = "# Changelog\n\n## Unreleased\n\n\n## 0.1.0\n\n- Old\n";
-        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
-        let err = finalize_next_section(content, &aliases, "0.2.0", false).unwrap_err();
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("Invalid"));
-    }
-
-    #[test]
-    fn finalize_noops_on_empty_when_allowed() {
-        let content = "# Changelog\n\n## Unreleased\n\n\n## 0.1.0\n\n- Old\n";
-        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
-        let (out, changed) = finalize_next_section(content, &aliases, "0.2.0", true).unwrap();
-        assert!(!changed);
-        assert_eq!(out, content);
-    }
-}
-
 fn normalize_heading_label(label: &str) -> String {
     label.trim().trim_matches(['[', ']']).trim().to_string()
 }
@@ -474,7 +407,6 @@ fn append_item_to_next_section(
     let end = find_section_end(&lines, start);
     let bullet = format!("- {}", message);
 
-    // If exact bullet already exists inside the section, no-op.
     for line in &lines[start + 1..end] {
         if line.trim() == bullet {
             return Ok((content.to_string(), false));
@@ -493,4 +425,70 @@ fn append_item_to_next_section(
     }
 
     Ok((out, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_next_section_items_appends_multiple_in_order() {
+        let content = "# Changelog\n\n## Unreleased\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
+        let messages = vec!["First".to_string(), "Second".to_string()];
+
+        let (out, changed, items_added) =
+            add_next_section_items(content, &aliases, &messages).unwrap();
+        assert!(changed);
+        assert_eq!(items_added, 2);
+        assert!(out.contains("## Unreleased\n\n- First\n- Second\n"));
+    }
+
+    #[test]
+    fn add_next_section_items_dedupes_exact_bullets() {
+        let content = "# Changelog\n\n## Unreleased\n\n- First\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
+        let messages = vec!["First".to_string(), "Second".to_string()];
+
+        let (out, changed, items_added) =
+            add_next_section_items(content, &aliases, &messages).unwrap();
+        assert!(changed);
+        assert_eq!(items_added, 1);
+        assert!(out.contains("- First"));
+        assert!(out.contains("- Second"));
+    }
+
+    #[test]
+    fn finalize_moves_body_to_new_version_and_resets_next_section() {
+        let content = "# Changelog\n\n## Unreleased\n\n- First\n- Second\n\n## 0.1.0\n\n- Old\n";
+        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
+        let (out, changed) = finalize_next_section(content, &aliases, "0.2.0", false).unwrap();
+        assert!(changed);
+        let unreleased_pos = out.find("## Unreleased").unwrap();
+        let version_pos = out.find("## 0.2.0").unwrap();
+        assert!(
+            unreleased_pos < version_pos,
+            "## Unreleased should come before ## 0.2.0"
+        );
+        assert!(out.contains("## 0.2.0\n\n- First\n- Second"));
+        assert!(out.contains("## 0.1.0"));
+    }
+
+    #[test]
+    fn finalize_errors_on_empty_next_section_by_default() {
+        let content = "# Changelog\n\n## Unreleased\n\n\n## 0.1.0\n\n- Old\n";
+        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
+        let err = finalize_next_section(content, &aliases, "0.2.0", false).unwrap_err();
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("Invalid"));
+    }
+
+    #[test]
+    fn finalize_noops_on_empty_when_allowed() {
+        let content = "# Changelog\n\n## Unreleased\n\n\n## 0.1.0\n\n- Old\n";
+        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
+        let (out, changed) = finalize_next_section(content, &aliases, "0.2.0", true).unwrap();
+        assert!(!changed);
+        assert_eq!(out, content);
+    }
 }

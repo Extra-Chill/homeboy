@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.2.9
+
+- Fix clippy warnings (argument bundling, test module ordering)
+
 ## 0.2.8
 
 - docs: homeboy docs outputs raw markdown by default
