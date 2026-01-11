@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "atty",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "dirs",
