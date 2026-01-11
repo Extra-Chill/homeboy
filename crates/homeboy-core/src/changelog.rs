@@ -268,10 +268,30 @@ pub fn finalize_next_section(
 
     // Replace old ## Unreleased with ## <new_version>.
     out_lines.push(format!("## {}", new_version.trim()));
+    out_lines.push(String::new());
 
     // Copy everything after the old heading (body + rest of file).
+    // Skip leading blank lines so the new version section starts cleanly.
+    let mut started = false;
     for line in &lines[start + 1..] {
+        if !started {
+            if line.trim().is_empty() {
+                continue;
+            }
+            started = true;
+        }
         out_lines.push((*line).to_string());
+    }
+
+    // Ensure a blank line between the finalized section and the next heading.
+    for idx in 0..out_lines.len().saturating_sub(1) {
+        let is_bullet = out_lines[idx].trim_start().starts_with("- ");
+        let next_is_heading = out_lines[idx + 1].trim_start().starts_with("## ");
+
+        if is_bullet && next_is_heading {
+            out_lines.insert(idx + 1, String::new());
+            break;
+        }
     }
 
     let mut out = out_lines.join("\n");
@@ -377,7 +397,7 @@ fn find_section_end(lines: &[&str], start: usize) -> usize {
     let mut index = start + 1;
     while index < lines.len() {
         let trimmed = lines[index].trim();
-        if trimmed.starts_with("## ") || trimmed == "##" {
+        if trimmed.starts_with("##") {
             break;
         }
         index += 1;

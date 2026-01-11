@@ -4,9 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.2.7
+
 - Default JSON output envelope; allow interactive passthrough
 - Require stdin+stdout TTY for interactive passthrough commands
 - Treat --json as global JSON input spec override
+- Fix changelog finalization formatting
+
 ## 0.2.5
 
 - added overlooked config command back in
