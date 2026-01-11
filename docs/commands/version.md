@@ -19,8 +19,6 @@ homeboy version show <componentId>
 ```sh
 homeboy version bump <componentId> <patch|minor|major> \
   [--changelog-add "<message>"]... \
-  [--changelog-finalize] \
-  [--changelog-empty-ok] \
   [--project-id <projectId>]
 ```
 
@@ -35,10 +33,11 @@ homeboy version bump <componentId> <patch|minor|major> \
 - `version` (for `show`)
 - `oldVersion`, `newVersion` (for `bump`)
 - `targets`: array of `{ versionFile, versionPattern, fullPath, matchCount }`
-- `changelogPath` (when changelog flags are used)
+- `changelogPath` (when `--changelog-add` is used and a changelog is available)
 - `changelogItemsAdded` (when `--changelog-add` is used)
-- `changelogFinalized` (when `--changelog-finalize` is used)
+- `changelogFinalized` (when `--changelog-add` is used and a changelog is available)
 - `changelogChanged` (when any changelog update occurs)
+- Global `warnings` may be present (for example, when `--changelog-add` is used but no changelog can be resolved)
 
 ## Exit code
 

@@ -11,7 +11,16 @@ Success:
 ```json
 {
   "success": true,
-  "data": { "...": "..." }
+  "data": { "...": "..." },
+  "warnings": [
+    {
+      "code": "validation.invalid_argument",
+      "message": "Human-readable message",
+      "details": {},
+      "hints": [{ "message": "..." }],
+      "retryable": false
+    }
+  ]
 }
 ```
 
@@ -34,11 +43,16 @@ Notes:
 
 - `data` is omitted on failure.
 - `error` is omitted on success.
-- `error.hints` and `error.retryable` are omitted when not set.
+- `warnings` is omitted when there are no warnings.
+- `error.hints`/`error.retryable` and `warnings.hints`/`warnings.retryable` are omitted when not set.
 
 ## Error fields
 
 `error` is a `homeboy_core::output::response::CliError`.
+
+## Warning fields
+
+Each item in `warnings` is a `homeboy_core::output::response::CliWarning`.
 
 - `code` (string): stable error code (see `homeboy_error::ErrorCode::as_str()`).
 - `message` (string): human-readable message.

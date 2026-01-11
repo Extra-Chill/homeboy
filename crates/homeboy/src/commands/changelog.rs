@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::docs;
 
@@ -19,15 +19,15 @@ enum ChangelogCommand {
     /// Show the embedded Homeboy CLI changelog documentation
     Show,
 
-    /// Add a changelog item to the configured "next" section
+    /// Add changelog items to the configured "next" section
     Add {
-        /// Component ID
-        component_id: String,
+        /// Component ID (non-JSON mode)
+        component_id: Option<String>,
 
-        /// Changelog item content
-        message: String,
+        /// Changelog item content (non-JSON mode)
+        message: Option<String>,
 
-        /// Optional project ID override (defaults to active project)
+        /// Optional project ID override (non-JSON mode; defaults to active project)
         #[arg(long)]
         project_id: Option<String>,
     },
@@ -48,7 +48,8 @@ pub struct ChangelogAddOutput {
     pub project_id: Option<String>,
     pub changelog_path: String,
     pub next_section_label: String,
-    pub message: String,
+    pub messages: Vec<String>,
+    pub items_added: usize,
     pub changed: bool,
 }
 
@@ -61,7 +62,16 @@ pub enum ChangelogOutput {
     Add(ChangelogAddOutput),
 }
 
-pub fn run(args: ChangelogArgs) -> CmdResult<ChangelogOutput> {
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangelogAddData {
+    pub component_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    pub messages: Vec<String>,
+}
+
+pub fn run(args: ChangelogArgs, json_spec: Option<&str>) -> CmdResult<ChangelogOutput> {
     match args.command {
         ChangelogCommand::Show => {
             let (out, code) = show()?;
@@ -72,7 +82,38 @@ pub fn run(args: ChangelogArgs) -> CmdResult<ChangelogOutput> {
             message,
             project_id,
         } => {
-            let (out, code) = add_next_item(&component_id, &message, project_id.as_deref())?;
+            if let Some(spec) = json_spec {
+                let data: ChangelogAddData =
+                    homeboy_core::json::load_op_data(spec, "changelog.add")?;
+
+                let (out, code) = add_next_items(
+                    &data.component_id,
+                    &data.messages,
+                    data.project_id.as_deref(),
+                )?;
+
+                return Ok((ChangelogOutput::Add(out), code));
+            }
+
+            let component_id = component_id.ok_or_else(|| {
+                homeboy_core::Error::validation_invalid_argument(
+                    "componentId",
+                    "Missing componentId",
+                    None,
+                    None,
+                )
+            })?;
+
+            let message = message.ok_or_else(|| {
+                homeboy_core::Error::validation_invalid_argument(
+                    "message",
+                    "Missing message",
+                    None,
+                    None,
+                )
+            })?;
+
+            let (out, code) = add_next_items(&component_id, &[message], project_id.as_deref())?;
             Ok((ChangelogOutput::Add(out), code))
         }
     }
@@ -105,9 +146,9 @@ fn resolve_project_id(project_id_override: Option<&str>) -> homeboy_core::Result
     Ok(app.active_project_id)
 }
 
-fn add_next_item(
+fn add_next_items(
     component_id: &str,
-    message: &str,
+    messages: &[String],
     project_id_override: Option<&str>,
 ) -> CmdResult<ChangelogAddOutput> {
     let component = ConfigManager::load_component(component_id)?;
@@ -119,8 +160,8 @@ fn add_next_item(
     };
 
     let settings = changelog::resolve_effective_settings(project.as_ref(), Some(&component))?;
-    let (path, changed) =
-        changelog::read_and_add_next_section_item(&component, &settings, message)?;
+    let (path, changed, items_added) =
+        changelog::read_and_add_next_section_items(&component, &settings, messages)?;
 
     Ok((
         ChangelogAddOutput {
@@ -128,7 +169,8 @@ fn add_next_item(
             project_id,
             changelog_path: path.to_string_lossy().to_string(),
             next_section_label: settings.next_section_label,
-            message: message.to_string(),
+            messages: messages.to_vec(),
+            items_added,
             changed,
         },
         0,

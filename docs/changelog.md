@@ -43,7 +43,7 @@ All notable changes to Homeboy CLI are documented in this file.
 ### Improvements
 - **Changelog**: `homeboy changelog add` auto-detects changelog path when `changelogTargets` is not configured.
 - **Changelog**: Default next section label is `Unreleased` (aliases include `[Unreleased]`).
-- **Version**: `homeboy version bump` can optionally add changelog items and/or finalize the "next" section into the new version section.
+- **Version**: `homeboy version bump` finalizes the "next" section into the new version section whenever `--changelog-add` is used.
 
 ## 0.1.12
 

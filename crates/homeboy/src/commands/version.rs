@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy_core::changelog;
 use homeboy_core::config::ProjectConfiguration;
+use homeboy_core::output::CliWarning;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
@@ -35,12 +36,6 @@ enum VersionCommand {
         /// Add a changelog item to the configured "next" section (repeatable)
         #[arg(long = "changelog-add", action = clap::ArgAction::Append)]
         changelog_add: Vec<String>,
-        /// Finalize the configured "next" section into the new version section
-        #[arg(long = "changelog-finalize")]
-        changelog_finalize: bool,
-        /// Allow finalizing an empty "next" section (no-op)
-        #[arg(long = "changelog-empty-ok")]
-        changelog_empty_ok: bool,
         /// Optional project ID override (defaults to active project)
         #[arg(long)]
         project_id: Option<String>,
@@ -92,22 +87,23 @@ pub struct VersionOutput {
     changelog_changed: Option<bool>,
 }
 
-pub fn run(args: VersionArgs) -> homeboy_core::Result<(VersionOutput, i32)> {
+pub fn run(args: VersionArgs) -> homeboy_core::output::CmdResult {
     match args.command {
-        VersionCommand::Show { component_id } => show(&component_id),
+        VersionCommand::Show { component_id } => {
+            let (out, exit_code) = show(&component_id)?;
+            let json = serde_json::to_value(out)
+                .map_err(|e| homeboy_core::Error::internal_json(e.to_string(), None))?;
+            Ok((json, Vec::new(), exit_code))
+        }
         VersionCommand::Bump {
             component_id,
             bump_type,
             changelog_add,
-            changelog_finalize,
-            changelog_empty_ok,
             project_id,
         } => bump(
             &component_id,
             bump_type,
             &changelog_add,
-            changelog_finalize,
-            changelog_empty_ok,
             project_id.as_deref(),
         ),
     }
@@ -313,10 +309,8 @@ fn bump(
     component_id: &str,
     bump_type: BumpType,
     changelog_add: &[String],
-    changelog_finalize: bool,
-    changelog_empty_ok: bool,
     project_id_override: Option<&str>,
-) -> homeboy_core::Result<(VersionOutput, i32)> {
+) -> homeboy_core::output::CmdResult {
     let component = ConfigManager::load_component(component_id)?;
     let targets = component.version_targets.clone().ok_or_else(|| {
         Error::config_missing_key("versionTargets", Some(component_id.to_string()))
@@ -403,7 +397,9 @@ fn bump(
     let mut changelog_finalized: Option<bool> = None;
     let mut changelog_changed: Option<bool> = None;
 
-    if !changelog_add.is_empty() || changelog_finalize {
+    let mut warnings: Vec<CliWarning> = Vec::new();
+
+    if !changelog_add.is_empty() {
         let project_id = match project_id_override {
             Some(id) => Some(id.to_string()),
             None => ConfigManager::load_app_config()?.active_project_id,
@@ -415,75 +411,100 @@ fn bump(
         };
 
         let settings = changelog::resolve_effective_settings(project.as_ref(), Some(&component))?;
-        let path = changelog::resolve_changelog_path(&component)?;
+
+        let path = match changelog::resolve_changelog_path(&component) {
+            Ok(path) => path,
+            Err(err) => {
+                warnings.push(CliWarning {
+                    code: err.code.as_str().to_string(),
+                    message: "Changelog not updated".to_string(),
+                    details: err.details.clone(),
+                    hints: if err.hints.is_empty() {
+                        None
+                    } else {
+                        Some(err.hints.clone())
+                    },
+                    retryable: err.retryable,
+                });
+
+                let out = VersionOutput {
+                    command: "version.bump".to_string(),
+                    component_id: component_id.to_string(),
+                    version: None,
+                    old_version: Some(old_version),
+                    new_version: Some(new_version),
+                    targets: outputs,
+                    changelog_path,
+                    changelog_items_added,
+                    changelog_finalized,
+                    changelog_changed,
+                };
+
+                let json = serde_json::to_value(out)
+                    .map_err(|e| homeboy_core::Error::internal_json(e.to_string(), None))?;
+
+                return Ok((json, warnings, 0));
+            }
+        };
+
         changelog_path = Some(path.to_string_lossy().to_string());
 
-        if !changelog_add.is_empty() {
-            let content = fs::read_to_string(&path).map_err(|err| {
-                Error::internal_io(err.to_string(), Some("read changelog".to_string()))
-            })?;
-            let mut new_content = content;
-            let mut changed = false;
-            let mut added_count = 0usize;
+        let content = fs::read_to_string(&path).map_err(|err| {
+            Error::internal_io(err.to_string(), Some("read changelog".to_string()))
+        })?;
+        let mut new_content = content;
+        let mut any_changed = false;
+        let mut added_count = 0usize;
 
-            for message in changelog_add {
-                let (next_content, item_changed) = changelog::add_next_section_item(
-                    &new_content,
-                    &settings.next_section_aliases,
-                    message,
-                )?;
-                new_content = next_content;
-                if item_changed {
-                    changed = true;
-                    added_count += 1;
-                }
-            }
-
-            if changed {
-                fs::write(&path, &new_content).map_err(|err| {
-                    Error::internal_io(err.to_string(), Some("write changelog".to_string()))
-                })?;
-            }
-
-            changelog_items_added = Some(added_count);
-            changelog_changed = Some(changed);
-        }
-
-        if changelog_finalize {
-            let content = fs::read_to_string(&path).map_err(|err| {
-                Error::internal_io(err.to_string(), Some("read changelog".to_string()))
-            })?;
-            let (new_content, changed) = changelog::finalize_next_section(
-                &content,
+        for message in changelog_add {
+            let (next_content, item_changed) = changelog::add_next_section_item(
+                &new_content,
                 &settings.next_section_aliases,
-                &new_version,
-                changelog_empty_ok,
+                message,
             )?;
-
-            if changed {
-                fs::write(&path, &new_content).map_err(|err| {
-                    Error::internal_io(err.to_string(), Some("write changelog".to_string()))
-                })?;
+            new_content = next_content;
+            if item_changed {
+                any_changed = true;
+                added_count += 1;
             }
-
-            changelog_finalized = Some(true);
-            changelog_changed = Some(changelog_changed.unwrap_or(false) || changed);
         }
+
+        let (finalized_content, finalized_changed) = changelog::finalize_next_section(
+            &new_content,
+            &settings.next_section_aliases,
+            &new_version,
+            true,
+        )?;
+
+        new_content = finalized_content;
+        any_changed = any_changed || finalized_changed;
+
+        if any_changed {
+            fs::write(&path, &new_content).map_err(|err| {
+                Error::internal_io(err.to_string(), Some("write changelog".to_string()))
+            })?;
+        }
+
+        changelog_items_added = Some(added_count);
+        changelog_finalized = Some(true);
+        changelog_changed = Some(any_changed);
     }
 
-    Ok((
-        VersionOutput {
-            command: "version.bump".to_string(),
-            component_id: component_id.to_string(),
-            version: None,
-            old_version: Some(old_version),
-            new_version: Some(new_version),
-            targets: outputs,
-            changelog_path,
-            changelog_items_added,
-            changelog_finalized,
-            changelog_changed,
-        },
-        0,
-    ))
+    let out = VersionOutput {
+        command: "version.bump".to_string(),
+        component_id: component_id.to_string(),
+        version: None,
+        old_version: Some(old_version),
+        new_version: Some(new_version),
+        targets: outputs,
+        changelog_path,
+        changelog_items_added,
+        changelog_finalized,
+        changelog_changed,
+    };
+
+    let json = serde_json::to_value(out)
+        .map_err(|e| homeboy_core::Error::internal_json(e.to_string(), None))?;
+
+    Ok((json, warnings, 0))
 }

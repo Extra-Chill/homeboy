@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use serde_json;
 
 fn validate_json_mode(command: &Commands) -> homeboy_core::Result<()> {
     match command {
@@ -103,10 +104,12 @@ fn main() -> std::process::ExitCode {
             homeboy_core::output::map_cmd_result_to_json(docs_command::run(args))
         }
         Commands::Changelog(args) => {
-            homeboy_core::output::map_cmd_result_to_json(changelog::run(args))
+            homeboy_core::output::map_cmd_result_to_json(changelog::run(args, cli.json.as_deref()))
         }
         Commands::Git(args) => homeboy_core::output::map_cmd_result_to_json(git::run(args)),
-        Commands::Version(args) => homeboy_core::output::map_cmd_result_to_json(version::run(args)),
+        Commands::Version(args) => {
+            homeboy_core::output::map_cmd_result_to_json_with_warnings(version::run(args))
+        }
         Commands::Build(args) => homeboy_core::output::map_cmd_result_to_json(build::run(args)),
         Commands::Doctor(args) => homeboy_core::output::map_cmd_result_to_json(doctor::run(args)),
     };

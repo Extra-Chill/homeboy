@@ -19,13 +19,8 @@ Use Homeboy to update the version and changelog together. Do not manually edit c
 ```sh
 homeboy version bump <componentId> <patch|minor|major> \
   --changelog-add "<change 1>" \
-  --changelog-add "<change 2>" \
-  --changelog-finalize
+  --changelog-add "<change 2>"
 ```
-
-- Omit `--changelog-finalize` if you are intentionally keeping items under "Unreleased".
-- Use `--changelog-empty-ok` only when an empty changelog is explicitly acceptable.
-
 5. `homeboy build <componentId>`
 6. `homeboy git commit <componentId> "Bump version to X.Y.Z"`
 7. `homeboy git push <componentId>`

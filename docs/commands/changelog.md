@@ -20,9 +20,12 @@ Shows the embedded Homeboy CLI changelog documentation (from `docs/changelog.md`
 
 ```sh
 homeboy changelog add <componentId> <message> [--project-id <projectId>]
+homeboy changelog add --json <spec>
 ```
 
-Adds a changelog item to the configured "next" section in the component's changelog file.
+Adds one or more changelog items to the configured "next" section in the component's changelog file.
+
+In JSON mode (`--json`), positional args are not used. The payload's `messages` array is applied in order.
 Configuration / defaults:
 
 - Changelog path resolution:
@@ -62,7 +65,8 @@ Configuration / defaults:
   "projectId": "<id>|null",
   "changelogPath": "</absolute/or/resolved/path.md>",
   "nextSectionLabel": "<label>",
-  "message": "<message>",
+  "messages": ["<message>", "<message>"],
+  "itemsAdded": 2,
   "changed": true
 }
 ```

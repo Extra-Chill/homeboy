@@ -123,6 +123,46 @@ pub fn add_next_section_item(
     Ok((with_item, section_changed || item_changed))
 }
 
+pub fn add_next_section_items(
+    changelog_content: &str,
+    next_section_aliases: &[String],
+    messages: &[String],
+) -> Result<(String, bool, usize)> {
+    if messages.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "messages",
+            "Changelog messages cannot be empty",
+            None,
+            None,
+        ));
+    }
+
+    let (mut content, mut changed) = ensure_next_section(changelog_content, next_section_aliases)?;
+    let mut items_added = 0;
+
+    for message in messages {
+        let trimmed_message = message.trim();
+        if trimmed_message.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "messages",
+                "Changelog messages cannot include empty values",
+                None,
+                None,
+            ));
+        }
+
+        let (next, item_changed) =
+            append_item_to_next_section(&content, next_section_aliases, trimmed_message)?;
+        if item_changed {
+            items_added += 1;
+            changed = true;
+        }
+        content = next;
+    }
+
+    Ok((content, changed, items_added))
+}
+
 pub fn read_and_add_next_section_item(
     component: &ComponentConfiguration,
     settings: &EffectiveChangelogSettings,
@@ -141,6 +181,26 @@ pub fn read_and_add_next_section_item(
     }
 
     Ok((path, changed))
+}
+
+pub fn read_and_add_next_section_items(
+    component: &ComponentConfiguration,
+    settings: &EffectiveChangelogSettings,
+    messages: &[String],
+) -> Result<(PathBuf, bool, usize)> {
+    let path = resolve_changelog_path(component)?;
+    let content = fs::read_to_string(&path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some("read changelog".to_string())))?;
+
+    let (new_content, changed, items_added) =
+        add_next_section_items(&content, &settings.next_section_aliases, messages)?;
+
+    if changed {
+        fs::write(&path, new_content)
+            .map_err(|e| Error::internal_io(e.to_string(), Some("write changelog".to_string())))?;
+    }
+
+    Ok((path, changed, items_added))
 }
 
 pub fn finalize_next_section(
@@ -179,7 +239,7 @@ pub fn finalize_next_section(
 
         return Err(Error::validation_invalid_argument(
             "changelog",
-            "Next changelog section is empty (use --changelog-empty-ok to finalize anyway)",
+            "Next changelog section is empty",
             None,
             None,
         ));
@@ -225,6 +285,33 @@ pub fn finalize_next_section(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_next_section_items_appends_multiple_in_order() {
+        let content = "# Changelog\n\n## Unreleased\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
+        let messages = vec!["First".to_string(), "Second".to_string()];
+
+        let (out, changed, items_added) =
+            add_next_section_items(content, &aliases, &messages).unwrap();
+        assert!(changed);
+        assert_eq!(items_added, 2);
+        assert!(out.contains("## Unreleased\n\n- First\n\n- Second"));
+    }
+
+    #[test]
+    fn add_next_section_items_dedupes_exact_bullets() {
+        let content = "# Changelog\n\n## Unreleased\n\n- First\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
+        let messages = vec!["First".to_string(), "Second".to_string()];
+
+        let (out, changed, items_added) =
+            add_next_section_items(content, &aliases, &messages).unwrap();
+        assert!(changed);
+        assert_eq!(items_added, 1);
+        assert!(out.contains("- First"));
+        assert!(out.contains("- Second"));
+    }
 
     #[test]
     fn finalize_moves_body_to_new_version_and_resets_next_section() {
@@ -381,7 +468,7 @@ fn append_item_to_next_section(
 
         if idx + 1 == end {
             out.push_str(&bullet);
-            out.push('\n');
+            out.push_str("\n\n");
         }
     }
 
