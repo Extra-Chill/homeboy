@@ -316,7 +316,7 @@ mod tests {
             add_next_section_items(content, &aliases, &messages).unwrap();
         assert!(changed);
         assert_eq!(items_added, 2);
-        assert!(out.contains("## Unreleased\n\n- First\n\n- Second"));
+        assert!(out.contains("## Unreleased\n\n- First\n- Second\n"));
     }
 
     #[test]
@@ -488,7 +488,7 @@ fn append_item_to_next_section(
 
         if idx + 1 == end {
             out.push_str(&bullet);
-            out.push_str("\n\n");
+            out.push('\n');
         }
     }
 
