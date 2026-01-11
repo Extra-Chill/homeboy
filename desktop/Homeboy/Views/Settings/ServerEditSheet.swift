@@ -1,5 +1,7 @@
 import SwiftUI
 
+import Foundation
+
 struct ServerEditSheet: View {
     @ObservedObject var config: ConfigurationManager
     @Environment(\.dismiss) private var dismiss
@@ -18,6 +20,7 @@ struct ServerEditSheet: View {
     @State private var publicKey: String?
     @State private var isGeneratingKey = false
     @State private var isTestingConnection = false
+    @State private var selectedConnectionTestProjectId: String = ""
     @State private var connectionTestResult: (success: Bool, message: String)?
     
     @State private var showDeleteConfirmation = false
@@ -132,31 +135,48 @@ struct ServerEditSheet: View {
                     }
                 }
                 
-                Section("Connection Test") {
-                    HStack {
-                        Button("Test SSH Connection") { testConnection() }
-                            .disabled(!hasSSHKey || isTestingConnection || host.isEmpty)
-                        
-                        if isTestingConnection {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                    }
-                    
-                    if let result = connectionTestResult {
-                        if result.success {
-                            HStack {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
-                                Text(result.message)
-                                    .font(.caption)
-                                    .foregroundColor(.green)
-                            }
-                        } else {
-                            InlineErrorView(result.message, source: "SSH Connection Test")
-                        }
-                    }
-                }
+                 Section("Connection Test") {
+                     if projectsUsingServer.isEmpty {
+                         Text("Link this server to a project to test via the Homeboy CLI.")
+                             .font(.caption)
+                             .foregroundColor(.secondary)
+                     } else {
+                         Picker("Project", selection: $selectedConnectionTestProjectId) {
+                             ForEach(projectsUsingServer) { project in
+                                 let isActive = project.id == config.activeProject?.id
+                                 Text(isActive ? "\(project.name) (Active)" : project.name)
+                                     .tag(project.id)
+                             }
+                         }
+                         Text("Project context used for CLI SSH test")
+                             .font(.caption)
+                             .foregroundColor(.secondary)
+                     }
+
+                     HStack {
+                         Button("Test SSH Connection") { testConnection() }
+                             .disabled(!hasSSHKey || isTestingConnection || selectedConnectionTestProjectId.isEmpty)
+
+                         if isTestingConnection {
+                             ProgressView()
+                                 .controlSize(.small)
+                         }
+                     }
+
+                     if let result = connectionTestResult {
+                         if result.success {
+                             HStack {
+                                 Image(systemName: "checkmark.circle.fill")
+                                     .foregroundColor(.green)
+                                 Text(result.message)
+                                     .font(.caption)
+                                     .foregroundColor(.green)
+                             }
+                         } else {
+                             InlineErrorView(result.message, source: "SSH Connection Test")
+                         }
+                     }
+                 }
                 
                 if !isNewServer {
                     Section("Danger Zone") {
@@ -194,6 +214,9 @@ struct ServerEditSheet: View {
         }
         .frame(width: 500, height: 600)
         .onAppear { loadExistingServer() }
+        .onChange(of: selectedConnectionTestProjectId) { _, _ in
+            connectionTestResult = nil
+        }
         .alert("Delete Server", isPresented: $showDeleteConfirmation) {
             TextField("Type server name to confirm", text: $deleteConfirmText)
             Button("Cancel", role: .cancel) { }
@@ -216,7 +239,17 @@ struct ServerEditSheet: View {
             host = server.host
             username = server.user
             port = String(server.port)
-            hasSSHKey = SSHKeyManager.hasKeyFile(forServer: server.id)
+
+            if let activeProjectId = config.activeProject?.id,
+               projectsUsingServer.contains(where: { $0.id == activeProjectId }) {
+                selectedConnectionTestProjectId = activeProjectId
+            } else {
+                selectedConnectionTestProjectId = projectsUsingServer.first?.id ?? ""
+            }
+
+            Task {
+                await refreshKeyStatusFromCLI()
+            }
         }
     }
     
@@ -234,86 +267,82 @@ struct ServerEditSheet: View {
     
     private func generateSSHKey() {
         guard !serverId.isEmpty else { return }
-        
+
         isGeneratingKey = true
         publicKey = nil
-        
-        SSHService.generateSSHKeyPair(forServer: serverId) { result in
-            isGeneratingKey = false
-            switch result {
-            case .success(let keys):
-                hasSSHKey = true
-                publicKey = keys.publicKey
-            case .failure(let error):
+
+        Task {
+            do {
+                _ = try await HomeboyCLI.shared.serverKeyGenerate(serverId: serverId)
+                await refreshKeyStatusFromCLI()
+            } catch {
+                isGeneratingKey = false
                 connectionTestResult = (false, "Key generation failed: \(error.localizedDescription)")
             }
         }
     }
-    
+
     private func showPublicKey() {
-        publicKey = try? SSHKeyManager.readPublicKey(forServer: serverId)
+        Task {
+            do {
+                let response = try await HomeboyCLI.shared.serverKeyShow(serverId: serverId)
+                let key = response.output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                if !key.isEmpty {
+                    publicKey = key
+                }
+            } catch {
+                connectionTestResult = (false, error.localizedDescription)
+            }
+        }
+    }
+
+    private func refreshKeyStatusFromCLI() async {
+        defer {
+            isGeneratingKey = false
+        }
+
+        guard !serverId.isEmpty else {
+            hasSSHKey = false
+            publicKey = nil
+            return
+        }
+
+        do {
+            let response = try await HomeboyCLI.shared.serverKeyShow(serverId: serverId)
+            let key = response.output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            hasSSHKey = !key.isEmpty
+            publicKey = key.isEmpty ? nil : key
+        } catch {
+            hasSSHKey = false
+            publicKey = nil
+        }
     }
     
     private func testConnection() {
-        // Create a temporary server config for testing
-        let testServer = ServerConfig(
-            id: serverId,
-            name: serverName,
-            host: host,
-            user: username,
-            port: Int(port) ?? 22
-        )
-        
-        // We need a base path to test - use a simple echo command
         isTestingConnection = true
         connectionTestResult = nil
-        
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Ensure key file exists
-            guard SSHKeyManager.restoreFromKeychainIfNeeded(forServer: serverId) else {
-                DispatchQueue.main.async {
-                    isTestingConnection = false
-                    connectionTestResult = (false, "SSH key not found")
-                }
-                return
-            }
 
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            process.arguments = [
-                "-i", SSHKeyManager.privateKeyPath(forServer: serverId),
-                "-p", String(testServer.port),
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=10",
-                "\(testServer.user)@\(testServer.host)",
-                "echo 'Connection successful'"
-            ]
-            
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            
+        guard !selectedConnectionTestProjectId.isEmpty else {
+            isTestingConnection = false
+            connectionTestResult = (false, "Select a project to test the connection.")
+            return
+        }
+
+        Task {
             do {
-                try process.run()
-                process.waitUntilExit()
-                
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                
-                DispatchQueue.main.async {
-                    isTestingConnection = false
-                    if process.terminationStatus == 0 {
-                        connectionTestResult = (true, output.trimmingCharacters(in: .whitespacesAndNewlines))
-                    } else {
-                        connectionTestResult = (false, output.trimmingCharacters(in: .whitespacesAndNewlines))
-                    }
+                let response = try await HomeboyCLI.shared.sshCommand(projectId: selectedConnectionTestProjectId, command: "echo 'Connection successful'")
+
+                isTestingConnection = false
+                let output = response.output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+
+                if response.exitCode == 0 {
+                    connectionTestResult = (true, output.isEmpty ? "Connection successful" : output)
+                } else {
+                    connectionTestResult = (false, output.isEmpty ? "SSH connection failed" : output)
                 }
             } catch {
-                DispatchQueue.main.async {
-                    isTestingConnection = false
-                    connectionTestResult = (false, error.localizedDescription)
-                }
+                isTestingConnection = false
+                connectionTestResult = (false, error.localizedDescription)
             }
         }
     }

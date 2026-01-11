@@ -223,7 +223,7 @@ Path values are automatically wrapped in backticks for markdown formatting.
 
 ## Best Practices
 
-1. **Provide meaningful source names** - Use the module or component name (e.g., "Database Browser", "Deployer", "SSH Tunnel")
+1. **Provide meaningful source names** - Use the module or component name (e.g., "Database Browser", "Deployer", "SSH")
 
 2. **Include path context for file operations** - Use the `path:` parameter when errors relate to specific files
 

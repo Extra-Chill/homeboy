@@ -1,5 +1,8 @@
 import Foundation
 
+// Note: `CLIBridge` is defined in `Homeboy/Core/CLI/CLIBridge.swift`.
+
+
 // MARK: - CLI Output Models
 
 struct FileListEntry: Decodable {
@@ -73,6 +76,10 @@ final class HomeboyCLI {
 
     private let cli = CLIBridge.shared
 
+    var isInstalled: Bool {
+        cli.isInstalled
+    }
+
     private init() {}
 
     func fileList(projectId: String, path: String) async throws -> FileOutput {
@@ -118,6 +125,26 @@ final class HomeboyCLI {
 
     func sshCommand(projectId: String, command: String) async throws -> CLIBridgeResponse {
         try await cli.execute(["ssh", projectId, command], timeout: 30)
+    }
+
+    func serverKeyGenerate(serverId: String) async throws -> CLIBridgeResponse {
+        try await cli.execute(["server", "key", "generate", serverId], timeout: 60)
+    }
+
+    func serverKeyShow(serverId: String) async throws -> CLIBridgeResponse {
+        try await cli.execute(["server", "key", "show", serverId], timeout: 30)
+    }
+
+    func serverKeyUnset(serverId: String) async throws -> CLIBridgeResponse {
+        try await cli.execute(["server", "key", "unset", serverId], timeout: 30)
+    }
+
+    func serverKeyImport(serverId: String, privateKeyPath: String) async throws -> CLIBridgeResponse {
+        try await cli.execute(["server", "key", "import", serverId, privateKeyPath], timeout: 60)
+    }
+
+    func serverKeyUse(serverId: String, privateKeyPath: String) async throws -> CLIBridgeResponse {
+        try await cli.execute(["server", "key", "use", serverId, privateKeyPath], timeout: 30)
     }
 
     func dbTables(projectId: String) async throws -> DbOutput {

@@ -35,8 +35,8 @@ class RemoteFileBrowser: ObservableObject {
     private let cli = HomeboyCLI.shared
 
     /// Initialize with a project ID and optional starting path
-    init(serverId: String, startingPath: String? = nil) {
-        self.projectId = serverId
+    init(projectId: String, startingPath: String? = nil) {
+        self.projectId = projectId
         self.startingPath = startingPath
     }
 

@@ -2,6 +2,14 @@
 
 All notable code changes to this project are documented in this file.
 
+## 0.7.2
+
+### Improvements
+- **CLI Wrapper**: Added `HomeboyCLI` for typed JSON decoding of CLI output (files, logs, db).
+- **Remote File Browser**: Refactored `RemoteFileBrowser` file operations to use `homeboy file` commands instead of direct SSH.
+- **Database Browser**: Expanded table/query functionality and added delete-row confirmation flow via `homeboy db`.
+- **Deployer**: Simplified deploy flow to be CLI-driven and aligned result parsing (source vs remote version fields).
+
 ## 0.7.1
 
 ### Improvements
@@ -54,10 +62,10 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 - **Centralized App Paths**: Added `AppPaths` and updated the app + CLI to use it for Application Support locations (projects, servers, modules, docs, keys, backups).
 - **Typed Configuration Change Events**: Replaced NotificationCenter project-change notifications with `ConfigurationObserver` + `ConfigurationChangeType`, and updated observing ViewModels to react only to relevant field changes.
 - **Remote Path Normalization**: Added `RemotePathResolver` (plus WordPress-specific helpers) and refactored SSH file/log browsing + module paths to avoid slash-joining edge cases.
-- **Non-Blocking SSH Tunnel Startup**: Updated `SSHTunnelService` to avoid `Thread.sleep` during tunnel establishment and stale tunnel cleanup.
+- **Non-Blocking SSH Tunnel Startup**: Updated `SSHTunnelService` to avoid `Thread.sleep` during tunnel establishment and stale tunnel cleanup. (Historical; desktop now uses the standalone CLI for DB access.)
 
 ### CLI
-- **Deploy Is Now Deploy-Only**: `homeboy deploy` no longer runs `build.sh`; it requires an existing build artifact and deploys via `DeploymentService`.
+- **Deploy Is Now Deploy-Only**: `homeboy deploy` no longer runs `build.sh`; it requires an existing build artifact and deploys via `DeploymentService`. (Historical; deploy behavior is now in the standalone CLI.)
 - **Config + Project Type Resolution Cleanup**: CLI commands now use `ConfigurationManager.readProject`/`readServer` and `ProjectTypeManager.shared.resolve(...)` with shared path helpers.
 
 ### SSH / Deployment
@@ -175,11 +183,11 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 
 ## 0.2.0
 
-- Database Browser: add a new sidebar tool for browsing remote MySQL databases over SSH tunnel.
+- Database Browser: add a new sidebar tool for browsing remote databases. (Historical; desktop now uses the standalone CLI for DB access.)
 - Database Browser: categorize multisite tables by site (plus Network/Other) via `WordPressSiteMap`, including protected table checks for core WordPress tables.
 - Database Browser: add table viewer with pagination, multi-row selection, copy-to-clipboard, and single-row deletion (with confirmation).
 - Database Browser: add SQL query mode with results table, row selection, and copy-to-clipboard.
-- Core/Database: add `SSHTunnelService` port-forwarding (local 3307 -> remote 3306) and `MySQLService` for listing tables/columns/rows, executing queries, and destructive operations.
+- Core/Database: add `SSHTunnelService` port-forwarding (local 3307 -> remote 3306) and `MySQLService` for listing tables/columns/rows, executing queries, and destructive operations. (Historical; removed as part of the CLI/Desktop split.)
 
 ## 0.1.4
 

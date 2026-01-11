@@ -1,5 +1,6 @@
 import Foundation
 
+
 /// Response structure for CLI execution results
 struct CLIBridgeResponse: Sendable {
     let success: Bool
@@ -71,6 +72,40 @@ actor CLIBridge {
 
     private init() {}
 
+    private actor ProcessOutputCollector {
+        private var stdoutData = Data()
+        private var stderrData = Data()
+
+        func appendStdout(_ data: Data) {
+            stdoutData.append(data)
+        }
+
+        func appendStderr(_ data: Data) {
+            stderrData.append(data)
+        }
+
+        func finalize() -> (stdout: String, stderr: String) {
+            (
+                String(data: stdoutData, encoding: .utf8) ?? "",
+                String(data: stderrData, encoding: .utf8) ?? ""
+            )
+        }
+    }
+
+    private actor ContinuationGate {
+        private var didResume = false
+
+        func resumeOnce<T>(
+            _ continuation: CheckedContinuation<T, Error>,
+            with result: Result<T, Error>
+        ) {
+            guard !didResume else { return }
+            didResume = true
+
+            continuation.resume(with: result)
+        }
+    }
+
     // MARK: - Installation Status
 
     /// Whether the CLI is installed (delegates to CLIVersionChecker)
@@ -105,29 +140,34 @@ actor CLIBridge {
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
 
-            var stdoutData = Data()
-            var stderrData = Data()
+            let outputCollector = ProcessOutputCollector()
+            let continuationGate = ContinuationGate()
 
-            // Read stdout
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
-                if !data.isEmpty {
-                    stdoutData.append(data)
+                guard !data.isEmpty else { return }
+
+                Task {
+                    await outputCollector.appendStdout(data)
                 }
             }
 
-            // Read stderr
             stderrPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
-                if !data.isEmpty {
-                    stderrData.append(data)
+                guard !data.isEmpty else { return }
+
+                Task {
+                    await outputCollector.appendStderr(data)
                 }
             }
 
-            // Timeout handling
             let timeoutWorkItem = DispatchWorkItem {
-                if process.isRunning {
-                    process.terminate()
+                Task {
+                    if process.isRunning {
+                        process.terminate()
+                    }
+
+                    await continuationGate.resumeOnce(continuation, with: .failure(CLIBridgeError.timeout))
                 }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
@@ -135,34 +175,45 @@ actor CLIBridge {
             process.terminationHandler = { proc in
                 timeoutWorkItem.cancel()
 
-                // Clean up handlers
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
 
-                // Get any remaining data
-                stdoutData.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-                stderrData.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+                Task {
+                    let remainingStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                    let remainingStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
 
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                    if !remainingStdout.isEmpty {
+                        await outputCollector.appendStdout(remainingStdout)
+                    }
+                    if !remainingStderr.isEmpty {
+                        await outputCollector.appendStderr(remainingStderr)
+                    }
 
-                let response = CLIBridgeResponse(
-                    success: proc.terminationStatus == 0,
-                    output: stdout,
-                    errorOutput: stderr,
-                    exitCode: proc.terminationStatus
-                )
+                    let output = await outputCollector.finalize()
+                    let response = CLIBridgeResponse(
+                        success: proc.terminationStatus == 0,
+                        output: output.stdout,
+                        errorOutput: output.stderr,
+                        exitCode: proc.terminationStatus
+                    )
 
-                continuation.resume(returning: response)
+                    await continuationGate.resumeOnce(continuation, with: .success(response))
+                }
             }
 
             do {
                 try process.run()
             } catch {
                 timeoutWorkItem.cancel()
-                continuation.resume(throwing: CLIBridgeError.executionFailed(exitCode: -1, message: error.localizedDescription))
+                Task {
+                    await continuationGate.resumeOnce(
+                        continuation,
+                        with: .failure(CLIBridgeError.executionFailed(exitCode: -1, message: error.localizedDescription))
+                    )
+                }
             }
         }
+
     }
 
     /// Executes a CLI command with stdin input and returns the result
@@ -188,29 +239,34 @@ actor CLIBridge {
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
 
-            var stdoutData = Data()
-            var stderrData = Data()
+            let outputCollector = ProcessOutputCollector()
+            let continuationGate = ContinuationGate()
 
-            // Read stdout
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
-                if !data.isEmpty {
-                    stdoutData.append(data)
+                guard !data.isEmpty else { return }
+
+                Task {
+                    await outputCollector.appendStdout(data)
                 }
             }
 
-            // Read stderr
             stderrPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
-                if !data.isEmpty {
-                    stderrData.append(data)
+                guard !data.isEmpty else { return }
+
+                Task {
+                    await outputCollector.appendStderr(data)
                 }
             }
 
-            // Timeout handling
             let timeoutWorkItem = DispatchWorkItem {
-                if process.isRunning {
-                    process.terminate()
+                Task {
+                    if process.isRunning {
+                        process.terminate()
+                    }
+
+                    await continuationGate.resumeOnce(continuation, with: .failure(CLIBridgeError.timeout))
                 }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
@@ -218,38 +274,47 @@ actor CLIBridge {
             process.terminationHandler = { proc in
                 timeoutWorkItem.cancel()
 
-                // Clean up handlers
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
 
-                // Get any remaining data
-                stdoutData.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-                stderrData.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+                Task {
+                    let remainingStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                    let remainingStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
 
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                    if !remainingStdout.isEmpty {
+                        await outputCollector.appendStdout(remainingStdout)
+                    }
+                    if !remainingStderr.isEmpty {
+                        await outputCollector.appendStderr(remainingStderr)
+                    }
 
-                let response = CLIBridgeResponse(
-                    success: proc.terminationStatus == 0,
-                    output: stdout,
-                    errorOutput: stderr,
-                    exitCode: proc.terminationStatus
-                )
+                    let output = await outputCollector.finalize()
+                    let response = CLIBridgeResponse(
+                        success: proc.terminationStatus == 0,
+                        output: output.stdout,
+                        errorOutput: output.stderr,
+                        exitCode: proc.terminationStatus
+                    )
 
-                continuation.resume(returning: response)
+                    await continuationGate.resumeOnce(continuation, with: .success(response))
+                }
             }
 
             do {
                 try process.run()
 
-                // Write stdin content and close
                 if let stdinData = stdin.data(using: .utf8) {
                     stdinPipe.fileHandleForWriting.write(stdinData)
                 }
                 stdinPipe.fileHandleForWriting.closeFile()
             } catch {
                 timeoutWorkItem.cancel()
-                continuation.resume(throwing: CLIBridgeError.executionFailed(exitCode: -1, message: error.localizedDescription))
+                Task {
+                    await continuationGate.resumeOnce(
+                        continuation,
+                        with: .failure(CLIBridgeError.executionFailed(exitCode: -1, message: error.localizedDescription))
+                    )
+                }
             }
         }
     }

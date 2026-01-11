@@ -14,7 +14,7 @@ One-click deployment of components (plugins, themes, packages) to any SSH-access
 - Per-site component registry
 
 **Database Browser**
-Browse and query remote MySQL databases over SSH tunnel.
+Browse and query remote databases via the `homeboy db` CLI (executed over SSH where applicable).
 - Table listing with multisite support (WordPress projects)
 - Table grouping system for organization
 - Query editor with native table results display
@@ -96,7 +96,7 @@ Homeboy works with **projects** (site profiles). On first launch, configure your
 - **General**: Project name, type, and local domain
 - **Servers**: Add an SSH server (host/user/port) and generate an SSH key
 - **Project Settings**: Set the remote base path (used by Deployer and remote file browsing)
-- **Database**: MySQL connection details (used by Database Browser over SSH tunnel)
+- **Database**: Database connection details (used by the Database Browser via the CLI)
 - **Components**: Plugins, themes, or packages for deployment
 - **API**: REST API base URL and authentication (used by module API actions)
 
@@ -121,7 +121,7 @@ Modules are installed to:
 
 ## Server Configuration (SSH)
 
-Remote features (deployments, database tunnel, remote file browsing) require an SSH server.
+Remote features (deployments, remote file browsing, remote database access) require an SSH server.
 
 1. Go to **Settings > Servers**
 2. Click **Add Server**
@@ -133,7 +133,7 @@ Remote features (deployments, database tunnel, remote file browsing) require an 
    - **Port**: usually `22`
 4. Under **SSH Key**, click **Generate SSH Key**
 5. Click **Show** to copy the public key and add it to the server’s `~/.ssh/authorized_keys`
-6. Click **Test SSH Connection** to verify
+6. Click **Test SSH Connection** to verify (requires selecting a project linked to this server)
 
 For WordPress projects, set the **wp-content path** in project settings (you can use **Browse** to discover installations on the server).
 
@@ -148,7 +148,7 @@ Homeboy/
 │   ├── CLI/                      # CLI installer
 │   ├── Config/                   # JSON config, ProjectTypeManager
 │   ├── Copyable/                 # Error/warning copy system
-│   ├── Database/                 # MySQL, SSH tunnel, SchemaResolver
+│   ├── Database/                 # Database tooling (CLI-mediated) and schema helpers
 │   ├── Grouping/                 # GroupingManager, ItemGrouping
 │   ├── Modules/                  # Module loading and execution
 │   ├── Process/                  # Python and shell runners

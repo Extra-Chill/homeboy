@@ -23,7 +23,7 @@ struct RemoteLogViewerView: View {
             }
             .sheet(isPresented: $showBrowser) {
                 RemoteFileBrowserView(
-                    serverId: serverId,
+                    projectId: serverId,
                     startingPath: basePath,
                     mode: .selectFile,
                     onSelectPath: { path in

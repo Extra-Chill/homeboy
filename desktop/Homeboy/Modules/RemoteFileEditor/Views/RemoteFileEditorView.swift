@@ -8,7 +8,7 @@ struct RemoteFileEditorView: View {
     init() {
         let serverId = ConfigurationManager.shared.safeActiveProject.serverId ?? ""
         let basePath = ConfigurationManager.shared.safeActiveProject.basePath
-        _browser = StateObject(wrappedValue: RemoteFileBrowser(serverId: serverId, startingPath: basePath))
+        _browser = StateObject(wrappedValue: RemoteFileBrowser(projectId: serverId, startingPath: basePath))
     }
     
     var body: some View {

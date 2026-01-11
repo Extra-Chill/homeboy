@@ -11,8 +11,8 @@ struct RemoteFileBrowserView: View {
     
     @State private var sortDescriptor: DataTableSortDescriptor<RemoteFileEntry>?
     
-    init(serverId: String, startingPath: String? = nil, mode: FileBrowserMode = .browse, onSelectPath: ((String) -> Void)? = nil) {
-        _browser = StateObject(wrappedValue: RemoteFileBrowser(serverId: serverId, startingPath: startingPath))
+    init(projectId: String, startingPath: String? = nil, mode: FileBrowserMode = .browse, onSelectPath: ((String) -> Void)? = nil) {
+        _browser = StateObject(wrappedValue: RemoteFileBrowser(projectId: projectId, startingPath: startingPath))
         self.mode = mode
         self.onSelectPath = onSelectPath
     }
@@ -251,5 +251,5 @@ struct RemoteFileBrowserView: View {
 // MARK: - Preview
 
 #Preview {
-    RemoteFileBrowserView(serverId: "test", mode: .browse)
+    RemoteFileBrowserView(projectId: "test", mode: .browse)
 }

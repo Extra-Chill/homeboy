@@ -44,10 +44,7 @@ struct DeployerView: View {
                 viewModel.cancelBuild()
             }
             Button("Deploy") {
-                let deployable = viewModel.selectedComponents
-                    .filter { viewModel.selectedComponents.contains($0.id) }
-                    .filter { $0.hasBuildArtifact }
-                viewModel.startDeployment(components: deployable)
+                viewModel.deploySelected()
             }
         } message: {
             let names = viewModel.componentsNeedingBuild.map { $0.name }.joined(separator: ", ")

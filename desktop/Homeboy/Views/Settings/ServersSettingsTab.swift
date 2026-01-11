@@ -1,5 +1,7 @@
 import SwiftUI
 
+import Foundation
+
 struct ServersSettingsTab: View {
     @ObservedObject var config: ConfigurationManager
 
@@ -20,13 +22,30 @@ struct ServersSettingsTab: View {
         return config.availableServers.first { $0.id == serverId }
     }
     
+    @State private var hasSSHKeyForSelectedServer: Bool = false
+
     private var hasSSHKey: Bool {
-        guard let serverId = config.safeActiveProject.serverId else { return false }
-        return SSHKeyManager.hasKeyFile(forServer: serverId)
+        guard selectedServer != nil else { return false }
+        return hasSSHKeyForSelectedServer
     }
     
     private var isWordPressProject: Bool {
         config.safeActiveProject.isWordPress
+    }
+
+    private func refreshSSHKeyStatusFromCLI() async {
+        guard let serverId = config.safeActiveProject.serverId, !serverId.isEmpty else {
+            hasSSHKeyForSelectedServer = false
+            return
+        }
+
+        do {
+            let response = try await HomeboyCLI.shared.serverKeyShow(serverId: serverId)
+            let key = response.output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            hasSSHKeyForSelectedServer = !key.isEmpty
+        } catch {
+            hasSSHKeyForSelectedServer = false
+        }
     }
     
     private var basePath: String {
@@ -201,7 +220,7 @@ struct ServersSettingsTab: View {
         .formStyle(.grouped)
         .sheet(isPresented: $showFileBrowser) {
             if let serverId = config.safeActiveProject.serverId {
-                RemoteFileBrowserView(serverId: serverId, mode: .selectPath) { selectedPath in
+                RemoteFileBrowserView(projectId: serverId, mode: .selectPath) { selectedPath in
                     Task {
                         // Resolve symlinks to get canonical path for SCP compatibility
                         let canonicalPath = await resolveCanonicalPath(selectedPath, serverId: serverId)
@@ -227,7 +246,6 @@ struct ServersSettingsTab: View {
                         config.updateActiveProject { $0.serverId = nil }
                     }
                     config.deleteServer(id: server.id)
-                    KeychainService.clearSSHKeys(forServer: server.id)
                 }
             } else {
                 // Add new server
@@ -238,37 +256,80 @@ struct ServersSettingsTab: View {
                 }
             }
         }
+        .task {
+            await refreshSSHKeyStatusFromCLI()
+        }
+        .onChange(of: config.safeActiveProject.serverId) { _, _ in
+            Task {
+                await refreshSSHKeyStatusFromCLI()
+            }
+        }
     }
     
     private func validateWPContentPath() async {
-        guard let wpModule = WordPressSSHModule() else {
-            wpContentValidation = .error("SSH not configured")
+        let project = config.safeActiveProject
+
+        guard project.isWordPress,
+              !project.id.isEmpty,
+              let basePath = project.basePath,
+              !basePath.isEmpty else {
+            wpContentValidation = .error("WordPress project not configured")
             return
         }
-        
+
+        let projectId = project.id
+
         isValidatingWPContent = true
         wpContentValidation = nil
-        
-        let status = await wpModule.getValidationStatus()
-        
+
+        do {
+            let themes = "\(basePath)/wp-content/themes"
+            let plugins = "\(basePath)/wp-content/plugins"
+
+            async let themesCheck = HomeboyCLI.shared.sshCommand(
+                projectId: projectId,
+                command: "test -d '\(themes)' && echo yes || echo no"
+            )
+            async let pluginsCheck = HomeboyCLI.shared.sshCommand(
+                projectId: projectId,
+                command: "test -d '\(plugins)' && echo yes || echo no"
+            )
+
+            let themesExists = (try await themesCheck).output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) == "yes"
+            let pluginsExists = (try await pluginsCheck).output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) == "yes"
+
+            if themesExists && pluginsExists {
+                wpContentValidation = .valid
+            } else if !themesExists && !pluginsExists {
+                wpContentValidation = .invalid("Missing themes/ and plugins/ directories")
+            } else if !themesExists {
+                wpContentValidation = .invalid("Missing themes/ directory")
+            } else {
+                wpContentValidation = .invalid("Missing plugins/ directory")
+            }
+        } catch {
+            wpContentValidation = .error(error.localizedDescription)
+        }
+
         isValidatingWPContent = false
-        wpContentValidation = status
     }
-    
+
     /// Resolve symlinks in a remote path to get the canonical filesystem path.
-    /// This ensures SCP uploads work correctly when paths contain symlinks.
     private func resolveCanonicalPath(_ path: String, serverId: String) async -> String {
+        let project = config.safeActiveProject
+
         guard !path.isEmpty,
-              let server = ConfigurationManager.readServer(id: serverId),
-              let ssh = SSHService(server: server) else {
+              !project.id.isEmpty,
+              project.serverId == serverId else {
             return path
         }
-        
+
         do {
-            let resolved = try await ssh.executeCommandSync("readlink -f '\(path)'")
-            return resolved.trimmingCharacters(in: .whitespacesAndNewlines)
+            let response = try await HomeboyCLI.shared.sshCommand(projectId: project.id, command: "readlink -f '\(path)'")
+            let resolved = response.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            return resolved.isEmpty ? path : resolved
         } catch {
-            return path  // Fall back to original if resolution fails
+            return path
         }
     }
 }

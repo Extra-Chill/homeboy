@@ -144,10 +144,12 @@ struct FileBrowserSidebarView: View {
                         newItemName = ""
                         showNewFileSheet = true
                     }
+
                     Button("New Folder...") {
                         newItemName = ""
                         showNewFolderSheet = true
                     }
+                    .disabled(true)
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -508,7 +510,7 @@ private class ClosureMenuItem: NSMenuItem {
     struct PreviewWrapper: View {
         var body: some View {
             FileBrowserSidebarView(
-                browser: RemoteFileBrowser(serverId: "test"),
+                browser: RemoteFileBrowser(projectId: "test"),
                 onFileSelected: { path in print("Selected: \(path)") },
                 onCollapse: { print("Collapse") },
                 fileOperationsEnabled: true,

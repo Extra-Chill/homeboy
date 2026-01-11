@@ -73,33 +73,6 @@ struct TableRow: Identifiable {
     }
 }
 
-/// MySQL connection errors
-enum MySQLError: LocalizedError {
-    case notConfigured
-    case connectionFailed(String)
-    case queryFailed(String)
-    case tunnelFailed(String)
-    case parseError(String)
-    case mysqlNotFound
-    
-    var errorDescription: String? {
-        switch self {
-        case .notConfigured:
-            return "Database credentials not configured"
-        case .connectionFailed(let msg):
-            return "Connection failed: \(msg)"
-        case .queryFailed(let msg):
-            return "Query failed: \(msg)"
-        case .tunnelFailed(let msg):
-            return "SSH tunnel failed: \(msg)"
-        case .parseError(let msg):
-            return "Parse error: \(msg)"
-        case .mysqlNotFound:
-            return "MySQL client not found. Install via Homebrew: brew install mysql-client"
-        }
-    }
-}
-
 /// Represents a WordPress site in the multisite network
 struct WordPressSite: Identifiable {
     let blogId: Int

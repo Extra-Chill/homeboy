@@ -44,13 +44,13 @@ Homeboy/
 │   ├── CLI/                      # CLI bridge + version checking (CLIBridge.swift, CLIVersionChecker.swift)
 │   ├── Config/                   # JSON config, ProjectTypeManager, ProjectTypeDefinition
 │   ├── Copyable/                 # Error/warning/output copy system
-│   ├── Database/                 # MySQL, SSH tunnel, SchemaResolver
+│   ├── Database/                 # Database tooling (CLI-mediated) and schema helpers
 │   ├── Grouping/                 # GroupingManager, ItemGrouping, TableProtectionManager
 │   ├── Modules/                  # Module plugin system
 │   ├── Process/                  # Python and shell runners
 │   └── SSH/                      # SSH/SCP operations, DeploymentService
 ├── Modules/                      # Built-in core tools
-│   ├── DatabaseBrowser/          # MySQL database browser
+│   ├── DatabaseBrowser/          # Database browser (CLI-backed)
 │   ├── Deployer/                 # SSH deployment module
 │   ├── RemoteFileEditor/         # Remote file editing over SSH
 │   └── RemoteLogViewer/          # Remote log viewing over SSH
@@ -128,11 +128,11 @@ See `docs/ERROR-HANDLING.md` for the complete Copyable system specification.
 ### Deployer
 SSH/SCP deployment of components (plugins, themes, packages).
 - Component registry defined in JSON project config
-- Deploys prebuilt artifacts (the CLI deploy command does not run `build.sh`)
+- Deploys prebuilt artifacts (build is optional via the CLI `--build` flag)
 - Version comparison
 
 ### Database Browser
-Browse remote MySQL databases over SSH tunnel.
+Browse remote databases via the `homeboy db` CLI (executed over SSH where applicable).
 - Table categorization via SchemaResolver (multisite support for WordPress projects)
 - Grouping system for organizing tables
 - Query editor with NativeDataTable results

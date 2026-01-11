@@ -397,7 +397,6 @@ struct AddEditComponentSheet: View {
             isNetwork: isNetwork ? true : nil
         )
         
-        let existingId = existing?.id
         let newGroupId = selectedGroupId
         
         // Save the component to its standalone file

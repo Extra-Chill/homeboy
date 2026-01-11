@@ -65,9 +65,9 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     @Published var selectedTableNames: Set<String> = []
 
     // MARK: - CLI Bridge
-
-    private let cli = CLIBridge.shared
-
+ 
+    private let cli = HomeboyCLI.shared
+ 
     private var projectId: String {
         ConfigurationManager.shared.safeActiveProject.id
     }
@@ -172,11 +172,10 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         isLoadingTableData = true
 
         do {
-            let describeArgs = ["db", "describe", projectId]
-            let describeResponse = try await cli.execute(describeArgs, timeout: 30)
+            let describe = try await cli.dbDescribe(projectId: projectId, table: nil)
 
-            if describeResponse.success {
-                let allTables = parseTables(from: describeResponse.output)
+            if describe.success == true, let stdout = describe.stdout {
+                let allTables = parseTables(from: stdout)
 
                 currentGroupings = ConfigurationManager.readCurrentProject().tableGroupings
 
@@ -194,7 +193,7 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
                 groupedTables = grouped
                 ungroupedTables = ungrouped
             } else {
-                errorMessage = AppError("Failed to fetch tables: \(describeResponse.errorOutput)", source: "Database Browser")
+                errorMessage = AppError("Failed to fetch tables: \(describe.stderr ?? "")", source: "Database Browser")
             }
         } catch {
             errorMessage = AppError("Failed to fetch tables: \(error.localizedDescription)", source: "Database Browser")
@@ -211,28 +210,22 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         isLoadingTableData = true
 
         do {
-            let describeArgs = ["db", "describe", projectId, table.name]
-            let describeResponse = try await cli.execute(describeArgs, timeout: 30)
-
-            if describeResponse.success {
-                columns = parseColumns(from: describeResponse.output)
+            let describe = try await cli.dbDescribe(projectId: projectId, table: table.name)
+            if describe.success == true, let stdout = describe.stdout {
+                columns = parseColumns(from: stdout)
             }
 
             let countQuery = "SELECT COUNT(*) as count FROM \(table.name)"
-            let countArgs = ["db", "query", projectId, countQuery]
-            let countResponse = try await cli.execute(countArgs, timeout: 30)
-
-            if countResponse.success {
-                totalRows = parseRowCount(from: countResponse.output)
+            let count = try await cli.dbQuery(projectId: projectId, sql: countQuery)
+            if count.success == true, let stdout = count.stdout {
+                totalRows = parseRowCount(from: stdout)
             }
 
             let columnNames = columns.map { $0.name }.joined(separator: ", ")
             let selectQuery = "SELECT \(columnNames.isEmpty ? "*" : columnNames) FROM \(table.name) LIMIT \(rowsPerPage) OFFSET 0"
-            let selectArgs = ["db", "query", projectId, selectQuery, ""]
-            let selectResponse = try await cli.execute(selectArgs, timeout: 60)
-
-            if selectResponse.success {
-                rows = parseRows(from: selectResponse.output, columns: columns)
+            let select = try await cli.dbQuery(projectId: projectId, sql: selectQuery)
+            if select.success == true, let stdout = select.stdout {
+                rows = parseRows(from: stdout, columns: columns)
             }
         } catch {
             errorMessage = AppError("Failed to load table: \(error.localizedDescription)", source: "Database Browser")
@@ -249,13 +242,12 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         do {
             let columnNames = columns.map { $0.name }.joined(separator: ", ")
             let selectQuery = "SELECT \(columnNames.isEmpty ? "*" : columnNames) FROM \(table.name) LIMIT \(rowsPerPage) OFFSET \(offset)"
-            let selectArgs = ["db", "query", projectId, selectQuery, ""]
-            let selectResponse = try await cli.execute(selectArgs, timeout: 60)
+            let select = try await cli.dbQuery(projectId: projectId, sql: selectQuery)
 
-            if selectResponse.success {
-                rows = parseRows(from: selectResponse.output, columns: columns)
+            if select.success == true, let stdout = select.stdout {
+                rows = parseRows(from: stdout, columns: columns)
             } else {
-                errorMessage = AppError("Failed to fetch rows: \(selectResponse.errorOutput)", source: "Database Browser")
+                errorMessage = AppError("Failed to fetch rows: \(select.stderr ?? "")", source: "Database Browser")
             }
         } catch {
             errorMessage = AppError("Failed to fetch rows: \(error.localizedDescription)", source: "Database Browser")
@@ -412,6 +404,10 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         }
     }
 
+    func toggleUngroupedExpansion() {
+        isUngroupedExpanded.toggle()
+    }
+
     func requestRowDeletion(row: TableRow) {
         pendingRowDeletion = PendingRowDeletion(
             table: selectedTable?.name ?? "",
@@ -431,13 +427,16 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         isDeletingRow = true
 
         do {
-            let args = ["db", "delete-row", projectId, pending.table, pending.primaryKeyValue, "--confirm", ""]
-            let response = try await cli.execute(args, timeout: 30)
+            let result = try await cli.dbDeleteRow(
+                projectId: projectId,
+                table: pending.table,
+                rowId: pending.primaryKeyValue
+            )
 
-            if response.success {
+            if result.success == true {
                 await refresh()
             } else {
-                errorMessage = AppError("Delete row failed: \(response.errorOutput)", source: "Database Browser")
+                errorMessage = AppError("Delete row failed: \(result.stderr ?? "")", source: "Database Browser")
             }
         } catch {
             errorMessage = AppError("Delete row failed: \(error.localizedDescription)", source: "Database Browser")
@@ -479,14 +478,13 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         }
 
         do {
-            let args = ["db", "query", projectId, query, "--json"]
-            let response = try await cli.execute(args, timeout: 60)
+            let result = try await cli.dbQuery(projectId: projectId, sql: query)
 
-            if response.success {
-                customQueryRows = parseRows(from: response.output, columns: customQueryColumns)
+            if result.success == true, let stdout = result.stdout {
+                customQueryRows = parseRows(from: stdout, columns: customQueryColumns)
                 hasExecutedQuery = true
             } else {
-                customQueryError = response.errorOutput
+                customQueryError = result.stderr
             }
         } catch {
             customQueryError = error.localizedDescription
@@ -515,22 +513,18 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         isDeletingTable = true
 
         do {
-            // homeboy db drop-table <project> <table> --confirm 
-            let args = ["db", "drop-table", projectId, pending.table.name, "--confirm", ""]
-            let response = try await cli.execute(args, timeout: 30)
+            let result = try await cli.dbDropTable(projectId: projectId, table: pending.table.name)
 
-            if response.success {
-                // Clear selection if we dropped the selected table
+            if result.success == true {
                 if selectedTable?.name == pending.table.name {
                     selectedTable = nil
                     columns = []
                     rows = []
                 }
 
-                // Refresh table list
                 await fetchTables()
             } else {
-                errorMessage = AppError("Drop table failed: \(response.errorOutput)", source: "Database Browser")
+                errorMessage = AppError("Drop table failed: \(result.stderr ?? "")", source: "Database Browser")
             }
         } catch {
             errorMessage = AppError("Drop table failed: \(error.localizedDescription)", source: "Database Browser")
@@ -541,6 +535,7 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         pendingTableDeletion = nil
         tableDeletionConfirmText = ""
     }
+
     
     func cancelTableDeletion() {
         showTableDeletionConfirm = false

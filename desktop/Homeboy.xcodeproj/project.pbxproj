@@ -52,7 +52,6 @@
 		5BD322602F64CCA4E7A54FEF /* ConfigurationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */; };
 		5C04267FDCF7C82C4BE9B087 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7A27F9F448DAC4DF35613F9 /* APIClient.swift */; };
 		5CA76C92A6AF0C42784FD35D /* ErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */; };
-		5F263EE965848ADD6D72A773 /* SSHTunnelService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D476C8F7828EF0FDC4996034 /* SSHTunnelService.swift */; };
 		61876E7ACDA5C3D7A5D2E40F /* AppPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C840B787B398287BC5EEE6 /* AppPaths.swift */; };
 		67B0C8541A262E38CBA8AECA /* ProjectTypeDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 599231AFF8DD800C0BA6DF12 /* ProjectTypeDefinition.swift */; };
 		6DA58994C9A0D94854E44A62 /* RemoteLogViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A6E91E37345CFC1CFCF9AA6 /* RemoteLogViewerView.swift */; };
@@ -85,7 +84,6 @@
 		AACC7F3153886939005FC50C /* WordPressSSHModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */; };
 		AC4B413EC80B0BD0F7AABB1D /* ModuleConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F014356904A59206993DA47 /* ModuleConsoleView.swift */; };
 		AC767488EAD832187214964D /* GroupingEditorSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89BDEBBC8BE666E1D40131AB /* GroupingEditorSheet.swift */; };
-		B21C1A0F3083F2DCC260CDD6 /* MySQLService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8106225CC14632C9644AFC7C /* MySQLService.swift */; };
 		B27446E0A3706D997A75D1E9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A690A4DC66BE109010668691 /* ContentView.swift */; };
 		B9C42108AC64D21BAEEE580A /* DeployableComponent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */; };
 		BBA251CB27591D879DAD4038 /* RemoteFileEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B19BDE6DDAAF5D914C29785 /* RemoteFileEditorView.swift */; };
@@ -157,7 +155,6 @@
 		69F9E6767A9B6A9F4792EAE5 /* project-types */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "project-types"; path = "Homeboy/Resources/project-types"; sourceTree = SOURCE_ROOT; };
 		75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */ = {isa = PBXFileReference; path = "bandcamp_scraper.cpython-314.pyc"; sourceTree = "<group>"; };
 		7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorView.swift; sourceTree = "<group>"; };
-		8106225CC14632C9644AFC7C /* MySQLService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MySQLService.swift; sourceTree = "<group>"; };
 		811079398986364AA0E0542A /* CLIVersionChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIVersionChecker.swift; sourceTree = "<group>"; };
 		830D15DCC64EB9AF17F822E0 /* ComponentsSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComponentsSettingsTab.swift; sourceTree = "<group>"; };
 		833BBA3138BAD0CFB3557D6B /* Homeboy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Homeboy.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -197,7 +194,6 @@
 		C794768AF4898995F64DB92D /* ProjectConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectConfiguration.swift; sourceTree = "<group>"; };
 		CC77F3DE919D687C5088735B /* ContentContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentContext.swift; sourceTree = "<group>"; };
 		CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeploymentService.swift; sourceTree = "<group>"; };
-		D476C8F7828EF0FDC4996034 /* SSHTunnelService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHTunnelService.swift; sourceTree = "<group>"; };
 		D4847DDB6175D9E32C423C8C /* ConfigurationChangeType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationChangeType.swift; sourceTree = "<group>"; };
 		D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyableContent.swift; sourceTree = "<group>"; };
 		D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectTypeManager.swift; sourceTree = "<group>"; };
@@ -391,9 +387,7 @@
 			isa = PBXGroup;
 			children = (
 				14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */,
-				8106225CC14632C9644AFC7C /* MySQLService.swift */,
 				3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */,
-				D476C8F7828EF0FDC4996034 /* SSHTunnelService.swift */,
 			);
 			path = Database;
 			sourceTree = "<group>";
@@ -740,7 +734,6 @@
 				34B6D8FD95927DA85561881D /* ModuleSetupView.swift in Sources */,
 				C7897C8689B4E0075B1CB0D6 /* ModuleViewModel.swift in Sources */,
 				27FA9FFDA56F6C7BCAFE0296 /* ModulesSettingsTab.swift in Sources */,
-				B21C1A0F3083F2DCC260CDD6 /* MySQLService.swift in Sources */,
 				C727FE57ACE75A3152D4C972 /* NativeDataTable.swift in Sources */,
 				76A91937D9017A5B0D9B0BA5 /* PinnableTabBar.swift in Sources */,
 				023E9AE450BF036FF40C0E76 /* ProjectConfiguration.swift in Sources */,
@@ -760,7 +753,6 @@
 				465D0E037B7E2705A578EAF2 /* RemotePathResolver.swift in Sources */,
 				58C9903BC07607162259D792 /* SSHKeyManager.swift in Sources */,
 				71419F89166E98CC7C4A3A98 /* SSHService.swift in Sources */,
-				5F263EE965848ADD6D72A773 /* SSHTunnelService.swift in Sources */,
 				E8A0E0A1E7364CFEB6EB48AF /* SchemaResolver.swift in Sources */,
 				8327EB6B86BD82A5A8F0E466 /* ServerConfig.swift in Sources */,
 				0B1C053B8DCA686200739C43 /* ServerEditSheet.swift in Sources */,
@@ -853,7 +845,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 0.7.1;
+				MARKETING_VERSION = 0.7.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
 				PRODUCT_NAME = Homeboy;
 				SDKROOT = macosx;
@@ -878,7 +870,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 0.7.1;
+				MARKETING_VERSION = 0.7.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
 				PRODUCT_NAME = Homeboy;
 				SDKROOT = macosx;
