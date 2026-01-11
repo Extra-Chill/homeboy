@@ -4,8 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## 0.1.5
 
+### Breaking Changes
+- **Docs Command Output**: `homeboy docs` now returns JSON output (via `homeboy_core::output::print_result`) instead of paging/printing raw text.
+
+### New Features
+- **Core Path Utilities**: Added `homeboy_core::base_path` helpers for base path validation and remote path joining (`join_remote_path`, `join_remote_child`, `remote_dirname`).
+- **Core Shell Utilities**: Added `homeboy_core::shell::cd_and()` to build safe "cd && <cmd>" strings.
+- **Core Token Utilities**: Added `homeboy_core::token` helpers for case-insensitive identifiers and doc topic normalization.
+
 ### Improvements
-- **Docs**: Expanded local development pipeline documentation in `README.md`
+- **Unified JSON Output**: CLI commands now return typed structs and are serialized in `crates/homeboy/src/main.rs`, standardizing success/error output and exit codes.
+- **Docs & Skill Updates**: Updated `crates/homeboy/docs/*` and `skills/homeboy/SKILL.md`, and added `crates/homeboy/docs/build.md`.
+- **Docs**: Expanded local development pipeline documentation in `README.md`.
 
 ## 0.1.4
 
