@@ -246,6 +246,15 @@ impl Error {
         )
     }
 
+    pub fn validation_invalid_json(err: serde_json::Error, context: Option<String>) -> Self {
+        let details = serde_json::json!({
+            "error": err.to_string(),
+            "context": context,
+        });
+
+        Self::new(ErrorCode::ValidationInvalidJson, "Invalid JSON", details)
+    }
+
     pub fn project_not_found(id: impl Into<String>) -> Self {
         Self::not_found(ErrorCode::ProjectNotFound, "Project not found", id)
     }

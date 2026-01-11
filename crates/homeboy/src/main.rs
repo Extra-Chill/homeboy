@@ -1,5 +1,17 @@
 use clap::{Parser, Subcommand};
 
+fn validate_json_mode(command: &Commands) -> homeboy_core::Result<()> {
+    match command {
+        Commands::Changelog(_) => Ok(()),
+        _ => Err(homeboy_core::Error::validation_invalid_argument(
+            "json",
+            "--json is not supported for this command yet",
+            None,
+            None,
+        )),
+    }
+}
+
 mod commands;
 mod docs;
 
@@ -15,6 +27,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(version = VERSION)]
 #[command(about = "CLI tool for development and deployment automation")]
 struct Cli {
+    #[arg(long, global = true)]
+    json: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -61,6 +76,13 @@ enum Commands {
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+
+    if cli.json.is_some() {
+        if let Err(err) = validate_json_mode(&cli.command) {
+            homeboy_core::output::print_result::<serde_json::Value>(Err(err));
+            return std::process::ExitCode::from(exit_code_to_u8(2));
+        }
+    }
 
     let (json_result, exit_code) = match cli.command {
         Commands::Project(args) => homeboy_core::output::map_cmd_result_to_json(project::run(args)),

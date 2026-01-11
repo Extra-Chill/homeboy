@@ -8,6 +8,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 - Restore 'homeboy config' command wiring
 - Update command docs to include config
+
 ## 0.2.3
 
 - Fix changelog finalize placing ## Unreleased at top instead of between versions
