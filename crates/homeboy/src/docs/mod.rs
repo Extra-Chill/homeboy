@@ -1,36 +1,31 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use homeboy_core::token;
 
-fn docs_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("docs")
+include!(concat!(env!("OUT_DIR"), "/generated_docs.rs"));
+
+fn docs_index() -> &'static HashMap<&'static str, &'static str> {
+    static DOCS: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+
+    DOCS.get_or_init(|| GENERATED_DOCS.iter().copied().collect())
 }
 
 pub fn resolve(topic: &[String]) -> (String, String) {
-    let doc_path = topic_to_doc_path(topic);
-    let label = topic.join(" ");
+    let (topic_label, key) = normalize_topic(topic);
+    let content = docs_index().get(key.as_str()).copied().unwrap_or_default();
 
-    let content = fs::read_to_string(&doc_path).unwrap_or_default();
-
-    let topic_label = if topic.is_empty() {
-        "index".to_string()
-    } else if label.is_empty() {
-        "unknown".to_string()
-    } else {
-        label
-    };
-
-    (topic_label, content)
+    (topic_label, content.to_string())
 }
 
-fn topic_to_doc_path(topic: &[String]) -> PathBuf {
+fn normalize_topic(topic: &[String]) -> (String, String) {
     if topic.is_empty() {
-        return docs_root().join("index.md");
+        return ("index".to_string(), "index".to_string());
     }
 
-    let mut segments: Vec<String> = Vec::new();
+    let user_label = topic.join(" ");
 
+    let mut segments: Vec<String> = Vec::new();
     for raw in topic {
         for part in raw.split('/') {
             let segment = token::normalize_doc_segment(part);
@@ -41,18 +36,21 @@ fn topic_to_doc_path(topic: &[String]) -> PathBuf {
     }
 
     if segments.is_empty() {
-        return docs_root().join("index.md");
+        return ("unknown".to_string(), "index".to_string());
     }
 
-    let mut path = docs_root();
-    for segment in segments {
-        path = path.join(segment);
+    let key = segments.join("/");
+
+    if user_label.is_empty() {
+        return ("unknown".to_string(), key);
     }
 
-    path.set_extension("md");
-    path
+    (user_label, key)
 }
 
-pub fn available_topics() -> &'static str {
-    "Use path tokens like: `homeboy docs`, `homeboy docs cli server`, `homeboy docs cli/server`, `homeboy docs config app-config`"
+pub fn available_topics() -> String {
+    let mut keys: Vec<&'static str> = GENERATED_DOCS.iter().map(|(key, _)| *key).collect();
+    keys.sort_unstable();
+
+    keys.join("\n")
 }

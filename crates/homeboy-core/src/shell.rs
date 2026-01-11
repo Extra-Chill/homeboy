@@ -20,7 +20,11 @@ pub fn cd_and(dir: &str, command: &str) -> Result<String> {
         return Err(Error::Config("Command cannot be empty".to_string()));
     }
 
-    Ok(format!("cd '{}' && {}", dir.replace('\'', "'\\''"), command))
+    Ok(format!(
+        "cd '{}' && {}",
+        dir.replace('\'', "'\\''"),
+        command
+    ))
 }
 
 #[cfg(test)]
@@ -29,7 +33,10 @@ mod tests {
 
     #[test]
     fn cd_and_wraps_command() {
-        assert_eq!(cd_and("/var/www", "wp option get blogname").unwrap(), "cd '/var/www' && wp option get blogname");
+        assert_eq!(
+            cd_and("/var/www", "wp option get blogname").unwrap(),
+            "cd '/var/www' && wp option get blogname"
+        );
     }
 
     #[test]

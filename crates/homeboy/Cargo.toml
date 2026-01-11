@@ -7,6 +7,7 @@ authors.workspace = true
 description = "CLI tool for development and deployment automation"
 repository = "https://github.com/Extra-Chill/homeboy-cli"
 homepage = "https://github.com/Extra-Chill/homeboy-cli"
+build = "build.rs"
 
 [[bin]]
 name = "homeboy"

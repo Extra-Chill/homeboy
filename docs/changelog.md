@@ -2,6 +2,16 @@
 
 All notable changes to Homeboy CLI are documented in this file.
 
+## 0.1.6
+
+### New Features
+- **Embedded docs**: Embed repo-root `docs/**/*.md` into the binary at build time, so `homeboy docs` works in Homebrew/releases.
+- **Changelog command**: Added `homeboy changelog` shortcut (equivalent to `homeboy docs changelog`).
+
+### Improvements
+- **Docs source of truth**: Moved CLI documentation to repo-root `docs/` and removed `crates/homeboy/docs/`.
+- **Docs topic listing**: `available_topics` is now generated dynamically from embedded keys (newline-separated).
+
 ## 0.1.5
 
 ### Breaking Changes

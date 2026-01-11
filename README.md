@@ -97,7 +97,7 @@ The CLI binary is installed to `/usr/local/bin/homeboy` (system) or `/opt/homebr
 
 The macOS desktop app (if installed) uses the same directory and JSON structure, but it is not required for CLI usage.
 
-Run `homeboy docs` or view the [CLI documentation](crates/homeboy/docs/index.md) for detailed information.
+Run `homeboy docs` or view the [CLI documentation](docs/index.md) for detailed information.
 
 ```
 Homeboy/

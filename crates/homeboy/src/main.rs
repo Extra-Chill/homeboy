@@ -4,8 +4,8 @@ mod commands;
 mod docs;
 
 use commands::{
-    build, component, db, deploy, docs as docs_command, file, git, logs, module, pin, pm2, project,
-    projects, server, ssh, version, wp,
+    build, changelog, component, db, deploy, docs as docs_command, file, git, logs, module, pin,
+    pm2, project, projects, server, ssh, version, wp,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -49,6 +49,8 @@ enum Commands {
     Module(module::ModuleArgs),
     /// Display CLI documentation
     Docs(docs_command::DocsArgs),
+    /// Display the changelog
+    Changelog,
     /// Git operations for components
     Git(git::GitArgs),
     /// Version management for components
@@ -284,6 +286,23 @@ fn main() -> std::process::ExitCode {
         }
         Commands::Docs(args) => {
             let result = docs_command::run(args);
+            let exit_code = extract_exit_code(&result);
+            match result.map(|(data, _)| data) {
+                Ok(data) => match serde_json::to_value(data) {
+                    Ok(value) => (Ok(value), exit_code),
+                    Err(err) => (
+                        Err(homeboy_core::Error::Other(format!(
+                            "Failed to serialize output: {}",
+                            err
+                        ))),
+                        1,
+                    ),
+                },
+                Err(err) => (Err(err), exit_code),
+            }
+        }
+        Commands::Changelog => {
+            let result = changelog::run();
             let exit_code = extract_exit_code(&result);
             match result.map(|(data, _)| data) {
                 Ok(data) => match serde_json::to_value(data) {

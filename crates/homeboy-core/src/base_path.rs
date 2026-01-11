@@ -116,7 +116,10 @@ mod tests {
 
     #[test]
     fn remote_dirname_gets_parent_dir() {
-        assert_eq!(remote_dirname("/var/www/site/file.zip").unwrap(), "/var/www/site");
+        assert_eq!(
+            remote_dirname("/var/www/site/file.zip").unwrap(),
+            "/var/www/site"
+        );
         assert_eq!(remote_dirname("/file.zip").unwrap(), "/");
         assert_eq!(remote_dirname("/var/www/site/").unwrap(), "/var/www");
     }

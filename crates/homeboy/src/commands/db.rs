@@ -380,7 +380,10 @@ fn delete_row(
 
     let command = shell::cd_and(
         &ctx.base_path,
-        &format!("{} db query \"{}\" --url='{}'", ctx.cli_path, delete_sql, ctx.domain),
+        &format!(
+            "{} db query \"{}\" --url='{}'",
+            ctx.cli_path, delete_sql, ctx.domain
+        ),
     )?;
 
     let output = ctx.client.execute(&command);
@@ -427,7 +430,10 @@ fn drop_table(
 
     let command = shell::cd_and(
         &ctx.base_path,
-        &format!("{} db query \"{}\" --url='{}'", ctx.cli_path, drop_sql, ctx.domain),
+        &format!(
+            "{} db query \"{}\" --url='{}'",
+            ctx.cli_path, drop_sql, ctx.domain
+        ),
     )?;
 
     let output = ctx.client.execute(&command);

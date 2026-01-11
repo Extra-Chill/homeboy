@@ -27,7 +27,7 @@ pub fn run(args: DocsArgs) -> CmdResult<DocsOutput> {
         return Err(homeboy_core::Error::Other(format!(
             "No documentation found for '{}' (available: {})",
             args.topic.join(" "),
-            docs::available_topics()
+            docs::available_topics().as_str()
         )));
     }
 
@@ -36,7 +36,7 @@ pub fn run(args: DocsArgs) -> CmdResult<DocsOutput> {
             topic: args.topic.join(" "),
             topic_label,
             content,
-            available_topics: docs::available_topics().to_string(),
+            available_topics: docs::available_topics(),
         },
         0,
     ))

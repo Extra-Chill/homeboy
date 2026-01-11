@@ -369,17 +369,17 @@ fn run_build_if_configured(component: &Component) -> (Option<i32>, Option<String
     }
 }
 
-
 fn deploy_component_artifact(
     server: &ServerConfig,
     client: &SshClient,
     base_path: &str,
     component: &Component,
 ) -> (Option<i32>, Option<String>) {
-    let remote_path = match homeboy_core::base_path::join_remote_path(Some(base_path), &component.remote_path) {
-        Ok(value) => value,
-        Err(err) => return (Some(1), Some(err.to_string())),
-    };
+    let remote_path =
+        match homeboy_core::base_path::join_remote_path(Some(base_path), &component.remote_path) {
+            Ok(value) => value,
+            Err(err) => return (Some(1), Some(err.to_string())),
+        };
 
     let mut scp_args: Vec<String> = vec![];
 
