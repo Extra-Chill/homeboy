@@ -23,16 +23,17 @@ homeboy changelog add <component_id> <message> [--project-id <id>]
 ```
 
 Adds a changelog item to the configured "next" section in the component's changelog file.
+Configuration / defaults:
 
-Required configuration:
+- Changelog path resolution:
+  - If `changelogTargets` is set in the component config, the first target is used.
+  - Otherwise, Homeboy auto-detects (in order): `CHANGELOG.md`, then `docs/changelog.md`.
+  - If neither exists (or both exist), the command errors and asks you to set `changelogTargets`.
+- "Next section" resolution:
+  - If no label is configured, Homeboy defaults to `Unreleased`.
+  - If no aliases are configured, Homeboy matches both `Unreleased` and `[Unreleased]`.
+  - Config overrides (most specific first): `component.json` → `project.json` → `config.json`.
 
-- Component config must include `changelogTargets` (first target used)
-- A "next section" label must be configured via:
-  - `component.json`: `changelogNextSectionLabel` / `changelogNextSectionAliases`, or
-  - `project.json`: `changelogNextSectionLabel` / `changelogNextSectionAliases`, or
-  - `config.json`: `defaultChangelogNextSectionLabel` / `defaultChangelogNextSectionAliases`
-
-Resolution order is most-specific first: `component.json`  `project.json`  `config.json`.
 
 ## JSON output
 

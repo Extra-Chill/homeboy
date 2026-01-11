@@ -2,11 +2,18 @@
 
 All notable changes to Homeboy CLI are documented in this file.
 
+## 0.1.13
+
+### Improvements
+- **Changelog**: `homeboy changelog add` auto-detects changelog path when `changelogTargets` is not configured.
+- **Changelog**: Default next section label is `Unreleased` (aliases include `[Unreleased]`).
+
 ## 0.1.12
 
 ### Improvements
 - **Changelog**: Promote `homeboy changelog` from a shortcut to a subcommand group with `show` and `add`.
-- **Changelog**: Add `homeboy changelog add <component_id> <message>` to append items to a configured “next” section.
+- **Changelog**: Add `homeboy changelog add <component_id> <message>` to append items to the “next” section (defaults to `Unreleased`).
+- **Changelog**: Auto-detect changelog path (`CHANGELOG.md` or `docs/changelog.md`) when `changelogTargets` is not configured.
 - **Config**: Support `changelogTargets` + `changelogNextSectionLabel`/`changelogNextSectionAliases` at component/project/app levels.
 - **Version**: Write JSON version bumps via the `version` key (pretty-printed) when using the default JSON version pattern.
 - **Deploy**: Load components via `ConfigManager` instead of ad-hoc JSON parsing.

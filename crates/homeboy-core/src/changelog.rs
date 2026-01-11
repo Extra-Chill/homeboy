@@ -19,12 +19,7 @@ pub fn resolve_effective_settings(
         .and_then(|c| c.changelog_next_section_label.clone())
         .or_else(|| project.and_then(|p| p.changelog_next_section_label.clone()))
         .or_else(|| app.default_changelog_next_section_label.clone())
-        .ok_or_else(|| {
-            Error::Config(
-                "Missing changelog next section label (set component.changelogNextSectionLabel, project.changelogNextSectionLabel, or config.defaultChangelogNextSectionLabel)"
-                    .to_string(),
-            )
-        })?;
+        .unwrap_or_else(|| "Unreleased".to_string());
 
     let mut next_section_aliases = component
         .and_then(|c| c.changelog_next_section_aliases.clone())
@@ -33,7 +28,10 @@ pub fn resolve_effective_settings(
         .unwrap_or_default();
 
     if next_section_aliases.is_empty() {
-        next_section_aliases.push(next_section_label.clone());
+        next_section_aliases.extend([
+            next_section_label.clone(),
+            format!("[{}]", next_section_label),
+        ]);
     }
 
     Ok(EffectiveChangelogSettings {
@@ -43,25 +41,53 @@ pub fn resolve_effective_settings(
 }
 
 pub fn resolve_changelog_path(component: &ComponentConfiguration) -> Result<PathBuf> {
-    let target = component
+    if let Some(target) = component
         .changelog_targets
         .as_ref()
-        .and_then(|t| t.first())
-        .ok_or_else(|| {
-            Error::Config(
-                "Component has no changelogTargets configured (set component.changelogTargets[0].file)"
-                    .to_string(),
-            )
-        })?;
+        .and_then(|targets| targets.first())
+    {
+        return resolve_target_path(&component.local_path, &target.file);
+    }
 
-    let file = target.file.as_str();
+    autodetect_changelog_path(&component.local_path)
+}
+
+fn resolve_target_path(local_path: &str, file: &str) -> Result<PathBuf> {
     let path = if file.starts_with('/') {
         PathBuf::from(file)
     } else {
-        Path::new(&component.local_path).join(file)
+        Path::new(local_path).join(file)
     };
 
     Ok(path)
+}
+
+fn autodetect_changelog_path(local_path: &str) -> Result<PathBuf> {
+    let candidates = ["CHANGELOG.md", "docs/changelog.md"];
+    let mut hits = Vec::new();
+
+    for rel in candidates {
+        let path = Path::new(local_path).join(rel);
+        if path.exists() {
+            hits.push(path);
+        }
+    }
+
+    match hits.len() {
+        1 => Ok(hits.remove(0)),
+        0 => Err(Error::Config(format!(
+            "No changelog file found for component at '{}'. Create CHANGELOG.md (preferred) or docs/changelog.md, or set component.changelogTargets[0].file",
+            local_path
+        ))),
+        _ => Err(Error::Config(format!(
+            "Multiple changelog files found for component at '{}': {}. Set component.changelogTargets[0].file to disambiguate.",
+            local_path,
+            hits.iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 pub fn add_next_section_item(
