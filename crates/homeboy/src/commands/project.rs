@@ -671,16 +671,67 @@ mod tests {
         }
     }
 
+    struct EnvGuard {
+        prev_xdg_config_home: Option<std::ffi::OsString>,
+        prev_home: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_var(&self, key: &str, value: &std::path::Path) {
+            std::env::set_var(key, value);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(v) = self.prev_xdg_config_home.take() {
+                std::env::set_var("XDG_CONFIG_HOME", v);
+            } else {
+                std::env::remove_var("XDG_CONFIG_HOME");
+            }
+
+            if let Some(v) = self.prev_home.take() {
+                std::env::set_var("HOME", v);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn lock_homeboy_test_env() -> (std::sync::MutexGuard<'static, ()>, EnvGuard) {
+        static MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let lock = MUTEX.get_or_init(|| std::sync::Mutex::new(()));
+        let guard = lock.lock().unwrap();
+
+        let env_guard = EnvGuard {
+            prev_xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
+            prev_home: std::env::var_os("HOME"),
+        };
+
+        (guard, env_guard)
+    }
+
     fn setup_homeboy_dir(test_id: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+
         let base = std::env::temp_dir().join(test_id);
-        std::env::set_var("XDG_CONFIG_HOME", &base);
-        base
+        base.join(format!("{}-{}-{}", std::process::id(), nanos, unique))
     }
 
     #[test]
     fn project_components_set_dedupes_preserving_order() {
         let test_id = "homeboy-project-components-set-dedupe";
         let base = setup_homeboy_dir(test_id);
+
+        let (_env_lock, env_guard) = lock_homeboy_test_env();
+        env_guard.set_var("XDG_CONFIG_HOME", &base);
+        env_guard.set_var("HOME", &base);
 
         AppPaths::ensure_directories().unwrap();
 
@@ -700,6 +751,8 @@ mod tests {
         let loaded = ConfigManager::load_project(&project_id).unwrap();
         assert_eq!(loaded.component_ids, vec!["alpha", "beta"]);
 
+        drop(env_guard);
+        drop(_env_lock);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -707,6 +760,10 @@ mod tests {
     fn project_components_set_rejects_unknown_component_ids() {
         let test_id = "homeboy-project-components-set-rejects-unknown";
         let base = setup_homeboy_dir(test_id);
+
+        let (_env_lock, env_guard) = lock_homeboy_test_env();
+        env_guard.set_var("XDG_CONFIG_HOME", &base);
+        env_guard.set_var("HOME", &base);
 
         AppPaths::ensure_directories().unwrap();
 
@@ -722,6 +779,8 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
 
+        drop(env_guard);
+        drop(_env_lock);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -729,6 +788,10 @@ mod tests {
     fn project_components_list_returns_configured_ids() {
         let test_id = "homeboy-project-components-list";
         let base = setup_homeboy_dir(test_id);
+
+        let (_env_lock, env_guard) = lock_homeboy_test_env();
+        env_guard.set_var("XDG_CONFIG_HOME", &base);
+        env_guard.set_var("HOME", &base);
 
         AppPaths::ensure_directories().unwrap();
 
@@ -747,6 +810,8 @@ mod tests {
         assert_eq!(payload.component_ids, vec!["beta", "alpha"]);
         assert_eq!(payload.components.len(), 2);
 
+        drop(env_guard);
+        drop(_env_lock);
         let _ = fs::remove_dir_all(&base);
     }
 }

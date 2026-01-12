@@ -18,7 +18,7 @@ fn reset_test_scp_call_count() {
 
 use homeboy_core::config::{ConfigManager, ServerConfig};
 use homeboy_core::context::resolve_project_ssh_with_base_path;
-use homeboy_core::ssh::{CommandOutput, SshClient};
+use homeboy_core::ssh::{execute_local_command_in_dir, CommandOutput, SshClient};
 use homeboy_core::version::parse_version;
 
 fn sanitize_remote_single_quotes(value: &str) -> String {
@@ -376,30 +376,15 @@ fn run_build_if_configured(component: &Component) -> (Option<i32>, Option<String
         return (None, None);
     };
 
-    #[cfg(windows)]
-    let status = Command::new("cmd")
-        .args(["/C", &build_cmd])
-        .current_dir(&component.local_path)
-        .status();
+    let output = execute_local_command_in_dir(&build_cmd, Some(&component.local_path));
 
-    #[cfg(not(windows))]
-    let status = Command::new("sh")
-        .args(["-c", &build_cmd])
-        .current_dir(&component.local_path)
-        .status();
-
-    match status {
-        Ok(status) => {
-            if status.success() {
-                (Some(status.code().unwrap_or(0)), None)
-            } else {
-                (
-                    Some(status.code().unwrap_or(1)),
-                    Some(format!("Build failed for {}", component.id)),
-                )
-            }
-        }
-        Err(err) => (Some(1), Some(format!("Build error: {}", err))),
+    if output.success {
+        (Some(output.exit_code), None)
+    } else {
+        (
+            Some(output.exit_code),
+            Some(format!("Build failed for {}", component.id)),
+        )
     }
 }
 

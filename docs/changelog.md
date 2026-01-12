@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.2.13
+
+- Project rewrite
+- Internal cleanup
+
 ## 0.2.12
 
 - Refactor command implementations to reduce boilerplate

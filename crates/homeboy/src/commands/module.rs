@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use homeboy_core::config::ModuleScope;
 use homeboy_core::config::{AppPaths, ConfigManager, InstalledModuleConfig, ProjectConfiguration};
 use homeboy_core::module::{load_all_modules, load_module, ModuleManifest, RuntimeType};
+use homeboy_core::ssh::execute_local_command_interactive;
 use homeboy_core::template;
 
 use crate::commands::CmdResult;
@@ -19,19 +20,22 @@ struct ModuleExecContext {
     settings_json: String,
 }
 
-fn apply_module_exec_context(command: &mut Command, context: &ModuleExecContext) {
-    command
-        .env("HOMEBOY_EXEC_CONTEXT_VERSION", "1")
-        .env("HOMEBOY_MODULE_ID", &context.module_id)
-        .env("HOMEBOY_SETTINGS_JSON", &context.settings_json);
+fn module_exec_context_env(context: &ModuleExecContext) -> Vec<(&'static str, String)> {
+    let mut env: Vec<(&'static str, String)> = vec![
+        ("HOMEBOY_EXEC_CONTEXT_VERSION", "1".to_string()),
+        ("HOMEBOY_MODULE_ID", context.module_id.clone()),
+        ("HOMEBOY_SETTINGS_JSON", context.settings_json.clone()),
+    ];
 
     if let Some(ref project_id) = context.project_id {
-        command.env("HOMEBOY_PROJECT_ID", project_id);
+        env.push(("HOMEBOY_PROJECT_ID", project_id.clone()));
     }
 
     if let Some(ref component_id) = context.component_id {
-        command.env("HOMEBOY_COMPONENT_ID", component_id);
+        env.push(("HOMEBOY_COMPONENT_ID", component_id.clone()));
     }
+
+    env
 }
 
 /// Find system Python by checking PATH first, then common locations (cross-platform)
@@ -485,11 +489,10 @@ fn run_python_module(
     command
         .args(&arguments)
         .env("PLAYWRIGHT_BROWSERS_PATH", &playwright_path)
+        .envs(module_exec_context_env(exec_context).into_iter())
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-
-    apply_module_exec_context(&mut command, exec_context);
 
     let status = command.status();
 
@@ -528,32 +531,14 @@ fn run_shell_module(
         }
     }
 
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.arg("/C");
-        command
-    };
+    let command = arguments.join(" ");
 
-    #[cfg(not(windows))]
-    let mut command = Command::new("sh");
+    let env = module_exec_context_env(exec_context);
+    let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
-    command
-        .args(&arguments)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
-    apply_module_exec_context(&mut command, exec_context);
-
-    #[cfg(windows)]
-    let status = command.status();
-
-    #[cfg(not(windows))]
-    let status = command.status();
-
-    let status = status.map_err(|e| homeboy_core::Error::other(e.to_string()))?;
-    Ok(status.code().unwrap_or(1))
+    let exit_code =
+        execute_local_command_interactive(&command, Some(module_path), Some(&env_pairs));
+    Ok(exit_code)
 }
 
 fn run_cli_module(
@@ -652,31 +637,11 @@ fn run_cli_module(
 
     let command = template::render(command_template, &vars);
 
-    #[cfg(windows)]
-    let mut command = {
-        let mut shell_command = Command::new("cmd");
-        shell_command.args(["/C", &command]);
-        shell_command
-    };
+    let env = module_exec_context_env(exec_context);
+    let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
-    #[cfg(not(windows))]
-    let mut command = {
-        let mut shell_command = Command::new("sh");
-        shell_command.args(["-c", &command]);
-        shell_command
-    };
-
-    command
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
-    apply_module_exec_context(&mut command, exec_context);
-
-    let status = command.status();
-
-    let status = status.map_err(|e| homeboy_core::Error::other(e.to_string()))?;
-    Ok(status.code().unwrap_or(1))
+    let exit_code = execute_local_command_interactive(&command, None, Some(&env_pairs));
+    Ok(exit_code)
 }
 
 fn slugify_module_id(value: &str) -> homeboy_core::Result<String> {

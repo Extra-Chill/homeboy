@@ -197,3 +197,42 @@ pub fn execute_local_command_in_dir(command: &str, current_dir: Option<&str>) ->
         },
     }
 }
+
+pub fn execute_local_command_interactive(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+) -> i32 {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    };
+
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    };
+
+    if let Some(dir) = current_dir {
+        cmd.current_dir(dir);
+    }
+
+    if let Some(env_pairs) = env {
+        cmd.envs(env_pairs.iter().copied());
+    }
+
+    let status = cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+
+    match status {
+        Ok(s) => s.code().unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
