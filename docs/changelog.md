@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.2.15
+
+- Derive git tag name
+- Internal refactor
+
 ## 0.2.14
 
 - Fix unused imports warnings

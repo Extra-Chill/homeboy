@@ -4,6 +4,8 @@ use std::process::Command;
 
 use homeboy_core::config::ConfigManager;
 
+use crate::commands::version;
+
 use super::CmdResult;
 
 #[derive(Args)]
@@ -44,7 +46,9 @@ enum GitCommand {
         /// Component ID
         component_id: String,
         /// Tag name (e.g., v0.1.2)
-        tag_name: String,
+        ///
+        /// If omitted, tag defaults to v<component version>.
+        tag_name: Option<String>,
         /// Tag message (creates annotated tag)
         #[arg(short, long)]
         message: Option<String>,
@@ -76,7 +80,17 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
             component_id,
             tag_name,
             message,
-        } => tag(&component_id, &tag_name, message.as_deref()),
+        } => {
+            let derived_tag_name = match tag_name {
+                Some(name) => name,
+                None => {
+                    let (out, _) = version::show_version_output(&component_id)?;
+                    format!("v{}", out.version)
+                }
+            };
+
+            tag(&component_id, &derived_tag_name, message.as_deref())
+        }
     }
 }
 

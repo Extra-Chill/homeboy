@@ -8,7 +8,24 @@ homeboy project <COMMAND>
 
 ## Subcommands
 
+### `list`
+
+```sh
+homeboy project list [--current]
+```
+
+- `--current`: return only the active project ID.
+
+### `show`
+
+```sh
+homeboy project show [<projectId>]
+```
+
+- `projectId` (optional): if omitted, uses the active project.
+
 ### `create`
+
 
 ```sh
 homeboy project create <name> <domain> <project_type> [--server-id <serverId>] [--base-path <path>] [--table-prefix <prefix>] [--activate]
@@ -77,14 +94,6 @@ JSON output:
 }
 ```
 
-### `list`
-
-```sh
-homeboy project list [--current]
-```
-
-- `--current`: return only the active project ID.
-
 JSON output (`list`):
 
 > Note: all command output is wrapped in the global JSON envelope described in the [JSON output contract](../json-output/json-output-contract.md). The object below is the `data` payload.
@@ -114,14 +123,6 @@ JSON output (`--current`):
   "projects": null
 }
 ```
-
-### `show`
-
-```sh
-homeboy project show [<projectId>]
-```
-
-- `projectId` (optional): if omitted, uses the active project.
 
 JSON output:
 
@@ -160,6 +161,14 @@ JSON output:
   }
 }
 ```
+
+### `components`
+
+```sh
+homeboy project components <COMMAND>
+```
+
+Manage the list of components associated with a project.
 
 ### `pin`
 

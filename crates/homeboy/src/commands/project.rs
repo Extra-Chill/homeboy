@@ -632,6 +632,8 @@ fn pin(command: ProjectPinCommand) -> homeboy_core::Result<(ProjectOutput, i32)>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::config::{slugify_id, AppPaths};
+    use std::fs;
 
     fn seed_component(id: &str) -> ComponentConfiguration {
         ComponentConfiguration::new(

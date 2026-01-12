@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "atty",
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy-core"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "dirs",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy-error"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "serde",
  "serde_json",

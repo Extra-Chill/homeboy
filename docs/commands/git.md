@@ -12,7 +12,8 @@ homeboy git <COMMAND>
 - `commit <componentId> <message>`
 - `push <componentId> [--tags]`
 - `pull <componentId>`
-- `tag <componentId> <tagName> [-m <message>]`
+- `tag <componentId> [tagName] [-m <message>]`
+  - If `tagName` is omitted, Homeboy tags `v<component version>` (from `homeboy version show`).
 
 ## JSON output
 

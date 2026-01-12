@@ -73,7 +73,7 @@ pub struct VersionTargetOutput {
 pub struct VersionShowOutput {
     command: String,
     component_id: String,
-    version: String,
+    pub version: String,
     targets: Vec<VersionTargetOutput>,
 }
 
@@ -111,7 +111,7 @@ pub fn run(
 
     match args.command {
         VersionCommand::Show { component_id } => {
-            let (out, exit_code) = show(&component_id)?;
+            let (out, exit_code) = show_version_output(&component_id)?;
             let json = serde_json::to_value(out)
                 .map_err(|e| homeboy_core::Error::internal_json(e.to_string(), None))?;
             Ok((json, Vec::new(), exit_code))
@@ -261,7 +261,7 @@ fn write_updated_version(
     Ok(replaced_count)
 }
 
-fn show(component_id: &str) -> homeboy_core::Result<(VersionShowOutput, i32)> {
+pub fn show_version_output(component_id: &str) -> homeboy_core::Result<(VersionShowOutput, i32)> {
     let component = ConfigManager::load_component(component_id)?;
     let targets = component.version_targets.ok_or_else(|| {
         Error::config_missing_key("versionTargets", Some(component_id.to_string()))
