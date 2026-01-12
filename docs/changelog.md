@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.4.1
+
+- Rename plugin terminology to module across CLI/docs
+- Remove active project concept; require explicit --project where needed
+- Update module manifest filename to homeboy.json
+
 ## 0.4.0
 
 - Unify plugins and modules under a single module manifest and config surface

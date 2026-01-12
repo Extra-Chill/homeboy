@@ -1,12 +1,12 @@
 ---
 name: homeboy
-description: Use this skill when deploying code to production, executing plugin-provided CLI tools or remote process managers over SSH, querying production databases, managing project/server configurations, performing component-scoped git operations, or when the user mentions Homeboy, deployment, or remote server operations.
+description: Use this skill when deploying code to production, executing module-provided CLI tools or remote process managers over SSH, querying production databases, managing project/server configurations, performing component-scoped git operations, or when the user mentions Homeboy, deployment, or remote server operations.
 version: 0.2.0
 ---
 
 # Homeboy CLI
 
-CLI for project development and deployment. Provides terminal access to project management, remote CLI tool passthrough (via plugins), database queries, deployments, and component-scoped git/build operations.
+CLI for project development and deployment. Provides terminal access to project management, remote CLI tool passthrough (via modules), database queries, deployments, and component-scoped git/build operations.
 
 **CLI documentation**: run `homeboy docs` (and `homeboy docs <topic>`).
 
@@ -20,8 +20,7 @@ CLI for project development and deployment. Provides terminal access to project 
 | `git` | Component-scoped git operations (status, commit, push, pull, tag) |
 | `version` | Component-scoped version management (show, bump) |
 | `build` | Component-scoped builds |
-| `plugin` | Inspect available plugins and their commands |
-| `<plugin cmd>` | Plugin-provided CLI tool passthrough (for example: `wp`, `pm2`) |
+| `<module cmd>` | Module-provided CLI tool passthrough (for example: `wp`, `pm2`) |
 | `db` | Database operations (tables, describe, query, delete-row, drop-table, tunnel) |
 | `deploy` | Deploy components to production |
 | `ssh` | Execute SSH commands or open interactive shell |
@@ -54,14 +53,14 @@ homeboy git push <component>             # Push to remote
 homeboy build <component>                # Run build command
 ```
 
-### Remote CLI Tool Operations (Plugin-Provided)
+### Remote CLI Tool Operations (Module-Provided)
 List available tools:
 
 ```bash
-homeboy plugin list
+homeboy module list
 ```
 
-Run a plugin-provided CLI tool command:
+Run a module-provided CLI tool command:
 
 ```bash
 homeboy wp <project> plugin list

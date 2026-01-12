@@ -49,14 +49,14 @@ A few common entrypoints:
 
 ```bash
 homeboy project list
-homeboy project create "My Project" example.com --plugin wordpress --activate
+homeboy project create "My Project" example.com --module wordpress --activate
 homeboy project set <projectId> --domain example.com --server-id <serverId>
 homeboy project repair <projectId>
 homeboy project switch <projectId>
 homeboy wp <projectId> core version
 homeboy deploy <projectId> --dry-run --all
 homeboy ssh <projectId>
-homeboy plugin list
+homeboy module list
 homeboy docs --list
 homeboy docs commands/deploy
 ```
@@ -78,7 +78,6 @@ Common paths:
 - `modules/`
 - `keys/`
 - `backups/`
-- `plugins/`
 
 See [CLI documentation](docs/index.md) for details.
 

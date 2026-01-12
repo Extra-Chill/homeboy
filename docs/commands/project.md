@@ -13,29 +13,25 @@ This command accepts the global flag `--dry-run` (see [Root command](../cli/home
 ### `list`
 
 ```sh
-homeboy project list [--current]
+homeboy project list
 ```
-
-Options:
-
-- `--current`: show only the active project ID.
 
 ### `show`
 
 ```sh
-homeboy project show [<projectId>]
+homeboy project show <projectId>
 ```
 
 Arguments:
 
-- `<projectId>` (optional): project ID (uses active project if not specified)
+- `<projectId>`: project ID
 
 ### `create`
 
 
 ```sh
 homeboy project create [--json <spec>] [--skip-existing] [name] [domain] \
-  [--plugin <pluginId>]... [--server-id <serverId>] [--base-path <path>] [--table-prefix <prefix>] [--activate]
+  [--module <moduleId>]... [--server-id <serverId>] [--base-path <path>] [--table-prefix <prefix>]
 ```
 
 Options:
@@ -44,14 +40,13 @@ Options:
 - `--skip-existing`: skip items that already exist (JSON mode only)
 - `--server-id <serverId>`: optional server ID (CLI mode)
 - `--base-path <path>`: optional remote base path (CLI mode)
-- `--table-prefix <prefix>`: optional table prefix (only used by plugins/modules that care about table naming)
-- `--activate`: switch active project after create (CLI mode only)
+- `--table-prefix <prefix>`: optional table prefix (only used by modules that care about table naming)
 
 Arguments (CLI mode):
 
 - `name`: project name
 - `domain`: public site domain
-- `--plugin <pluginId>`: enable a plugin for the project (repeatable). Example: `--plugin wordpress`
+- `--module <moduleId>`: enable a module for the project (repeatable). Example: `--module wordpress`
 
 JSON mode:
 
@@ -61,7 +56,7 @@ JSON mode:
 ```json
 {
   "op": "project.create",
-  "data": { "name": "...", "domain": "...", "plugins": ["wordpress"] }
+  "data": { "name": "...", "domain": "...", "modules": ["wordpress"] }
 }
 ```
 
@@ -99,7 +94,7 @@ JSON mode:
 ### `set`
 
 ```sh
-homeboy project set <projectId> [--name <name>] [--domain <domain>] [--plugin <pluginId>]... [--server-id <serverId>] [--base-path <path>] [--table-prefix <prefix>] [--plugin-setting <pluginId.key=value>]... [--component-ids <ids>]
+homeboy project set <projectId> [--name <name>] [--domain <domain>] [--module <moduleId>]... [--server-id <serverId>] [--base-path <path>] [--table-prefix <prefix>] [--module-setting <moduleId.key=value>]... [--component-ids <ids>]
 ```
 
 Arguments:
@@ -110,11 +105,11 @@ Options:
 
 - `--name <name>`: project name
 - `--domain <domain>`: public site domain
-- `--plugin <pluginId>`: replace the `plugins` list (repeatable)
+- `--module <moduleId>`: replace the `modules` list (repeatable)
 - `--server-id <serverId>`: server ID
 - `--base-path <path>`: remote base path
 - `--table-prefix <prefix>`: table prefix
-- `--plugin-setting <pluginId.key=value>`: set a plugin setting (repeatable)
+- `--module-setting <moduleId.key=value>`: set a module setting (repeatable)
 - `--component-ids <ids>`: replace component IDs (comma-separated)
 
 JSON output:
@@ -170,30 +165,18 @@ JSON output (`list`):
 ```json
 {
   "command": "project.list",
-  "activeProjectId": "<projectId>|null",
   "projects": [
     {
       "id": "<projectId>",
       "name": "<name>",
       "domain": "<domain>",
-      "plugins": ["<pluginId>"] ,
-      "active": true
+      "modules": ["<moduleId>"]
     }
   ]
 }
 ```
 
-JSON output (`--current`):
-
-```json
-{
-  "command": "project.current",
-  "activeProjectId": "<projectId>|null",
-  "projects": null
-}
-```
-
-JSON output:
+JSON output (`show`):
 
 > Note: all command output is wrapped in the global JSON envelope described in the [JSON output contract](../json-output/json-output-contract.md). The object below is the `data` payload.
 
@@ -210,28 +193,6 @@ JSON output:
 ```
 
 `project` is the serialized `ProjectRecord` (`{ id, config }`).
-
-### `switch`
-
-```sh
-homeboy project switch <projectId>
-```
-
-JSON output:
-
-> Note: all command output is wrapped in the global JSON envelope described in the [JSON output contract](../json-output/json-output-contract.md). The object below is the `data` payload.
-
-```json
-{
-  "command": "project.switch",
-  "projectId": "<projectId>",
-  "project": {
-    "id": "<projectId>",
-    "config": { }
-  },
-  "import": null
-}
-```
 
 ### `components`
 

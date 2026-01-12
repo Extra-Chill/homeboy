@@ -28,7 +28,6 @@ Common paths:
 - `modules/`
 - `keys/`
 - `backups/`
-- `plugins/`
 
 Additional:
 

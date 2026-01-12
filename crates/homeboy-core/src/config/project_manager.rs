@@ -52,10 +52,6 @@ impl ProjectManager {
             sub_targets: Default::default(),
             shared_tables: Default::default(),
             component_ids: Default::default(),
-            table_groupings: Default::default(),
-            component_groupings: Default::default(),
-            protected_table_patterns: Default::default(),
-            unlocked_table_patterns: Default::default(),
         };
 
         ConfigManager::save_project(&id, &project)?;
@@ -101,12 +97,6 @@ impl ProjectManager {
             return Err(error);
         }
 
-        let mut app_config = ConfigManager::load_app_config()?;
-        if app_config.active_project_id.as_deref() == Some(id) {
-            app_config.active_project_id = Some(new_id.clone());
-            ConfigManager::save_app_config(&app_config)?;
-        }
-
         Ok(RenameResult {
             old_id: id.to_string(),
             new_id,
@@ -150,12 +140,6 @@ impl ProjectManager {
         fs::rename(&path, &new_path).map_err(|e| {
             Error::internal_io(e.to_string(), Some("repair project rename".to_string()))
         })?;
-
-        let mut app_config = ConfigManager::load_app_config()?;
-        if app_config.active_project_id.as_deref() == Some(id) {
-            app_config.active_project_id = Some(expected_id.clone());
-            ConfigManager::save_app_config(&app_config)?;
-        }
 
         Ok(RenameResult {
             old_id: id.to_string(),

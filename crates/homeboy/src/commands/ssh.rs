@@ -222,10 +222,6 @@ mod tests {
                 sub_targets: vec![],
                 shared_tables: vec![],
                 component_ids: vec![],
-                table_groupings: vec![],
-                component_groupings: vec![],
-                protected_table_patterns: vec![],
-                unlocked_table_patterns: vec![],
             },
         }
     }

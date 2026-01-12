@@ -91,10 +91,6 @@ fn merges_with_precedence_and_defaults() {
         sub_targets: Vec::new(),
         shared_tables: Vec::new(),
         component_ids: Vec::new(),
-        table_groupings: Vec::new(),
-        component_groupings: Vec::new(),
-        protected_table_patterns: Vec::new(),
-        unlocked_table_patterns: Vec::new(),
     };
 
     let mut project_scoped_modules = HashMap::new();

@@ -59,14 +59,6 @@ pub struct ProjectConfiguration {
     pub shared_tables: Vec<String>,
     #[serde(default)]
     pub component_ids: Vec<String>,
-    #[serde(default)]
-    pub table_groupings: Vec<ItemGrouping>,
-    #[serde(default)]
-    pub component_groupings: Vec<ItemGrouping>,
-    #[serde(default)]
-    pub protected_table_patterns: Vec<String>,
-    #[serde(default)]
-    pub unlocked_table_patterns: Vec<String>,
 }
 
 impl SlugIdentifiable for ProjectConfiguration {
@@ -315,24 +307,3 @@ pub struct NewsletterConfig {
     pub sendy_list_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ItemGrouping {
-    pub name: String,
-    #[serde(default)]
-    pub patterns: Vec<String>,
-    #[serde(default)]
-    pub is_collapsed: bool,
-}
-
-impl SlugIdentifiable for ItemGrouping {
-    fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-impl SetName for ItemGrouping {
-    fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-}

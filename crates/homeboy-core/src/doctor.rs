@@ -319,7 +319,7 @@ impl Scanner {
             if !path.is_dir() {
                 continue;
             }
-            let manifest_path = path.join("module.json");
+            let manifest_path = path.join("homeboy.json");
             if !manifest_path.exists() {
                 continue;
             }
@@ -468,19 +468,7 @@ impl Scanner {
                 None,
             );
         }
-        // plugins array can be empty - project is just a generic SSH target
-        if let Some(prefix) = project.table_prefix.as_deref() {
-            if !prefix.is_empty() && !prefix.ends_with('_') {
-                self.push_issue(
-                    DoctorSeverity::Warning,
-                    "SUSPICIOUS_VALUE",
-                    "WordPress tablePrefix usually ends with '_'",
-                    path,
-                    Some("/tablePrefix".to_string()),
-                    Some(serde_json::json!({"value": prefix})),
-                );
-            }
-        }
+        // modules array can be empty - project is just a generic SSH target
 
         self.projects.insert(id, project);
     }
@@ -791,23 +779,6 @@ impl Scanner {
     fn validate_cross_refs(&mut self) {
         let mut extra_issues = Vec::new();
 
-        if let Some(app) = &self.app_config {
-            if let Some(active) = app.active_project_id.as_deref() {
-                if !self.projects.contains_key(active) {
-                    extra_issues.push(DoctorIssue {
-                        severity: DoctorSeverity::Error,
-                        code: "BROKEN_REFERENCE".to_string(),
-                        message: "activeProjectId references missing project".to_string(),
-                        file: AppPaths::config()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_else(|_| "<unresolved config path>".to_string()),
-                        pointer: Some("/activeProjectId".to_string()),
-                        details: Some(serde_json::json!({"id": active})),
-                    });
-                }
-            }
-        }
-
         for (project_id, project) in &self.projects {
             if let Some(server_id) = project.server_id.as_deref() {
                 if !self.servers.contains_key(server_id) {
@@ -964,7 +935,7 @@ fn classify_file(path: &Path) -> Option<FileKind> {
         "servers" => Some(FileKind::Server),
         "components" => Some(FileKind::Component),
         _ => {
-            if path.file_name().is_some_and(|n| n == "module.json") {
+            if path.file_name().is_some_and(|n| n == "homeboy.json") {
                 Some(FileKind::ModuleManifest)
             } else {
                 None
@@ -1073,7 +1044,7 @@ impl CleanerState {
                     if !module_dir.is_dir() {
                         continue;
                     }
-                    let manifest_path = module_dir.join("module.json");
+                    let manifest_path = module_dir.join("homeboy.json");
                     if !manifest_path.exists() {
                         continue;
                     }
@@ -1096,7 +1067,7 @@ impl CleanerState {
                     "projects/*.json".to_string(),
                     "servers/*.json".to_string(),
                     "components/*.json".to_string(),
-                    "modules/*/module.json".to_string(),
+                    "modules/*/homeboy.json".to_string(),
                 ]),
             ));
         };
@@ -1209,13 +1180,10 @@ mod tests {
     fn unknown_keys_are_detected() {
         let mut scanner = Scanner::new("doctor.scan");
         let raw = serde_json::json!({
-            "activeProjectId": "abc",
+            "defaultDatabaseHost": "127.0.0.1",
             "unknownField": 123
         });
-        let typed = AppConfig {
-            active_project_id: Some("abc".to_string()),
-            ..Default::default()
-        };
+        let typed = AppConfig::default();
         let path = Path::new("/tmp/config.json");
         scanner.emit_unknown_keys(path, "AppConfig", &raw, &typed);
 
@@ -1247,7 +1215,7 @@ mod tests {
 
         let path = dir.join("config.json");
         let original = serde_json::json!({
-            "activeProjectId": "abc",
+            "defaultDatabaseHost": "192.168.1.1",
             "extra": 1
         });
         write_json_file_pretty(&path, &original).unwrap();
@@ -1262,19 +1230,4 @@ mod tests {
         assert!(after.get("extra").is_some());
     }
 
-    #[test]
-    fn broken_active_project_is_error() {
-        let mut scanner = Scanner::new("doctor.scan");
-        scanner.app_config = Some(AppConfig {
-            active_project_id: Some("missing".to_string()),
-            ..Default::default()
-        });
-        scanner.validate_cross_refs();
-
-        assert!(scanner.issues.iter().any(|i| {
-            i.code == "BROKEN_REFERENCE"
-                && i.severity == DoctorSeverity::Error
-                && i.pointer.as_deref() == Some("/activeProjectId")
-        }));
-    }
 }

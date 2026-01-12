@@ -362,13 +362,11 @@ fn run_module(
             let requires_project = module.requires.is_some();
 
             let (project_config, project_id) = if requires_project {
-                let project_id = project
-                    .or_else(|| app_config.active_project_id.clone())
-                    .ok_or_else(|| {
-                        homeboy_core::Error::other(
-                            "This module requires a project; pass --project <id>".to_string(),
-                        )
-                    })?;
+                let project_id = project.ok_or_else(|| {
+                    homeboy_core::Error::other(
+                        "This module requires a project; pass --project <id>".to_string(),
+                    )
+                })?;
 
                 let project_config = ConfigManager::load_project(&project_id)?;
                 ModuleScope::validate_project_compatibility(&module, &project_config)?;
@@ -647,7 +645,7 @@ fn run_cli_module(
             .local_environment
             .cli_path
             .clone()
-            .unwrap_or("wp".to_string());
+            .unwrap_or_default();
 
         vec![
             ("projectId", project_id.unwrap_or("")),

@@ -17,15 +17,11 @@ pub struct ProjectArgs {
 #[derive(Subcommand)]
 enum ProjectCommand {
     /// List all configured projects
-    List {
-        /// Show only the active project ID
-        #[arg(long)]
-        current: bool,
-    },
+    List,
     /// Show project configuration
     Show {
-        /// Project ID (uses active project if not specified)
-        project_id: Option<String>,
+        /// Project ID
+        project_id: String,
     },
     /// Create a new project
     Create {
@@ -41,9 +37,9 @@ enum ProjectCommand {
         name: Option<String>,
         /// Public site domain (CLI mode)
         domain: Option<String>,
-        /// Plugin to enable (can be specified multiple times)
-        #[arg(long = "plugin", value_name = "PLUGIN")]
-        plugins: Vec<String>,
+        /// Module to enable (can be specified multiple times)
+        #[arg(long = "module", value_name = "MODULE")]
+        modules: Vec<String>,
         /// Optional server ID
         #[arg(long)]
         server_id: Option<String>,
@@ -53,9 +49,6 @@ enum ProjectCommand {
         /// Optional table prefix
         #[arg(long)]
         table_prefix: Option<String>,
-        /// Switch active project after create (CLI mode only)
-        #[arg(long)]
-        activate: bool,
     },
     /// Update project configuration fields
     Set {
@@ -67,9 +60,9 @@ enum ProjectCommand {
         /// Public site domain
         #[arg(long)]
         domain: Option<String>,
-        /// Replace plugins (can be specified multiple times)
-        #[arg(long = "plugin", value_name = "PLUGIN")]
-        plugins: Vec<String>,
+        /// Replace modules (can be specified multiple times)
+        #[arg(long = "module", value_name = "MODULE")]
+        modules: Vec<String>,
         /// Server ID
         #[arg(long)]
         server_id: Option<String>,
@@ -79,17 +72,12 @@ enum ProjectCommand {
         /// Table prefix
         #[arg(long)]
         table_prefix: Option<String>,
-        /// Plugin setting in format plugin_id.key=value (can be specified multiple times)
-        #[arg(long = "plugin-setting", value_name = "SETTING")]
-        plugin_settings: Vec<String>,
+        /// Module setting in format module_id.key=value (can be specified multiple times)
+        #[arg(long = "module-setting", value_name = "SETTING")]
+        module_settings: Vec<String>,
         /// Replace project component IDs (comma-separated)
         #[arg(long, value_delimiter = ',')]
         component_ids: Vec<String>,
-    },
-    /// Switch active project
-    Switch {
-        /// Project ID to switch to
-        project_id: String,
     },
     /// Repair a project file whose name doesn't match the stored project name
     Repair {
@@ -159,7 +147,6 @@ pub struct ProjectListItem {
     name: String,
     domain: String,
     modules: Vec<String>,
-    active: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -243,7 +230,6 @@ enum ProjectPinType {
 pub struct ProjectOutput {
     command: String,
     project_id: Option<String>,
-    active_project_id: Option<String>,
     project: Option<ProjectRecord>,
     projects: Option<Vec<ProjectListItem>>,
     components: Option<ProjectComponentsOutput>,
@@ -259,18 +245,17 @@ pub fn run(
     _global: &crate::commands::GlobalArgs,
 ) -> homeboy_core::Result<(ProjectOutput, i32)> {
     match args.command {
-        ProjectCommand::List { current } => list(current),
-        ProjectCommand::Show { project_id } => show(project_id),
+        ProjectCommand::List => list(),
+        ProjectCommand::Show { project_id } => show(&project_id),
         ProjectCommand::Create {
             json,
             skip_existing,
             name,
             domain,
-            plugins,
+            modules,
             server_id,
             base_path,
             table_prefix,
-            activate,
         } => {
             if let Some(spec) = json {
                 return create_json(&spec, skip_existing);
@@ -293,71 +278,41 @@ pub fn run(
                 )
             })?;
 
-            create(
-                &name,
-                &domain,
-                plugins,
-                server_id,
-                base_path,
-                table_prefix,
-                activate,
-            )
+            create(&name, &domain, modules, server_id, base_path, table_prefix)
         }
         ProjectCommand::Set {
             project_id,
             name,
             domain,
-            plugins,
+            modules,
             server_id,
             base_path,
             table_prefix,
-            plugin_settings,
+            module_settings,
             component_ids,
         } => set(
             &project_id,
             name,
             domain,
-            plugins,
+            modules,
             server_id,
             base_path,
             table_prefix,
-            plugin_settings,
+            module_settings,
             component_ids,
         ),
-        ProjectCommand::Switch { project_id } => switch(&project_id),
         ProjectCommand::Repair { project_id } => repair(&project_id),
         ProjectCommand::Components { command } => components(command),
         ProjectCommand::Pin { command } => pin(command),
     }
 }
 
-fn list(current: bool) -> homeboy_core::Result<(ProjectOutput, i32)> {
-    let app_config = ConfigManager::load_app_config()?;
-    let active_id = app_config.active_project_id.clone();
-
-    if current {
-        return Ok((
-            ProjectOutput {
-                command: "project.current".to_string(),
-                project_id: None,
-                active_project_id: active_id,
-                project: None,
-                projects: None,
-                components: None,
-                pin: None,
-                updated: None,
-                import: None,
-            },
-            0,
-        ));
-    }
-
+fn list() -> homeboy_core::Result<(ProjectOutput, i32)> {
     let projects = ConfigManager::list_projects()?;
 
     let items: Vec<ProjectListItem> = projects
         .into_iter()
         .map(|record| ProjectListItem {
-            active: active_id.as_ref().is_some_and(|a| a == &record.id),
             id: record.id,
             name: record.config.name,
             domain: record.config.domain,
@@ -369,7 +324,6 @@ fn list(current: bool) -> homeboy_core::Result<(ProjectOutput, i32)> {
         ProjectOutput {
             command: "project.list".to_string(),
             project_id: None,
-            active_project_id: active_id,
             project: None,
             projects: Some(items),
             components: None,
@@ -381,17 +335,13 @@ fn list(current: bool) -> homeboy_core::Result<(ProjectOutput, i32)> {
     ))
 }
 
-fn show(project_id: Option<String>) -> homeboy_core::Result<(ProjectOutput, i32)> {
-    let project = match project_id.clone() {
-        Some(id) => ConfigManager::load_project_record(&id)?,
-        None => ConfigManager::get_active_project()?,
-    };
+fn show(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
+    let project = ConfigManager::load_project_record(project_id)?;
 
     Ok((
         ProjectOutput {
             command: "project.show".to_string(),
             project_id: Some(project.id.clone()),
-            active_project_id: None,
             project: Some(project),
             projects: None,
             components: None,
@@ -411,7 +361,6 @@ fn create_json(spec: &str, skip_existing: bool) -> homeboy_core::Result<(Project
         ProjectOutput {
             command: "project.create".to_string(),
             project_id: None,
-            active_project_id: None,
             project: None,
             projects: None,
             components: None,
@@ -426,18 +375,13 @@ fn create_json(spec: &str, skip_existing: bool) -> homeboy_core::Result<(Project
 fn create(
     name: &str,
     domain: &str,
-    plugins: Vec<String>,
+    modules: Vec<String>,
     server_id: Option<String>,
     base_path: Option<String>,
     table_prefix: Option<String>,
-    activate: bool,
 ) -> homeboy_core::Result<(ProjectOutput, i32)> {
     let (created_project_id, _project) =
-        ProjectManager::create_project(name, domain, plugins, server_id, base_path, table_prefix)?;
-
-    if activate {
-        ConfigManager::set_active_project(&created_project_id)?;
-    }
+        ProjectManager::create_project(name, domain, modules, server_id, base_path, table_prefix)?;
 
     let project = ConfigManager::load_project_record(&created_project_id)?;
 
@@ -445,7 +389,6 @@ fn create(
         ProjectOutput {
             command: "project.create".to_string(),
             project_id: Some(created_project_id),
-            active_project_id: None,
             project: Some(project),
             projects: None,
             components: None,
@@ -461,11 +404,11 @@ fn set(
     project_id: &str,
     name: Option<String>,
     domain: Option<String>,
-    plugins: Vec<String>,
+    modules: Vec<String>,
     server_id: Option<String>,
     base_path: Option<String>,
     table_prefix: Option<String>,
-    plugin_settings: Vec<String>,
+    module_settings: Vec<String>,
     component_ids: Vec<String>,
 ) -> homeboy_core::Result<(ProjectOutput, i32)> {
     let mut updated_fields: Vec<String> = Vec::new();
@@ -482,8 +425,7 @@ fn set(
             ProjectOutput {
                 command: "project.set".to_string(),
                 project_id: Some(result.new_id.clone()),
-                active_project_id: None,
-                project: Some(ConfigManager::load_project_record(&result.new_id)?),
+                    project: Some(ConfigManager::load_project_record(&result.new_id)?),
                 projects: None,
                 components: None,
                 pin: None,
@@ -501,8 +443,8 @@ fn set(
         updated_fields.push("domain".to_string());
     }
 
-    if !plugins.is_empty() {
-        project.modules = plugins;
+    if !modules.is_empty() {
+        project.modules = modules;
         updated_fields.push("modules".to_string());
     }
 
@@ -521,20 +463,20 @@ fn set(
         updated_fields.push("tablePrefix".to_string());
     }
 
-    for setting in &plugin_settings {
-        let (plugin_key, value) = setting.split_once('=').ok_or_else(|| {
+    for setting in &module_settings {
+        let (module_key, value) = setting.split_once('=').ok_or_else(|| {
             homeboy_core::Error::validation_invalid_argument(
-                "plugin-setting",
-                "Plugin setting must be in format plugin_id.key=value",
+                "module-setting",
+                "Module setting must be in format module_id.key=value",
                 Some(setting.clone()),
                 None,
             )
         })?;
 
-        let (plugin_id, key) = plugin_key.split_once('.').ok_or_else(|| {
+        let (module_id, key) = module_key.split_once('.').ok_or_else(|| {
             homeboy_core::Error::validation_invalid_argument(
-                "plugin-setting",
-                "Plugin setting must be in format plugin_id.key=value",
+                "module-setting",
+                "Module setting must be in format module_id.key=value",
                 Some(setting.clone()),
                 None,
             )
@@ -542,14 +484,14 @@ fn set(
 
         project
             .module_settings
-            .entry(plugin_id.to_string())
+            .entry(module_id.to_string())
             .or_default()
             .insert(
                 key.to_string(),
                 serde_json::Value::String(value.to_string()),
             );
 
-        updated_fields.push(format!("moduleSettings.{}.{}", plugin_id, key));
+        updated_fields.push(format!("moduleSettings.{}.{}", module_id, key));
     }
 
     if !component_ids.is_empty() {
@@ -572,33 +514,11 @@ fn set(
         ProjectOutput {
             command: "project.set".to_string(),
             project_id: Some(project_id.to_string()),
-            active_project_id: None,
             project: Some(ConfigManager::load_project_record(project_id)?),
             projects: None,
             components: None,
             pin: None,
             updated: Some(updated_fields),
-            import: None,
-        },
-        0,
-    ))
-}
-
-fn switch(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
-    ConfigManager::set_active_project(project_id)?;
-
-    let project = ConfigManager::load_project_record(project_id)?;
-
-    Ok((
-        ProjectOutput {
-            command: "project.switch".to_string(),
-            project_id: Some(project_id.to_string()),
-            active_project_id: None,
-            project: Some(project),
-            projects: None,
-            components: None,
-            pin: None,
-            updated: None,
             import: None,
         },
         0,
@@ -618,7 +538,6 @@ fn repair(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
         ProjectOutput {
             command: "project.repair".to_string(),
             project_id: Some(result.new_id.clone()),
-            active_project_id: None,
             project: Some(ConfigManager::load_project_record(&result.new_id)?),
             projects: None,
             components: None,
@@ -662,7 +581,6 @@ fn components_list(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32
         ProjectOutput {
             command: "project.components.list".to_string(),
             project_id: Some(project_id.to_string()),
-            active_project_id: None,
             project: None,
             projects: None,
             components: Some(ProjectComponentsOutput {
@@ -809,7 +727,6 @@ fn write_project_components(
         ProjectOutput {
             command: format!("project.components.{action}"),
             project_id: Some(project_id.to_string()),
-            active_project_id: None,
             project: None,
             projects: None,
             components: Some(ProjectComponentsOutput {
@@ -881,10 +798,6 @@ mod tests {
             sub_targets: Default::default(),
             shared_tables: Default::default(),
             component_ids: Default::default(),
-            table_groupings: Default::default(),
-            component_groupings: Default::default(),
-            protected_table_patterns: Default::default(),
-            unlocked_table_patterns: Default::default(),
         }
     }
 
@@ -1204,7 +1117,6 @@ fn pin_list(
         ProjectOutput {
             command: "project.pin.list".to_string(),
             project_id: Some(project_id.to_string()),
-            active_project_id: None,
             project: None,
             projects: None,
             components: None,
@@ -1288,7 +1200,6 @@ fn pin_add(
         ProjectOutput {
             command: "project.pin.add".to_string(),
             project_id: Some(project_id.to_string()),
-            active_project_id: None,
             project: None,
             projects: None,
             components: None,
@@ -1356,7 +1267,6 @@ fn pin_remove(
         ProjectOutput {
             command: "project.pin.remove".to_string(),
             project_id: Some(project_id.to_string()),
-            active_project_id: None,
             project: None,
             projects: None,
             components: None,

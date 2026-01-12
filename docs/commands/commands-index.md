@@ -16,13 +16,12 @@
 - [logs](logs.md)
 - [module](module.md)
 - [homeboy-init](homeboy-init.md)
-- [plugin](plugin.md)
 - [project](project.md)
 - [server](server.md)
 - [ssh](ssh.md)
 - [version](version.md)
 
-Plugin-provided CLI commands (loaded from `plugins/*/homeboy.json`) also appear as top-level commands (for example: `wp`, `pm2`) when their plugin is present.
+Module-provided CLI commands (loaded from `modules/*/homeboy.json`) also appear as top-level commands (for example: `wp`, `pm2`) when their module is present.
 
 Related:
 

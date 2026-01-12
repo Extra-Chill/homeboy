@@ -156,22 +156,6 @@ impl ConfigManager {
         Ok(servers)
     }
 
-    pub fn get_active_project() -> Result<ProjectRecord> {
-        let app_config = Self::load_app_config()?;
-        let config_path = AppPaths::config()?.to_string_lossy().to_string();
-        let active_id = app_config
-            .active_project_id
-            .ok_or_else(|| Error::project_no_active(Some(config_path)))?;
-        Self::load_project_record(&active_id)
-    }
-
-    pub fn set_active_project(id: &str) -> Result<()> {
-        let _ = Self::load_project_record(id)?;
-        let mut app_config = Self::load_app_config()?;
-        app_config.active_project_id = Some(id.to_string());
-        Self::save_app_config(&app_config)
-    }
-
     pub fn save_server(id: &str, server: &ServerConfig) -> Result<()> {
         let expected_id = server.slug_id()?;
         if expected_id != id {
@@ -212,13 +196,6 @@ impl ConfigManager {
         }
         fs::remove_file(&path)
             .map_err(|e| Error::internal_io(e.to_string(), Some("delete project".to_string())))?;
-
-        let mut app_config = Self::load_app_config()?;
-        if app_config.active_project_id.as_deref() == Some(id) {
-            app_config.active_project_id = None;
-            Self::save_app_config(&app_config)?;
-        }
-
         Ok(())
     }
 

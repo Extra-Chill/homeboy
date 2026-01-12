@@ -189,7 +189,8 @@ fn build_context(
                 .and_then(|m| m.cli)
                 .and_then(|cli| cli.default_cli_path)
         })
-        .unwrap_or_else(|| app_config.default_cli_path.clone());
+        .or_else(|| app_config.default_cli_path.clone())
+        .unwrap_or_default();
 
     Ok((
         DbContext {
