@@ -2,8 +2,11 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use homeboy_core::config::{
-    ConfigManager, PinnedRemoteFile, PinnedRemoteLog, ProjectManager, ProjectRecord,
+    slugify_id, AppPaths, ComponentConfiguration, ConfigManager, PinnedRemoteFile, PinnedRemoteLog,
+    ProjectManager, ProjectRecord,
 };
+use std::collections::HashSet;
+use std::fs;
 use uuid::Uuid;
 
 #[derive(Args)]
@@ -79,11 +82,41 @@ enum ProjectCommand {
         /// Project ID (file stem)
         project_id: String,
     },
+    /// Manage project components
+    Components {
+        #[command(subcommand)]
+        command: ProjectComponentsCommand,
+    },
     /// Manage pinned files and logs
     Pin {
         #[command(subcommand)]
         command: ProjectPinCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum ProjectComponentsCommand {
+    /// List associated components
+    List {
+        /// Project ID
+        project_id: String,
+    },
+    /// Replace project components with the provided list
+    Set {
+        /// Project ID
+        project_id: String,
+        /// Component IDs
+        component_ids: Vec<String>,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectComponentsOutput {
+    pub action: String,
+    pub project_id: String,
+    pub component_ids: Vec<String>,
+    pub components: Vec<ComponentConfiguration>,
 }
 
 #[derive(Serialize)]
@@ -172,7 +205,7 @@ enum ProjectPinType {
     Log,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectOutput {
     command: String,
@@ -180,6 +213,7 @@ pub struct ProjectOutput {
     active_project_id: Option<String>,
     project: Option<ProjectRecord>,
     projects: Option<Vec<ProjectListItem>>,
+    components: Option<ProjectComponentsOutput>,
     pin: Option<ProjectPinOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     updated: Option<Vec<String>>,
@@ -228,6 +262,7 @@ pub fn run(
         ),
         ProjectCommand::Switch { project_id } => switch(&project_id),
         ProjectCommand::Repair { project_id } => repair(&project_id),
+        ProjectCommand::Components { command } => components(command),
         ProjectCommand::Pin { command } => pin(command),
     }
 }
@@ -244,6 +279,7 @@ fn list(current: bool) -> homeboy_core::Result<(ProjectOutput, i32)> {
                 active_project_id: active_id,
                 project: None,
                 projects: None,
+                components: None,
                 pin: None,
                 updated: None,
             },
@@ -271,6 +307,7 @@ fn list(current: bool) -> homeboy_core::Result<(ProjectOutput, i32)> {
             active_project_id: active_id,
             project: None,
             projects: Some(items),
+            components: None,
             pin: None,
             updated: None,
         },
@@ -291,6 +328,7 @@ fn show(project_id: Option<String>) -> homeboy_core::Result<(ProjectOutput, i32)
             active_project_id: None,
             project: Some(project),
             projects: None,
+            components: None,
             pin: None,
             updated: None,
         },
@@ -329,6 +367,7 @@ fn create(
             active_project_id: None,
             project: Some(project),
             projects: None,
+            components: None,
             pin: None,
             updated: None,
         },
@@ -362,6 +401,7 @@ fn set(
                 active_project_id: None,
                 project: Some(ConfigManager::load_project_record(&result.new_id)?),
                 projects: None,
+                components: None,
                 pin: None,
                 updated: Some(updated_fields),
             },
@@ -414,6 +454,7 @@ fn set(
             active_project_id: None,
             project: Some(ConfigManager::load_project_record(project_id)?),
             projects: None,
+            components: None,
             pin: None,
             updated: Some(updated_fields),
         },
@@ -433,6 +474,7 @@ fn switch(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
             active_project_id: None,
             project: Some(project),
             projects: None,
+            components: None,
             pin: None,
             updated: None,
         },
@@ -456,8 +498,115 @@ fn repair(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
             active_project_id: None,
             project: Some(ConfigManager::load_project_record(&result.new_id)?),
             projects: None,
+            components: None,
             pin: None,
             updated,
+        },
+        0,
+    ))
+}
+
+fn components(command: ProjectComponentsCommand) -> homeboy_core::Result<(ProjectOutput, i32)> {
+    match command {
+        ProjectComponentsCommand::List { project_id } => components_list(&project_id),
+        ProjectComponentsCommand::Set {
+            project_id,
+            component_ids,
+        } => components_set(&project_id, component_ids),
+    }
+}
+
+fn components_list(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
+    let project = ConfigManager::load_project(project_id)?;
+
+    let mut components = Vec::new();
+    for component_id in &project.component_ids {
+        let component = ConfigManager::load_component(component_id)?;
+        components.push(component);
+    }
+
+    Ok((
+        ProjectOutput {
+            command: "project.components.list".to_string(),
+            project_id: Some(project_id.to_string()),
+            active_project_id: None,
+            project: None,
+            projects: None,
+            components: Some(ProjectComponentsOutput {
+                action: "list".to_string(),
+                project_id: project_id.to_string(),
+                component_ids: project.component_ids,
+                components,
+            }),
+            pin: None,
+            updated: None,
+        },
+        0,
+    ))
+}
+
+fn components_set(
+    project_id: &str,
+    component_ids: Vec<String>,
+) -> homeboy_core::Result<(ProjectOutput, i32)> {
+    if component_ids.is_empty() {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "componentIds",
+            "At least one component ID is required",
+            Some(project_id.to_string()),
+            None,
+        ));
+    }
+
+    let mut missing = Vec::new();
+    for component_id in &component_ids {
+        if ConfigManager::load_component(component_id).is_err() {
+            missing.push(component_id.clone());
+        }
+    }
+
+    if !missing.is_empty() {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "componentIds",
+            "Unknown component IDs (must exist in `homeboy component list`)",
+            Some(project_id.to_string()),
+            Some(missing),
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for id in component_ids {
+        if seen.insert(id.clone()) {
+            deduped.push(id);
+        }
+    }
+
+    let mut project = ConfigManager::load_project(project_id)?;
+    project.component_ids = deduped.clone();
+    ConfigManager::save_project(project_id, &project)?;
+
+    let mut components = Vec::new();
+    for component_id in &project.component_ids {
+        let component = ConfigManager::load_component(component_id)?;
+        components.push(component);
+    }
+
+    Ok((
+        ProjectOutput {
+            command: "project.components.set".to_string(),
+            project_id: Some(project_id.to_string()),
+            active_project_id: None,
+            project: None,
+            projects: None,
+            components: Some(ProjectComponentsOutput {
+                action: "set".to_string(),
+                project_id: project_id.to_string(),
+                component_ids: project.component_ids,
+                components,
+            }),
+            pin: None,
+            updated: Some(vec!["componentIds".to_string()]),
         },
         0,
     ))
@@ -478,6 +627,127 @@ fn pin(command: ProjectPinCommand) -> homeboy_core::Result<(ProjectOutput, i32)>
             path,
             r#type,
         } => pin_remove(&project_id, &path, r#type),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_component(id: &str) -> ComponentConfiguration {
+        ComponentConfiguration::new(
+            id.to_string(),
+            id.to_string(),
+            "/tmp".to_string(),
+            "remote".to_string(),
+            "artifact".to_string(),
+        )
+    }
+
+    fn seed_project(name: &str) -> homeboy_core::config::ProjectConfiguration {
+        homeboy_core::config::ProjectConfiguration {
+            name: name.to_string(),
+            domain: "example.com".to_string(),
+            project_type: "wordpress".to_string(),
+            modules: None,
+            server_id: None,
+            base_path: None,
+            table_prefix: None,
+            remote_files: Default::default(),
+            remote_logs: Default::default(),
+            database: Default::default(),
+            local_environment: Default::default(),
+            tools: Default::default(),
+            api: Default::default(),
+            changelog_next_section_label: None,
+            changelog_next_section_aliases: None,
+            sub_targets: Default::default(),
+            shared_tables: Default::default(),
+            component_ids: Default::default(),
+            table_groupings: Default::default(),
+            component_groupings: Default::default(),
+            protected_table_patterns: Default::default(),
+            unlocked_table_patterns: Default::default(),
+        }
+    }
+
+    fn setup_homeboy_dir(test_id: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(test_id);
+        std::env::set_var("XDG_CONFIG_HOME", &base);
+        base
+    }
+
+    #[test]
+    fn project_components_set_dedupes_preserving_order() {
+        let test_id = "homeboy-project-components-set-dedupe";
+        let base = setup_homeboy_dir(test_id);
+
+        AppPaths::ensure_directories().unwrap();
+
+        ConfigManager::save_component("alpha", &seed_component("alpha")).unwrap();
+        ConfigManager::save_component("beta", &seed_component("beta")).unwrap();
+
+        let project_id = slugify_id("My Project").unwrap();
+        ConfigManager::save_project(&project_id, &seed_project("My Project")).unwrap();
+
+        let (_out, code) = components_set(
+            &project_id,
+            vec!["alpha".to_string(), "beta".to_string(), "alpha".to_string()],
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+
+        let loaded = ConfigManager::load_project(&project_id).unwrap();
+        assert_eq!(loaded.component_ids, vec!["alpha", "beta"]);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn project_components_set_rejects_unknown_component_ids() {
+        let test_id = "homeboy-project-components-set-rejects-unknown";
+        let base = setup_homeboy_dir(test_id);
+
+        AppPaths::ensure_directories().unwrap();
+
+        ConfigManager::save_component("alpha", &seed_component("alpha")).unwrap();
+
+        let project_id = slugify_id("My Project").unwrap();
+        ConfigManager::save_project(&project_id, &seed_project("My Project")).unwrap();
+
+        let err = components_set(
+            &project_id,
+            vec!["alpha".to_string(), "missing".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Unknown component IDs"));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn project_components_list_returns_configured_ids() {
+        let test_id = "homeboy-project-components-list";
+        let base = setup_homeboy_dir(test_id);
+
+        AppPaths::ensure_directories().unwrap();
+
+        ConfigManager::save_component("alpha", &seed_component("alpha")).unwrap();
+        ConfigManager::save_component("beta", &seed_component("beta")).unwrap();
+
+        let project_id = slugify_id("My Project").unwrap();
+        let mut project = seed_project("My Project");
+        project.component_ids = vec!["beta".to_string(), "alpha".to_string()];
+        ConfigManager::save_project(&project_id, &project).unwrap();
+
+        let (out, code) = components_list(&project_id).unwrap();
+        assert_eq!(code, 0);
+
+        let payload = out.components.unwrap();
+        assert_eq!(payload.component_ids, vec!["beta", "alpha"]);
+        assert_eq!(payload.components.len(), 2);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
 
@@ -525,6 +795,7 @@ fn pin_list(
             active_project_id: None,
             project: None,
             projects: None,
+            components: None,
             pin: Some(ProjectPinOutput {
                 action: "list".to_string(),
                 project_id: project_id.to_string(),
@@ -607,6 +878,7 @@ fn pin_add(
             active_project_id: None,
             project: None,
             projects: None,
+            components: None,
             pin: Some(ProjectPinOutput {
                 action: "add".to_string(),
                 project_id: project_id.to_string(),
@@ -673,6 +945,7 @@ fn pin_remove(
             active_project_id: None,
             project: None,
             projects: None,
+            components: None,
             pin: Some(ProjectPinOutput {
                 action: "remove".to_string(),
                 project_id: project_id.to_string(),
