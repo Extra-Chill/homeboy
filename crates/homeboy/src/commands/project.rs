@@ -2,11 +2,10 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use homeboy_core::config::{
-    slugify_id, AppPaths, ComponentConfiguration, ConfigManager, PinnedRemoteFile, PinnedRemoteLog,
-    ProjectManager, ProjectRecord,
+    ComponentConfiguration, ConfigManager, PinnedRemoteFile, PinnedRemoteLog, ProjectManager,
+    ProjectRecord,
 };
 use std::collections::HashSet;
-use std::fs;
 use uuid::Uuid;
 
 #[derive(Args)]
