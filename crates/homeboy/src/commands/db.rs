@@ -304,7 +304,7 @@ fn query(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i
         .any(|keyword| trimmed_sql.starts_with(keyword))
     {
         return Err(homeboy_core::Error::config(
-            "Write operations not allowed via 'db query'. Use the plugin CLI directly for writes."
+            "Write operations not allowed via 'db query'. Use the module CLI directly for writes."
                 .to_string(),
         ));
     }

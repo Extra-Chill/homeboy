@@ -68,12 +68,35 @@ When running a module, Homeboy passes an execution context via environment varia
 - `HOMEBOY_EXEC_CONTEXT_VERSION`: currently `1`
 - `HOMEBOY_MODULE_ID`
 - `HOMEBOY_SETTINGS_JSON`: merged effective settings (JSON)
-- `HOMEBOY_PROJECT_ID` (optional; CLI modules when a project context is used)
+- `HOMEBOY_PROJECT_ID` (optional; when a project context is used)
 - `HOMEBOY_COMPONENT_ID` (optional; when a component context is resolved)
 
-Python modules also receive `PLAYWRIGHT_BROWSERS_PATH` (used when Playwright browsers are installed/configured).
+Modules can define additional environment variables via `runtime.env` in their manifest.
 
 `homeboy doctor scan` validates each scope's `settings` object against the module's manifest.
+
+## Runtime Configuration
+
+Modules define their runtime behavior in `homeboy.json`:
+
+```json
+{
+  "runtime": {
+    "runCommand": "./venv/bin/python3 {{entrypoint}} {{args}}",
+    "setupCommand": "python3 -m venv venv && ./venv/bin/pip install -r requirements.txt",
+    "readyCheck": "test -f ./venv/bin/python3",
+    "entrypoint": "main.py",
+    "env": {
+      "MY_VAR": "{{modulePath}}/data"
+    }
+  }
+}
+```
+
+- `runCommand`: Shell command to execute the module. Template variables: `{{modulePath}}`, `{{entrypoint}}`, `{{args}}`, plus project context vars.
+- `setupCommand`: Optional shell command to set up the module (run during install/update).
+- `readyCheck`: Optional shell command to check if module is ready (exit 0 = ready).
+- `env`: Optional environment variables to set when running.
 
 ## JSON output
 
@@ -85,7 +108,6 @@ Python modules also receive `PLAYWRIGHT_BROWSERS_PATH` (used when Playwright bro
 - `projectId` (only used for `module.list` filter)
 - `moduleId`
 - `modules`: list output for `module.list`
-- `runtimeType`: `python` | `shell` | `cli` (for `run` and `setup`)
 - `installed`: `{ url, path }` for `module.install`
 - `updated`: `{ url, path }` for `module.update`
 - `uninstalled`: `{ path }` for `module.uninstall`
@@ -93,15 +115,15 @@ Python modules also receive `PLAYWRIGHT_BROWSERS_PATH` (used when Playwright bro
 Module entry (`modules[]`):
 
 - `id`, `name`, `version`, `description`
-- `runtime` (runtime type as lowercase string)
+- `runtime`: `executable` (has runtime config) or `platform` (no runtime config)
 - `compatible` (with optional `--project`)
-- `ready` (runtime readiness)
+- `ready` (runtime readiness based on `readyCheck`)
 - `configured` (whether the module is present in `homeboy.json` under `installedModules`)
 
 ## Exit code
 
-- `module.run`: exit code of the executed module.
-- `module.setup`: `0` on success; when the module runtime is not python, it returns `0` without setup.
+- `module.run`: exit code of the executed module's `runCommand`.
+- `module.setup`: `0` on success; if no `setupCommand` defined, returns `0` without action.
 
 ## Related
 

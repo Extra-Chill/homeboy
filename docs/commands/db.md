@@ -70,10 +70,10 @@ Action-specific fields:
 
 ## Exit code
 
-- For remote-command actions: exit code of the underlying remote database CLI command (as defined by the enabled plugin's `database.cli` templates).
+- For remote-command actions: exit code of the underlying remote database CLI command (as defined by the enabled module's `database.cli` templates).
 - For `tunnel`: exit code of the local `ssh -L` process.
 
 ## Related
 
-- [plugin](plugin.md)
-- [wp](wp.md) (plugin-provided CLI tool example)
+- [module](module.md)
+- [wp](wp.md) (module-provided CLI tool example)

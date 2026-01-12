@@ -43,10 +43,6 @@ impl AppPaths {
         Ok(Self::homeboy()?.join("backups"))
     }
 
-    pub fn playwright_browsers() -> Result<PathBuf> {
-        Ok(Self::homeboy()?.join("playwright-browsers"))
-    }
-
     pub fn docs() -> Result<PathBuf> {
         Ok(Self::homeboy()?.join("docs"))
     }

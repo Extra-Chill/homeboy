@@ -23,7 +23,7 @@ pub struct ModuleManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
 
-    // Platform behavior (from former plugins)
+    // Platform behavior
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -86,7 +86,7 @@ pub struct RequirementsConfig {
     pub components: Vec<String>,
 }
 
-// Platform behavior configs (from former plugins)
+// Platform behavior configs
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,26 +176,34 @@ pub struct BuildConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeConfig {
-    #[serde(rename = "type")]
-    pub runtime_type: RuntimeType,
+    /// Shell command to execute when running the module.
+    /// Template variables: {{entrypoint}}, {{args}}, {{modulePath}}, plus project context vars.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_command: Option<String>,
+
+    /// Shell command to set up the module (e.g., create venv, install deps).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_command: Option<String>,
+
+    /// Shell command to check if module is ready. Exit 0 = ready.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_check: Option<String>,
+
+    /// Environment variables to set when running the module.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::HashMap<String, String>>,
+
+    /// Entry point file (used in template substitution).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dependencies: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub playwright_browsers: Option<Vec<String>>,
+
+    /// Default args template (used in template substitution).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
+
+    /// Default site for this module (used by some CLI modules).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_site: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RuntimeType {
-    Python,
-    Shell,
-    Cli,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

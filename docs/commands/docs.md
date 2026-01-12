@@ -8,7 +8,7 @@ homeboy docs [--list] [<topic>...]
 
 ## Description
 
-By default, this command prints raw markdown to stdout.
+By default, this command prints raw markdown to stdout (no JSON envelope).
 
 Use `--list` to return a JSON list of available topics.
 
@@ -29,7 +29,7 @@ Topic resolution is documented in: [Embedded docs topic resolution](../embedded-
 
 ### Default (render topic)
 
-When `--list` is **not** used, `homeboy docs` writes the embedded markdown topic **as-is** to stdout (no JSON envelope).
+When `--list` is **not** used, `homeboy docs` writes the embedded markdown topic **as-is** to stdout (no JSON envelope, not wrapped).
 
 ### `--list`
 

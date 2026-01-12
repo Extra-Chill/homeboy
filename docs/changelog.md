@@ -153,7 +153,7 @@ All notable changes to Homeboy CLI are documented in this file.
 ## 0.1.9
 
 ### Improvements
-- **Project management**: Added `homeboy project list` (and `--current`) plus `homeboy project pin` subcommands to manage pinned files/logs per project.
+- **Project management**: Added `homeboy project list` and `homeboy project pin` subcommands to manage pinned files/logs per project.
 - **Config correctness**: Project configs are a strict `ProjectRecord` (`id` derived via `slugify_id(name)`) with validation to prevent mismatched IDs and to clear `active_project_id` when a project is deleted.
 - **Docs**: Updated embedded docs to reflect new/removed commands.
 
@@ -184,7 +184,7 @@ All notable changes to Homeboy CLI are documented in this file.
 ## 0.1.5
 
 ### Breaking Changes
-- **Docs Command Output**: `homeboy docs` now returns JSON output (via `homeboy_core::output::print_result`) instead of paging/printing raw text.
+- **Docs Command Output**: `homeboy docs` now prints embedded markdown to stdout by default (instead of paging).
 
 ### New Features
 - **Core Path Utilities**: Added `homeboy_core::base_path` helpers for base path validation and remote path joining (`join_remote_path`, `join_remote_child`, `remote_dirname`).

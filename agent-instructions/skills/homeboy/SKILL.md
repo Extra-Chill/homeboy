@@ -14,7 +14,7 @@ CLI for project development and deployment. Provides terminal access to project 
 
 | Command | Purpose |
 |---------|---------|
-| `project` | Manage project configurations (create, set, list, show, switch, repair, pin) |
+| `project` | Manage project configurations (create, set, list, show, repair, components, pin) |
 | `component` | Manage standalone component configurations |
 | `server` | Manage server configurations (create, show, set, delete, list, key) |
 | `git` | Component-scoped git operations (status, commit, push, pull, tag) |
@@ -30,7 +30,7 @@ CLI for project development and deployment. Provides terminal access to project 
 
 ```bash
 homeboy project list           # List all projects
-homeboy project list --current # Get active project ID
+homeboy project list           # List all projects
 homeboy docs                   # Embedded docs index
 homeboy docs <topic...>        # Embedded docs for a topic
 homeboy help <command>         # CLI help for any command/subcommand
@@ -63,7 +63,7 @@ homeboy module list
 Run a module-provided CLI tool command:
 
 ```bash
-homeboy wp <project> plugin list
+homeboy wp <project> core version
 homeboy pm2 <project> status
 ```
 

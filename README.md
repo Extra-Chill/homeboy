@@ -49,10 +49,9 @@ A few common entrypoints:
 
 ```bash
 homeboy project list
-homeboy project create "My Project" example.com --module wordpress --activate
+homeboy project create "My Project" example.com --module wordpress
 homeboy project set <projectId> --domain example.com --server-id <serverId>
 homeboy project repair <projectId>
-homeboy project switch <projectId>
 homeboy wp <projectId> core version
 homeboy deploy <projectId> --dry-run --all
 homeboy ssh <projectId>

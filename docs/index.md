@@ -31,6 +31,5 @@ Common paths:
 
 Additional:
 
-- `playwright-browsers/` (used when running Playwright-backed modules; see `PLAYWRIGHT_BROWSERS_PATH`)
 - `docs/` (reserved for cached/generated docs)
 

@@ -41,9 +41,9 @@ If unclear which scope applies, ask the user.
 
 ### Creating a new project
 
-1. Ask for: `name`, `domain`, plugin IDs to enable (e.g. `wordpress`), optional `serverId`
-2. Create (activate if desired):
-   - `homeboy project create "<name>" <domain> --plugin <pluginId> --activate`
+1. Ask for: `name`, `domain`, module IDs to enable (e.g. `wordpress`), optional `serverId`
+2. Create:
+   - `homeboy project create "<name>" <domain> --module <moduleId>`
 3. Verify:
    - `homeboy project show <projectId>`
 

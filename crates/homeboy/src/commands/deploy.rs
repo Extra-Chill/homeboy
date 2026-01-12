@@ -88,6 +88,21 @@ pub struct DeployOutput {
 }
 
 pub fn run(args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DeployOutput> {
+    // Check for common subcommand mistakes (deploy doesn't have subcommands)
+    let subcommand_hints = ["status", "list", "show", "help"];
+    if subcommand_hints.contains(&args.project_id.as_str()) {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "project_id",
+            format!(
+                "'{}' looks like a subcommand, but 'deploy' doesn't have subcommands. \
+                 Usage: homeboy deploy <projectId> [componentIds...] [--all] [--dry-run]",
+                args.project_id
+            ),
+            None,
+            None,
+        ));
+    }
+
     let project = ConfigManager::load_project_record(&args.project_id)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(&args.project_id)?;
     let server = ctx.server;
@@ -236,6 +251,35 @@ pub fn run(args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             });
             failed += 1;
             continue;
+        }
+
+        let artifact_metadata = fs::metadata(&component.build_artifact);
+        if let Ok(ref metadata) = artifact_metadata {
+            if metadata.is_dir() {
+                results.push(DeployComponentResult {
+                    id: component.id.clone(),
+                    name: component.name.clone(),
+                    status: "failed".to_string(),
+                    local_version,
+                    remote_version,
+                    error: Some(format!(
+                        "Build artifact '{}' is a directory. Homeboy supports ZIP archives and regular files, not directories. \
+                         Configure a build command that produces a ZIP artifact (e.g., 'build/{}.zip')",
+                        component.build_artifact,
+                        component.id
+                    )),
+                    artifact_path: Some(component.build_artifact.clone()),
+                    remote_path: Some(homeboy_core::base_path::join_remote_path_or_fallback(
+                        Some(&base_path),
+                        &component.remote_path,
+                    )),
+                    build_command: component.build_command.clone(),
+                    build_exit_code,
+                    scp_exit_code: None,
+                });
+                failed += 1;
+                continue;
+            }
         }
 
         let (scp_exit_code, scp_error) = deploy_component_artifact(
@@ -651,6 +695,18 @@ fn upload_to_path(
     #[cfg(test)]
     {
         TEST_SCP_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Safety belt: refuse to upload directories (prevents silent filesystem corruption)
+    let path = Path::new(local_path);
+    if path.is_dir() {
+        return (
+            Some(1),
+            Some(format!(
+                "Cannot upload directory '{}' as a file. Use a ZIP archive instead.",
+                local_path
+            )),
+        );
     }
 
     let Some(ssh_client) = client.as_ssh_client() else {

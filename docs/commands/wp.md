@@ -20,7 +20,7 @@ homeboy wp <projectId> [--local] <args...>
 {
   "projectId": "<projectId>",
   "local": false,
-  "args": ["plugin", "list"],
+  "args": ["core", "version"],
   "targetDomain": "<domain>|null",
   "command": "<rendered command string>",
   "stdout": "<stdout>",
@@ -40,5 +40,5 @@ Exit code matches the executed CLI tool command.
 
 ## Related
 
-- [plugin](plugin.md)
+- [module](module.md)
 - [db](db.md)
