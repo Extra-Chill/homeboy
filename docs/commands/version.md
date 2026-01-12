@@ -19,24 +19,25 @@ homeboy version show <componentId>
 ### `bump`
 
 ```sh
-homeboy version bump <componentId> <patch|minor|major> \
-  [--changelog-add "<message>"]...
+homeboy version bump <componentId> <patch|minor|major>
 ```
+
+This command:
+
+- Bumps all configured `versionTargets`.
+- Finalizes the component changelog by moving the current "next" section (usually `Unreleased`) into a new `## <newVersion>` section.
+
+Changelog entries must be added *before* running this command (recommended: `homeboy changelog add --json ...`).
 
 Arguments:
 
 - `<componentId>`: component ID
 - `<patch|minor|major>`: version bump type
 
-Options:
-
-- `--changelog-add "<message>"`: add a changelog item to the configured "next" section (repeatable)
-
 Dry-run mode:
 
 ```sh
-homeboy --dry-run version bump <componentId> <patch|minor|major> \
-  --changelog-add "<message>"
+homeboy --dry-run version bump <componentId> <patch|minor|major>
 ```
 
 ## JSON output
@@ -57,11 +58,13 @@ homeboy --dry-run version bump <componentId> <patch|minor|major> \
 - `version` (detected current version before bump)
 - `newVersion` (version after bump)
 - `targets`: array of `{ file, pattern, fullPath, matchCount }`
-- `changelogPath` (when `--changelog-add` is used and a changelog is available)
-- `changelogItemsAdded` (when `--changelog-add` is used)
-- `changelogFinalized` (when `--changelog-add` is used and a changelog is available)
-- `changelogChanged` (when any changelog update occurs)
-- Global `warnings` may be present (for example, when `--changelog-add` is used but no changelog can be resolved)
+- `changelogPath` (resolved changelog path)
+- `changelogFinalized` (always `true` on success)
+- `changelogChanged` (whether the changelog file was modified)
+
+Errors:
+
+- `bump` errors if the changelog cannot be resolved, if the changelog is out of sync with the current version, or if the "next" section is missing/empty.
 
 ## Exit code
 

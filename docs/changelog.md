@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.4.0
+
+- Unify plugins and modules under a single module manifest and config surface
+- Remove plugin command and plugin manifest subsystem; migrate CLI/db/deploy/version/build to module-based lookups
+- Rename config fields: plugins→modules, plugin_settings→module_settings, modules→scoped_modules
+
 ## 0.3.0
 
 - Add plugin support (nodejs/wordpress)

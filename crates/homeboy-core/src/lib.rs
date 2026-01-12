@@ -1,15 +1,14 @@
 pub mod base_path;
 pub mod changelog;
 pub mod config;
-pub mod git;
 pub mod context;
-pub mod plugin;
-pub mod prompt;
 pub mod doctor;
+pub mod git;
 pub mod json;
 pub mod module;
 pub mod module_settings;
 pub mod output;
+pub mod prompt;
 pub mod shell;
 pub mod ssh;
 pub mod template;

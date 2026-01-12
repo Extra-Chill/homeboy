@@ -18,7 +18,7 @@ fn reset_test_scp_call_count() {
 
 use homeboy_core::config::{ConfigManager, ServerConfig};
 use homeboy_core::context::resolve_project_ssh_with_base_path;
-use homeboy_core::plugin::{load_plugin, DeployVerification};
+use homeboy_core::module::{load_module, DeployVerification};
 use homeboy_core::shell;
 use homeboy_core::ssh::{execute_local_command_in_dir, CommandOutput, SshClient};
 use homeboy_core::template::{render_map, TemplateVars};
@@ -238,8 +238,13 @@ pub fn run(args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             continue;
         }
 
-        let (scp_exit_code, scp_error) =
-            deploy_component_artifact(&server, &client, &base_path, component, &project.config.plugins);
+        let (scp_exit_code, scp_error) = deploy_component_artifact(
+            &server,
+            &client,
+            &base_path,
+            component,
+            &project.config.modules,
+        );
 
         if let Some(error) = scp_error {
             results.push(DeployComponentResult {
@@ -316,7 +321,7 @@ struct Component {
     build_artifact: String,
     build_command: Option<String>,
     version_targets: Option<Vec<VersionTarget>>,
-    plugins: Vec<String>,
+    modules: Vec<String>,
 }
 
 fn plan_components_to_deploy(
@@ -371,7 +376,7 @@ fn run_build_if_configured(component: &Component) -> (Option<i32>, Option<String
         homeboy_core::build::detect_build_command(
             &component.local_path,
             &component.build_artifact,
-            &component.plugins,
+            &component.modules,
         )
         .map(|candidate| candidate.command)
     });
@@ -392,10 +397,10 @@ fn run_build_if_configured(component: &Component) -> (Option<i32>, Option<String
     }
 }
 
-fn find_deploy_verification(plugins: &[String], target_path: &str) -> Option<DeployVerification> {
-    for plugin_id in plugins {
-        if let Some(plugin) = load_plugin(plugin_id) {
-            for verification in &plugin.deploy {
+fn find_deploy_verification(modules: &[String], target_path: &str) -> Option<DeployVerification> {
+    for module_id in modules {
+        if let Some(module) = load_module(module_id) {
+            for verification in &module.deploy {
                 if target_path.contains(&verification.path_pattern) {
                     return Some(verification.clone());
                 }
@@ -410,7 +415,7 @@ fn deploy_component_artifact(
     client: &dyn RemoteExec,
     base_path: &str,
     component: &Component,
-    plugins: &[String],
+    modules: &[String],
 ) -> (Option<i32>, Option<String>) {
     let install_dir =
         match homeboy_core::base_path::join_remote_path(Some(base_path), &component.remote_path) {
@@ -496,8 +501,8 @@ fn deploy_component_artifact(
             final_install_dir.clone()
         };
 
-        // Find matching deploy verification from plugins
-        let deploy_verification = find_deploy_verification(plugins, &cleanup_target_dir);
+        // Find matching deploy verification from modules
+        let deploy_verification = find_deploy_verification(modules, &cleanup_target_dir);
 
         if cleanup_target_dir.starts_with(base_path)
             && deploy_verification.is_some()
@@ -537,11 +542,14 @@ fn deploy_component_artifact(
                 return (Some(unzip_output.exit_code), Some(unzip_output.stderr));
             }
 
-            // Run plugin-driven verification if configured
+            // Run module-driven verification if configured
             if let Some(verification) = deploy_verification {
                 if let Some(ref verify_cmd_template) = verification.verify_command {
                     let mut vars = HashMap::new();
-                    vars.insert(TemplateVars::TARGET_DIR.to_string(), cleanup_target_dir.clone());
+                    vars.insert(
+                        TemplateVars::TARGET_DIR.to_string(),
+                        cleanup_target_dir.clone(),
+                    );
                     let verify_cmd = render_map(verify_cmd_template, &vars);
 
                     let verify_output = client.execute(&verify_cmd);
@@ -616,7 +624,7 @@ mod tests {
             build_artifact: zip_file.path().to_string_lossy().to_string(),
             build_command: None,
             version_targets: None,
-            plugins: vec![],
+            modules: vec![],
         };
 
         let client = TestRemoteExec::default();
@@ -744,7 +752,7 @@ fn load_components(component_ids: &[String]) -> Vec<Component> {
                 build_artifact,
                 build_command: component.build_command,
                 version_targets,
-                plugins: component.plugins,
+                modules: component.modules,
             });
         }
     }
@@ -756,11 +764,11 @@ fn parse_component_version(
     content: &str,
     pattern: Option<&str>,
     filename: &str,
-    plugins: &[String],
+    modules: &[String],
 ) -> Option<String> {
     let pattern_str = match pattern {
         Some(p) => p.replace("\\\\", "\\"),
-        None => default_pattern_for_file(filename, plugins),
+        None => default_pattern_for_file(filename, modules),
     };
 
     parse_version(content, &pattern_str)
@@ -770,7 +778,12 @@ fn fetch_local_version(component: &Component) -> Option<String> {
     let target = component.version_targets.as_ref()?.first()?;
     let path = format!("{}/{}", component.local_path, target.file);
     let content = fs::read_to_string(&path).ok()?;
-    parse_component_version(&content, target.pattern.as_deref(), &target.file, &component.plugins)
+    parse_component_version(
+        &content,
+        target.pattern.as_deref(),
+        &target.file,
+        &component.modules,
+    )
 }
 
 trait RemoteExec {
@@ -870,7 +883,7 @@ fn fetch_remote_versions(
                 .and_then(|t| t.pattern.as_deref());
 
             if let Some(version) =
-                parse_component_version(&output.stdout, pattern, version_file, &component.plugins)
+                parse_component_version(&output.stdout, pattern, version_file, &component.modules)
             {
                 versions.insert(component.id.clone(), version);
             }

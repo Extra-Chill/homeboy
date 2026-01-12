@@ -158,7 +158,7 @@ pub struct ProjectListItem {
     id: String,
     name: String,
     domain: String,
-    plugins: Vec<String>,
+    modules: Vec<String>,
     active: bool,
 }
 
@@ -361,7 +361,7 @@ fn list(current: bool) -> homeboy_core::Result<(ProjectOutput, i32)> {
             id: record.id,
             name: record.config.name,
             domain: record.config.domain,
-            plugins: record.config.plugins,
+            modules: record.config.modules,
         })
         .collect();
 
@@ -432,14 +432,8 @@ fn create(
     table_prefix: Option<String>,
     activate: bool,
 ) -> homeboy_core::Result<(ProjectOutput, i32)> {
-    let (created_project_id, _project) = ProjectManager::create_project(
-        name,
-        domain,
-        plugins,
-        server_id,
-        base_path,
-        table_prefix,
-    )?;
+    let (created_project_id, _project) =
+        ProjectManager::create_project(name, domain, plugins, server_id, base_path, table_prefix)?;
 
     if activate {
         ConfigManager::set_active_project(&created_project_id)?;
@@ -508,8 +502,8 @@ fn set(
     }
 
     if !plugins.is_empty() {
-        project.plugins = plugins;
-        updated_fields.push("plugins".to_string());
+        project.modules = plugins;
+        updated_fields.push("modules".to_string());
     }
 
     if let Some(server_id) = server_id {
@@ -528,35 +522,34 @@ fn set(
     }
 
     for setting in &plugin_settings {
-        let (plugin_key, value) = setting
-            .split_once('=')
-            .ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
-                    "plugin-setting",
-                    "Plugin setting must be in format plugin_id.key=value",
-                    Some(setting.clone()),
-                    None,
-                )
-            })?;
+        let (plugin_key, value) = setting.split_once('=').ok_or_else(|| {
+            homeboy_core::Error::validation_invalid_argument(
+                "plugin-setting",
+                "Plugin setting must be in format plugin_id.key=value",
+                Some(setting.clone()),
+                None,
+            )
+        })?;
 
-        let (plugin_id, key) = plugin_key
-            .split_once('.')
-            .ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
-                    "plugin-setting",
-                    "Plugin setting must be in format plugin_id.key=value",
-                    Some(setting.clone()),
-                    None,
-                )
-            })?;
+        let (plugin_id, key) = plugin_key.split_once('.').ok_or_else(|| {
+            homeboy_core::Error::validation_invalid_argument(
+                "plugin-setting",
+                "Plugin setting must be in format plugin_id.key=value",
+                Some(setting.clone()),
+                None,
+            )
+        })?;
 
         project
-            .plugin_settings
+            .module_settings
             .entry(plugin_id.to_string())
             .or_default()
-            .insert(key.to_string(), serde_json::Value::String(value.to_string()));
+            .insert(
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
 
-        updated_fields.push(format!("pluginSettings.{}.{}", plugin_id, key));
+        updated_fields.push(format!("moduleSettings.{}.{}", plugin_id, key));
     }
 
     if !component_ids.is_empty() {
@@ -871,12 +864,12 @@ mod tests {
         homeboy_core::config::ProjectConfiguration {
             name: name.to_string(),
             domain: "example.com".to_string(),
-            plugins: vec!["wordpress".to_string()],
-            modules: None,
+            modules: vec!["wordpress".to_string()],
+            scoped_modules: None,
             server_id: None,
             base_path: None,
             table_prefix: None,
-            plugin_settings: Default::default(),
+            module_settings: Default::default(),
             remote_files: Default::default(),
             remote_logs: Default::default(),
             database: Default::default(),

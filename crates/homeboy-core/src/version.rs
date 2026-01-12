@@ -1,4 +1,4 @@
-use crate::plugin::{load_plugin, PluginManifest};
+use crate::module::{load_module, ModuleManifest};
 use regex::Regex;
 
 /// Parse version from content using regex pattern.
@@ -54,12 +54,12 @@ fn builtin_pattern_for_file(filename: &str) -> &'static str {
     }
 }
 
-/// Get default version pattern, checking plugins first for platform-specific patterns.
-pub fn default_pattern_for_file(filename: &str, plugins: &[String]) -> String {
-    // Check plugins for matching extension pattern
-    for plugin_id in plugins {
-        if let Some(plugin) = load_plugin(plugin_id) {
-            if let Some(pattern) = find_version_pattern_in_plugin(&plugin, filename) {
+/// Get default version pattern, checking modules first for platform-specific patterns.
+pub fn default_pattern_for_file(filename: &str, modules: &[String]) -> String {
+    // Check modules for matching extension pattern
+    for module_id in modules {
+        if let Some(module) = load_module(module_id) {
+            if let Some(pattern) = find_version_pattern_in_module(&module, filename) {
                 return pattern;
             }
         }
@@ -69,8 +69,8 @@ pub fn default_pattern_for_file(filename: &str, plugins: &[String]) -> String {
     builtin_pattern_for_file(filename).to_string()
 }
 
-fn find_version_pattern_in_plugin(plugin: &PluginManifest, filename: &str) -> Option<String> {
-    for vp in &plugin.version_patterns {
+fn find_version_pattern_in_module(module: &ModuleManifest, filename: &str) -> Option<String> {
+    for vp in &module.version_patterns {
         if filename.ends_with(&vp.extension) {
             return Some(vp.pattern.clone());
         }

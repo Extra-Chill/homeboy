@@ -1,11 +1,11 @@
-use crate::plugin::{load_plugin, PluginManifest};
+use crate::module::{load_module, ModuleManifest};
 use crate::template::{render, TemplateVars};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildCommandSource {
-    Plugin,
+    Module,
 }
 
 pub struct BuildCommandCandidate {
@@ -17,18 +17,18 @@ fn file_exists(path: &Path) -> bool {
     std::fs::metadata(path).is_ok()
 }
 
-/// Detect build command using plugin configuration.
+/// Detect build command using module configuration.
 pub fn detect_build_command(
     local_path: &str,
     build_artifact: &str,
-    plugins: &[String],
+    modules: &[String],
 ) -> Option<BuildCommandCandidate> {
     let root = PathBuf::from(local_path);
 
-    // Check plugins for matching build config
-    for plugin_id in plugins {
-        if let Some(plugin) = load_plugin(plugin_id) {
-            if let Some(candidate) = detect_build_from_plugin(&root, build_artifact, &plugin) {
+    // Check modules for matching build config
+    for module_id in modules {
+        if let Some(module) = load_module(module_id) {
+            if let Some(candidate) = detect_build_from_module(&root, build_artifact, &module) {
                 return Some(candidate);
             }
         }
@@ -37,12 +37,12 @@ pub fn detect_build_command(
     None
 }
 
-fn detect_build_from_plugin(
+fn detect_build_from_module(
     root: &Path,
     build_artifact: &str,
-    plugin: &PluginManifest,
+    module: &ModuleManifest,
 ) -> Option<BuildCommandCandidate> {
-    let build_config = plugin.build.as_ref()?;
+    let build_config = module.build.as_ref()?;
 
     // Check if artifact matches any configured extension
     let artifact_lower = build_artifact.to_ascii_lowercase();
@@ -66,7 +66,7 @@ fn detect_build_from_plugin(
                 .unwrap_or_else(|| format!("sh {}", script_name));
 
             return Some(BuildCommandCandidate {
-                source: BuildCommandSource::Plugin,
+                source: BuildCommandSource::Module,
                 command,
             });
         }
@@ -114,16 +114,13 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn no_detection_without_plugins() {
+    fn no_detection_without_modules() {
         let temp_dir = tempfile::tempdir().unwrap();
         std::fs::write(temp_dir.path().join("build.sh"), "#!/bin/sh\necho ok\n").unwrap();
 
-        // Without plugins, no build command is detected (plugin-driven detection)
-        let candidate = detect_build_command(
-            temp_dir.path().to_str().unwrap(),
-            "dist/plugin.zip",
-            &[],
-        );
+        // Without modules, no build command is detected (module-driven detection)
+        let candidate =
+            detect_build_command(temp_dir.path().to_str().unwrap(), "dist/plugin.zip", &[]);
         assert!(candidate.is_none());
     }
 

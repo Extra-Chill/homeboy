@@ -43,14 +43,6 @@ impl AppPaths {
         Ok(Self::homeboy()?.join("backups"))
     }
 
-    pub fn plugins() -> Result<PathBuf> {
-        Ok(Self::homeboy()?.join("plugins"))
-    }
-
-    pub fn plugin(id: &str) -> Result<PathBuf> {
-        Ok(Self::plugins()?.join(id))
-    }
-
     pub fn playwright_browsers() -> Result<PathBuf> {
         Ok(Self::homeboy()?.join("playwright-browsers"))
     }
@@ -88,7 +80,6 @@ impl AppPaths {
             Self::modules()?,
             Self::keys()?,
             Self::backups()?,
-            Self::plugins()?,
         ];
         for dir in dirs {
             if !dir.exists() {

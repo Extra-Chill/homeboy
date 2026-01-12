@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 
 use homeboy_core::config::{ConfigManager, SlugIdentifiable};
 use homeboy_core::context::{resolve_project_ssh, resolve_project_ssh_with_base_path};
-use homeboy_core::plugin::{load_plugin, DatabaseCliConfig};
+use homeboy_core::module::{load_module, DatabaseCliConfig};
 use homeboy_core::ssh::SshClient;
 use homeboy_core::template::{render_map, TemplateVars};
 use homeboy_core::token;
@@ -164,29 +164,29 @@ fn build_context(
 
     let app_config = ConfigManager::load_app_config()?;
 
-    // Find first plugin with database CLI config
+    // Find first module with database CLI config
     let db_cli = project
         .config
-        .plugins
+        .modules
         .iter()
-        .find_map(|plugin_id| {
-            load_plugin(plugin_id)
-                .and_then(|p| p.database)
+        .find_map(|module_id| {
+            load_module(module_id)
+                .and_then(|m| m.database)
                 .and_then(|db| db.cli)
         })
         .ok_or_else(|| {
             homeboy_core::Error::config(
-                "No plugin with database CLI configuration found".to_string(),
+                "No module with database CLI configuration found".to_string(),
             )
         })?;
 
     let cli_path = project
         .config
-        .plugins
+        .modules
         .iter()
-        .find_map(|plugin_id| {
-            load_plugin(plugin_id)
-                .and_then(|p| p.cli)
+        .find_map(|module_id| {
+            load_module(module_id)
+                .and_then(|m| m.cli)
                 .and_then(|cli| cli.default_cli_path)
         })
         .unwrap_or_else(|| app_config.default_cli_path.clone());

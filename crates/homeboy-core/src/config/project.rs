@@ -19,10 +19,10 @@ pub struct ProjectConfiguration {
     pub name: String,
     pub domain: String,
     #[serde(default)]
-    pub plugins: Vec<String>,
+    pub modules: Vec<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub modules: Option<std::collections::HashMap<String, super::ScopedModuleConfig>>,
+    pub scoped_modules: Option<std::collections::HashMap<String, super::ScopedModuleConfig>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
@@ -32,7 +32,7 @@ pub struct ProjectConfiguration {
     pub table_prefix: Option<String>,
 
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub plugin_settings: HashMap<String, HashMap<String, Value>>,
+    pub module_settings: HashMap<String, HashMap<String, Value>>,
 
     #[serde(default)]
     pub remote_files: RemoteFileConfig,
@@ -108,18 +108,18 @@ impl ConfigImportable for ProjectConfiguration {
 }
 
 impl ProjectConfiguration {
-    pub fn has_plugin(&self, plugin_id: &str) -> bool {
-        self.plugins.contains(&plugin_id.to_string())
+    pub fn has_module(&self, module_id: &str) -> bool {
+        self.modules.contains(&module_id.to_string())
     }
 
-    pub fn get_plugin_setting(&self, plugin_id: &str, key: &str) -> Option<&Value> {
-        self.plugin_settings
-            .get(plugin_id)
+    pub fn get_module_setting(&self, module_id: &str, key: &str) -> Option<&Value> {
+        self.module_settings
+            .get(module_id)
             .and_then(|settings| settings.get(key))
     }
 
-    pub fn get_plugin_setting_str(&self, plugin_id: &str, key: &str) -> Option<&str> {
-        self.get_plugin_setting(plugin_id, key)
+    pub fn get_module_setting_str(&self, module_id: &str, key: &str) -> Option<&str> {
+        self.get_module_setting(module_id, key)
             .and_then(|v| v.as_str())
     }
 

@@ -523,8 +523,22 @@ impl Scanner {
             ("name", manifest.name.trim().is_empty()),
             ("version", manifest.version.trim().is_empty()),
             ("icon", manifest.icon.trim().is_empty()),
-            ("description", manifest.description.trim().is_empty()),
-            ("author", manifest.author.trim().is_empty()),
+            (
+                "description",
+                manifest
+                    .description
+                    .as_ref()
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true),
+            ),
+            (
+                "author",
+                manifest
+                    .author
+                    .as_ref()
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true),
+            ),
         ]
         .into_iter()
         .filter_map(|(field, is_bad)| if is_bad { Some(field) } else { None })
@@ -830,11 +844,11 @@ impl Scanner {
             let Some(requires) = &manifest.requires else {
                 continue;
             };
-            let Some(required_components) = &requires.components else {
+            if requires.components.is_empty() {
                 continue;
-            };
+            }
 
-            for component_id in required_components {
+            for component_id in &requires.components {
                 if self.components.contains_key(component_id) {
                     continue;
                 }
@@ -844,7 +858,7 @@ impl Scanner {
                     code: "BROKEN_REFERENCE".to_string(),
                     message: "module requires missing component".to_string(),
                     file: PathBuf::from(module_dir)
-                        .join("module.json")
+                        .join("homeboy.json")
                         .to_string_lossy()
                         .to_string(),
                     pointer: Some("/requires/components".to_string()),

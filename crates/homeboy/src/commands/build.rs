@@ -19,8 +19,8 @@ mod tests {
             local_path: "component".to_string(),
             remote_path: "/var/www/component".to_string(),
             build_artifact: "dist/plugin.zip".to_string(),
-            plugins: vec![],
-            modules: None,
+            modules: vec![],
+            scoped_modules: None,
             version_targets: None,
             changelog_targets: None,
             changelog_next_section_label: None,
@@ -96,7 +96,7 @@ fn run_with_loader_and_executor(
         homeboy_core::build::detect_build_command(
             &component.local_path,
             &component.build_artifact,
-            &component.plugins,
+            &component.modules,
         )
         .map(|candidate| candidate.command)
     });

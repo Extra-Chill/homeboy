@@ -1,6 +1,6 @@
 use homeboy_core::config::{ConfigManager, ProjectConfiguration, ProjectRecord, SlugIdentifiable};
 use homeboy_core::context::resolve_project_ssh;
-use homeboy_core::plugin::{find_plugin_by_tool, CliConfig, PluginManifest};
+use homeboy_core::module::{find_module_by_tool, CliConfig, ModuleManifest};
 use homeboy_core::shell;
 use homeboy_core::ssh::{execute_local_command, CommandOutput};
 use homeboy_core::template::{render_map, TemplateVars};
@@ -13,7 +13,7 @@ use super::CmdResult;
 #[derive(Serialize)]
 pub struct CliOutput {
     pub tool: String,
-    pub plugin_id: String,
+    pub module_id: String,
     pub project_id: String,
     pub local: bool,
     pub args: Vec<String>,
@@ -55,34 +55,31 @@ fn run_with_loader_and_executor(
         ));
     }
 
-    let plugin = find_plugin_by_tool(tool).ok_or_else(|| {
-        homeboy_core::Error::other(format!("No plugin provides tool '{}'", tool))
-    })?;
+    let module = find_module_by_tool(tool)
+        .ok_or_else(|| homeboy_core::Error::other(format!("No module provides tool '{}'", tool)))?;
 
-    let cli_config = plugin.cli.as_ref().ok_or_else(|| {
+    let cli_config = module.cli.as_ref().ok_or_else(|| {
         homeboy_core::Error::other(format!(
-            "Plugin '{}' does not have CLI configuration",
-            plugin.id
+            "Module '{}' does not have CLI configuration",
+            module.id
         ))
     })?;
 
     let project = project_loader(project_id)?;
 
-    if !project.config.has_plugin(&plugin.id) {
+    if !project.config.has_module(&module.id) {
         return Err(homeboy_core::Error::other(format!(
-            "Project '{}' does not have the '{}' plugin enabled",
-            project_id, plugin.id
+            "Project '{}' does not have the '{}' module enabled",
+            project_id, module.id
         )));
     }
 
     let (output, target_domain, command) = if local {
-        let (target_domain, command) =
-            build_command(&project, &plugin, cli_config, &args, true)?;
+        let (target_domain, command) = build_command(&project, &module, cli_config, &args, true)?;
         let output = local_executor(&command);
         (output, Some(target_domain), command)
     } else {
-        let (target_domain, command) =
-            build_command(&project, &plugin, cli_config, &args, false)?;
+        let (target_domain, command) = build_command(&project, &module, cli_config, &args, false)?;
 
         let ctx = resolve_project_ssh(project_id)?;
         let output = ctx.client.execute(&command);
@@ -92,7 +89,7 @@ fn run_with_loader_and_executor(
     Ok((
         CliOutput {
             tool: tool.to_string(),
-            plugin_id: plugin.id,
+            module_id: module.id,
             project_id: project_id.to_string(),
             local,
             args,
@@ -108,7 +105,7 @@ fn run_with_loader_and_executor(
 
 fn build_command(
     project: &ProjectRecord,
-    plugin: &PluginManifest,
+    module: &ModuleManifest,
     cli_config: &CliConfig,
     args: &[String],
     use_local: bool,
@@ -133,7 +130,7 @@ fn build_command(
 
     let (target_domain, command_args) = resolve_subtarget(&project.config, args, use_local);
 
-    let command_args = inject_plugin_args(&project.config, plugin, command_args);
+    let command_args = inject_module_args(&project.config, module, command_args);
 
     if command_args.is_empty() {
         return Err(homeboy_core::Error::other(
@@ -172,12 +169,12 @@ fn build_command(
     ))
 }
 
-fn inject_plugin_args(
+fn inject_module_args(
     project: &ProjectConfiguration,
-    plugin: &PluginManifest,
+    module: &ModuleManifest,
     args: Vec<String>,
 ) -> Vec<String> {
-    let cli_config = match &plugin.cli {
+    let cli_config = match &module.cli {
         Some(cli) => cli,
         None => return args,
     };
@@ -185,7 +182,7 @@ fn inject_plugin_args(
     let mut injected_args = Vec::new();
 
     for injection in &cli_config.arg_injections {
-        if let Some(value) = project.get_plugin_setting_str(&plugin.id, &injection.setting_key) {
+        if let Some(value) = project.get_module_setting_str(&module.id, &injection.setting_key) {
             let arg = injection.arg_template.replace("{{value}}", value);
             injected_args.push(arg);
         }

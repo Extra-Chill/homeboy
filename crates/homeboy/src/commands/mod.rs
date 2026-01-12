@@ -20,7 +20,6 @@ pub mod git;
 pub mod init;
 pub mod logs;
 pub mod module;
-pub mod plugin;
 pub mod project;
 pub mod server;
 pub mod ssh;
@@ -81,9 +80,6 @@ pub(crate) fn run_json(
         ),
         crate::Commands::Module(args) => homeboy_core::output::map_cmd_result_to_json(
             module::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        crate::Commands::Plugin(args) => homeboy_core::output::map_cmd_result_to_json(
-            plugin::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),
         ),
         crate::Commands::Docs(args) => homeboy_core::output::map_cmd_result_to_json(
             docs::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),

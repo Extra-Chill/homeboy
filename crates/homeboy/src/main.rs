@@ -19,9 +19,9 @@ mod docs;
 
 use commands::{
     build, changelog, cli, component, config, context, db, deploy, doctor, error, file, git, init,
-    logs, module, plugin, project, server, ssh, version,
+    logs, module, project, server, ssh, version,
 };
-use homeboy_core::plugin::load_all_plugins;
+use homeboy_core::module::load_all_modules;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -62,8 +62,6 @@ enum Commands {
     Context(context::ContextArgs),
     /// Execute CLI-compatible modules
     Module(module::ModuleArgs),
-    /// Manage platform plugins
-    Plugin(plugin::PluginArgs),
     /// Initialize a repo for use with Homeboy
     Init(init::InitArgs),
     /// Display CLI documentation
@@ -102,40 +100,43 @@ fn response_mode(command: &Commands) -> ResponseMode {
     }
 }
 
-struct PluginCommand {
+struct ModuleCliCommand {
     tool: String,
     project_id: String,
     local: bool,
     args: Vec<String>,
 }
 
-struct PluginCliInfo {
+struct ModuleCliInfo {
     tool: String,
     display_name: String,
-    plugin_name: String,
+    module_name: String,
 }
 
-fn collect_plugin_cli_info() -> Vec<PluginCliInfo> {
-    load_all_plugins()
+fn collect_module_cli_info() -> Vec<ModuleCliInfo> {
+    load_all_modules()
         .into_iter()
-        .filter_map(|p| {
-            p.cli.map(|cli| PluginCliInfo {
+        .filter_map(|m| {
+            m.cli.map(|cli| ModuleCliInfo {
                 tool: cli.tool,
                 display_name: cli.display_name,
-                plugin_name: p.name,
+                module_name: m.name,
             })
         })
         .collect()
 }
 
-fn build_augmented_command(plugin_info: &[PluginCliInfo]) -> Command {
+fn build_augmented_command(module_info: &[ModuleCliInfo]) -> Command {
     let mut cmd = Cli::command();
 
-    for info in plugin_info {
+    for info in module_info {
         let tool_name: &'static str = Box::leak(info.tool.clone().into_boxed_str());
         cmd = cmd.subcommand(
             Command::new(tool_name)
-                .about(format!("Run {} commands via {}", info.display_name, info.plugin_name))
+                .about(format!(
+                    "Run {} commands via {}",
+                    info.display_name, info.module_name
+                ))
                 .arg(
                     clap::Arg::new("project_id")
                         .help("Project ID")
@@ -162,10 +163,13 @@ fn build_augmented_command(plugin_info: &[PluginCliInfo]) -> Command {
     cmd
 }
 
-fn try_parse_plugin_command(matches: &ArgMatches, plugin_info: &[PluginCliInfo]) -> Option<PluginCommand> {
+fn try_parse_module_cli_command(
+    matches: &ArgMatches,
+    module_info: &[ModuleCliInfo],
+) -> Option<ModuleCliCommand> {
     let (tool, sub_matches) = matches.subcommand()?;
 
-    if !plugin_info.iter().any(|p| p.tool == tool) {
+    if !module_info.iter().any(|m| m.tool == tool) {
         return None;
     }
 
@@ -177,7 +181,7 @@ fn try_parse_plugin_command(matches: &ArgMatches, plugin_info: &[PluginCliInfo])
         .map(|vals| vals.cloned().collect())
         .unwrap_or_default();
 
-    Some(PluginCommand {
+    Some(ModuleCliCommand {
         tool: tool.to_string(),
         project_id,
         local,
@@ -186,20 +190,20 @@ fn try_parse_plugin_command(matches: &ArgMatches, plugin_info: &[PluginCliInfo])
 }
 
 fn main() -> std::process::ExitCode {
-    let plugin_info = collect_plugin_cli_info();
-    let cmd = build_augmented_command(&plugin_info);
+    let module_info = collect_module_cli_info();
+    let cmd = build_augmented_command(&module_info);
     let matches = cmd.get_matches();
 
     let global = GlobalArgs {
         dry_run: matches.get_flag("dry_run"),
     };
 
-    if let Some(plugin_cmd) = try_parse_plugin_command(&matches, &plugin_info) {
+    if let Some(module_cmd) = try_parse_module_cli_command(&matches, &module_info) {
         let result = cli::run(
-            &plugin_cmd.tool,
-            &plugin_cmd.project_id,
-            plugin_cmd.local,
-            plugin_cmd.args,
+            &module_cmd.tool,
+            &module_cmd.project_id,
+            module_cmd.local,
+            module_cmd.args,
             &global,
         );
 
@@ -237,7 +241,7 @@ fn main() -> std::process::ExitCode {
     }
 
     if matches!(cli.command, Commands::List) {
-        let mut cmd = build_augmented_command(&plugin_info);
+        let mut cmd = build_augmented_command(&module_info);
         cmd.print_help().expect("Failed to print help");
         println!();
         return std::process::ExitCode::SUCCESS;

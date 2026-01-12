@@ -27,10 +27,10 @@ pub struct ComponentConfiguration {
     pub build_artifact: String,
 
     #[serde(default)]
-    pub plugins: Vec<String>,
+    pub modules: Vec<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub modules: Option<std::collections::HashMap<String, super::ScopedModuleConfig>>,
+    pub scoped_modules: Option<std::collections::HashMap<String, super::ScopedModuleConfig>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_targets: Option<Vec<VersionTarget>>,
@@ -98,8 +98,8 @@ impl ComponentConfiguration {
             local_path,
             remote_path,
             build_artifact,
-            plugins: Vec::new(),
-            modules: None,
+            modules: Vec::new(),
+            scoped_modules: None,
             version_targets: None,
             changelog_targets: None,
             changelog_next_section_label: None,

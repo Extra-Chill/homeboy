@@ -23,7 +23,7 @@ impl ModuleScope {
         }
 
         if let Some(project) = project {
-            if let Some(project_modules) = project.modules.as_ref() {
+            if let Some(project_modules) = project.scoped_modules.as_ref() {
                 if let Some(project_config) = project_modules.get(module_id) {
                     settings.extend(project_config.settings.clone());
                 }
@@ -31,7 +31,7 @@ impl ModuleScope {
         }
 
         if let Some(component) = component {
-            if let Some(component_modules) = component.modules.as_ref() {
+            if let Some(component_modules) = component.scoped_modules.as_ref() {
                 if let Some(component_config) = component_modules.get(module_id) {
                     settings.extend(component_config.settings.clone());
                 }
@@ -60,12 +60,12 @@ impl ModuleScope {
 
         let app_settings = app.map(|a| a.settings.clone()).unwrap_or_default();
         let project_settings = project
-            .and_then(|p| p.modules.as_ref())
+            .and_then(|p| p.scoped_modules.as_ref())
             .and_then(|m| m.get(module_id))
             .map(|c| c.settings.clone())
             .unwrap_or_default();
         let component_settings = component
-            .and_then(|c| c.modules.as_ref())
+            .and_then(|c| c.scoped_modules.as_ref())
             .and_then(|m| m.get(module_id))
             .map(|c| c.settings.clone())
             .unwrap_or_default();
@@ -92,13 +92,14 @@ impl ModuleScope {
             return Ok(());
         };
 
-        if let Some(required_plugin) = requires.project_type.as_deref() {
-            if !project.has_plugin(required_plugin) {
+        // Check required modules
+        for required_module in &requires.modules {
+            if !project.has_module(required_module) {
                 return Err(Error::validation_invalid_argument(
-                    "project.plugins",
+                    "project.modules",
                     format!(
-                        "Module '{}' requires plugin '{}', but project does not have it enabled",
-                        module.id, required_plugin
+                        "Module '{}' requires module '{}', but project does not have it enabled",
+                        module.id, required_module
                     ),
                     None,
                     None,
@@ -106,19 +107,18 @@ impl ModuleScope {
             }
         }
 
-        if let Some(required_components) = requires.components.as_ref() {
-            for required in required_components {
-                if !project.component_ids.iter().any(|c| c == required) {
-                    return Err(Error::validation_invalid_argument(
-                        "project.componentIds",
-                        format!(
-                            "Module '{}' requires component '{}', but project does not include it",
-                            module.id, required
-                        ),
-                        None,
-                        None,
-                    ));
-                }
+        // Check required components
+        for required in &requires.components {
+            if !project.component_ids.iter().any(|c| c == required) {
+                return Err(Error::validation_invalid_argument(
+                    "project.componentIds",
+                    format!(
+                        "Module '{}' requires component '{}', but project does not include it",
+                        module.id, required
+                    ),
+                    None,
+                    None,
+                ));
             }
         }
 
@@ -133,7 +133,7 @@ impl ModuleScope {
         let required_components = module
             .requires
             .as_ref()
-            .and_then(|r| r.components.as_ref())
+            .map(|r| &r.components)
             .filter(|c| !c.is_empty());
 
         let Some(required_components) = required_components else {

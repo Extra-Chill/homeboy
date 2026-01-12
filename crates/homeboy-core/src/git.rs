@@ -145,7 +145,10 @@ fn strip_conventional_prefix(subject: &str) -> &str {
     if let Some(pos) = subject.find(": ") {
         let prefix = &subject[..pos];
         // Check if it looks like a conventional commit prefix
-        if prefix.chars().all(|c| c.is_alphanumeric() || c == '(' || c == ')' || c == '!') {
+        if prefix
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '(' || c == ')' || c == '!')
+        {
             return &subject[pos + 2..];
         }
     }
@@ -198,7 +201,10 @@ mod tests {
 
     #[test]
     fn strip_conventional_prefix_works() {
-        assert_eq!(strip_conventional_prefix("feat: Add feature"), "Add feature");
+        assert_eq!(
+            strip_conventional_prefix("feat: Add feature"),
+            "Add feature"
+        );
         assert_eq!(
             strip_conventional_prefix("fix(shell): Fix escaping"),
             "Fix escaping"

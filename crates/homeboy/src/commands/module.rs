@@ -253,8 +253,17 @@ fn list(project: Option<String>) -> CmdResult<ModuleOutput> {
                 id: module.id.clone(),
                 name: module.name.clone(),
                 version: module.version.clone(),
-                description: module.description.lines().next().unwrap_or("").to_string(),
-                runtime: format!("{:?}", module.runtime.runtime_type).to_lowercase(),
+                description: module
+                    .description
+                    .as_ref()
+                    .and_then(|d| d.lines().next())
+                    .unwrap_or("")
+                    .to_string(),
+                runtime: module
+                    .runtime
+                    .as_ref()
+                    .map(|r| format!("{:?}", r.runtime_type).to_lowercase())
+                    .unwrap_or_else(|| "none".to_string()),
                 compatible,
                 ready,
                 configured,
@@ -287,6 +296,13 @@ fn run_module(
     let module = load_module(module_id)
         .ok_or_else(|| homeboy_core::Error::other(format!("Module '{}' not found", module_id)))?;
 
+    let runtime = module.runtime.as_ref().ok_or_else(|| {
+        homeboy_core::Error::other(format!(
+            "Module '{}' does not have a runtime configuration and cannot be executed",
+            module_id
+        ))
+    })?;
+
     let app_config = ConfigManager::load_app_config()?;
     let installed_module = app_config
         .installed_modules
@@ -305,7 +321,7 @@ fn run_module(
     let mut resolved_project_id: Option<String> = None;
     let mut resolved_component_id: Option<String> = None;
 
-    let (runtime_type, code) = match module.runtime.runtime_type {
+    let (runtime_type, code) = match runtime.runtime_type {
         RuntimeType::Python => {
             let effective_settings =
                 ModuleScope::effective_settings(module_id, installed_module, None, None);
@@ -459,8 +475,12 @@ fn run_python_module(
         ));
     };
 
+    let runtime = module.runtime.as_ref().ok_or_else(|| {
+        homeboy_core::Error::other("Module has no runtime configuration".to_string())
+    })?;
+
     // Build entrypoint path
-    let entrypoint = match &module.runtime.entrypoint {
+    let entrypoint = match &runtime.entrypoint {
         Some(e) => format!("{}/{}", module_path, e),
         None => {
             return Err(homeboy_core::Error::other(
@@ -510,8 +530,12 @@ fn run_shell_module(
         .as_ref()
         .ok_or_else(|| homeboy_core::Error::other("module_path not set".to_string()))?;
 
+    let runtime = module.runtime.as_ref().ok_or_else(|| {
+        homeboy_core::Error::other("Module has no runtime configuration".to_string())
+    })?;
+
     // Build entrypoint path
-    let entrypoint = match &module.runtime.entrypoint {
+    let entrypoint = match &runtime.entrypoint {
         Some(e) => format!("{}/{}", module_path, e),
         None => {
             return Err(homeboy_core::Error::other(
@@ -549,7 +573,11 @@ fn run_cli_module(
     extra_args: Vec<String>,
     exec_context: &ModuleExecContext,
 ) -> homeboy_core::Result<i32> {
-    let command_template = match &module.runtime.args {
+    let runtime = module.runtime.as_ref().ok_or_else(|| {
+        homeboy_core::Error::other("Module has no runtime configuration".to_string())
+    })?;
+
+    let command_template = match &runtime.args {
         Some(args) if !args.trim().is_empty() => args.as_str(),
         _ => {
             return Err(homeboy_core::Error::other(
@@ -809,7 +837,11 @@ fn install_module(url: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
     ConfigManager::save_app_config(&app_config)?;
 
     if let Some(module) = load_module(&module_id) {
-        if module.runtime.runtime_type == RuntimeType::Python {
+        if module
+            .runtime
+            .as_ref()
+            .is_some_and(|r| r.runtime_type == RuntimeType::Python)
+        {
             let _ = setup_module(&module_id)?;
         }
     }
@@ -863,7 +895,11 @@ fn update_module(module_id: &str, force: bool) -> CmdResult<ModuleOutput> {
     }
 
     if let Some(module) = load_module(module_id) {
-        if module.runtime.runtime_type == RuntimeType::Python {
+        if module
+            .runtime
+            .as_ref()
+            .is_some_and(|r| r.runtime_type == RuntimeType::Python)
+        {
             let _ = setup_module(module_id)?;
         }
     }
@@ -924,14 +960,33 @@ fn setup_module(module_id: &str) -> CmdResult<ModuleOutput> {
     let module = load_module(module_id)
         .ok_or_else(|| homeboy_core::Error::other(format!("Module '{}' not found", module_id)))?;
 
-    if module.runtime.runtime_type != RuntimeType::Python {
+    let runtime = match module.runtime.as_ref() {
+        Some(r) => r,
+        None => {
+            return Ok((
+                ModuleOutput {
+                    command: "module.setup".to_string(),
+                    project_id: None,
+                    module_id: Some(module_id.to_string()),
+                    modules: None,
+                    runtime_type: Some("none".to_string()),
+                    installed: None,
+                    updated: None,
+                    uninstalled: None,
+                },
+                0,
+            ));
+        }
+    };
+
+    if runtime.runtime_type != RuntimeType::Python {
         return Ok((
             ModuleOutput {
                 command: "module.setup".to_string(),
                 project_id: None,
                 module_id: Some(module_id.to_string()),
                 modules: None,
-                runtime_type: Some(format!("{:?}", module.runtime.runtime_type).to_lowercase()),
+                runtime_type: Some(format!("{:?}", runtime.runtime_type).to_lowercase()),
                 installed: None,
                 updated: None,
                 uninstalled: None,
@@ -970,7 +1025,7 @@ fn setup_module(module_id: &str) -> CmdResult<ModuleOutput> {
         ));
     }
 
-    if let Some(deps) = module.runtime.dependencies.as_ref() {
+    if let Some(deps) = runtime.dependencies.as_ref() {
         if !deps.is_empty() {
             #[cfg(windows)]
             let pip_path = format!("{}\\Scripts\\pip.exe", venv_path);
@@ -995,7 +1050,7 @@ fn setup_module(module_id: &str) -> CmdResult<ModuleOutput> {
         }
     }
 
-    if let Some(browsers) = module.runtime.playwright_browsers.as_ref() {
+    if let Some(browsers) = runtime.playwright_browsers.as_ref() {
         if !browsers.is_empty() {
             #[cfg(windows)]
             let venv_python = format!("{}\\Scripts\\python.exe", venv_path);
@@ -1045,7 +1100,12 @@ fn setup_module(module_id: &str) -> CmdResult<ModuleOutput> {
 }
 
 fn is_module_ready(module: &ModuleManifest) -> bool {
-    match module.runtime.runtime_type {
+    let Some(runtime) = module.runtime.as_ref() else {
+        // Modules without runtime (platform modules) are always ready
+        return true;
+    };
+
+    match runtime.runtime_type {
         RuntimeType::Python => {
             // Python modules need venv to be ready
             if let Some(ref path) = module.module_path {
@@ -1071,26 +1131,25 @@ fn is_module_compatible(module: &ModuleManifest, project: Option<&ProjectConfigu
         return true;
     };
 
-    // Check required plugin
-    if let Some(ref required_plugin) = requires.project_type {
-        if !project.has_plugin(required_plugin) {
+    // Check required modules
+    for required_module in &requires.modules {
+        if !project.has_module(required_module) {
             return false;
         }
     }
 
     // Check components
-    if let Some(ref required_components) = requires.components {
-        for component in required_components {
-            if !project.component_ids.contains(component) {
-                return false;
-            }
+    for component in &requires.components {
+        if !project.component_ids.contains(component) {
+            return false;
         }
     }
 
     // For CLI modules, check local environment is configured
-    if module.runtime.runtime_type == RuntimeType::Cli && !project.local_environment.is_configured()
-    {
-        return false;
+    if let Some(runtime) = module.runtime.as_ref() {
+        if runtime.runtime_type == RuntimeType::Cli && !project.local_environment.is_configured() {
+            return false;
+        }
     }
 
     true

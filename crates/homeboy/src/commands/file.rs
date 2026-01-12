@@ -263,7 +263,11 @@ fn rename(
 
     let full_old = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), old_path)?;
     let full_new = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), new_path)?;
-    let command = format!("mv {} {}", shell::quote_path(&full_old), shell::quote_path(&full_new));
+    let command = format!(
+        "mv {} {}",
+        shell::quote_path(&full_old),
+        shell::quote_path(&full_new)
+    );
     let output = ctx.client.execute(&command);
 
     if !output.success {

@@ -1,16 +1,11 @@
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy_core::changelog;
-use homeboy_core::git;
 use homeboy_core::output::CliWarning;
-use homeboy_core::prompt::{ConfirmListPrompt, PromptEngine, YesNoPrompt};
-use homeboy_core::ssh::execute_local_command_in_dir;
+use regex::Regex;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
-
-use regex::Regex;
 
 use homeboy_core::config::{ConfigManager, VersionTarget};
 use homeboy_core::json::{read_json_file, set_json_pointer, write_json_file_pretty};
@@ -32,31 +27,12 @@ enum VersionCommand {
         /// Component ID
         component_id: String,
     },
-    /// Bump version of a component
+    /// Bump version of a component and finalize changelog
     Bump {
         /// Component ID
         component_id: String,
         /// Version bump type
         bump_type: BumpType,
-        /// Add a changelog item to the configured "next" section (repeatable)
-        #[arg(long = "changelog-add", action = clap::ArgAction::Append)]
-        changelog_add: Vec<String>,
-    },
-    /// Automated release: generate changelog from commits, bump, commit, tag, push
-    Release {
-        /// Component ID
-        component_id: String,
-        /// Version bump type
-        bump_type: BumpType,
-        /// Skip build step
-        #[arg(long)]
-        no_build: bool,
-        /// Skip creating git tag
-        #[arg(long)]
-        no_tag: bool,
-        /// Skip interactive confirmations (for CI)
-        #[arg(long, short)]
-        yes: bool,
     },
 }
 
@@ -105,32 +81,9 @@ pub struct VersionBumpOutput {
     /// Version after bump.
     new_version: String,
     targets: Vec<VersionTargetOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changelog_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changelog_items_added: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changelog_finalized: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changelog_changed: Option<bool>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VersionReleaseOutput {
-    command: String,
-    component_id: String,
-    previous_version: String,
-    new_version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    latest_tag: Option<String>,
-    commits_included: Vec<String>,
-    changelog_entries: Vec<String>,
-    built: bool,
-    committed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tag_created: Option<String>,
-    pushed: bool,
+    changelog_path: String,
+    changelog_finalized: bool,
+    changelog_changed: bool,
 }
 
 pub fn run(
@@ -147,15 +100,7 @@ pub fn run(
         VersionCommand::Bump {
             component_id,
             bump_type,
-            changelog_add,
-        } => bump(&component_id, bump_type, &changelog_add, global.dry_run),
-        VersionCommand::Release {
-            component_id,
-            bump_type,
-            no_build,
-            no_tag,
-            yes,
-        } => release(&component_id, bump_type, no_build, no_tag, yes, global.dry_run),
+        } => bump(&component_id, bump_type, global.dry_run),
     }
 }
 
@@ -167,11 +112,11 @@ fn resolve_target_full_path(component_local_path: &str, version_file: &str) -> S
     }
 }
 
-fn resolve_target_pattern(target: &VersionTarget, plugins: &[String]) -> String {
+fn resolve_target_pattern(target: &VersionTarget, modules: &[String]) -> String {
     target
         .pattern
         .clone()
-        .unwrap_or_else(|| default_pattern_for_file(&target.file, plugins))
+        .unwrap_or_else(|| default_pattern_for_file(&target.file, modules))
 }
 
 fn extract_versions_from_content(
@@ -278,12 +223,12 @@ fn write_updated_version(
     version_pattern: &str,
     old_version: &str,
     new_version: &str,
-    plugins: &[String],
+    modules: &[String],
 ) -> homeboy_core::Result<usize> {
     if Path::new(full_path)
         .extension()
         .is_some_and(|ext| ext == "json")
-        && version_pattern == default_pattern_for_file(full_path, plugins)
+        && version_pattern == default_pattern_for_file(full_path, modules)
     {
         let mut json = read_json_file(full_path)?;
         let Some(current) = json.get("version").and_then(|v| v.as_str()) else {
@@ -335,7 +280,7 @@ pub fn show_version_output(component_id: &str) -> homeboy_core::Result<(VersionS
     }
 
     let primary = &targets[0];
-    let primary_pattern = resolve_target_pattern(primary, &component.plugins);
+    let primary_pattern = resolve_target_pattern(primary, &component.modules);
     let primary_full_path = resolve_target_full_path(&component.local_path, &primary.file);
 
     let content = fs::read_to_string(&primary_full_path).map_err(|err| {
@@ -381,12 +326,7 @@ pub fn show_version_output(component_id: &str) -> homeboy_core::Result<(VersionS
     ))
 }
 
-fn bump(
-    component_id: &str,
-    bump_type: BumpType,
-    changelog_add: &[String],
-    dry_run: bool,
-) -> homeboy_core::output::CmdResult {
+fn bump(component_id: &str, bump_type: BumpType, dry_run: bool) -> homeboy_core::output::CmdResult {
     let mut warnings: Vec<CliWarning> = Vec::new();
 
     if dry_run {
@@ -413,7 +353,7 @@ fn bump(
     }
 
     let primary = &targets[0];
-    let primary_pattern = resolve_target_pattern(primary, &component.plugins);
+    let primary_pattern = resolve_target_pattern(primary, &component.modules);
     let primary_full_path = resolve_target_full_path(&component.local_path, &primary.file);
 
     let primary_content = fs::read_to_string(&primary_full_path).map_err(|err| {
@@ -451,36 +391,55 @@ fn bump(
         )
     })?;
 
-    // Gap prevention: ensure changelog and version files are in sync before bumping.
-    // If they differ, bumping would create a version gap in the changelog.
-    if !changelog_add.is_empty() {
-        if let Ok(path) = changelog::resolve_changelog_path(&component) {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Some(latest_changelog_version) =
-                    changelog::get_latest_finalized_version(&content)
-                {
-                    if latest_changelog_version != old_version {
-                        return Err(Error::validation_invalid_argument(
-                            "version",
-                            format!(
-                                "Version mismatch: changelog is at {} but files are at {}. Bumping would create a version gap.",
-                                latest_changelog_version, old_version
-                            ),
-                            None,
-                            Some(vec![
-                                "Ensure changelog and version files are in sync before bumping.".to_string(),
-                            ]),
-                        ));
-                    }
-                }
-            }
-        }
+    let settings = changelog::resolve_effective_settings(Some(&component))?;
+    let changelog_path = changelog::resolve_changelog_path(&component)?;
+
+    let changelog_content = fs::read_to_string(&changelog_path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some("read changelog".to_string())))?;
+
+    let latest_changelog_version = changelog::get_latest_finalized_version(&changelog_content)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "changelog",
+                "Changelog has no finalized versions".to_string(),
+                None,
+                Some(vec![
+                    "Add at least one finalized version section like '## 0.1.0'".to_string(),
+                ]),
+            )
+        })?;
+
+    if latest_changelog_version != old_version {
+        return Err(Error::validation_invalid_argument(
+            "version",
+            format!(
+                "Version mismatch: changelog is at {} but files are at {}. Bumping would create a version gap.",
+                latest_changelog_version, old_version
+            ),
+            None,
+            Some(vec![
+                "Ensure changelog and version files are in sync before bumping.".to_string(),
+            ]),
+        ));
+    }
+
+    let (finalized_changelog, changelog_changed) = changelog::finalize_next_section(
+        &changelog_content,
+        &settings.next_section_aliases,
+        &new_version,
+        false,
+    )?;
+
+    if changelog_changed && !dry_run {
+        fs::write(&changelog_path, &finalized_changelog).map_err(|err| {
+            Error::internal_io(err.to_string(), Some("write changelog".to_string()))
+        })?;
     }
 
     let mut outputs = Vec::new();
 
     for target in targets {
-        let version_pattern = resolve_target_pattern(&target, &component.plugins);
+        let version_pattern = resolve_target_pattern(&target, &component.modules);
         let full_path = resolve_target_full_path(&component.local_path, &target.file);
         let content = fs::read_to_string(&full_path).map_err(|err| {
             Error::internal_io(err.to_string(), Some("read version file".to_string()))
@@ -497,7 +456,7 @@ fn bump(
                 &version_pattern,
                 &old_version,
                 &new_version,
-                &component.plugins,
+                &component.modules,
             )?
         };
 
@@ -516,331 +475,15 @@ fn bump(
         });
     }
 
-    let mut changelog_path: Option<String> = None;
-    let mut changelog_items_added: Option<usize> = None;
-    let mut changelog_finalized: Option<bool> = None;
-    let mut changelog_changed: Option<bool> = None;
-
-    if !changelog_add.is_empty() {
-        let settings = changelog::resolve_effective_settings(Some(&component))?;
-
-        let path = match changelog::resolve_changelog_path(&component) {
-            Ok(path) => path,
-            Err(err) => {
-                warnings.push(CliWarning {
-                    code: err.code.as_str().to_string(),
-                    message: "Changelog not updated".to_string(),
-                    details: err.details.clone(),
-                    hints: if err.hints.is_empty() {
-                        None
-                    } else {
-                        Some(err.hints.clone())
-                    },
-                    retryable: err.retryable,
-                });
-
-                let out = VersionBumpOutput {
-                    command: "version.bump".to_string(),
-                    component_id: component_id.to_string(),
-                    version: old_version,
-                    new_version,
-                    targets: outputs,
-                    changelog_path,
-                    changelog_items_added,
-                    changelog_finalized,
-                    changelog_changed,
-                };
-
-                let json = serde_json::to_value(out)
-                    .map_err(|e| homeboy_core::Error::internal_json(e.to_string(), None))?;
-
-                return Ok((json, warnings, 0));
-            }
-        };
-
-        changelog_path = Some(path.to_string_lossy().to_string());
-
-        let content = fs::read_to_string(&path).map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read changelog".to_string()))
-        })?;
-        let mut new_content = content;
-        let mut any_changed = false;
-        let mut added_count = 0usize;
-
-        for message in changelog_add {
-            let (next_content, item_changed) = changelog::add_next_section_item(
-                &new_content,
-                &settings.next_section_aliases,
-                message,
-            )?;
-            new_content = next_content;
-            if item_changed {
-                any_changed = true;
-                added_count += 1;
-            }
-        }
-
-        let (finalized_content, finalized_changed) = changelog::finalize_next_section(
-            &new_content,
-            &settings.next_section_aliases,
-            &new_version,
-            true,
-        )?;
-
-        new_content = finalized_content;
-        any_changed = any_changed || finalized_changed;
-
-        if any_changed && !dry_run {
-            fs::write(&path, &new_content).map_err(|err| {
-                Error::internal_io(err.to_string(), Some("write changelog".to_string()))
-            })?;
-        }
-
-        changelog_items_added = Some(added_count);
-        changelog_finalized = Some(true);
-        changelog_changed = Some(any_changed);
-    }
-
     let out = VersionBumpOutput {
         command: "version.bump".to_string(),
         component_id: component_id.to_string(),
         version: old_version,
         new_version,
         targets: outputs,
-        changelog_path,
-        changelog_items_added,
-        changelog_finalized,
+        changelog_path: changelog_path.to_string_lossy().to_string(),
+        changelog_finalized: true,
         changelog_changed,
-    };
-
-    let json = serde_json::to_value(out)
-        .map_err(|e| homeboy_core::Error::internal_json(e.to_string(), None))?;
-
-    Ok((json, warnings, 0))
-}
-
-fn execute_git_in_path(path: &str, args: &[&str]) -> homeboy_core::Result<std::process::Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::other(format!("Failed to run git: {}", e)))
-}
-
-fn release(
-    component_id: &str,
-    bump_type: BumpType,
-    no_build: bool,
-    no_tag: bool,
-    yes: bool,
-    dry_run: bool,
-) -> homeboy_core::output::CmdResult {
-    let mut warnings: Vec<CliWarning> = Vec::new();
-    let engine = if yes {
-        PromptEngine::non_interactive()
-    } else {
-        PromptEngine::new()
-    };
-
-    if dry_run {
-        warnings.push(CliWarning {
-            code: "mode.dry_run".to_string(),
-            message: "Dry-run: no changes will be made".to_string(),
-            details: serde_json::Value::Object(serde_json::Map::new()),
-            hints: None,
-            retryable: None,
-        });
-    }
-
-    // Load component
-    let component = ConfigManager::load_component(component_id)?;
-    let component_path = &component.local_path;
-
-    // Get current version
-    let (version_out, _) = show_version_output(component_id)?;
-    let current_version = version_out.version.clone();
-    let new_version = increment_version(&current_version, bump_type.as_str()).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "version",
-            format!("Invalid version format: {}", current_version),
-            None,
-            None,
-        )
-    })?;
-
-    // Get latest tag and commits
-    let latest_tag = git::get_latest_tag(component_path)?;
-    let commits = git::get_commits_since_tag(component_path, latest_tag.as_deref())?;
-
-    if commits.is_empty() {
-        return Err(Error::other(format!(
-            "No commits found since {}. Nothing to release.",
-            latest_tag.as_deref().unwrap_or("repository start")
-        )));
-    }
-
-    // Generate changelog entries from commits
-    let changelog_entries = git::commits_to_changelog_entries(&commits);
-    let commit_summaries: Vec<String> = commits.iter().map(|c| format!("{} {}", c.hash, c.subject)).collect();
-
-    // Interactive: show what we're about to do
-    engine.message(&format!("\nCurrent version: {}", current_version));
-    engine.message(&format!("New version: {} ({})", new_version, bump_type.as_str()));
-
-    let proceed = engine.confirm_list(&ConfirmListPrompt {
-        header: format!(
-            "\nCommits since {}:",
-            latest_tag.as_deref().unwrap_or("start")
-        ),
-        items: commits
-            .iter()
-            .map(|c| format!("{} {}", c.hash, c.subject))
-            .collect(),
-        confirm_question: "Proceed with release?".to_string(),
-        default: true,
-    });
-
-    if !proceed {
-        return Err(Error::other("Release cancelled by user".to_string()));
-    }
-
-    // Determine build step
-    let should_build = if no_build {
-        false
-    } else {
-        engine.yes_no(&YesNoPrompt {
-            question: "Build before committing?".to_string(),
-            default: false,
-        })
-    };
-
-    // Determine tag step
-    let should_tag = if no_tag {
-        false
-    } else {
-        engine.yes_no(&YesNoPrompt {
-            question: format!("Create tag v{}?", new_version),
-            default: true,
-        })
-    };
-
-    // Execute the release pipeline
-    let mut built = false;
-    let mut committed = false;
-    let mut tag_created: Option<String> = None;
-    let mut pushed = false;
-
-    // Step 1: Bump version (includes changelog)
-    if !dry_run {
-        let bump_result = bump(component_id, bump_type.clone(), &changelog_entries, false)?;
-        let (_, _, exit_code) = bump_result;
-        if exit_code != 0 {
-            return Err(Error::other("Version bump failed".to_string()));
-        }
-    }
-
-    // Step 2: Build (if requested)
-    if should_build && !dry_run {
-        engine.message("Building...");
-
-        if let Some(ref build_cmd) = component.build_command {
-            let output = execute_local_command_in_dir(build_cmd, Some(component_path));
-            if !output.success {
-                return Err(Error::other(format!(
-                    "Build failed:\n{}",
-                    output.stderr
-                )));
-            }
-            built = true;
-        }
-    }
-
-    // Step 3: Commit
-    if !dry_run {
-        engine.message("Committing...");
-
-        let commit_msg = format!("Bump version to {}", new_version);
-        let add_output = execute_git_in_path(component_path, &["add", "."])?;
-        if !add_output.status.success() {
-            return Err(Error::other(format!(
-                "git add failed: {}",
-                String::from_utf8_lossy(&add_output.stderr)
-            )));
-        }
-
-        let commit_output = execute_git_in_path(component_path, &["commit", "-m", &commit_msg])?;
-        if !commit_output.status.success() {
-            let stderr = String::from_utf8_lossy(&commit_output.stderr);
-            // "nothing to commit" is okay
-            if !stderr.contains("nothing to commit") {
-                return Err(Error::other(format!("git commit failed: {}", stderr)));
-            }
-        }
-        committed = true;
-    }
-
-    // Step 4: Tag (if requested)
-    if should_tag && !dry_run {
-        engine.message(&format!("Creating tag v{}...", new_version));
-
-        let tag_name = format!("v{}", new_version);
-        let tag_output = execute_git_in_path(component_path, &["tag", &tag_name])?;
-        if !tag_output.status.success() {
-            return Err(Error::other(format!(
-                "git tag failed: {}",
-                String::from_utf8_lossy(&tag_output.stderr)
-            )));
-        }
-        tag_created = Some(tag_name);
-    }
-
-    // Step 5: Push
-    if !dry_run {
-        engine.message("Pushing...");
-
-        let push_output = execute_git_in_path(component_path, &["push"])?;
-        if !push_output.status.success() {
-            return Err(Error::other(format!(
-                "git push failed: {}",
-                String::from_utf8_lossy(&push_output.stderr)
-            )));
-        }
-
-        // Push tags if we created one
-        if tag_created.is_some() {
-            let push_tags_output = execute_git_in_path(component_path, &["push", "--tags"])?;
-            if !push_tags_output.status.success() {
-                warnings.push(CliWarning {
-                    code: "git.push_tags_failed".to_string(),
-                    message: "Failed to push tags".to_string(),
-                    details: serde_json::json!({
-                        "stderr": String::from_utf8_lossy(&push_tags_output.stderr).to_string()
-                    }),
-                    hints: Some(vec![homeboy_error::Hint { message: "Run 'git push --tags' manually".to_string() }]),
-                    retryable: Some(true),
-                });
-            }
-        }
-
-        pushed = true;
-    }
-
-    if !dry_run {
-        engine.message(&format!("\nReleased v{}", new_version));
-    }
-
-    let out = VersionReleaseOutput {
-        command: "version.release".to_string(),
-        component_id: component_id.to_string(),
-        previous_version: current_version,
-        new_version,
-        latest_tag,
-        commits_included: commit_summaries,
-        changelog_entries,
-        built,
-        committed,
-        tag_created,
-        pushed,
     };
 
     let json = serde_json::to_value(out)
@@ -861,11 +504,9 @@ mod tests {
         fs::write(&version_file, "version = \"0.1.0\"\n").expect("write version");
 
         let content = fs::read_to_string(&version_file).expect("read before");
-        let versions = extract_versions_from_content(
-            &content,
-            &default_pattern_for_file("Cargo.toml", &[]),
-        )
-        .expect("extract");
+        let versions =
+            extract_versions_from_content(&content, &default_pattern_for_file("Cargo.toml", &[]))
+                .expect("extract");
         let (old_version, match_count) =
             validate_single_version(versions, "Cargo.toml", "0.1.0").expect("validate");
 
