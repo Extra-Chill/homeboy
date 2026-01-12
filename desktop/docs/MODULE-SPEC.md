@@ -1,6 +1,6 @@
 # Module Specification
 
-This document describes the module.json manifest format for Homeboy modules.
+This document describes the `module.json` manifest format for Homeboy modules.
 
 ## Overview
 
@@ -13,17 +13,17 @@ Modules extend Homeboy with custom functionality. Each module is a self-containe
 
 Modules are installed to:
 ```
-~/Library/Application Support/Homeboy/modules/<module-id>/
+~/Library/Application Support/homeboy/modules/<module-id>/
 ```
 
 Each Python module gets its own isolated virtual environment at:
 ```
-~/Library/Application Support/Homeboy/modules/<module-id>/venv/
+~/Library/Application Support/homeboy/modules/<module-id>/venv/
 ```
 
 Playwright browsers are shared across modules at:
 ```
-~/Library/Application Support/Homeboy/playwright-browsers/
+~/Library/Application Support/homeboy/playwright-browsers/
 ```
 
 ## Module Types

@@ -2,6 +2,14 @@
 
 All notable code changes to this project are documented in this file.
 
+## Unreleased
+
+## 0.7.3
+
+- Remove legacy Swift CLI sources from repo
+- Remove local Xcode archive build artifacts
+- Update docs to clarify CLI is standalone Rust project
+
 ## 0.7.2
 
 ### Improvements

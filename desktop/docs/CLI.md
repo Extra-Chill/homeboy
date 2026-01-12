@@ -1,4 +1,4 @@
-# Homeboy Desktop  CLI Integration
+# Homeboy Desktop + CLI Integration
 
 Homeboy Desktop shells out to the standalone `homeboy` CLI binary for all core operations.
 
@@ -26,20 +26,18 @@ homeboy --version
 
 The CLI source lives in `homeboy-cli/`.
 
-**Verify Installation**:
-```bash
-homeboy --version
-# homeboy 0.1.4
-```
-
 ## Configuration
 
 The CLI uses the same configuration as the desktop app stored at:
 ```
-~/Library/Application Support/Homeboy/
-├── config.json           # Active project ID
+~/Library/Application Support/homeboy/
+├── homeboy.json          # App config
 ├── projects/             # Project configurations
-└── servers/              # SSH server configurations
+├── servers/              # SSH server configurations
+├── components/           # Component definitions
+├── modules/              # Installed modules
+├── keys/                 # SSH keys (per server)
+└── backups/              # Backup files
 ```
 
 Projects and servers can be configured via Homeboy.app or via the CLI.
@@ -58,7 +56,7 @@ Or browse the markdown source under `homeboy-cli/docs/commands/`.
 
 ### Desktop ↔ CLI responsibilities
 
-- The desktop app creates/edits configuration JSON under `~/Library/Application Support/Homeboy/`.
+- The desktop app reads/writes configuration JSON under `~/Library/Application Support/homeboy/`.
 - The desktop app executes the CLI via `CLIBridge` and expects JSON output for most operations.
 - The CLI can also manage config directly; the app should react via its directory watchers.
 
@@ -66,16 +64,14 @@ Or browse the markdown source under `homeboy-cli/docs/commands/`.
 
 ```bash
 homeboy docs
-homeboy projects
-homeboy project
-homeboy server
-homeboy deploy
-homeboy ssh
-homeboy db
-homeboy wp
-homeboy pm2
-homeboy logs
-homeboy file
+homeboy project list
+homeboy project show <projectId>
+homeboy server list
+homeboy deploy <projectId>
+homeboy ssh <projectId>
+homeboy db <projectId> tables
+homeboy logs list <projectId>
+homeboy file list <projectId>
 ```
 
 (See `homeboy docs <topic>` for each command’s details.)
@@ -123,18 +119,16 @@ homeboy deploy <project> [component-id...] [flags]
 **Flags**:
 - `--all` - Deploy all configured components
 - `--outdated` - Deploy only components where local version differs from remote
-- `--build` - Build components before deploying
 - `--dry-run` - Show what would be deployed without executing
-- `--json` - Output as JSON
+
+Note: `homeboy deploy` always returns JSON output wrapped in the global envelope; there is no `--json` flag and no `--build` flag. Use `homeboy build <componentId>` separately if you want to build before deploying.
 
 **Deployment Process**:
-- (Optional) Run a component build when `--build` is passed.
-- Upload the configured artifact to the remote server (transport is implementation-defined).
-- Zip artifacts may be unzipped on the remote server.
+- Upload the configured artifact to the remote server.
+- If the component config includes an extract command, the uploaded artifact may be extracted on the remote server.
 
 **Requirements**:
 - Components configured with their local path, remote path, and build artifact path in Homeboy config
-- If you want the CLI to build before deploying, pass `--build`
 - Server configured with SSH key
 
 **Examples**:

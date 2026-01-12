@@ -60,7 +60,7 @@ Homeboy/
 │   ├── Modules/                  # Dynamic module UI harness
 │   └── Settings/                 # Settings tabs
 └── docs/                         # Documentation
-(Legacy Swift CLI sources are removed.)
+(Legacy Swift CLI sources have been removed.)
 
 The desktop app shells out to the system-installed `homeboy` binary via:
 - `Homeboy/Core/CLI/CLIBridge.swift` (command execution)
@@ -73,7 +73,7 @@ CLI discovery checks these paths in order: `/opt/homebrew/bin/homeboy` (Apple Si
 
 The app supports installable modules via JSON manifest. Modules are stored at:
 ```
-~/Library/Application Support/Homeboy/modules/<module-id>/
+~/Library/Application Support/homeboy/modules/<module-id>/
 ```
 
 ### Key Files
@@ -128,7 +128,7 @@ See `docs/ERROR-HANDLING.md` for the complete Copyable system specification.
 ### Deployer
 SSH/SCP deployment of components (plugins, themes, packages).
 - Component registry defined in JSON project config
-- Deploys prebuilt artifacts (build is optional via the CLI `--build` flag)
+- Deploys prebuilt artifacts (build is handled via `homeboy build`, not a deploy flag)
 - Version comparison
 
 ### Database Browser
@@ -162,14 +162,17 @@ Run `homeboy docs` for the canonical CLI documentation.
 
 Configuration is stored as JSON:
 ```
-~/Library/Application Support/Homeboy/
-├── config.json           # App-level config (active project ID)
-├── projects/             # Per-project configuration
+~/Library/Application Support/homeboy/
+├── homeboy.json          # App config
+├── projects/             # Project configuration
 │   └── <project-id>.json
 ├── servers/              # SSH server configuration
 │   └── <server-id>.json
-├── modules/              # Installed modules
+├── components/           # Component definitions
+│   └── <component-id>.json
+├── modules/              # Installed modules (git clones)
 ├── keys/                 # SSH keys (per server)
+├── backups/              # Local backups (deploy/file operations)
 └── playwright-browsers/  # Shared Playwright cache
 ```
 

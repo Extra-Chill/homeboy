@@ -50,8 +50,8 @@ Homeboy includes a CLI (`homeboy`) for terminal access to project management, Wo
 
 **Available Commands**:
 ```bash
-homeboy projects                                    # List configured projects
-homeboy project create "My Site" --type wordpress  # Create a new project (--type required)
+homeboy project list                                # List configured projects
+homeboy project create "My Site" example.com --module wordpress
 homeboy project show extrachill                    # Show project configuration
 homeboy server create "Prod" --host server.example.com --user deploy
 homeboy wp extrachill plugin list                  # Execute WP-CLI on production
@@ -63,7 +63,7 @@ homeboy module list                                # List available modules
 homeboy module run <module-id>                     # Run a CLI module locally
 ```
 
-Projects must be configured via Homeboy.app before using the CLI. See docs/CLI.md for full documentation.
+The CLI can manage config directly, but the desktop app may not yet support newer CLI configuration fields. When in doubt, use `homeboy docs` as the canonical CLI reference.
 
 ## Requirements
 
@@ -102,11 +102,11 @@ Homeboy works with **projects** (site profiles). On first launch, configure your
 - **Components**: Plugins, themes, or packages for deployment
 - **API**: REST API base URL and authentication (used by module API actions)
 
-Project configurations are stored as JSON files at `~/Library/Application Support/Homeboy/projects/`. You can manage multiple projects and switch between them.
+Project configurations are stored as JSON files under `~/Library/Application Support/homeboy/projects/`.
 
 ### Project Types
 
-Homeboy ships with built-in definitions for WordPress and Node.js projects. Custom project types can be added via JSON files in `~/Library/Application Support/Homeboy/project-types/`.
+Project type support is primarily defined by installed modules and the CLI; the desktop app UI may not expose all project/module settings.
 
 ## Installing Modules
 
@@ -118,7 +118,7 @@ Homeboy ships with built-in definitions for WordPress and Node.js projects. Cust
 
 Modules are installed to:
 ```
-~/Library/Application Support/Homeboy/modules/
+~/Library/Application Support/homeboy/modules/
 ```
 
 ## Server Configuration (SSH)
@@ -186,20 +186,21 @@ CLI/
 
 Site configurations are stored as JSON files:
 ```
-~/Library/Application Support/Homeboy/
-├── config.json                   # App-level config
+~/Library/Application Support/homeboy/
+├── homeboy.json                  # CLI app config
 ├── projects/                     # Project configurations
 │   └── <project-id>.json
 ├── servers/                      # SSH server configurations
 │   └── <server-id>.json
-├── modules/                      # Installed modules
+├── components/                   # Component definitions
+│   └── <component-id>.json
+├── modules/                      # Installed modules (git clones)
 │   └── <module-id>/
-│       ├── module.json           # Module manifest
-│       ├── venv/                 # Python virtual environment
-│       └── config.json           # Module settings
+│       └── .install.json         # Install metadata (CLI-managed)
 ├── keys/                         # SSH private/public keys (per server)
 │   ├── <server-id>_id_rsa
 │   └── <server-id>_id_rsa.pub
+├── backups/                      # Local backups
 └── playwright-browsers/          # Shared Playwright browsers
 ```
 
