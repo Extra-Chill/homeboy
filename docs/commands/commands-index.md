@@ -21,7 +21,9 @@
 - [ssh](ssh.md)
 - [version](version.md)
 
-Module-provided CLI commands (loaded from `modules/*/homeboy.json`) also appear as top-level commands (for example: `wp`, `pm2`) when their module is present.
+Module-provided CLI commands (from installed modules that define `cli.tool`) also appear as top-level commands (for example: `wp`, `pm2`).
+
+These commands are generated at runtime from installed module manifests (loaded via `homeboy_core::module::load_all_modules`).
 
 Related:
 

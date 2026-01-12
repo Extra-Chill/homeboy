@@ -2,7 +2,10 @@
 
 Homeboy prints JSON to stdout for most commands.
 
-Exception: `homeboy docs` renders embedded markdown topics as plain text (no JSON envelope) unless `--list` is used. In `--list` mode, `homeboy docs` returns JSON.
+Exceptions:
+
+- `homeboy docs` renders embedded markdown topics as plain text (no JSON envelope) unless `--list` is used.
+- `homeboy ssh` connect mode and `homeboy logs show --follow` use interactive passthrough output (no JSON envelope).
 
 ## Top-level envelope
 

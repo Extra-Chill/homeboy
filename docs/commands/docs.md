@@ -10,9 +10,10 @@ homeboy docs [--list] [<topic>...]
 
 By default, this command prints raw markdown to stdout (no JSON envelope).
 
-Use `--list` to return a JSON list of available topics.
+Use `--list` to return a JSON list of available topics (wrapped in the global JSON envelope).
 
 - Topic arguments are treated as a free-form trailing list.
+- If the topic contains a trailing `--format <value>`, Homeboy strips those two arguments before resolving the topic (compatibility behavior).
 - The resolved key must exist in embedded docs; otherwise the command errors.
 
 Topic resolution is documented in: [Embedded docs topic resolution](../embedded-docs/embedded-docs-topic-resolution.md).
@@ -25,23 +26,24 @@ Topic resolution is documented in: [Embedded docs topic resolution](../embedded-
 
 - `--list`: return available embedded keys and exit (JSON output).
 
+Note: `--list` is only supported in JSON mode. In markdown mode, `homeboy docs --list` returns an error.
+
 ## Output
 
 ### Default (render topic)
 
-When `--list` is **not** used, `homeboy docs` writes the embedded markdown topic **as-is** to stdout (no JSON envelope, not wrapped).
+When `--list` is **not** used, `homeboy docs` writes the embedded markdown topic **as-is** to stdout (no JSON envelope).
 
 ### `--list`
 
-When `--list` is used, output is JSON:
+When `--list` is used, output is JSON.
+
+> Note: all JSON output is wrapped in the global JSON envelope described in the [JSON output contract](../json-output/json-output-contract.md). The object below is `data.payload`.
 
 ```json
 {
-  "success": true,
-  "data": {
-    "available_topics": ["index", "commands/deploy"],
-    "mode": "list"
-  }
+  "mode": "list",
+  "availableTopics": ["index", "commands/deploy"]
 }
 ```
 

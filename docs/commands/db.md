@@ -11,19 +11,19 @@ homeboy db <COMMAND>
 ### `tables`
 
 ```sh
-homeboy db tables <projectId> [<subtarget?> <args...>]
+homeboy db tables <projectId> [<subtarget>] [<args...>]
 ```
 
 ### `describe`
 
 ```sh
-homeboy db describe <projectId> [<subtarget?> <table>]
+homeboy db describe <projectId> [<subtarget>] <table>
 ```
 
 ### `query`
 
 ```sh
-homeboy db query <projectId> [<subtarget?> <sql...>]
+homeboy db query <projectId> [<subtarget>] <sql...>
 ```
 
 Note: `query` is intended for SELECT-only operations. Non-SELECT statements are rejected.
@@ -31,10 +31,13 @@ Note: `query` is intended for SELECT-only operations. Non-SELECT statements are 
 ### `delete-row`
 
 ```sh
-homeboy db delete-row <projectId> <table> <rowId> --confirm
+homeboy db delete-row <projectId> [<subtarget>] <table> <rowId> --confirm
 ```
 
-Note: `--confirm` is required.
+Notes:
+
+- `--confirm` is required.
+- `<rowId>` must be numeric.
 
 ### `drop-table`
 

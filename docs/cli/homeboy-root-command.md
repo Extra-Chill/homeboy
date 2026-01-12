@@ -21,7 +21,8 @@ Homeboy also defines:
 
 - `--dry-run`: global dry-run mode.
   - Commands that support dry-run avoid writing local files and avoid remote side effects where applicable.
-  - Some commands also have their own `--dry-run` flag for command-specific behavior (for example `deploy`, and `doctor cleanup`).
+
+Note: some subcommands also define their own `--dry-run` flag (for example `deploy`, and `doctor cleanup`). This is separate from the global flag.
 
 ## Subcommands
 

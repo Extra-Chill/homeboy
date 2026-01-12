@@ -34,10 +34,10 @@ homeboy module setup <moduleId>
 ### `install`
 
 ```sh
-homeboy module install <git_url> [--id <moduleId>]
+homeboy module install <url> [--id <moduleId>]
 ```
 
-Installs a module by cloning it into `homeboy/modules/<moduleId>/` (under your OS config directory) and writing `.install.json` so it can be updated later.
+Installs a module by cloning it into Homeboy's modules directory (under your OS config directory) and writing `.install.json` so it can be updated later.
 
 ### `update`
 
@@ -53,7 +53,7 @@ Updates a module by running `git pull --ff-only` in the module directory. If the
 homeboy module uninstall <moduleId> [--force]
 ```
 
-Uninstalls a module by deleting its directory. `--force` is required (no interactive prompts).
+Uninstalls a module by deleting its directory. If `--force` is not provided, Homeboy errors (there is no interactive prompt).
 
 ## Settings
 
@@ -74,6 +74,8 @@ When running a module, Homeboy passes an execution context via environment varia
 Modules can define additional environment variables via `runtime.env` in their manifest.
 
 `homeboy doctor scan` validates each scope's `settings` object against the module's manifest.
+
+`homeboy module run` requires the module to be present in app config (`homeboy.json`) under `installedModules`.
 
 ## Runtime Configuration
 
