@@ -1,14 +1,7 @@
 pub type CmdResult<T> = homeboy_core::Result<(T, i32)>;
 
 pub(crate) struct GlobalArgs {
-    pub(crate) json_spec: Option<String>,
     pub(crate) dry_run: bool,
-}
-
-impl GlobalArgs {
-    pub(crate) fn json_spec(&self) -> Option<&str> {
-        self.json_spec.as_deref()
-    }
 }
 
 pub mod build;

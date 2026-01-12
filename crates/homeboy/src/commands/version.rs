@@ -98,14 +98,6 @@ pub fn run(
     args: VersionArgs,
     global: &crate::commands::GlobalArgs,
 ) -> homeboy_core::output::CmdResult {
-    let json_spec = global.json_spec();
-
-    if json_spec.is_some() {
-        return Err(homeboy_core::Error::other(
-            "json input spec is not supported for version commands".to_string(),
-        ));
-    }
-
     match args.command {
         VersionCommand::Show { component_id } => {
             let (out, exit_code) = show_version_output(&component_id)?;

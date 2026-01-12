@@ -29,12 +29,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(version = VERSION)]
 #[command(about = "CLI tool for development and deployment automation")]
 struct Cli {
-    /// JSON input spec override.
-    ///
-    /// Use "-" to read from stdin, "@file.json" to read from a file, or an inline JSON string.
-    #[arg(long, global = true)]
-    json: Option<String>,
-
     /// Dry-run: show what would happen without writing.
     #[arg(long, global = true)]
     dry_run: bool,
@@ -129,7 +123,6 @@ fn main() -> std::process::ExitCode {
     }
 
     let global = GlobalArgs {
-        json_spec: cli.json,
         dry_run: cli.dry_run,
     };
 

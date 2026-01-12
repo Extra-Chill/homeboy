@@ -9,6 +9,12 @@ use homeboy_core::config::ConfigManager;
 
 #[derive(Args)]
 pub struct ChangelogArgs {
+    /// JSON input spec for batch operations.
+    ///
+    /// Use "-" to read from stdin, "@file.json" to read from a file, or an inline JSON string.
+    #[arg(long)]
+    pub json: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<ChangelogCommand>,
 }
@@ -79,9 +85,9 @@ pub fn is_show_markdown(args: &ChangelogArgs) -> bool {
 
 pub fn run(
     args: ChangelogArgs,
-    global: &crate::commands::GlobalArgs,
+    _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ChangelogOutput> {
-    let json_spec = global.json_spec();
+    let json_spec = args.json.as_deref();
     match args.command {
         None => {
             let (out, code) = show_json()?;
