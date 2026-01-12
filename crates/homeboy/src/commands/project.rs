@@ -1066,7 +1066,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            vec![],
             vec!["beta".to_string(), "beta".to_string(), "alpha".to_string()],
         )
         .unwrap();

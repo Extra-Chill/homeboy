@@ -35,10 +35,6 @@ impl PluginManifest {
     pub fn has_cli(&self) -> bool {
         self.cli.is_some()
     }
-
-    pub fn is_wordpress(&self) -> bool {
-        self.config_schema.as_deref() == Some("wordpress")
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

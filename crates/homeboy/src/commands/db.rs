@@ -1,12 +1,13 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
 use homeboy_core::config::{ConfigManager, SlugIdentifiable};
-use homeboy_core::plugin::load_plugin;
 use homeboy_core::context::{resolve_project_ssh, resolve_project_ssh_with_base_path};
-use homeboy_core::shell;
+use homeboy_core::plugin::{load_plugin, DatabaseCliConfig};
 use homeboy_core::ssh::SshClient;
+use homeboy_core::template::{render_map, TemplateVars};
 use homeboy_core::token;
 
 #[derive(Args)]
@@ -132,6 +133,7 @@ struct DbContext {
     base_path: String,
     domain: String,
     cli_path: String,
+    db_cli: DatabaseCliConfig,
 }
 
 fn build_context(
@@ -162,15 +164,32 @@ fn build_context(
 
     let app_config = ConfigManager::load_app_config()?;
 
-    // Try to get CLI path from wordpress plugin if enabled
-    let cli_path = if project.config.has_plugin("wordpress") {
-        load_plugin("wordpress")
-            .and_then(|p| p.cli)
-            .and_then(|cli| cli.default_cli_path)
-            .unwrap_or_else(|| app_config.default_cli_path.clone())
-    } else {
-        app_config.default_cli_path.clone()
-    };
+    // Find first plugin with database CLI config
+    let db_cli = project
+        .config
+        .plugins
+        .iter()
+        .find_map(|plugin_id| {
+            load_plugin(plugin_id)
+                .and_then(|p| p.database)
+                .and_then(|db| db.cli)
+        })
+        .ok_or_else(|| {
+            homeboy_core::Error::config(
+                "No plugin with database CLI configuration found".to_string(),
+            )
+        })?;
+
+    let cli_path = project
+        .config
+        .plugins
+        .iter()
+        .find_map(|plugin_id| {
+            load_plugin(plugin_id)
+                .and_then(|p| p.cli)
+                .and_then(|cli| cli.default_cli_path)
+        })
+        .unwrap_or_else(|| app_config.default_cli_path.clone());
 
     Ok((
         DbContext {
@@ -179,32 +198,29 @@ fn build_context(
             base_path,
             domain,
             cli_path,
+            db_cli,
         },
         remaining_args,
     ))
 }
 
-fn parse_wp_db_tables_csv(csv: &str) -> Vec<String> {
-    csv.split(',')
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-        .collect()
+fn parse_json_tables(json: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(json).unwrap_or_default()
 }
 
 fn tables(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i32)> {
     let (ctx, _) = build_context(project_id, args)?;
 
-    let command = shell::cd_and(
-        &ctx.base_path,
-        &format!("{} db tables --format=csv", ctx.cli_path),
-    )?;
+    let mut vars = HashMap::new();
+    vars.insert(TemplateVars::SITE_PATH.to_string(), ctx.base_path.clone());
+    vars.insert(TemplateVars::CLI_PATH.to_string(), ctx.cli_path.clone());
+    let command = render_map(&ctx.db_cli.tables_command, &vars);
 
     let output = ctx.client.execute(&command);
     let exit_code = output.exit_code;
     let success = output.success;
     let tables = if success {
-        Some(parse_wp_db_tables_csv(&output.stdout))
+        Some(parse_json_tables(&output.stdout))
     } else {
         None
     };
@@ -236,10 +252,11 @@ fn describe(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput
         .first()
         .ok_or_else(|| homeboy_core::Error::config("Table name required".to_string()))?;
 
-    let command = shell::cd_and(
-        &ctx.base_path,
-        &format!("{} db columns {} --format=json", ctx.cli_path, table_name),
-    )?;
+    let mut vars = HashMap::new();
+    vars.insert(TemplateVars::SITE_PATH.to_string(), ctx.base_path.clone());
+    vars.insert(TemplateVars::CLI_PATH.to_string(), ctx.cli_path.clone());
+    vars.insert(TemplateVars::TABLE.to_string(), table_name.clone());
+    let command = render_map(&ctx.db_cli.describe_command, &vars);
 
     let output = ctx.client.execute(&command);
     let exit_code = output.exit_code;
@@ -286,19 +303,20 @@ fn query(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i
         .any(|keyword| trimmed_sql.starts_with(keyword))
     {
         return Err(homeboy_core::Error::config(
-            "Write operations not allowed via 'db query'. Use 'homeboy wp <project> db query' for writes.".to_string(),
+            "Write operations not allowed via 'db query'. Use the plugin CLI directly for writes."
+                .to_string(),
         ));
     }
 
-    let escaped_sql = sql.replace('"', "\\\"");
+    let escaped_sql = sql.replace('\'', "''");
 
-    let command = shell::cd_and(
-        &ctx.base_path,
-        &format!(
-            "{} db query \"{}\" --format=json --url='{}'",
-            ctx.cli_path, escaped_sql, ctx.domain
-        ),
-    )?;
+    let mut vars = HashMap::new();
+    vars.insert(TemplateVars::SITE_PATH.to_string(), ctx.base_path.clone());
+    vars.insert(TemplateVars::CLI_PATH.to_string(), ctx.cli_path.clone());
+    vars.insert(TemplateVars::QUERY.to_string(), escaped_sql);
+    vars.insert(TemplateVars::FORMAT.to_string(), "json".to_string());
+    vars.insert(TemplateVars::DOMAIN.to_string(), ctx.domain.clone());
+    let command = render_map(&ctx.db_cli.query_command, &vars);
 
     let output = ctx.client.execute(&command);
     let exit_code = output.exit_code;
@@ -351,13 +369,13 @@ fn delete_row(
 
     let delete_sql = format!("DELETE FROM {} WHERE ID = {} LIMIT 1", table_name, row_id);
 
-    let command = shell::cd_and(
-        &ctx.base_path,
-        &format!(
-            "{} db query \"{}\" --url='{}'",
-            ctx.cli_path, delete_sql, ctx.domain
-        ),
-    )?;
+    let mut vars = HashMap::new();
+    vars.insert(TemplateVars::SITE_PATH.to_string(), ctx.base_path.clone());
+    vars.insert(TemplateVars::CLI_PATH.to_string(), ctx.cli_path.clone());
+    vars.insert(TemplateVars::QUERY.to_string(), delete_sql.clone());
+    vars.insert(TemplateVars::FORMAT.to_string(), "json".to_string());
+    vars.insert(TemplateVars::DOMAIN.to_string(), ctx.domain.clone());
+    let command = render_map(&ctx.db_cli.query_command, &vars);
 
     let output = ctx.client.execute(&command);
     let exit_code = output.exit_code;
@@ -401,13 +419,13 @@ fn drop_table(
 
     let drop_sql = format!("DROP TABLE {}", table_name);
 
-    let command = shell::cd_and(
-        &ctx.base_path,
-        &format!(
-            "{} db query \"{}\" --url='{}'",
-            ctx.cli_path, drop_sql, ctx.domain
-        ),
-    )?;
+    let mut vars = HashMap::new();
+    vars.insert(TemplateVars::SITE_PATH.to_string(), ctx.base_path.clone());
+    vars.insert(TemplateVars::CLI_PATH.to_string(), ctx.cli_path.clone());
+    vars.insert(TemplateVars::QUERY.to_string(), drop_sql.clone());
+    vars.insert(TemplateVars::FORMAT.to_string(), "json".to_string());
+    vars.insert(TemplateVars::DOMAIN.to_string(), ctx.domain.clone());
+    let command = render_map(&ctx.db_cli.query_command, &vars);
 
     let output = ctx.client.execute(&command);
     let exit_code = output.exit_code;
@@ -513,9 +531,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_wp_db_tables_csv_trims_and_filters() {
-        let csv = "wp_posts, wp_options,,\nwp_users\n";
-        let tables = parse_wp_db_tables_csv(csv);
+    fn parse_json_tables_handles_array() {
+        let json = r#"["wp_posts", "wp_options", "wp_users"]"#;
+        let tables = parse_json_tables(json);
         assert_eq!(tables, vec!["wp_posts", "wp_options", "wp_users"]);
+    }
+
+    #[test]
+    fn parse_json_tables_returns_empty_on_invalid() {
+        let invalid = "not json";
+        let tables = parse_json_tables(invalid);
+        assert!(tables.is_empty());
     }
 }

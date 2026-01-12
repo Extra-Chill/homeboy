@@ -177,14 +177,22 @@ fn inject_plugin_args(
     plugin: &PluginManifest,
     args: Vec<String>,
 ) -> Vec<String> {
-    if plugin.id == "wordpress" {
-        if let Some(ref wp_user) = project.wp_user {
-            let mut args_with_user = vec![format!("--user={}", wp_user)];
-            args_with_user.extend(args);
-            return args_with_user;
+    let cli_config = match &plugin.cli {
+        Some(cli) => cli,
+        None => return args,
+    };
+
+    let mut injected_args = Vec::new();
+
+    for injection in &cli_config.arg_injections {
+        if let Some(value) = project.get_plugin_setting_str(&plugin.id, &injection.setting_key) {
+            let arg = injection.arg_template.replace("{{value}}", value);
+            injected_args.push(arg);
         }
     }
-    args
+
+    injected_args.extend(args);
+    injected_args
 }
 
 fn resolve_subtarget(
