@@ -26,7 +26,7 @@ homeboy db describe <projectId> [<subtarget?> <table>]
 homeboy db query <projectId> [<subtarget?> <sql...>]
 ```
 
-- Rejects SQL that begins with write-operation keywords (e.g. `INSERT`, `UPDATE`, `DELETE`, `DROP`).
+Note: `query` is intended for SELECT-only operations. Non-SELECT statements are rejected.
 
 ### `delete-row`
 
@@ -34,11 +34,15 @@ homeboy db query <projectId> [<subtarget?> <sql...>]
 homeboy db delete-row <projectId> <table> <rowId> --confirm
 ```
 
+Note: `--confirm` is required.
+
 ### `drop-table`
 
 ```sh
 homeboy db drop-table <projectId> <table> --confirm
 ```
+
+Note: `--confirm` is required.
 
 ### `tunnel`
 

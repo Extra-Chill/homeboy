@@ -12,7 +12,8 @@ homeboy server <COMMAND>
 
 ```sh
 homeboy server create <name> --host <host> --user <user> [--port <port>]
-# port default: 22
+
+- `--port` defaults to `22`.
 ```
 
 `serverId` is derived from `slugify_id(<name>)`.
@@ -34,6 +35,8 @@ homeboy server set <serverId> [--name <name>] [--host <host>] [--user <user>] [-
 ```sh
 homeboy server delete <serverId> --force
 ```
+
+Note: `--force` is required (no interactive prompt).
 
 ### `list`
 

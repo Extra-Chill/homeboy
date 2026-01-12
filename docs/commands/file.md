@@ -11,7 +11,7 @@ homeboy file <COMMAND>
 - `list <projectId> <path>`
 - `read <projectId> <path>`
 - `write <projectId> <path>` (reads content from stdin)
-- `delete <projectId> <path> [--recursive]` (or `-r`)
+- `delete <projectId> <path> [-r|--recursive]` (delete directories recursively)
 - `rename <projectId> <oldPath> <newPath>`
 
 ## JSON output

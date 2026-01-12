@@ -27,7 +27,7 @@ homeboy ssh list
 - `id`: a project ID or server ID (the CLI resolves which one you mean)
 - `--project <projectId>`: force project resolution
 - `--server <serverId>`: force server resolution
-- `command` (optional): single token; executes that command, otherwise interactive session.
+- `command...` (optional): one or more command tokens; executes the command when provided, otherwise starts an interactive session.
 
 ## JSON output
 

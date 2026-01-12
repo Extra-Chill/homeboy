@@ -20,6 +20,8 @@ homeboy module list [-p|--project <projectId>]
 homeboy module run <moduleId> [-p|--project <projectId>] [-c|--component <componentId>] [-i|--input <key=value>]... [<args...>]
 ```
 
+- `--project` defaults to the active project.
+- `--component` is required when component context is ambiguous.
 - `--input` repeats; each value must be in `KEY=value` form.
 - Trailing `<args...>` are passed to CLI-type modules.
 

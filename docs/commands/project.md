@@ -71,6 +71,8 @@ JSON output:
 homeboy project set <projectId> [--name <name>] [--domain <domain>] [--project-type <type>] [--server-id <serverId>] [--base-path <path>] [--table-prefix <prefix>]
 ```
 
+Note: `project set` does not currently update `componentIds`. Use `homeboy project components set` instead.
+
 Arguments:
 
 - `<projectId>`: project ID
@@ -203,6 +205,59 @@ homeboy project components <COMMAND>
 ```
 
 Manage the list of components associated with a project.
+
+#### `components list`
+
+```sh
+homeboy project components list <projectId>
+```
+
+Lists component IDs and the resolved component configs.
+
+JSON output:
+
+```json
+{
+  "command": "project.components.list",
+  "projectId": "<projectId>",
+  "components": {
+    "action": "list",
+    "projectId": "<projectId>",
+    "componentIds": ["<componentId>", "<componentId>"],
+    "components": [ { } ]
+  }
+}
+```
+
+#### `components set`
+
+```sh
+homeboy project components set <projectId> <componentId> [<componentId>...]
+```
+
+Replaces the full `componentIds` list on the project (deduped, order-preserving). Component IDs must exist in `homeboy component list`.
+
+Example:
+
+```sh
+homeboy project components set chubes chubes-theme chubes-blocks chubes-contact chubes-docs chubes-games
+```
+
+JSON output:
+
+```json
+{
+  "command": "project.components.set",
+  "projectId": "<projectId>",
+  "components": {
+    "action": "set",
+    "projectId": "<projectId>",
+    "componentIds": ["<componentId>", "<componentId>"],
+    "components": [ { } ]
+  },
+  "updated": ["componentIds"]
+}
+```
 
 ### `pin`
 
