@@ -2,6 +2,8 @@
 
 Native macOS SwiftUI application for development and deployment automation. Supports WordPress, Node.js, and custom project types via extensible JSON definitions. Configure multiple sites and extend functionality with installable modules.
 
+**Note:** The desktop app may lag behind the Homeboy CLI as the CLI is the main project.
+
 ## Features
 
 ### Core Tools
