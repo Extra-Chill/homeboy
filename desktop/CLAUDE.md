@@ -1,4 +1,6 @@
-# Agent Instructions (homeboy)
+# Agent Instructions (homeboy-desktop)
+
+> **Note**: For project-wide architecture and future refactor plans, see the root [`../CLAUDE.md`](../CLAUDE.md).
 
 ## Project Overview
 
@@ -77,13 +79,13 @@ CLI discovery checks these paths in order:
 
 ## Module Plugin System
 
-The app supports installable modules via JSON manifest. Modules are stored at:
+The app supports installable modules via the `homeboy.json` manifest. Modules are stored at:
 ```
 ~/Library/Application Support/homeboy/modules/<module-id>/
 ```
 
 ### Key Files
-- `Core/Modules/ModuleManifest.swift` - Codable types for module.json
+- `Core/Modules/ModuleManifest.swift` - Codable types for `homeboy.json`
 - `Core/Modules/ModuleManager.swift` - Module discovery and loading
 - `Core/Modules/ModuleRunner.swift` - Script execution
 - `Core/Modules/ModuleInstaller.swift` - Venv and dependency installation
@@ -174,7 +176,7 @@ macOS locations:
 
 ```
 ~/Library/Application Support/homeboy/
-├── homeboy.json          # App config
+├── homeboy.json          # Global app/CLI config
 ├── projects/             # Project configuration
 │   └── <project-id>.json
 ├── servers/              # SSH server configuration
@@ -184,7 +186,7 @@ macOS locations:
 ├── modules/              # Installed modules
 ├── keys/                 # SSH keys (per server)
 ├── backups/              # Local backups (deploy/file operations)
-└── playwright-browsers/  # Shared Playwright cache
+└── docs/                 # Reserved (not currently written by the CLI)
 ```
 
 ## API Integration

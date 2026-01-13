@@ -28,13 +28,14 @@ macOS config location:
 
 ```
 ~/Library/Application Support/homeboy/
-├── homeboy.json          # App config
+├── homeboy.json          # Global app/CLI config
 ├── projects/             # Project configurations
 ├── servers/              # SSH server configurations
 ├── components/           # Component definitions
 ├── modules/              # Installed modules
 ├── keys/                 # SSH keys (per server)
-└── backups/              # Backup files
+├── backups/              # Backup files
+└── docs/                 # Reserved (not currently written by the CLI for docs topics)
 ```
 
 Projects and servers are editable via Homeboy.app or via the CLI.

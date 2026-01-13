@@ -123,7 +123,7 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 ### New Features
 - **Generic Remote CLI System**: Replaced monolithic `WPCommand.swift` with modular `RemoteCommand.swift` supporting multiple tools (WP-CLI, PM2).
 - **Template Rendering**: Added `TemplateRenderer.swift` for flexible command template substitution with `{{variable}}` placeholders.
-- **PM2 Command Support**: Added `homeboy pm2 <project> [sub-target] <args...>` for Node.js project process management.
+- **PM2 Command Support**: Added support for running PM2 on Node.js projects via module-provided CLI tooling.
 - **CLI Configuration**: Added `CLIConfig` to project type definitions, enabling per-project-type remote CLI tools.
 - **Subtarget Support**: Added `subTargets` computed property to `ProjectConfiguration` for generic subtarget targeting (e.g., multisite sites, environments).
 
@@ -171,7 +171,7 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 ### Removed
 - **ConfigEditor module**: Removed `Homeboy/Modules/ConfigEditor/` (BackupService, ConfigEditorViewModel, ConfigFile, ConfigEditorView).
 - **DebugLogs module**: Removed `Homeboy/Modules/DebugLogs/` (DebugLogsViewModel, DebugLogsView).
-- **WP-CLI Terminal module**: Removed `Homeboy/Modules/WPCLITerminal/` (local WP-CLI execution on Local by Flywheel sites). Remote WP-CLI is available via CLI tool (`homeboy wp`).
+- **WP-CLI Terminal module**: Removed `Homeboy/Modules/WPCLITerminal/` (local WP-CLI execution on Local by Flywheel sites). Remote WP-CLI is available via module-provided CLI tooling.
 - **MigrationService**: Removed legacy ExtraChillDesktop migration service.
 - **WordPressSiteMap**: Removed in favor of new Database Browser grouping system.
 

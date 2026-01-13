@@ -25,10 +25,11 @@ macOS locations:
   ```
   ~/Library/Application Support/homeboy/modules/<module-id>/venv/
   ```
-- Shared Playwright browser cache:
+- `docs/` directory:
   ```
-  ~/Library/Application Support/homeboy/playwright-browsers/
+  ~/Library/Application Support/homeboy/docs/
   ```
+  (Reserved. The CLI reads module docs from `modules/<moduleId>/docs/` rather than writing global docs.)
 
 ## Module responsibilities
 
@@ -71,26 +72,9 @@ For the authoritative runtime behavior, see [`homeboy-cli/docs/commands/module.m
 
 ### Runtime Object
 
-#### Common Fields
+Executable modules use the CLI runtime contract described in [`homeboy-cli/docs/commands/module.md`](../../homeboy-cli/docs/commands/module.md).
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `type` | string | Yes | `"python"`, `"shell"`, or `"cli"` |
-
-#### Python/Shell Runtime
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `entrypoint` | string | Yes | Script filename (e.g., `"scraper.py"`) |
-| `dependencies` | array | No | Python package names (Python only) |
-| `playwrightBrowsers` | array | No | Browsers to install (e.g., `["chromium"]`) |
-
-#### CLI Runtime
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `args` | string | No | Args template passed to CLI (e.g., `"datamachine-events test-scraper"`) |
-| `defaultSite` | string | No | Default subtarget ID for multisite projects (lowercase) |
+The manifest's `runtime` object configures shell commands that the CLI runs (for example `runCommand`, `setupCommand`, and optional `readyCheck`). The CLI injects execution context and merged settings via environment variables.
 
 ### Requirements Object
 
@@ -169,50 +153,24 @@ Modules can declare dependencies on project configuration (components, feature f
 | `placeholder` | string | No | Help text |
 | `default` | any | No | Default value |
 
-## Script Output Contract
+## Module output
 
-### Python/Shell Modules
+For `homeboy module run`, the CLI streams the module process output to the console and determines success/failure based on exit code.
 
-Scripts must output to:
-- **stderr**: Real-time progress logs (streamed to console)
-- **stdout**: Final JSON result
-
-#### Output JSON Format
-
-```json
-{
-  "success": true,
-  "results": [
-    { "column1": "value1", "column2": "value2" }
-  ],
-  "errors": ["optional warning messages"]
-}
-```
-
-The `results` array must match the schema defined in `output.schema.items`.
-
-### CLI Modules
-
-CLI modules stream all output (stdout and stderr) to the console. The success/failure is determined by the command's exit code.
+If your module is intended for use in Homeboy Desktop's dynamic UI, structure your module `homeboy.json` using the **inputs/output/actions/settings** fields documented in this file.
 
 ## Examples
 
-### Python Module (Scraper)
+### Desktop-focused module (dynamic UI)
 
 ```json
 {
-  "id": "example-scraper",
-  "name": "Example Scraper",
+  "id": "example-tool",
+  "name": "Example Tool",
   "version": "1.0.0",
-  "icon": "magnifyingglass",
-  "description": "Example module demonstrating the manifest format",
+  "icon": "hammer",
+  "description": "Example module demonstrating inputs/output/actions",
   "author": "Your Name",
-
-  "runtime": {
-    "type": "python",
-    "entrypoint": "scraper.py",
-    "dependencies": ["requests", "beautifulsoup4"]
-  },
 
   "inputs": [
     {
@@ -221,15 +179,6 @@ CLI modules stream all output (stdout and stderr) to the console. The success/fa
       "label": "URL",
       "placeholder": "https://example.com",
       "arg": "--url"
-    },
-    {
-      "id": "depth",
-      "type": "stepper",
-      "label": "Depth",
-      "default": 2,
-      "min": 1,
-      "max": 10,
-      "arg": "--depth"
     }
   ],
 
@@ -252,12 +201,6 @@ CLI modules stream all output (stdout and stderr) to the console. The success/fa
       "type": "builtin",
       "builtin": "copy-column",
       "column": "link"
-    },
-    {
-      "id": "export",
-      "label": "Export CSV",
-      "type": "builtin",
-      "builtin": "export-csv"
     }
   ],
 
@@ -265,97 +208,12 @@ CLI modules stream all output (stdout and stderr) to the console. The success/fa
 }
 ```
 
-### CLI Module (Scraper Tester)
 
-```json
-{
-  "id": "datamachine-scraper-tester",
-  "name": "Scraper Tester",
-  "version": "1.0.0",
-  "icon": "ant",
-  "description": "Test Data Machine event scrapers against venue URLs",
-  "author": "Extra Chill",
-  "homepage": "https://github.com/Extra-Chill/data-machine",
+## Project configuration
 
-  "runtime": {
-    "type": "cli",
-    "args": "datamachine-events test-scraper",
-    "defaultSite": "events"
-  },
+Project configuration requirements (local environment settings, subtargets, and CLI template variables) are defined by the CLI and the active project type.
 
-  "requires": {
-    "components": ["datamachine-events"],
-    "projectType": "wordpress"
-  },
+Use the CLI as the source of truth:
 
-  "inputs": [
-    {
-      "id": "target_url",
-      "type": "text",
-      "label": "Target URL",
-      "placeholder": "https://venue.com/events",
-      "arg": "--target_url"
-    }
-  ],
-
-  "output": {
-    "schema": {
-      "type": "array",
-      "items": null
-    },
-    "display": "log-only",
-    "selectable": false
-  },
-
-  "actions": [],
-  "settings": []
-}
-```
-
-## Project Configuration Requirements
-
-### Local CLI Settings
-
-For CLI modules to work, the active project configuration must include `localEnvironment` settings:
-
-```json
-{
-  "localEnvironment": {
-    "sitePath": "/path/to/project/root",
-    "domain": "your-site.local",
-    "cliPath": "/optional/path/to/cli"
-  }
-}
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `sitePath` | string | Yes | Path to local project root (e.g., WordPress public directory) |
-| `domain` | string | No | Local development domain (e.g., `testing-grounds.local`) |
-| `cliPath` | string | No | Explicit path to CLI binary (uses project type default if omitted) |
-
-### Subtarget Settings
-
-For projects with multiple targets (e.g., WordPress multisite), configure `subTargets`:
-
-```json
-{
-  "subTargets": [
-    { "id": "main", "name": "Main Site", "domain": "example.com", "number": 1, "isDefault": true },
-    { "id": "blog", "name": "Blog", "domain": "blog.example.com", "number": 2, "isDefault": false }
-  ]
-}
-```
-
-When a CLI module runs on a project with subtargets, the module UI displays a site selector for targeting a specific subtarget.
-
-### CLI Module Execution
-
-CLI modules can be executed in two ways:
-
-1. **Homeboy.app GUI**: Select a module from the sidebar, configure inputs, and click Run
-2. **Terminal**: Use `homeboy module run <module-id> [--project <project>] [args...]`
-
-The CLI execution uses the project type's command template with variable substitution for `{{sitePath}}`, `{{domain}}`, `{{cliPath}}`, and `{{args}}`.
-
-Supported template variables (CLI + modules) include `{{projectId}}`.
+- `homeboy docs project`
+- `homeboy docs module`

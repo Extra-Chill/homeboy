@@ -52,7 +52,7 @@ This README avoids duplicating CLI reference docs.
 - Desktop/CLI integration notes: [docs/CLI.md](docs/CLI.md)
 - Embedded CLI markdown sources: [`../homeboy-cli/docs/`](../homeboy-cli/docs/index.md)
 
-Compatibility note: the CLI is the source of truth for command behavior and output. The desktop app may lag behind and not support newer options until it is updated.
+Compatibility note: the CLI is the source of truth for command behavior and output. The desktop app may lag behind and not support newer commands/options until it is updated.
 
 ## Requirements
 
@@ -62,19 +62,20 @@ Compatibility note: the CLI is the source of truth for command behavior and outp
 
 ## Setup
 
+This README keeps desktop-specific setup and defers general setup to the root README.
+
+- Canonical monorepo setup: [`../README.md`](../README.md)
+
 ### 1. Clone and Open
 
 ```bash
 git clone https://github.com/Extra-Chill/homeboy.git
 cd homeboy
-
-xcodegen generate --spec homeboy-desktop/project.yml
-open homeboy-desktop/Homeboy.xcodeproj
 ```
 
-### 2. Generate Project + Run
+### 2. Generate Xcode Project + Run
 
-This repo uses `project.yml` + XcodeGen.
+The desktop app uses `project.yml` + XcodeGen.
 
 ```bash
 xcodegen generate --spec homeboy-desktop/project.yml
@@ -93,7 +94,7 @@ Homeboy works with **projects** (site profiles). On first launch, configure your
 - **Components**: Plugins, themes, or packages for deployment
 - **API**: REST API base URL and authentication (used by module API actions)
 
-Project configurations are stored as JSON files under `~/Library/Application Support/homeboy/projects/`.
+Project configurations are stored under `~/Library/Application Support/homeboy/projects/` (see `docs/CLI.md` for the full shared config tree).
 
 ### Project Types
 
@@ -130,70 +131,13 @@ Remote features (deployments, remote file browsing, remote database access) requ
 
 For WordPress projects, set the **wp-content path** in project settings (you can use **Browse** to discover installations on the server).
 
-## Project Structure
+## Documentation map
 
-```
-Homeboy/
-├── App/                          # App entry point
-├── Core/
-│   ├── API/                      # REST API client
-│   ├── Auth/                     # Keychain and authentication
-│   ├── CLI/                      # CLI bridge + version checking
-│   ├── Config/                   # JSON config, ProjectTypeManager
-│   ├── Copyable/                 # Error/warning copy system
-│   ├── Database/                 # Database tooling (CLI-mediated) and schema helpers
-│   ├── Grouping/                 # GroupingManager, ItemGrouping
-│   ├── Modules/                  # Module loading and execution
-│   ├── Process/                  # Python and shell runners
-│   └── SSH/                      # SSH/SCP operations, DeploymentService
-├── Modules/
-│   ├── DatabaseBrowser/          # Database browser
-│   ├── Deployer/                 # Deployment module
-│   ├── RemoteFileEditor/         # Remote file editor
-│   └── RemoteLogViewer/          # Remote log viewer
-├── ViewModels/                   # Module view models
-├── Views/                        # SwiftUI views
-│   ├── Components/               # Reusable components (Table/, Grouping/)
-│   ├── Modules/                  # Dynamic module UI
-│   └── Settings/                 # Settings tabs
-└── docs/                         # Documentation
-CLI/
-├── main.swift                    # Entry point and Projects command
-├── Commands/                     # CLI command implementations
-│   ├── DBCommand.swift           # Database operations
-│   ├── DeployCommand.swift       # Component deployment
-│   ├── ModuleCommand.swift       # Module listing and execution
-│   ├── ProjectCommand.swift      # Project CRUD and management
-│   ├── ProjectsCommand.swift     # Project listing
-│   ├── RemoteCommand.swift       # WP-CLI and PM2 passthrough
-│   ├── ServerCommand.swift       # Server configuration
-│   └── SSHCommand.swift          # SSH command execution
-└── Utilities/
-    ├── OutputFormatter.swift     # Table and JSON formatting
-    └── TemplateRenderer.swift    # Command template rendering
-```
+This README stays desktop-focused and intentionally avoids duplicating CLI reference docs.
 
-## Configuration Storage
-
-Site configurations are stored as JSON files:
-```
-~/Library/Application Support/homeboy/
-├── homeboy.json                  # CLI app config
-├── projects/                     # Project configurations
-│   └── <project-id>.json
-├── servers/                      # SSH server configurations
-│   └── <server-id>.json
-├── components/                   # Component definitions
-│   └── <component-id>.json
-├── modules/                      # Installed modules (git clones)
-│   └── <module-id>/
-│       └── .install.json         # Install metadata (CLI-managed)
-├── keys/                         # SSH private/public keys (per server)
-│   ├── <server-id>_id_rsa
-│   └── <server-id>_id_rsa.pub
-├── backups/                      # Local backups
-└── playwright-browsers/          # Shared Playwright browsers
-```
+- Desktop 1 CLI integration + config tree: [`docs/CLI.md`](docs/CLI.md)
+- Embedded CLI markdown sources (canonical command docs): [`../homeboy-cli/docs/index.md`](../homeboy-cli/docs/index.md)
+- Module manifest spec (`homeboy.json`): [`docs/MODULE-SPEC.md`](docs/MODULE-SPEC.md)
 
 ## API Authentication
 
@@ -216,16 +160,16 @@ Modules follow a JSON manifest contract. See docs/MODULE-SPEC.md for:
 Example module structure:
 ```
 my-module/
-├── module.json       # Manifest (required)
-├── script.py         # Python entry point
-└── README.md         # Documentation
+├── homeboy.json       # Manifest (required)
+├── script.py          # Optional script entrypoint
+└── README.md          # Documentation
 ```
 
 ## Development
 
-Regenerate the Xcode project after adding/removing files:
+Regenerate the desktop app Xcode project after adding/removing files:
 ```bash
-xcodegen generate
+xcodegen generate --spec homeboy-desktop/project.yml
 ```
 
 ## License
