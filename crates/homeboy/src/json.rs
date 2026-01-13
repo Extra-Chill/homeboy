@@ -264,3 +264,66 @@ pub fn parse_bulk_ids(json_spec: &str) -> Result<BulkIdsInput> {
     serde_json::from_str(&raw)
         .map_err(|e| Error::validation_invalid_json(e, Some("parse bulk IDs input".to_string())))
 }
+
+// === Config Merge Operations ===
+
+/// Result of a config merge operation
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeResult {
+    pub updated_fields: Vec<String>,
+}
+
+/// Merge a JSON patch into any serializable config type.
+pub(crate) fn merge_config<T: Serialize + DeserializeOwned>(
+    existing: &mut T,
+    patch: Value,
+) -> Result<MergeResult> {
+    let patch_obj = match &patch {
+        Value::Object(obj) => obj,
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "merge",
+                "Merge patch must be a JSON object",
+                None,
+                None,
+            ))
+        }
+    };
+
+    let updated_fields: Vec<String> = patch_obj.keys().cloned().collect();
+
+    if updated_fields.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "merge",
+            "Merge patch cannot be empty",
+            None,
+            None,
+        ));
+    }
+
+    let mut base = serde_json::to_value(&*existing)
+        .map_err(|e| Error::internal_json(e.to_string(), Some("serialize config".to_string())))?;
+
+    deep_merge(&mut base, patch);
+
+    *existing = serde_json::from_value(base)
+        .map_err(|e| Error::validation_invalid_json(e, Some("merge config".to_string())))?;
+
+    Ok(MergeResult { updated_fields })
+}
+
+fn deep_merge(base: &mut Value, patch: Value) {
+    match (base, patch) {
+        (Value::Object(base_obj), Value::Object(patch_obj)) => {
+            for (key, value) in patch_obj {
+                if value.is_null() {
+                    base_obj.remove(&key);
+                } else {
+                    deep_merge(base_obj.entry(key).or_insert(Value::Null), value);
+                }
+            }
+        }
+        (base, patch) => *base = patch,
+    }
+}

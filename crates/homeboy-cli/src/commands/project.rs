@@ -50,6 +50,9 @@ enum ProjectCommand {
     Set {
         /// Project ID
         project_id: String,
+        /// Merge JSON object into config (any field, supports @file and - for stdin)
+        #[arg(long, value_name = "JSON")]
+        merge: Option<String>,
         /// Project name
         #[arg(long)]
         name: Option<String>,
@@ -282,6 +285,7 @@ pub fn run(
         }
         ProjectCommand::Set {
             project_id,
+            merge,
             name,
             domain,
             modules,
@@ -291,6 +295,7 @@ pub fn run(
             component_ids,
         } => set(
             &project_id,
+            merge,
             name,
             domain,
             modules,
@@ -408,6 +413,7 @@ fn create(
 
 fn set(
     project_id: &str,
+    merge: Option<String>,
     name: Option<String>,
     domain: Option<String>,
     modules: Vec<String>,
@@ -416,6 +422,24 @@ fn set(
     table_prefix: Option<String>,
     component_ids: Vec<String>,
 ) -> homeboy::Result<(ProjectOutput, i32)> {
+    // Handle --merge via public API (mutually exclusive with individual flags)
+    if let Some(spec) = merge {
+        let result = project::merge_from_json(project_id, &spec)?;
+        return Ok((
+            ProjectOutput {
+                command: "project.set".to_string(),
+                project_id: Some(project_id.to_string()),
+                project: Some(project::load_record(project_id)?),
+                projects: None,
+                components: None,
+                pin: None,
+                updated: Some(result.updated_fields),
+                import: None,
+            },
+            0,
+        ));
+    }
+
     let mut updated_fields: Vec<String> = Vec::new();
 
     if let Some(name) = name {

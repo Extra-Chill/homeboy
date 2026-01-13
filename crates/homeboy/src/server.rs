@@ -81,6 +81,16 @@ pub fn save(server: &Server) -> Result<()> {
     Ok(())
 }
 
+/// Merge JSON into server config. Accepts JSON string, @file, or - for stdin.
+pub fn merge_from_json(id: &str, json_spec: &str) -> Result<json::MergeResult> {
+    let mut server = load(id)?;
+    let raw = json::read_json_spec_to_string(json_spec)?;
+    let patch = json::from_str(&raw)?;
+    let result = json::merge_config(&mut server, patch)?;
+    save(&server)?;
+    Ok(result)
+}
+
 pub fn delete(id: &str) -> Result<()> {
     let path = paths::server(id)?;
     if !path.exists() {

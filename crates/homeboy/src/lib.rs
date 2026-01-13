@@ -19,8 +19,8 @@ pub mod token;
 pub mod version;
 
 // Internal modules - not part of public API
-pub(crate) mod http;
 pub(crate) mod json;
+pub(crate) mod http;
 pub(crate) mod keychain;
 pub(crate) mod local_files;
 pub(crate) mod paths;
@@ -31,3 +31,4 @@ pub(crate) mod base_path;
 
 // Re-exports for convenient access
 pub use error::{Error, ErrorCode, Result};
+pub use json::MergeResult;

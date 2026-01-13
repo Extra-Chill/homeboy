@@ -348,6 +348,16 @@ pub fn save(id: &str, project: &Project) -> Result<()> {
     Ok(())
 }
 
+/// Merge JSON into project config. Accepts JSON string, @file, or - for stdin.
+pub fn merge_from_json(id: &str, json_spec: &str) -> Result<json::MergeResult> {
+    let mut project = load(id)?;
+    let raw = json::read_json_spec_to_string(json_spec)?;
+    let patch = json::from_str(&raw)?;
+    let result = json::merge_config(&mut project, patch)?;
+    save(id, &project)?;
+    Ok(result)
+}
+
 pub fn delete(id: &str) -> Result<()> {
     let path = paths::project(id)?;
     if !path.exists() {

@@ -6,6 +6,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.6.0
+
+- Add universal --merge flag for component/project/server set commands
+- Fix changelog entry spacing to preserve blank line before next version
+- Refactor core into a headless/public API; treat the CLI as one interface
+- Move business logic into homeboy-core and reduce CLI responsibilities
+- Standardize command/output layers and keep TTY concerns in the CLI
+- Introduce/expand the module system and module settings
+- Add generic auth support plus a generic API client/command
+- Remove/adjust doctor and error commands during stabilization
+
 ## 0.5.0
 
 - Refactor deploy to use a generic core implementation
@@ -181,11 +192,11 @@ All notable changes to Homeboy CLI are documented in this file.
 ## 0.1.6
 
 ### New Features
-- **Embedded docs**: Embed repo-root `docs/**/*.md` into the binary at build time, so `homeboy docs` works in Homebrew/releases.
+- **Embedded docs**: Embed `homeboy-core/docs/**/*.md` into the CLI binary at build time, so `homeboy docs` works in Homebrew/releases.
 - **Changelog command**: Added `homeboy changelog` shortcut (equivalent to `homeboy docs changelog`).
 
 ### Improvements
-- **Docs source of truth**: Moved CLI documentation to repo-root `docs/` and removed `crates/homeboy/docs/`.
+- **Docs source of truth**: Keep CLI documentation under `homeboy-core/docs/` and embed it into the CLI binary.
 - **Docs topic listing**: `available_topics` is now generated dynamically from embedded keys (newline-separated).
 
 ## 0.1.5

@@ -54,6 +54,9 @@ enum ComponentCommand {
     Set {
         /// Component ID
         id: String,
+        /// Merge JSON object into config (any field, supports @file and - for stdin)
+        #[arg(long, value_name = "JSON")]
+        merge: Option<String>,
         /// Update display name
         #[arg(long)]
         name: Option<String>,
@@ -174,6 +177,7 @@ pub fn run(
         ComponentCommand::Show { id } => show(&id),
         ComponentCommand::Set {
             id,
+            merge,
             name,
             local_path,
             remote_path,
@@ -183,6 +187,7 @@ pub fn run(
             extract_command,
         } => set(SetComponentArgs {
             id,
+            merge,
             name,
             local_path,
             remote_path,
@@ -285,6 +290,7 @@ fn show(id: &str) -> CmdResult<ComponentOutput> {
 
 struct SetComponentArgs {
     id: String,
+    merge: Option<String>,
     name: Option<String>,
     local_path: Option<String>,
     remote_path: Option<String>,
@@ -297,6 +303,7 @@ struct SetComponentArgs {
 fn set(args: SetComponentArgs) -> CmdResult<ComponentOutput> {
     let SetComponentArgs {
         id,
+        merge,
         name,
         local_path,
         remote_path,
@@ -306,8 +313,25 @@ fn set(args: SetComponentArgs) -> CmdResult<ComponentOutput> {
         extract_command,
     } = args;
 
-    let mut component = component::load(&id)?;
+    // Handle --merge via public API (mutually exclusive with individual flags)
+    if let Some(spec) = merge {
+        let result = component::merge_from_json(&id, &spec)?;
+        let component = component::load(&id)?;
+        return Ok((
+            ComponentOutput {
+                action: "set".to_string(),
+                component_id: Some(id.clone()),
+                success: true,
+                updated_fields: result.updated_fields,
+                component: Some(component),
+                components: vec![],
+                import: None,
+            },
+            0,
+        ));
+    }
 
+    let mut component = component::load(&id)?;
     let mut updated_fields: Vec<String> = vec![];
 
     if let Some(value) = name {

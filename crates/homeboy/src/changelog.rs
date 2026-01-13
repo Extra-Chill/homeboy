@@ -386,23 +386,48 @@ fn append_item_to_next_section(
         Error::internal_unexpected("Next changelog section not found (unexpected)".to_string())
     })?;
 
-    let end = find_section_end(&lines, start);
+    let section_end = find_section_end(&lines, start);
     let bullet = format!("- {}", message);
 
-    for line in &lines[start + 1..end] {
+    // Check for duplicates
+    for line in &lines[start + 1..section_end] {
         if line.trim() == bullet {
             return Ok((content.to_string(), false));
         }
     }
 
+    // Find where to insert: after last bullet, or after blank line following header if no bullets
+    let mut insert_after = start;
+    let mut has_bullets = false;
+    for i in start + 1..section_end {
+        if lines[i].trim().starts_with('-') {
+            insert_after = i;
+            has_bullets = true;
+        } else if !has_bullets && lines[i].trim().is_empty() {
+            // No bullets yet, insert after the blank line following the header
+            insert_after = i;
+        }
+    }
+
     let mut out = String::new();
     for (idx, line) in lines.iter().enumerate() {
+        // Skip trailing blank lines after bullets (we'll add one at the end)
+        // Only skip if there are actual bullets
+        if has_bullets && idx > insert_after && idx < section_end && lines[idx].trim().is_empty() {
+            continue;
+        }
+
         out.push_str(line);
         out.push('\n');
 
-        if idx + 1 == end {
+        // Insert new bullet at the insertion point
+        if idx == insert_after {
             out.push_str(&bullet);
             out.push('\n');
+            // Add blank line after bullets (before next section)
+            if section_end < lines.len() {
+                out.push('\n');
+            }
         }
     }
 
@@ -487,7 +512,7 @@ mod tests {
             add_next_section_items(content, &aliases, &messages).unwrap();
         assert!(changed);
         assert_eq!(items_added, 2);
-        assert!(out.contains("## Unreleased\n\n- First\n- Second\n"));
+        assert!(out.contains("## Unreleased\n\n- First\n- Second\n\n## 0.1.0"));
     }
 
     #[test]

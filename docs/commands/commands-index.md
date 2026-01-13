@@ -11,6 +11,8 @@
 - [file](file.md)
 - [git](git.md)
 - [init](homeboy-init.md)
+- [api](api.md)
+- [auth](auth.md)
 - [list](list.md)
 - [logs](logs.md)
 - [module](module.md)

@@ -68,6 +68,9 @@ enum ServerCommand {
     Set {
         /// Server ID
         server_id: String,
+        /// Merge JSON object into config (any field, supports @file and - for stdin)
+        #[arg(long, value_name = "JSON")]
+        merge: Option<String>,
         /// Server display name
         #[arg(long)]
         name: Option<String>,
@@ -181,11 +184,12 @@ pub fn run(
         ServerCommand::Show { server_id } => show(&server_id),
         ServerCommand::Set {
             server_id,
+            merge,
             name,
             host,
             user,
             port,
-        } => set(&server_id, name, host, user, port),
+        } => set(&server_id, merge, name, host, user, port),
         ServerCommand::Delete { server_id, force } => delete(&server_id, force),
         ServerCommand::List => list(),
         ServerCommand::Key(key_args) => run_key(key_args),
@@ -275,11 +279,31 @@ fn show(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
 
 fn set(
     server_id: &str,
+    merge: Option<String>,
     name: Option<String>,
     host: Option<String>,
     user: Option<String>,
     port: Option<u16>,
 ) -> homeboy::Result<(ServerOutput, i32)> {
+    // Handle --merge via public API (mutually exclusive with individual flags)
+    if let Some(spec) = merge {
+        let result = server::merge_from_json(server_id, &spec)?;
+        let server = server::load(server_id)?;
+        return Ok((
+            ServerOutput {
+                command: "server.set".to_string(),
+                server_id: Some(server_id.to_string()),
+                server: Some(server),
+                servers: None,
+                updated: Some(result.updated_fields),
+                deleted: None,
+                key: None,
+                import: None,
+            },
+            0,
+        ));
+    }
+
     if name.is_none() && host.is_none() && user.is_none() && port.is_none() {
         return Err(Error::validation_invalid_argument(
             "fields",

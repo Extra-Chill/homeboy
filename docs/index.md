@@ -32,6 +32,6 @@ Common paths:
 Notes:
 
 - Embedded CLI docs ship inside the binary (see [Embedded docs topic resolution](embedded-docs/embedded-docs-topic-resolution.md)).
-- Module docs load from `<config dir>/homeboy/modules/<moduleId>/docs/`.
+- Module docs load from each installed module’s `docs/` folder: `dirs::config_dir()/homeboy/modules/<moduleId>/docs/` (same topic-key rules as core docs).
 - The CLI does not write documentation into `<config dir>/homeboy/docs/`.
 

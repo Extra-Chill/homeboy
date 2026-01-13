@@ -12,7 +12,7 @@ Exceptions:
 
 ## Top-level envelope
 
-In JSON mode, Homeboy prints a `homeboy::output::CliResponse<T>` where `T` is the **command-specific output struct**.
+In JSON mode, Homeboy prints a `CliResponse<T>` (implemented in the `homeboy-cli` crate) where `T` is the **command-specific output struct**.
 
 Success:
 
@@ -61,13 +61,13 @@ Notes:
 
 ## Error fields
 
-`error` is a `homeboy::output::CliError`.
+`error` is a `CliError` (implemented in the `homeboy-cli` crate).
 
 ## Warning fields
 
-Each item in top-level `warnings` is a `homeboy::output::CliWarning`.
+Each item in top-level `warnings` is a `CliWarning` (implemented in the `homeboy-cli` crate).
 
-- `code` (string): stable error code (see `homeboy_error::ErrorCode::as_str()`).
+- `code` (string): stable error code (see `homeboy::error::ErrorCode::as_str()`).
 - `message` (string): human-readable message.
 - `details` (JSON value): structured error details (may be `{}`).
 - `hints` (optional array): additional guidance.

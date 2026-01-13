@@ -149,6 +149,16 @@ pub fn save(component: &Component) -> Result<()> {
     Ok(())
 }
 
+/// Merge JSON into component config. Accepts JSON string, @file, or - for stdin.
+pub fn merge_from_json(id: &str, json_spec: &str) -> Result<json::MergeResult> {
+    let mut component = load(id)?;
+    let raw = json::read_json_spec_to_string(json_spec)?;
+    let patch = json::from_str(&raw)?;
+    let result = json::merge_config(&mut component, patch)?;
+    save(&component)?;
+    Ok(result)
+}
+
 pub fn delete(id: &str) -> Result<()> {
     let path = paths::component(id)?;
     if !path.exists() {
