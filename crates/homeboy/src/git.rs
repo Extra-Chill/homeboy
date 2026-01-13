@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-use crate::config::ConfigManager;
+use crate::component;
 use crate::json::read_json_spec_to_string;
 use crate::error::{Error, Result};
 
@@ -62,7 +62,7 @@ pub fn get_latest_tag(path: &str) -> Result<Option<String>> {
         .args(["describe", "--tags", "--abbrev=0"])
         .current_dir(path)
         .output()
-        .map_err(|e| crate::Error::other(format!("Failed to run git describe: {}", e)))?;
+        .map_err(|e| Error::other(format!("Failed to run git describe: {}", e)))?;
 
     if !output.status.success() {
         // No tags exist - this is fine, not an error
@@ -70,7 +70,7 @@ pub fn get_latest_tag(path: &str) -> Result<Option<String>> {
         if stderr.contains("No names found") || stderr.contains("No tags can describe") {
             return Ok(None);
         }
-        return Err(crate::Error::other(format!(
+        return Err(Error::other(format!(
             "git describe failed: {}",
             stderr
         )));
@@ -96,11 +96,11 @@ pub fn get_commits_since_tag(path: &str, tag: Option<&str>) -> Result<Vec<Commit
         .args(["log", &range, "--format=%h|%s"])
         .current_dir(path)
         .output()
-        .map_err(|e| crate::Error::other(format!("Failed to run git log: {}", e)))?;
+        .map_err(|e| Error::other(format!("Failed to run git log: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(crate::Error::other(format!("git log failed: {}", stderr)));
+        return Err(Error::other(format!("git log failed: {}", stderr)));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -211,8 +211,8 @@ struct CommitSpec {
 }
 
 fn get_component_path(component_id: &str) -> Result<String> {
-    let component = ConfigManager::load_component(component_id)?;
-    Ok(component.local_path)
+    let comp = component::load(component_id)?;
+    Ok(comp.local_path)
 }
 
 fn execute_git(path: &str, args: &[&str]) -> std::io::Result<std::process::Output> {

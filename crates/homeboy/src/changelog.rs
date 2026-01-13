@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{ComponentConfiguration, ConfigManager};
+use crate::component::{self, Component};
 use crate::json::read_json_spec_to_string;
 use crate::error::{Error, Result};
 
@@ -15,7 +15,7 @@ pub struct EffectiveChangelogSettings {
 }
 
 pub fn resolve_effective_settings(
-    component: Option<&ComponentConfiguration>,
+    component: Option<&Component>,
 ) -> EffectiveChangelogSettings {
     let next_section_label = component
         .and_then(|c| c.changelog_next_section_label.clone())
@@ -38,7 +38,7 @@ pub fn resolve_effective_settings(
     }
 }
 
-pub fn resolve_changelog_path(component: &ComponentConfiguration) -> Result<PathBuf> {
+pub fn resolve_changelog_path(component: &Component) -> Result<PathBuf> {
     let target = component
         .changelog_targets
         .as_ref()
@@ -129,7 +129,7 @@ pub fn add_next_section_items(
 }
 
 pub fn read_and_add_next_section_item(
-    component: &ComponentConfiguration,
+    component: &Component,
     settings: &EffectiveChangelogSettings,
     message: &str,
 ) -> Result<(PathBuf, bool)> {
@@ -149,7 +149,7 @@ pub fn read_and_add_next_section_item(
 }
 
 pub fn read_and_add_next_section_items(
-    component: &ComponentConfiguration,
+    component: &Component,
     settings: &EffectiveChangelogSettings,
     messages: &[String],
 ) -> Result<(PathBuf, bool, usize)> {
@@ -457,7 +457,7 @@ pub fn add_items_bulk(json_spec: &str, expected_op: &str) -> Result<AddItemsOutp
 
 /// Add changelog items to a component.
 pub fn add_items(component_id: &str, messages: &[String]) -> Result<AddItemsOutput> {
-    let component = ConfigManager::load_component(component_id)?;
+    let component = component::load(component_id)?;
     let settings = resolve_effective_settings(Some(&component));
 
     let (path, changed, items_added) =

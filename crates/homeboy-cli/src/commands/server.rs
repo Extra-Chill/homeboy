@@ -4,7 +4,7 @@ use std::fs;
 use std::process::Command;
 
 use homeboy::config::{create_from_json, slugify_id, AppPaths, ConfigManager, CreateSummary, ServerConfig};
-use homeboy::Error;
+use homeboy::error::Error;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

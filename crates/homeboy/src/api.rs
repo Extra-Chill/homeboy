@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::ConfigManager;
+use crate::project;
+use crate::error::{Error, Result};
 use crate::http::ApiClient;
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,12 +20,12 @@ pub struct ApiOutput {
 /// ```json
 /// {"projectId": "my-project", "method": "GET", "endpoint": "/wp/v2/posts", "body": null}
 /// ```
-pub fn run(input: &str) -> crate::Result<(ApiOutput, i32)> {
+pub fn run(input: &str) -> Result<(ApiOutput, i32)> {
     let parsed: ApiInput = serde_json::from_str(input)
-        .map_err(|e| crate::Error::validation_invalid_json(e, Some("parse api input".to_string())))?;
+        .map_err(|e| Error::validation_invalid_json(e, Some("parse api input".to_string())))?;
 
-    let project = ConfigManager::load_project(&parsed.project_id)?;
-    let client = ApiClient::new(&parsed.project_id, &project.api)?;
+    let proj = project::load(&parsed.project_id)?;
+    let client = ApiClient::new(&parsed.project_id, &proj.api)?;
 
     let body = parsed.body.unwrap_or_else(|| Value::Object(serde_json::Map::new()));
 
@@ -35,7 +36,7 @@ pub fn run(input: &str) -> crate::Result<(ApiOutput, i32)> {
         "PATCH" => client.patch(&parsed.endpoint, &body)?,
         "DELETE" => client.delete(&parsed.endpoint)?,
         _ => {
-            return Err(crate::Error::validation_invalid_argument(
+            return Err(Error::validation_invalid_argument(
                 "method",
                 &format!("Invalid HTTP method: {}", parsed.method),
                 None,

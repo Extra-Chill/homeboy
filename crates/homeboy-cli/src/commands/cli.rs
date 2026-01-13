@@ -1,7 +1,7 @@
 use homeboy::config::{
     ComponentConfiguration, ConfigManager, ProjectConfiguration, ProjectRecord, SlugIdentifiable,
 };
-use homeboy::ErrorCode;
+use homeboy::error::ErrorCode;
 use homeboy::context::resolve_project_ssh;
 use homeboy::module::{find_module_by_tool, CliConfig};
 use homeboy::shell;

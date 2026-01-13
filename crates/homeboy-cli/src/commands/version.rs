@@ -10,7 +10,7 @@ use homeboy::config::{ConfigManager, VersionTarget};
 use homeboy::version::{
     default_pattern_for_file, increment_version, parse_versions, update_version_in_file,
 };
-use homeboy::Error;
+use homeboy::error::Error;
 
 #[derive(Args)]
 pub struct VersionArgs {

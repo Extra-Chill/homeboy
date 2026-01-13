@@ -1,4 +1,4 @@
-use crate::config::AppPaths;
+use crate::paths;
 use crate::files::{self, FileSystem};
 use crate::json;
 use serde::{Deserialize, Serialize};
@@ -273,7 +273,7 @@ pub struct SettingConfig {
 // Module loader functions
 
 pub fn load_module(id: &str) -> Option<ModuleManifest> {
-    let module_dir = AppPaths::module(id).ok()?;
+    let module_dir = paths::module(id).ok()?;
     let manifest_path = module_dir.join("homeboy.json");
 
     if !manifest_path.exists() {
@@ -287,7 +287,7 @@ pub fn load_module(id: &str) -> Option<ModuleManifest> {
 }
 
 pub fn load_all_modules() -> Vec<ModuleManifest> {
-    let Ok(modules_dir) = AppPaths::modules() else {
+    let Ok(modules_dir) = paths::modules() else {
         return Vec::new();
     };
     if !modules_dir.exists() {
@@ -323,7 +323,7 @@ pub fn find_module_by_tool(tool: &str) -> Option<ModuleManifest> {
 }
 
 pub fn module_path(id: &str) -> PathBuf {
-    AppPaths::module(id).unwrap_or_else(|_| PathBuf::from(id))
+    paths::module(id).unwrap_or_else(|_| PathBuf::from(id))
 }
 
 pub fn available_module_ids() -> Vec<String> {
@@ -352,11 +352,12 @@ pub mod exec_context {
 // Module Execution API
 // ============================================================================
 
-use crate::config::{ConfigManager, ModuleScope, ProjectConfiguration};
+use crate::component::{self, Component};
+use crate::project::{self, Project};
 use crate::http::ApiClient;
 use crate::ssh::execute_local_command_interactive;
 use crate::template;
-use crate::Result;
+use crate::error::{Error, Result};
 use std::collections::HashMap;
 
 /// Result of executing a module.
@@ -374,17 +375,17 @@ pub fn run_module(
     args: Vec<String>,
 ) -> Result<ModuleRunResult> {
     let module = load_module(module_id)
-        .ok_or_else(|| crate::Error::other(format!("Module '{}' not found", module_id)))?;
+        .ok_or_else(|| Error::other(format!("Module '{}' not found", module_id)))?;
 
     let runtime = module.runtime.as_ref().ok_or_else(|| {
-        crate::Error::other(format!(
+        Error::other(format!(
             "Module '{}' does not have a runtime configuration and cannot be executed",
             module_id
         ))
     })?;
 
     let run_command = runtime.run_command.as_ref().ok_or_else(|| {
-        crate::Error::other(format!(
+        Error::other(format!(
             "Module '{}' does not have a runCommand defined",
             module_id
         ))
@@ -393,7 +394,7 @@ pub fn run_module(
     let module_path = module
         .module_path
         .as_ref()
-        .ok_or_else(|| crate::Error::other("module_path not set".to_string()))?;
+        .ok_or_else(|| Error::other("module_path not set".to_string()))?;
 
     let input_values: HashMap<String, String> = inputs.into_iter().collect();
 
@@ -419,23 +420,23 @@ pub fn run_module(
 
     let mut resolved_project_id: Option<String> = None;
     let mut resolved_component_id: Option<String> = None;
-    let mut project_config: Option<ProjectConfiguration> = None;
+    let mut project_config: Option<Project> = None;
     let mut component_config = None;
 
     if requires_project {
         let pid = project_id.ok_or_else(|| {
-            crate::Error::other("This module requires a project; pass --project <id>".to_string())
+            Error::other("This module requires a project; pass --project <id>".to_string())
         })?;
 
-        let loaded_project = ConfigManager::load_project(pid)?;
+        let loaded_project = project::load(pid)?;
         ModuleScope::validate_project_compatibility(&module, &loaded_project)?;
 
         resolved_component_id =
             ModuleScope::resolve_component_scope(&module, &loaded_project, component_id)?;
 
         if let Some(ref comp_id) = resolved_component_id {
-            component_config = Some(ConfigManager::load_component(comp_id).map_err(|_| {
-                crate::Error::config(format!(
+            component_config = Some(component::load(comp_id).map_err(|_| {
+                Error::config(format!(
                     "Component '{}' required by module '{}' is not configured",
                     comp_id, module.id
                 ))
@@ -453,7 +454,7 @@ pub fn run_module(
     );
 
     let settings_json =
-        serde_json::to_string(&effective_settings).map_err(|e| crate::Error::other(e.to_string()))?;
+        serde_json::to_string(&effective_settings).map_err(|e| Error::other(e.to_string()))?;
 
     // Build template variables
     let entrypoint = runtime.entrypoint.clone().unwrap_or_default();
@@ -513,10 +514,10 @@ pub fn run_action(
     data: Option<&str>,
 ) -> Result<serde_json::Value> {
     let module = load_module(module_id)
-        .ok_or_else(|| crate::Error::other(format!("Module '{}' not found", module_id)))?;
+        .ok_or_else(|| Error::other(format!("Module '{}' not found", module_id)))?;
 
     if module.actions.is_empty() {
-        return Err(crate::Error::other(format!(
+        return Err(Error::other(format!(
             "Module '{}' has no actions defined",
             module_id
         )));
@@ -527,7 +528,7 @@ pub fn run_action(
         .iter()
         .find(|a| a.id == action_id)
         .ok_or_else(|| {
-            crate::Error::other(format!(
+            Error::other(format!(
                 "Action '{}' not found in module '{}'",
                 action_id, module_id
             ))
@@ -535,7 +536,7 @@ pub fn run_action(
 
     let selected: Vec<serde_json::Value> = if let Some(data_str) = data {
         serde_json::from_str(data_str)
-            .map_err(|e| crate::Error::other(format!("Invalid JSON data: {}", e)))?
+            .map_err(|e| Error::other(format!("Invalid JSON data: {}", e)))?
     } else {
         Vec::new()
     };
@@ -543,13 +544,13 @@ pub fn run_action(
     match action.action_type.as_str() {
         "api" => {
             let pid = project_id
-                .ok_or_else(|| crate::Error::other("--project is required for API actions"))?;
+                .ok_or_else(|| Error::other("--project is required for API actions"))?;
 
-            let project = ConfigManager::load_project(pid)?;
+            let project = project::load(pid)?;
             let client = ApiClient::new(pid, &project.api)?;
 
             if action.requires_auth.unwrap_or(false) && !client.is_authenticated() {
-                return Err(crate::Error::other(
+                return Err(Error::other(
                     "Not authenticated. Run 'homeboy auth login --project <id>' first.",
                 ));
             }
@@ -557,7 +558,7 @@ pub fn run_action(
             let endpoint = action
                 .endpoint
                 .as_ref()
-                .ok_or_else(|| crate::Error::other("API action missing 'endpoint'"))?;
+                .ok_or_else(|| Error::other("API action missing 'endpoint'"))?;
 
             let method = action.method.as_deref().unwrap_or("POST");
             let settings = get_module_settings(module_id, Some(pid))?;
@@ -569,7 +570,7 @@ pub fn run_action(
                 client.post(endpoint, &payload)
             }
         }
-        other => Err(crate::Error::other(format!("Unknown action type: {}", other))),
+        other => Err(Error::other(format!("Unknown action type: {}", other))),
     }
 }
 
@@ -581,7 +582,7 @@ pub fn get_module_settings(
     let mut settings = HashMap::new();
 
     if let Some(pid) = project_id {
-        if let Ok(project) = ConfigManager::load_project(pid) {
+        if let Ok(project) = project::load(pid) {
             if let Some(scoped) = project.scoped_modules.as_ref() {
                 if let Some(module_scope) = scoped.get(module_id) {
                     for (k, v) in &module_scope.settings {
@@ -643,7 +644,7 @@ pub fn is_module_ready(module: &ModuleManifest) -> bool {
 }
 
 /// Check if a module is compatible with a project.
-pub fn is_module_compatible(module: &ModuleManifest, project: Option<&ProjectConfiguration>) -> bool {
+pub fn is_module_compatible(module: &ModuleManifest, project: Option<&Project>) -> bool {
     let Some(project) = project else {
         return true;
     };
@@ -669,7 +670,7 @@ pub fn is_module_compatible(module: &ModuleManifest, project: Option<&ProjectCon
 
 /// Check if a module is a symlink (linked, not installed).
 pub fn is_module_linked(module_id: &str) -> bool {
-    AppPaths::module(module_id)
+    paths::module(module_id)
         .map(|p| p.is_symlink())
         .unwrap_or(false)
 }
@@ -727,5 +728,184 @@ fn interpolate_payload_value(
             Ok(serde_json::Value::Object(result))
         }
         _ => Ok(value.clone()),
+    }
+}
+
+// ============================================================================
+// Module Scope - Settings resolution for modules with project/component context
+// ============================================================================
+
+pub struct ModuleScope;
+
+impl ModuleScope {
+    pub fn effective_settings(
+        module_id: &str,
+        project: Option<&Project>,
+        component: Option<&Component>,
+    ) -> HashMap<String, serde_json::Value> {
+        let mut settings = HashMap::new();
+
+        if let Some(project) = project {
+            if let Some(project_modules) = project.scoped_modules.as_ref() {
+                if let Some(project_config) = project_modules.get(module_id) {
+                    settings.extend(project_config.settings.clone());
+                }
+            }
+        }
+
+        if let Some(component) = component {
+            if let Some(component_modules) = component.scoped_modules.as_ref() {
+                if let Some(component_config) = component_modules.get(module_id) {
+                    settings.extend(component_config.settings.clone());
+                }
+            }
+        }
+
+        settings
+    }
+
+    pub fn effective_settings_validated(
+        module: &ModuleManifest,
+        project: Option<&Project>,
+        component: Option<&Component>,
+    ) -> Result<HashMap<String, serde_json::Value>> {
+        use crate::module_settings::ModuleSettingsValidator;
+
+        let module_id = module.id.as_str();
+
+        let mut out: HashMap<String, serde_json::Value> = HashMap::new();
+        for setting in &module.settings {
+            let Some(default_value) = setting.default.clone() else {
+                continue;
+            };
+
+            out.insert(setting.id.clone(), default_value);
+        }
+
+        let project_settings = project
+            .and_then(|p| p.scoped_modules.as_ref())
+            .and_then(|m| m.get(module_id))
+            .map(|c| c.settings.clone())
+            .unwrap_or_default();
+        let component_settings = component
+            .and_then(|c| c.scoped_modules.as_ref())
+            .and_then(|m| m.get(module_id))
+            .map(|c| c.settings.clone())
+            .unwrap_or_default();
+
+        let validator = ModuleSettingsValidator::new(module);
+        validator.validate_settings_map("project", &project_settings)?;
+        validator.validate_settings_map("component", &component_settings)?;
+
+        for settings in [&project_settings, &component_settings] {
+            for (key, value) in settings {
+                out.insert(key.clone(), value.clone());
+            }
+        }
+
+        Ok(out)
+    }
+
+    pub fn validate_project_compatibility(
+        module: &ModuleManifest,
+        project: &Project,
+    ) -> Result<()> {
+        let Some(requires) = module.requires.as_ref() else {
+            return Ok(());
+        };
+
+        for required_module in &requires.modules {
+            if !project.has_module(required_module) {
+                return Err(Error::validation_invalid_argument(
+                    "project.modules",
+                    format!(
+                        "Module '{}' requires module '{}', but project does not have it enabled",
+                        module.id, required_module
+                    ),
+                    None,
+                    None,
+                ));
+            }
+        }
+
+        for required in &requires.components {
+            if !project.component_ids.iter().any(|c| c == required) {
+                return Err(Error::validation_invalid_argument(
+                    "project.componentIds",
+                    format!(
+                        "Module '{}' requires component '{}', but project does not include it",
+                        module.id, required
+                    ),
+                    None,
+                    None,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn resolve_component_scope(
+        module: &ModuleManifest,
+        project: &Project,
+        component_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        let required_components = module
+            .requires
+            .as_ref()
+            .map(|r| &r.components)
+            .filter(|c| !c.is_empty());
+
+        let Some(required_components) = required_components else {
+            return Ok(component_id.map(str::to_string));
+        };
+
+        let matching_component_ids: Vec<String> = required_components
+            .iter()
+            .filter(|required_id| project.component_ids.iter().any(|id| id == *required_id))
+            .cloned()
+            .collect();
+
+        if matching_component_ids.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "project.componentIds",
+                format!(
+                    "Module '{}' requires components {:?}; none are configured for this project",
+                    module.id, required_components
+                ),
+                None,
+                None,
+            ));
+        }
+
+        if let Some(component_id) = component_id {
+            if !matching_component_ids.iter().any(|c| c == component_id) {
+                return Err(Error::validation_invalid_argument(
+                    "component",
+                    format!(
+                        "Module '{}' only supports project components {:?}; --component '{}' is not compatible",
+                        module.id, matching_component_ids, component_id
+                    ),
+                    Some(component_id.to_string()),
+                    None,
+                ));
+            }
+
+            return Ok(Some(component_id.to_string()));
+        }
+
+        if matching_component_ids.len() == 1 {
+            return Ok(Some(matching_component_ids[0].clone()));
+        }
+
+        Err(Error::validation_invalid_argument(
+            "component",
+            format!(
+                "Module '{}' matches multiple project components {:?}; pass --component <id>",
+                module.id, matching_component_ids
+            ),
+            None,
+            None,
+        ))
     }
 }

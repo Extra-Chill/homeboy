@@ -132,6 +132,28 @@ pub fn local() -> LocalFs {
     LocalFs::new()
 }
 
+/// Ensure all app directories exist
+pub fn ensure_app_dirs() -> Result<()> {
+    use crate::paths;
+
+    let dirs = [
+        paths::homeboy()?,
+        paths::projects()?,
+        paths::servers()?,
+        paths::components()?,
+        paths::modules()?,
+        paths::keys()?,
+        paths::backups()?,
+    ];
+
+    let fs = local();
+    for dir in dirs {
+        fs.ensure_dir(&dir)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

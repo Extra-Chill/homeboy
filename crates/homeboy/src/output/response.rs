@@ -1,5 +1,4 @@
-use crate::error::{ErrorCode, Hint};
-use crate::Error;
+use crate::error::{Error, ErrorCode, Hint, Result};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -98,7 +97,7 @@ pub fn print_success_with_warnings<T: Serialize>(data: T, warnings: Vec<CliWarni
     );
 }
 
-pub fn print_result<T: Serialize>(result: crate::Result<T>) {
+pub fn print_result<T: Serialize>(result: Result<T>) {
     match result {
         Ok(data) => print_success(data),
         Err(err) => println!("{}", CliResponse::<()>::from_error(&err).to_json()),
@@ -112,11 +111,11 @@ pub struct CmdSuccess {
     pub warnings: Vec<CliWarning>,
 }
 
-pub type CmdResult = crate::Result<(serde_json::Value, Vec<CliWarning>, i32)>;
+pub type CmdResult = Result<(serde_json::Value, Vec<CliWarning>, i32)>;
 
 pub fn map_cmd_result_to_json<T: Serialize>(
-    result: crate::Result<(T, Vec<CliWarning>, i32)>,
-) -> (crate::Result<CmdSuccess>, i32) {
+    result: Result<(T, Vec<CliWarning>, i32)>,
+) -> (Result<CmdSuccess>, i32) {
     match result {
         Ok((data, warnings, exit_code)) => match serde_json::to_value(data) {
             Ok(value) => (
@@ -127,7 +126,7 @@ pub fn map_cmd_result_to_json<T: Serialize>(
                 exit_code,
             ),
             Err(err) => (
-                Err(crate::Error::internal_json(
+                Err(Error::internal_json(
                     err.to_string(),
                     Some("serialize response".to_string()),
                 )),
@@ -175,7 +174,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
     }
 }
 
-pub fn print_json_result(result: crate::Result<CmdSuccess>) {
+pub fn print_json_result(result: Result<CmdSuccess>) {
     match result {
         Ok(success) => print_success_with_warnings(success.payload, success.warnings),
         Err(err) => println!("{}", CliResponse::<()>::from_error(&err).to_json()),

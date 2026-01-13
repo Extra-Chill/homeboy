@@ -1,7 +1,8 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use crate::config::ConfigManager;
+use crate::component;
+use crate::error::{Error, Result};
 use crate::json::{is_json_input, parse_bulk_ids, BulkResult, BulkSummary, ItemOutcome};
 use crate::module::{load_module, ModuleManifest};
 use crate::ssh::execute_local_command_in_dir;
@@ -32,7 +33,7 @@ pub enum BuildResult {
 /// Accepts either:
 /// - A single component ID: "extrachill-api"
 /// - A JSON spec: {"componentIds": ["api", "users"]}
-pub fn run(input: &str) -> crate::Result<(BuildResult, i32)> {
+pub fn run(input: &str) -> Result<(BuildResult, i32)> {
     if is_json_input(input) {
         run_bulk(input)
     } else {
@@ -42,12 +43,12 @@ pub fn run(input: &str) -> crate::Result<(BuildResult, i32)> {
 
 // === Internal implementation ===
 
-fn run_single(component_id: &str) -> crate::Result<(BuildResult, i32)> {
+fn run_single(component_id: &str) -> Result<(BuildResult, i32)> {
     let (output, exit_code) = execute_build(component_id)?;
     Ok((BuildResult::Single(output), exit_code))
 }
 
-fn run_bulk(json_spec: &str) -> crate::Result<(BuildResult, i32)> {
+fn run_bulk(json_spec: &str) -> Result<(BuildResult, i32)> {
     let input = parse_bulk_ids(json_spec)?;
 
     let mut results = Vec::with_capacity(input.component_ids.len());
@@ -95,22 +96,22 @@ fn run_bulk(json_spec: &str) -> crate::Result<(BuildResult, i32)> {
     ))
 }
 
-fn execute_build(component_id: &str) -> crate::Result<(BuildOutput, i32)> {
-    let component = ConfigManager::load_component(component_id)?;
+fn execute_build(component_id: &str) -> Result<(BuildOutput, i32)> {
+    let comp = component::load(component_id)?;
 
-    let build_cmd = component.build_command.clone().or_else(|| {
-        detect_build_command(&component.local_path, &component.build_artifact, &component.modules)
+    let build_cmd = comp.build_command.clone().or_else(|| {
+        detect_build_command(&comp.local_path, &comp.build_artifact, &comp.modules)
             .map(|c| c.command)
     });
 
     let build_cmd = build_cmd.ok_or_else(|| {
-        crate::Error::other(format!(
+        Error::other(format!(
             "Component '{}' has no build_command configured and no build script was detected",
             component_id
         ))
     })?;
 
-    let output = execute_local_command_in_dir(&build_cmd, Some(&component.local_path));
+    let output = execute_local_command_in_dir(&build_cmd, Some(&comp.local_path));
 
     Ok((
         BuildOutput {

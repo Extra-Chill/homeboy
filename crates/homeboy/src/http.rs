@@ -3,7 +3,7 @@
 //! Makes HTTP requests with auth headers resolved from project configuration.
 //! Homeboy doesn't know about specific auth types - it just templates strings.
 
-use crate::config::{ApiConfig, AuthConfig, AuthFlowConfig, VariableSource};
+use crate::project::{ApiConfig, AuthConfig, AuthFlowConfig, VariableSource};
 use crate::keychain;
 use crate::error::{Error, ErrorCode, Result};
 use reqwest::blocking::{Client, Response};

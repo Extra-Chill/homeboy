@@ -1,7 +1,9 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-use crate::config::{ConfigManager, ProjectConfiguration, ServerConfig};
+use crate::component;
+use crate::project::{self, Project};
+use crate::server::{self, Server};
 use crate::ssh::SshClient;
 use crate::error::{Error, Result};
 
@@ -30,7 +32,7 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
     let cwd_str = cwd.to_string_lossy().to_string();
     let git_root = detect_git_root(&cwd);
 
-    let components = ConfigManager::list_components().unwrap_or_default();
+    let components = component::list().unwrap_or_default();
 
     let matched: Vec<String> = components
         .iter()
@@ -95,27 +97,27 @@ fn path_matches(cwd: &PathBuf, local_path: &str) -> bool {
 // === Project/Server Context Resolution ===
 
 pub struct ProjectServerContext {
-    pub project: ProjectConfiguration,
+    pub project: Project,
     pub server_id: String,
-    pub server: ServerConfig,
+    pub server: Server,
 }
 
 pub enum ResolvedTarget {
     Project(Box<ProjectServerContext>),
     Server {
         server_id: String,
-        server: ServerConfig,
+        server: Server,
     },
 }
 
 pub fn resolve_project_server(project_id: &str) -> Result<ProjectServerContext> {
-    let project = ConfigManager::load_project(project_id)?;
+    let project = project::load(project_id)?;
 
     let server_id = project.server_id.clone().ok_or_else(|| {
         Error::config_missing_key("project.serverId", Some(project_id.to_string()))
     })?;
 
-    let server = ConfigManager::load_server(&server_id)
+    let server = server::load(&server_id)
         .map_err(|_| Error::server_not_found(server_id.clone()))?;
 
     Ok(ProjectServerContext {
@@ -127,7 +129,7 @@ pub fn resolve_project_server(project_id: &str) -> Result<ProjectServerContext> 
 
 pub fn require_project_base_path(
     project_id: &str,
-    project: &ProjectConfiguration,
+    project: &Project,
 ) -> Result<String> {
     project
         .base_path
@@ -150,7 +152,7 @@ pub fn resolve_project_or_server_id(id: &str) -> Result<ResolvedTarget> {
     }
 
     let server =
-        ConfigManager::load_server(id).map_err(|_| Error::server_not_found(id.to_string()))?;
+        server::load(id).map_err(|_| Error::server_not_found(id.to_string()))?;
 
     Ok(ResolvedTarget::Server {
         server_id: id.to_string(),
@@ -159,9 +161,9 @@ pub fn resolve_project_or_server_id(id: &str) -> Result<ResolvedTarget> {
 }
 
 pub struct RemoteProjectContext {
-    pub project: ProjectConfiguration,
+    pub project: Project,
     pub server_id: String,
-    pub server: ServerConfig,
+    pub server: Server,
     pub client: SshClient,
     pub base_path: Option<String>,
 }

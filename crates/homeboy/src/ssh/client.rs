@@ -1,7 +1,6 @@
-use crate::config::ServerConfig;
-use crate::error::{RemoteCommandFailedDetails, TargetDetails};
+use crate::server::Server;
+use crate::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::shell;
-use crate::Result;
 use std::process::{Command, Stdio};
 
 pub struct SshClient {
@@ -19,12 +18,12 @@ pub struct CommandOutput {
 }
 
 impl CommandOutput {
-    pub fn into_remote_result(self, command: &str, target: TargetDetails) -> crate::Result<Self> {
+    pub fn into_remote_result(self, command: &str, target: TargetDetails) -> Result<Self> {
         if self.success {
             return Ok(self);
         }
 
-        Err(crate::Error::remote_command_failed(
+        Err(Error::remote_command_failed(
             RemoteCommandFailedDetails {
                 command: command.to_string(),
                 exit_code: self.exit_code,
@@ -37,12 +36,12 @@ impl CommandOutput {
 }
 
 impl SshClient {
-    pub fn from_server(server: &ServerConfig, server_id: &str) -> Result<Self> {
+    pub fn from_server(server: &Server, server_id: &str) -> Result<Self> {
         let identity_file = match &server.identity_file {
             Some(path) if !path.is_empty() => {
                 let expanded = shellexpand::tilde(path).to_string();
                 if !std::path::Path::new(&expanded).exists() {
-                    return Err(crate::Error::ssh_identity_file_not_found(
+                    return Err(Error::ssh_identity_file_not_found(
                         server_id.to_string(),
                         expanded,
                     ));
