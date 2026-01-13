@@ -1,61 +1,13 @@
 # `homeboy config`
 
-Manage the global Homeboy config file (`homeboy.json`).
+This command group is not implemented in the current CLI.
 
-- Path: `dirs::config_dir()/homeboy/homeboy.json` (see `homeboy config path`)
-- This does not edit project/component config files.
+The CLI currently stores configuration under the OS config directory (`dirs::config_dir()/homeboy/`) using per-entity JSON files:
 
-## Commands
+- `projects/<id>.json`
+- `servers/<id>.json`
+- `components/<id>.json`
+- `modules/<moduleId>/homeboy.json` (module manifest)
 
-### `homeboy config path`
+(There is no separate global `homeboy.json` file in the current CLI implementation.)
 
-Print the resolved path to the global `homeboy.json`.
-
-### `homeboy config show`
-
-Show the current global config. If the file does not exist yet, Homeboy returns the default struct (mostly empty/`null` values).
-
-### `homeboy config keys`
-
-List the known keys that `homeboy config set`/`unset` supports.
-
-### `homeboy config set <key> <value>`
-
-Set a known key.
-
-- String keys: pass the string directly
-- String array keys: pass a comma-separated list (whitespace is trimmed)
-
-Examples:
-
-- `homeboy config set defaultChangelogNextSectionLabel Unreleased`
-- `homeboy config set defaultChangelogNextSectionAliases "Unreleased,[Unreleased]"`
-
-### `homeboy config unset <key>`
-
-Unset (remove) a known key.
-
-Example:
-
-- `homeboy config unset defaultChangelogNextSectionAliases`
-
-### `homeboy config set-json <pointer> <value> [--allow-unknown]`
-
-Synopsis:
-
-```sh
-homeboy config set-json <pointer> <value> [--allow-unknown]
-```
-
-Note: `set-json` is an escape hatch; `homeboy config set` only supports known keys.
-
-Escape hatch for setting a raw JSON value at a JSON pointer.
-
-
-- If `<pointer>` is not in the known-key registry, you must pass `--allow-unknown`.
-- `<value>` must be valid JSON (e.g. `"hello"`, `123`, `true`, `[]`, `{}`).
-
-Examples:
-
-- `homeboy config set-json /defaultChangelogNextSectionAliases '["Unreleased","Next"]'`
-- `homeboy config set-json /someNewKey '{"a":1}' --allow-unknown`

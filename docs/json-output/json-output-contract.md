@@ -12,36 +12,30 @@ Exceptions:
 
 ## Top-level envelope
 
-Homeboy prints a `homeboy::output::CliResponse<T>` object.
-
-In JSON mode, `T` is `homeboy::output::CmdSuccess` with:
-
-- `payload`: the command-specific output
-- `warnings`: command-scoped warnings (omitted when empty)
+In JSON mode, Homeboy prints a `homeboy::output::CliResponse<T>` where `T` is the **command-specific output struct**.
 
 Success:
 
 ```json
 {
   "success": true,
-  "data": {
-    "payload": { "...": "..." },
-    "warnings": [
-      {
-        "code": "validation.invalid_argument",
-        "message": "Human-readable message",
-        "details": {},
-        "hints": [{ "message": "..." }],
-        "retryable": false
-      }
-    ]
-  }
+  "data": { "...": "..." },
+  "warnings": [
+    {
+      "code": "validation.invalid_argument",
+      "message": "Human-readable message",
+      "details": {},
+      "hints": [{ "message": "..." }],
+      "retryable": false
+    }
+  ]
 }
 ```
 
 Notes:
 
-- Top-level `warnings` is reserved for process-level warnings, but the CLI currently emits command warnings in `data.warnings` via the `CmdSuccess` wrapper.
+- The CLI emits command-scoped warnings at the **top level** (`warnings`).
+- `data` is the serialized command output (not a `payload` wrapper).
 
 Failure:
 
@@ -62,9 +56,8 @@ Notes:
 
 - `data` is omitted on failure.
 - `error` is omitted on success.
-- `data.warnings` (the `CmdSuccess.warnings` field) is omitted when empty.
-- Top-level `warnings` is omitted when there are no process-level warnings.
-- `error.hints`/`error.retryable` and `data.warnings[*].hints`/`data.warnings[*].retryable` are omitted when not set.
+- `warnings` is omitted when empty.
+- `error.hints`/`error.retryable` and `warnings[*].hints`/`warnings[*].retryable` are omitted when not set.
 
 ## Error fields
 
@@ -96,12 +89,9 @@ Each item in top-level `warnings` is a `homeboy::output::CliWarning`.
 
 ## Success payload
 
-On success, `data` is a `CmdSuccess` wrapper:
+On success, `data` is the command-specific output struct (varies by command).
 
-- `data.payload`: the command-specific output struct (varies by command)
-- `data.warnings`: command warnings (omitted when empty)
-
-Process-level warnings also exist at the top level (`warnings`), but most Homeboy commands only emit warnings in `data.warnings` via the `CmdSuccess` wrapper.
+Warnings are emitted at the top level (`warnings`).
 
 ## Command payload conventions
 

@@ -1,9 +1,45 @@
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::process::Command;
 
 use crate::component;
 use crate::json::read_json_spec_to_string;
 use crate::error::{Error, Result};
+
+// ============================================================================
+// Low-level Git Primitives (path-based)
+// ============================================================================
+
+/// Clone a git repository to a target directory.
+pub fn clone_repo(url: &str, target_dir: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["clone", url, &target_dir.to_string_lossy()])
+        .output()
+        .map_err(|e| Error::git_command_failed(format!("Failed to run git clone: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::git_command_failed(format!("git clone failed: {}", stderr)));
+    }
+
+    Ok(())
+}
+
+/// Pull latest changes in a git repository.
+pub fn pull_repo(repo_dir: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["pull"])
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|e| Error::git_command_failed(format!("Failed to run git pull: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::git_command_failed(format!("git pull failed: {}", stderr)));
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct CommitInfo {

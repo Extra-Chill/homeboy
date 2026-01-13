@@ -22,7 +22,6 @@ Configuration and state live under the OS config directory (`dirs::config_dir()/
 
 Common paths:
 
-- `homeboy.json`
 - `projects/`
 - `servers/`
 - `components/`

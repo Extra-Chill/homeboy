@@ -98,19 +98,19 @@ mod tests {
 
     #[test]
     fn join_remote_path_rejects_relative_paths_without_base() {
-        assert!(join_remote_path(None, "config.json").is_err());
+        assert!(join_remote_path(None, "file.json").is_err());
     }
 
     #[test]
     fn join_remote_path_joins_relative_paths() {
         assert_eq!(
-            join_remote_path(Some("/var/www/site"), "config.json").unwrap(),
-            "/var/www/site/config.json"
+            join_remote_path(Some("/var/www/site"), "file.json").unwrap(),
+            "/var/www/site/file.json"
         );
 
         assert_eq!(
-            join_remote_path(Some("/var/www/site/"), "config.json").unwrap(),
-            "/var/www/site/config.json"
+            join_remote_path(Some("/var/www/site/"), "file.json").unwrap(),
+            "/var/www/site/file.json"
         );
     }
 

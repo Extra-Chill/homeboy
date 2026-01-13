@@ -12,11 +12,6 @@ pub fn homeboy() -> Result<PathBuf> {
     Ok(config_dir.join("homeboy"))
 }
 
-/// Main config file
-pub fn config() -> Result<PathBuf> {
-    Ok(homeboy()?.join("homeboy.json"))
-}
-
 /// Projects directory
 pub fn projects() -> Result<PathBuf> {
     Ok(homeboy()?.join("projects"))
@@ -45,11 +40,6 @@ pub fn keys() -> Result<PathBuf> {
 /// Backups directory
 pub fn backups() -> Result<PathBuf> {
     Ok(homeboy()?.join("backups"))
-}
-
-/// Docs directory
-pub fn docs() -> Result<PathBuf> {
-    Ok(homeboy()?.join("docs"))
 }
 
 /// Project file path

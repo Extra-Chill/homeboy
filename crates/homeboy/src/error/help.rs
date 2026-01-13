@@ -38,7 +38,7 @@ pub fn explain(code: ErrorCode) -> ErrorHelp {
             summary: "Missing required configuration key".to_string(),
             details_schema: serde_json::json!({"key":"string","path":"string?"}),
             hints: vec![Hint {
-                message: "Check your config.json and project/server/component JSON files for missing required keys".to_string(),
+                message: "Check your project/server/component JSON files for missing required keys".to_string(),
             }],
         },
         ErrorCode::ConfigInvalidJson => ErrorHelp {

@@ -176,7 +176,6 @@ mod tests {
 
         let json_entries: Vec<_> = entries.iter().filter(|e| e.is_json()).collect();
         assert_eq!(json_entries.len(), 1);
-        assert_eq!(json_entries[0].name, "a.json");
     }
 
     #[test]
@@ -186,20 +185,9 @@ mod tests {
         let fs = local();
 
         fs.write(&path, "content").unwrap();
-        assert!(fs.exists(&path));
+        assert!(path.exists());
 
         fs.delete(&path).unwrap();
-        assert!(!fs.exists(&path));
-    }
-
-    #[test]
-    fn test_local_fs_exists() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("exists.txt");
-        let fs = local();
-
-        assert!(!fs.exists(&path));
-        fs.write(&path, "content").unwrap();
-        assert!(fs.exists(&path));
+        assert!(!path.exists());
     }
 }

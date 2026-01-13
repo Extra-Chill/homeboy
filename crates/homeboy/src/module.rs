@@ -3,7 +3,7 @@ use crate::files::{self, FileSystem};
 use crate::json;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Unified module manifest that can provide platform behavior AND/OR executable tools.
 /// All fields are optional - modules include only what they need.
@@ -23,6 +23,8 @@ pub struct ModuleManifest {
     pub author: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
 
     // Platform behavior
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -812,41 +814,6 @@ impl ModuleScope {
         settings
     }
 
-    pub fn effective_settings_with_defaults(
-        module: &ModuleManifest,
-        project: Option<&Project>,
-        component: Option<&Component>,
-    ) -> HashMap<String, serde_json::Value> {
-        let module_id = module.id.as_str();
-
-        let mut out: HashMap<String, serde_json::Value> = HashMap::new();
-        for setting in &module.settings {
-            let Some(default_value) = setting.default.clone() else {
-                continue;
-            };
-            out.insert(setting.id.clone(), default_value);
-        }
-
-        let project_settings = project
-            .and_then(|p| p.scoped_modules.as_ref())
-            .and_then(|m| m.get(module_id))
-            .map(|c| c.settings.clone())
-            .unwrap_or_default();
-        let component_settings = component
-            .and_then(|c| c.scoped_modules.as_ref())
-            .and_then(|m| m.get(module_id))
-            .map(|c| c.settings.clone())
-            .unwrap_or_default();
-
-        for settings in [&project_settings, &component_settings] {
-            for (key, value) in settings {
-                out.insert(key.clone(), value.clone());
-            }
-        }
-
-        out
-    }
-
     pub fn validate_project_compatibility(
         module: &ModuleManifest,
         project: &Project,
@@ -951,147 +918,318 @@ impl ModuleScope {
     }
 }
 
-mod settings {
-    use crate::error::{Error, Result};
-    use crate::module::ModuleManifest;
-    use serde_json::Value;
-    use std::collections::{BTreeMap, BTreeSet, HashMap};
+// ============================================================================
+// Module Lifecycle Operations
+// ============================================================================
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum SettingValueType {
-        String,
-        Number,
-        Bool,
-        Json,
-    }
+use crate::git;
+use std::process::Command;
 
-    pub struct ModuleSettingsValidator {
-        module_id: String,
-        allowed_ids: BTreeSet<String>,
-        expected_types: BTreeMap<String, SettingValueType>,
-    }
+#[derive(Debug, Clone)]
+pub struct InstallResult {
+    pub module_id: String,
+    pub url: String,
+    pub path: PathBuf,
+}
 
-    impl ModuleSettingsValidator {
-        pub fn new(module: &ModuleManifest) -> Self {
-            let allowed_ids: BTreeSet<String> =
-                module.settings.iter().map(|s| s.id.clone()).collect();
-            let expected_types: BTreeMap<String, SettingValueType> = module
-                .settings
-                .iter()
-                .map(|s| (s.id.clone(), expected_value_type(&s.setting_type)))
-                .collect();
+#[derive(Debug, Clone)]
+pub struct UpdateResult {
+    pub module_id: String,
+    pub url: String,
+    pub path: PathBuf,
+}
 
-            Self {
-                module_id: module.id.clone(),
-                allowed_ids,
-                expected_types,
-            }
+#[derive(Debug, Clone)]
+pub struct LinkResult {
+    pub module_id: String,
+    pub source_path: PathBuf,
+    pub symlink_path: PathBuf,
+}
+
+/// Slugify a string into a valid module ID.
+pub fn slugify_id(value: &str) -> Result<String> {
+    let mut output = String::new();
+    let mut last_was_dash = false;
+
+    for ch in value.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            output.push(lower);
+            last_was_dash = false;
+            continue;
         }
 
-        pub fn validate_settings_map(
-            &self,
-            scope: &str,
-            settings: &HashMap<String, Value>,
-        ) -> Result<()> {
-            for (key, value) in settings {
-                if !self.allowed_ids.contains(key) {
-                    return Err(Error::config_invalid_value(
-                        format!("module.settings.{key}"),
-                        Some(value.to_string()),
-                        format!(
-                            "Unknown setting '{key}' for module '{}' (from {scope} scope)",
-                            self.module_id
-                        ),
-                    ));
-                }
-
-                let expected = self
-                    .expected_types
-                    .get(key)
-                    .copied()
-                    .unwrap_or(SettingValueType::Json);
-
-                if !value_matches_type(value, expected) {
-                    let expected_label = match expected {
-                        SettingValueType::String => "string",
-                        SettingValueType::Number => "number",
-                        SettingValueType::Bool => "boolean",
-                        SettingValueType::Json => "json",
-                    };
-
-                    return Err(Error::config_invalid_value(
-                        format!("module.settings.{key}"),
-                        Some(value.to_string()),
-                        format!(
-                            "Invalid type for module setting '{key}' (from {scope} scope); expected '{expected_label}'",
-                        ),
-                    ));
-                }
-            }
-
-            Ok(())
-        }
-
-        pub fn validate_json_object(
-            &self,
-            scope: &str,
-            settings: &serde_json::Map<String, Value>,
-        ) -> Result<()> {
-            for (key, value) in settings {
-                if !self.allowed_ids.contains(key) {
-                    return Err(Error::config_invalid_value(
-                        format!("module.settings.{key}"),
-                        Some(value.to_string()),
-                        format!(
-                            "Unknown setting '{key}' for module '{}' (from {scope} scope)",
-                            self.module_id
-                        ),
-                    ));
-                }
-
-                let expected = self
-                    .expected_types
-                    .get(key)
-                    .copied()
-                    .unwrap_or(SettingValueType::Json);
-
-                if !value_matches_type(value, expected) {
-                    let expected_label = match expected {
-                        SettingValueType::String => "string",
-                        SettingValueType::Number => "number",
-                        SettingValueType::Bool => "boolean",
-                        SettingValueType::Json => "json",
-                    };
-
-                    return Err(Error::config_invalid_value(
-                        format!("module.settings.{key}"),
-                        Some(value.to_string()),
-                        format!(
-                            "Invalid type for module setting '{key}' (from {scope} scope); expected '{expected_label}'",
-                        ),
-                    ));
-                }
-            }
-
-            Ok(())
+        if !last_was_dash && !output.is_empty() {
+            output.push('-');
+            last_was_dash = true;
         }
     }
 
-    fn expected_value_type(setting_type: &str) -> SettingValueType {
-        match setting_type {
-            "string" => SettingValueType::String,
-            "number" => SettingValueType::Number,
-            "boolean" => SettingValueType::Bool,
-            _ => SettingValueType::Json,
+    while output.ends_with('-') {
+        output.pop();
+    }
+
+    if output.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "module_id",
+            "Unable to derive module id",
+            None,
+            None,
+        ));
+    }
+
+    Ok(output)
+}
+
+/// Derive a module ID from a git URL.
+pub fn derive_id_from_url(url: &str) -> Result<String> {
+    let trimmed = url.trim_end_matches('/');
+    let segment = trimmed
+        .split('/')
+        .next_back()
+        .unwrap_or(trimmed)
+        .trim_end_matches(".git");
+
+    slugify_id(segment)
+}
+
+/// Check if a git working directory is clean (no uncommitted changes).
+fn is_workdir_clean(path: &Path) -> bool {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output();
+
+    match output {
+        Ok(output) => output.status.success() && output.stdout.is_empty(),
+        Err(_) => false,
+    }
+}
+
+/// Install a module from a git repository URL.
+pub fn install(url: &str, id_override: Option<&str>) -> Result<InstallResult> {
+    let module_id = match id_override {
+        Some(id) => slugify_id(id)?,
+        None => derive_id_from_url(url)?,
+    };
+
+    let module_dir = paths::module(&module_id)?;
+    if module_dir.exists() {
+        return Err(Error::validation_invalid_argument(
+            "module_id",
+            format!("Module '{}' already exists", module_id),
+            Some(module_id),
+            None,
+        ));
+    }
+
+    files::ensure_app_dirs()?;
+    git::clone_repo(url, &module_dir)?;
+
+    // Write sourceUrl to the module's homeboy.json
+    let manifest_path = module_dir.join("homeboy.json");
+    if manifest_path.exists() {
+        let content = files::local().read(&manifest_path)?;
+        let mut manifest: serde_json::Value = json::from_str(&content)?;
+        manifest["sourceUrl"] = serde_json::Value::String(url.to_string());
+        let updated = json::to_string_pretty(&manifest)?;
+        files::local().write(&manifest_path, &updated)?;
+    }
+
+    // Auto-run setup if module defines a setup_command
+    if let Some(module) = load_module(&module_id) {
+        if module.runtime.as_ref().is_some_and(|r| r.setup_command.is_some()) {
+            let _ = run_setup(&module_id);
         }
     }
 
-    fn value_matches_type(value: &Value, expected: SettingValueType) -> bool {
-        match expected {
-            SettingValueType::String => value.is_string(),
-            SettingValueType::Number => value.is_number(),
-            SettingValueType::Bool => value.is_boolean(),
-            SettingValueType::Json => true,
+    Ok(InstallResult {
+        module_id,
+        url: url.to_string(),
+        path: module_dir,
+    })
+}
+
+/// Update an installed module by pulling latest changes.
+pub fn update(module_id: &str, force: bool) -> Result<UpdateResult> {
+    let module_dir = paths::module(module_id)?;
+    if !module_dir.exists() {
+        return Err(Error::module_not_found(module_id.to_string()));
+    }
+
+    // Linked modules are managed externally
+    if is_module_linked(module_id) {
+        return Err(Error::validation_invalid_argument(
+            "module_id",
+            format!("Module '{}' is linked. Update the source directory directly.", module_id),
+            Some(module_id.to_string()),
+            None,
+        ));
+    }
+
+    if !force && !is_workdir_clean(&module_dir) {
+        return Err(Error::validation_invalid_argument(
+            "module_id",
+            "Module has uncommitted changes; update may overwrite them. Use --force to proceed.",
+            Some(module_id.to_string()),
+            None,
+        ));
+    }
+
+    let module = load_module(module_id).ok_or_else(|| {
+        Error::module_not_found(module_id.to_string())
+    })?;
+
+    let source_url = module.source_url.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "module_id",
+            format!("Module '{}' has no sourceUrl. Reinstall with 'homeboy module install <url>'.", module_id),
+            Some(module_id.to_string()),
+            None,
+        )
+    })?;
+
+    git::pull_repo(&module_dir)?;
+
+    // Auto-run setup if module defines a setup_command
+    if let Some(module) = load_module(module_id) {
+        if module.runtime.as_ref().is_some_and(|r| r.setup_command.is_some()) {
+            let _ = run_setup(module_id);
         }
     }
+
+    Ok(UpdateResult {
+        module_id: module_id.to_string(),
+        url: source_url,
+        path: module_dir,
+    })
+}
+
+/// Uninstall a module by removing its directory.
+pub fn uninstall(module_id: &str, force: bool) -> Result<PathBuf> {
+    let module_dir = paths::module(module_id)?;
+    if !module_dir.exists() {
+        return Err(Error::module_not_found(module_id.to_string()));
+    }
+
+    if !force {
+        return Err(Error::validation_invalid_argument(
+            "force",
+            "This will permanently remove the module. Use --force to confirm.",
+            None,
+            None,
+        ));
+    }
+
+    std::fs::remove_dir_all(&module_dir).map_err(|e| {
+        Error::internal_io(e.to_string(), Some("remove module directory".to_string()))
+    })?;
+
+    Ok(module_dir)
+}
+
+/// Link a local module directory for development.
+pub fn link(source_path: &str, id_override: Option<&str>) -> Result<LinkResult> {
+    let source = Path::new(source_path);
+
+    // Resolve to absolute path
+    let source = if source.is_absolute() {
+        source.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| Error::internal_io(e.to_string(), Some("get current dir".to_string())))?
+            .join(source)
+    };
+
+    if !source.exists() {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            format!("Source path does not exist: {}", source.display()),
+            Some(source_path.to_string()),
+            None,
+        ));
+    }
+
+    // Validate homeboy.json exists
+    let manifest_path = source.join("homeboy.json");
+    if !manifest_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            format!("No homeboy.json found at {}", source.display()),
+            Some(source_path.to_string()),
+            None,
+        ));
+    }
+
+    // Read manifest to get module id if not provided
+    let manifest_content = files::local().read(&manifest_path)?;
+    let manifest: ModuleManifest = json::from_str(&manifest_content)?;
+
+    let module_id = match id_override {
+        Some(id) => slugify_id(id)?,
+        None => manifest.id.clone(),
+    };
+
+    if module_id.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "module_id",
+            "Module id is empty. Provide --id or ensure manifest has an id field.",
+            None,
+            None,
+        ));
+    }
+
+    let module_dir = paths::module(&module_id)?;
+    if module_dir.exists() {
+        return Err(Error::validation_invalid_argument(
+            "module_id",
+            format!("Module '{}' already exists at {}", module_id, module_dir.display()),
+            Some(module_id),
+            None,
+        ));
+    }
+
+    files::ensure_app_dirs()?;
+
+    // Create symlink
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&source, &module_dir).map_err(|e| {
+        Error::internal_io(e.to_string(), Some("create symlink".to_string()))
+    })?;
+
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&source, &module_dir).map_err(|e| {
+        Error::internal_io(e.to_string(), Some("create symlink".to_string()))
+    })?;
+
+    Ok(LinkResult {
+        module_id,
+        source_path: source,
+        symlink_path: module_dir,
+    })
+}
+
+/// Unlink a symlinked module (preserves source directory).
+pub fn unlink(module_id: &str) -> Result<PathBuf> {
+    let module_dir = paths::module(module_id)?;
+
+    if !module_dir.exists() {
+        return Err(Error::module_not_found(module_id.to_string()));
+    }
+
+    if !module_dir.is_symlink() {
+        return Err(Error::validation_invalid_argument(
+            "module_id",
+            format!("Module '{}' is not a symlink. Use `uninstall` to remove git-cloned modules.", module_id),
+            Some(module_id.to_string()),
+            None,
+        ));
+    }
+
+    // Remove the symlink (this does not delete the source directory)
+    std::fs::remove_file(&module_dir).map_err(|e| {
+        Error::internal_io(e.to_string(), Some("remove symlink".to_string()))
+    })?;
+
+    Ok(module_dir)
 }

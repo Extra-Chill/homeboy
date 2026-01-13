@@ -348,6 +348,14 @@ impl Error {
         )
     }
 
+    pub fn git_command_failed(message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorCode::GitCommandFailed,
+            message,
+            Value::Object(serde_json::Map::new()),
+        )
+    }
+
     pub fn config_missing_key(key: impl Into<String>, path: Option<String>) -> Self {
         let details = serde_json::to_value(ConfigMissingKeyDetails {
             key: key.into(),

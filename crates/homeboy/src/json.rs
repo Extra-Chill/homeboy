@@ -14,25 +14,10 @@ pub fn from_str<T: DeserializeOwned>(s: &str) -> Result<T> {
         .map_err(|e| Error::validation_invalid_json(e, Some("parse json".to_string())))
 }
 
-/// Serialize value to JSON string
-pub fn to_string<T: Serialize>(data: &T) -> Result<String> {
-    serde_json::to_string(data)
-        .map_err(|e| Error::internal_json(e.to_string(), Some("serialize json".to_string())))
-}
-
 /// Serialize value to pretty-printed JSON string
 pub fn to_string_pretty<T: Serialize>(data: &T) -> Result<String> {
     serde_json::to_string_pretty(data)
         .map_err(|e| Error::internal_json(e.to_string(), Some("serialize json".to_string())))
-}
-
-// === Payload Types ===
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpPayload<T> {
-    pub op: String,
-    pub data: T,
 }
 
 pub fn read_json_spec_to_string(spec: &str) -> Result<String> {
@@ -71,51 +56,6 @@ pub fn read_json_spec_to_string(spec: &str) -> Result<String> {
     Ok(spec.to_string())
 }
 
-pub fn read_json_from_piped_stdin() -> Result<Option<String>> {
-    use std::io::IsTerminal;
-
-    let mut stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return Ok(None);
-    }
-
-    let mut buf = String::new();
-    stdin
-        .read_to_string(&mut buf)
-        .map_err(|e| Error::internal_io(e.to_string(), Some("read stdin".to_string())))?;
-
-    if buf.trim().is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(buf))
-}
-
-pub fn read_json_input(json_spec: Option<&str>) -> Result<Option<String>> {
-    match json_spec {
-        Some(spec) => Ok(Some(read_json_spec_to_string(spec)?)),
-        None => read_json_from_piped_stdin(),
-    }
-}
-
-pub fn load_op_data<T: DeserializeOwned>(spec: &str, expected_op: &str) -> Result<T> {
-    let raw = read_json_spec_to_string(spec)?;
-
-    let payload: OpPayload<T> = serde_json::from_str(&raw)
-        .map_err(|e| Error::validation_invalid_json(e, Some("parse op payload".to_string())))?;
-
-    if payload.op != expected_op {
-        return Err(Error::validation_invalid_argument(
-            "op",
-            format!("Unexpected op '{}'", payload.op),
-            Some(expected_op.to_string()),
-            Some(vec![expected_op.to_string()]),
-        ));
-    }
-
-    Ok(payload.data)
-}
-
 // === JSON Pointer Operations ===
 
 pub fn set_json_pointer(root: &mut Value, pointer: &str, new_value: Value) -> Result<()> {
@@ -127,57 +67,6 @@ pub fn set_json_pointer(root: &mut Value, pointer: &str, new_value: Value) -> Re
 
     let parent = ensure_pointer_container(root, &parent_ptr)?;
     set_child(parent, &token, new_value)
-}
-
-pub fn remove_json_pointer(root: &mut Value, pointer: &str) -> Result<()> {
-    let pointer = normalize_pointer(pointer)?;
-    let Some((parent_ptr, token)) = split_parent_pointer(&pointer) else {
-        return Err(Error::validation_invalid_argument(
-            "pointer",
-            "Cannot remove the root JSON value",
-            None,
-            None,
-        ));
-    };
-
-    let Some(parent) = root.pointer_mut(&parent_ptr) else {
-        return Err(Error::validation_invalid_argument(
-            "pointer",
-            format!("JSON pointer parent path not found: {}", parent_ptr),
-            None,
-            None,
-        ));
-    };
-
-    remove_child(parent, &token)
-}
-
-/// RFC 7396 JSON Merge Patch: merge source into target.
-///
-/// - If source is an object, recursively merge each key into target
-/// - If a source value is null, remove that key from target
-/// - Otherwise, replace the target value with source value
-pub fn json_merge_patch(target: &mut Value, source: Value) {
-    if let Value::Object(source_map) = source {
-        if let Value::Object(target_map) = target {
-            for (key, value) in source_map {
-                if value.is_null() {
-                    target_map.remove(&key);
-                } else if value.is_object() {
-                    let entry = target_map
-                        .entry(key)
-                        .or_insert(Value::Object(serde_json::Map::new()));
-                    json_merge_patch(entry, value);
-                } else {
-                    target_map.insert(key, value);
-                }
-            }
-        } else {
-            *target = Value::Object(source_map);
-        }
-    } else {
-        *target = source;
-    }
 }
 
 fn normalize_pointer(pointer: &str) -> Result<String> {
@@ -295,32 +184,6 @@ fn set_child(parent: &mut Value, token: &str, value: Value) -> Result<()> {
             "jsonPointer",
             Some(value_type_name(parent).to_string()),
             "Cannot set child on non-container",
-        )),
-    }
-}
-
-fn remove_child(parent: &mut Value, token: &str) -> Result<()> {
-    match parent {
-        Value::Object(map) => {
-            map.remove(token);
-            Ok(())
-        }
-        Value::Array(arr) => {
-            let index = parse_index(token)?;
-            if index >= arr.len() {
-                return Err(Error::config_invalid_value(
-                    "arrayIndex",
-                    Some(index.to_string()),
-                    "Array index out of bounds",
-                ));
-            }
-            arr.remove(index);
-            Ok(())
-        }
-        _ => Err(Error::config_invalid_value(
-            "jsonPointer",
-            Some(value_type_name(parent).to_string()),
-            "Cannot remove child on non-container",
         )),
     }
 }

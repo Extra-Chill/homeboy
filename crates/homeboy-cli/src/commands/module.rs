@@ -298,63 +298,6 @@ fn slugify_module_id(value: &str) -> homeboy::Result<String> {
     Ok(output)
 }
 
-#[derive(Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ModuleInstallMetadata {
-    source_url: String,
-    #[serde(default)]
-    linked: bool,
-}
-
-fn install_metadata_path(module_id: &str) -> std::path::PathBuf {
-    module_path(module_id).join(".install.json")
-}
-
-fn write_install_metadata(module_id: &str, url: &str) -> homeboy::Result<()> {
-    let path = install_metadata_path(module_id);
-    let content = serde_json::to_string_pretty(&ModuleInstallMetadata {
-        source_url: url.to_string(),
-        linked: false,
-    })
-    .map_err(|err| {
-        homeboy::Error::internal_json(
-            err.to_string(),
-            Some("serialize module install metadata".to_string()),
-        )
-    })?;
-
-    fs::write(path, content).map_err(|err| {
-        homeboy::Error::internal_io(
-            err.to_string(),
-            Some("write module install metadata".to_string()),
-        )
-    })?;
-    Ok(())
-}
-
-fn read_install_metadata(module_id: &str) -> homeboy::Result<ModuleInstallMetadata> {
-    let path = install_metadata_path(module_id);
-    if !path.exists() {
-        return Err(homeboy::Error::other(format!(
-            "No .install.json found for module '{module_id}'. Reinstall it with `homeboy module install`.",
-        )));
-    }
-
-    let content = fs::read_to_string(path).map_err(|err| {
-        homeboy::Error::internal_io(
-            err.to_string(),
-            Some("read module install metadata".to_string()),
-        )
-    })?;
-
-    serde_json::from_str(&content).map_err(|err| {
-        homeboy::Error::internal_json(
-            err.to_string(),
-            Some("parse module install metadata".to_string()),
-        )
-    })
-}
-
 fn derive_module_id_from_url(url: &str) -> homeboy::Result<String> {
     let trimmed = url.trim_end_matches('/');
     let segment = trimmed
@@ -419,7 +362,27 @@ fn install_module(url: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
         return Err(homeboy::Error::other("git clone failed".to_string()));
     }
 
-    write_install_metadata(&module_id, url)?;
+    // Write sourceUrl to the module's homeboy.json
+    let manifest_path = module_dir.join("homeboy.json");
+    if manifest_path.exists() {
+        let content = fs::read_to_string(&manifest_path).map_err(|e| {
+            homeboy::Error::internal_io(e.to_string(), Some("read module manifest".to_string()))
+        })?;
+
+        let mut manifest: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+            homeboy::Error::config_invalid_json(manifest_path.to_string_lossy().to_string(), e)
+        })?;
+
+        manifest["sourceUrl"] = serde_json::Value::String(url.to_string());
+
+        let updated = serde_json::to_string_pretty(&manifest).map_err(|e| {
+            homeboy::Error::internal_json(e.to_string(), Some("serialize manifest".to_string()))
+        })?;
+
+        fs::write(&manifest_path, updated).map_err(|e| {
+            homeboy::Error::internal_io(e.to_string(), Some("write module manifest".to_string()))
+        })?;
+    }
 
     // Auto-run setup if module defines a setup_command
     if let Some(module) = load_module(&module_id) {
@@ -450,6 +413,13 @@ fn update_module(module_id: &str, force: bool) -> CmdResult<ModuleOutput> {
         )));
     }
 
+    // Check if module is linked (symlink) - linked modules are managed externally
+    if is_module_linked(module_id) {
+        return Err(homeboy::Error::other(format!(
+            "Module '{module_id}' is linked. Update the source directory directly.",
+        )));
+    }
+
     if !is_git_workdir_clean(&module_dir) {
         confirm_dangerous_action(
             force,
@@ -457,7 +427,18 @@ fn update_module(module_id: &str, force: bool) -> CmdResult<ModuleOutput> {
         )?;
     }
 
-    let metadata = read_install_metadata(module_id)?;
+    // Load module to get sourceUrl from manifest
+    let module = load_module(module_id).ok_or_else(|| {
+        homeboy::Error::other(format!(
+            "Module '{module_id}' not found or invalid manifest"
+        ))
+    })?;
+
+    let source_url = module.source_url.ok_or_else(|| {
+        homeboy::Error::other(format!(
+            "Module '{module_id}' has no sourceUrl. Reinstall with 'homeboy module install <url>'."
+        ))
+    })?;
 
     let status = Command::new("git")
         .args(["pull", "--ff-only"])
@@ -486,7 +467,7 @@ fn update_module(module_id: &str, force: bool) -> CmdResult<ModuleOutput> {
     Ok((
         ModuleOutput::Update {
             module_id: module_id.to_string(),
-            url: metadata.source_url,
+            url: source_url,
             path: module_dir.to_string_lossy().to_string(),
         },
         0,
@@ -601,25 +582,6 @@ fn link_module(path: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
     #[cfg(windows)]
     std::os::windows::fs::symlink_dir(&source_path, &module_dir).map_err(|e| {
         homeboy::Error::internal_io(e.to_string(), Some("create symlink".to_string()))
-    })?;
-
-    // Write install metadata with linked: true
-    let metadata_path = module_dir.join(".install.json");
-    let metadata = ModuleInstallMetadata {
-        source_url: source_path.to_string_lossy().to_string(),
-        linked: true,
-    };
-    let metadata_content = serde_json::to_string_pretty(&metadata).map_err(|e| {
-        homeboy::Error::internal_json(
-            e.to_string(),
-            Some("serialize module install metadata".to_string()),
-        )
-    })?;
-    fs::write(&metadata_path, metadata_content).map_err(|e| {
-        homeboy::Error::internal_io(
-            e.to_string(),
-            Some("write module install metadata".to_string()),
-        )
     })?;
 
     Ok((

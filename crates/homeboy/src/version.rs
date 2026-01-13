@@ -1,9 +1,13 @@
+use crate::changelog;
+use crate::component::{self, VersionTarget};
 use crate::files::{self, FileSystem};
 use crate::json::{self, set_json_pointer};
 use crate::module::{load_module, ModuleManifest};
 use crate::error::{Error, Result};
 use regex::Regex;
+use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 

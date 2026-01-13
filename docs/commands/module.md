@@ -86,9 +86,8 @@ Executes an action defined in the module manifest.
 
 Homeboy builds an **effective settings** map for each module by merging settings across scopes, in order (later scopes override earlier ones):
 
-1. App (`homeboy.json`): `installedModules.<moduleId>.settings`
-2. Project (`projects/<projectId>.json`): `modules.<moduleId>.settings`
-3. Component (`components/<componentId>.json`): `modules.<moduleId>.settings`
+1. Project (`projects/<projectId>.json`): `scopedModules.<moduleId>.settings`
+2. Component (`components/<componentId>.json`): `scopedModules.<moduleId>.settings`
 
 When running a module, Homeboy passes an execution context via environment variables:
 
@@ -102,7 +101,7 @@ Modules can define additional environment variables via `runtime.env` in their m
 
 Module settings validation currently happens during module execution (and may also be checked by other commands). There is no dedicated validation-only command in the CLI.
 
-`homeboy module run` requires the module to be present in app config (`homeboy.json`) under `installedModules` (i.e., installed/linked and recorded).
+`homeboy module run` requires the module to be installed/linked under the Homeboy modules directory (discovered by scanning `<config dir>/homeboy/modules/<moduleId>/homeboy.json`). There is no separate “installedModules in global config” requirement.
 
 ## Runtime Configuration
 
@@ -129,7 +128,7 @@ Executable modules define their runtime behavior in their module manifest (`modu
 
 ## JSON output
 
-> Note: all command output is wrapped in the global JSON envelope described in the [JSON output contract](../json-output/json-output-contract.md). `homeboy module` returns a `ModuleOutput` object as the `data` payload.
+> Note: all command output is wrapped in the global JSON envelope described in the [JSON output contract](../json-output/json-output-contract.md). `homeboy module` returns a `ModuleOutput` object as `data`.
 
 `ModuleOutput`:
 
@@ -147,7 +146,7 @@ Module entry (`modules[]`):
 - `runtime`: `executable` (has runtime config) or `platform` (no runtime config)
 - `compatible` (with optional `--project`)
 - `ready` (runtime readiness based on `readyCheck`)
-- `configured` (whether the module is present in `homeboy.json` under `installedModules`)
+- `configured`: currently always `true` for discovered modules (reserved for future richer config state)
 
 ## Exit code
 

@@ -70,7 +70,10 @@ Configuration and state live under the OS config directory (from `dirs::config_d
 
 Common paths:
 
-- `homeboy.json`
+- `projects/<id>.json`, `servers/<id>.json`, and `components/<id>.json` under the Homeboy config root
+- `modules/<moduleId>/homeboy.json` (module manifest)
+
+(There is no separate global `homeboy.json` config file in the current CLI implementation.)
 - `projects/`
 - `servers/`
 - `components/`

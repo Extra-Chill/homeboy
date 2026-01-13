@@ -1,6 +1,6 @@
 # Embedded docs: topic resolution and keys
 
-Homeboy embeds markdown files from `homeboy-cli/docs/` into the CLI binary at build time.
+Homeboy embeds markdown files from `homeboy-core/docs/` into the CLI binary at build time.
 
 In addition, `homeboy docs` reads documentation provided by installed modules from:
 
@@ -12,15 +12,15 @@ Module docs use the same key format as embedded docs (relative path within the m
 
 Embedded documentation keys are derived from markdown file paths:
 
-- Root: `homeboy-cli/docs/`
-- Key: relative path from `homeboy-cli/docs/`, with OS separators normalized to `/`
+- Root: `homeboy-core/docs/`
+- Key: relative path from `homeboy-core/docs/`, with OS separators normalized to `/`
 - Key: `.md` extension removed
 
 Examples:
 
-- `homeboy-cli/docs/index.md` → key `index`
-- `homeboy-cli/docs/changelog.md` → key `changelog`
-- `homeboy-cli/docs/commands/docs.md` → key `commands/docs`
+- `homeboy-core/docs/index.md` → key `index`
+- `homeboy-core/docs/changelog.md` → key `changelog`
+- `homeboy-core/docs/commands/docs.md` → key `commands/docs`
 
 ## `homeboy docs <topic...>` normalization
 
