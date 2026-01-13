@@ -38,15 +38,20 @@ pub fn resolve_effective_settings(
 }
 
 pub fn resolve_changelog_path(component: &ComponentConfiguration) -> Result<PathBuf> {
-    if let Some(target) = component
+    let target = component
         .changelog_targets
         .as_ref()
         .and_then(|targets| targets.first())
-    {
-        return resolve_target_path(&component.local_path, &target.file);
-    }
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "component.changelogTargets",
+                "No changelog targets configured for component. Set component.changelogTargets[0].file".to_string(),
+                None,
+                None,
+            )
+        })?;
 
-    autodetect_changelog_path(&component.local_path)
+    resolve_target_path(&component.local_path, &target.file)
 }
 
 fn resolve_target_path(local_path: &str, file: &str) -> Result<PathBuf> {
@@ -57,44 +62,6 @@ fn resolve_target_path(local_path: &str, file: &str) -> Result<PathBuf> {
     };
 
     Ok(path)
-}
-
-fn autodetect_changelog_path(local_path: &str) -> Result<PathBuf> {
-    let candidates = ["CHANGELOG.md", "docs/changelog.md"];
-    let mut hits = Vec::new();
-
-    for rel in candidates {
-        let path = Path::new(local_path).join(rel);
-        if path.exists() {
-            hits.push(path);
-        }
-    }
-
-    match hits.len() {
-        1 => Ok(hits.remove(0)),
-        0 => Err(Error::validation_invalid_argument(
-            "component.changelogTargets",
-            format!(
-                "No changelog file found for component at '{}'. Create CHANGELOG.md (preferred) or docs/changelog.md, or set component.changelogTargets[0].file",
-                local_path
-            ),
-            None,
-            None,
-        )),
-        _ => Err(Error::validation_invalid_argument(
-            "component.changelogTargets[0].file",
-            format!(
-                "Multiple changelog files found for component at '{}': {}. Set component.changelogTargets[0].file to disambiguate.",
-                local_path,
-                hits.iter()
-                    .map(|p| p.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            None,
-            None,
-        )),
-    }
 }
 
 pub fn add_next_section_item(

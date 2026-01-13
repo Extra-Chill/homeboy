@@ -94,6 +94,48 @@ impl ApiClient {
         parse_json_response(response)
     }
 
+    /// Makes a PUT request with JSON body.
+    pub fn put(&self, endpoint: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let mut request = self.client.put(&url).json(body);
+
+        if let Some(header) = self.resolve_auth_header()? {
+            let (name, value) = parse_header(&header)?;
+            request = request.header(name, value);
+        }
+
+        let response = request.send().map_err(http_error)?;
+        parse_json_response(response)
+    }
+
+    /// Makes a PATCH request with JSON body.
+    pub fn patch(&self, endpoint: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let mut request = self.client.patch(&url).json(body);
+
+        if let Some(header) = self.resolve_auth_header()? {
+            let (name, value) = parse_header(&header)?;
+            request = request.header(name, value);
+        }
+
+        let response = request.send().map_err(http_error)?;
+        parse_json_response(response)
+    }
+
+    /// Makes a DELETE request.
+    pub fn delete(&self, endpoint: &str) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let mut request = self.client.delete(&url);
+
+        if let Some(header) = self.resolve_auth_header()? {
+            let (name, value) = parse_header(&header)?;
+            request = request.header(name, value);
+        }
+
+        let response = request.send().map_err(http_error)?;
+        parse_json_response(response)
+    }
+
     /// Makes a POST request without auth (for login flows).
     pub fn post_unauthenticated(&self, endpoint: &str, body: &Value) -> Result<Value> {
         let url = format!("{}{}", self.base_url, endpoint);

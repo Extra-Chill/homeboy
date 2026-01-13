@@ -18,8 +18,8 @@ mod commands;
 mod docs;
 
 use commands::{
-    auth, build, changelog, cli, component, config, context, db, deploy, doctor, error, file, git,
-    init, logs, module, project, server, ssh, version,
+    api, auth, build, changelog, cli, component, config, context, db, deploy, doctor, error, file,
+    git, init, logs, module, project, server, ssh, version,
 };
 use homeboy_core::module::load_all_modules;
 
@@ -80,6 +80,8 @@ enum Commands {
     Error(error::ErrorArgs),
     /// Authenticate with a project's API
     Auth(auth::AuthArgs),
+    /// Make API requests to a project
+    Api(api::ApiArgs),
     /// List available commands (alias for --help)
     List,
 }

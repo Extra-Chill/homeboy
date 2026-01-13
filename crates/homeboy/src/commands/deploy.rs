@@ -531,7 +531,7 @@ fn parse_component_version(
 ) -> Option<String> {
     let pattern_str = match pattern {
         Some(p) => p.replace("\\\\", "\\"),
-        None => default_pattern_for_file(filename, modules),
+        None => default_pattern_for_file(filename, modules)?,
     };
 
     parse_version(content, &pattern_str)

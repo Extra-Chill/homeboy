@@ -43,30 +43,17 @@ pub fn replace_versions(
     Some((replaced, count))
 }
 
-/// Get default version pattern based on file extension (built-in patterns only).
-fn builtin_pattern_for_file(filename: &str) -> &'static str {
-    if filename.ends_with(".toml") {
-        r#"version\s*=\s*"(\d+\.\d+\.\d+)""#
-    } else if filename.ends_with(".json") {
-        r#""version"\s*:\s*"(\d+\.\d+\.\d+)""#
-    } else {
-        r"(\d+\.\d+\.\d+)"
-    }
-}
-
-/// Get default version pattern, checking modules first for platform-specific patterns.
-pub fn default_pattern_for_file(filename: &str, modules: &[String]) -> String {
-    // Check modules for matching extension pattern
+/// Get version pattern from module configuration.
+/// Returns None if no module defines a pattern for this file type.
+pub fn default_pattern_for_file(filename: &str, modules: &[String]) -> Option<String> {
     for module_id in modules {
         if let Some(module) = load_module(module_id) {
             if let Some(pattern) = find_version_pattern_in_module(&module, filename) {
-                return pattern;
+                return Some(pattern);
             }
         }
     }
-
-    // Fall back to built-in patterns
-    builtin_pattern_for_file(filename).to_string()
+    None
 }
 
 fn find_version_pattern_in_module(module: &ModuleManifest, filename: &str) -> Option<String> {

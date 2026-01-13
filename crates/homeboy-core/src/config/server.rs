@@ -53,8 +53,8 @@ impl ConfigImportable for ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn keychain_service_name(&self) -> String {
-        format!("com.extrachill.homeboy.ssh.{}", self.id)
+    pub fn keychain_service_name(&self, prefix: &str) -> String {
+        format!("{}.{}", prefix, self.id)
     }
 
     pub fn is_valid(&self) -> bool {

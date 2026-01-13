@@ -20,6 +20,14 @@ fn is_default_local_db_port(v: &u16) -> bool {
     *v == 33306
 }
 
+fn default_keychain_prefix() -> String {
+    "com.extrachill.homeboy.ssh".to_string()
+}
+
+fn is_default_keychain_prefix(v: &String) -> bool {
+    v == "com.extrachill.homeboy.ssh"
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -46,6 +54,12 @@ pub struct AppConfig {
         skip_serializing_if = "is_default_local_db_port"
     )]
     pub default_local_db_port: u16,
+
+    #[serde(
+        default = "default_keychain_prefix",
+        skip_serializing_if = "is_default_keychain_prefix"
+    )]
+    pub keychain_service_prefix: String,
 }
 
 impl Default for AppConfig {
@@ -57,6 +71,7 @@ impl Default for AppConfig {
             default_cli_path: None,
             default_database_host: default_database_host(),
             default_local_db_port: default_local_db_port(),
+            keychain_service_prefix: default_keychain_prefix(),
         }
     }
 }

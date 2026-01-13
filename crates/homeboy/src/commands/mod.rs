@@ -4,6 +4,7 @@ pub(crate) struct GlobalArgs {
     pub(crate) dry_run: bool,
 }
 
+pub mod api;
 pub mod auth;
 pub mod build;
 pub mod changelog;
@@ -105,6 +106,9 @@ pub(crate) fn run_json(
         ),
         crate::Commands::Auth(args) => homeboy_core::output::map_cmd_result_to_json(
             auth::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),
+        ),
+        crate::Commands::Api(args) => homeboy_core::output::map_cmd_result_to_json(
+            api::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),
         ),
         crate::Commands::List => {
             let err = homeboy_core::Error::other("List uses raw output mode".to_string());
