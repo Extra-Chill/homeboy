@@ -11,6 +11,7 @@ Homeboy is a config-driven automation engine for development and deployment auto
 - JSON output envelope: [JSON output contract](json-output/json-output-contract.md)
 - Embedded docs behavior: [Embedded docs topic resolution](embedded-docs/embedded-docs-topic-resolution.md)
 - Changelog content: [Changelog](changelog.md)
+
 ## Configuration
 
 Configuration and state live under the OS config directory (`dirs::config_dir()/homeboy/`):

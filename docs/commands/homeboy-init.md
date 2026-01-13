@@ -17,7 +17,7 @@ Run:
 ### If `managed: false` (UNMANAGED REPO)
 
 This is a NEW repo. Skip to "New Project/Component Initialization" below.
-Do NOT run doctor scan, project list, or component list - they are irrelevant for unmanaged repos.
+Do NOT run project list or component list - they are irrelevant for unmanaged repos.
 
 ### If `managed: true` (EXISTING REPO)
 
@@ -63,11 +63,10 @@ If unclear which scope applies, ask the user.
 
 For managed repos (`managed: true`), verify and repair existing configuration:
 
-1. `homeboy doctor scan --scope all --fail-on error`
-2. `homeboy component show <matchedComponentId>`
-3. If issues found:
+1. `homeboy component show <matchedComponentId>`
+2. If issues found:
    - `homeboy component set <componentId> ...` to fix missing/incorrect values
-4. Verify build (if configured):
+3. Verify build (if configured):
    - `homeboy build <componentId>`
 
 ---
@@ -77,7 +76,7 @@ For managed repos (`managed: true`), verify and repair existing configuration:
 Report what was initialized and suggest next steps:
 
 - **Unmanaged → Created project/component**: `homeboy context` now shows `managed: true`
-- **Managed → Verified/repaired**: Doctor scan passes, component commands succeed
+- **Managed → Verified/repaired**: component commands succeed
 
 ### Suggested next steps
 

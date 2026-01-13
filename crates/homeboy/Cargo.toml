@@ -24,7 +24,6 @@ shellexpand = "3.1"
 uuid.workspace = true
 atty = "0.2"
 regex = "1"
-arboard = "3"
 
 [dev-dependencies]
 tempfile = "3.14"

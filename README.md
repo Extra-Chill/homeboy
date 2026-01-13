@@ -51,16 +51,13 @@ See [CLI documentation](docs/index.md) for the authoritative command list, topic
 A few common entrypoints:
 
 ```bash
-homeboy project list
-homeboy project create "My Project" example.com --module wordpress
-homeboy project set <projectId> --domain example.com --server-id <serverId>
-homeboy project repair <projectId>
-homeboy module list
-homeboy deploy <projectId> --dry-run --all
-homeboy ssh <projectId>
-homeboy module list
+homeboy list
 homeboy docs --list
-homeboy docs commands/deploy
+homeboy docs commands/project
+homeboy project list
+homeboy module list
+homeboy ssh <projectId>   # interactive passthrough
+homeboy logs show <projectId> <path> --follow   # interactive passthrough
 ```
 
 ## Configuration

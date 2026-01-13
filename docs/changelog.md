@@ -90,7 +90,6 @@ All notable changes to Homeboy CLI are documented in this file.
 
 - added overlooked config command back in
 - docs updated
-- doctor refactor
 - module standardized data contract
 
 ## 0.2.4
@@ -108,7 +107,7 @@ All notable changes to Homeboy CLI are documented in this file.
 - Add scan_json_dir<T>() helper to json module for directory scanning
 - Refactor config list functions to use centralized json helpers
 - Refactor module loading to use read_json_file_typed()
-- Refactor doctor to use read_json_file() internally
+- Internal refactor
 
 ## 0.2.1
 
@@ -118,7 +117,6 @@ All notable changes to Homeboy CLI are documented in this file.
 ## 0.2.0
 
 ### Improvements
-- **Doctor**: Add `homeboy doctor` / `homeboy_core::doctor` to scan config JSON with typed schema validation (`SCHEMA_DESERIALIZE_ERROR`), unknown-key warnings (`UNKNOWN_KEYS`), and cross-reference checks (`BROKEN_REFERENCE`).
 - **Config schema**: Introduce `homeboy config` command group + `ConfigKeys` schema listing to standardize how config keys are described/exposed.
 - **Config records**: Standardize config identity via `slugify_id()` + `SlugIdentifiable::slug_id()` and enforce id/name consistency in `ConfigManager::save_server()` and `ConfigManager::save_component()`.
 - **App config**: Extend `AppConfig` with `installedModules: HashMap<String, InstalledModuleConfig>`; each module stores `settings: HashMap<String, Value>` and optional `sourceUrl`.

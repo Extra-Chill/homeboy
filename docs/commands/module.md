@@ -73,7 +73,7 @@ When running a module, Homeboy passes an execution context via environment varia
 
 Modules can define additional environment variables via `runtime.env` in their manifest.
 
-`homeboy doctor scan` validates each scope's `settings` object against the module's manifest.
+Module settings validation currently happens during module execution (and may also be checked by other commands). There is no dedicated validation-only command in the CLI.
 
 `homeboy module run` requires the module to be present in app config (`homeboy.json`) under `installedModules` (i.e., installed/linked and recorded).
 

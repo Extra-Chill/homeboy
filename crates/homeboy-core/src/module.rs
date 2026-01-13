@@ -247,10 +247,6 @@ pub struct ActionConfig {
     #[serde(rename = "type")]
     pub action_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub builtin: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub column: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
@@ -346,4 +342,386 @@ pub mod exec_context {
 
     /// Current version of the exec context protocol.
     pub const CURRENT_VERSION: &str = "1";
+}
+
+// ============================================================================
+// Module Execution API
+// ============================================================================
+
+use crate::config::{ConfigManager, ModuleScope, ProjectConfiguration};
+use crate::http::ApiClient;
+use crate::ssh::execute_local_command_interactive;
+use crate::template;
+use crate::Result;
+use std::collections::HashMap;
+
+/// Result of executing a module.
+pub struct ModuleRunResult {
+    pub exit_code: i32,
+    pub project_id: Option<String>,
+}
+
+/// Execute a module with optional project context.
+pub fn run_module(
+    module_id: &str,
+    project_id: Option<&str>,
+    component_id: Option<&str>,
+    inputs: Vec<(String, String)>,
+    args: Vec<String>,
+) -> Result<ModuleRunResult> {
+    let module = load_module(module_id)
+        .ok_or_else(|| crate::Error::other(format!("Module '{}' not found", module_id)))?;
+
+    let runtime = module.runtime.as_ref().ok_or_else(|| {
+        crate::Error::other(format!(
+            "Module '{}' does not have a runtime configuration and cannot be executed",
+            module_id
+        ))
+    })?;
+
+    let run_command = runtime.run_command.as_ref().ok_or_else(|| {
+        crate::Error::other(format!(
+            "Module '{}' does not have a runCommand defined",
+            module_id
+        ))
+    })?;
+
+    let module_path = module
+        .module_path
+        .as_ref()
+        .ok_or_else(|| crate::Error::other("module_path not set".to_string()))?;
+
+    let input_values: HashMap<String, String> = inputs.into_iter().collect();
+
+    // Build args string from inputs and trailing args
+    let mut argv = Vec::new();
+    for input in &module.inputs {
+        if let Some(value) = input_values.get(&input.id) {
+            if !value.is_empty() {
+                argv.push(input.arg.clone());
+                argv.push(value.clone());
+            }
+        }
+    }
+    argv.extend(args);
+    let args_str = argv.join(" ");
+
+    // Check if project context is required
+    let requires_project = module.requires.is_some()
+        || template::is_present(run_command, "projectId")
+        || template::is_present(run_command, "sitePath")
+        || template::is_present(run_command, "cliPath")
+        || template::is_present(run_command, "domain");
+
+    let mut resolved_project_id: Option<String> = None;
+    let mut resolved_component_id: Option<String> = None;
+    let mut project_config: Option<ProjectConfiguration> = None;
+    let mut component_config = None;
+
+    if requires_project {
+        let pid = project_id.ok_or_else(|| {
+            crate::Error::other("This module requires a project; pass --project <id>".to_string())
+        })?;
+
+        let loaded_project = ConfigManager::load_project(pid)?;
+        ModuleScope::validate_project_compatibility(&module, &loaded_project)?;
+
+        resolved_component_id =
+            ModuleScope::resolve_component_scope(&module, &loaded_project, component_id)?;
+
+        if let Some(ref comp_id) = resolved_component_id {
+            component_config = Some(ConfigManager::load_component(comp_id).map_err(|_| {
+                crate::Error::config(format!(
+                    "Component '{}' required by module '{}' is not configured",
+                    comp_id, module.id
+                ))
+            })?);
+        }
+
+        resolved_project_id = Some(pid.to_string());
+        project_config = Some(loaded_project);
+    }
+
+    let effective_settings = ModuleScope::effective_settings(
+        module_id,
+        project_config.as_ref(),
+        component_config.as_ref(),
+    );
+
+    let settings_json =
+        serde_json::to_string(&effective_settings).map_err(|e| crate::Error::other(e.to_string()))?;
+
+    // Build template variables
+    let entrypoint = runtime.entrypoint.clone().unwrap_or_default();
+    let domain: String;
+    let site_path: String;
+
+    let vars: Vec<(&str, &str)> = if let Some(ref proj) = project_config {
+        domain = proj.domain.clone();
+        site_path = proj.base_path.clone().unwrap_or_default();
+
+        vec![
+            ("modulePath", module_path.as_str()),
+            ("entrypoint", entrypoint.as_str()),
+            ("args", args_str.as_str()),
+            ("projectId", resolved_project_id.as_deref().unwrap_or("")),
+            ("domain", domain.as_str()),
+            ("sitePath", site_path.as_str()),
+        ]
+    } else {
+        vec![
+            ("modulePath", module_path.as_str()),
+            ("entrypoint", entrypoint.as_str()),
+            ("args", args_str.as_str()),
+        ]
+    };
+
+    let command = template::render(run_command, &vars);
+
+    // Build environment with module-defined env vars + exec context
+    let mut env = build_exec_env(
+        module_id,
+        resolved_project_id.as_deref(),
+        resolved_component_id.as_deref(),
+        &settings_json,
+    );
+    if let Some(ref module_env) = runtime.env {
+        for (key, value) in module_env {
+            let rendered_value = template::render(value, &vars);
+            env.push((key.clone(), rendered_value));
+        }
+    }
+    let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    let exit_code = execute_local_command_interactive(&command, Some(module_path), Some(&env_pairs));
+
+    Ok(ModuleRunResult {
+        exit_code,
+        project_id: resolved_project_id,
+    })
+}
+
+/// Execute a module action (API call).
+pub fn run_action(
+    module_id: &str,
+    action_id: &str,
+    project_id: Option<&str>,
+    data: Option<&str>,
+) -> Result<serde_json::Value> {
+    let module = load_module(module_id)
+        .ok_or_else(|| crate::Error::other(format!("Module '{}' not found", module_id)))?;
+
+    if module.actions.is_empty() {
+        return Err(crate::Error::other(format!(
+            "Module '{}' has no actions defined",
+            module_id
+        )));
+    }
+
+    let action = module
+        .actions
+        .iter()
+        .find(|a| a.id == action_id)
+        .ok_or_else(|| {
+            crate::Error::other(format!(
+                "Action '{}' not found in module '{}'",
+                action_id, module_id
+            ))
+        })?;
+
+    let selected: Vec<serde_json::Value> = if let Some(data_str) = data {
+        serde_json::from_str(data_str)
+            .map_err(|e| crate::Error::other(format!("Invalid JSON data: {}", e)))?
+    } else {
+        Vec::new()
+    };
+
+    match action.action_type.as_str() {
+        "api" => {
+            let pid = project_id
+                .ok_or_else(|| crate::Error::other("--project is required for API actions"))?;
+
+            let project = ConfigManager::load_project(pid)?;
+            let client = ApiClient::new(pid, &project.api)?;
+
+            if action.requires_auth.unwrap_or(false) && !client.is_authenticated() {
+                return Err(crate::Error::other(
+                    "Not authenticated. Run 'homeboy auth login --project <id>' first.",
+                ));
+            }
+
+            let endpoint = action
+                .endpoint
+                .as_ref()
+                .ok_or_else(|| crate::Error::other("API action missing 'endpoint'"))?;
+
+            let method = action.method.as_deref().unwrap_or("POST");
+            let settings = get_module_settings(module_id, Some(pid))?;
+            let payload = interpolate_action_payload(action, &selected, &settings)?;
+
+            if method == "GET" {
+                client.get(endpoint)
+            } else {
+                client.post(endpoint, &payload)
+            }
+        }
+        other => Err(crate::Error::other(format!("Unknown action type: {}", other))),
+    }
+}
+
+/// Get effective module settings from project config.
+pub fn get_module_settings(
+    module_id: &str,
+    project_id: Option<&str>,
+) -> Result<HashMap<String, serde_json::Value>> {
+    let mut settings = HashMap::new();
+
+    if let Some(pid) = project_id {
+        if let Ok(project) = ConfigManager::load_project(pid) {
+            if let Some(scoped) = project.scoped_modules.as_ref() {
+                if let Some(module_scope) = scoped.get(module_id) {
+                    for (k, v) in &module_scope.settings {
+                        settings.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(settings)
+}
+
+/// Build execution environment variables for a module.
+pub fn build_exec_env(
+    module_id: &str,
+    project_id: Option<&str>,
+    component_id: Option<&str>,
+    settings_json: &str,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        (exec_context::VERSION.to_string(), exec_context::CURRENT_VERSION.to_string()),
+        (exec_context::MODULE_ID.to_string(), module_id.to_string()),
+        (exec_context::SETTINGS_JSON.to_string(), settings_json.to_string()),
+    ];
+
+    if let Some(pid) = project_id {
+        env.push((exec_context::PROJECT_ID.to_string(), pid.to_string()));
+    }
+
+    if let Some(cid) = component_id {
+        env.push((exec_context::COMPONENT_ID.to_string(), cid.to_string()));
+    }
+
+    env
+}
+
+/// Check if a module is ready (setup complete).
+pub fn is_module_ready(module: &ModuleManifest) -> bool {
+    let Some(runtime) = module.runtime.as_ref() else {
+        return true;
+    };
+
+    if let Some(ref ready_check) = runtime.ready_check {
+        if let Some(ref module_path) = module.module_path {
+            let entrypoint = runtime.entrypoint.clone().unwrap_or_default();
+            let vars: Vec<(&str, &str)> = vec![
+                ("modulePath", module_path.as_str()),
+                ("entrypoint", entrypoint.as_str()),
+            ];
+            let command = template::render(ready_check, &vars);
+            let exit_code = execute_local_command_interactive(&command, Some(module_path), None);
+            return exit_code == 0;
+        }
+        return false;
+    }
+
+    true
+}
+
+/// Check if a module is compatible with a project.
+pub fn is_module_compatible(module: &ModuleManifest, project: Option<&ProjectConfiguration>) -> bool {
+    let Some(project) = project else {
+        return true;
+    };
+
+    let Some(ref requires) = module.requires else {
+        return true;
+    };
+
+    for required_module in &requires.modules {
+        if !project.has_module(required_module) {
+            return false;
+        }
+    }
+
+    for component in &requires.components {
+        if !project.component_ids.contains(component) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Check if a module is a symlink (linked, not installed).
+pub fn is_module_linked(module_id: &str) -> bool {
+    AppPaths::module(module_id)
+        .map(|p| p.is_symlink())
+        .unwrap_or(false)
+}
+
+fn interpolate_action_payload(
+    action: &ActionConfig,
+    selected: &[serde_json::Value],
+    settings: &HashMap<String, serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let payload_template = match &action.payload {
+        Some(p) => p,
+        None => return Ok(serde_json::Value::Object(serde_json::Map::new())),
+    };
+
+    let mut result = serde_json::Map::new();
+    for (key, value) in payload_template {
+        let interpolated = interpolate_payload_value(value, selected, settings)?;
+        result.insert(key.clone(), interpolated);
+    }
+
+    Ok(serde_json::Value::Object(result))
+}
+
+fn interpolate_payload_value(
+    value: &serde_json::Value,
+    selected: &[serde_json::Value],
+    settings: &HashMap<String, serde_json::Value>,
+) -> Result<serde_json::Value> {
+    match value {
+        serde_json::Value::String(template) => {
+            if template == "{{selected}}" {
+                Ok(serde_json::Value::Array(selected.to_vec()))
+            } else if template.starts_with("{{settings.") && template.ends_with("}}") {
+                let key = &template[11..template.len() - 2];
+                Ok(settings
+                    .get(key)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::String(String::new())))
+            } else {
+                Ok(serde_json::Value::String(template.clone()))
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            let interpolated: Result<Vec<serde_json::Value>> = arr
+                .iter()
+                .map(|v| interpolate_payload_value(v, selected, settings))
+                .collect();
+            Ok(serde_json::Value::Array(interpolated?))
+        }
+        serde_json::Value::Object(obj) => {
+            let mut result = serde_json::Map::new();
+            for (k, v) in obj {
+                result.insert(k.clone(), interpolate_payload_value(v, selected, settings)?);
+            }
+            Ok(serde_json::Value::Object(result))
+        }
+        _ => Ok(value.clone()),
+    }
 }
