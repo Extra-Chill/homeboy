@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::base_path;
-use homeboy::config::ConfigManager;
+use homeboy::project;
 use homeboy::context::resolve_project_ssh;
 use homeboy::shell;
 
@@ -90,7 +90,7 @@ pub struct LogContent {
 }
 
 fn list(project_id: &str) -> CmdResult<LogsOutput> {
-    let project = ConfigManager::load_project_record(project_id)?;
+    let project = project::load_record(project_id)?;
 
     let entries = project
         .config

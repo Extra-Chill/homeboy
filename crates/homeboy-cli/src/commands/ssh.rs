@@ -1,5 +1,6 @@
 use clap::{Args, Subcommand};
-use homeboy::config::{ConfigManager, ProjectConfiguration, ProjectRecord, ServerConfig};
+use homeboy::project::{Project, ProjectRecord};
+use homeboy::server::{self, Server};
 use homeboy::ssh::SshClient;
 use serde::Serialize;
 
@@ -51,13 +52,13 @@ pub struct SshConnectOutput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshListOutput {
-    pub servers: Vec<ServerConfig>,
+    pub servers: Vec<Server>,
 }
 
 pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<SshOutput> {
     match args.subcommand {
         Some(SshSubcommand::List) => {
-            let servers = ConfigManager::list_servers()?;
+            let servers = server::list()?;
             Ok((SshOutput::List(SshListOutput { servers }), 0))
         }
         None => {
@@ -71,8 +72,8 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
 
             run_with_loaders_and_executor(
                 args,
-                ConfigManager::load_project_record,
-                ConfigManager::load_server,
+                homeboy::project::load_record,
+                server::load,
                 execute_interactive,
             )
         }

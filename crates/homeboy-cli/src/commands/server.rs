@@ -3,21 +3,21 @@ use serde::Serialize;
 use std::fs;
 use std::process::Command;
 
-use homeboy::config::{create_from_json, slugify_id, AppPaths, ConfigManager, CreateSummary, ServerConfig};
-use homeboy::error::Error;
+use homeboy::server::{self, Server};
+use homeboy::{project, Error};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerOutput {
     command: String,
     server_id: Option<String>,
-    server: Option<ServerConfig>,
-    servers: Option<Vec<ServerConfig>>,
+    server: Option<Server>,
+    servers: Option<Vec<Server>>,
     updated: Option<Vec<String>>,
     deleted: Option<Vec<String>>,
     key: Option<ServerKeyOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    import: Option<CreateSummary>,
+    import: Option<server::CreateSummary>,
 }
 
 #[derive(Serialize)]
@@ -210,7 +210,7 @@ fn run_key(args: KeyArgs) -> homeboy::Result<(ServerOutput, i32)> {
 }
 
 fn create_json(spec: &str, skip_existing: bool) -> homeboy::Result<(ServerOutput, i32)> {
-    let summary = create_from_json::<ServerConfig>(spec, skip_existing)?;
+    let summary = server::create_from_json(spec, skip_existing)?;
     let exit_code = if summary.errors > 0 { 1 } else { 0 };
 
     Ok((
@@ -234,28 +234,18 @@ fn create(
     user: &str,
     port: u16,
 ) -> homeboy::Result<(ServerOutput, i32)> {
-    let id = slugify_id(name)?;
-
-    if ConfigManager::load_server(&id).is_ok() {
-        return Err(Error::other(format!("Server '{}' already exists", id)));
-    }
-
-    let server = ServerConfig {
-        id: id.clone(),
-        name: name.to_string(),
-        host: host.to_string(),
-        user: user.to_string(),
-        port,
-        identity_file: None,
-    };
-
-    ConfigManager::save_server(&id, &server)?;
+    let result = server::create_from_cli(
+        Some(name.to_string()),
+        Some(host.to_string()),
+        Some(user.to_string()),
+        Some(port),
+    )?;
 
     Ok((
         ServerOutput {
             command: "server.create".to_string(),
-            server_id: Some(id),
-            server: Some(server),
+            server_id: Some(result.id),
+            server: Some(result.server),
             servers: None,
             updated: Some(vec!["created".to_string()]),
             deleted: None,
@@ -267,13 +257,13 @@ fn create(
 }
 
 fn show(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
-    let server = ConfigManager::load_server(server_id)?;
+    let svr = server::load(server_id)?;
 
     Ok((
         ServerOutput {
             command: "server.show".to_string(),
             server_id: Some(server_id.to_string()),
-            server: Some(server),
+            server: Some(svr),
             servers: None,
             updated: None,
             deleted: None,
@@ -291,40 +281,19 @@ fn set(
     user: Option<String>,
     port: Option<u16>,
 ) -> homeboy::Result<(ServerOutput, i32)> {
-    let mut server = ConfigManager::load_server(server_id)?;
-
-    let mut changes = Vec::new();
-
-    if let Some(n) = name {
-        server.name = n;
-        changes.push("name".to_string());
-    }
-    if let Some(h) = host {
-        server.host = h;
-        changes.push("host".to_string());
-    }
-    if let Some(u) = user {
-        server.user = u;
-        changes.push("user".to_string());
-    }
-    if let Some(p) = port {
-        server.port = p;
-        changes.push("port".to_string());
-    }
-
-    if changes.is_empty() {
+    if name.is_none() && host.is_none() && user.is_none() && port.is_none() {
         return Err(Error::other("No changes specified".to_string()));
     }
 
-    ConfigManager::save_server(server_id, &server)?;
+    let result = server::update(server_id, name, host, user, port)?;
 
     Ok((
         ServerOutput {
             command: "server.set".to_string(),
             server_id: Some(server_id.to_string()),
-            server: Some(server),
+            server: Some(result.server),
             servers: None,
-            updated: Some(changes),
+            updated: Some(result.updated_fields),
             deleted: None,
             key: None,
             import: None,
@@ -338,19 +307,19 @@ fn delete(server_id: &str, force: bool) -> homeboy::Result<(ServerOutput, i32)> 
         return Err(Error::other("Use --force to confirm deletion".to_string()));
     }
 
-    ConfigManager::load_server(server_id)?;
+    server::load(server_id)?;
 
-    let projects = ConfigManager::list_projects()?;
-    for project in projects {
-        if project.config.server_id.as_deref() == Some(server_id) {
+    let projects = project::list()?;
+    for proj in projects {
+        if proj.config.server_id.as_deref() == Some(server_id) {
             return Err(Error::other(format!(
                 "Server is used by project '{}'. Update or delete the project first.",
-                project.id
+                proj.id
             )));
         }
     }
 
-    ConfigManager::delete_server(server_id)?;
+    server::delete(server_id)?;
 
     Ok((
         ServerOutput {
@@ -368,7 +337,7 @@ fn delete(server_id: &str, force: bool) -> homeboy::Result<(ServerOutput, i32)> 
 }
 
 fn list() -> homeboy::Result<(ServerOutput, i32)> {
-    let servers = ConfigManager::list_servers()?;
+    let servers = server::list()?;
 
     Ok((
         ServerOutput {
@@ -386,9 +355,9 @@ fn list() -> homeboy::Result<(ServerOutput, i32)> {
 }
 
 fn key_generate(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
-    ConfigManager::load_server(server_id)?;
+    server::load(server_id)?;
 
-    let key_path = AppPaths::key(server_id)?;
+    let key_path = server::key_path(server_id)?;
     let key_path_str = key_path.to_string_lossy().to_string();
 
     if let Some(parent) = key_path.parent() {
@@ -427,9 +396,9 @@ fn key_generate(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
         )));
     }
 
-    let mut server = ConfigManager::load_server(server_id)?;
+    let mut server = server::load(server_id)?;
     server.identity_file = Some(key_path_str.clone());
-    ConfigManager::save_server(server_id, &server)?;
+    server::save(&server)?;
 
     let pub_key_path = format!("{}.pub", key_path_str);
     let public_key = fs::read_to_string(&pub_key_path).map_err(|err| {
@@ -461,9 +430,9 @@ fn key_generate(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
 }
 
 fn key_show(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
-    ConfigManager::load_server(server_id)?;
+    server::load(server_id)?;
 
-    let key_path = AppPaths::key(server_id)?;
+    let key_path = server::key_path(server_id)?;
     let pub_key_path = format!("{}.pub", key_path.to_string_lossy());
 
     let public_key = fs::read_to_string(&pub_key_path).map_err(|err| {
@@ -496,7 +465,7 @@ fn key_show(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
 }
 
 fn key_use(server_id: &str, private_key_path: &str) -> homeboy::Result<(ServerOutput, i32)> {
-    let mut server = ConfigManager::load_server(server_id)?;
+    let mut server = server::load(server_id)?;
 
     let expanded_path = shellexpand::tilde(private_key_path).to_string();
 
@@ -508,7 +477,7 @@ fn key_use(server_id: &str, private_key_path: &str) -> homeboy::Result<(ServerOu
     }
 
     server.identity_file = Some(expanded_path.clone());
-    ConfigManager::save_server(server_id, &server)?;
+    server::save(&server)?;
 
     Ok((
         ServerOutput {
@@ -532,10 +501,10 @@ fn key_use(server_id: &str, private_key_path: &str) -> homeboy::Result<(ServerOu
 }
 
 fn key_unset(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
-    let mut server = ConfigManager::load_server(server_id)?;
+    let mut server = server::load(server_id)?;
 
     server.identity_file = None;
-    ConfigManager::save_server(server_id, &server)?;
+    server::save(&server)?;
 
     Ok((
         ServerOutput {
@@ -562,7 +531,7 @@ fn key_import(
     server_id: &str,
     private_key_path: &str,
 ) -> homeboy::Result<(ServerOutput, i32)> {
-    ConfigManager::load_server(server_id)?;
+    server::load(server_id)?;
 
     let expanded_path = shellexpand::tilde(private_key_path).to_string();
 
@@ -594,7 +563,7 @@ fn key_import(
 
     let public_key = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    let key_path = AppPaths::key(server_id)?;
+    let key_path = server::key_path(server_id)?;
     let key_path_str = key_path.to_string_lossy().to_string();
 
     if let Some(parent) = key_path.parent() {
@@ -625,9 +594,9 @@ fn key_import(
         Error::internal_io(err.to_string(), Some("write ssh public key".to_string()))
     })?;
 
-    let mut server = ConfigManager::load_server(server_id)?;
+    let mut server = server::load(server_id)?;
     server.identity_file = Some(key_path_str.clone());
-    ConfigManager::save_server(server_id, &server)?;
+    server::save(&server)?;
 
     Ok((
         ServerOutput {

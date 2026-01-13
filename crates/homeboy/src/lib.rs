@@ -10,7 +10,7 @@ pub(crate) mod files;
 pub mod git;
 pub mod http;
 pub(crate) mod json;
-pub mod keychain;
+pub(crate) mod keychain;
 pub mod module;
 pub mod module_settings;
 pub mod output;
@@ -24,3 +24,6 @@ pub mod template;
 pub mod token;
 pub mod tty;
 pub mod version;
+
+// Re-exports for convenient access
+pub use error::{Error, ErrorCode, Result};

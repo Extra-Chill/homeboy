@@ -3,9 +3,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
-use homeboy::config::ConfigManager;
+use homeboy::project;
 use homeboy::http::ApiClient;
-use homeboy::keychain;
 
 use super::{CmdResult, GlobalArgs};
 
@@ -72,7 +71,7 @@ fn run_login(
     identifier: Option<String>,
     password: Option<String>,
 ) -> CmdResult<AuthOutput> {
-    let project = ConfigManager::load_project(project_id)?;
+    let project = project::load(project_id)?;
     let client = ApiClient::new(project_id, &project.api)?;
 
     // Get credentials - prompt if not provided
@@ -86,20 +85,12 @@ fn run_login(
         None => prompt_password("Password: ")?,
     };
 
-    // Generate device ID if we don't have one stored
-    let device_id = keychain::get(project_id, "device_id")?
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    // Store device ID for future use
-    keychain::store(project_id, "device_id", &device_id)?;
-
     // Build credentials map
     let mut credentials = HashMap::new();
     credentials.insert("identifier".to_string(), identifier);
     credentials.insert("password".to_string(), password);
-    credentials.insert("device_id".to_string(), device_id);
 
-    // Execute login flow
+    // Execute login flow (device_id handled internally by core)
     client.login(&credentials)?;
 
     Ok((
@@ -112,7 +103,7 @@ fn run_login(
 }
 
 fn run_logout(project_id: &str) -> CmdResult<AuthOutput> {
-    let project = ConfigManager::load_project(project_id)?;
+    let project = project::load(project_id)?;
     let client = ApiClient::new(project_id, &project.api)?;
 
     client.logout()?;
@@ -126,7 +117,7 @@ fn run_logout(project_id: &str) -> CmdResult<AuthOutput> {
 }
 
 fn run_status(project_id: &str) -> CmdResult<AuthOutput> {
-    let project = ConfigManager::load_project(project_id)?;
+    let project = project::load(project_id)?;
     let client = ApiClient::new(project_id, &project.api)?;
 
     let authenticated = client.is_authenticated();

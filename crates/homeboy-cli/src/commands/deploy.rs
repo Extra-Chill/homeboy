@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use homeboy::config::{ConfigManager, ProjectRecord};
+use homeboy::component;
+use homeboy::project::{self, ProjectRecord};
 use homeboy::context::{resolve_project_ssh_with_base_path, RemoteProjectContext};
 use homeboy::deploy::{deploy_artifact, parse_bulk_component_ids, DeployResult};
 use homeboy::module::{load_module, DeployVerification};
@@ -134,7 +135,7 @@ pub struct DeployOutput {
 pub fn run(args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DeployOutput> {
     run_with_loaders(
         args,
-        ConfigManager::load_project_record,
+        project::load_record,
         resolve_project_ssh_with_base_path,
         run_build,
     )
@@ -496,16 +497,16 @@ fn load_components(component_ids: &[String]) -> Vec<Component> {
     let mut components = Vec::new();
 
     for id in component_ids {
-        if let Ok(component) = ConfigManager::load_component(id) {
-            let local_path = component.local_path;
+        if let Ok(loaded) = component::load(id) {
+            let local_path = loaded.local_path;
 
-            let build_artifact = if component.build_artifact.starts_with('/') {
-                component.build_artifact
+            let build_artifact = if loaded.build_artifact.starts_with('/') {
+                loaded.build_artifact
             } else {
-                format!("{}/{}", local_path, component.build_artifact)
+                format!("{}/{}", local_path, loaded.build_artifact)
             };
 
-            let version_targets = component.version_targets.map(|targets| {
+            let version_targets = loaded.version_targets.map(|targets| {
                 targets
                     .into_iter()
                     .map(|target| VersionTarget {
@@ -517,14 +518,14 @@ fn load_components(component_ids: &[String]) -> Vec<Component> {
 
             components.push(Component {
                 id: id.clone(),
-                name: component.name,
+                name: loaded.name,
                 local_path,
-                remote_path: component.remote_path,
+                remote_path: loaded.remote_path,
                 build_artifact,
-                build_command: component.build_command,
-                extract_command: component.extract_command,
+                build_command: loaded.build_command,
+                extract_command: loaded.extract_command,
                 version_targets,
-                modules: component.modules,
+                modules: loaded.modules,
             });
         }
     }

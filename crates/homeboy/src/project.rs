@@ -765,3 +765,114 @@ pub fn unpin_log(project_id: &str, log_id: &str) -> Result<()> {
     save(project_id, &project)?;
     Ok(())
 }
+
+// ============================================================================
+// JSON Import
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSummary {
+    pub created: u32,
+    pub skipped: u32,
+    pub errors: u32,
+    pub items: Vec<CreateSummaryItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSummaryItem {
+    pub id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub fn create_from_json(spec: &str, skip_existing: bool) -> Result<CreateSummary> {
+    let value: serde_json::Value = json::from_str(spec)?;
+
+    let items: Vec<serde_json::Value> = if value.is_array() {
+        value.as_array().unwrap().clone()
+    } else {
+        vec![value]
+    };
+
+    let mut summary = CreateSummary {
+        created: 0,
+        skipped: 0,
+        errors: 0,
+        items: Vec::new(),
+    };
+
+    for item in items {
+        let project: Project = match serde_json::from_value(item.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                let id = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|n| slugify_id(n).unwrap_or_else(|_| "unknown".to_string()))
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                summary.errors += 1;
+                summary.items.push(CreateSummaryItem {
+                    id,
+                    status: "error".to_string(),
+                    error: Some(format!("Parse error: {}", e)),
+                });
+                continue;
+            }
+        };
+
+        let id = match slugify_id(&project.name) {
+            Ok(id) => id,
+            Err(e) => {
+                summary.errors += 1;
+                summary.items.push(CreateSummaryItem {
+                    id: "unknown".to_string(),
+                    status: "error".to_string(),
+                    error: Some(e.message.clone()),
+                });
+                continue;
+            }
+        };
+
+        if exists(&id) {
+            if skip_existing {
+                summary.skipped += 1;
+                summary.items.push(CreateSummaryItem {
+                    id,
+                    status: "skipped".to_string(),
+                    error: None,
+                });
+            } else {
+                summary.errors += 1;
+                summary.items.push(CreateSummaryItem {
+                    id: id.clone(),
+                    status: "error".to_string(),
+                    error: Some(format!("Project '{}' already exists", id)),
+                });
+            }
+            continue;
+        }
+
+        if let Err(e) = save(&id, &project) {
+            summary.errors += 1;
+            summary.items.push(CreateSummaryItem {
+                id,
+                status: "error".to_string(),
+                error: Some(e.message.clone()),
+            });
+            continue;
+        }
+
+        summary.created += 1;
+        summary.items.push(CreateSummaryItem {
+            id,
+            status: "created".to_string(),
+            error: None,
+        });
+    }
+
+    Ok(summary)
+}

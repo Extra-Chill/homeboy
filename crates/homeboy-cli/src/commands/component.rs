@@ -1,10 +1,8 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::config::{
-    create_from_json, slugify_id, ComponentConfiguration, ConfigManager, CreateSummary,
-    VersionTarget,
-};
+use homeboy::component::{self, Component, CreateSummary, VersionTarget};
+use homeboy::project;
 
 use super::CmdResult;
 
@@ -119,8 +117,8 @@ pub struct ComponentOutput {
     pub component_id: Option<String>,
     pub success: bool,
     pub updated_fields: Vec<String>,
-    pub component: Option<ComponentConfiguration>,
-    pub components: Vec<ComponentConfiguration>,
+    pub component: Option<Component>,
+    pub components: Vec<Component>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub import: Option<CreateSummary>,
 }
@@ -214,7 +212,7 @@ pub fn run(
 }
 
 fn create_json(spec: &str, skip_existing: bool) -> CmdResult<ComponentOutput> {
-    let summary = create_from_json::<ComponentConfiguration>(spec, skip_existing)?;
+    let summary = component::create_from_json(spec, skip_existing)?;
     let exit_code = if summary.errors > 0 { 1 } else { 0 };
 
     Ok((
@@ -240,9 +238,9 @@ fn create(
     build_command: Option<String>,
     extract_command: Option<String>,
 ) -> CmdResult<ComponentOutput> {
-    let id = slugify_id(name)?;
+    let id = component::slugify_id(name)?;
 
-    if ConfigManager::load_component(&id).is_ok() {
+    if component::load(&id).is_ok() {
         return Err(homeboy::Error::other(format!(
             "Component '{}' already exists",
             id
@@ -251,7 +249,7 @@ fn create(
 
     let expanded_path = shellexpand::tilde(local_path).to_string();
 
-    let mut component = ComponentConfiguration::new(
+    let mut component = Component::new(
         id.to_string(),
         name.to_string(),
         expanded_path,
@@ -264,7 +262,7 @@ fn create(
     component.build_command = build_command;
     component.extract_command = extract_command;
 
-    ConfigManager::save_component(&id, &component)?;
+    component::save(&component)?;
 
     Ok((
         ComponentOutput {
@@ -281,7 +279,7 @@ fn create(
 }
 
 fn show(id: &str) -> CmdResult<ComponentOutput> {
-    let component = ConfigManager::load_component(id)?;
+    let component = component::load(id)?;
 
     Ok((
         ComponentOutput {
@@ -320,7 +318,7 @@ fn set(args: SetComponentArgs) -> CmdResult<ComponentOutput> {
         extract_command,
     } = args;
 
-    let mut component = ConfigManager::load_component(&id)?;
+    let mut component = component::load(&id)?;
 
     let mut updated_fields: Vec<String> = vec![];
 
@@ -365,7 +363,7 @@ fn set(args: SetComponentArgs) -> CmdResult<ComponentOutput> {
         ));
     }
 
-    ConfigManager::save_component(&id, &component)?;
+    component::save(&component)?;
 
     Ok((
         ComponentOutput {
@@ -382,7 +380,7 @@ fn set(args: SetComponentArgs) -> CmdResult<ComponentOutput> {
 }
 
 fn delete(id: &str, force: bool) -> CmdResult<ComponentOutput> {
-    if ConfigManager::load_component(id).is_err() {
+    if component::load(id).is_err() {
         return Err(homeboy::Error::other(format!(
             "Component '{}' not found",
             id
@@ -390,7 +388,7 @@ fn delete(id: &str, force: bool) -> CmdResult<ComponentOutput> {
     }
 
     if !force {
-        let projects = ConfigManager::list_projects().unwrap_or_default();
+        let projects = project::list().unwrap_or_default();
         let using: Vec<String> = projects
             .iter()
             .filter(|p| p.config.component_ids.contains(&id.to_string()))
@@ -406,7 +404,7 @@ fn delete(id: &str, force: bool) -> CmdResult<ComponentOutput> {
         }
     }
 
-    ConfigManager::delete_component(id)?;
+    component::delete(id)?;
 
     Ok((
         ComponentOutput {
@@ -423,7 +421,7 @@ fn delete(id: &str, force: bool) -> CmdResult<ComponentOutput> {
 }
 
 fn list() -> CmdResult<ComponentOutput> {
-    let components = ConfigManager::list_components()?;
+    let components = component::list()?;
 
     Ok((
         ComponentOutput {

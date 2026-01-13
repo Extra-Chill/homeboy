@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
-use homeboy::config::{ConfigManager, SlugIdentifiable};
+use homeboy::project;
 use homeboy::context::{resolve_project_ssh, resolve_project_ssh_with_base_path};
 use homeboy::module::{load_module, DatabaseCliConfig};
 
@@ -143,14 +143,14 @@ fn build_context(
     project_id: &str,
     args: &[String],
 ) -> homeboy::Result<(DbContext, Vec<String>)> {
-    let project = ConfigManager::load_project_record(project_id)?;
+    let project = project::load_record(project_id)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
 
     let mut remaining_args = args.to_vec();
     let domain = if !project.config.sub_targets.is_empty() {
         if let Some(sub_id) = args.first() {
             if let Some(subtarget) = project.config.sub_targets.iter().find(|target| {
-                target.slug_id().ok().as_deref() == Some(sub_id)
+                project::slugify_id(&target.name).ok().as_deref() == Some(sub_id)
                     || token::identifier_eq(&target.name, sub_id)
             }) {
                 remaining_args.remove(0);
@@ -452,7 +452,7 @@ fn drop_table(
 }
 
 fn tunnel(project_id: &str, local_port: Option<u16>) -> homeboy::Result<(DbOutput, i32)> {
-    let project = ConfigManager::load_project_record(project_id)?;
+    let project = project::load_record(project_id)?;
     let ctx = resolve_project_ssh(project_id)?;
     let server = ctx.server;
     let client = ctx.client;
