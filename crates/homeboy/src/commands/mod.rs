@@ -16,7 +16,6 @@ pub mod db;
 pub mod deploy;
 pub mod docs;
 pub mod doctor;
-pub mod error;
 pub mod file;
 pub mod git;
 pub mod init;
@@ -100,9 +99,6 @@ pub(crate) fn run_json(
         ),
         crate::Commands::Doctor(args) => homeboy_core::output::map_cmd_result_to_json(
             doctor::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),
-        ),
-        crate::Commands::Error(args) => homeboy_core::output::map_cmd_result_to_json(
-            error::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),
         ),
         crate::Commands::Auth(args) => homeboy_core::output::map_cmd_result_to_json(
             auth::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),
