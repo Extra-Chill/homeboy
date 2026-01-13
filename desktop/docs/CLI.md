@@ -1,34 +1,31 @@
-# Homeboy Desktop + CLI Integration
+# Homeboy Desktop ↔ CLI integration
 
-Homeboy Desktop shells out to the standalone `homeboy` CLI binary for all core operations.
+Homeboy Desktop shells out to the standalone `homeboy` CLI binary for most core operations.
 
-## Installation Notes
+## CLI installation / discovery
 
-The CLI is maintained as a standalone project (`homeboy-cli/`). The desktop app shells out to a system-installed `homeboy` binary.
+The desktop app relies on a system-installed `homeboy` binary and checks these paths in order:
 
-### CLI Binary Location
-
-The CLI is maintained as a standalone project (`homeboy-cli/`). The desktop app shells out to the `homeboy` CLI binary installed on your system.
-
-**Supported Paths**:
 - `/opt/homebrew/bin/homeboy` (Apple Silicon Homebrew)
 - `/usr/local/bin/homeboy` (Intel Homebrew)
 - `~/.cargo/bin/homeboy` (Cargo)
 
-The app checks these paths in order. If `homeboy` is not found, the desktop app prompts you to install it.
-
 Verify installation:
+
 ```bash
 homeboy --version
 ```
 
-### CLI Source
+CLI source: `../homeboy-cli/`.
 
-The CLI source lives in `homeboy-cli/`.
+## Shared configuration
 
-## Configuration
+Homeboy Desktop is macOS-only, but it interoperates with the CLI in the same on-disk config tree used by the CLI.
 
-The CLI uses the same configuration as the desktop app stored at:
+Canonical config path rules live in the CLI docs: [`homeboy-cli/docs/index.md`](../../homeboy-cli/docs/index.md).
+
+macOS config location:
+
 ```
 ~/Library/Application Support/homeboy/
 ├── homeboy.json          # App config
@@ -40,19 +37,14 @@ The CLI uses the same configuration as the desktop app stored at:
 └── backups/              # Backup files
 ```
 
-Projects and servers can be configured via Homeboy.app or via the CLI.
+Projects and servers are editable via Homeboy.app or via the CLI.
 
-## Commands
+## CLI reference
 
-This document intentionally avoids duplicating CLI reference docs.
+This document avoids duplicating CLI command docs.
 
-For the canonical CLI reference, use:
-
-```bash
-homeboy docs
-```
-
-Or browse the markdown source under `homeboy-cli/docs/commands/`.
+- Canonical CLI reference: `homeboy docs`
+- Markdown sources embedded into the CLI: [`homeboy-cli/docs/`](../../homeboy-cli/docs/index.md)
 
 ### Desktop ↔ CLI responsibilities
 
@@ -61,6 +53,8 @@ Or browse the markdown source under `homeboy-cli/docs/commands/`.
 - The CLI can also manage config directly; the app should react via its directory watchers.
 
 ### Common CLI entrypoints
+
+(See `homeboy docs <topic>` for canonical flags, schemas, and JSON output.)
 
 ```bash
 homeboy docs
@@ -73,9 +67,6 @@ homeboy db <projectId> tables
 homeboy logs list <projectId>
 homeboy file list <projectId>
 ```
-
-(See `homeboy docs <topic>` for each command’s details.)
-
 ### Config editing notes
 
 The desktop app’s Settings UI is the intended way to create and edit projects/servers.
@@ -106,40 +97,14 @@ For canonical usage, safety rules (`query` vs destructive subcommands), and JSON
 
 ### deploy
 
-Deploy configured components to the project server.
+The desktop app uses `homeboy deploy` for component deployments.
 
-```bash
-homeboy deploy <project> [component-id...] [flags]
-```
+This document does not restate deploy flags or JSON shapes; the canonical reference is:
 
-**Arguments**:
-- `project` - Project ID (required)
-- `component-id` - One or more component IDs to deploy (optional if using flags)
+- `homeboy docs commands/deploy`
+- [`homeboy-cli/docs/commands/deploy.md`](../../homeboy-cli/docs/commands/deploy.md)
 
-**Flags**:
-- `--all` - Deploy all configured components
-- `--outdated` - Deploy only components where local version differs from remote
-- `--dry-run` - Show what would be deployed without executing
-
-Note: `homeboy deploy` always returns JSON output wrapped in the global envelope; there is no `--json` flag and no `--build` flag. Use `homeboy build <componentId>` separately if you want to build before deploying.
-
-**Deployment Process**:
-- Upload the configured artifact to the remote server.
-- If the component config includes an extract command, the uploaded artifact may be extracted on the remote server.
-
-**Requirements**:
-- Components configured with their local path, remote path, and build artifact path in Homeboy config
-- Server configured with SSH key
-
-**Examples**:
-```bash
-homeboy deploy extrachill my-plugin my-theme
-homeboy deploy extrachill --all
-homeboy deploy extrachill --outdated
-homeboy deploy extrachill --all --dry-run
-```
-
-For the canonical deploy JSON output contract, run `homeboy docs deploy` (or see `homeboy-cli/docs/commands/deploy.md`).
+Note: deploy output is JSON-wrapped like other commands; there is no extra `--json` flag. Building artifacts is a separate concern (`homeboy build`).
 
 ### ssh
 
@@ -179,18 +144,19 @@ For canonical remote file tooling, run `homeboy docs file`.
 
 ### pin
 
-For canonical pin management (files/logs), run `homeboy docs pin`.
+Pin management lives under `homeboy project pin ...`.
 
+For canonical pin docs, run `homeboy docs commands/project` and see the `project pin` section.
 ### docs
 
 For the full CLI reference, run `homeboy docs`.
 
-## Exit Codes
+## Exit codes
 
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | General error (configuration missing, command failed, etc.) |
+The desktop app relies on the CLI's mapped exit codes.
+
+Canonical mapping and error-code groups live in:
+- [`homeboy-cli/docs/json-output/json-output-contract.md`](../../homeboy-cli/docs/json-output/json-output-contract.md#exit-codes)
 
 ## Error Messages
 

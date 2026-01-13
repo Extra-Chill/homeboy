@@ -4,6 +4,13 @@ All notable code changes to this project are documented in this file.
 
 ## Unreleased
 
+## 0.8.0
+
+- Delegate module discovery/setup/run to CLI; UI loads manifests from CLI-reported paths
+- Load platform project types from shared modules directory (user overrides still supported)
+- Remove localEnvironment from project configuration schema and related change detection
+- Sync documentation for CLI discovery paths and module/project-type behavior
+
 ## 0.7.3
 
 - Remove legacy Swift CLI sources from repo
@@ -83,7 +90,7 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 
 ### New Features
 - **CLI Docs Command**: Added `homeboy docs [topic...]` to display bundled CLI documentation in the terminal, with optional heading-based filtering.
-- **Docs Bundling for CLI**: Removed; CLI docs are embedded in the Rust CLI binary.
+- **Docs bundling**: CLI docs are embedded into the CLI binary.
 
 ### Improvements
 - **Configuration Reactivity**: Added directory watchers so the app UI updates available projects/servers when CLI edits JSON configs.

@@ -1,43 +1,45 @@
 # Module Specification
 
-This document describes the `module.json` manifest format for Homeboy modules.
+This document describes the `homeboy.json` module manifest format used by the Homeboy CLI and (via the CLI) the desktop app.
 
 ## Overview
 
 Modules extend Homeboy with custom functionality. Each module is a self-contained directory with:
-- `module.json` - Manifest file (required)
-- Entry point script (for Python/Shell modules)
+- `homeboy.json` - Manifest file (required)
+- Optional scripts (executed by the CLI based on `runtime.*` commands)
 - Optional assets and configuration
 
-## Installation Location
+## Installation location
 
-Modules are installed to:
-```
-~/Library/Application Support/homeboy/modules/<module-id>/
-```
+Homeboy Desktop is macOS-only; module installation paths below are the macOS view of the shared Homeboy config tree.
 
-Each Python module gets its own isolated virtual environment at:
-```
-~/Library/Application Support/homeboy/modules/<module-id>/venv/
-```
+The CLI documents the cross-platform config root (macOS/Linux/Windows): [`homeboy-cli/docs/index.md`](../../homeboy-cli/docs/index.md).
 
-Playwright browsers are shared across modules at:
-```
-~/Library/Application Support/homeboy/playwright-browsers/
-```
+macOS locations:
 
-## Module Types
+- Modules:
+  ```
+  ~/Library/Application Support/homeboy/modules/<module-id>/
+  ```
+- Per-module Python venv:
+  ```
+  ~/Library/Application Support/homeboy/modules/<module-id>/venv/
+  ```
+- Shared Playwright browser cache:
+  ```
+  ~/Library/Application Support/homeboy/playwright-browsers/
+  ```
 
-### Python Modules
-Run Python scripts in an isolated virtual environment. Dependencies are installed per-module.
+## Module responsibilities
 
-### Shell Modules
-Run shell scripts directly.
+Homeboy modules can:
 
-### CLI Modules
-Run CLI commands against the configured local project installation using the project type's command template. Supports multisite via URL targeting.
+- define **project type behavior** for the platform (discovery, CLI templates, DB templates, deploy verification, version parsing patterns, etc.)
+- define **executable tools** (optional `runtime.*` section) runnable via `homeboy module run`
 
-CLI modules can be executed from the terminal via `homeboy module run <module-id>`.
+The manifest is a single unified `homeboy.json` file; modules include only fields they need.
+
+For the authoritative runtime behavior, see [`homeboy-cli/docs/commands/module.md`](../../homeboy-cli/docs/commands/module.md).
 
 ## Manifest Schema
 
@@ -52,12 +54,20 @@ CLI modules can be executed from the terminal via `homeboy module run <module-id
 | `description` | string | Yes | Short description |
 | `author` | string | Yes | Author name |
 | `homepage` | string | No | URL to documentation/repo |
-| `runtime` | object | Yes | Runtime configuration |
-| `inputs` | array | Yes | Input field definitions |
-| `output` | object | Yes | Output configuration |
-| `actions` | array | Yes | Action button definitions |
-| `settings` | array | Yes | Persistent settings |
-| `requires` | object | No | Component dependencies |
+| `configSchema` | string | No | Project-type config schema identifier (platform behavior) |
+| `discovery` | object | No | Project discovery commands (platform behavior) |
+| `cli` | object | No | Project-type CLI template (platform behavior) |
+| `database` | object | No | Project-type DB templates (platform behavior) |
+| `deploy` | array | No | Deployment verification rules (platform behavior) |
+| `versionPatterns` | array | No | Version parsing rules by file/extension (platform behavior) |
+| `build` | object | No | Build behavior (platform behavior) |
+| `commands` | array | No | Additional CLI command names this module provides (platform behavior) |
+| `runtime` | object | No | Executable runtime configuration (for `homeboy module run`) |
+| `inputs` | array | No | Input field definitions (for executable modules) |
+| `output` | object | No | Output configuration (for executable modules) |
+| `actions` | array | No | Action button definitions (for executable modules) |
+| `settings` | array | No | Persistent settings (merged across scopes by the CLI) |
+| `requires` | object | No | Module/component requirements for activation |
 
 ### Runtime Object
 

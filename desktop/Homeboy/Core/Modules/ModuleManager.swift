@@ -2,7 +2,7 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// Module loading state
+/// Module loading state derived from CLI response
 enum ModuleState: Equatable {
     case ready
     case needsSetup
@@ -12,79 +12,72 @@ enum ModuleState: Equatable {
 }
 
 /// Represents a loaded module with its manifest and state
+/// Manifest is loaded from CLI-reported path for UI rendering
 struct LoadedModule: Identifiable {
     let manifest: ModuleManifest
     var state: ModuleState
     var settings: ModuleSettings
-    
+    let cliEntry: CLIModuleEntry
+
     var id: String { manifest.id }
     var name: String { manifest.name }
     var icon: String { manifest.icon }
-    var modulePath: String { manifest.modulePath ?? "" }
-    
+    var modulePath: String { cliEntry.path }
+    var isLinked: Bool { cliEntry.linked }
+
     var venvPath: String {
         "\(modulePath)/venv"
     }
-    
+
     var venvPythonPath: String {
         "\(venvPath)/bin/python3"
     }
-    
+
     var entrypointPath: String {
         guard let entrypoint = manifest.runtime.entrypoint else { return "" }
         return "\(modulePath)/\(entrypoint)"
     }
-    
+
     var settingsPath: String {
         "\(modulePath)/config.json"
     }
-    
+
     var isDisabled: Bool {
         if case .missingRequirements = state { return true }
         return false
     }
-    
+
     var missingComponents: [String] {
         if case .missingRequirements(let components) = state { return components }
         return []
     }
 }
 
-/// Singleton manager for discovering, loading, and managing modules
+/// Singleton manager for module operations via CLI delegation
+/// CLI is the single source of truth for module discovery and installation.
+/// Desktop reads manifests from CLI-reported paths for UI rendering.
 @MainActor
 class ModuleManager: ObservableObject, ConfigurationObserving {
     static let shared = ModuleManager()
 
     var cancellables = Set<AnyCancellable>()
-    
+
     @Published var modules: [LoadedModule] = []
     @Published var isLoading = false
-    
+    @Published var error: String?
+
     private let fileManager = FileManager.default
     private let jsonDecoder: JSONDecoder
     private let jsonEncoder: JSONEncoder
-    
-    /// Base directory for modules
-    /// ~/Library/Application Support/Homeboy/modules/
-    var modulesDirectory: URL {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("Homeboy/modules")
-    }
-    
-    /// Shared Playwright browsers location
-    /// ~/Library/Application Support/Homeboy/playwright-browsers/
-    var playwrightBrowsersPath: String {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("Homeboy/playwright-browsers").path
-    }
-    
+
     private init() {
         jsonDecoder = JSONDecoder()
         jsonEncoder = JSONEncoder()
         jsonEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
-        ensureDirectoriesExist()
-        loadModules()
+        Task {
+            await loadModules()
+        }
         observeConfiguration()
     }
 
@@ -93,197 +86,119 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
     func handleConfigChange(_ change: ConfigurationChangeType) {
         switch change {
         case .projectDidSwitch:
-            // Re-evaluate module requirements for new project
-            loadModules()
+            Task { await loadModules() }
         case .moduleAdded, .moduleRemoved, .moduleModified:
-            // Refresh module list when modules change
-            loadModules()
+            Task { await loadModules() }
         default:
             break
         }
     }
-    
-    // MARK: - Directory Management
-    
-    private func ensureDirectoriesExist() {
-        do {
-            try fileManager.createDirectory(at: modulesDirectory, withIntermediateDirectories: true)
-            try fileManager.createDirectory(
-                atPath: playwrightBrowsersPath,
-                withIntermediateDirectories: true,
-                attributes: nil
-            )
-        } catch {
-            print("[ModuleManager] Failed to create directories: \(error)")
-        }
-    }
-    
-    // MARK: - Module Discovery & Loading
-    
-    /// Scans the modules directory and loads all valid modules
-    func loadModules() {
+
+    // MARK: - Module Discovery via CLI
+
+    /// Loads modules from CLI and reads manifests for UI rendering
+    func loadModules() async {
         isLoading = true
-        modules = []
-        
+        error = nil
+
         do {
-            let contents = try fileManager.contentsOfDirectory(
-                at: modulesDirectory,
-                includingPropertiesForKeys: [.isDirectoryKey]
-            )
-            
-            for itemURL in contents {
-                guard isDirectory(itemURL) else { continue }
-                
-                if let module = loadModule(at: itemURL) {
-                    modules.append(module)
+            let projectId = ConfigurationManager.shared.activeProjectId
+            var args = ["module", "list", "--json"]
+            if let project = projectId {
+                args += ["--project", project]
+            }
+
+            let response = try await CLIBridge.shared.execute(args)
+            let result = try response.decodeResponse(CLIModuleListData.self)
+
+            guard result.success, let data = result.data else {
+                let message = result.error?.message ?? "Failed to load modules"
+                self.error = message
+                self.modules = []
+                isLoading = false
+                return
+            }
+
+            // Filter to executable modules only (platform modules don't have UI)
+            let executableEntries = data.modules.filter { $0.runtime == "executable" }
+
+            // Load manifests from CLI-reported paths
+            var loadedModules: [LoadedModule] = []
+            for entry in executableEntries {
+                if let module = loadManifest(from: entry) {
+                    loadedModules.append(module)
                 }
             }
-            
-            // Sort by name
-            modules.sort { $0.name < $1.name }
-            
+
+            modules = loadedModules.sorted { $0.name < $1.name }
+
         } catch {
-            print("[ModuleManager] Failed to scan modules directory: \(error)")
+            self.error = error.localizedDescription
+            modules = []
         }
-        
+
         isLoading = false
     }
-    
-    /// Loads a single module from a directory
-    private func loadModule(at url: URL) -> LoadedModule? {
-        let manifestPath = url.appendingPathComponent("module.json")
-        
+
+    /// Loads manifest from CLI-reported path and creates LoadedModule
+    private func loadManifest(from entry: CLIModuleEntry) -> LoadedModule? {
+        let manifestPath = URL(fileURLWithPath: entry.path).appendingPathComponent("homeboy.json")
+
         guard fileManager.fileExists(atPath: manifestPath.path) else {
-            print("[ModuleManager] No module.json found at \(url.path)")
+            print("[ModuleManager] No homeboy.json at \(entry.path)")
             return nil
         }
-        
+
         do {
             let data = try Data(contentsOf: manifestPath)
             var manifest = try jsonDecoder.decode(ModuleManifest.self, from: data)
-            manifest.modulePath = url.path
-            
-            let state = determineModuleState(manifest: manifest, modulePath: url.path)
-            let settings = loadModuleSettings(modulePath: url.path)
-            
-            return LoadedModule(manifest: manifest, state: state, settings: settings)
-            
+            manifest.modulePath = entry.path
+
+            let state = deriveState(from: entry)
+            let settings = loadModuleSettings(modulePath: entry.path)
+
+            return LoadedModule(
+                manifest: manifest,
+                state: state,
+                settings: settings,
+                cliEntry: entry
+            )
         } catch {
-            print("[ModuleManager] Failed to load module at \(url.path): \(error)")
+            print("[ModuleManager] Failed to load manifest at \(entry.path): \(error)")
             return nil
         }
     }
-    
-    /// Determines the current state of a module
-    private func determineModuleState(manifest: ModuleManifest, modulePath: String) -> ModuleState {
-        // Check requirements first
-        if let missingComponents = checkRequirements(manifest: manifest), !missingComponents.isEmpty {
-            return .missingRequirements(missingComponents)
+
+    /// Derives ModuleState from CLI entry
+    private func deriveState(from entry: CLIModuleEntry) -> ModuleState {
+        if !entry.compatible {
+            return .missingRequirements(["Incompatible with current project"])
         }
-        
-        // For Python modules, check entrypoint and venv
-        if manifest.runtime.type == .python {
-            guard let entrypoint = manifest.runtime.entrypoint else {
-                return .error("Missing entrypoint in manifest")
-            }
-            
-            let entrypointPath = "\(modulePath)/\(entrypoint)"
-            guard fileManager.fileExists(atPath: entrypointPath) else {
-                return .error("Missing entrypoint: \(entrypoint)")
-            }
-            
-            let venvPythonPath = "\(modulePath)/venv/bin/python3"
-            if !fileManager.fileExists(atPath: venvPythonPath) {
-                return .needsSetup
-            }
-            
-            // Check if Playwright browsers are needed but missing
-            if let browsers = manifest.runtime.playwrightBrowsers, !browsers.isEmpty {
-                let chromiumExists = (try? fileManager.contentsOfDirectory(atPath: playwrightBrowsersPath))?
-                    .contains { $0.hasPrefix("chromium-") } ?? false
-                
-                if browsers.contains("chromium") && !chromiumExists {
-                    return .needsSetup
-                }
-            }
+        if !entry.ready {
+            return .needsSetup
         }
-        
         return .ready
     }
-    
-    /// Checks if a module's requirements are satisfied (components, features, projectType)
-    private func checkRequirements(manifest: ModuleManifest) -> [String]? {
-        guard let requires = manifest.requires else {
-            return nil
-        }
-        
-        var missing: [String] = []
-        let project = ConfigurationManager.shared.safeActiveProject
-        
-        // Check projectType requirement
-        if let requiredProjectType = requires.projectType {
-            if project.projectType != requiredProjectType {
-                let typeDef = ProjectTypeManager.shared.resolve(requiredProjectType)
-                missing.append("Project type: \(typeDef.displayName)")
-            }
-        }
-        
-        // Check feature requirements
-        // Most features are now universal (always available):
-        // - hasDatabase, hasDeployer, hasRemoteLogs, hasRemoteFileEditor: always true
-        // - hasCLI: true if project type has CLI config
-        if let requiredFeatures = requires.features {
-            let typeDefinition = project.typeDefinition
-            for feature in requiredFeatures {
-                let isSatisfied: Bool
-                switch feature {
-                case "hasCLI":
-                    isSatisfied = typeDefinition.hasCLI
-                case "hasDatabase", "hasDeployer", "hasRemoteDeployment", "hasRemoteLogs", "hasRemoteFileEditor":
-                    isSatisfied = true  // Universal features, always available
-                default:
-                    isSatisfied = false
-                }
-                if !isSatisfied {
-                    missing.append(feature)
-                }
-            }
-        }
-        
-        // Check component requirements
-        if let requiredComponents = requires.components, !requiredComponents.isEmpty {
-            let installedComponentIds = Set(project.componentIds)
-            for component in requiredComponents {
-                if !installedComponentIds.contains(component) {
-                    missing.append(component)
-                }
-            }
-        }
-        
-        return missing.isEmpty ? nil : missing
-    }
-    
+
     // MARK: - Module Settings
-    
-    /// Loads settings for a module from its config.json
+
     private func loadModuleSettings(modulePath: String) -> ModuleSettings {
         let settingsPath = "\(modulePath)/config.json"
-        
+
         guard fileManager.fileExists(atPath: settingsPath),
               let data = try? Data(contentsOf: URL(fileURLWithPath: settingsPath)),
               let settings = try? jsonDecoder.decode(ModuleSettings.self, from: data) else {
             return ModuleSettings()
         }
-        
+
         return settings
     }
-    
-    /// Saves settings for a module
+
     func saveModuleSettings(moduleId: String, settings: ModuleSettings) {
         guard let index = modules.firstIndex(where: { $0.id == moduleId }) else { return }
-        
+
         let settingsPath = modules[index].settingsPath
-        
+
         do {
             let data = try jsonEncoder.encode(settings)
             try data.write(to: URL(fileURLWithPath: settingsPath))
@@ -292,91 +207,110 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
             print("[ModuleManager] Failed to save settings for \(moduleId): \(error)")
         }
     }
-    
-    /// Updates a specific setting value
+
     func updateSetting(moduleId: String, key: String, value: SettingValue) {
         guard let index = modules.firstIndex(where: { $0.id == moduleId }) else { return }
-        
+
         var settings = modules[index].settings
         settings.values[key] = value
         saveModuleSettings(moduleId: moduleId, settings: settings)
     }
-    
-    // MARK: - Module Installation
-    
-    /// Installs a module from a source directory (copies to modules directory)
-    func installModule(from sourcePath: URL) -> Result<LoadedModule, Error> {
-        let manifestPath = sourcePath.appendingPathComponent("module.json")
-        
-        // Validate manifest exists
-        guard fileManager.fileExists(atPath: manifestPath.path) else {
-            return .failure(ModuleError.missingManifest)
+
+    // MARK: - Module Installation via CLI
+
+    /// Installs a module from a Git URL
+    func installModule(from url: String) async throws {
+        let args = ["module", "install", url]
+        let response = try await CLIBridge.shared.execute(args, timeout: 300)
+
+        guard response.success else {
+            throw ModuleError.installFailed
         }
-        
-        // Load manifest to get module ID
-        do {
-            let data = try Data(contentsOf: manifestPath)
-            let manifest = try jsonDecoder.decode(ModuleManifest.self, from: data)
-            
-            let destinationPath = modulesDirectory.appendingPathComponent(manifest.id)
-            
-            // Remove existing if present
-            if fileManager.fileExists(atPath: destinationPath.path) {
-                try fileManager.removeItem(at: destinationPath)
-            }
-            
-            // Copy module directory
-            try fileManager.copyItem(at: sourcePath, to: destinationPath)
-            
-            // Load the installed module
-            if let module = loadModule(at: destinationPath) {
-                modules.append(module)
-                modules.sort { $0.name < $1.name }
-                return .success(module)
-            } else {
-                return .failure(ModuleError.installFailed)
-            }
-            
-        } catch {
-            return .failure(error)
+
+        await loadModules()
+    }
+
+    /// Links a local module directory
+    func linkModule(path: String) async throws {
+        let args = ["module", "link", path]
+        let response = try await CLIBridge.shared.execute(args)
+
+        guard response.success else {
+            throw ModuleError.installFailed
+        }
+
+        await loadModules()
+    }
+
+    /// Unlinks a linked module (preserves source)
+    func unlinkModule(moduleId: String) async throws {
+        let args = ["module", "unlink", moduleId]
+        let response = try await CLIBridge.shared.execute(args)
+
+        guard response.success else {
+            throw ModuleError.moduleNotFound
+        }
+
+        await loadModules()
+    }
+
+    /// Uninstalls a module via CLI
+    func uninstallModule(moduleId: String) async throws {
+        let args = ["module", "uninstall", moduleId, "--force"]
+        let response = try await CLIBridge.shared.execute(args)
+
+        guard response.success else {
+            throw ModuleError.moduleNotFound
+        }
+
+        await loadModules()
+    }
+
+    /// Sets up a module via CLI
+    func setupModule(moduleId: String) async throws {
+        let args = ["module", "setup", moduleId]
+        let response = try await CLIBridge.shared.execute(args, timeout: 600)
+
+        guard response.success else {
+            throw ModuleError.setupFailed(response.errorOutput)
+        }
+
+        await loadModules()
+    }
+
+    // MARK: - Module Execution via CLI
+
+    /// Runs a module via CLI and streams output
+    func runModule(
+        moduleId: String,
+        inputs: [String: String],
+        projectId: String?,
+        onOutput: @escaping (String) -> Void
+    ) async {
+        var args = ["module", "run", moduleId]
+        if let project = projectId {
+            args += ["--project", project]
+        }
+        for (key, value) in inputs {
+            args += ["--input", "\(key)=\(value)"]
+        }
+
+        let stream = await CLIBridge.shared.executeStreaming(args)
+        for await line in stream {
+            onOutput(line)
         }
     }
-    
-    /// Uninstalls a module by removing its directory
-    func uninstallModule(moduleId: String) -> Result<Void, Error> {
-        guard let index = modules.firstIndex(where: { $0.id == moduleId }) else {
-            return .failure(ModuleError.moduleNotFound)
-        }
-        
-        let modulePath = modules[index].modulePath
-        
-        do {
-            try fileManager.removeItem(atPath: modulePath)
-            modules.remove(at: index)
-            return .success(())
-        } catch {
-            return .failure(error)
-        }
-    }
-    
+
     /// Updates a module's state
     func updateModuleState(moduleId: String, state: ModuleState) {
         guard let index = modules.firstIndex(where: { $0.id == moduleId }) else { return }
         modules[index].state = state
     }
-    
+
     // MARK: - Module Lookup
-    
-    /// Gets a module by ID
+
     func module(withId id: String) -> LoadedModule? {
         modules.first { $0.id == id }
-    }
-    
-    // MARK: - Helpers
-    
-    private func isDirectory(_ url: URL) -> Bool {
-        var isDir: ObjCBool = false
-        return fileManager.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
     }
 }
 
@@ -388,19 +322,22 @@ enum ModuleError: LocalizedError {
     case moduleNotFound
     case installFailed
     case setupFailed(String)
-    
+    case cliNotInstalled
+
     var errorDescription: String? {
         switch self {
         case .missingManifest:
-            return "No module.json found in the selected directory"
+            return "No homeboy.json found in the selected directory"
         case .invalidManifest:
-            return "Invalid module.json format"
+            return "Invalid homeboy.json format"
         case .moduleNotFound:
             return "Module not found"
         case .installFailed:
             return "Failed to install module"
         case .setupFailed(let reason):
             return "Setup failed: \(reason)"
+        case .cliNotInstalled:
+            return "Homeboy CLI is not installed"
         }
     }
 }

@@ -27,10 +27,16 @@ struct ProjectTypeDefinition: Codable, Identifiable, Equatable {
     /// Whether this is a WordPress project type
     var isWordPress: Bool { configSchema == "wordpress" }
     
+    private enum CodingKeys: String, CodingKey {
+        case id, displayName, name, icon, configSchema, defaultPinnedFiles, defaultPinnedLogs, database, cli, discovery
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
-        displayName = try container.decode(String.self, forKey: .displayName)
+        // Accept both "displayName" and "name" fields (CLI modules use "name")
+        displayName = try container.decodeIfPresent(String.self, forKey: .displayName)
+            ?? container.decode(String.self, forKey: .name)
         icon = try container.decode(String.self, forKey: .icon)
         configSchema = try container.decodeIfPresent(String.self, forKey: .configSchema)
         defaultPinnedFiles = try container.decodeIfPresent([String].self, forKey: .defaultPinnedFiles) ?? []
@@ -38,6 +44,19 @@ struct ProjectTypeDefinition: Codable, Identifiable, Equatable {
         database = try container.decodeIfPresent(DatabaseSchemaDefinition.self, forKey: .database)
         cli = try container.decodeIfPresent(CLIConfig.self, forKey: .cli)
         discovery = try container.decodeIfPresent(DiscoveryConfig.self, forKey: .discovery)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encode(icon, forKey: .icon)
+        try container.encodeIfPresent(configSchema, forKey: .configSchema)
+        try container.encode(defaultPinnedFiles, forKey: .defaultPinnedFiles)
+        try container.encode(defaultPinnedLogs, forKey: .defaultPinnedLogs)
+        try container.encodeIfPresent(database, forKey: .database)
+        try container.encodeIfPresent(cli, forKey: .cli)
+        try container.encodeIfPresent(discovery, forKey: .discovery)
     }
 }
 

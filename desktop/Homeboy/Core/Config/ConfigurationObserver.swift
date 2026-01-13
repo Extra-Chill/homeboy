@@ -391,9 +391,6 @@ final class ConfigurationObserver: ObservableObject {
         if !isEqual(oldConfig.tools, newConfig.tools) {
             fields.insert(.tools)
         }
-        if !isEqual(oldConfig.localEnvironment, newConfig.localEnvironment) {
-            fields.insert(.localEnvironment)
-        }
 
         return fields
     }

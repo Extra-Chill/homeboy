@@ -88,7 +88,6 @@ struct ProjectConfiguration: Codable, Identifiable {
     var remoteFiles: RemoteFileConfig
     var remoteLogs: RemoteLogConfig
     var database: DatabaseConfig
-    var localEnvironment: LocalEnvironmentConfig
     var tools: ToolsConfig
     var api: APIConfig
     var subTargets: [SubTarget]
@@ -102,7 +101,7 @@ struct ProjectConfiguration: Codable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case id, name, domain, projectType
         case serverId, basePath, tablePrefix
-        case remoteFiles, remoteLogs, database, localEnvironment, tools, api
+        case remoteFiles, remoteLogs, database, tools, api
         case subTargets, sharedTables, componentIds
         case tableGroupings, componentGroupings, protectedTablePatterns, unlockedTablePatterns
     }
@@ -140,7 +139,6 @@ struct ProjectConfiguration: Codable, Identifiable {
         remoteFiles: RemoteFileConfig,
         remoteLogs: RemoteLogConfig,
         database: DatabaseConfig,
-        localEnvironment: LocalEnvironmentConfig,
         tools: ToolsConfig,
         api: APIConfig,
         subTargets: [SubTarget] = [],
@@ -161,7 +159,6 @@ struct ProjectConfiguration: Codable, Identifiable {
         self.remoteFiles = remoteFiles
         self.remoteLogs = remoteLogs
         self.database = database
-        self.localEnvironment = localEnvironment
         self.tools = tools
         self.api = api
         self.subTargets = subTargets
@@ -188,7 +185,6 @@ struct ProjectConfiguration: Codable, Identifiable {
             remoteFiles: .defaults(for: projectType),
             remoteLogs: .defaults(for: projectType),
             database: DatabaseConfig(),
-            localEnvironment: LocalEnvironmentConfig(),
             tools: ToolsConfig(),
             api: APIConfig(),
             subTargets: [],
@@ -223,7 +219,6 @@ struct ProjectConfiguration: Codable, Identifiable {
             ?? .defaults(for: projectType)
 
         database = try container.decode(DatabaseConfig.self, forKey: .database)
-        localEnvironment = try container.decodeIfPresent(LocalEnvironmentConfig.self, forKey: .localEnvironment) ?? LocalEnvironmentConfig()
         tools = try container.decode(ToolsConfig.self, forKey: .tools)
         api = try container.decode(APIConfig.self, forKey: .api)
 
@@ -250,7 +245,6 @@ struct ProjectConfiguration: Codable, Identifiable {
         try container.encode(remoteFiles, forKey: .remoteFiles)
         try container.encode(remoteLogs, forKey: .remoteLogs)
         try container.encode(database, forKey: .database)
-        try container.encode(localEnvironment, forKey: .localEnvironment)
         try container.encode(tools, forKey: .tools)
         try container.encode(api, forKey: .api)
         
@@ -280,27 +274,6 @@ struct DatabaseConfig: Codable {
         self.name = name
         self.user = user
         self.useSSHTunnel = useSSHTunnel
-    }
-}
-
-// MARK: - Local Environment Configuration
-
-/// Configuration for local environment execution (e.g., WP-CLI, PM2, Artisan).
-/// Used by modules and the --local flag for CLI commands.
-struct LocalEnvironmentConfig: Codable {
-    var sitePath: String      // Path to local project root
-    var domain: String        // Local dev domain (e.g., testing-grounds.local)
-    var cliPath: String?      // Optional: explicit path to CLI binary (uses project type default if nil)
-    
-    init(sitePath: String = "", domain: String = "", cliPath: String? = nil) {
-        self.sitePath = sitePath
-        self.domain = domain
-        self.cliPath = cliPath
-    }
-    
-    /// Whether local CLI is configured (has a site path)
-    var isConfigured: Bool {
-        !sitePath.isEmpty
     }
 }
 

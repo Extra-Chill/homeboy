@@ -11,7 +11,7 @@ Native macOS SwiftUI application for development and deployment automation. Supp
 **Deployer**
 One-click deployment of components (plugins, themes, packages) to any SSH-accessible server.
 - SSH key authentication
-- Build automation via `build.sh` scripts
+- Deploys prebuilt artifacts (build happens via the CLI `homeboy build`, not as a deploy flag)
 - Version comparison (local vs remote)
 - Per-site component registry
 
@@ -44,26 +44,15 @@ See docs/MODULE-SPEC.md for the complete module specification.
 
 ### Command Line Tool
 
-Homeboy includes a CLI (`homeboy`) for terminal access to project management, WordPress operations, database queries, and deployments.
+Homeboy Desktop shells out to the standalone `homeboy` CLI binary for most core operations.
 
-**Installation**: The app prompts to install the CLI on first launch, or install manually via **Settings > General**.
+This README avoids duplicating CLI reference docs.
 
-**Available Commands**:
-```bash
-homeboy project list                                # List configured projects
-homeboy project create "My Site" example.com --module wordpress
-homeboy project show extrachill                    # Show project configuration
-homeboy server create "Prod" --host server.example.com --user deploy
-homeboy wp extrachill plugin list                  # Execute WP-CLI on production
-homeboy pm2 api-server list                        # Execute PM2 on Node.js servers
-homeboy db extrachill tables                       # List database tables
-homeboy deploy extrachill --all                    # Deploy all components
-homeboy ssh extrachill                             # Open interactive SSH shell
-homeboy module list                                # List available modules
-homeboy module run <module-id>                     # Run a CLI module locally
-```
+- Canonical CLI reference: `homeboy docs`
+- Desktop/CLI integration notes: [docs/CLI.md](docs/CLI.md)
+- Embedded CLI markdown sources: [`../homeboy-cli/docs/`](../homeboy-cli/docs/index.md)
 
-The CLI can manage config directly, but the desktop app may not yet support newer CLI configuration fields. When in doubt, use `homeboy docs` as the canonical CLI reference.
+Compatibility note: the CLI is the source of truth for command behavior and output. The desktop app may lag behind and not support newer options until it is updated.
 
 ## Requirements
 
@@ -78,7 +67,9 @@ The CLI can manage config directly, but the desktop app may not yet support newe
 ```bash
 git clone https://github.com/Extra-Chill/homeboy.git
 cd homeboy
-open Homeboy.xcodeproj
+
+xcodegen generate --spec homeboy-desktop/project.yml
+open homeboy-desktop/Homeboy.xcodeproj
 ```
 
 ### 2. Generate Project + Run
@@ -86,8 +77,8 @@ open Homeboy.xcodeproj
 This repo uses `project.yml` + XcodeGen.
 
 ```bash
-xcodegen generate
-open Homeboy.xcodeproj
+xcodegen generate --spec homeboy-desktop/project.yml
+open homeboy-desktop/Homeboy.xcodeproj
 ```
 
 Build and run from Xcode (Cmd+R).
@@ -112,7 +103,7 @@ Project type support is primarily defined by installed modules and the CLI; the 
 
 1. Go to **Settings > Modules**
 2. Click **Install Module from Folder...**
-3. Select a folder containing a `module.json` manifest
+3. Select a folder containing a `homeboy.json` manifest
 4. The module appears in the sidebar under "Modules"
 5. If setup is required, click the module and follow the prompts
 
@@ -147,7 +138,7 @@ Homeboy/
 ├── Core/
 │   ├── API/                      # REST API client
 │   ├── Auth/                     # Keychain and authentication
-│   ├── CLI/                      # CLI installer
+│   ├── CLI/                      # CLI bridge + version checking
 │   ├── Config/                   # JSON config, ProjectTypeManager
 │   ├── Copyable/                 # Error/warning copy system
 │   ├── Database/                 # Database tooling (CLI-mediated) and schema helpers

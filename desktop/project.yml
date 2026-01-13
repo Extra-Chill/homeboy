@@ -14,18 +14,14 @@ targets:
       - path: Homeboy
         excludes:
           - Resources/Scripts/**
-          - Resources/project-types/**
       - path: Homeboy/Resources/Scripts
         buildPhase: resources
-      - path: Homeboy/Resources/project-types
-        buildPhase: resources
-        type: folder
       - path: Homeboy/Assets.xcassets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.extrachill.homeboy
         PRODUCT_NAME: Homeboy
-        MARKETING_VERSION: 0.7.3
+        MARKETING_VERSION: 0.8.0
         CURRENT_PROJECT_VERSION: 12
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools

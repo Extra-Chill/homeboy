@@ -17,7 +17,6 @@
 		1E0233CF5AC026C74233786E /* TableDataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EC7ED01925DBCB9195A8A4D /* TableDataView.swift */; };
 		1EBFEF675F781A40A250D009 /* BackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2026B5BAE550AC7BD82744DA /* BackupService.swift */; };
 		22221233AC86561D48490886 /* RemoteFileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7C2AF5C1F794564BF7DC0F4 /* RemoteFileBrowserView.swift */; };
-		2453E7963F678EA067547AEF /* ModuleRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6304E63C8AC4239FBA559CC8 /* ModuleRunner.swift */; };
 		278021F9D228BBDA95267231 /* HomeboyCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */; };
 		27D41F217F00E3A8171BEC63 /* AppWarning.swift in Sources */ = {isa = PBXBuildFile; fileRef = C489D03946456721B73D70EA /* AppWarning.swift */; };
 		27FA9FFDA56F6C7BCAFE0296 /* ModulesSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C398F35F8687FF75D86A408 /* ModulesSettingsTab.swift */; };
@@ -38,8 +37,6 @@
 		3E503022AB80B6AEA06D0E24 /* ItemGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC24361248E8DB9D359A8C1E /* ItemGrouping.swift */; };
 		465D0E037B7E2705A578EAF2 /* RemotePathResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0EEE1B29B6CBCC9B7AE92D /* RemotePathResolver.swift */; };
 		469CB781A5654E2EA41A3B30 /* RemoteFileEditorViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1682E9BF7F10ED915C606359 /* RemoteFileEditorViewModel.swift */; };
-		471FBA3C8CEB4393CFEE5091 /* project-types in Resources */ = {isa = PBXBuildFile; fileRef = 69F9E6767A9B6A9F4792EAE5 /* project-types */; };
-		50C74163D68312AC098E4FE4 /* ModuleInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7B0366D7FFE2A9A7F15384 /* ModuleInstaller.swift */; };
 		53E684EC9B358CC6CF15C7C2 /* DatabaseTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */; };
 		5724ADBBD83934015A0383D2 /* DeployerComponentContextMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBC7AF862A7B02E0B062D8EB /* DeployerComponentContextMenu.swift */; };
 		57C3AE0D20A591DEE69B0FF0 /* HomeboyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFEA6E42C1D9292B10447CDA /* HomeboyApp.swift */; };
@@ -103,6 +100,7 @@
 		E77C55FA6D3BBCCD6422EDBA /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC3095C66C75EB70DD73775 /* PythonRunner.swift */; };
 		E832787BA1F926FB3A085E09 /* InlineErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943FB329E82EA8D3985C41BE /* InlineErrorView.swift */; };
 		E8A0E0A1E7364CFEB6EB48AF /* SchemaResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */; };
+		E9D7338A6D0F128987F91E83 /* CLIModuleTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1815EE5F0948B590DB303B60 /* CLIModuleTypes.swift */; };
 		EEA581470DC8B48027F54228 /* InlineWarningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */; };
 		EFAD229C7AEECA77273843D0 /* ModuleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F16DF708DA86DFB9E5B27FBC /* ModuleManager.swift */; };
 		F34BB35C6C33E774792043ED /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83B2C9499D9E9A17D32109EF /* SettingsView.swift */; };
@@ -119,6 +117,7 @@
 		13F8D60E3516F29F554438A0 /* VersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionParser.swift; sourceTree = "<group>"; };
 		14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseTypes.swift; sourceTree = "<group>"; };
 		1682E9BF7F10ED915C606359 /* RemoteFileEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorViewModel.swift; sourceTree = "<group>"; };
+		1815EE5F0948B590DB303B60 /* CLIModuleTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIModuleTypes.swift; sourceTree = "<group>"; };
 		1EC3095C66C75EB70DD73775 /* PythonRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonRunner.swift; sourceTree = "<group>"; };
 		20129FFBFEEBA4948B8DA194 /* WarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WarningView.swift; sourceTree = "<group>"; };
 		2026B5BAE550AC7BD82744DA /* BackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupService.swift; sourceTree = "<group>"; };
@@ -149,10 +148,8 @@
 		5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSSHModule.swift; sourceTree = "<group>"; };
 		5F014356904A59206993DA47 /* ModuleConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleConsoleView.swift; sourceTree = "<group>"; };
 		60913533AA72054F3D79625C /* ArtifactVersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactVersionParser.swift; sourceTree = "<group>"; };
-		6304E63C8AC4239FBA559CC8 /* ModuleRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleRunner.swift; sourceTree = "<group>"; };
 		66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnableTabBar.swift; sourceTree = "<group>"; };
 		69348F2856AF692571BB880E /* ModuleContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleContainerView.swift; sourceTree = "<group>"; };
-		69F9E6767A9B6A9F4792EAE5 /* project-types */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "project-types"; path = "Homeboy/Resources/project-types"; sourceTree = SOURCE_ROOT; };
 		75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */ = {isa = PBXFileReference; path = "bandcamp_scraper.cpython-314.pyc"; sourceTree = "<group>"; };
 		7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorView.swift; sourceTree = "<group>"; };
 		811079398986364AA0E0542A /* CLIVersionChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIVersionChecker.swift; sourceTree = "<group>"; };
@@ -175,7 +172,6 @@
 		A690A4DC66BE109010668691 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployableComponent.swift; sourceTree = "<group>"; };
 		A7A27F9F448DAC4DF35613F9 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
-		AA7B0366D7FFE2A9A7F15384 /* ModuleInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleInstaller.swift; sourceTree = "<group>"; };
 		AB2507DAC42BC6CDA2DF39CE /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
 		AD23DCF3987518BDD613AA7A /* SSHService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHService.swift; sourceTree = "<group>"; };
 		AD70F8136E9691D7528CB581 /* FileBrowserSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBrowserSidebarView.swift; sourceTree = "<group>"; };
@@ -219,10 +215,8 @@
 		03381E1786CD41871C8760AF /* Modules */ = {
 			isa = PBXGroup;
 			children = (
-				AA7B0366D7FFE2A9A7F15384 /* ModuleInstaller.swift */,
 				F16DF708DA86DFB9E5B27FBC /* ModuleManager.swift */,
 				267B4789567169ABFC9AAD53 /* ModuleManifest.swift */,
-				6304E63C8AC4239FBA559CC8 /* ModuleRunner.swift */,
 			);
 			path = Modules;
 			sourceTree = "<group>";
@@ -283,7 +277,6 @@
 			isa = PBXGroup;
 			children = (
 				5160882C4D72CD5AA9A7A214 /* Scripts */,
-				69F9E6767A9B6A9F4792EAE5 /* project-types */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -369,6 +362,7 @@
 			children = (
 				40736E67E0624C5F3AA5913C /* CLIBridge.swift */,
 				42B48848AAF3B2E6808ED4E9 /* CLIInstaller.swift */,
+				1815EE5F0948B590DB303B60 /* CLIModuleTypes.swift */,
 				811079398986364AA0E0542A /* CLIVersionChecker.swift */,
 				D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */,
 			);
@@ -657,7 +651,6 @@
 			files = (
 				58782E3C2B83E467318758D3 /* Assets.xcassets in Resources */,
 				C6F738277B8D48B8F03655CA /* bandcamp_scraper.cpython-314.pyc in Resources */,
-				471FBA3C8CEB4393CFEE5091 /* project-types in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -680,6 +673,7 @@
 				1EBFEF675F781A40A250D009 /* BackupService.swift in Sources */,
 				D067D1266FD0989BC9E07C43 /* CLIBridge.swift in Sources */,
 				DD3128834B4A7FF474DB3C02 /* CLIInstaller.swift in Sources */,
+				E9D7338A6D0F128987F91E83 /* CLIModuleTypes.swift in Sources */,
 				761826050ADDBB5E4B00E1AC /* CLIVersionChecker.swift in Sources */,
 				CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */,
 				807E4729F90F95A12FAB99B7 /* CollapsibleSplitView.swift in Sources */,
@@ -726,11 +720,9 @@
 				8C6CA13F14113243F0E6CDC4 /* ModuleContainerView.swift in Sources */,
 				3D9711220108F7258431211E /* ModuleInputsView.swift in Sources */,
 				0BB5245A79F8709EBD8C5269 /* ModuleInstallSheet.swift in Sources */,
-				50C74163D68312AC098E4FE4 /* ModuleInstaller.swift in Sources */,
 				EFAD229C7AEECA77273843D0 /* ModuleManager.swift in Sources */,
 				5AAC8C88082027144361696A /* ModuleManifest.swift in Sources */,
 				8ACB39F91168D33D93F5B338 /* ModuleResultsView.swift in Sources */,
-				2453E7963F678EA067547AEF /* ModuleRunner.swift in Sources */,
 				34B6D8FD95927DA85561881D /* ModuleSetupView.swift in Sources */,
 				C7897C8689B4E0075B1CB0D6 /* ModuleViewModel.swift in Sources */,
 				27FA9FFDA56F6C7BCAFE0296 /* ModulesSettingsTab.swift in Sources */,
@@ -845,7 +837,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 0.7.3;
+				MARKETING_VERSION = 0.8.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
 				PRODUCT_NAME = Homeboy;
 				SDKROOT = macosx;
@@ -870,7 +862,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 0.7.3;
+				MARKETING_VERSION = 0.8.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
 				PRODUCT_NAME = Homeboy;
 				SDKROOT = macosx;

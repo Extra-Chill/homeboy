@@ -66,7 +66,13 @@ The desktop app shells out to the system-installed `homeboy` binary via:
 - `Homeboy/Core/CLI/CLIBridge.swift` (command execution)
 - `Homeboy/Core/CLI/CLIVersionChecker.swift` (CLI discovery, installed/latest version checks)
 
-CLI discovery checks these paths in order: `/opt/homebrew/bin/homeboy` (Apple Silicon), `/usr/local/bin/homeboy` (Intel), `~/.cargo/bin/homeboy` (Cargo).
+CLI discovery checks these paths in order:
+
+- `/opt/homebrew/bin/homeboy` (Apple Silicon Homebrew)
+- `/usr/local/bin/homeboy` (Intel Homebrew)
+- `~/.cargo/bin/homeboy` (Cargo)
+
+(Keep this list in sync with [docs/CLI.md](docs/CLI.md) and the root [README](../README.md).)
 ```
 
 ## Module Plugin System
@@ -160,7 +166,12 @@ Run `homeboy docs` for the canonical CLI documentation.
 
 ## Configuration
 
-Configuration is stored as JSON:
+The desktop app is macOS-only and stores configuration as JSON under the shared Homeboy config tree.
+
+Canonical cross-platform config root rules live in the CLI docs: [`../homeboy-cli/docs/index.md`](../homeboy-cli/docs/index.md).
+
+macOS locations:
+
 ```
 ~/Library/Application Support/homeboy/
 ├── homeboy.json          # App config
@@ -170,7 +181,7 @@ Configuration is stored as JSON:
 │   └── <server-id>.json
 ├── components/           # Component definitions
 │   └── <component-id>.json
-├── modules/              # Installed modules (git clones)
+├── modules/              # Installed modules
 ├── keys/                 # SSH keys (per server)
 ├── backups/              # Local backups (deploy/file operations)
 └── playwright-browsers/  # Shared Playwright cache

@@ -144,8 +144,8 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         let log = openLogs[index]
 
         do {
-            // Build command: homeboy logs show <project> <logName> -n <lines>
-            var args = ["logs", "show", projectId, log.displayName]
+            // Build command: homeboy logs show <project> <path> -n <lines>
+            var args = ["logs", "show", projectId, log.path]
             if log.tailLines > 0 {
                 args.append(contentsOf: ["-n", String(log.tailLines)])
             }
@@ -186,8 +186,8 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         let log = openLogs[index]
 
         do {
-            // homeboy logs clear <project> <logName> --json
-            let args = ["logs", "clear", projectId, log.displayName]
+            // homeboy logs clear <project> <path> --json
+            let args = ["logs", "clear", projectId, log.path]
             let response = try await cli.execute(args, timeout: 30)
 
             if response.success {
