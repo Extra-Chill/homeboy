@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use homeboy::component;
 use homeboy::version::{
-    read_component_version, bump_component_version, VersionTargetInfo,
+    bump_component_version, read_component_version, VersionTargetInfo,
 };
 
 use crate::output::{CliWarning, CmdResult};
@@ -49,31 +49,11 @@ impl BumpType {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VersionTargetOutput {
-    version_file: String,
-    version_pattern: String,
-    full_path: String,
-    match_count: usize,
-}
-
-impl From<VersionTargetInfo> for VersionTargetOutput {
-    fn from(info: VersionTargetInfo) -> Self {
-        VersionTargetOutput {
-            version_file: info.file,
-            version_pattern: info.pattern,
-            full_path: info.full_path,
-            match_count: info.match_count,
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct VersionShowOutput {
     command: String,
     component_id: String,
     pub version: String,
-    targets: Vec<VersionTargetOutput>,
+    targets: Vec<VersionTargetInfo>,
 }
 
 #[derive(Serialize)]
@@ -81,9 +61,9 @@ pub struct VersionShowOutput {
 pub struct VersionBumpOutput {
     command: String,
     component_id: String,
-    version: String,
+    old_version: String,
     new_version: String,
-    targets: Vec<VersionTargetOutput>,
+    targets: Vec<VersionTargetInfo>,
     changelog_path: String,
     changelog_finalized: bool,
     changelog_changed: bool,
@@ -116,7 +96,7 @@ pub fn show_version_output(component_id: &str) -> homeboy::Result<(VersionShowOu
             command: "version.show".to_string(),
             component_id: component_id.to_string(),
             version: info.version,
-            targets: info.targets.into_iter().map(|t| t.into()).collect(),
+            targets: info.targets,
         },
         0,
     ))
@@ -141,9 +121,9 @@ fn bump(component_id: &str, bump_type: BumpType, dry_run: bool) -> CmdResult {
     let out = VersionBumpOutput {
         command: "version.bump".to_string(),
         component_id: component_id.to_string(),
-        version: result.old_version,
+        old_version: result.old_version,
         new_version: result.new_version,
-        targets: result.targets.into_iter().map(|t| t.into()).collect(),
+        targets: result.targets,
         changelog_path: result.changelog_path,
         changelog_finalized: result.changelog_finalized,
         changelog_changed: result.changelog_changed,

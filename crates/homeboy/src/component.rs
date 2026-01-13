@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use crate::local_files::{self, FileSystem};
 use crate::json;
 use crate::paths;
+use crate::project;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -418,10 +419,36 @@ pub fn rename(id: &str, new_name: &str) -> Result<CreateResult> {
         return Err(error);
     }
 
+    // Update project references to use the new component ID
+    update_project_references(id, &new_id)?;
+
     Ok(CreateResult {
         id: new_id,
         component,
     })
+}
+
+/// Update all projects that reference the old component ID to use the new ID.
+fn update_project_references(old_id: &str, new_id: &str) -> Result<()> {
+    let projects = project::list().unwrap_or_default();
+    for proj in projects {
+        if proj.config.component_ids.contains(&old_id.to_string()) {
+            let updated_ids: Vec<String> = proj
+                .config
+                .component_ids
+                .iter()
+                .map(|id| {
+                    if id == old_id {
+                        new_id.to_string()
+                    } else {
+                        id.clone()
+                    }
+                })
+                .collect();
+            project::set_components(&proj.id, updated_ids)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn delete_with_validation(id: &str, force: bool) -> Result<()> {

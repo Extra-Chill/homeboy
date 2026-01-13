@@ -8,16 +8,14 @@ homeboy docs [OPTIONS] [TOPIC]...
 
 ## Description
 
-When `--list` is not used, this command prints the embedded markdown topic to stdout (no JSON envelope).
+This command renders documentation topics from two sources:
 
-When `--list` is used, this command returns a JSON list of available topics (wrapped in the global JSON envelope).
+1) Embedded core docs in the CLI binary
+2) Installed module docs under `<config dir>/homeboy/modules/<moduleId>/docs/`
 
-`homeboy docs` also supports the global `--dry-run` flag (it has no effect for docs output).
+Topic arguments are treated as a free-form trailing list.
 
-- Topic arguments are treated as a free-form trailing list.
-- The resolved key is checked against:
-  1) embedded core docs in the CLI binary, then
-  2) installed module docs under `<config dir>/homeboy/modules/<moduleId>/docs/`.
+Note: the CLI strips a stray `--format <...>` pair from the trailing topic args before resolving the topic. `homeboy docs` does not define a `--format` option; this is defensive parsing to avoid global flags being interpreted as part of the topic.
 
 Topic resolution is documented in: [Embedded docs topic resolution](../embedded-docs/embedded-docs-topic-resolution.md).
 
@@ -33,7 +31,7 @@ Topic resolution is documented in: [Embedded docs topic resolution](../embedded-
 
 ### Default (render topic)
 
-When `--list` is **not** used, `homeboy docs` writes the embedded markdown topic **as-is** to stdout (no JSON envelope).
+`homeboy docs` prints the resolved markdown content to stdout.
 
 ### `--list`
 
@@ -50,11 +48,9 @@ When `--list` is used, output is JSON.
 
 ## Errors
 
-If resolved content is empty, the command returns an error message:
+If resolved content is empty, the command fails with a missing-key style error:
 
-- `No documentation found for '<topic>' (available: <available_topics>)`
-
-`<available_topics>` is a newline-separated list included in the error string.
+- `config_missing_key("docs.<topic>")`
 
 ## Related
 

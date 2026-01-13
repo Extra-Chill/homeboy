@@ -6,10 +6,10 @@ use std::process::Command;
 use crate::base_path;
 use crate::build;
 use crate::component::{self, Component};
-use crate::context::RemoteProjectContext;
+use crate::context::{resolve_project_ssh_with_base_path, RemoteProjectContext};
 use crate::json::read_json_spec_to_string;
 use crate::module::{load_module, DeployVerification};
-use crate::project::ProjectRecord;
+use crate::project::{self, ProjectRecord};
 use crate::shell;
 use crate::ssh::SshClient;
 use crate::template::{render_map, TemplateVars};
@@ -344,6 +344,16 @@ pub struct DeploySummary {
 pub struct DeployOrchestrationResult {
     pub components: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
+}
+
+/// High-level deploy entry point. Resolves SSH context internally.
+///
+/// This is the preferred entry point for callers - it handles project loading
+/// and SSH context resolution, keeping those details encapsulated.
+pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
+    let project = project::load_record(project_id)?;
+    let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
+    deploy_components(config, &project, &ctx, &base_path)
 }
 
 /// Main deploy orchestration entry point.

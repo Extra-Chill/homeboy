@@ -1,5 +1,3 @@
-use crate::error::{Error, Result};
-
 /// Escape a value for use inside single quotes.
 /// Replaces `'` with `'\''` (end quote, escaped quote, start quote).
 pub fn escape_single_quote_content(value: &str) -> String {
@@ -39,32 +37,6 @@ pub fn quote_args(args: &[String]) -> String {
 /// Quote a path for shell execution (always quotes).
 pub fn quote_path(path: &str) -> String {
     format!("'{}'", escape_single_quote_content(path))
-}
-
-/// Wrap a command with cd to a directory.
-pub fn cd_and(dir: &str, command: &str) -> Result<String> {
-    let dir = dir.trim();
-    let command = command.trim();
-
-    if dir.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "dir",
-            "Directory cannot be empty",
-            None,
-            None,
-        ));
-    }
-
-    if command.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "command",
-            "Command cannot be empty",
-            None,
-            None,
-        ));
-    }
-
-    Ok(format!("cd {} && {}", quote_path(dir), command))
 }
 
 #[cfg(test)]
@@ -114,21 +86,5 @@ mod tests {
     #[test]
     fn quote_path_with_quote() {
         assert_eq!(quote_path("/var/www/it's"), "'/var/www/it'\\''s'");
-    }
-
-    #[test]
-    fn cd_and_escapes_dir() {
-        assert_eq!(
-            cd_and("/var/www", "wp core version").unwrap(),
-            "cd '/var/www' && wp core version"
-        );
-    }
-
-    #[test]
-    fn cd_and_escapes_quotes_in_dir() {
-        assert_eq!(
-            cd_and("/var/www/it's", "echo ok").unwrap(),
-            "cd '/var/www/it'\\''s' && echo ok"
-        );
     }
 }

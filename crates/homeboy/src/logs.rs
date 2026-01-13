@@ -11,6 +11,7 @@ use crate::shell;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogEntry {
     pub path: String,
     pub label: Option<String>,
@@ -18,6 +19,7 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogContent {
     pub path: String,
     pub lines: u32,

@@ -11,9 +11,10 @@ homeboy server <COMMAND>
 ### `create`
 
 ```sh
-homeboy server create <name> --host <host> --user <user> [--port <port>]
+homeboy server create [--json <spec>] [--skip-existing] <name> --host <host> --user <user> [--port <port>]
 
 - `--port` defaults to `22`.
+- When `--json` is provided, CLI mode arguments are not required.
 ```
 
 `serverId` is derived from `slugify_id(<name>)`.

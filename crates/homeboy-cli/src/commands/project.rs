@@ -77,6 +77,13 @@ enum ProjectCommand {
         /// Project ID (file stem)
         project_id: String,
     },
+    /// Rename a project (changes ID based on new name)
+    Rename {
+        /// Current project ID
+        project_id: String,
+        /// New display name (ID will be derived from this)
+        new_name: String,
+    },
     /// Manage project components
     Components {
         #[command(subcommand)]
@@ -293,6 +300,7 @@ pub fn run(
             component_ids,
         ),
         ProjectCommand::Repair { project_id } => repair(&project_id),
+        ProjectCommand::Rename { project_id, new_name } => rename(&project_id, &new_name),
         ProjectCommand::Components { command } => components(command),
         ProjectCommand::Pin { command } => pin(command),
     }
@@ -509,6 +517,24 @@ fn repair(project_id: &str) -> homeboy::Result<(ProjectOutput, i32)> {
             components: None,
             pin: None,
             updated,
+            import: None,
+        },
+        0,
+    ))
+}
+
+fn rename(project_id: &str, new_name: &str) -> homeboy::Result<(ProjectOutput, i32)> {
+    let result = project::rename(project_id, new_name)?;
+
+    Ok((
+        ProjectOutput {
+            command: "project.rename".to_string(),
+            project_id: Some(result.new_id.clone()),
+            project: Some(project::load_record(&result.new_id)?),
+            projects: None,
+            components: None,
+            pin: None,
+            updated: Some(vec!["id".to_string(), "name".to_string()]),
             import: None,
         },
         0,

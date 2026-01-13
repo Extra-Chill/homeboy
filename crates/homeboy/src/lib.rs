@@ -27,8 +27,7 @@ pub(crate) mod paths;
 pub(crate) mod shell;
 pub(crate) mod template;
 
-// TODO: Migrate deploy command to use core functions, then make this private
-pub mod base_path;
+pub(crate) mod base_path;
 
 // Re-exports for convenient access
 pub use error::{Error, ErrorCode, Result};

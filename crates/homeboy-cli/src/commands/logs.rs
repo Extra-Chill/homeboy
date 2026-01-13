@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::logs;
+use homeboy::logs::{self, LogContent, LogEntry};
 
 use crate::commands::CmdResult;
 
@@ -70,21 +70,6 @@ pub struct LogsOutput {
     pub cleared_path: Option<String>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LogEntry {
-    pub path: String,
-    pub label: Option<String>,
-    pub tail_lines: u32,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LogContent {
-    pub path: String,
-    pub lines: u32,
-    pub content: String,
-}
 
 fn list(project_id: &str) -> CmdResult<LogsOutput> {
     let entries = logs::list(project_id)?;
@@ -93,16 +78,7 @@ fn list(project_id: &str) -> CmdResult<LogsOutput> {
         LogsOutput {
             command: "logs.list".to_string(),
             project_id: project_id.to_string(),
-            entries: Some(
-                entries
-                    .into_iter()
-                    .map(|e| LogEntry {
-                        path: e.path,
-                        label: e.label,
-                        tail_lines: e.tail_lines,
-                    })
-                    .collect(),
-            ),
+            entries: Some(entries),
             log: None,
             cleared_path: None,
         },
@@ -132,11 +108,7 @@ fn show(project_id: &str, path: &str, lines: u32, follow: bool) -> CmdResult<Log
                 command: "logs.show".to_string(),
                 project_id: project_id.to_string(),
                 entries: None,
-                log: Some(LogContent {
-                    path: content.path,
-                    lines: content.lines,
-                    content: content.content,
-                }),
+                log: Some(content),
                 cleared_path: None,
             },
             0,

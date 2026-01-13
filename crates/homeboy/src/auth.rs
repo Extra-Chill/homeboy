@@ -21,6 +21,11 @@ pub struct AuthStatus {
     pub authenticated: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct LogoutResult {
+    pub project_id: String,
+}
+
 /// Authenticates with a project's API using provided credentials.
 ///
 /// The caller is responsible for obtaining credentials (prompting, flags, etc.).
@@ -37,10 +42,14 @@ pub fn login(project_id: &str, credentials: HashMap<String, String>) -> Result<L
 }
 
 /// Clears stored authentication for a project.
-pub fn logout(project_id: &str) -> Result<()> {
+pub fn logout(project_id: &str) -> Result<LogoutResult> {
     let project = project::load(project_id)?;
     let client = ApiClient::new(project_id, &project.api)?;
-    client.logout()
+    client.logout()?;
+
+    Ok(LogoutResult {
+        project_id: project_id.to_string(),
+    })
 }
 
 /// Checks authentication status for a project.

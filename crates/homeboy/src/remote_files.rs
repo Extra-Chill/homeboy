@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::io::{self, Read};
 
-use crate::context::{resolve_project_ssh, RemoteProjectContext};
+use crate::context::resolve_project_ssh;
 use crate::error::{Error, Result};
 use crate::{base_path, shell, token};
 
@@ -121,11 +121,6 @@ pub fn read_stdin() -> Result<String> {
 /// List directory contents on remote server.
 pub fn list(project_id: &str, path: &str) -> Result<ListResult> {
     let ctx = resolve_project_ssh(project_id)?;
-    list_with_context(&ctx, path)
-}
-
-/// List directory contents using an existing SSH context.
-pub fn list_with_context(ctx: &RemoteProjectContext, path: &str) -> Result<ListResult> {
     let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let command = format!("ls -la {}", shell::quote_path(&full_path));
     let output = ctx.client.execute(&command);
@@ -146,11 +141,6 @@ pub fn list_with_context(ctx: &RemoteProjectContext, path: &str) -> Result<ListR
 /// Read file content from remote server.
 pub fn read(project_id: &str, path: &str) -> Result<ReadResult> {
     let ctx = resolve_project_ssh(project_id)?;
-    read_with_context(&ctx, path)
-}
-
-/// Read file content using an existing SSH context.
-pub fn read_with_context(ctx: &RemoteProjectContext, path: &str) -> Result<ReadResult> {
     let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let command = format!("cat {}", shell::quote_path(&full_path));
     let output = ctx.client.execute(&command);
@@ -169,11 +159,6 @@ pub fn read_with_context(ctx: &RemoteProjectContext, path: &str) -> Result<ReadR
 /// Write content to file on remote server.
 pub fn write(project_id: &str, path: &str, content: &str) -> Result<WriteResult> {
     let ctx = resolve_project_ssh(project_id)?;
-    write_with_context(&ctx, path, content)
-}
-
-/// Write content to file using an existing SSH context.
-pub fn write_with_context(ctx: &RemoteProjectContext, path: &str, content: &str) -> Result<WriteResult> {
     let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let command = format!(
         "cat > {} << 'HOMEBOYEOF'\n{}\nHOMEBOYEOF",
@@ -196,11 +181,6 @@ pub fn write_with_context(ctx: &RemoteProjectContext, path: &str, content: &str)
 /// Delete file or directory on remote server.
 pub fn delete(project_id: &str, path: &str, recursive: bool) -> Result<DeleteResult> {
     let ctx = resolve_project_ssh(project_id)?;
-    delete_with_context(&ctx, path, recursive)
-}
-
-/// Delete file or directory using an existing SSH context.
-pub fn delete_with_context(ctx: &RemoteProjectContext, path: &str, recursive: bool) -> Result<DeleteResult> {
     let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let flags = if recursive { "-rf" } else { "-f" };
     let command = format!("rm {} {}", flags, shell::quote_path(&full_path));
@@ -220,11 +200,6 @@ pub fn delete_with_context(ctx: &RemoteProjectContext, path: &str, recursive: bo
 /// Rename or move file on remote server.
 pub fn rename(project_id: &str, old_path: &str, new_path: &str) -> Result<RenameResult> {
     let ctx = resolve_project_ssh(project_id)?;
-    rename_with_context(&ctx, old_path, new_path)
-}
-
-/// Rename or move file using an existing SSH context.
-pub fn rename_with_context(ctx: &RemoteProjectContext, old_path: &str, new_path: &str) -> Result<RenameResult> {
     let full_old = base_path::join_remote_path(ctx.base_path.as_deref(), old_path)?;
     let full_new = base_path::join_remote_path(ctx.base_path.as_deref(), new_path)?;
     let command = format!(

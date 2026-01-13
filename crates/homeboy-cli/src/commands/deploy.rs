@@ -1,9 +1,7 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::context::resolve_project_ssh_with_base_path;
-use homeboy::deploy::{self, DeployConfig};
-use homeboy::project;
+use homeboy::deploy::{self, ComponentDeployResult, DeployConfig, DeploySummary};
 
 use super::CmdResult;
 
@@ -34,37 +32,13 @@ pub struct DeployArgs {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeployComponentResult {
-    pub id: String,
-    pub name: String,
-    pub status: String,
-    pub local_version: Option<String>,
-    pub remote_version: Option<String>,
-    pub error: Option<String>,
-    pub artifact_path: Option<String>,
-    pub remote_path: Option<String>,
-    pub build_command: Option<String>,
-    pub build_exit_code: Option<i32>,
-    pub deploy_exit_code: Option<i32>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeploySummary {
-    pub succeeded: u32,
-    pub failed: u32,
-    pub skipped: u32,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DeployOutput {
     pub command: String,
     pub project_id: String,
     pub all: bool,
     pub outdated: bool,
     pub dry_run: bool,
-    pub components: Vec<DeployComponentResult>,
+    pub components: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
 }
 
@@ -89,10 +63,6 @@ pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdRe
         args.component_ids = deploy::parse_bulk_component_ids(spec)?;
     }
 
-    // Load project and SSH context
-    let project = project::load_record(&args.project_id)?;
-    let (ctx, base_path) = resolve_project_ssh_with_base_path(&args.project_id)?;
-
     // Build config and call core orchestration
     let config = DeployConfig {
         component_ids: args.component_ids.clone(),
@@ -101,27 +71,7 @@ pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdRe
         dry_run: args.dry_run,
     };
 
-    let result = deploy::deploy_components(&config, &project, &ctx, &base_path)?;
-
-    // Format output
-    let components: Vec<DeployComponentResult> = result
-        .components
-        .into_iter()
-        .map(|r| DeployComponentResult {
-            id: r.id,
-            name: r.name,
-            status: r.status,
-            local_version: r.local_version,
-            remote_version: r.remote_version,
-            error: r.error,
-            artifact_path: r.artifact_path,
-            remote_path: r.remote_path,
-            build_command: r.build_command,
-            build_exit_code: r.build_exit_code,
-            deploy_exit_code: r.deploy_exit_code,
-        })
-        .collect();
-
+    let result = deploy::run(&args.project_id, &config)?;
     let exit_code = if result.summary.failed > 0 { 1 } else { 0 };
 
     Ok((
@@ -131,12 +81,8 @@ pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdRe
             all: args.all,
             outdated: args.outdated,
             dry_run: args.dry_run,
-            components,
-            summary: DeploySummary {
-                succeeded: result.summary.succeeded,
-                failed: result.summary.failed,
-                skipped: result.summary.skipped,
-            },
+            components: result.components,
+            summary: result.summary,
         },
         exit_code,
     ))

@@ -53,8 +53,10 @@ Options:
 ### `delete`
 
 ```sh
-homeboy component delete <id> --force
+homeboy component delete <id> [--force]
 ```
+
+If the component is referenced by one or more projects, `--force` is required.
 
 ### `list`
 
@@ -70,7 +72,7 @@ homeboy component list
 
 ```json
 {
-  "action": "component.create|component.show|component.set|component.delete|component.list",
+  "action": "create|show|set|delete|list|component.create",
   "componentId": "<id>|null",
   "success": true,
   "updatedFields": ["name", "localPath"],
@@ -79,6 +81,12 @@ homeboy component list
   "import": null
 }
 ```
+
+Notes:
+
+- `action` is `component.create` only for JSON import mode (`homeboy component create --json ...`).
+- Other subcommands use `create`, `show`, `set`, `delete`, or `list`.
+
 
 ## Related
 

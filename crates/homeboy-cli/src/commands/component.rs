@@ -84,6 +84,13 @@ enum ComponentCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Rename a component (changes ID based on new name)
+    Rename {
+        /// Current component ID
+        id: String,
+        /// New display name (ID will be derived from this)
+        new_name: String,
+    },
     /// List all available components
     List,
 }
@@ -185,6 +192,7 @@ pub fn run(
             extract_command,
         }),
         ComponentCommand::Delete { id, force } => delete(&id, force),
+        ComponentCommand::Rename { id, new_name } => rename(&id, &new_name),
         ComponentCommand::List => list(),
     }
 }
@@ -398,6 +406,23 @@ fn delete(id: &str, force: bool) -> CmdResult<ComponentOutput> {
             success: true,
             updated_fields: vec![],
             component: None,
+            components: vec![],
+            import: None,
+        },
+        0,
+    ))
+}
+
+fn rename(id: &str, new_name: &str) -> CmdResult<ComponentOutput> {
+    let result = component::rename(id, new_name)?;
+
+    Ok((
+        ComponentOutput {
+            action: "rename".to_string(),
+            component_id: Some(result.id.clone()),
+            success: true,
+            updated_fields: vec!["id".to_string(), "name".to_string()],
+            component: Some(result.component),
             components: vec![],
             import: None,
         },

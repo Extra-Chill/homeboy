@@ -5,6 +5,7 @@ use std::process::Command;
 use crate::component;
 use crate::json::read_json_spec_to_string;
 use crate::error::{Error, Result};
+use crate::project;
 
 // ============================================================================
 // Low-level Git Primitives (path-based)
@@ -74,14 +75,15 @@ pub fn pull_ff_only_interactive(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommitInfo {
     pub hash: String,
     pub subject: String,
     pub category: CommitCategory,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum CommitCategory {
     Breaking,
     Feature,
@@ -255,6 +257,49 @@ pub struct BulkSummary {
     pub total: usize,
     pub succeeded: usize,
     pub failed: usize,
+}
+
+// === Changes Output Types ===
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UncommittedChanges {
+    pub has_changes: bool,
+    pub staged: Vec<String>,
+    pub unstaged: Vec<String>,
+    pub untracked: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangesOutput {
+    pub component_id: String,
+    pub path: String,
+    pub success: bool,
+    pub latest_tag: Option<String>,
+    pub commits: Vec<CommitInfo>,
+    pub uncommitted: UncommittedChanges,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangesSummary {
+    pub total: usize,
+    pub with_commits: usize,
+    pub with_uncommitted: usize,
+    pub clean: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkChangesOutput {
+    pub action: String,
+    pub results: Vec<ChangesOutput>,
+    pub summary: ChangesSummary,
 }
 
 // Input types for JSON parsing
@@ -575,6 +620,187 @@ pub fn tag(component_id: &str, tag_name: &str, message: Option<&str>) -> Result<
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     })
+}
+
+// === Changes Operations ===
+
+/// Parse git status output into structured uncommitted changes.
+pub fn get_uncommitted_changes(path: &str) -> Result<UncommittedChanges> {
+    let output = execute_git(path, &["status", "--porcelain=v1"])
+        .map_err(|e| Error::other(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::other(format!("git status failed: {}", stderr)));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut staged = Vec::new();
+    let mut unstaged = Vec::new();
+    let mut untracked = Vec::new();
+
+    for line in stdout.lines() {
+        if line.len() < 3 {
+            continue;
+        }
+        let index_status = line.chars().next().unwrap_or(' ');
+        let worktree_status = line.chars().nth(1).unwrap_or(' ');
+        let file_path = line[3..].to_string();
+
+        match (index_status, worktree_status) {
+            ('?', '?') => untracked.push(file_path),
+            (idx, wt) => {
+                if idx != ' ' && idx != '?' {
+                    staged.push(file_path.clone());
+                }
+                if wt != ' ' && wt != '?' {
+                    unstaged.push(file_path);
+                }
+            }
+        }
+    }
+
+    let has_changes = !staged.is_empty() || !unstaged.is_empty() || !untracked.is_empty();
+
+    Ok(UncommittedChanges {
+        has_changes,
+        staged,
+        unstaged,
+        untracked,
+    })
+}
+
+/// Get diff of uncommitted changes.
+pub fn get_diff(path: &str) -> Result<String> {
+    // Get both staged and unstaged diff
+    let staged = execute_git(path, &["diff", "--cached"])
+        .map_err(|e| Error::other(e.to_string()))?;
+    let unstaged = execute_git(path, &["diff"])
+        .map_err(|e| Error::other(e.to_string()))?;
+
+    let staged_diff = String::from_utf8_lossy(&staged.stdout);
+    let unstaged_diff = String::from_utf8_lossy(&unstaged.stdout);
+
+    let mut result = String::new();
+    if !staged_diff.is_empty() {
+        result.push_str("=== Staged Changes ===\n");
+        result.push_str(&staged_diff);
+    }
+    if !unstaged_diff.is_empty() {
+        if !result.is_empty() {
+            result.push_str("\n");
+        }
+        result.push_str("=== Unstaged Changes ===\n");
+        result.push_str(&unstaged_diff);
+    }
+
+    Ok(result)
+}
+
+/// Get all changes for a component since its latest tag.
+pub fn changes(
+    component_id: &str,
+    since_tag: Option<&str>,
+    include_diff: bool,
+) -> Result<ChangesOutput> {
+    let path = get_component_path(component_id)?;
+
+    // Get latest tag if not specified
+    let latest_tag = match since_tag {
+        Some(t) => Some(t.to_string()),
+        None => get_latest_tag(&path)?,
+    };
+
+    // Get commits since tag
+    let commits = get_commits_since_tag(&path, latest_tag.as_deref())?;
+
+    // Get uncommitted changes
+    let uncommitted = get_uncommitted_changes(&path)?;
+
+    // Get diff if requested
+    let diff = if include_diff {
+        Some(get_diff(&path)?)
+    } else {
+        None
+    };
+
+    Ok(ChangesOutput {
+        component_id: component_id.to_string(),
+        path,
+        success: true,
+        latest_tag,
+        commits,
+        uncommitted,
+        diff,
+        error: None,
+    })
+}
+
+fn build_bulk_changes_output(component_ids: &[String], include_diff: bool) -> BulkChangesOutput {
+    let mut results = Vec::new();
+    let mut with_commits = 0;
+    let mut with_uncommitted = 0;
+    let mut clean = 0;
+
+    for id in component_ids {
+        match changes(id, None, include_diff) {
+            Ok(output) => {
+                if !output.commits.is_empty() {
+                    with_commits += 1;
+                }
+                if output.uncommitted.has_changes {
+                    with_uncommitted += 1;
+                }
+                if output.commits.is_empty() && !output.uncommitted.has_changes {
+                    clean += 1;
+                }
+                results.push(output);
+            }
+            Err(e) => {
+                results.push(ChangesOutput {
+                    component_id: id.clone(),
+                    path: String::new(),
+                    success: false,
+                    latest_tag: None,
+                    commits: Vec::new(),
+                    uncommitted: UncommittedChanges {
+                        has_changes: false,
+                        staged: Vec::new(),
+                        unstaged: Vec::new(),
+                        untracked: Vec::new(),
+                    },
+                    diff: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    BulkChangesOutput {
+        action: "changes".to_string(),
+        results,
+        summary: ChangesSummary {
+            total: component_ids.len(),
+            with_commits,
+            with_uncommitted,
+            clean,
+        },
+    }
+}
+
+/// Get changes for multiple components from JSON spec.
+pub fn changes_bulk(json_spec: &str, include_diff: bool) -> Result<BulkChangesOutput> {
+    let raw = read_json_spec_to_string(json_spec)?;
+    let input: BulkIdsInput = serde_json::from_str(&raw)
+        .map_err(|e| Error::validation_invalid_json(e, Some("parse bulk changes input".to_string())))?;
+
+    Ok(build_bulk_changes_output(&input.component_ids, include_diff))
+}
+
+/// Get changes for all components in a project.
+pub fn changes_project(project_id: &str, include_diff: bool) -> Result<BulkChangesOutput> {
+    let proj = project::load(project_id)?;
+    Ok(build_bulk_changes_output(&proj.component_ids, include_diff))
 }
 
 #[cfg(test)]

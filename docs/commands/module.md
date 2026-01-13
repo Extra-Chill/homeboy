@@ -34,10 +34,13 @@ homeboy module setup <moduleId>
 ### `install`
 
 ```sh
-homeboy module install <url> [--id <moduleId>]
+homeboy module install <source> [--id <moduleId>]
 ```
 
-Installs a module by cloning it into Homeboy's modules directory (under your OS config directory) and writing `.install.json` so it can be updated later.
+Installs a module into Homeboy's modules directory.
+
+- If `<source>` is a git URL, Homeboy clones it and writes `sourceUrl` into the installed module's `homeboy.json`.
+- If `<source>` is a local path, Homeboy symlinks the directory into the modules directory.
 
 ### `update`
 
@@ -45,7 +48,11 @@ Installs a module by cloning it into Homeboy's modules directory (under your OS 
 homeboy module update <moduleId> [--force]
 ```
 
-Updates a module by running `git pull --ff-only` in the module directory. If the module has uncommitted changes, `--force` is required.
+Updates a git-cloned module.
+
+- If the module is symlinked, Homeboy returns an error (linked modules are updated at the source directory).
+- If the module has uncommitted changes, `--force` is required.
+- Homeboy reads `sourceUrl` from the module's `homeboy.json` to report the module URL in JSON output.
 
 ### `uninstall`
 
@@ -53,23 +60,10 @@ Updates a module by running `git pull --ff-only` in the module directory. If the
 homeboy module uninstall <moduleId> [--force]
 ```
 
-Uninstalls a module by deleting its directory. If `--force` is not provided, Homeboy errors (there is no interactive prompt).
+Uninstalls a module.
 
-### `link`
-
-```sh
-homeboy module link <path> [--id <moduleId>]
-```
-
-Symlinks a local module directory into the Homeboy modules directory for development.
-
-### `unlink`
-
-```sh
-homeboy module unlink <moduleId>
-```
-
-Removes a symlinked module entry from the Homeboy modules directory (preserves the source directory).
+- If the module is **symlinked**, Homeboy removes the symlink (the source directory is preserved) and `--force` is not required.
+- If the module is **git-cloned**, Homeboy deletes the module directory and `--force` is required.
 
 ### `action`
 
@@ -135,11 +129,9 @@ Top-level variants (`data.command`):
 - `module.list`: `{ projectId?, modules: ModuleEntry[] }`
 - `module.run`: `{ moduleId, projectId? }`
 - `module.setup`: `{ moduleId }`
-- `module.install`: `{ moduleId, url, path }`
+- `module.install`: `{ moduleId, source, path, linked }`
 - `module.update`: `{ moduleId, url, path }`
-- `module.uninstall`: `{ moduleId, path }`
-- `module.link`: `{ moduleId, sourcePath, symlinkPath }`
-- `module.unlink`: `{ moduleId, path }`
+- `module.uninstall`: `{ moduleId, path, wasLinked }`
 - `module.action`: `{ moduleId, actionId, projectId?, response }`
 
 Module entry (`modules[]`):

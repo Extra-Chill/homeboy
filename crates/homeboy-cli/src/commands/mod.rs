@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 pub mod build;
 pub mod changelog;
+pub mod changes;
 pub mod cli;
 pub mod component;
 pub mod context;
@@ -99,6 +100,9 @@ pub(crate) fn run_json(
         }
         crate::Commands::Build(args) => crate::output::map_cmd_result_to_json(
             build::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),
+        ),
+        crate::Commands::Changes(args) => crate::output::map_cmd_result_to_json(
+            changes::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),
         ),
         crate::Commands::Auth(args) => crate::output::map_cmd_result_to_json(
             auth::run(args, global).map(|(data, exit_code)| (data, vec![], exit_code)),
