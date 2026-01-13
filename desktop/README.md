@@ -2,7 +2,7 @@
 
 Native macOS SwiftUI application for development and deployment automation. Supports WordPress, Node.js, and custom project types via extensible JSON definitions. Configure multiple sites and extend functionality with installable modules.
 
-**Note:** The desktop app may lag behind the Homeboy CLI as the CLI is the main project.
+**Note:** The desktop app may lag behind the Homeboy CLI. The CLI is the source of truth for behavior and output contracts.
 
 ## Features
 
@@ -50,7 +50,7 @@ This README avoids duplicating CLI reference docs.
 
 - Canonical CLI reference: `homeboy docs`
 - Desktop/CLI integration notes: [docs/CLI.md](docs/CLI.md)
-- Embedded CLI markdown sources: [`../homeboy-cli/docs/`](../homeboy-cli/docs/index.md)
+- Embedded CLI markdown sources: [`../homeboy-core/docs/`](../homeboy-core/docs/index.md)
 
 Compatibility note: the CLI is the source of truth for command behavior and output. The desktop app may lag behind and not support newer commands/options until it is updated.
 
@@ -136,7 +136,7 @@ For WordPress projects, set the **wp-content path** in project settings (you can
 This README stays desktop-focused and intentionally avoids duplicating CLI reference docs.
 
 - Desktop 1 CLI integration + config tree: [`docs/CLI.md`](docs/CLI.md)
-- Embedded CLI markdown sources (canonical command docs): [`../homeboy-cli/docs/index.md`](../homeboy-cli/docs/index.md)
+- Embedded CLI markdown sources (canonical command docs): [`../homeboy-core/docs/index.md`](../homeboy-core/docs/index.md)
 - Module manifest spec (`homeboy.json`): [`docs/MODULE-SPEC.md`](docs/MODULE-SPEC.md)
 
 ## API Authentication

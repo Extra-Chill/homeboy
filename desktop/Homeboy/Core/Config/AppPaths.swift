@@ -12,10 +12,6 @@ enum AppPaths {
         appSupport.appendingPathComponent(appName)
     }
 
-    static var config: URL {
-        homeboy.appendingPathComponent("config.json")
-    }
-
     static var projects: URL {
         homeboy.appendingPathComponent("projects")
     }

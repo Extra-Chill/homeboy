@@ -16,7 +16,6 @@ enum ModuleState: Equatable {
 struct LoadedModule: Identifiable {
     let manifest: ModuleManifest
     var state: ModuleState
-    var settings: ModuleSettings
     let cliEntry: CLIModuleEntry
 
     var id: String { manifest.id }
@@ -36,10 +35,6 @@ struct LoadedModule: Identifiable {
     var entrypointPath: String {
         guard let entrypoint = manifest.runtime.entrypoint else { return "" }
         return "\(modulePath)/\(entrypoint)"
-    }
-
-    var settingsPath: String {
-        "\(modulePath)/config.json"
     }
 
     var isDisabled: Bool {
@@ -102,7 +97,7 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
         error = nil
 
         do {
-            let projectId = ConfigurationManager.shared.activeProjectId
+            let projectId = ConfigurationManager.shared.activeProject?.id
             var args = ["module", "list", "--json"]
             if let project = projectId {
                 args += ["--project", project]
@@ -155,12 +150,10 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
             manifest.modulePath = entry.path
 
             let state = deriveState(from: entry)
-            let settings = loadModuleSettings(modulePath: entry.path)
 
             return LoadedModule(
                 manifest: manifest,
                 state: state,
-                settings: settings,
                 cliEntry: entry
             )
         } catch {
@@ -180,41 +173,6 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
         return .ready
     }
 
-    // MARK: - Module Settings
-
-    private func loadModuleSettings(modulePath: String) -> ModuleSettings {
-        let settingsPath = "\(modulePath)/config.json"
-
-        guard fileManager.fileExists(atPath: settingsPath),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: settingsPath)),
-              let settings = try? jsonDecoder.decode(ModuleSettings.self, from: data) else {
-            return ModuleSettings()
-        }
-
-        return settings
-    }
-
-    func saveModuleSettings(moduleId: String, settings: ModuleSettings) {
-        guard let index = modules.firstIndex(where: { $0.id == moduleId }) else { return }
-
-        let settingsPath = modules[index].settingsPath
-
-        do {
-            let data = try jsonEncoder.encode(settings)
-            try data.write(to: URL(fileURLWithPath: settingsPath))
-            modules[index].settings = settings
-        } catch {
-            print("[ModuleManager] Failed to save settings for \(moduleId): \(error)")
-        }
-    }
-
-    func updateSetting(moduleId: String, key: String, value: SettingValue) {
-        guard let index = modules.firstIndex(where: { $0.id == moduleId }) else { return }
-
-        var settings = modules[index].settings
-        settings.values[key] = value
-        saveModuleSettings(moduleId: moduleId, settings: settings)
-    }
 
     // MARK: - Module Installation via CLI
 

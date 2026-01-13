@@ -22,10 +22,7 @@ final class ConfigurationObserver: ObservableObject {
     private var projectSnapshots: [String: Data] = [:]
     private var serverSnapshots: [String: Data] = [:]
     private var moduleManifestSnapshots: [String: Data] = [:]
-    private var moduleSettingsSnapshots: [String: Data] = [:]
 
-    // Track last active project ID for switch detection
-    private var lastActiveProjectId: String?
 
     private let fileManager = FileManager.default
     private let jsonDecoder = JSONDecoder()
@@ -52,9 +49,6 @@ final class ConfigurationObserver: ObservableObject {
     // MARK: - File Watching Setup
 
     private func setupWatchers() {
-        // Watch app config file for active project changes
-        watchFile(AppPaths.config, key: "config")
-
         // Watch directories for add/remove/modify
         watchDirectory(AppPaths.projects, key: "projects")
         watchDirectory(AppPaths.servers, key: "servers")
@@ -140,8 +134,6 @@ final class ConfigurationObserver: ObservableObject {
 
     private func detectAndPublishChanges(source: String) {
         switch source {
-        case "config":
-            detectActiveProjectChange()
         case "projects":
             detectProjectChanges()
         case "servers":
@@ -158,20 +150,11 @@ final class ConfigurationObserver: ObservableObject {
     // MARK: - Snapshot Management
 
     private func refreshAllSnapshots() {
-        lastActiveProjectId = loadActiveProjectId()
         projectSnapshots = loadAllProjectData()
         serverSnapshots = loadAllServerData()
         moduleManifestSnapshots = loadAllModuleManifestData()
-        moduleSettingsSnapshots = loadAllModuleSettingsData()
     }
 
-    private func loadActiveProjectId() -> String? {
-        guard let data = try? Data(contentsOf: AppPaths.config),
-              let config = try? jsonDecoder.decode(AppConfiguration.self, from: data) else {
-            return nil
-        }
-        return config.activeProjectId
-    }
 
     private func loadAllProjectData() -> [String: Data] {
         loadAllJsonData(from: AppPaths.projects)
@@ -187,7 +170,7 @@ final class ConfigurationObserver: ObservableObject {
             return result
         }
         for moduleId in moduleIds {
-            let manifestPath = AppPaths.module(id: moduleId).appendingPathComponent("module.json")
+            let manifestPath = AppPaths.module(id: moduleId).appendingPathComponent("homeboy.json")
             if let data = try? Data(contentsOf: manifestPath) {
                 result[moduleId] = data
             }
@@ -195,19 +178,6 @@ final class ConfigurationObserver: ObservableObject {
         return result
     }
 
-    private func loadAllModuleSettingsData() -> [String: Data] {
-        var result: [String: Data] = [:]
-        guard let moduleIds = try? fileManager.contentsOfDirectory(atPath: AppPaths.modules.path) else {
-            return result
-        }
-        for moduleId in moduleIds {
-            let settingsPath = AppPaths.module(id: moduleId).appendingPathComponent("config.json")
-            if let data = try? Data(contentsOf: settingsPath) {
-                result[moduleId] = data
-            }
-        }
-        return result
-    }
 
     private func loadAllJsonData(from directory: URL) -> [String: Data] {
         var result: [String: Data] = [:]
@@ -225,20 +195,6 @@ final class ConfigurationObserver: ObservableObject {
 
     // MARK: - Change Detection
 
-    private func detectActiveProjectChange() {
-        let newActiveId = loadActiveProjectId()
-
-        if let oldId = lastActiveProjectId, let newId = newActiveId, oldId != newId {
-            // Project switch detected
-            publish(.projectWillSwitch(from: oldId, to: newId))
-            lastActiveProjectId = newId
-            publish(.projectDidSwitch(projectId: newId))
-        } else if lastActiveProjectId == nil, let newId = newActiveId {
-            // First project selection
-            lastActiveProjectId = newId
-            publish(.projectDidSwitch(projectId: newId))
-        }
-    }
 
     private func detectProjectChanges() {
         let currentProjects = loadAllProjectData()
@@ -292,7 +248,6 @@ final class ConfigurationObserver: ObservableObject {
 
     private func detectModuleChanges() {
         let currentManifests = loadAllModuleManifestData()
-        let currentSettings = loadAllModuleSettingsData()
         let currentIds = Set(currentManifests.keys)
         let previousIds = Set(moduleManifestSnapshots.keys)
 
@@ -315,25 +270,7 @@ final class ConfigurationObserver: ObservableObject {
             }
         }
 
-        // Modified settings (separate check since settings file may not exist)
-        let currentSettingsIds = Set(currentSettings.keys)
-        let previousSettingsIds = Set(moduleSettingsSnapshots.keys)
-
-        for moduleId in currentSettingsIds.intersection(previousSettingsIds) {
-            if let newData = currentSettings[moduleId],
-               let oldData = moduleSettingsSnapshots[moduleId],
-               newData != oldData {
-                publish(.moduleSettingsChanged(moduleId: moduleId))
-            }
-        }
-
-        // New settings file created
-        for moduleId in currentSettingsIds.subtracting(previousSettingsIds) {
-            publish(.moduleSettingsChanged(moduleId: moduleId))
-        }
-
         moduleManifestSnapshots = currentManifests
-        moduleSettingsSnapshots = currentSettings
     }
 
     private func detectProjectTypeChanges() {

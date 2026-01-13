@@ -45,14 +45,21 @@ class ConfigurationManager: ObservableObject {
     
     /// Thread-safe static accessor for reading project configuration from any context.
     nonisolated static func readCurrentProject() -> ProjectConfiguration {
-        guard let appData = try? Data(contentsOf: AppPaths.config),
-              let appConfig = try? JSONDecoder().decode(AppConfiguration.self, from: appData) else {
+        let fileManager = FileManager.default
+        let decoder = JSONDecoder()
+
+        guard let files = try? fileManager.contentsOfDirectory(at: AppPaths.projects, includingPropertiesForKeys: nil) else {
             return ProjectConfiguration.empty(id: "default", name: "Default")
         }
 
-        guard let projectData = try? Data(contentsOf: AppPaths.project(id: appConfig.activeProjectId)),
-              let project = try? JSONDecoder().decode(ProjectConfiguration.self, from: projectData) else {
-            return ProjectConfiguration.empty(id: appConfig.activeProjectId, name: "Default")
+        let projectFiles = files
+            .filter { $0.pathExtension == "json" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        guard let firstFile = projectFiles.first,
+              let data = try? Data(contentsOf: firstFile),
+              let project = try? decoder.decode(ProjectConfiguration.self, from: data) else {
+            return ProjectConfiguration.empty(id: "default", name: "Default")
         }
 
         return project
@@ -67,7 +74,6 @@ class ConfigurationManager: ObservableObject {
         return config
     }
 
-    @Published var appConfig: AppConfiguration
     @Published var activeProject: ProjectConfiguration?
     
     /// Whether the app needs the user to create a project (no projects exist or active project invalid)
@@ -156,9 +162,6 @@ class ConfigurationManager: ObservableObject {
         AppPaths.servers
     }
 
-    private var appConfigPath: URL {
-        AppPaths.config
-    }
     
     // MARK: - Initialization
     
@@ -167,15 +170,12 @@ class ConfigurationManager: ObservableObject {
         jsonEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         jsonDecoder = JSONDecoder()
 
-        appConfig = AppConfiguration()
         activeProject = nil
 
         ensureDirectoriesExist()
         load()
-        refreshAvailableProjects()
         refreshAvailableServers()
         refreshAvailableComponents()
-        startWatchingActiveProject()
         startWatchingDirectories()
     }
     
@@ -358,62 +358,17 @@ class ConfigurationManager: ObservableObject {
     // MARK: - Load Configuration
     
     private func load() {
-        if fileManager.fileExists(atPath: appConfigPath.path) {
-            loadFromJSON()
-        } else {
-            appConfig = AppConfiguration()
-            saveAppConfig()
-            checkProjectState()
-        }
-    }
-    
-    private func loadFromJSON() {
-        do {
-            let data = try Data(contentsOf: appConfigPath)
-            appConfig = try jsonDecoder.decode(AppConfiguration.self, from: data)
-        } catch {
-            print("[ConfigurationManager] Failed to load app config: \(error)")
-            appConfig = AppConfiguration()
-        }
-        
-        if let project = loadProject(id: appConfig.activeProjectId) {
-            activeProject = project
+        refreshAvailableProjects()
+
+        if let firstId = availableProjectIds().first, let firstProject = loadProject(id: firstId) {
+            activeProject = firstProject
             needsProjectCreation = false
         } else {
-            print("[ConfigurationManager] Active project '\(appConfig.activeProjectId)' not found")
             activeProject = nil
-            checkProjectState()
-        }
-    }
-    
-    /// Check if user needs to create a project (no projects exist or active project invalid)
-    private func checkProjectState() {
-        if !hasProjects() {
             needsProjectCreation = true
-        } else if activeProject == nil {
-            // Projects exist but active one is invalid - pick the first available
-            if let firstId = availableProjectIds().first, let firstProject = loadProject(id: firstId) {
-                activeProject = firstProject
-                appConfig.activeProjectId = firstId
-                saveAppConfig()
-                needsProjectCreation = false
-            } else {
-                needsProjectCreation = true
-            }
-        } else {
-            needsProjectCreation = false
         }
-    }
-    
-    // MARK: - Save Configuration
-    
-    func saveAppConfig() {
-        do {
-            let data = try jsonEncoder.encode(appConfig)
-            try data.write(to: appConfigPath)
-        } catch {
-            print("[ConfigurationManager] Failed to save app config: \(error)")
-        }
+
+        startWatchingActiveProject()
     }
     
     func saveProject(_ project: ProjectConfiguration) {
@@ -521,8 +476,6 @@ class ConfigurationManager: ObservableObject {
         ConfigurationObserver.shared.publish(.projectWillSwitch(from: oldId, to: id))
 
         activeProject = project
-        appConfig.activeProjectId = id
-        saveAppConfig()
 
         startWatchingActiveProject()
 
@@ -553,7 +506,7 @@ class ConfigurationManager: ObservableObject {
     }
     
     func deleteProject(id: String) {
-        guard id != appConfig.activeProjectId else {
+        guard id != activeProject?.id else {
             print("[ConfigurationManager] Cannot delete active project")
             return
         }

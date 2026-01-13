@@ -170,13 +170,12 @@ Run `homeboy docs` for the canonical CLI documentation.
 
 The desktop app is macOS-only and stores configuration as JSON under the shared Homeboy config tree.
 
-Canonical cross-platform config root rules live in the CLI docs: [`../homeboy-cli/docs/index.md`](../homeboy-cli/docs/index.md).
+Canonical cross-platform config root rules live in the CLI docs: [`../homeboy-core/docs/index.md`](../homeboy-core/docs/index.md).
 
 macOS locations:
 
 ```
 ~/Library/Application Support/homeboy/
-├── homeboy.json          # Global app/CLI config
 ├── projects/             # Project configuration
 │   └── <project-id>.json
 ├── servers/              # SSH server configuration

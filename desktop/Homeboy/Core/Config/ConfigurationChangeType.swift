@@ -33,7 +33,6 @@ enum ConfigurationChangeType {
     case moduleAdded(moduleId: String)
     case moduleModified(moduleId: String)
     case moduleRemoved(moduleId: String)
-    case moduleSettingsChanged(moduleId: String)
 
     // Project type changes
     case projectTypeModified(typeId: String)

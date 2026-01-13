@@ -4,6 +4,11 @@ All notable code changes to this project are documented in this file.
 
 ## Unreleased
 
+## 0.8.1
+
+- Docs: restructure desktop README and refine module spec wording
+- Docs: update CLI config tree notes and reserve docs directory
+
 ## 0.8.0
 
 - Delegate module discovery/setup/run to CLI; UI loads manifests from CLI-reported paths

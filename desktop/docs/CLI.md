@@ -16,19 +16,18 @@ Verify installation:
 homeboy --version
 ```
 
-CLI source: `../homeboy-cli/`.
+CLI source: `../homeboy-core/` (Rust workspace; `crates/homeboy-cli` is the CLI binary).
 
 ## Shared configuration
 
 Homeboy Desktop is macOS-only, but it interoperates with the CLI in the same on-disk config tree used by the CLI.
 
-Canonical config path rules live in the CLI docs: [`homeboy-cli/docs/index.md`](../../homeboy-cli/docs/index.md).
+Canonical config path rules live in the CLI docs: [`homeboy-core/docs/index.md`](../../homeboy-core/docs/index.md).
 
 macOS config location:
 
 ```
 ~/Library/Application Support/homeboy/
-├── homeboy.json          # Global app/CLI config
 ├── projects/             # Project configurations
 ├── servers/              # SSH server configurations
 ├── components/           # Component definitions
@@ -45,7 +44,7 @@ Projects and servers are editable via Homeboy.app or via the CLI.
 This document avoids duplicating CLI command docs.
 
 - Canonical CLI reference: `homeboy docs`
-- Markdown sources embedded into the CLI: [`homeboy-cli/docs/`](../../homeboy-cli/docs/index.md)
+- Markdown sources embedded into the CLI: [`homeboy-core/docs/`](../../homeboy-core/docs/index.md)
 
 ### Desktop ↔ CLI responsibilities
 
@@ -103,7 +102,7 @@ The desktop app uses `homeboy deploy` for component deployments.
 This document does not restate deploy flags or JSON shapes; the canonical reference is:
 
 - `homeboy docs commands/deploy`
-- [`homeboy-cli/docs/commands/deploy.md`](../../homeboy-cli/docs/commands/deploy.md)
+- [`homeboy-core/docs/commands/deploy.md`](../../homeboy-core/docs/commands/deploy.md)
 
 Note: deploy output is JSON-wrapped like other commands; there is no extra `--json` flag. Building artifacts is a separate concern (`homeboy build`).
 
@@ -157,7 +156,7 @@ For the full CLI reference, run `homeboy docs`.
 The desktop app relies on the CLI's mapped exit codes.
 
 Canonical mapping and error-code groups live in:
-- [`homeboy-cli/docs/json-output/json-output-contract.md`](../../homeboy-cli/docs/json-output/json-output-contract.md#exit-codes)
+- [`homeboy-core/docs/json-output/json-output-contract.md`](../../homeboy-core/docs/json-output/json-output-contract.md#exit-codes)
 
 ## Error Messages
 

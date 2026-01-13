@@ -6,10 +6,6 @@ struct ModulesSettingsTab: View {
     @State private var selectedModuleForUninstall: LoadedModule?
     @State private var showUninstallConfirmation = false
     
-    /// Modules that have configurable settings
-    private var modulesWithSettings: [LoadedModule] {
-        moduleManager.modules.filter { !$0.manifest.settings.isEmpty }
-    }
     
     var body: some View {
         Form {
@@ -24,13 +20,6 @@ struct ModulesSettingsTab: View {
                     ForEach(moduleManager.modules) { module in
                         moduleRow(module)
                     }
-                }
-            }
-            
-            // Module Settings - only show if any module has settings
-            if !modulesWithSettings.isEmpty {
-                ForEach(modulesWithSettings) { module in
-                    moduleSettingsSection(for: module)
                 }
             }
             
@@ -189,94 +178,6 @@ struct ModulesSettingsTab: View {
                 }
         }
     }
-    
-    // MARK: - Module Settings
-    
-    @ViewBuilder
-    private func moduleSettingsSection(for module: LoadedModule) -> some View {
-        Section("\(module.name) Settings") {
-            ForEach(module.manifest.settings) { setting in
-                settingField(for: setting, module: module)
-            }
-        }
-    }
-    
-    @ViewBuilder
-    private func settingField(for setting: SettingConfig, module: LoadedModule) -> some View {
-        switch setting.type {
-        case .text:
-            VStack(alignment: .leading, spacing: 4) {
-                TextField(setting.label, text: settingBinding(for: setting, module: module))
-                    .textFieldStyle(.roundedBorder)
-                
-                if let placeholder = setting.placeholder {
-                    Text(placeholder)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            
-        case .toggle:
-            Toggle(setting.label, isOn: toggleBinding(for: setting, module: module))
-            
-        case .stepper:
-            LabeledContent(setting.label) {
-                HStack {
-                    TextField("", text: settingBinding(for: setting, module: module))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 60)
-                    
-                    Stepper("", value: stepperBinding(for: setting, module: module))
-                        .labelsHidden()
-                }
-            }
-        }
-    }
-    
-    // MARK: - Settings Bindings
-    
-    private func settingBinding(for setting: SettingConfig, module: LoadedModule) -> Binding<String> {
-        Binding(
-            get: {
-                module.settings.string(for: setting.id) ?? setting.default?.stringValue ?? ""
-            },
-            set: { newValue in
-                moduleManager.updateSetting(
-                    moduleId: module.id,
-                    key: setting.id,
-                    value: .string(newValue)
-                )
-            }
-        )
-    }
-    
-    private func toggleBinding(for setting: SettingConfig, module: LoadedModule) -> Binding<Bool> {
-        Binding(
-            get: {
-                module.settings.bool(for: setting.id) ?? setting.default?.boolValue ?? false
-            },
-            set: { newValue in
-                moduleManager.updateSetting(
-                    moduleId: module.id,
-                    key: setting.id,
-                    value: .bool(newValue)
-                )
-            }
-        )
-    }
-    
-    private func stepperBinding(for setting: SettingConfig, module: LoadedModule) -> Binding<Int> {
-        Binding(
-            get: {
-                module.settings.int(for: setting.id) ?? setting.default?.intValue ?? 0
-            },
-            set: { newValue in
-                moduleManager.updateSetting(
-                    moduleId: module.id,
-                    key: setting.id,
-                    value: .int(newValue)
-                )
-            }
-        )
-    }
+
 }
+

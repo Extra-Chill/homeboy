@@ -240,12 +240,7 @@ struct ServerEditSheet: View {
             username = server.user
             port = String(server.port)
 
-            if let activeProjectId = config.activeProject?.id,
-               projectsUsingServer.contains(where: { $0.id == activeProjectId }) {
-                selectedConnectionTestProjectId = activeProjectId
-            } else {
-                selectedConnectionTestProjectId = projectsUsingServer.first?.id ?? ""
-            }
+            selectedConnectionTestProjectId = projectsUsingServer.first?.id ?? ""
 
             Task {
                 await refreshKeyStatusFromCLI()

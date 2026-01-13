@@ -13,7 +13,7 @@ Modules extend Homeboy with custom functionality. Each module is a self-containe
 
 Homeboy Desktop is macOS-only; module installation paths below are the macOS view of the shared Homeboy config tree.
 
-The CLI documents the cross-platform config root (macOS/Linux/Windows): [`homeboy-cli/docs/index.md`](../../homeboy-cli/docs/index.md).
+The CLI documents the cross-platform config root (macOS/Linux/Windows): [`homeboy-core/docs/index.md`](../../homeboy-core/docs/index.md).
 
 macOS locations:
 
@@ -40,7 +40,7 @@ Homeboy modules can:
 
 The manifest is a single unified `homeboy.json` file; modules include only fields they need.
 
-For the authoritative runtime behavior, see [`homeboy-cli/docs/commands/module.md`](../../homeboy-cli/docs/commands/module.md).
+For the authoritative runtime behavior, see [`homeboy-core/docs/commands/module.md`](../../homeboy-core/docs/commands/module.md).
 
 ## Manifest Schema
 
@@ -72,7 +72,7 @@ For the authoritative runtime behavior, see [`homeboy-cli/docs/commands/module.m
 
 ### Runtime Object
 
-Executable modules use the CLI runtime contract described in [`homeboy-cli/docs/commands/module.md`](../../homeboy-cli/docs/commands/module.md).
+Executable modules use the CLI runtime contract described in [`homeboy-core/docs/commands/module.md`](../../homeboy-core/docs/commands/module.md).
 
 The manifest's `runtime` object configures shell commands that the CLI runs (for example `runCommand`, `setupCommand`, and optional `readyCheck`). The CLI injects execution context and merged settings via environment variables.
 

@@ -21,8 +21,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
     @Published var actionResult: String?
     @Published var isPerformingAction = false
     
-    private let runner = ModuleRunner()
-    private let installer = ModuleInstaller()
+
     private let configManager = ConfigurationManager.shared
     
     /// Current module from manager (always up-to-date)
@@ -99,21 +98,23 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         actionResult = nil
         isRunning = true
         
-        runner.run(
-            module: module,
-            inputValues: inputValues,
-            selectedNetworkSite: selectedNetworkSite,
-            onOutput: { [weak self] line in
-                Task { @MainActor in
-                    self?.consoleOutput += line
+        Task {
+            let projectId = configManager.activeProject?.id
+
+            await ModuleManager.shared.runModule(
+                moduleId: module.id,
+                inputs: inputValues,
+                projectId: projectId,
+                onOutput: { [weak self] line in
+                    Task { @MainActor in
+                        self?.consoleOutput += line
+                    }
                 }
-            },
-            onComplete: { [weak self] result in
-                Task { @MainActor in
-                    self?.handleRunResult(result, module: module)
-                }
-            }
-        )
+            )
+
+            let output = parseScriptOutput(from: consoleOutput)
+            handleRunResult(output, module: module)
+        }
     }
     
     private func handleRunResult(_ result: Result<ScriptOutput, Error>, module: LoadedModule) {
@@ -144,7 +145,6 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
     }
     
     func cancel() {
-        runner.cancel()
         isRunning = false
     }
     
@@ -157,28 +157,16 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         consoleOutput = ""
         error = nil
         
-        installer.setupModule(
-            module,
-            onOutput: { [weak self] line in
-                Task { @MainActor in
-                    self?.consoleOutput += line
-                }
-            },
-            onComplete: { [weak self] result in
-                Task { @MainActor in
-                    self?.isSettingUp = false
-                    switch result {
-                    case .success:
-                        // Update module state in manager
-                        ModuleManager.shared.updateModuleState(moduleId: self?.moduleId ?? "", state: .ready)
-                    case .failure(let err):
-                        if let moduleId = self?.moduleId {
-                            self?.error = AppError(err.localizedDescription, source: "Module: \(moduleId)")
-                        }
-                    }
-                }
+        Task {
+            do {
+                try await ModuleManager.shared.setupModule(moduleId: module.id)
+                ModuleManager.shared.updateModuleState(moduleId: module.id, state: .ready)
+            } catch {
+                self.error = AppError(error.localizedDescription, source: "Module: \(moduleId)")
             }
-        )
+
+            isSettingUp = false
+        }
     }
     
     // MARK: - Row Selection
@@ -365,9 +353,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
                     return dict
                 }
             } else if template.hasPrefix("{{settings.") && template.hasSuffix("}}") {
-                // Extract setting key and lookup value
-                let key = String(template.dropFirst(11).dropLast(2))
-                return module.settings.string(for: key) ?? ""
+                return ""
             }
             return template
             
