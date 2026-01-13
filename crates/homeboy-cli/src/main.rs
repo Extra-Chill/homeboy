@@ -16,6 +16,8 @@ enum RawOutputMode {
 
 mod commands;
 mod docs;
+mod output;
+mod tty;
 
 use commands::{
     api, auth, build, changelog, cli, component, context, db, deploy, file, git, init, logs,
@@ -195,10 +197,10 @@ fn main() -> std::process::ExitCode {
             &global,
         );
 
-        let (json_result, exit_code) = homeboy::output::map_cmd_result_to_json(
+        let (json_result, exit_code) = output::map_cmd_result_to_json(
             result.map(|(data, exit_code)| (data, vec![], exit_code)),
         );
-        homeboy::output::print_json_result(json_result);
+        output::print_json_result(json_result);
         return std::process::ExitCode::from(exit_code_to_u8(exit_code));
     }
 
@@ -214,14 +216,14 @@ fn main() -> std::process::ExitCode {
     match mode {
         ResponseMode::Json => {}
         ResponseMode::Raw(RawOutputMode::InteractivePassthrough) => {
-            if !homeboy::tty::require_tty_for_interactive() {
+            if !tty::require_tty_for_interactive() {
                 let err = homeboy::Error::validation_invalid_argument(
                     "tty",
                     "This command requires an interactive TTY",
                     None,
                     None,
                 );
-                homeboy::output::print_result::<serde_json::Value>(Err(err));
+                output::print_result::<serde_json::Value>(Err(err));
                 return std::process::ExitCode::from(exit_code_to_u8(2));
             }
         }
@@ -244,7 +246,7 @@ fn main() -> std::process::ExitCode {
                 return std::process::ExitCode::from(exit_code_to_u8(exit_code));
             }
             Err(err) => {
-                homeboy::output::print_result::<serde_json::Value>(Err(err));
+                output::print_result::<serde_json::Value>(Err(err));
                 return std::process::ExitCode::from(exit_code_to_u8(1));
             }
         }
@@ -253,7 +255,7 @@ fn main() -> std::process::ExitCode {
     let (json_result, exit_code) = commands::run_json(cli.command, &global);
 
     match mode {
-        ResponseMode::Json => homeboy::output::print_json_result(json_result),
+        ResponseMode::Json => output::print_json_result(json_result),
         ResponseMode::Raw(RawOutputMode::InteractivePassthrough) => {}
         ResponseMode::Raw(RawOutputMode::Markdown) => {}
     }

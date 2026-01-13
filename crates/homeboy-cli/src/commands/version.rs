@@ -122,7 +122,7 @@ pub fn show_version_output(component_id: &str) -> homeboy::Result<(VersionShowOu
     ))
 }
 
-fn bump(component_id: &str, bump_type: BumpType, dry_run: bool) -> homeboy::output::CmdResult {
+fn bump(component_id: &str, bump_type: BumpType, dry_run: bool) -> CmdResult {
     let mut warnings: Vec<CliWarning> = Vec::new();
 
     if dry_run {

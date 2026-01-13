@@ -19,7 +19,6 @@ pub mod token;
 pub mod version;
 
 // Internal modules - not part of public API
-pub(crate) mod base_path;
 pub(crate) mod http;
 pub(crate) mod json;
 pub(crate) mod keychain;
@@ -27,6 +26,9 @@ pub(crate) mod local_files;
 pub(crate) mod paths;
 pub(crate) mod shell;
 pub(crate) mod template;
+
+// TODO: Migrate deploy command to use core functions, then make this private
+pub mod base_path;
 
 // Re-exports for convenient access
 pub use error::{Error, ErrorCode, Result};

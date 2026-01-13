@@ -1,21 +1,11 @@
 use clap::Args;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::path::Path;
 
-use homeboy::component::{self, Component};
-use homeboy::context::{resolve_project_ssh_with_base_path, RemoteProjectContext};
-use homeboy::deploy::{deploy_artifact, parse_bulk_component_ids, DeployResult};
-use homeboy::project::{self, ProjectRecord};
-use homeboy::module::{load_module, DeployVerification};
-use homeboy::ssh::{execute_local_command_in_dir, SshClient};
-use homeboy::version::{default_pattern_for_file, parse_version, read_local_version};
+use homeboy::context::resolve_project_ssh_with_base_path;
+use homeboy::deploy::{self, DeployConfig};
+use homeboy::project;
 
 use super::CmdResult;
-
-type ProjectLoader = fn(&str) -> homeboy::Result<ProjectRecord>;
-type SshResolver = fn(&str) -> homeboy::Result<(RemoteProjectContext, String)>;
-type BuildRunner = fn(&Component) -> (Option<i32>, Option<String>);
 
 #[derive(Args)]
 pub struct DeployArgs {
@@ -58,59 +48,6 @@ pub struct DeployComponentResult {
     pub deploy_exit_code: Option<i32>,
 }
 
-impl DeployComponentResult {
-    fn new(component: &Component, base_path: &str) -> Self {
-        Self {
-            id: component.id.clone(),
-            name: component.name.clone(),
-            status: String::new(),
-            local_version: None,
-            remote_version: None,
-            error: None,
-            artifact_path: Some(component.build_artifact.clone()),
-            remote_path: homeboy::base_path::join_remote_path(
-                Some(base_path),
-                &component.remote_path,
-            )
-            .ok(),
-            build_command: component.build_command.clone(),
-            build_exit_code: None,
-            deploy_exit_code: None,
-        }
-    }
-
-    fn with_status(mut self, status: &str) -> Self {
-        self.status = status.to_string();
-        self
-    }
-
-    fn with_versions(mut self, local: Option<String>, remote: Option<String>) -> Self {
-        self.local_version = local;
-        self.remote_version = remote;
-        self
-    }
-
-    fn with_error(mut self, error: String) -> Self {
-        self.error = Some(error);
-        self
-    }
-
-    fn with_build_exit_code(mut self, code: Option<i32>) -> Self {
-        self.build_exit_code = code;
-        self
-    }
-
-    fn with_deploy_exit_code(mut self, code: Option<i32>) -> Self {
-        self.deploy_exit_code = code;
-        self
-    }
-
-    fn with_remote_path(mut self, path: String) -> Self {
-        self.remote_path = Some(path);
-        self
-    }
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeploySummary {
@@ -131,22 +68,8 @@ pub struct DeployOutput {
     pub summary: DeploySummary,
 }
 
-pub fn run(args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DeployOutput> {
-    run_with_loaders(
-        args,
-        project::load_record,
-        resolve_project_ssh_with_base_path,
-        run_build,
-    )
-}
-
-fn run_with_loaders(
-    mut args: DeployArgs,
-    project_loader: ProjectLoader,
-    ssh_resolver: SshResolver,
-    build_runner: BuildRunner,
-) -> CmdResult<DeployOutput> {
-    // Check for common subcommand mistakes (deploy doesn't have subcommands)
+pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DeployOutput> {
+    // Check for common subcommand mistakes
     let subcommand_hints = ["status", "list", "show", "help"];
     if subcommand_hints.contains(&args.project_id.as_str()) {
         return Err(homeboy::Error::validation_invalid_argument(
@@ -161,206 +84,45 @@ fn run_with_loaders(
         ));
     }
 
-    // Parse JSON input if provided and merge into component_ids
+    // Parse JSON input if provided
     if let Some(ref spec) = args.json {
-        args.component_ids = parse_bulk_component_ids(spec)?;
+        args.component_ids = deploy::parse_bulk_component_ids(spec)?;
     }
 
-    let project = project_loader(&args.project_id)?;
-    let (ctx, base_path) = ssh_resolver(&args.project_id)?;
-    let client = ctx.client;
+    // Load project and SSH context
+    let project = project::load_record(&args.project_id)?;
+    let (ctx, base_path) = resolve_project_ssh_with_base_path(&args.project_id)?;
 
-    let all_components = load_components(&project.config.component_ids);
-    if all_components.is_empty() {
-        return Err(homeboy::Error::validation_invalid_argument(
-            "componentIds",
-            "No components configured for project",
-            Some(args.project_id.clone()),
-            None,
-        ));
-    }
-
-    let components_to_deploy =
-        plan_components_to_deploy(&args, &all_components, &base_path, &client)?;
-
-    if components_to_deploy.is_empty() {
-        return Ok((
-            DeployOutput {
-                command: "deploy.run".to_string(),
-                project_id: args.project_id,
-                all: args.all,
-                outdated: args.outdated,
-                dry_run: args.dry_run,
-                components: vec![],
-                summary: DeploySummary {
-                    succeeded: 0,
-                    failed: 0,
-                    skipped: 0,
-                },
-            },
-            0,
-        ));
-    }
-
-    let local_versions: HashMap<String, String> = components_to_deploy
-        .iter()
-        .filter_map(|c| fetch_local_version(c).map(|v| (c.id.clone(), v)))
-        .collect();
-
-    let remote_versions = if args.dry_run || args.outdated {
-        fetch_remote_versions(&components_to_deploy, &base_path, &client)
-    } else {
-        HashMap::new()
+    // Build config and call core orchestration
+    let config = DeployConfig {
+        component_ids: args.component_ids.clone(),
+        all: args.all,
+        outdated: args.outdated,
+        dry_run: args.dry_run,
     };
 
-    if args.dry_run {
-        let results = components_to_deploy
-            .iter()
-            .map(|component| {
-                DeployComponentResult::new(component, &base_path)
-                    .with_status("would_deploy")
-                    .with_versions(
-                        local_versions.get(&component.id).cloned(),
-                        remote_versions.get(&component.id).cloned(),
-                    )
-            })
-            .collect::<Vec<_>>();
+    let result = deploy::deploy_components(&config, &project, &ctx, &base_path)?;
 
-        let succeeded = results.len() as u32;
+    // Format output
+    let components: Vec<DeployComponentResult> = result
+        .components
+        .into_iter()
+        .map(|r| DeployComponentResult {
+            id: r.id,
+            name: r.name,
+            status: r.status,
+            local_version: r.local_version,
+            remote_version: r.remote_version,
+            error: r.error,
+            artifact_path: r.artifact_path,
+            remote_path: r.remote_path,
+            build_command: r.build_command,
+            build_exit_code: r.build_exit_code,
+            deploy_exit_code: r.deploy_exit_code,
+        })
+        .collect();
 
-        return Ok((
-            DeployOutput {
-                command: "deploy.run".to_string(),
-                project_id: args.project_id,
-                all: args.all,
-                outdated: args.outdated,
-                dry_run: true,
-                components: results,
-                summary: DeploySummary {
-                    succeeded,
-                    failed: 0,
-                    skipped: 0,
-                },
-            },
-            0,
-        ));
-    }
-
-    let mut results: Vec<DeployComponentResult> = vec![];
-    let mut succeeded: u32 = 0;
-    let mut failed: u32 = 0;
-
-    for component in &components_to_deploy {
-        let local_version = local_versions.get(&component.id).cloned();
-        let remote_version = remote_versions.get(&component.id).cloned();
-
-        // Build is mandatory before deploy
-        let (build_exit_code, build_error) = build_runner(component);
-
-        if let Some(ref error) = build_error {
-            results.push(
-                DeployComponentResult::new(component, &base_path)
-                    .with_status("failed")
-                    .with_versions(local_version, remote_version)
-                    .with_error(error.clone())
-                    .with_build_exit_code(build_exit_code),
-            );
-            failed += 1;
-            continue;
-        }
-
-        // Check artifact exists after build
-        if !Path::new(&component.build_artifact).exists() {
-            results.push(
-                DeployComponentResult::new(component, &base_path)
-                    .with_status("failed")
-                    .with_versions(local_version, remote_version)
-                    .with_error(format!("Artifact not found: {}", component.build_artifact))
-                    .with_build_exit_code(build_exit_code),
-            );
-            failed += 1;
-            continue;
-        }
-
-        // Calculate install directory
-        let install_dir = match homeboy::base_path::join_remote_path(
-            Some(&base_path),
-            &component.remote_path,
-        ) {
-            Ok(v) => v,
-            Err(err) => {
-                results.push(
-                    DeployComponentResult::new(component, &base_path)
-                        .with_status("failed")
-                        .with_versions(local_version, remote_version)
-                        .with_error(err.to_string())
-                        .with_build_exit_code(build_exit_code),
-                );
-                failed += 1;
-                continue;
-            }
-        };
-
-        // Look up verification from modules
-        let verification = find_deploy_verification(&project.config.modules, &install_dir);
-
-        // Deploy using core module
-        let deploy_result = deploy_artifact(
-            &client,
-            Path::new(&component.build_artifact),
-            &install_dir,
-            component.extract_command.as_deref(),
-            verification.as_ref(),
-        );
-
-        match deploy_result {
-            Ok(DeployResult {
-                success: true,
-                exit_code,
-                ..
-            }) => {
-                results.push(
-                    DeployComponentResult::new(component, &base_path)
-                        .with_status("deployed")
-                        .with_versions(local_version.clone(), local_version)
-                        .with_remote_path(install_dir)
-                        .with_build_exit_code(build_exit_code)
-                        .with_deploy_exit_code(Some(exit_code)),
-                );
-                succeeded += 1;
-            }
-            Ok(DeployResult {
-                success: false,
-                exit_code,
-                error,
-            }) => {
-                let mut result = DeployComponentResult::new(component, &base_path)
-                    .with_status("failed")
-                    .with_versions(local_version, remote_version)
-                    .with_remote_path(install_dir)
-                    .with_build_exit_code(build_exit_code)
-                    .with_deploy_exit_code(Some(exit_code));
-                if let Some(e) = error {
-                    result = result.with_error(e);
-                }
-                results.push(result);
-                failed += 1;
-            }
-            Err(err) => {
-                results.push(
-                    DeployComponentResult::new(component, &base_path)
-                        .with_status("failed")
-                        .with_versions(local_version, remote_version)
-                        .with_remote_path(install_dir)
-                        .with_error(err.to_string())
-                        .with_build_exit_code(build_exit_code),
-                );
-                failed += 1;
-            }
-        }
-    }
-
-    let exit_code = if failed > 0 { 1 } else { 0 };
+    let exit_code = if result.summary.failed > 0 { 1 } else { 0 };
 
     Ok((
         DeployOutput {
@@ -369,192 +131,13 @@ fn run_with_loaders(
             all: args.all,
             outdated: args.outdated,
             dry_run: args.dry_run,
-            components: results,
+            components,
             summary: DeploySummary {
-                succeeded,
-                failed,
-                skipped: 0,
+                succeeded: result.summary.succeeded,
+                failed: result.summary.failed,
+                skipped: result.summary.skipped,
             },
         },
         exit_code,
     ))
-}
-
-fn plan_components_to_deploy(
-    args: &DeployArgs,
-    all_components: &[Component],
-    base_path: &str,
-    client: &SshClient,
-) -> homeboy::Result<Vec<Component>> {
-    if args.all {
-        return Ok(all_components.to_vec());
-    }
-
-    if !args.component_ids.is_empty() {
-        let selected: Vec<Component> = all_components
-            .iter()
-            .filter(|c| args.component_ids.contains(&c.id))
-            .cloned()
-            .collect();
-        return Ok(selected);
-    }
-
-    if args.outdated {
-        let remote_versions = fetch_remote_versions(all_components, base_path, client);
-
-        let selected: Vec<Component> = all_components
-            .iter()
-            .filter(|c| {
-                let Some(local_version) = fetch_local_version(c) else {
-                    return true;
-                };
-
-                let Some(remote_version) = remote_versions.get(&c.id) else {
-                    return true;
-                };
-
-                local_version != *remote_version
-            })
-            .cloned()
-            .collect();
-
-        return Ok(selected);
-    }
-
-    Err(homeboy::Error::validation_missing_argument(vec![
-        "component_ids".to_string(),
-        "--all".to_string(),
-        "--outdated".to_string(),
-    ]))
-}
-
-/// Build is mandatory before deploy. Returns error if no build command configured.
-fn run_build(component: &Component) -> (Option<i32>, Option<String>) {
-    let build_cmd = component.build_command.clone().or_else(|| {
-        homeboy::build::detect_build_command(
-            &component.local_path,
-            &component.build_artifact,
-            &component.modules,
-        )
-        .map(|candidate| candidate.command)
-    });
-
-    let Some(build_cmd) = build_cmd else {
-        return (
-            Some(1),
-            Some(format!(
-                "Component '{}' has no build command configured. Configure one with: homeboy component set {} --build-command '<command>'",
-                component.id,
-                component.id
-            )),
-        );
-    };
-
-    let output = execute_local_command_in_dir(&build_cmd, Some(&component.local_path));
-
-    if output.success {
-        (Some(output.exit_code), None)
-    } else {
-        (
-            Some(output.exit_code),
-            Some(format!(
-                "Build failed for '{}'. Fix build errors before deploying.",
-                component.id
-            )),
-        )
-    }
-}
-
-fn find_deploy_verification(modules: &[String], target_path: &str) -> Option<DeployVerification> {
-    for module_id in modules {
-        if let Some(module) = load_module(module_id) {
-            for verification in &module.deploy {
-                if target_path.contains(&verification.path_pattern) {
-                    return Some(verification.clone());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn load_components(component_ids: &[String]) -> Vec<Component> {
-    let mut components = Vec::new();
-
-    for id in component_ids {
-        if let Ok(mut loaded) = component::load(id) {
-            // Resolve relative build artifact path
-            if !loaded.build_artifact.starts_with('/') {
-                loaded.build_artifact = format!("{}/{}", loaded.local_path, loaded.build_artifact);
-            }
-            components.push(loaded);
-        }
-    }
-
-    components
-}
-
-fn parse_component_version(
-    content: &str,
-    pattern: Option<&str>,
-    filename: &str,
-    modules: &[String],
-) -> Option<String> {
-    let pattern_str = match pattern {
-        Some(p) => p.replace("\\\\", "\\"),
-        None => default_pattern_for_file(filename, modules)?,
-    };
-
-    parse_version(content, &pattern_str)
-}
-
-fn fetch_local_version(component: &Component) -> Option<String> {
-    let target = component.version_targets.as_ref()?.first()?;
-    read_local_version(&component.local_path, target, &component.modules)
-}
-
-fn fetch_remote_versions(
-    components: &[Component],
-    base_path: &str,
-    client: &SshClient,
-) -> HashMap<String, String> {
-    let mut versions = HashMap::new();
-
-    for component in components {
-        let Some(version_file) = component
-            .version_targets
-            .as_ref()
-            .and_then(|targets| targets.first())
-            .map(|t| t.file.as_str())
-        else {
-            continue;
-        };
-
-        let remote_path = match homeboy::base_path::join_remote_child(
-            Some(base_path),
-            &component.remote_path,
-            version_file,
-        ) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-
-        let output = client.execute(&format!("cat '{}' 2>/dev/null", remote_path));
-
-        if output.success {
-            let pattern = component
-                .version_targets
-                .as_ref()
-                .and_then(|targets| targets.first())
-                .and_then(|t| t.pattern.as_deref());
-
-            if let Some(version) =
-                parse_component_version(&output.stdout, pattern, version_file, &component.modules)
-            {
-                versions.insert(component.id.clone(), version);
-            }
-        }
-    }
-
-    versions
 }

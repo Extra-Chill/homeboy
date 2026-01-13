@@ -41,6 +41,40 @@ pub fn run(input: &str) -> Result<(BuildResult, i32)> {
     }
 }
 
+/// Build a component for deploy context.
+/// Returns (exit_code, error_message) - None error means success.
+pub fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
+    let build_cmd = component.build_command.clone().or_else(|| {
+        detect_build_command(&component.local_path, &component.build_artifact, &component.modules)
+            .map(|c| c.command)
+    });
+
+    let Some(build_cmd) = build_cmd else {
+        return (
+            Some(1),
+            Some(format!(
+                "Component '{}' has no build command configured. Configure one with: homeboy component set {} --build-command '<command>'",
+                component.id,
+                component.id
+            )),
+        );
+    };
+
+    let output = execute_local_command_in_dir(&build_cmd, Some(&component.local_path));
+
+    if output.success {
+        (Some(output.exit_code), None)
+    } else {
+        (
+            Some(output.exit_code),
+            Some(format!(
+                "Build failed for '{}'. Fix build errors before deploying.",
+                component.id
+            )),
+        )
+    }
+}
+
 // === Internal implementation ===
 
 fn run_single(component_id: &str) -> Result<(BuildResult, i32)> {

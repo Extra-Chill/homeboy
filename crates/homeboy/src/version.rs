@@ -181,6 +181,14 @@ pub fn update_version_in_file(
     Ok(replaced_count)
 }
 
+/// Get version string from a component's first version target.
+/// Returns None if no version targets configured or version can't be read.
+/// Use this for simple version checks (e.g., deploy outdated detection).
+pub fn get_component_version(component: &Component) -> Option<String> {
+    let target = component.version_targets.as_ref()?.first()?;
+    read_local_version(&component.local_path, target, &component.modules)
+}
+
 /// Read version from a local file for a component's version target.
 /// Returns None if file doesn't exist or version can't be parsed.
 pub fn read_local_version(

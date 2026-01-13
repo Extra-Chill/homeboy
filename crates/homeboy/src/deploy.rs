@@ -1,13 +1,19 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
+use crate::base_path;
+use crate::build;
+use crate::component::{self, Component};
+use crate::context::RemoteProjectContext;
 use crate::json::read_json_spec_to_string;
-use crate::module::DeployVerification;
+use crate::module::{load_module, DeployVerification};
+use crate::project::ProjectRecord;
 use crate::shell;
 use crate::ssh::SshClient;
 use crate::template::{render_map, TemplateVars};
+use crate::version;
 use crate::error::{Error, Result};
 
 #[derive(Debug, Deserialize)]
@@ -242,4 +248,435 @@ fn scp_recursive(
         )),
         Err(err) => Ok(DeployResult::failure(1, err.to_string())),
     }
+}
+
+// =============================================================================
+// Deploy Orchestration
+// =============================================================================
+
+/// Configuration for deploy orchestration.
+#[derive(Debug, Clone)]
+pub struct DeployConfig {
+    pub component_ids: Vec<String>,
+    pub all: bool,
+    pub outdated: bool,
+    pub dry_run: bool,
+}
+
+/// Result for a single component deployment.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentDeployResult {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub local_version: Option<String>,
+    pub remote_version: Option<String>,
+    pub error: Option<String>,
+    pub artifact_path: Option<String>,
+    pub remote_path: Option<String>,
+    pub build_command: Option<String>,
+    pub build_exit_code: Option<i32>,
+    pub deploy_exit_code: Option<i32>,
+}
+
+impl ComponentDeployResult {
+    fn new(component: &Component, base_path: &str) -> Self {
+        Self {
+            id: component.id.clone(),
+            name: component.name.clone(),
+            status: String::new(),
+            local_version: None,
+            remote_version: None,
+            error: None,
+            artifact_path: Some(component.build_artifact.clone()),
+            remote_path: base_path::join_remote_path(Some(base_path), &component.remote_path).ok(),
+            build_command: component.build_command.clone(),
+            build_exit_code: None,
+            deploy_exit_code: None,
+        }
+    }
+
+    fn with_status(mut self, status: &str) -> Self {
+        self.status = status.to_string();
+        self
+    }
+
+    fn with_versions(mut self, local: Option<String>, remote: Option<String>) -> Self {
+        self.local_version = local;
+        self.remote_version = remote;
+        self
+    }
+
+    fn with_error(mut self, error: String) -> Self {
+        self.error = Some(error);
+        self
+    }
+
+    fn with_build_exit_code(mut self, code: Option<i32>) -> Self {
+        self.build_exit_code = code;
+        self
+    }
+
+    fn with_deploy_exit_code(mut self, code: Option<i32>) -> Self {
+        self.deploy_exit_code = code;
+        self
+    }
+
+    fn with_remote_path(mut self, path: String) -> Self {
+        self.remote_path = Some(path);
+        self
+    }
+}
+
+/// Summary of deploy orchestration.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploySummary {
+    pub succeeded: u32,
+    pub failed: u32,
+    pub skipped: u32,
+}
+
+/// Result of deploy orchestration for multiple components.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployOrchestrationResult {
+    pub components: Vec<ComponentDeployResult>,
+    pub summary: DeploySummary,
+}
+
+/// Main deploy orchestration entry point.
+/// Handles component selection, building, and deployment.
+pub fn deploy_components(
+    config: &DeployConfig,
+    project: &ProjectRecord,
+    ctx: &RemoteProjectContext,
+    base_path: &str,
+) -> Result<DeployOrchestrationResult> {
+    let all_components = load_project_components(&project.config.component_ids);
+    if all_components.is_empty() {
+        return Err(Error::other("No components configured for project".to_string()));
+    }
+
+    let components_to_deploy = plan_components(config, &all_components, base_path, &ctx.client)?;
+
+    if components_to_deploy.is_empty() {
+        return Ok(DeployOrchestrationResult {
+            components: vec![],
+            summary: DeploySummary {
+                succeeded: 0,
+                failed: 0,
+                skipped: 0,
+            },
+        });
+    }
+
+    // Gather local versions
+    let local_versions: HashMap<String, String> = components_to_deploy
+        .iter()
+        .filter_map(|c| version::get_component_version(c).map(|v| (c.id.clone(), v)))
+        .collect();
+
+    // Gather remote versions if needed
+    let remote_versions = if config.dry_run || config.outdated {
+        fetch_remote_versions(&components_to_deploy, base_path, &ctx.client)
+    } else {
+        HashMap::new()
+    };
+
+    // Dry run - just report what would happen
+    if config.dry_run {
+        let results: Vec<ComponentDeployResult> = components_to_deploy
+            .iter()
+            .map(|component| {
+                ComponentDeployResult::new(component, base_path)
+                    .with_status("would_deploy")
+                    .with_versions(
+                        local_versions.get(&component.id).cloned(),
+                        remote_versions.get(&component.id).cloned(),
+                    )
+            })
+            .collect();
+
+        let succeeded = results.len() as u32;
+
+        return Ok(DeployOrchestrationResult {
+            components: results,
+            summary: DeploySummary {
+                succeeded,
+                failed: 0,
+                skipped: 0,
+            },
+        });
+    }
+
+    // Execute deployments
+    let mut results: Vec<ComponentDeployResult> = vec![];
+    let mut succeeded: u32 = 0;
+    let mut failed: u32 = 0;
+
+    for component in &components_to_deploy {
+        let local_version = local_versions.get(&component.id).cloned();
+        let remote_version = remote_versions.get(&component.id).cloned();
+
+        // Build is mandatory before deploy
+        let (build_exit_code, build_error) = build::build_component(component);
+
+        if let Some(ref error) = build_error {
+            results.push(
+                ComponentDeployResult::new(component, base_path)
+                    .with_status("failed")
+                    .with_versions(local_version, remote_version)
+                    .with_error(error.clone())
+                    .with_build_exit_code(build_exit_code),
+            );
+            failed += 1;
+            continue;
+        }
+
+        // Check artifact exists after build
+        if !Path::new(&component.build_artifact).exists() {
+            results.push(
+                ComponentDeployResult::new(component, base_path)
+                    .with_status("failed")
+                    .with_versions(local_version, remote_version)
+                    .with_error(format!("Artifact not found: {}", component.build_artifact))
+                    .with_build_exit_code(build_exit_code),
+            );
+            failed += 1;
+            continue;
+        }
+
+        // Calculate install directory
+        let install_dir = match base_path::join_remote_path(Some(base_path), &component.remote_path)
+        {
+            Ok(v) => v,
+            Err(err) => {
+                results.push(
+                    ComponentDeployResult::new(component, base_path)
+                        .with_status("failed")
+                        .with_versions(local_version, remote_version)
+                        .with_error(err.to_string())
+                        .with_build_exit_code(build_exit_code),
+                );
+                failed += 1;
+                continue;
+            }
+        };
+
+        // Look up verification from modules
+        let verification = find_deploy_verification(&project.config.modules, &install_dir);
+
+        // Deploy using core module
+        let deploy_result = deploy_artifact(
+            &ctx.client,
+            Path::new(&component.build_artifact),
+            &install_dir,
+            component.extract_command.as_deref(),
+            verification.as_ref(),
+        );
+
+        match deploy_result {
+            Ok(DeployResult {
+                success: true,
+                exit_code,
+                ..
+            }) => {
+                results.push(
+                    ComponentDeployResult::new(component, base_path)
+                        .with_status("deployed")
+                        .with_versions(local_version.clone(), local_version)
+                        .with_remote_path(install_dir)
+                        .with_build_exit_code(build_exit_code)
+                        .with_deploy_exit_code(Some(exit_code)),
+                );
+                succeeded += 1;
+            }
+            Ok(DeployResult {
+                success: false,
+                exit_code,
+                error,
+            }) => {
+                let mut result = ComponentDeployResult::new(component, base_path)
+                    .with_status("failed")
+                    .with_versions(local_version, remote_version)
+                    .with_remote_path(install_dir)
+                    .with_build_exit_code(build_exit_code)
+                    .with_deploy_exit_code(Some(exit_code));
+                if let Some(e) = error {
+                    result = result.with_error(e);
+                }
+                results.push(result);
+                failed += 1;
+            }
+            Err(err) => {
+                results.push(
+                    ComponentDeployResult::new(component, base_path)
+                        .with_status("failed")
+                        .with_versions(local_version, remote_version)
+                        .with_remote_path(install_dir)
+                        .with_error(err.to_string())
+                        .with_build_exit_code(build_exit_code),
+                );
+                failed += 1;
+            }
+        }
+    }
+
+    Ok(DeployOrchestrationResult {
+        components: results,
+        summary: DeploySummary {
+            succeeded,
+            failed,
+            skipped: 0,
+        },
+    })
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Plan which components to deploy based on config flags.
+fn plan_components(
+    config: &DeployConfig,
+    all_components: &[Component],
+    base_path: &str,
+    client: &SshClient,
+) -> Result<Vec<Component>> {
+    if config.all {
+        return Ok(all_components.to_vec());
+    }
+
+    if !config.component_ids.is_empty() {
+        let selected: Vec<Component> = all_components
+            .iter()
+            .filter(|c| config.component_ids.contains(&c.id))
+            .cloned()
+            .collect();
+        return Ok(selected);
+    }
+
+    if config.outdated {
+        let remote_versions = fetch_remote_versions(all_components, base_path, client);
+
+        let selected: Vec<Component> = all_components
+            .iter()
+            .filter(|c| {
+                let Some(local_version) = version::get_component_version(c) else {
+                    return true;
+                };
+
+                let Some(remote_version) = remote_versions.get(&c.id) else {
+                    return true;
+                };
+
+                local_version != *remote_version
+            })
+            .cloned()
+            .collect();
+
+        return Ok(selected);
+    }
+
+    Err(Error::other(
+        "No components specified. Use component IDs, --all, or --outdated".to_string(),
+    ))
+}
+
+/// Load components by ID and normalize artifact paths.
+fn load_project_components(component_ids: &[String]) -> Vec<Component> {
+    let mut components = Vec::new();
+
+    for id in component_ids {
+        if let Ok(mut loaded) = component::load(id) {
+            // Resolve relative build artifact path
+            if !loaded.build_artifact.starts_with('/') {
+                loaded.build_artifact = format!("{}/{}", loaded.local_path, loaded.build_artifact);
+            }
+            components.push(loaded);
+        }
+    }
+
+    components
+}
+
+/// Fetch versions from remote server for components.
+fn fetch_remote_versions(
+    components: &[Component],
+    base_path: &str,
+    client: &SshClient,
+) -> HashMap<String, String> {
+    let mut versions = HashMap::new();
+
+    for component in components {
+        let Some(version_file) = component
+            .version_targets
+            .as_ref()
+            .and_then(|targets| targets.first())
+            .map(|t| t.file.as_str())
+        else {
+            continue;
+        };
+
+        let remote_path = match base_path::join_remote_child(
+            Some(base_path),
+            &component.remote_path,
+            version_file,
+        ) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        let output = client.execute(&format!("cat '{}' 2>/dev/null", remote_path));
+
+        if output.success {
+            let pattern = component
+                .version_targets
+                .as_ref()
+                .and_then(|targets| targets.first())
+                .and_then(|t| t.pattern.as_deref());
+
+            if let Some(ver) = parse_component_version(
+                &output.stdout,
+                pattern,
+                version_file,
+                &component.modules,
+            ) {
+                versions.insert(component.id.clone(), ver);
+            }
+        }
+    }
+
+    versions
+}
+
+/// Parse version from content using pattern or module defaults.
+fn parse_component_version(
+    content: &str,
+    pattern: Option<&str>,
+    filename: &str,
+    modules: &[String],
+) -> Option<String> {
+    let pattern_str = match pattern {
+        Some(p) => p.replace("\\\\", "\\"),
+        None => version::default_pattern_for_file(filename, modules)?,
+    };
+
+    version::parse_version(content, &pattern_str)
+}
+
+/// Find deploy verification config from modules.
+fn find_deploy_verification(modules: &[String], target_path: &str) -> Option<DeployVerification> {
+    for module_id in modules {
+        if let Some(module) = load_module(module_id) {
+            for verification in &module.deploy {
+                if target_path.contains(&verification.path_pattern) {
+                    return Some(verification.clone());
+                }
+            }
+        }
+    }
+    None
 }
