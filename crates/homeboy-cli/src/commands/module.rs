@@ -1,46 +1,18 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use serde_json::Value;
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use homeboy_core::config::ModuleScope;
-use homeboy_core::config::{AppPaths, ConfigManager, ProjectConfiguration};
-use homeboy_core::http::ApiClient;
-use homeboy_core::module::{load_all_modules, load_module, ModuleManifest};
-use homeboy_core::ssh::execute_local_command_interactive;
-use homeboy_core::template;
+use homeboy::config::{AppPaths, ConfigManager, ProjectConfiguration};
+use homeboy::module::{
+    is_module_compatible, is_module_linked, is_module_ready, load_all_modules, load_module,
+    ModuleManifest,
+};
+use homeboy::ssh::execute_local_command_interactive;
+use homeboy::template;
 
 use crate::commands::CmdResult;
-
-struct ModuleExecContext {
-    module_id: String,
-    project_id: Option<String>,
-    component_id: Option<String>,
-    settings_json: String,
-}
-
-fn module_exec_context_env(context: &ModuleExecContext) -> Vec<(&'static str, String)> {
-    use homeboy_core::module::exec_context;
-
-    let mut env: Vec<(&'static str, String)> = vec![
-        (exec_context::VERSION, exec_context::CURRENT_VERSION.to_string()),
-        (exec_context::MODULE_ID, context.module_id.clone()),
-        (exec_context::SETTINGS_JSON, context.settings_json.clone()),
-    ];
-
-    if let Some(ref project_id) = context.project_id {
-        env.push((exec_context::PROJECT_ID, project_id.clone()));
-    }
-
-    if let Some(ref component_id) = context.component_id {
-        env.push((exec_context::COMPONENT_ID, component_id.clone()));
-    }
-
-    env
-}
 
 #[derive(Args)]
 pub struct ModuleArgs {
@@ -280,147 +252,24 @@ fn run_module(
     inputs: Vec<(String, String)>,
     args: Vec<String>,
 ) -> CmdResult<ModuleOutput> {
-    let module = load_module(module_id)
-        .ok_or_else(|| homeboy_core::Error::other(format!("Module '{}' not found", module_id)))?;
-
-    let runtime = module.runtime.as_ref().ok_or_else(|| {
-        homeboy_core::Error::other(format!(
-            "Module '{}' does not have a runtime configuration and cannot be executed",
-            module_id
-        ))
-    })?;
-
-    let run_command = runtime.run_command.as_ref().ok_or_else(|| {
-        homeboy_core::Error::other(format!(
-            "Module '{}' does not have a runCommand defined",
-            module_id
-        ))
-    })?;
-
-    let module_path = module
-        .module_path
-        .as_ref()
-        .ok_or_else(|| homeboy_core::Error::other("module_path not set".to_string()))?;
-
-    let input_values: HashMap<String, String> = inputs.into_iter().collect();
-
-    // Build args string from inputs and trailing args
-    let mut argv = Vec::new();
-    for input in &module.inputs {
-        if let Some(value) = input_values.get(&input.id) {
-            if !value.is_empty() {
-                argv.push(input.arg.clone());
-                argv.push(value.clone());
-            }
-        }
-    }
-    argv.extend(args);
-    let args_str = argv.join(" ");
-
-    // Check if project context is required
-    let requires_project = module.requires.is_some()
-        || template::is_present(run_command, "projectId")
-        || template::is_present(run_command, "sitePath")
-        || template::is_present(run_command, "cliPath")
-        || template::is_present(run_command, "domain");
-
-    let mut resolved_project_id: Option<String> = None;
-    let mut resolved_component_id: Option<String> = None;
-    let mut project_config: Option<ProjectConfiguration> = None;
-    let mut component_config = None;
-
-    if requires_project {
-        let project_id = project.ok_or_else(|| {
-            homeboy_core::Error::other(
-                "This module requires a project; pass --project <id>".to_string(),
-            )
-        })?;
-
-        let loaded_project = ConfigManager::load_project(&project_id)?;
-        ModuleScope::validate_project_compatibility(&module, &loaded_project)?;
-
-        resolved_component_id =
-            ModuleScope::resolve_component_scope(&module, &loaded_project, component.as_deref())?;
-
-        if let Some(ref comp_id) = resolved_component_id {
-            component_config = Some(ConfigManager::load_component(comp_id).map_err(|_| {
-                homeboy_core::Error::config(format!(
-                    "Component '{}' required by module '{}' is not configured",
-                    comp_id, module.id
-                ))
-            })?);
-        }
-
-        resolved_project_id = Some(project_id);
-        project_config = Some(loaded_project);
-    }
-
-    let effective_settings = ModuleScope::effective_settings(
+    let result = homeboy::module::run_module(
         module_id,
-        project_config.as_ref(),
-        component_config.as_ref(),
-    );
-
-    let settings_json = serde_json::to_string(&effective_settings)
-        .map_err(|e| homeboy_core::Error::other(e.to_string()))?;
-
-    let exec_context = ModuleExecContext {
-        module_id: module_id.to_string(),
-        project_id: resolved_project_id.clone(),
-        component_id: resolved_component_id.clone(),
-        settings_json,
-    };
-
-    // Build template variables
-    let entrypoint = runtime.entrypoint.clone().unwrap_or_default();
-    let domain: String;
-    let site_path: String;
-
-    let vars: Vec<(&str, &str)> = if let Some(ref proj) = project_config {
-        domain = proj.domain.clone();
-        site_path = proj.base_path.clone().unwrap_or_default();
-
-        vec![
-            ("modulePath", module_path.as_str()),
-            ("entrypoint", entrypoint.as_str()),
-            ("args", args_str.as_str()),
-            ("projectId", resolved_project_id.as_deref().unwrap_or("")),
-            ("domain", domain.as_str()),
-            ("sitePath", site_path.as_str()),
-        ]
-    } else {
-        vec![
-            ("modulePath", module_path.as_str()),
-            ("entrypoint", entrypoint.as_str()),
-            ("args", args_str.as_str()),
-        ]
-    };
-
-    let command = template::render(run_command, &vars);
-
-    // Build environment with module-defined env vars + exec context
-    let mut env = module_exec_context_env(&exec_context);
-    if let Some(ref module_env) = runtime.env {
-        for (key, value) in module_env {
-            let rendered_value = template::render(value, &vars);
-            env.push((Box::leak(key.clone().into_boxed_str()), rendered_value));
-        }
-    }
-    let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
-
-    let exit_code =
-        execute_local_command_interactive(&command, Some(module_path), Some(&env_pairs));
+        project.as_deref(),
+        component.as_deref(),
+        inputs,
+        args,
+    )?;
 
     Ok((
         ModuleOutput::Run {
             module_id: module_id.to_string(),
-            project_id: resolved_project_id,
+            project_id: result.project_id,
         },
-        exit_code,
+        result.exit_code,
     ))
 }
 
-fn slugify_module_id(value: &str) -> homeboy_core::Result<String> {
+fn slugify_module_id(value: &str) -> homeboy::Result<String> {
     let mut output = String::new();
     let mut last_was_dash = false;
 
@@ -443,7 +292,7 @@ fn slugify_module_id(value: &str) -> homeboy_core::Result<String> {
     }
 
     if output.is_empty() {
-        return Err(homeboy_core::Error::other(
+        return Err(homeboy::Error::other(
             "Unable to derive module id".to_string(),
         ));
     }
@@ -459,25 +308,25 @@ struct ModuleInstallMetadata {
     linked: bool,
 }
 
-fn install_metadata_path(module_id: &str) -> homeboy_core::Result<std::path::PathBuf> {
+fn install_metadata_path(module_id: &str) -> homeboy::Result<std::path::PathBuf> {
     Ok(AppPaths::module(module_id)?.join(".install.json"))
 }
 
-fn write_install_metadata(module_id: &str, url: &str) -> homeboy_core::Result<()> {
+fn write_install_metadata(module_id: &str, url: &str) -> homeboy::Result<()> {
     let path = install_metadata_path(module_id)?;
     let content = serde_json::to_string_pretty(&ModuleInstallMetadata {
         source_url: url.to_string(),
         linked: false,
     })
     .map_err(|err| {
-        homeboy_core::Error::internal_json(
+        homeboy::Error::internal_json(
             err.to_string(),
             Some("serialize module install metadata".to_string()),
         )
     })?;
 
     fs::write(path, content).map_err(|err| {
-        homeboy_core::Error::internal_io(
+        homeboy::Error::internal_io(
             err.to_string(),
             Some("write module install metadata".to_string()),
         )
@@ -485,30 +334,30 @@ fn write_install_metadata(module_id: &str, url: &str) -> homeboy_core::Result<()
     Ok(())
 }
 
-fn read_install_metadata(module_id: &str) -> homeboy_core::Result<ModuleInstallMetadata> {
+fn read_install_metadata(module_id: &str) -> homeboy::Result<ModuleInstallMetadata> {
     let path = install_metadata_path(module_id)?;
     if !path.exists() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "No .install.json found for module '{module_id}'. Reinstall it with `homeboy module install`.",
         )));
     }
 
     let content = fs::read_to_string(path).map_err(|err| {
-        homeboy_core::Error::internal_io(
+        homeboy::Error::internal_io(
             err.to_string(),
             Some("read module install metadata".to_string()),
         )
     })?;
 
     serde_json::from_str(&content).map_err(|err| {
-        homeboy_core::Error::internal_json(
+        homeboy::Error::internal_json(
             err.to_string(),
             Some("parse module install metadata".to_string()),
         )
     })
 }
 
-fn derive_module_id_from_url(url: &str) -> homeboy_core::Result<String> {
+fn derive_module_id_from_url(url: &str) -> homeboy::Result<String> {
     let trimmed = url.trim_end_matches('/');
     let segment = trimmed
         .split('/')
@@ -519,12 +368,12 @@ fn derive_module_id_from_url(url: &str) -> homeboy_core::Result<String> {
     slugify_module_id(segment)
 }
 
-fn confirm_dangerous_action(force: bool, message: &str) -> homeboy_core::Result<()> {
+fn confirm_dangerous_action(force: bool, message: &str) -> homeboy::Result<()> {
     if force {
         return Ok(());
     }
 
-    Err(homeboy_core::Error::other(format!(
+    Err(homeboy::Error::other(format!(
         "{message} Re-run with --force to confirm.",
     )))
 }
@@ -549,7 +398,7 @@ fn install_module(url: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
 
     let module_dir = AppPaths::module(&module_id)?;
     if module_dir.exists() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Module '{module_id}' already exists",
         )));
     }
@@ -562,10 +411,10 @@ fn install_module(url: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+        .map_err(|e| homeboy::Error::other(e.to_string()))?;
 
     if !status.success() {
-        return Err(homeboy_core::Error::other("git clone failed".to_string()));
+        return Err(homeboy::Error::other("git clone failed".to_string()));
     }
 
     write_install_metadata(&module_id, url)?;
@@ -594,7 +443,7 @@ fn install_module(url: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
 fn update_module(module_id: &str, force: bool) -> CmdResult<ModuleOutput> {
     let module_dir = AppPaths::module(module_id)?;
     if !module_dir.exists() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Module '{module_id}' not found",
         )));
     }
@@ -615,10 +464,10 @@ fn update_module(module_id: &str, force: bool) -> CmdResult<ModuleOutput> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+        .map_err(|e| homeboy::Error::other(e.to_string()))?;
 
     if !status.success() {
-        return Err(homeboy_core::Error::other("git pull failed".to_string()));
+        return Err(homeboy::Error::other("git pull failed".to_string()));
     }
 
     // Auto-run setup if module defines a setup_command
@@ -645,7 +494,7 @@ fn update_module(module_id: &str, force: bool) -> CmdResult<ModuleOutput> {
 fn uninstall_module(module_id: &str, force: bool) -> CmdResult<ModuleOutput> {
     let module_dir = AppPaths::module(module_id)?;
     if !module_dir.exists() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Module '{module_id}' not found",
         )));
     }
@@ -653,7 +502,7 @@ fn uninstall_module(module_id: &str, force: bool) -> CmdResult<ModuleOutput> {
     confirm_dangerous_action(force, "This will permanently remove the module")?;
 
     fs::remove_dir_all(&module_dir).map_err(|err| {
-        homeboy_core::Error::internal_io(
+        homeboy::Error::internal_io(
             err.to_string(),
             Some("remove module directory".to_string()),
         )
@@ -670,7 +519,7 @@ fn uninstall_module(module_id: &str, force: bool) -> CmdResult<ModuleOutput> {
 
 fn setup_module(module_id: &str) -> CmdResult<ModuleOutput> {
     let module = load_module(module_id)
-        .ok_or_else(|| homeboy_core::Error::other(format!("Module '{}' not found", module_id)))?;
+        .ok_or_else(|| homeboy::Error::other(format!("Module '{}' not found", module_id)))?;
 
     let runtime = match module.runtime.as_ref() {
         Some(r) => r,
@@ -699,7 +548,7 @@ fn setup_module(module_id: &str) -> CmdResult<ModuleOutput> {
     let module_path = module
         .module_path
         .as_ref()
-        .ok_or_else(|| homeboy_core::Error::other("module_path not set".to_string()))?;
+        .ok_or_else(|| homeboy::Error::other("module_path not set".to_string()))?;
 
     let entrypoint = runtime.entrypoint.clone().unwrap_or_default();
     let vars: Vec<(&str, &str)> = vec![
@@ -712,7 +561,7 @@ fn setup_module(module_id: &str) -> CmdResult<ModuleOutput> {
     let exit_code = execute_local_command_interactive(&command, Some(module_path), None);
 
     if exit_code != 0 {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Setup command failed with exit code {}",
             exit_code
         )));
@@ -726,63 +575,6 @@ fn setup_module(module_id: &str) -> CmdResult<ModuleOutput> {
     ))
 }
 
-fn is_module_ready(module: &ModuleManifest) -> bool {
-    let Some(runtime) = module.runtime.as_ref() else {
-        // Modules without runtime (platform modules) are always ready
-        return true;
-    };
-
-    // If module has a ready_check command, run it
-    if let Some(ref ready_check) = runtime.ready_check {
-        if let Some(ref module_path) = module.module_path {
-            let entrypoint = runtime.entrypoint.clone().unwrap_or_default();
-            let vars: Vec<(&str, &str)> = vec![
-                ("modulePath", module_path.as_str()),
-                ("entrypoint", entrypoint.as_str()),
-            ];
-            let command = template::render(ready_check, &vars);
-            let exit_code = execute_local_command_interactive(&command, Some(module_path), None);
-            return exit_code == 0;
-        }
-        return false;
-    }
-
-    // No ready_check defined - assume ready
-    true
-}
-
-fn is_module_compatible(module: &ModuleManifest, project: Option<&ProjectConfiguration>) -> bool {
-    let Some(project) = project else {
-        return true;
-    };
-
-    let Some(ref requires) = module.requires else {
-        return true;
-    };
-
-    // Check required modules
-    for required_module in &requires.modules {
-        if !project.has_module(required_module) {
-            return false;
-        }
-    }
-
-    // Check components
-    for component in &requires.components {
-        if !project.component_ids.contains(component) {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn is_module_linked(module_id: &str) -> bool {
-    AppPaths::module(module_id)
-        .map(|p| p.is_symlink())
-        .unwrap_or(false)
-}
-
 fn link_module(path: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
     let source_path = Path::new(path);
 
@@ -791,12 +583,12 @@ fn link_module(path: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
         source_path.to_path_buf()
     } else {
         std::env::current_dir()
-            .map_err(|e| homeboy_core::Error::other(e.to_string()))?
+            .map_err(|e| homeboy::Error::other(e.to_string()))?
             .join(source_path)
     };
 
     if !source_path.exists() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Source path does not exist: {}",
             source_path.display()
         )));
@@ -805,7 +597,7 @@ fn link_module(path: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
     // Validate homeboy.json exists
     let manifest_path = source_path.join("homeboy.json");
     if !manifest_path.exists() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "No homeboy.json found at {}",
             source_path.display()
         )));
@@ -813,10 +605,10 @@ fn link_module(path: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
 
     // Read manifest to get module id if not provided
     let manifest_content = fs::read_to_string(&manifest_path).map_err(|e| {
-        homeboy_core::Error::internal_io(e.to_string(), Some("read module manifest".to_string()))
+        homeboy::Error::internal_io(e.to_string(), Some("read module manifest".to_string()))
     })?;
     let manifest: ModuleManifest = serde_json::from_str(&manifest_content).map_err(|e| {
-        homeboy_core::Error::config_invalid_json(manifest_path.to_string_lossy().to_string(), e)
+        homeboy::Error::config_invalid_json(manifest_path.to_string_lossy().to_string(), e)
     })?;
 
     let module_id = match id {
@@ -825,14 +617,14 @@ fn link_module(path: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
     };
 
     if module_id.is_empty() {
-        return Err(homeboy_core::Error::other(
+        return Err(homeboy::Error::other(
             "Module id is empty. Provide --id or ensure manifest has an id field.".to_string(),
         ));
     }
 
     let module_dir = AppPaths::module(&module_id)?;
     if module_dir.exists() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Module '{}' already exists at {}",
             module_id,
             module_dir.display()
@@ -844,12 +636,12 @@ fn link_module(path: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
     // Create symlink
     #[cfg(unix)]
     std::os::unix::fs::symlink(&source_path, &module_dir).map_err(|e| {
-        homeboy_core::Error::internal_io(e.to_string(), Some("create symlink".to_string()))
+        homeboy::Error::internal_io(e.to_string(), Some("create symlink".to_string()))
     })?;
 
     #[cfg(windows)]
     std::os::windows::fs::symlink_dir(&source_path, &module_dir).map_err(|e| {
-        homeboy_core::Error::internal_io(e.to_string(), Some("create symlink".to_string()))
+        homeboy::Error::internal_io(e.to_string(), Some("create symlink".to_string()))
     })?;
 
     // Write install metadata with linked: true
@@ -859,13 +651,13 @@ fn link_module(path: &str, id: Option<String>) -> CmdResult<ModuleOutput> {
         linked: true,
     };
     let metadata_content = serde_json::to_string_pretty(&metadata).map_err(|e| {
-        homeboy_core::Error::internal_json(
+        homeboy::Error::internal_json(
             e.to_string(),
             Some("serialize module install metadata".to_string()),
         )
     })?;
     fs::write(&metadata_path, metadata_content).map_err(|e| {
-        homeboy_core::Error::internal_io(
+        homeboy::Error::internal_io(
             e.to_string(),
             Some("write module install metadata".to_string()),
         )
@@ -885,14 +677,14 @@ fn unlink_module(module_id: &str) -> CmdResult<ModuleOutput> {
     let module_dir = AppPaths::module(module_id)?;
 
     if !module_dir.exists() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Module '{}' not found",
             module_id
         )));
     }
 
     if !module_dir.is_symlink() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Module '{}' is not a symlink. Use `uninstall` to remove git-cloned modules.",
             module_id
         )));
@@ -900,7 +692,7 @@ fn unlink_module(module_id: &str) -> CmdResult<ModuleOutput> {
 
     // Remove the symlink (this does not delete the source directory)
     fs::remove_file(&module_dir).map_err(|e| {
-        homeboy_core::Error::internal_io(e.to_string(), Some("remove symlink".to_string()))
+        homeboy::Error::internal_io(e.to_string(), Some("remove symlink".to_string()))
     })?;
 
     Ok((
@@ -918,171 +710,21 @@ fn run_action(
     project_id: Option<String>,
     data: Option<String>,
 ) -> CmdResult<ModuleOutput> {
-    let module = load_module(module_id)
-        .ok_or_else(|| homeboy_core::Error::other(format!("Module '{}' not found", module_id)))?;
+    let response = homeboy::module::run_action(
+        module_id,
+        action_id,
+        project_id.as_deref(),
+        data.as_deref(),
+    )?;
 
-    // Find the action in the module manifest
-    if module.actions.is_empty() {
-        return Err(homeboy_core::Error::other(format!(
-            "Module '{}' has no actions defined",
-            module_id
-        )));
-    }
-
-    let action = module
-        .actions
-        .iter()
-        .find(|a| a.id == action_id)
-        .ok_or_else(|| {
-            homeboy_core::Error::other(format!(
-                "Action '{}' not found in module '{}'",
-                action_id, module_id
-            ))
-        })?;
-
-    // Parse the selected data
-    let selected: Vec<Value> = if let Some(data_str) = &data {
-        serde_json::from_str(data_str).map_err(|e| {
-            homeboy_core::Error::other(format!("Invalid JSON data: {}", e))
-        })?
-    } else {
-        Vec::new()
-    };
-
-    // Handle based on action type
-    match action.action_type.as_str() {
-        "api" => {
-            // API actions require a project
-            let project_id = project_id.ok_or_else(|| {
-                homeboy_core::Error::other("--project is required for API actions")
-            })?;
-
-            let project = ConfigManager::load_project(&project_id)?;
-            let client = ApiClient::new(&project_id, &project.api)?;
-
-            // Check auth if required
-            if action.requires_auth.unwrap_or(false) && !client.is_authenticated() {
-                return Err(homeboy_core::Error::other(
-                    "Not authenticated. Run 'homeboy auth login --project <id>' first.",
-                ));
-            }
-
-            // Build payload by interpolating templates
-            let endpoint = action.endpoint.as_ref().ok_or_else(|| {
-                homeboy_core::Error::other("API action missing 'endpoint'")
-            })?;
-
-            let method = action.method.as_deref().unwrap_or("POST");
-
-            // Get module settings for interpolation
-            let settings = get_module_settings(module_id, Some(&project_id), None)?;
-
-            // Interpolate payload
-            let payload = interpolate_action_payload(action, &selected, &settings)?;
-
-            // Make the request
-            let response = if method == "GET" {
-                client.get(endpoint)?
-            } else {
-                client.post(endpoint, &payload)?
-            };
-
-            Ok((
-                ModuleOutput::Action {
-                    module_id: module_id.to_string(),
-                    action_id: action_id.to_string(),
-                    project_id: Some(project_id),
-                    response,
-                },
-                0,
-            ))
-        }
-        other => Err(homeboy_core::Error::other(format!(
-            "Unknown action type: {}",
-            other
-        ))),
-    }
-}
-
-fn get_module_settings(
-    module_id: &str,
-    project_id: Option<&str>,
-    _component_id: Option<&str>,
-) -> homeboy_core::Result<HashMap<String, Value>> {
-    let mut settings = HashMap::new();
-
-    // Load from project config
-    if let Some(pid) = project_id {
-        if let Ok(project) = ConfigManager::load_project(pid) {
-            if let Some(scoped) = project.scoped_modules.as_ref() {
-                if let Some(module_scope) = scoped.get(module_id) {
-                    for (k, v) in &module_scope.settings {
-                        settings.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(settings)
-}
-
-fn interpolate_action_payload(
-    action: &homeboy_core::module::ActionConfig,
-    selected: &[Value],
-    settings: &HashMap<String, Value>,
-) -> homeboy_core::Result<Value> {
-    let payload_template = match &action.payload {
-        Some(p) => p,
-        None => return Ok(Value::Object(serde_json::Map::new())),
-    };
-
-    let mut result = serde_json::Map::new();
-
-    for (key, value) in payload_template {
-        let interpolated = interpolate_payload_value(value, selected, settings)?;
-        result.insert(key.clone(), interpolated);
-    }
-
-    Ok(Value::Object(result))
-}
-
-fn interpolate_payload_value(
-    value: &Value,
-    selected: &[Value],
-    settings: &HashMap<String, Value>,
-) -> homeboy_core::Result<Value> {
-    match value {
-        Value::String(template) => {
-            if template == "{{selected}}" {
-                // Return selected rows as array
-                Ok(Value::Array(selected.to_vec()))
-            } else if template.starts_with("{{settings.") && template.ends_with("}}") {
-                // Extract setting key
-                let key = &template[11..template.len() - 2];
-                Ok(settings
-                    .get(key)
-                    .cloned()
-                    .unwrap_or(Value::String(String::new())))
-            } else {
-                Ok(Value::String(template.clone()))
-            }
-        }
-        Value::Array(arr) => {
-            let interpolated: Result<Vec<Value>, _> = arr
-                .iter()
-                .map(|v| interpolate_payload_value(v, selected, settings))
-                .collect();
-            Ok(Value::Array(interpolated?))
-        }
-        Value::Object(obj) => {
-            let mut result = serde_json::Map::new();
-            for (k, v) in obj {
-                result.insert(k.clone(), interpolate_payload_value(v, selected, settings)?);
-            }
-            Ok(Value::Object(result))
-        }
-        _ => Ok(value.clone()),
-    }
+    Ok((
+        ModuleOutput::Action {
+            module_id: module_id.to_string(),
+            action_id: action_id.to_string(),
+            project_id,
+            response,
+        },
+        0,
+    ))
 }
 

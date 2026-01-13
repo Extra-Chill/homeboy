@@ -60,7 +60,7 @@ pub struct DocsListOutput {
 
 pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
     if args.list {
-        return Err(homeboy_core::Error::validation_invalid_argument(
+        return Err(homeboy::Error::validation_invalid_argument(
             "list",
             "Cannot use --list with markdown output",
             None,
@@ -74,7 +74,7 @@ pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
     if resolved.content.is_empty() {
         let available_topics = docs::available_topics();
 
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "No documentation found for '{}' (available: {})",
             topic.join(" "),
             available_topics.join("\n")
@@ -100,7 +100,7 @@ pub fn run(args: DocsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<D
     if resolved.content.is_empty() {
         let available_topics = docs::available_topics();
 
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "No documentation found for '{}' (available: {})",
             topic.join(" "),
             available_topics.join("\n")

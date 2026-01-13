@@ -4,18 +4,18 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use homeboy_core::config::{ConfigManager, ProjectRecord};
-use homeboy_core::context::{resolve_project_ssh_with_base_path, RemoteProjectContext};
-use homeboy_core::deploy::{deploy_artifact, DeployResult};
-use homeboy_core::json::parse_bulk_ids;
-use homeboy_core::module::{load_module, DeployVerification};
-use homeboy_core::ssh::{execute_local_command_in_dir, SshClient};
-use homeboy_core::version::{default_pattern_for_file, parse_version};
+use homeboy::config::{ConfigManager, ProjectRecord};
+use homeboy::context::{resolve_project_ssh_with_base_path, RemoteProjectContext};
+use homeboy::deploy::{deploy_artifact, DeployResult};
+use homeboy::json::parse_bulk_ids;
+use homeboy::module::{load_module, DeployVerification};
+use homeboy::ssh::{execute_local_command_in_dir, SshClient};
+use homeboy::version::{default_pattern_for_file, parse_version};
 
 use super::CmdResult;
 
-type ProjectLoader = fn(&str) -> homeboy_core::Result<ProjectRecord>;
-type SshResolver = fn(&str) -> homeboy_core::Result<(RemoteProjectContext, String)>;
+type ProjectLoader = fn(&str) -> homeboy::Result<ProjectRecord>;
+type SshResolver = fn(&str) -> homeboy::Result<(RemoteProjectContext, String)>;
 type BuildRunner = fn(&Component) -> (Option<i32>, Option<String>);
 
 #[derive(Args)]
@@ -69,7 +69,7 @@ impl DeployComponentResult {
             remote_version: None,
             error: None,
             artifact_path: Some(component.build_artifact.clone()),
-            remote_path: homeboy_core::base_path::join_remote_path(
+            remote_path: homeboy::base_path::join_remote_path(
                 Some(base_path),
                 &component.remote_path,
             )
@@ -150,7 +150,7 @@ fn run_with_loaders(
     // Check for common subcommand mistakes (deploy doesn't have subcommands)
     let subcommand_hints = ["status", "list", "show", "help"];
     if subcommand_hints.contains(&args.project_id.as_str()) {
-        return Err(homeboy_core::Error::validation_invalid_argument(
+        return Err(homeboy::Error::validation_invalid_argument(
             "project_id",
             format!(
                 "'{}' looks like a subcommand, but 'deploy' doesn't have subcommands. \
@@ -174,7 +174,7 @@ fn run_with_loaders(
 
     let all_components = load_components(&project.config.component_ids);
     if all_components.is_empty() {
-        return Err(homeboy_core::Error::other(
+        return Err(homeboy::Error::other(
             "No components configured for project".to_string(),
         ));
     }
@@ -282,7 +282,7 @@ fn run_with_loaders(
         }
 
         // Calculate install directory
-        let install_dir = match homeboy_core::base_path::join_remote_path(
+        let install_dir = match homeboy::base_path::join_remote_path(
             Some(&base_path),
             &component.remote_path,
         ) {
@@ -403,7 +403,7 @@ fn plan_components_to_deploy(
     all_components: &[Component],
     base_path: &str,
     client: &SshClient,
-) -> homeboy_core::Result<Vec<Component>> {
+) -> homeboy::Result<Vec<Component>> {
     if args.all {
         return Ok(all_components.to_vec());
     }
@@ -439,7 +439,7 @@ fn plan_components_to_deploy(
         return Ok(selected);
     }
 
-    Err(homeboy_core::Error::other(
+    Err(homeboy::Error::other(
         "No components specified. Use component IDs, --all, or --outdated".to_string(),
     ))
 }
@@ -447,7 +447,7 @@ fn plan_components_to_deploy(
 /// Build is mandatory before deploy. Returns error if no build command configured.
 fn run_build(component: &Component) -> (Option<i32>, Option<String>) {
     let build_cmd = component.build_command.clone().or_else(|| {
-        homeboy_core::build::detect_build_command(
+        homeboy::build::detect_build_command(
             &component.local_path,
             &component.build_artifact,
             &component.modules,
@@ -577,7 +577,7 @@ fn fetch_remote_versions(
             continue;
         };
 
-        let remote_path = match homeboy_core::base_path::join_remote_child(
+        let remote_path = match homeboy::base_path::join_remote_child(
             Some(base_path),
             &component.remote_path,
             version_file,

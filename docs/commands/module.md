@@ -55,6 +55,33 @@ homeboy module uninstall <moduleId> [--force]
 
 Uninstalls a module by deleting its directory. If `--force` is not provided, Homeboy errors (there is no interactive prompt).
 
+### `link`
+
+```sh
+homeboy module link <path> [--id <moduleId>]
+```
+
+Symlinks a local module directory into the Homeboy modules directory for development.
+
+### `unlink`
+
+```sh
+homeboy module unlink <moduleId>
+```
+
+Removes a symlinked module entry from the Homeboy modules directory (preserves the source directory).
+
+### `action`
+
+```sh
+homeboy module action <moduleId> <actionId> [-p|--project <projectId>] [--data <json>]
+```
+
+Executes an action defined in the module manifest.
+
+- For `type: "api"` actions, `--project` is required.
+- `--data` accepts a JSON array string of selected result rows (passed through to template variables like `{{selected}}`).
+
 ## Settings
 
 Homeboy builds an **effective settings** map for each module by merging settings across scopes, in order (later scopes override earlier ones):

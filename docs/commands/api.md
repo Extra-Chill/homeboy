@@ -51,7 +51,7 @@ homeboy api <projectId> delete <endpoint>
 
 ## Output
 
-JSON output is wrapped in the global envelope. The `data.payload` is the `homeboy_core::api::ApiOutput` struct.
+JSON output is wrapped in the global envelope. The `data.payload` is the `homeboy::api::ApiOutput` struct.
 
 ## Related
 

@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
-use homeboy_core::config::{
+use homeboy::config::{
     create_from_json, ComponentConfiguration, ConfigManager, CreateSummary, PinnedRemoteFile,
     PinnedRemoteLog, ProjectConfiguration, ProjectManager, ProjectRecord,
 };
@@ -240,7 +240,7 @@ pub struct ProjectOutput {
 pub fn run(
     args: ProjectArgs,
     _global: &crate::commands::GlobalArgs,
-) -> homeboy_core::Result<(ProjectOutput, i32)> {
+) -> homeboy::Result<(ProjectOutput, i32)> {
     match args.command {
         ProjectCommand::List => list(),
         ProjectCommand::Show { project_id } => show(&project_id),
@@ -259,7 +259,7 @@ pub fn run(
             }
 
             let name = name.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "name",
                     "Missing required argument: name (or use --json)",
                     None,
@@ -267,7 +267,7 @@ pub fn run(
                 )
             })?;
             let domain = domain.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "domain",
                     "Missing required argument: domain (or use --json)",
                     None,
@@ -302,7 +302,7 @@ pub fn run(
     }
 }
 
-fn list() -> homeboy_core::Result<(ProjectOutput, i32)> {
+fn list() -> homeboy::Result<(ProjectOutput, i32)> {
     let projects = ConfigManager::list_projects()?;
 
     let items: Vec<ProjectListItem> = projects
@@ -330,7 +330,7 @@ fn list() -> homeboy_core::Result<(ProjectOutput, i32)> {
     ))
 }
 
-fn show(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
+fn show(project_id: &str) -> homeboy::Result<(ProjectOutput, i32)> {
     let project = ConfigManager::load_project_record(project_id)?;
 
     Ok((
@@ -348,7 +348,7 @@ fn show(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
     ))
 }
 
-fn create_json(spec: &str, skip_existing: bool) -> homeboy_core::Result<(ProjectOutput, i32)> {
+fn create_json(spec: &str, skip_existing: bool) -> homeboy::Result<(ProjectOutput, i32)> {
     let summary = create_from_json::<ProjectConfiguration>(spec, skip_existing)?;
     let exit_code = if summary.errors > 0 { 1 } else { 0 };
 
@@ -374,7 +374,7 @@ fn create(
     server_id: Option<String>,
     base_path: Option<String>,
     table_prefix: Option<String>,
-) -> homeboy_core::Result<(ProjectOutput, i32)> {
+) -> homeboy::Result<(ProjectOutput, i32)> {
     let (created_project_id, _project) =
         ProjectManager::create_project(name, domain, modules, server_id, base_path, table_prefix)?;
 
@@ -404,7 +404,7 @@ fn set(
     base_path: Option<String>,
     table_prefix: Option<String>,
     component_ids: Vec<String>,
-) -> homeboy_core::Result<(ProjectOutput, i32)> {
+) -> homeboy::Result<(ProjectOutput, i32)> {
     let mut updated_fields: Vec<String> = Vec::new();
 
     if let Some(name) = name {
@@ -463,7 +463,7 @@ fn set(
     }
 
     if updated_fields.is_empty() {
-        return Err(homeboy_core::Error::validation_invalid_argument(
+        return Err(homeboy::Error::validation_invalid_argument(
             "fields",
             "No fields provided to update",
             Some(project_id.to_string()),
@@ -488,7 +488,7 @@ fn set(
     ))
 }
 
-fn repair(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
+fn repair(project_id: &str) -> homeboy::Result<(ProjectOutput, i32)> {
     let result = ProjectManager::repair_project(project_id)?;
 
     let updated = if result.new_id != result.old_id {
@@ -512,7 +512,7 @@ fn repair(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
     ))
 }
 
-fn components(command: ProjectComponentsCommand) -> homeboy_core::Result<(ProjectOutput, i32)> {
+fn components(command: ProjectComponentsCommand) -> homeboy::Result<(ProjectOutput, i32)> {
     match command {
         ProjectComponentsCommand::List { project_id } => components_list(&project_id),
         ProjectComponentsCommand::Set {
@@ -531,7 +531,7 @@ fn components(command: ProjectComponentsCommand) -> homeboy_core::Result<(Projec
     }
 }
 
-fn components_list(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
+fn components_list(project_id: &str) -> homeboy::Result<(ProjectOutput, i32)> {
     let project = ConfigManager::load_project(project_id)?;
 
     let mut components = Vec::new();
@@ -563,9 +563,9 @@ fn components_list(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32
 fn resolve_component_ids(
     component_ids: Vec<String>,
     project_id: &str,
-) -> homeboy_core::Result<Vec<String>> {
+) -> homeboy::Result<Vec<String>> {
     if component_ids.is_empty() {
-        return Err(homeboy_core::Error::validation_invalid_argument(
+        return Err(homeboy::Error::validation_invalid_argument(
             "componentIds",
             "At least one component ID is required",
             Some(project_id.to_string()),
@@ -581,7 +581,7 @@ fn resolve_component_ids(
     }
 
     if !missing.is_empty() {
-        return Err(homeboy_core::Error::validation_invalid_argument(
+        return Err(homeboy::Error::validation_invalid_argument(
             "componentIds",
             "Unknown component IDs (must exist in `homeboy component list`)",
             Some(project_id.to_string()),
@@ -603,7 +603,7 @@ fn resolve_component_ids(
 fn components_set(
     project_id: &str,
     component_ids: Vec<String>,
-) -> homeboy_core::Result<(ProjectOutput, i32)> {
+) -> homeboy::Result<(ProjectOutput, i32)> {
     let deduped = resolve_component_ids(component_ids, project_id)?;
 
     let mut project = ConfigManager::load_project(project_id)?;
@@ -615,7 +615,7 @@ fn components_set(
 fn components_add(
     project_id: &str,
     component_ids: Vec<String>,
-) -> homeboy_core::Result<(ProjectOutput, i32)> {
+) -> homeboy::Result<(ProjectOutput, i32)> {
     let deduped = resolve_component_ids(component_ids, project_id)?;
 
     let mut project = ConfigManager::load_project(project_id)?;
@@ -631,9 +631,9 @@ fn components_add(
 fn components_remove(
     project_id: &str,
     component_ids: Vec<String>,
-) -> homeboy_core::Result<(ProjectOutput, i32)> {
+) -> homeboy::Result<(ProjectOutput, i32)> {
     if component_ids.is_empty() {
-        return Err(homeboy_core::Error::validation_invalid_argument(
+        return Err(homeboy::Error::validation_invalid_argument(
             "componentIds",
             "At least one component ID is required",
             Some(project_id.to_string()),
@@ -651,7 +651,7 @@ fn components_remove(
     }
 
     if !missing_from_project.is_empty() {
-        return Err(homeboy_core::Error::validation_invalid_argument(
+        return Err(homeboy::Error::validation_invalid_argument(
             "componentIds",
             "Component IDs not attached to project",
             Some(project_id.to_string()),
@@ -666,7 +666,7 @@ fn components_remove(
     write_project_components(project_id, "remove", &project)
 }
 
-fn components_clear(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i32)> {
+fn components_clear(project_id: &str) -> homeboy::Result<(ProjectOutput, i32)> {
     let mut project = ConfigManager::load_project(project_id)?;
     project.component_ids.clear();
 
@@ -676,8 +676,8 @@ fn components_clear(project_id: &str) -> homeboy_core::Result<(ProjectOutput, i3
 fn write_project_components(
     project_id: &str,
     action: &str,
-    project: &homeboy_core::config::ProjectConfiguration,
-) -> homeboy_core::Result<(ProjectOutput, i32)> {
+    project: &homeboy::config::ProjectConfiguration,
+) -> homeboy::Result<(ProjectOutput, i32)> {
     ConfigManager::save_project(project_id, project)?;
 
     let mut components = Vec::new();
@@ -706,7 +706,7 @@ fn write_project_components(
     ))
 }
 
-fn pin(command: ProjectPinCommand) -> homeboy_core::Result<(ProjectOutput, i32)> {
+fn pin(command: ProjectPinCommand) -> homeboy::Result<(ProjectOutput, i32)> {
     match command {
         ProjectPinCommand::List { project_id, r#type } => pin_list(&project_id, r#type),
         ProjectPinCommand::Add {
@@ -727,7 +727,7 @@ fn pin(command: ProjectPinCommand) -> homeboy_core::Result<(ProjectOutput, i32)>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::config::{slugify_id, AppPaths};
+    use homeboy::config::{slugify_id, AppPaths};
     use std::fs;
 
     fn seed_component(id: &str) -> ComponentConfiguration {
@@ -740,8 +740,8 @@ mod tests {
         )
     }
 
-    fn seed_project(name: &str) -> homeboy_core::config::ProjectConfiguration {
-        homeboy_core::config::ProjectConfiguration {
+    fn seed_project(name: &str) -> homeboy::config::ProjectConfiguration {
+        homeboy::config::ProjectConfiguration {
             name: name.to_string(),
             domain: "example.com".to_string(),
             modules: vec![],
@@ -868,7 +868,7 @@ mod tests {
             vec!["alpha".to_string(), "missing".to_string()],
         )
         .unwrap_err();
-        assert_eq!(err.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.code, homeboy::ErrorCode::ValidationInvalidArgument);
 
         drop(env_guard);
         drop(_env_lock);
@@ -999,7 +999,7 @@ mod tests {
         ConfigManager::save_project(&project_id, &project).unwrap();
 
         let err = components_remove(&project_id, vec!["missing".to_string()]).unwrap_err();
-        assert_eq!(err.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.code, homeboy::ErrorCode::ValidationInvalidArgument);
 
         drop(env_guard);
         drop(_env_lock);
@@ -1039,7 +1039,7 @@ mod tests {
 fn pin_list(
     project_id: &str,
     pin_type: ProjectPinType,
-) -> homeboy_core::Result<(ProjectOutput, i32)> {
+) -> homeboy::Result<(ProjectOutput, i32)> {
     let project = ConfigManager::load_project(project_id)?;
 
     let (items, type_string) = match pin_type {
@@ -1101,7 +1101,7 @@ fn pin_add(
     pin_type: ProjectPinType,
     label: Option<String>,
     tail: u32,
-) -> homeboy_core::Result<(ProjectOutput, i32)> {
+) -> homeboy::Result<(ProjectOutput, i32)> {
     let mut project = ConfigManager::load_project(project_id)?;
 
     let type_string = match pin_type {
@@ -1112,7 +1112,7 @@ fn pin_add(
                 .iter()
                 .any(|file| file.path == path)
             {
-                return Err(homeboy_core::Error::validation_invalid_argument(
+                return Err(homeboy::Error::validation_invalid_argument(
                     "path",
                     "File is already pinned",
                     Some(project_id.to_string()),
@@ -1135,7 +1135,7 @@ fn pin_add(
                 .iter()
                 .any(|log| log.path == path)
             {
-                return Err(homeboy_core::Error::validation_invalid_argument(
+                return Err(homeboy::Error::validation_invalid_argument(
                     "path",
                     "Log is already pinned",
                     Some(project_id.to_string()),
@@ -1185,7 +1185,7 @@ fn pin_remove(
     project_id: &str,
     path: &str,
     pin_type: ProjectPinType,
-) -> homeboy_core::Result<(ProjectOutput, i32)> {
+) -> homeboy::Result<(ProjectOutput, i32)> {
     let mut project = ConfigManager::load_project(project_id)?;
 
     let (removed, type_string) = match pin_type {
@@ -1213,7 +1213,7 @@ fn pin_remove(
     };
 
     if !removed {
-        return Err(homeboy_core::Error::validation_invalid_argument(
+        return Err(homeboy::Error::validation_invalid_argument(
             "path",
             format!("{} is not pinned", type_string),
             Some(project_id.to_string()),

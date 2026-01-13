@@ -1,5 +1,5 @@
 use clap::Args;
-use homeboy_core::build;
+use homeboy::build;
 
 use crate::commands::CmdResult;
 
@@ -18,7 +18,7 @@ pub fn run(args: BuildArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<
         (Some(json), _) => json.as_str(),
         (None, Some(id)) => id.as_str(),
         (None, None) => {
-            return Err(homeboy_core::Error::validation_invalid_argument(
+            return Err(homeboy::Error::validation_invalid_argument(
                 "input",
                 "Provide component ID or --json spec",
                 None,

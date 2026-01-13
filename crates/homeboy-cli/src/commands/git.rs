@@ -2,8 +2,8 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-use homeboy_core::config::ConfigManager;
-use homeboy_core::json::read_json_spec_to_string;
+use homeboy::config::ConfigManager;
+use homeboy::json::read_json_spec_to_string;
 
 use crate::commands::version;
 
@@ -146,12 +146,12 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
             if let Some(spec) = json {
                 let raw = read_json_spec_to_string(&spec)?;
                 let input: BulkIdsInput = serde_json::from_str(&raw)
-                    .map_err(|e| homeboy_core::Error::validation_invalid_json(e, Some("parse bulk status input".to_string())))?;
+                    .map_err(|e| homeboy::Error::validation_invalid_json(e, Some("parse bulk status input".to_string())))?;
                 return bulk_status(input);
             }
 
             let id = component_id.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "componentId",
                     "Missing componentId (or use --json for bulk)",
                     None,
@@ -169,12 +169,12 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
             if let Some(spec) = json {
                 let raw = read_json_spec_to_string(&spec)?;
                 let input: BulkCommitInput = serde_json::from_str(&raw)
-                    .map_err(|e| homeboy_core::Error::validation_invalid_json(e, Some("parse bulk commit input".to_string())))?;
+                    .map_err(|e| homeboy::Error::validation_invalid_json(e, Some("parse bulk commit input".to_string())))?;
                 return bulk_commit(input);
             }
 
             let id = component_id.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "componentId",
                     "Missing componentId (or use --json for bulk)",
                     None,
@@ -182,7 +182,7 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
                 )
             })?;
             let msg = message.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "message",
                     "Missing message (or use --json for bulk)",
                     None,
@@ -200,12 +200,12 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
             if let Some(spec) = json {
                 let raw = read_json_spec_to_string(&spec)?;
                 let input: BulkIdsInput = serde_json::from_str(&raw)
-                    .map_err(|e| homeboy_core::Error::validation_invalid_json(e, Some("parse bulk push input".to_string())))?;
+                    .map_err(|e| homeboy::Error::validation_invalid_json(e, Some("parse bulk push input".to_string())))?;
                 return bulk_push(input);
             }
 
             let id = component_id.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "componentId",
                     "Missing componentId (or use --json for bulk)",
                     None,
@@ -219,12 +219,12 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
             if let Some(spec) = json {
                 let raw = read_json_spec_to_string(&spec)?;
                 let input: BulkIdsInput = serde_json::from_str(&raw)
-                    .map_err(|e| homeboy_core::Error::validation_invalid_json(e, Some("parse bulk pull input".to_string())))?;
+                    .map_err(|e| homeboy::Error::validation_invalid_json(e, Some("parse bulk pull input".to_string())))?;
                 return bulk_pull(input);
             }
 
             let id = component_id.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "componentId",
                     "Missing componentId (or use --json for bulk)",
                     None,
@@ -253,7 +253,7 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
     }
 }
 
-fn get_component_path(component_id: &str) -> homeboy_core::Result<String> {
+fn get_component_path(component_id: &str) -> homeboy::Result<String> {
     let component = ConfigManager::load_component(component_id)?;
     Ok(component.local_path)
 }
@@ -270,7 +270,7 @@ fn status(component_id: &str) -> CmdResult<GitOutput> {
     let path = get_component_path(component_id)?;
 
     let output = execute_git(&path, &["status", "--porcelain=v1"])
-        .map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+        .map_err(|e| homeboy::Error::other(e.to_string()))?;
 
     Ok((
         GitOutput {
@@ -290,7 +290,7 @@ fn commit(component_id: &str, message: &str) -> CmdResult<GitOutput> {
     let path = get_component_path(component_id)?;
 
     let status_output = execute_git(&path, &["status", "--porcelain=v1"])
-        .map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+        .map_err(|e| homeboy::Error::other(e.to_string()))?;
 
     let status_stdout = String::from_utf8_lossy(&status_output.stdout).to_string();
 
@@ -310,7 +310,7 @@ fn commit(component_id: &str, message: &str) -> CmdResult<GitOutput> {
     }
 
     let add_output =
-        execute_git(&path, &["add", "."]).map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+        execute_git(&path, &["add", "."]).map_err(|e| homeboy::Error::other(e.to_string()))?;
 
     if !add_output.status.success() {
         let exit_code = to_exit_code(add_output.status);
@@ -329,7 +329,7 @@ fn commit(component_id: &str, message: &str) -> CmdResult<GitOutput> {
     }
 
     let commit_output = execute_git(&path, &["commit", "-m", message])
-        .map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+        .map_err(|e| homeboy::Error::other(e.to_string()))?;
 
     let exit_code = to_exit_code(commit_output.status);
 
@@ -357,7 +357,7 @@ fn push(component_id: &str, tags: bool) -> CmdResult<GitOutput> {
     };
 
     let output =
-        execute_git(&path, &push_args).map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+        execute_git(&path, &push_args).map_err(|e| homeboy::Error::other(e.to_string()))?;
     let exit_code = to_exit_code(output.status);
 
     Ok((
@@ -378,7 +378,7 @@ fn pull(component_id: &str) -> CmdResult<GitOutput> {
     let path = get_component_path(component_id)?;
 
     let output =
-        execute_git(&path, &["pull"]).map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+        execute_git(&path, &["pull"]).map_err(|e| homeboy::Error::other(e.to_string()))?;
     let exit_code = to_exit_code(output.status);
 
     Ok((
@@ -404,7 +404,7 @@ fn tag(component_id: &str, tag_name: &str, message: Option<&str>) -> CmdResult<G
     };
 
     let output =
-        execute_git(&path, &tag_args).map_err(|e| homeboy_core::Error::other(e.to_string()))?;
+        execute_git(&path, &tag_args).map_err(|e| homeboy::Error::other(e.to_string()))?;
     let exit_code = to_exit_code(output.status);
 
     Ok((

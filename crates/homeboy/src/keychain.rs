@@ -76,7 +76,7 @@ mod tests {
     use super::*;
 
     // Note: These tests require keychain access and may prompt for permissions
-    // Run manually with: cargo test -p homeboy-core keychain -- --ignored
+    // Run manually with: cargo test -p homeboy keychain -- --ignored
 
     #[test]
     #[ignore]

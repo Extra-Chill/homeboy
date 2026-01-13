@@ -12,9 +12,9 @@ Exceptions:
 
 ## Top-level envelope
 
-Homeboy prints a `homeboy_core::output::CliResponse<T>` object.
+Homeboy prints a `homeboy::output::CliResponse<T>` object.
 
-In JSON mode, `T` is `homeboy_core::output::CmdSuccess` with:
+In JSON mode, `T` is `homeboy::output::CmdSuccess` with:
 
 - `payload`: the command-specific output
 - `warnings`: command-scoped warnings (omitted when empty)
@@ -68,11 +68,11 @@ Notes:
 
 ## Error fields
 
-`error` is a `homeboy_core::output::CliError`.
+`error` is a `homeboy::output::CliError`.
 
 ## Warning fields
 
-Each item in top-level `warnings` is a `homeboy_core::output::CliWarning`.
+Each item in top-level `warnings` is a `homeboy::output::CliWarning`.
 
 - `code` (string): stable error code (see `homeboy_error::ErrorCode::as_str()`).
 - `message` (string): human-readable message.

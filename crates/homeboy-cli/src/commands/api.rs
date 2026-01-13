@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use homeboy_core::api;
+use homeboy::api;
 
 use super::CmdResult;
 

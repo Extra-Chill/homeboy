@@ -1,7 +1,7 @@
-use homeboy_core::config::{
+use homeboy::config::{
     ComponentConfiguration, ModuleScope, ProjectConfiguration, ScopedModuleConfig,
 };
-use homeboy_core::module::{ModuleManifest, SettingConfig};
+use homeboy::module::{ModuleManifest, SettingConfig};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -24,7 +24,7 @@ fn module_manifest() -> ModuleManifest {
         version_patterns: Vec::new(),
         build: None,
         commands: Vec::new(),
-        runtime: Some(homeboy_core::module::RuntimeConfig {
+        runtime: Some(homeboy::module::RuntimeConfig {
             run_command: Some("echo {{args}}".to_string()),
             setup_command: None,
             ready_check: None,
@@ -34,8 +34,8 @@ fn module_manifest() -> ModuleManifest {
             default_site: None,
         }),
         inputs: Vec::new(),
-        output: Some(homeboy_core::module::OutputConfig {
-            schema: homeboy_core::module::OutputSchema {
+        output: Some(homeboy::module::OutputConfig {
+            schema: homeboy::module::OutputSchema {
                 schema_type: "object".to_string(),
                 items: None,
             },

@@ -3,15 +3,15 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
-use homeboy_core::config::{ConfigManager, SlugIdentifiable};
-use homeboy_core::context::{resolve_project_ssh, resolve_project_ssh_with_base_path};
-use homeboy_core::module::{load_module, DatabaseCliConfig};
+use homeboy::config::{ConfigManager, SlugIdentifiable};
+use homeboy::context::{resolve_project_ssh, resolve_project_ssh_with_base_path};
+use homeboy::module::{load_module, DatabaseCliConfig};
 
 const DEFAULT_DATABASE_HOST: &str = "127.0.0.1";
 const DEFAULT_LOCAL_DB_PORT: u16 = 33306;
-use homeboy_core::ssh::SshClient;
-use homeboy_core::template::{render_map, TemplateVars};
-use homeboy_core::token;
+use homeboy::ssh::SshClient;
+use homeboy::template::{render_map, TemplateVars};
+use homeboy::token;
 
 #[derive(Args)]
 pub struct DbArgs {
@@ -108,7 +108,7 @@ pub struct DbTunnelInfo {
 pub fn run(
     args: DbArgs,
     _global: &crate::commands::GlobalArgs,
-) -> homeboy_core::Result<(DbOutput, i32)> {
+) -> homeboy::Result<(DbOutput, i32)> {
     match args.command {
         DbCommand::Tables { project_id, args } => tables(&project_id, &args),
         DbCommand::Describe { project_id, args } => describe(&project_id, &args),
@@ -142,7 +142,7 @@ struct DbContext {
 fn build_context(
     project_id: &str,
     args: &[String],
-) -> homeboy_core::Result<(DbContext, Vec<String>)> {
+) -> homeboy::Result<(DbContext, Vec<String>)> {
     let project = ConfigManager::load_project_record(project_id)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
 
@@ -176,7 +176,7 @@ fn build_context(
                 .and_then(|db| db.cli)
         })
         .ok_or_else(|| {
-            homeboy_core::Error::config(
+            homeboy::Error::config(
                 "No module with database CLI configuration found".to_string(),
             )
         })?;
@@ -209,7 +209,7 @@ fn parse_json_tables(json: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(json).unwrap_or_default()
 }
 
-fn tables(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i32)> {
+fn tables(project_id: &str, args: &[String]) -> homeboy::Result<(DbOutput, i32)> {
     let (ctx, _) = build_context(project_id, args)?;
 
     let mut vars = HashMap::new();
@@ -246,12 +246,12 @@ fn tables(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, 
     ))
 }
 
-fn describe(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i32)> {
+fn describe(project_id: &str, args: &[String]) -> homeboy::Result<(DbOutput, i32)> {
     let (ctx, remaining) = build_context(project_id, args)?;
 
     let table_name = remaining
         .first()
-        .ok_or_else(|| homeboy_core::Error::config("Table name required".to_string()))?;
+        .ok_or_else(|| homeboy::Error::config("Table name required".to_string()))?;
 
     let mut vars = HashMap::new();
     vars.insert(TemplateVars::SITE_PATH.to_string(), ctx.base_path.clone());
@@ -282,12 +282,12 @@ fn describe(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput
     ))
 }
 
-fn query(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i32)> {
+fn query(project_id: &str, args: &[String]) -> homeboy::Result<(DbOutput, i32)> {
     let (ctx, remaining) = build_context(project_id, args)?;
 
     let sql = remaining.join(" ");
     if sql.trim().is_empty() {
-        return Err(homeboy_core::Error::config(
+        return Err(homeboy::Error::config(
             "SQL query required".to_string(),
         ));
     }
@@ -303,7 +303,7 @@ fn query(project_id: &str, args: &[String]) -> homeboy_core::Result<(DbOutput, i
         .iter()
         .any(|keyword| trimmed_sql.starts_with(keyword))
     {
-        return Err(homeboy_core::Error::config(
+        return Err(homeboy::Error::config(
             "Write operations not allowed via 'db query'. Use the module CLI directly for writes."
                 .to_string(),
         ));
@@ -346,9 +346,9 @@ fn delete_row(
     project_id: &str,
     args: &[String],
     confirm: bool,
-) -> homeboy_core::Result<(DbOutput, i32)> {
+) -> homeboy::Result<(DbOutput, i32)> {
     if !confirm {
-        return Err(homeboy_core::Error::config(
+        return Err(homeboy::Error::config(
             "Use --confirm to execute destructive operations".to_string(),
         ));
     }
@@ -356,7 +356,7 @@ fn delete_row(
     let (ctx, remaining) = build_context(project_id, args)?;
 
     if remaining.len() < 2 {
-        return Err(homeboy_core::Error::config(
+        return Err(homeboy::Error::config(
             "Table name and row ID required".to_string(),
         ));
     }
@@ -366,7 +366,7 @@ fn delete_row(
 
     row_id
         .parse::<i64>()
-        .map_err(|_| homeboy_core::Error::config("Row ID must be numeric".to_string()))?;
+        .map_err(|_| homeboy::Error::config("Row ID must be numeric".to_string()))?;
 
     let delete_sql = format!("DELETE FROM {} WHERE ID = {} LIMIT 1", table_name, row_id);
 
@@ -405,9 +405,9 @@ fn drop_table(
     project_id: &str,
     args: &[String],
     confirm: bool,
-) -> homeboy_core::Result<(DbOutput, i32)> {
+) -> homeboy::Result<(DbOutput, i32)> {
     if !confirm {
-        return Err(homeboy_core::Error::config(
+        return Err(homeboy::Error::config(
             "Use --confirm to execute destructive operations".to_string(),
         ));
     }
@@ -416,7 +416,7 @@ fn drop_table(
 
     let table_name = remaining
         .first()
-        .ok_or_else(|| homeboy_core::Error::config("Table name required".to_string()))?;
+        .ok_or_else(|| homeboy::Error::config("Table name required".to_string()))?;
 
     let drop_sql = format!("DROP TABLE {}", table_name);
 
@@ -451,7 +451,7 @@ fn drop_table(
     ))
 }
 
-fn tunnel(project_id: &str, local_port: Option<u16>) -> homeboy_core::Result<(DbOutput, i32)> {
+fn tunnel(project_id: &str, local_port: Option<u16>) -> homeboy::Result<(DbOutput, i32)> {
     let project = ConfigManager::load_project_record(project_id)?;
     let ctx = resolve_project_ssh(project_id)?;
     let server = ctx.server;
@@ -500,7 +500,7 @@ fn tunnel(project_id: &str, local_port: Option<u16>) -> homeboy_core::Result<(Db
 
     let exit_code = match status {
         Ok(s) => s.code().unwrap_or(0),
-        Err(e) => return Err(homeboy_core::Error::other(e.to_string())),
+        Err(e) => return Err(homeboy::Error::other(e.to_string())),
     };
 
     let success = exit_code == 0 || exit_code == 130;

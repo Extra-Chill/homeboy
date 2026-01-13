@@ -1,5 +1,5 @@
-use homeboy_core::output::{map_cmd_result_to_json, CliResponse};
-use homeboy_core::Error;
+use homeboy::output::{map_cmd_result_to_json, CliResponse};
+use homeboy::Error;
 use homeboy_error::{RemoteCommandFailedDetails, TargetDetails};
 
 #[test]

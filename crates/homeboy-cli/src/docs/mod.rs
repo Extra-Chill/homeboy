@@ -2,8 +2,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::OnceLock;
 
-use homeboy_core::config::AppPaths;
-use homeboy_core::token;
+use homeboy::config::AppPaths;
+use homeboy::token;
 
 include!(concat!(env!("OUT_DIR"), "/generated_docs.rs"));
 

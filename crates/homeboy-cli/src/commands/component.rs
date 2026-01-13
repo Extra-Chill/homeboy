@@ -1,14 +1,14 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy_core::config::{
+use homeboy::config::{
     create_from_json, slugify_id, ComponentConfiguration, ConfigManager, CreateSummary,
     VersionTarget,
 };
 
 use super::CmdResult;
 
-fn parse_version_targets(targets: &[String]) -> homeboy_core::Result<Vec<VersionTarget>> {
+fn parse_version_targets(targets: &[String]) -> homeboy::Result<Vec<VersionTarget>> {
     let mut parsed = Vec::new();
 
     for target in targets {
@@ -17,7 +17,7 @@ fn parse_version_targets(targets: &[String]) -> homeboy_core::Result<Vec<Version
             .next()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| homeboy_core::Error::other("Invalid version target".to_string()))?;
+            .ok_or_else(|| homeboy::Error::other("Invalid version target".to_string()))?;
 
         let pattern = parts.next().map(str::trim).filter(|s| !s.is_empty());
 
@@ -146,7 +146,7 @@ pub fn run(
             }
 
             let name = name.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "name",
                     "Missing required argument: name (or use --json)",
                     None,
@@ -154,7 +154,7 @@ pub fn run(
                 )
             })?;
             let local_path = local_path.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "localPath",
                     "Missing required argument: --local-path (or use --json)",
                     None,
@@ -162,7 +162,7 @@ pub fn run(
                 )
             })?;
             let remote_path = remote_path.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "remotePath",
                     "Missing required argument: --remote-path (or use --json)",
                     None,
@@ -170,7 +170,7 @@ pub fn run(
                 )
             })?;
             let build_artifact = build_artifact.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "buildArtifact",
                     "Missing required argument: --build-artifact (or use --json)",
                     None,
@@ -243,7 +243,7 @@ fn create(
     let id = slugify_id(name)?;
 
     if ConfigManager::load_component(&id).is_ok() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Component '{}' already exists",
             id
         )));
@@ -360,7 +360,7 @@ fn set(args: SetComponentArgs) -> CmdResult<ComponentOutput> {
     }
 
     if updated_fields.is_empty() {
-        return Err(homeboy_core::Error::other(
+        return Err(homeboy::Error::other(
             "No fields specified to update".to_string(),
         ));
     }
@@ -383,7 +383,7 @@ fn set(args: SetComponentArgs) -> CmdResult<ComponentOutput> {
 
 fn delete(id: &str, force: bool) -> CmdResult<ComponentOutput> {
     if ConfigManager::load_component(id).is_err() {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Component '{}' not found",
             id
         )));
@@ -398,7 +398,7 @@ fn delete(id: &str, force: bool) -> CmdResult<ComponentOutput> {
             .collect();
 
         if !using.is_empty() {
-            return Err(homeboy_core::Error::other(format!(
+            return Err(homeboy::Error::other(format!(
                 "Component '{}' is used by projects: {}. Use --force to delete anyway.",
                 id,
                 using.join(", ")

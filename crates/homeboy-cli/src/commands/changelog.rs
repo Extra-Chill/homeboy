@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use crate::docs;
 
 use super::CmdResult;
-use homeboy_core::changelog;
-use homeboy_core::config::ConfigManager;
+use homeboy::changelog;
+use homeboy::config::ConfigManager;
 
 #[derive(Args)]
 pub struct ChangelogArgs {
@@ -69,7 +69,7 @@ pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
     match args.command {
         None => show_markdown(),
         Some(ChangelogCommand::Add { .. }) => {
-            Err(homeboy_core::Error::validation_invalid_argument(
+            Err(homeboy::Error::validation_invalid_argument(
                 "command",
                 "Markdown output is only supported for 'changelog'",
                 None,
@@ -99,7 +99,7 @@ pub fn run(
         }) => {
             if let Some(spec) = json.as_deref() {
                 let data: ChangelogAddData =
-                    homeboy_core::json::load_op_data(spec, "changelog.add")?;
+                    homeboy::json::load_op_data(spec, "changelog.add")?;
 
                 let (out, code) = add_next_items(&data.component_id, &data.messages)?;
 
@@ -107,7 +107,7 @@ pub fn run(
             }
 
             let component_id = component_id.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "componentId",
                     "Missing componentId",
                     None,
@@ -116,7 +116,7 @@ pub fn run(
             })?;
 
             let message = message.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "message",
                     "Missing message",
                     None,
@@ -134,7 +134,7 @@ fn show_markdown() -> CmdResult<String> {
     let resolved = docs::resolve(&["changelog".to_string()]);
 
     if resolved.content.is_empty() {
-        return Err(homeboy_core::Error::other(
+        return Err(homeboy::Error::other(
             "No changelog found (expected embedded docs topic 'changelog')".to_string(),
         ));
     }
@@ -146,7 +146,7 @@ fn show_json() -> CmdResult<ChangelogShowOutput> {
     let resolved = docs::resolve(&["changelog".to_string()]);
 
     if resolved.content.is_empty() {
-        return Err(homeboy_core::Error::other(
+        return Err(homeboy::Error::other(
             "No changelog found (expected embedded docs topic 'changelog')".to_string(),
         ));
     }

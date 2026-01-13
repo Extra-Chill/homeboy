@@ -3,8 +3,8 @@ use serde::Serialize;
 use std::fs;
 use std::process::Command;
 
-use homeboy_core::config::{create_from_json, slugify_id, AppPaths, ConfigManager, CreateSummary, ServerConfig};
-use homeboy_core::Error;
+use homeboy::config::{create_from_json, slugify_id, AppPaths, ConfigManager, CreateSummary, ServerConfig};
+use homeboy::Error;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -138,7 +138,7 @@ enum KeyCommand {
 pub fn run(
     args: ServerArgs,
     _global: &crate::commands::GlobalArgs,
-) -> homeboy_core::Result<(ServerOutput, i32)> {
+) -> homeboy::Result<(ServerOutput, i32)> {
     match args.command {
         ServerCommand::Create {
             json,
@@ -153,7 +153,7 @@ pub fn run(
             }
 
             let name = name.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "name",
                     "Missing required argument: name (or use --json)",
                     None,
@@ -161,7 +161,7 @@ pub fn run(
                 )
             })?;
             let host = host.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "host",
                     "Missing required argument: --host (or use --json)",
                     None,
@@ -169,7 +169,7 @@ pub fn run(
                 )
             })?;
             let user = user.ok_or_else(|| {
-                homeboy_core::Error::validation_invalid_argument(
+                homeboy::Error::validation_invalid_argument(
                     "user",
                     "Missing required argument: --user (or use --json)",
                     None,
@@ -193,7 +193,7 @@ pub fn run(
     }
 }
 
-fn run_key(args: KeyArgs) -> homeboy_core::Result<(ServerOutput, i32)> {
+fn run_key(args: KeyArgs) -> homeboy::Result<(ServerOutput, i32)> {
     match args.command {
         KeyCommand::Generate { server_id } => key_generate(&server_id),
         KeyCommand::Show { server_id } => key_show(&server_id),
@@ -209,7 +209,7 @@ fn run_key(args: KeyArgs) -> homeboy_core::Result<(ServerOutput, i32)> {
     }
 }
 
-fn create_json(spec: &str, skip_existing: bool) -> homeboy_core::Result<(ServerOutput, i32)> {
+fn create_json(spec: &str, skip_existing: bool) -> homeboy::Result<(ServerOutput, i32)> {
     let summary = create_from_json::<ServerConfig>(spec, skip_existing)?;
     let exit_code = if summary.errors > 0 { 1 } else { 0 };
 
@@ -233,7 +233,7 @@ fn create(
     host: &str,
     user: &str,
     port: u16,
-) -> homeboy_core::Result<(ServerOutput, i32)> {
+) -> homeboy::Result<(ServerOutput, i32)> {
     let id = slugify_id(name)?;
 
     if ConfigManager::load_server(&id).is_ok() {
@@ -266,7 +266,7 @@ fn create(
     ))
 }
 
-fn show(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
+fn show(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
     let server = ConfigManager::load_server(server_id)?;
 
     Ok((
@@ -290,7 +290,7 @@ fn set(
     host: Option<String>,
     user: Option<String>,
     port: Option<u16>,
-) -> homeboy_core::Result<(ServerOutput, i32)> {
+) -> homeboy::Result<(ServerOutput, i32)> {
     let mut server = ConfigManager::load_server(server_id)?;
 
     let mut changes = Vec::new();
@@ -333,7 +333,7 @@ fn set(
     ))
 }
 
-fn delete(server_id: &str, force: bool) -> homeboy_core::Result<(ServerOutput, i32)> {
+fn delete(server_id: &str, force: bool) -> homeboy::Result<(ServerOutput, i32)> {
     if !force {
         return Err(Error::other("Use --force to confirm deletion".to_string()));
     }
@@ -367,7 +367,7 @@ fn delete(server_id: &str, force: bool) -> homeboy_core::Result<(ServerOutput, i
     ))
 }
 
-fn list() -> homeboy_core::Result<(ServerOutput, i32)> {
+fn list() -> homeboy::Result<(ServerOutput, i32)> {
     let servers = ConfigManager::list_servers()?;
 
     Ok((
@@ -385,7 +385,7 @@ fn list() -> homeboy_core::Result<(ServerOutput, i32)> {
     ))
 }
 
-fn key_generate(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
+fn key_generate(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
     ConfigManager::load_server(server_id)?;
 
     let key_path = AppPaths::key(server_id)?;
@@ -460,7 +460,7 @@ fn key_generate(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
     ))
 }
 
-fn key_show(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
+fn key_show(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
     ConfigManager::load_server(server_id)?;
 
     let key_path = AppPaths::key(server_id)?;
@@ -495,7 +495,7 @@ fn key_show(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
     ))
 }
 
-fn key_use(server_id: &str, private_key_path: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
+fn key_use(server_id: &str, private_key_path: &str) -> homeboy::Result<(ServerOutput, i32)> {
     let mut server = ConfigManager::load_server(server_id)?;
 
     let expanded_path = shellexpand::tilde(private_key_path).to_string();
@@ -531,7 +531,7 @@ fn key_use(server_id: &str, private_key_path: &str) -> homeboy_core::Result<(Ser
     ))
 }
 
-fn key_unset(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
+fn key_unset(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
     let mut server = ConfigManager::load_server(server_id)?;
 
     server.identity_file = None;
@@ -561,7 +561,7 @@ fn key_unset(server_id: &str) -> homeboy_core::Result<(ServerOutput, i32)> {
 fn key_import(
     server_id: &str,
     private_key_path: &str,
-) -> homeboy_core::Result<(ServerOutput, i32)> {
+) -> homeboy::Result<(ServerOutput, i32)> {
     ConfigManager::load_server(server_id)?;
 
     let expanded_path = shellexpand::tilde(private_key_path).to_string();

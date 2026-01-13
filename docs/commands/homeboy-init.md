@@ -55,7 +55,7 @@ If unclear which scope applies, ask the user.
 3. Verify:
    - `homeboy component show <componentId>`
 4. If versioning/build are relevant, configure:
-   - `homeboy component set <componentId> --version-target "<file>" --build-command "<command>"`
+    - `homeboy component set <componentId> --version-target "<file>" --build-command "<command>"` (repeat `--version-target` as needed)
 
 ---
 

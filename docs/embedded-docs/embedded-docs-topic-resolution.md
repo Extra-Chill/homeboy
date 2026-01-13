@@ -32,11 +32,11 @@ Examples:
 - Key is `segments.join("/")`.
 - `topic_label` is the user input joined with spaces (e.g. `"project set"`).
 
-If normalization yields no segments (for example: topic args are only whitespace or only `/`), the command behaves as if no topic was provided (defaults to `index`).
+If normalization yields no segments (for example: topic args are only whitespace or only `/`), the command behaves as if no topic was provided (defaults to `index`). In this case `topic_label` is set to `"unknown"` (the resolved key still becomes `index`).
 
 If the resolved key does not exist in embedded core docs or module docs, `homeboy docs` returns an error.
 
-Segment normalization is performed by `homeboy_core::token::normalize_doc_segment`.
+Segment normalization is performed by `homeboy::token::normalize_doc_segment`.
 
 ## Available topics list format
 

@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
-use homeboy_core::config::{ConfigManager, ProjectConfiguration, ProjectRecord, ServerConfig};
-use homeboy_core::ssh::SshClient;
+use homeboy::config::{ConfigManager, ProjectConfiguration, ProjectRecord, ServerConfig};
+use homeboy::ssh::SshClient;
 use serde::Serialize;
 
 use super::CmdResult;
@@ -62,7 +62,7 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
         }
         None => {
             if args.id.is_none() && args.project.is_none() && args.server.is_none() {
-                return Err(homeboy_core::Error::validation_missing_argument(vec![
+                return Err(homeboy::Error::validation_missing_argument(vec![
                     "<id>".to_string(),
                     "--project".to_string(),
                     "--server".to_string(),
@@ -81,9 +81,9 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
 
 fn run_with_loaders_and_executor(
     args: SshArgs,
-    project_loader: fn(&str) -> homeboy_core::Result<ProjectRecord>,
-    server_loader: fn(&str) -> homeboy_core::Result<ServerConfig>,
-    executor: fn(&ServerConfig, &str, Option<&str>) -> homeboy_core::Result<i32>,
+    project_loader: fn(&str) -> homeboy::Result<ProjectRecord>,
+    server_loader: fn(&str) -> homeboy::Result<ServerConfig>,
+    executor: fn(&ServerConfig, &str, Option<&str>) -> homeboy::Result<i32>,
 ) -> CmdResult<SshOutput> {
     let (resolved_type, project_id, server_id, server) =
         resolve_context(&args, project_loader, server_loader)?;
@@ -97,7 +97,7 @@ fn run_with_loaders_and_executor(
             missing_fields.push("user".to_string());
         }
 
-        return Err(homeboy_core::Error::ssh_server_invalid(
+        return Err(homeboy::Error::ssh_server_invalid(
             server_id.clone(),
             missing_fields,
         ));
@@ -120,16 +120,16 @@ fn execute_interactive(
     server: &ServerConfig,
     server_id: &str,
     command: Option<&str>,
-) -> homeboy_core::Result<i32> {
+) -> homeboy::Result<i32> {
     let client = SshClient::from_server(server, server_id)?;
     Ok(client.execute_interactive(command))
 }
 
 fn resolve_context(
     args: &SshArgs,
-    project_loader: fn(&str) -> homeboy_core::Result<ProjectRecord>,
-    server_loader: fn(&str) -> homeboy_core::Result<ServerConfig>,
-) -> homeboy_core::Result<(String, Option<String>, String, ServerConfig)> {
+    project_loader: fn(&str) -> homeboy::Result<ProjectRecord>,
+    server_loader: fn(&str) -> homeboy::Result<ServerConfig>,
+) -> homeboy::Result<(String, Option<String>, String, ServerConfig)> {
     if let Some(project_id) = &args.project {
         let record = project_loader(project_id)?;
         let (server_id, server) = resolve_from_loaded_project(&record.config, server_loader)?;
@@ -142,7 +142,7 @@ fn resolve_context(
     }
 
     let id = args.id.as_ref().ok_or_else(|| {
-        homeboy_core::Error::validation_missing_argument(vec![
+        homeboy::Error::validation_missing_argument(vec![
             "<id>".to_string(),
             "--project".to_string(),
             "--server".to_string(),
@@ -158,7 +158,7 @@ fn resolve_context(
         return Ok(("server".to_string(), None, id.to_string(), server));
     }
 
-    Err(homeboy_core::Error::validation_invalid_argument(
+    Err(homeboy::Error::validation_invalid_argument(
         "id",
         "No matching project or server",
         Some(id.to_string()),
@@ -168,10 +168,10 @@ fn resolve_context(
 
 fn resolve_from_loaded_project(
     project: &ProjectConfiguration,
-    server_loader: fn(&str) -> homeboy_core::Result<ServerConfig>,
-) -> homeboy_core::Result<(String, ServerConfig)> {
+    server_loader: fn(&str) -> homeboy::Result<ServerConfig>,
+) -> homeboy::Result<(String, ServerConfig)> {
     let server_id = project.server_id.clone().ok_or_else(|| {
-        homeboy_core::Error::validation_invalid_argument(
+        homeboy::Error::validation_invalid_argument(
             "project.serverId",
             "Server not configured for project",
             None,
@@ -210,11 +210,11 @@ mod tests {
                 server_id: server_id.map(|s| s.to_string()),
                 base_path: None,
                 table_prefix: None,
-                remote_files: homeboy_core::config::RemoteFileConfig::default(),
-                remote_logs: homeboy_core::config::RemoteLogConfig::default(),
-                database: homeboy_core::config::DatabaseConfig::default(),
-                tools: homeboy_core::config::ToolsConfig::default(),
-                api: homeboy_core::config::ApiConfig::default(),
+                remote_files: homeboy::config::RemoteFileConfig::default(),
+                remote_logs: homeboy::config::RemoteLogConfig::default(),
+                database: homeboy::config::DatabaseConfig::default(),
+                tools: homeboy::config::ToolsConfig::default(),
+                api: homeboy::config::ApiConfig::default(),
                 changelog_next_section_label: None,
                 changelog_next_section_aliases: None,
                 sub_targets: vec![],
@@ -228,7 +228,7 @@ mod tests {
         _server: &ServerConfig,
         _server_id: &str,
         _command: Option<&str>,
-    ) -> homeboy_core::Result<i32> {
+    ) -> homeboy::Result<i32> {
         Ok(0)
     }
 
@@ -246,7 +246,7 @@ mod tests {
             args,
             |id| match id {
                 "alpha" => Ok(project("alpha", Some("alpha"))),
-                _ => Err(homeboy_core::Error::project_not_found("missing")),
+                _ => Err(homeboy::Error::project_not_found("missing")),
             },
             |id| Ok(server(id)),
             noop_executor,
@@ -275,10 +275,10 @@ mod tests {
 
         let result = run_with_loaders_and_executor(
             args,
-            |_id| Err(homeboy_core::Error::project_not_found("missing")),
+            |_id| Err(homeboy::Error::project_not_found("missing")),
             |id| match id {
                 "prod-server" => Ok(server(id)),
-                _ => Err(homeboy_core::Error::server_not_found("missing")),
+                _ => Err(homeboy::Error::server_not_found("missing")),
             },
             noop_executor,
         )
@@ -334,8 +334,8 @@ mod tests {
 
         let error = run_with_loaders_and_executor(
             args,
-            |_id| Err(homeboy_core::Error::project_not_found("missing")),
-            |_id| Err(homeboy_core::Error::server_not_found("missing")),
+            |_id| Err(homeboy::Error::project_not_found("missing")),
+            |_id| Err(homeboy::Error::server_not_found("missing")),
             noop_executor,
         )
         .unwrap_err();

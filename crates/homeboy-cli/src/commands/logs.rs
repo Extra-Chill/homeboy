@@ -1,10 +1,10 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy_core::base_path;
-use homeboy_core::config::ConfigManager;
-use homeboy_core::context::resolve_project_ssh;
-use homeboy_core::shell;
+use homeboy::base_path;
+use homeboy::config::ConfigManager;
+use homeboy::context::resolve_project_ssh;
+use homeboy::shell;
 
 use crate::commands::CmdResult;
 
@@ -140,7 +140,7 @@ fn show(project_id: &str, path: &str, lines: u32, follow: bool) -> CmdResult<Log
         let output = ctx.client.execute(&command);
 
         if !output.success {
-            return Err(homeboy_core::Error::other(output.stderr));
+            return Err(homeboy::Error::other(output.stderr));
         }
 
         Ok((
@@ -169,7 +169,7 @@ fn clear(project_id: &str, path: &str) -> CmdResult<LogsOutput> {
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        return Err(homeboy_core::Error::other(output.stderr));
+        return Err(homeboy::Error::other(output.stderr));
     }
 
     Ok((

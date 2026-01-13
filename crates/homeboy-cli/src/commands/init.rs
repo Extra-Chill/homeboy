@@ -13,7 +13,7 @@ pub fn run_markdown(_args: InitArgs) -> CmdResult<String> {
 
     if resolved.content.is_empty() {
         let available_topics = docs::available_topics();
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "No documentation found for '{}' (available: {})",
             topic.join(" "),
             available_topics.join("\n")

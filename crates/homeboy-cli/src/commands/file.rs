@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
-use homeboy_core::context::resolve_project_ssh;
-use homeboy_core::shell;
+use homeboy::context::resolve_project_ssh;
+use homeboy::shell;
 use serde::Serialize;
 use std::io::{self, Read};
 
@@ -76,7 +76,7 @@ pub struct FileOutput {
 pub fn run(
     args: FileArgs,
     _global: &crate::commands::GlobalArgs,
-) -> homeboy_core::Result<(FileOutput, i32)> {
+) -> homeboy::Result<(FileOutput, i32)> {
     match args.command {
         FileCommand::List { project_id, path } => list(&project_id, &path),
         FileCommand::Read { project_id, path } => read(&project_id, &path),
@@ -94,15 +94,15 @@ pub fn run(
     }
 }
 
-fn list(project_id: &str, path: &str) -> homeboy_core::Result<(FileOutput, i32)> {
+fn list(project_id: &str, path: &str) -> homeboy::Result<(FileOutput, i32)> {
     let ctx = resolve_project_ssh(project_id)?;
 
-    let full_path = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let full_path = homeboy::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let command = format!("ls -la {}", shell::quote_path(&full_path));
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "LIST_FAILED: {}",
             output.stderr
         )));
@@ -131,15 +131,15 @@ fn list(project_id: &str, path: &str) -> homeboy_core::Result<(FileOutput, i32)>
     ))
 }
 
-fn read(project_id: &str, path: &str) -> homeboy_core::Result<(FileOutput, i32)> {
+fn read(project_id: &str, path: &str) -> homeboy::Result<(FileOutput, i32)> {
     let ctx = resolve_project_ssh(project_id)?;
 
-    let full_path = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let full_path = homeboy::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let command = format!("cat {}", shell::quote_path(&full_path));
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "READ_FAILED: {}",
             output.stderr
         )));
@@ -166,19 +166,19 @@ fn read(project_id: &str, path: &str) -> homeboy_core::Result<(FileOutput, i32)>
     ))
 }
 
-fn write(project_id: &str, path: &str) -> homeboy_core::Result<(FileOutput, i32)> {
+fn write(project_id: &str, path: &str) -> homeboy::Result<(FileOutput, i32)> {
     let ctx = resolve_project_ssh(project_id)?;
 
     let mut content = String::new();
     io::stdin()
         .read_to_string(&mut content)
-        .map_err(|e| homeboy_core::Error::other(format!("STDIN_ERROR: {}", e)))?;
+        .map_err(|e| homeboy::Error::other(format!("STDIN_ERROR: {}", e)))?;
 
     if content.ends_with('\n') {
         content.pop();
     }
 
-    let full_path = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let full_path = homeboy::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let command = format!(
         "cat > {} << 'HOMEBOYEOF'\n{}\nHOMEBOYEOF",
         shell::quote_path(&full_path),
@@ -187,7 +187,7 @@ fn write(project_id: &str, path: &str) -> homeboy_core::Result<(FileOutput, i32)
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "WRITE_FAILED: {}",
             output.stderr
         )));
@@ -218,16 +218,16 @@ fn delete(
     project_id: &str,
     path: &str,
     recursive: bool,
-) -> homeboy_core::Result<(FileOutput, i32)> {
+) -> homeboy::Result<(FileOutput, i32)> {
     let ctx = resolve_project_ssh(project_id)?;
 
-    let full_path = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let full_path = homeboy::base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
     let flags = if recursive { "-rf" } else { "-f" };
     let command = format!("rm {} {}", flags, shell::quote_path(&full_path));
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "DELETE_FAILED: {}",
             output.stderr
         )));
@@ -258,11 +258,11 @@ fn rename(
     project_id: &str,
     old_path: &str,
     new_path: &str,
-) -> homeboy_core::Result<(FileOutput, i32)> {
+) -> homeboy::Result<(FileOutput, i32)> {
     let ctx = resolve_project_ssh(project_id)?;
 
-    let full_old = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), old_path)?;
-    let full_new = homeboy_core::base_path::join_remote_path(ctx.base_path.as_deref(), new_path)?;
+    let full_old = homeboy::base_path::join_remote_path(ctx.base_path.as_deref(), old_path)?;
+    let full_new = homeboy::base_path::join_remote_path(ctx.base_path.as_deref(), new_path)?;
     let command = format!(
         "mv {} {}",
         shell::quote_path(&full_old),
@@ -271,7 +271,7 @@ fn rename(
     let output = ctx.client.execute(&command);
 
     if !output.success {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "RENAME_FAILED: {}",
             output.stderr
         )));
@@ -350,7 +350,7 @@ fn parse_ls_output(output: &str, base_path: &str) -> Vec<FileEntry> {
         if a.is_directory != b.is_directory {
             return b.is_directory.cmp(&a.is_directory);
         }
-        homeboy_core::token::cmp_case_insensitive(&a.name, &b.name)
+        homeboy::token::cmp_case_insensitive(&a.name, &b.name)
     });
 
     entries

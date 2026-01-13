@@ -3,9 +3,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
-use homeboy_core::config::ConfigManager;
-use homeboy_core::http::ApiClient;
-use homeboy_core::keychain;
+use homeboy::config::ConfigManager;
+use homeboy::http::ApiClient;
+use homeboy::keychain;
 
 use super::{CmdResult, GlobalArgs};
 
@@ -140,15 +140,15 @@ fn run_status(project_id: &str) -> CmdResult<AuthOutput> {
     ))
 }
 
-fn prompt(message: &str) -> homeboy_core::Result<String> {
+fn prompt(message: &str) -> homeboy::Result<String> {
     eprint!("{}", message);
     io::stderr().flush().ok();
 
     let stdin = io::stdin();
     let mut line = String::new();
     stdin.lock().read_line(&mut line).map_err(|e| {
-        homeboy_core::Error::new(
-            homeboy_core::ErrorCode::InternalIoError,
+        homeboy::Error::new(
+            homeboy::ErrorCode::InternalIoError,
             format!("Failed to read input: {}", e),
             serde_json::Value::Null,
         )
@@ -157,7 +157,7 @@ fn prompt(message: &str) -> homeboy_core::Result<String> {
     Ok(line.trim().to_string())
 }
 
-fn prompt_password(message: &str) -> homeboy_core::Result<String> {
+fn prompt_password(message: &str) -> homeboy::Result<String> {
     eprint!("{}", message);
     io::stderr().flush().ok();
 
@@ -165,8 +165,8 @@ fn prompt_password(message: &str) -> homeboy_core::Result<String> {
     let stdin = io::stdin();
     let mut line = String::new();
     stdin.lock().read_line(&mut line).map_err(|e| {
-        homeboy_core::Error::new(
-            homeboy_core::ErrorCode::InternalIoError,
+        homeboy::Error::new(
+            homeboy::ErrorCode::InternalIoError,
             format!("Failed to read input: {}", e),
             serde_json::Value::Null,
         )

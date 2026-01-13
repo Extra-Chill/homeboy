@@ -1,18 +1,18 @@
 use clap::{Args, Subcommand, ValueEnum};
-use homeboy_core::changelog;
-use homeboy_core::output::CliWarning;
+use homeboy::changelog;
+use homeboy::output::CliWarning;
 use regex::Regex;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use homeboy_core::config::{ConfigManager, VersionTarget};
-use homeboy_core::json::{read_json_file, set_json_pointer, write_json_file_pretty};
-use homeboy_core::version::{
+use homeboy::config::{ConfigManager, VersionTarget};
+use homeboy::json::{read_json_file, set_json_pointer, write_json_file_pretty};
+use homeboy::version::{
     default_pattern_for_file, increment_version, parse_versions, replace_versions,
 };
-use homeboy_core::Error;
+use homeboy::Error;
 
 #[derive(Args)]
 pub struct VersionArgs {
@@ -89,12 +89,12 @@ pub struct VersionBumpOutput {
 pub fn run(
     args: VersionArgs,
     global: &crate::commands::GlobalArgs,
-) -> homeboy_core::output::CmdResult {
+) -> homeboy::output::CmdResult {
     match args.command {
         VersionCommand::Show { component_id } => {
             let (out, exit_code) = show_version_output(&component_id)?;
             let json = serde_json::to_value(out)
-                .map_err(|e| homeboy_core::Error::internal_json(e.to_string(), None))?;
+                .map_err(|e| homeboy::Error::internal_json(e.to_string(), None))?;
             Ok((json, Vec::new(), exit_code))
         }
         VersionCommand::Bump {
@@ -115,7 +115,7 @@ fn resolve_target_full_path(component_local_path: &str, version_file: &str) -> S
 fn resolve_target_pattern(
     target: &VersionTarget,
     modules: &[String],
-) -> homeboy_core::Result<String> {
+) -> homeboy::Result<String> {
     target
         .pattern
         .clone()
@@ -136,7 +136,7 @@ fn resolve_target_pattern(
 fn extract_versions_from_content(
     content: &str,
     pattern: &str,
-) -> homeboy_core::Result<Vec<String>> {
+) -> homeboy::Result<Vec<String>> {
     parse_versions(content, pattern).ok_or_else(|| {
         Error::validation_invalid_argument(
             "versionPattern",
@@ -181,7 +181,7 @@ fn validate_single_version(
     versions: Vec<String>,
     version_file: &str,
     expected: &str,
-) -> homeboy_core::Result<(String, usize)> {
+) -> homeboy::Result<(String, usize)> {
     if versions.is_empty() {
         return Err(Error::internal_unexpected(format!(
             "Could not find version in {}",
@@ -215,7 +215,7 @@ fn replace_versions_in_content(
     pattern: &str,
     expected_old: &str,
     new_version: &str,
-) -> homeboy_core::Result<(String, usize)> {
+) -> homeboy::Result<(String, usize)> {
     let all_versions = extract_versions_from_content(content, pattern)?;
     let _ = validate_single_version(all_versions, "<content>", expected_old)?;
 
@@ -238,7 +238,7 @@ fn write_updated_version(
     old_version: &str,
     new_version: &str,
     modules: &[String],
-) -> homeboy_core::Result<usize> {
+) -> homeboy::Result<usize> {
     if Path::new(full_path)
         .extension()
         .is_some_and(|ext| ext == "json")
@@ -279,7 +279,7 @@ fn write_updated_version(
     Ok(replaced_count)
 }
 
-pub fn show_version_output(component_id: &str) -> homeboy_core::Result<(VersionShowOutput, i32)> {
+pub fn show_version_output(component_id: &str) -> homeboy::Result<(VersionShowOutput, i32)> {
     let component = ConfigManager::load_component(component_id)?;
     let targets = component.version_targets.ok_or_else(|| {
         Error::config_missing_key("versionTargets", Some(component_id.to_string()))
@@ -340,7 +340,7 @@ pub fn show_version_output(component_id: &str) -> homeboy_core::Result<(VersionS
     ))
 }
 
-fn bump(component_id: &str, bump_type: BumpType, dry_run: bool) -> homeboy_core::output::CmdResult {
+fn bump(component_id: &str, bump_type: BumpType, dry_run: bool) -> homeboy::output::CmdResult {
     let mut warnings: Vec<CliWarning> = Vec::new();
 
     if dry_run {
@@ -501,7 +501,7 @@ fn bump(component_id: &str, bump_type: BumpType, dry_run: bool) -> homeboy_core:
     };
 
     let json = serde_json::to_value(out)
-        .map_err(|e| homeboy_core::Error::internal_json(e.to_string(), None))?;
+        .map_err(|e| homeboy::Error::internal_json(e.to_string(), None))?;
 
     Ok((json, warnings, 0))
 }

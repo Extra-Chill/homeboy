@@ -1,13 +1,13 @@
-use homeboy_core::config::{
+use homeboy::config::{
     ComponentConfiguration, ConfigManager, ProjectConfiguration, ProjectRecord, SlugIdentifiable,
 };
-use homeboy_core::ErrorCode;
-use homeboy_core::context::resolve_project_ssh;
-use homeboy_core::module::{find_module_by_tool, CliConfig};
-use homeboy_core::shell;
-use homeboy_core::ssh::{execute_local_command, CommandOutput};
-use homeboy_core::template::{render_map, TemplateVars};
-use homeboy_core::token;
+use homeboy::ErrorCode;
+use homeboy::context::resolve_project_ssh;
+use homeboy::module::{find_module_by_tool, CliConfig};
+use homeboy::shell;
+use homeboy::ssh::{execute_local_command, CommandOutput};
+use homeboy::template::{render_map, TemplateVars};
+use homeboy::token;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -109,20 +109,20 @@ fn run_with_loader_and_executor(
     tool: &str,
     project_id: &str,
     args: Vec<String>,
-    project_loader: fn(&str) -> homeboy_core::Result<ProjectRecord>,
+    project_loader: fn(&str) -> homeboy::Result<ProjectRecord>,
     local_executor: fn(&str) -> CommandOutput,
 ) -> CmdResult<CliOutput> {
     if args.is_empty() {
-        return Err(homeboy_core::Error::other(
+        return Err(homeboy::Error::other(
             "No command provided".to_string(),
         ));
     }
 
     let module = find_module_by_tool(tool)
-        .ok_or_else(|| homeboy_core::Error::other(format!("No module provides tool '{}'", tool)))?;
+        .ok_or_else(|| homeboy::Error::other(format!("No module provides tool '{}'", tool)))?;
 
     let cli_config = module.cli.as_ref().ok_or_else(|| {
-        homeboy_core::Error::other(format!(
+        homeboy::Error::other(format!(
             "Module '{}' does not have CLI configuration",
             module.id
         ))
@@ -131,7 +131,7 @@ fn run_with_loader_and_executor(
     let project = project_loader(project_id)?;
 
     if !project.config.has_module(&module.id) {
-        return Err(homeboy_core::Error::other(format!(
+        return Err(homeboy::Error::other(format!(
             "Project '{}' does not have the '{}' module enabled",
             project_id, module.id
         )));
@@ -168,18 +168,18 @@ fn build_command(
     project: &ProjectRecord,
     cli_config: &CliConfig,
     args: &[String],
-) -> homeboy_core::Result<(String, String)> {
+) -> homeboy::Result<(String, String)> {
     let base_path = project
         .config
         .base_path
         .clone()
         .filter(|p| !p.is_empty())
-        .ok_or_else(|| homeboy_core::Error::config("Base path not configured".to_string()))?;
+        .ok_or_else(|| homeboy::Error::config("Base path not configured".to_string()))?;
 
     let (target_domain, command_args) = resolve_subtarget(&project.config, args);
 
     if command_args.is_empty() {
-        return Err(homeboy_core::Error::other(
+        return Err(homeboy::Error::other(
             "No command provided after subtarget".to_string(),
         ));
     }
