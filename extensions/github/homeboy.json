@@ -1,0 +1,15 @@
+{
+  "id": "github",
+  "name": "GitHub",
+  "version": "1.0.0",
+  "icon": "arrow.triangle.branch",
+  "description": "GitHub CLI integration for component repositories",
+  "author": "Extra Chill",
+
+  "cli": {
+    "tool": "gh",
+    "displayName": "GitHub CLI",
+    "commandTemplate": "cd {{sitePath}} && {{cliPath}} {{args}}",
+    "defaultCLIPath": "gh"
+  }
+}

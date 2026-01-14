@@ -1,0 +1,13 @@
+{
+  "id": "rust",
+  "name": "Rust",
+  "version": "1.0.0",
+  "icon": "gearshape.2.fill",
+  "description": "Cargo CLI integration for Rust components",
+  "cli": {
+    "tool": "cargo",
+    "displayName": "Cargo",
+    "commandTemplate": "cd {{sitePath}} && {{cliPath}} {{args}}",
+    "defaultCLIPath": "cargo"
+  }
+}
