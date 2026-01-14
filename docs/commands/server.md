@@ -11,13 +11,14 @@ homeboy server <COMMAND>
 ### `create`
 
 ```sh
-homeboy server create [--json <spec>] [--skip-existing] <name> --host <host> --user <user> [--port <port>]
+homeboy server create [--json <spec>] [--skip-existing] <id> --host <host> --user <user> [--port <port>]
 
 - `--port` defaults to `22`.
 - When `--json` is provided, CLI mode arguments are not required.
+- `id` is the server ID (not a display name); it should match what you’ll reference from projects.
 ```
 
-`serverId` is derived from `slugify_id(<name>)`.
+`serverId` is the `<id>` you provide (CLI mode) or the `id` field in the JSON body (JSON mode).
 
 ### `show`
 
@@ -29,6 +30,8 @@ homeboy server show <serverId>
 
 ```sh
 homeboy server set <serverId> --json <JSON>
+homeboy server set <serverId> '<JSON>'
+homeboy server set --json <JSON>   # serverId may be provided in JSON body
 ```
 
 Updates a server by merging a JSON object into `servers/<id>.json`.

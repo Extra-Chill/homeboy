@@ -50,12 +50,14 @@ When `--list` is used, output is JSON.
 
 ### JSON content mode
 
-`homeboy docs` does not render topic content as JSON.
+`homeboy docs` supports two output shapes:
 
-- In JSON mode, `homeboy docs` is only supported for `--list`.
-- Without `--list`, output is raw markdown.
+- Without `--list`: prints raw markdown by default.
+- With JSON output enabled:
+  - `--list` returns JSON.
+  - Without `--list`, the command returns a JSON payload that includes the resolved markdown content.
 
-(If you need machine-readable docs content, treat `homeboy docs <topic...>` as markdown text and parse it in your consumer.)
+If you need *only* raw markdown, avoid JSON mode for `homeboy docs`.
 
 ## Errors
 

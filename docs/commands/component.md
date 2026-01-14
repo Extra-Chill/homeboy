@@ -40,6 +40,8 @@ homeboy component show <id>
 
 ```sh
 homeboy component set <id> --json <JSON>
+homeboy component set <id> '<JSON>'
+homeboy component set --json <JSON>   # id may be provided in JSON body
 ```
 
 Updates a component by merging a JSON object into `components/<id>.json`.

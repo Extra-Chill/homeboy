@@ -8,7 +8,9 @@ homeboy changelog [COMMAND]
 
 ## Description
 
-`homeboy changelog` prints the embedded Homeboy CLI changelog documentation (from `docs/changelog.md`) as raw markdown.
+`homeboy changelog` prints the embedded Homeboy CLI changelog documentation (from `docs/changelog.md`) as raw markdown by default.
+
+In JSON output mode, the default `show` output is returned as JSON (with a `content` field containing the markdown).
 
 ## Subcommands
 

@@ -67,16 +67,22 @@ Arguments (CLI mode):
 JSON mode:
 
 - `<spec>` accepts `-` (stdin), `@file.json`, or an inline JSON string.
-- Payload format:
+- The payload is the project object (single or array for bulk).
+
+Single:
 
 ```json
-{
-  "op": "project.create",
-  "data": { "id": "...", "domain": "..." }
-}
+{ "id": "my-project", "domain": "example.com" }
 ```
 
-Bulk payload (`data` as an array) is also supported.
+Bulk:
+
+```json
+[
+  { "id": "my-project", "domain": "example.com" },
+  { "id": "my-project-2", "domain": "example.com" }
+]
+```
 
 JSON output:
 
@@ -111,6 +117,8 @@ JSON mode:
 
 ```sh
 homeboy project set <projectId> --json <JSON>
+homeboy project set <projectId> '<JSON>'
+homeboy project set --json <JSON>   # projectId may be provided in JSON body
 ```
 
 Updates a project by merging a JSON object into `projects/<id>.json`.

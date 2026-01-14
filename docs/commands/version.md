@@ -13,21 +13,21 @@ This command accepts the global flag `--dry-run` (see [Root command](../cli/home
 ### `show`
 
 ```sh
-homeboy version show <componentId>
+homeboy version show [<componentId>]
 homeboy version show --cwd
 ```
 
 ### `bump`
 
 ```sh
-homeboy version bump <componentId> <patch|minor|major>
+homeboy version bump [<componentId>] <patch|minor|major>
 homeboy version bump --cwd <patch|minor|major>
 ```
 
 ### `set`
 
 ```sh
-homeboy version set <componentId> <newVersion>
+homeboy version set [<componentId>] <newVersion>
 ```
 
 `set` writes the version targets directly without incrementing and does not finalize the changelog.
@@ -90,6 +90,7 @@ homeboy --dry-run version bump <componentId> <patch|minor|major>
 - `changelogPath` (resolved changelog path)
 - `changelogFinalized` (always `true` on success)
 - `changelogChanged` (whether the changelog file was modified)
+- `dryRun` (mirrors global `--dry-run`)
 
 `homeboy version set` data payload:
 
@@ -98,6 +99,7 @@ homeboy --dry-run version bump <componentId> <patch|minor|major>
 - `oldVersion`
 - `newVersion`
 - `targets`: array of `{ file, pattern, fullPath, matchCount }`
+- `dryRun` (mirrors global `--dry-run`)
 
 Errors:
 
@@ -107,6 +109,7 @@ Errors:
 
 - `show`: `0` on success; errors if the version cannot be parsed.
 - `bump`: `0` on success.
+- `set`: `0` on success.
 
 ## Notes
 

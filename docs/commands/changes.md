@@ -6,7 +6,10 @@
 homeboy changes <componentId> [--since <tag>] [--git-diffs]
 homeboy changes --cwd [--git-diffs]
 homeboy changes --json <spec> [--git-diffs]
-homeboy changes --project <projectId> [--git-diffs]
+
+# Project mode
+homeboy changes --project <projectId> [<componentIds...>] [--git-diffs]
+homeboy changes <projectId> <componentId> [<componentId>...] [--git-diffs]
 ```
 
 ## Description
@@ -27,11 +30,15 @@ Release workflow note:
 ## Options
 
 - `--cwd`: use current working directory (ad-hoc mode, no component registration required)
-- `--since <tag>`: tag name to compare against (single-component mode)
-- `--git-diffs`: include commit-range diff content in output
+- `--cwd`: use current working directory (ad-hoc mode, no component registration required)
 - `--json <spec>`: bulk mode input
+  - Priority: `--cwd > --json > --project > positional`
   - `<spec>` supports `-` (stdin), `@file.json`, or an inline JSON string
+  - Spec format: `{ "componentIds": ["id1", "id2"] }`
 - `--project <projectId>`: show changes for all components attached to a project
+  - If you also pass positional `<componentIds...>`, Homeboy only returns changes for those components
+- `--since <tag>`: tag name to compare against (single-component mode only)
+- `--git-diffs`: include commit-range diff content in output
 
 ## JSON output
 
