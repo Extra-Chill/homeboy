@@ -6,6 +6,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.14.0
+
+- Merge workspace into single crate for crates.io publishing
+- Add src/core/ architectural boundary separating library from CLI
+- Library users get ergonomic imports via re-exports (homeboy::config instead of homeboy::core::config)
+
 ## 0.13.0
 
 - Add --staged-only flag to git commit for committing only pre-staged changes
