@@ -58,7 +58,7 @@ Configuration / defaults:
 - "Next section" resolution:
   - If no label is configured, Homeboy defaults to `Unreleased`.
   - If no aliases are configured, Homeboy matches both `Unreleased` and `[Unreleased]`.
-  - Config overrides (most specific first): component config → project config → global `homeboy.json`.
+  - Config overrides (most specific first): component config → project config.
 
 
 ## JSON output

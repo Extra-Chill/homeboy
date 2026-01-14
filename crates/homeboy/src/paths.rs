@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use std::path::PathBuf;
 
-/// Base homeboy config directory
+/// Base homeboy config directory.
 pub fn homeboy() -> Result<PathBuf> {
     let config_dir = dirs::config_dir().ok_or_else(|| {
         Error::internal_unexpected(
@@ -60,6 +60,11 @@ pub fn component(id: &str) -> Result<PathBuf> {
 /// Module directory path
 pub fn module(id: &str) -> Result<PathBuf> {
     Ok(modules()?.join(id))
+}
+
+/// Module manifest file path
+pub fn module_manifest(id: &str) -> Result<PathBuf> {
+    Ok(modules()?.join(id).join(format!("{}.json", id)))
 }
 
 /// Key file path

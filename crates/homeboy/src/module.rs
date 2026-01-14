@@ -1,3 +1,5 @@
+use crate::config::{self, ConfigEntity};
+use crate::error::{Error, Result};
 use crate::json;
 use crate::local_files::{self, FileSystem};
 use crate::paths;
@@ -11,11 +13,13 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModuleManifest {
-    // Required metadata
+    // ID derived from filename at runtime, not stored in JSON
+    #[serde(default, skip_serializing)]
     pub id: String,
+
+    // Required metadata
     pub name: String,
     pub version: String,
-    pub icon: String,
 
     // Optional metadata
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +69,10 @@ pub struct ModuleManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<RequirementsConfig>,
 
+    // Extensibility: preserve unknown fields for external consumers (GUI, workflows)
+    #[serde(flatten, default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+
     // Internal path (not serialized)
     #[serde(skip)]
     pub module_path: Option<String>,
@@ -77,6 +85,27 @@ impl ModuleManifest {
 
     pub fn has_runtime(&self) -> bool {
         self.runtime.is_some()
+    }
+}
+
+impl ConfigEntity for ModuleManifest {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn set_id(&mut self, id: String) {
+        self.id = id;
+    }
+    fn config_path(id: &str) -> Result<PathBuf> {
+        paths::module_manifest(id)
+    }
+    fn config_dir() -> Result<PathBuf> {
+        paths::modules()
+    }
+    fn not_found_error(id: String) -> Error {
+        Error::module_not_found(id)
+    }
+    fn entity_type() -> &'static str {
+        "module"
     }
 }
 
@@ -275,16 +304,34 @@ pub struct SettingConfig {
 
 // Module loader functions
 
+/// Returns the path to a module's manifest file: {module_dir}/{id}.json
+fn manifest_path_for_module(module_dir: &Path, id: &str) -> PathBuf {
+    module_dir.join(format!("{}.json", id))
+}
+
+/// Find manifest path, supporting both new ({id}.json) and legacy (homeboy.json) naming.
+fn find_manifest_path(module_dir: &Path, id: &str) -> Option<PathBuf> {
+    let new_path = manifest_path_for_module(module_dir, id);
+    if new_path.exists() {
+        return Some(new_path);
+    }
+
+    // Fallback for legacy modules
+    let old_path = module_dir.join("homeboy.json");
+    if old_path.exists() {
+        return Some(old_path);
+    }
+
+    None
+}
+
 pub fn load_module(id: &str) -> Option<ModuleManifest> {
     let module_dir = paths::module(id).ok()?;
-    let manifest_path = module_dir.join("homeboy.json");
-
-    if !manifest_path.exists() {
-        return None;
-    }
+    let manifest_path = find_manifest_path(&module_dir, id)?;
 
     let content = local_files::local().read(&manifest_path).ok()?;
     let mut manifest: ModuleManifest = json::from_str(&content).ok()?;
+    manifest.id = id.to_string();
     manifest.module_path = Some(module_dir.to_string_lossy().to_string());
     Some(manifest)
 }
@@ -305,9 +352,16 @@ pub fn load_all_modules() -> Vec<ModuleManifest> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let manifest_path = path.join("homeboy.json");
+            // Derive ID from directory name
+            let Some(id) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(manifest_path) = find_manifest_path(&path, id) else {
+                continue;
+            };
             if let Ok(content) = local_files::local().read(&manifest_path) {
                 if let Ok(mut manifest) = json::from_str::<ModuleManifest>(&content) {
+                    manifest.id = id.to_string();
                     manifest.module_path = Some(path.to_string_lossy().to_string());
                     modules.push(manifest);
                 }
@@ -356,7 +410,6 @@ pub mod exec_context {
 // ============================================================================
 
 use crate::component::{self, Component};
-use crate::error::{Error, Result};
 use crate::http::ApiClient;
 use crate::project::{self, Project};
 use crate::ssh::execute_local_command_interactive;
@@ -513,7 +566,7 @@ pub fn run_module(
     let site_path: String;
 
     let vars: Vec<(&str, &str)> = if let Some(ref proj) = project_config {
-        domain = proj.domain.clone();
+        domain = proj.domain.clone().unwrap_or_default();
         site_path = proj.base_path.clone().unwrap_or_default();
 
         vec![
@@ -1017,14 +1070,27 @@ fn install_from_url(url: &str, id_override: Option<&str>) -> Result<InstallResul
     local_files::ensure_app_dirs()?;
     git::clone_repo(url, &module_dir)?;
 
-    // Write sourceUrl to the module's homeboy.json
-    let manifest_path = module_dir.join("homeboy.json");
-    if manifest_path.exists() {
-        let content = local_files::local().read(&manifest_path)?;
+    // Migrate manifest to {id}.json naming and add sourceUrl
+    let old_manifest_path = module_dir.join("homeboy.json");
+    let new_manifest_path = manifest_path_for_module(&module_dir, &module_id);
+
+    if old_manifest_path.exists() {
+        let content = local_files::local().read(&old_manifest_path)?;
         let mut manifest: serde_json::Value = json::from_str(&content)?;
+
+        // Add sourceUrl for update tracking
         manifest["sourceUrl"] = serde_json::Value::String(url.to_string());
+
+        // Remove redundant id field (now derived from filename)
+        if let Some(obj) = manifest.as_object_mut() {
+            obj.remove("id");
+        }
+
         let updated = json::to_string_pretty(&manifest)?;
-        local_files::local().write(&manifest_path, &updated)?;
+        local_files::local().write(&new_manifest_path, &updated)?;
+
+        // Remove old homeboy.json
+        let _ = std::fs::remove_file(&old_manifest_path);
     }
 
     // Auto-run setup if module defines a setup_command
@@ -1067,34 +1133,41 @@ fn install_from_path(source_path: &str, id_override: Option<&str>) -> Result<Ins
         ));
     }
 
-    // Validate homeboy.json exists
-    let manifest_path = source.join("homeboy.json");
-    if !manifest_path.exists() {
-        return Err(Error::validation_invalid_argument(
-            "source",
-            format!("No homeboy.json found at {}", source.display()),
-            Some(source_path.to_string()),
-            None,
-        ));
-    }
-
-    // Read manifest to get module id if not provided
-    let manifest_content = local_files::local().read(&manifest_path)?;
-    let manifest: ModuleManifest = json::from_str(&manifest_content)?;
+    // Derive module ID from directory name or override
+    let dir_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "source",
+                "Could not determine directory name",
+                Some(source_path.to_string()),
+                None,
+            )
+        })?;
 
     let module_id = match id_override {
         Some(id) => slugify_id(id)?,
-        None => manifest.id.clone(),
+        None => slugify_id(dir_name)?,
     };
 
-    if module_id.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "module_id",
-            "Module id is empty. Provide --id or ensure manifest has an id field.",
+    // Check for manifest: prefer {id}.json, fall back to homeboy.json
+    let manifest_path = find_manifest_path(&source, &module_id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "source",
+            format!(
+                "No {}.json or homeboy.json found at {}",
+                module_id,
+                source.display()
+            ),
+            Some(source_path.to_string()),
             None,
-            None,
-        ));
-    }
+        )
+    })?;
+
+    // Validate manifest is parseable
+    let manifest_content = local_files::local().read(&manifest_path)?;
+    let _manifest: ModuleManifest = json::from_str(&manifest_content)?;
 
     let module_dir = paths::module(&module_id)?;
     if module_dir.exists() {

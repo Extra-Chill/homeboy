@@ -153,7 +153,7 @@ fn build_project_command(
         .filter(|p| !p.is_empty())
         .ok_or_else(|| Error::config("Base path not configured".to_string()))?;
 
-    let (target_domain, command_args) = resolve_subtarget(project, args);
+    let (target_domain, command_args) = resolve_subtarget(project, args)?;
 
     if command_args.is_empty() {
         return Err(Error::other(
@@ -182,23 +182,33 @@ fn build_project_command(
     ))
 }
 
-fn resolve_subtarget(project: &Project, args: &[String]) -> (String, Vec<String>) {
-    let default_domain = project.domain.clone();
+fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<String>)> {
+    let require_domain = || {
+        Error::validation_invalid_argument(
+            "domain",
+            "This operation requires a domain to be configured on the project",
+            Some(project.id.clone()),
+            None,
+        )
+    };
 
     if project.sub_targets.is_empty() {
-        return (default_domain, args.to_vec());
+        let domain = project.domain.clone().ok_or_else(require_domain)?;
+        return Ok((domain, args.to_vec()));
     }
 
     let Some(sub_id) = args.first() else {
-        return (default_domain, args.to_vec());
+        let domain = project.domain.clone().ok_or_else(require_domain)?;
+        return Ok((domain, args.to_vec()));
     };
 
     if let Some(subtarget) = project.sub_targets.iter().find(|t| {
         project::slugify_id(&t.name).ok().as_deref() == Some(sub_id)
             || token::identifier_eq(&t.name, sub_id)
     }) {
-        return (subtarget.domain.clone(), args[1..].to_vec());
+        return Ok((subtarget.domain.clone(), args[1..].to_vec()));
     }
 
-    (default_domain, args.to_vec())
+    let domain = project.domain.clone().ok_or_else(require_domain)?;
+    Ok((domain, args.to_vec()))
 }

@@ -39,7 +39,7 @@ homeboy module install <source> [--id <moduleId>]
 
 Installs a module into Homeboy's modules directory.
 
-- If `<source>` is a git URL, Homeboy clones it and writes `sourceUrl` into the installed module's `homeboy.json`.
+- If `<source>` is a git URL, Homeboy clones it and writes `sourceUrl` into the installed module's `<moduleId>.json` manifest.
 - If `<source>` is a local path, Homeboy symlinks the directory into the modules directory.
 
 ### `update`
@@ -52,7 +52,7 @@ Updates a git-cloned module.
 
 - If the module is symlinked, Homeboy returns an error (linked modules are updated at the source directory).
 - Update runs without an extra confirmation flag.
-- Homeboy reads `sourceUrl` from the module's `homeboy.json` to report the module URL in JSON output.
+- Homeboy reads `sourceUrl` from the module's manifest to report the module URL in JSON output.
 
 ### `uninstall`
 
@@ -95,11 +95,11 @@ Modules can define additional environment variables via `runtime.env` in their m
 
 Module settings validation currently happens during module execution (and may also be checked by other commands). There is no dedicated validation-only command in the CLI.
 
-`homeboy module run` requires the module to be installed/linked under the Homeboy modules directory (discovered by scanning `<config dir>/homeboy/modules/<moduleId>/homeboy.json`). There is no separate “installedModules in global config” requirement.
+`homeboy module run` requires the module to be installed/linked under the Homeboy modules directory (discovered by scanning `<config dir>/homeboy/modules/<moduleId>/<moduleId>.json`). There is no separate "installedModules in global config" requirement.
 
 ## Runtime Configuration
 
-Executable modules define their runtime behavior in their module manifest (`modules/<moduleId>/homeboy.json`):
+Executable modules define their runtime behavior in their module manifest (`modules/<moduleId>/<moduleId>.json`):
 
 ```json
 {

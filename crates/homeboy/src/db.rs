@@ -63,7 +63,7 @@ fn build_context(project_id: &str, subtarget: Option<&str>) -> Result<DbContext>
     let project = project::load(project_id)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
 
-    let domain = resolve_domain(&project, subtarget);
+    let domain = resolve_domain(&project, subtarget, project_id)?;
 
     let modules = load_all_modules();
 
@@ -89,23 +89,32 @@ fn build_context(project_id: &str, subtarget: Option<&str>) -> Result<DbContext>
     })
 }
 
-fn resolve_domain(project: &Project, subtarget: Option<&str>) -> String {
+fn resolve_domain(project: &Project, subtarget: Option<&str>, project_id: &str) -> Result<String> {
+    let require_domain = || {
+        Error::validation_invalid_argument(
+            "domain",
+            "This operation requires a domain to be configured on the project",
+            Some(project_id.to_string()),
+            None,
+        )
+    };
+
     if project.sub_targets.is_empty() {
-        return project.domain.clone();
+        return project.domain.clone().ok_or_else(require_domain);
     }
 
     let Some(sub_id) = subtarget else {
-        return project.domain.clone();
+        return project.domain.clone().ok_or_else(require_domain);
     };
 
     if let Some(target) = project.sub_targets.iter().find(|t| {
         project::slugify_id(&t.name).ok().as_deref() == Some(sub_id)
             || token::identifier_eq(&t.name, sub_id)
     }) {
-        return target.domain.clone();
+        return Ok(target.domain.clone());
     }
 
-    project.domain.clone()
+    project.domain.clone().ok_or_else(require_domain)
 }
 
 fn parse_json_tables(json: &str) -> Vec<String> {
@@ -419,7 +428,7 @@ pub fn create_tunnel(project_id: &str, local_port: Option<u16>) -> Result<DbTunn
     Ok(DbTunnelResult {
         project_id: project_id.to_string(),
         base_path: project.base_path.clone(),
-        domain: Some(project.domain.clone()),
+        domain: project.domain.clone(),
         exit_code,
         success,
         tunnel: tunnel_info,

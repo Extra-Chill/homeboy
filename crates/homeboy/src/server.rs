@@ -265,57 +265,7 @@ pub use config::BatchResult as CreateSummary;
 pub use config::BatchResultItem as CreateSummaryItem;
 
 pub fn create_from_json(spec: &str, skip_existing: bool) -> Result<CreateSummary> {
-    let value: serde_json::Value = json::from_str(spec)?;
-
-    let items: Vec<serde_json::Value> = if value.is_array() {
-        value.as_array().unwrap().clone()
-    } else {
-        vec![value]
-    };
-
-    let mut summary = CreateSummary::new();
-
-    for item in items {
-        let id = match item.get("id").and_then(|v| v.as_str()) {
-            Some(id) => id.to_string(),
-            None => {
-                summary.record_error("unknown".to_string(), "Missing required field: id".to_string());
-                continue;
-            }
-        };
-
-        if let Err(e) = slugify::validate_component_id(&id) {
-            summary.record_error(id, e.message.clone());
-            continue;
-        }
-
-        let mut server: Server = match serde_json::from_value(item.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                summary.record_error(id, format!("Parse error: {}", e));
-                continue;
-            }
-        };
-        server.id = id.clone();
-
-        if exists(&id) {
-            if skip_existing {
-                summary.record_skipped(id);
-            } else {
-                summary.record_error(id.clone(), format!("Server '{}' already exists", id));
-            }
-            continue;
-        }
-
-        if let Err(e) = save(&server) {
-            summary.record_error(id, e.message.clone());
-            continue;
-        }
-
-        summary.record_created(id);
-    }
-
-    Ok(summary)
+    config::create_from_json::<Server>(spec, skip_existing)
 }
 
 // ============================================================================

@@ -124,7 +124,8 @@ pub struct ProjectComponentsOutput {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectListItem {
     id: String,
-    domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

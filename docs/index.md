@@ -15,7 +15,7 @@ Homeboy is a config-driven automation engine for development and deployment auto
 
 ## Configuration
 
-Configuration and state live under the OS config directory (`dirs::config_dir()/homeboy/`):
+Configuration and state live under the OS config directory (`dirs::config_dir()/homeboy/`).
 
 - macOS: `~/Library/Application Support/homeboy/`
 - Linux: `$XDG_CONFIG_HOME/homeboy/` (fallback: `~/.config/homeboy/`)

@@ -1,7 +1,6 @@
 use clap::{Args, Subcommand};
-use homeboy::project::Project;
 use homeboy::server::{self, Server};
-use homeboy::ssh::SshClient;
+use homeboy::ssh::{resolve_context, SshClient, SshResolveArgs};
 use serde::Serialize;
 
 use super::CmdResult;
@@ -62,291 +61,27 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
             Ok((SshOutput::List(SshListOutput { servers }), 0))
         }
         None => {
-            if args.id.is_none() && args.project.is_none() && args.server.is_none() {
-                return Err(homeboy::Error::validation_missing_argument(vec![
-                    "<id>".to_string(),
-                    "--project".to_string(),
-                    "--server".to_string(),
-                ]));
-            }
+            // Core handles all validation and resolution
+            let resolve_args = SshResolveArgs {
+                id: args.id.clone(),
+                project: args.project.clone(),
+                server: args.server.clone(),
+            };
+            let result = resolve_context(&resolve_args)?;
 
-            run_with_loaders_and_executor(
-                args,
-                homeboy::project::load,
-                server::load,
-                execute_interactive,
-            )
+            // Execute interactive SSH (CLI-owned TTY interaction)
+            let client = SshClient::from_server(&result.server, &result.server_id)?;
+            let exit_code = client.execute_interactive(args.command.as_deref());
+
+            Ok((
+                SshOutput::Connect(SshConnectOutput {
+                    resolved_type: result.resolved_type,
+                    project_id: result.project_id,
+                    server_id: result.server_id,
+                    command: args.command,
+                }),
+                exit_code,
+            ))
         }
-    }
-}
-
-fn run_with_loaders_and_executor(
-    args: SshArgs,
-    project_loader: fn(&str) -> homeboy::Result<Project>,
-    server_loader: fn(&str) -> homeboy::Result<Server>,
-    executor: fn(&Server, &str, Option<&str>) -> homeboy::Result<i32>,
-) -> CmdResult<SshOutput> {
-    let (resolved_type, project_id, server_id, server) =
-        resolve_context(&args, project_loader, server_loader)?;
-
-    if !server.is_valid() {
-        let mut missing_fields = Vec::new();
-        if server.host.is_empty() {
-            missing_fields.push("host".to_string());
-        }
-        if server.user.is_empty() {
-            missing_fields.push("user".to_string());
-        }
-
-        return Err(homeboy::Error::ssh_server_invalid(
-            server_id.clone(),
-            missing_fields,
-        ));
-    }
-
-    let exit_code = executor(&server, &server_id, args.command.as_deref())?;
-
-    Ok((
-        SshOutput::Connect(SshConnectOutput {
-            resolved_type,
-            project_id,
-            server_id,
-            command: args.command,
-        }),
-        exit_code,
-    ))
-}
-
-fn execute_interactive(
-    server: &Server,
-    server_id: &str,
-    command: Option<&str>,
-) -> homeboy::Result<i32> {
-    let client = SshClient::from_server(server, server_id)?;
-    Ok(client.execute_interactive(command))
-}
-
-fn resolve_context(
-    args: &SshArgs,
-    project_loader: fn(&str) -> homeboy::Result<Project>,
-    server_loader: fn(&str) -> homeboy::Result<Server>,
-) -> homeboy::Result<(String, Option<String>, String, Server)> {
-    if let Some(project_id) = &args.project {
-        let project = project_loader(project_id)?;
-        let (server_id, server) = resolve_from_loaded_project(&project, server_loader)?;
-        return Ok(("project".to_string(), Some(project.id), server_id, server));
-    }
-
-    if let Some(server_id) = &args.server {
-        let server = server_loader(server_id)?;
-        return Ok(("server".to_string(), None, server_id.clone(), server));
-    }
-
-    let id = args.id.as_ref().ok_or_else(|| {
-        homeboy::Error::validation_missing_argument(vec![
-            "<id>".to_string(),
-            "--project".to_string(),
-            "--server".to_string(),
-        ])
-    })?;
-
-    if let Ok(project) = project_loader(id) {
-        let (server_id, server) = resolve_from_loaded_project(&project, server_loader)?;
-        return Ok(("project".to_string(), Some(project.id), server_id, server));
-    }
-
-    if let Ok(server) = server_loader(id) {
-        return Ok(("server".to_string(), None, id.to_string(), server));
-    }
-
-    Err(homeboy::Error::validation_invalid_argument(
-        "id",
-        "No matching project or server",
-        Some(id.to_string()),
-        Some(vec!["project".to_string(), "server".to_string()]),
-    ))
-}
-
-fn resolve_from_loaded_project(
-    project: &Project,
-    server_loader: fn(&str) -> homeboy::Result<Server>,
-) -> homeboy::Result<(String, Server)> {
-    let server_id = project.server_id.clone().ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
-            "project.serverId",
-            "Server not configured for project",
-            None,
-            None,
-        )
-    })?;
-
-    let server = server_loader(&server_id)?;
-
-    Ok((server_id, server))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn server(id: &str) -> Server {
-        Server {
-            id: id.to_string(),
-            host: "example.com".to_string(),
-            user: "user".to_string(),
-            port: 22,
-            identity_file: None,
-        }
-    }
-
-    fn project(id: &str, server_id: Option<&str>) -> Project {
-        Project {
-            id: id.to_string(),
-            domain: String::new(),
-            scoped_modules: None,
-            server_id: server_id.map(|s| s.to_string()),
-            base_path: None,
-            table_prefix: None,
-            remote_files: homeboy::project::RemoteFileConfig::default(),
-            remote_logs: homeboy::project::RemoteLogConfig::default(),
-            database: homeboy::project::DatabaseConfig::default(),
-            tools: homeboy::project::ToolsConfig::default(),
-            api: homeboy::project::ApiConfig::default(),
-            changelog_next_section_label: None,
-            changelog_next_section_aliases: None,
-            sub_targets: vec![],
-            shared_tables: vec![],
-            component_ids: vec![],
-        }
-    }
-
-    fn noop_executor(
-        _server: &Server,
-        _server_id: &str,
-        _command: Option<&str>,
-    ) -> homeboy::Result<i32> {
-        Ok(0)
-    }
-
-    #[test]
-    fn resolves_project_first_when_both_exist() {
-        let args = SshArgs {
-            id: Some("alpha".to_string()),
-            project: None,
-            server: None,
-            command: Some("pwd".to_string()),
-            subcommand: None,
-        };
-
-        let result = run_with_loaders_and_executor(
-            args,
-            |id| match id {
-                "alpha" => Ok(project("alpha", Some("alpha"))),
-                _ => Err(homeboy::Error::project_not_found("missing")),
-            },
-            |id| Ok(server(id)),
-            noop_executor,
-        )
-        .unwrap();
-
-        let data = match result.0 {
-            SshOutput::Connect(data) => data,
-            _ => panic!("expected connect output"),
-        };
-
-        assert_eq!(data.resolved_type, "project");
-        assert_eq!(data.project_id.as_deref(), Some("alpha"));
-        assert_eq!(data.server_id, "alpha");
-    }
-
-    #[test]
-    fn resolves_server_when_project_missing() {
-        let args = SshArgs {
-            id: Some("prod-server".to_string()),
-            project: None,
-            server: None,
-            command: None,
-            subcommand: None,
-        };
-
-        let result = run_with_loaders_and_executor(
-            args,
-            |_id| Err(homeboy::Error::project_not_found("missing")),
-            |id| match id {
-                "prod-server" => Ok(server(id)),
-                _ => Err(homeboy::Error::server_not_found("missing")),
-            },
-            noop_executor,
-        )
-        .unwrap();
-
-        let data = match result.0 {
-            SshOutput::Connect(data) => data,
-            _ => panic!("expected connect output"),
-        };
-
-        assert_eq!(data.resolved_type, "server");
-        assert!(data.project_id.is_none());
-        assert_eq!(data.server_id, "prod-server");
-    }
-
-    #[test]
-    fn server_flag_forces_server_even_if_project_exists() {
-        let args = SshArgs {
-            id: None,
-            project: None,
-            server: Some("alpha".to_string()),
-            command: Some("uptime".to_string()),
-            subcommand: None,
-        };
-
-        let result = run_with_loaders_and_executor(
-            args,
-            |_id| Ok(project("alpha", Some("alpha"))),
-            |id| Ok(server(id)),
-            noop_executor,
-        )
-        .unwrap();
-
-        let data = match result.0 {
-            SshOutput::Connect(data) => data,
-            _ => panic!("expected connect output"),
-        };
-
-        assert_eq!(data.resolved_type, "server");
-        assert!(data.project_id.is_none());
-        assert_eq!(data.server_id, "alpha");
-    }
-
-    #[test]
-    fn returns_error_when_neither_project_nor_server_found() {
-        let args = SshArgs {
-            id: Some("missing".to_string()),
-            project: None,
-            server: None,
-            command: None,
-            subcommand: None,
-        };
-
-        let error = run_with_loaders_and_executor(
-            args,
-            |_id| Err(homeboy::Error::project_not_found("missing")),
-            |_id| Err(homeboy::Error::server_not_found("missing")),
-            noop_executor,
-        )
-        .unwrap_err();
-
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-    }
-
-    #[test]
-    fn list_output_serializes_servers() {
-        let output = SshOutput::List(SshListOutput {
-            servers: vec![server("alpha"), server("beta")],
-        });
-
-        let value = serde_json::to_value(output).unwrap();
-        assert_eq!(value["action"], "list");
-        assert_eq!(value["servers"].as_array().unwrap().len(), 2);
     }
 }

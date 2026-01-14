@@ -14,7 +14,9 @@ use uuid::Uuid;
 pub struct Project {
     #[serde(skip)]
     pub id: String,
-    pub domain: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scoped_modules: Option<HashMap<String, ScopedModuleConfig>>,
@@ -354,15 +356,6 @@ pub fn create_from_cli(
 
     slugify::validate_component_id(&id)?;
 
-    let domain = domain.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "domain",
-            "Missing required argument: domain",
-            None,
-            None,
-        )
-    })?;
-
     if exists(&id) {
         return Err(Error::validation_invalid_argument(
             "project.id",
@@ -408,7 +401,7 @@ pub fn update(
     let mut updated = Vec::new();
 
     if let Some(new_domain) = domain {
-        project.domain = new_domain;
+        project.domain = Some(new_domain);
         updated.push("domain".to_string());
     }
 
@@ -526,10 +519,44 @@ pub fn validate_component_ids(component_ids: Vec<String>, project_id: &str) -> R
 }
 
 pub fn set_components(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
+    use crate::component;
+    use std::collections::HashSet;
+
+    if component_ids.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "componentIds",
+            "At least one component ID is required",
+            Some(project_id.to_string()),
+            None,
+        ));
+    }
+
+    let mut missing = Vec::new();
+    for component_id in &component_ids {
+        if !component::exists(component_id) {
+            missing.push(component_id.clone());
+        }
+    }
+
+    if !missing.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "componentIds",
+            "Unknown component IDs (must exist in `homeboy component list`)",
+            Some(project_id.to_string()),
+            Some(missing),
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let deduped: Vec<String> = component_ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+
     let mut project = load(project_id)?;
-    project.component_ids = component_ids.clone();
+    project.component_ids = deduped.clone();
     save(&project)?;
-    Ok(component_ids)
+    Ok(deduped)
 }
 
 pub fn add_components(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
@@ -544,18 +571,6 @@ pub fn add_components(project_id: &str, component_ids: Vec<String>) -> Result<Ve
 }
 
 pub fn remove_components(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
-    let mut project = load(project_id)?;
-    project
-        .component_ids
-        .retain(|id| !component_ids.contains(id));
-    save(&project)?;
-    Ok(project.component_ids)
-}
-
-pub fn remove_components_validated(
-    project_id: &str,
-    component_ids: Vec<String>,
-) -> Result<Vec<String>> {
     if component_ids.is_empty() {
         return Err(Error::validation_invalid_argument(
             "componentIds",
@@ -755,55 +770,5 @@ pub use config::BatchResult as CreateSummary;
 pub use config::BatchResultItem as CreateSummaryItem;
 
 pub fn create_from_json(spec: &str, skip_existing: bool) -> Result<CreateSummary> {
-    let value: serde_json::Value = json::from_str(spec)?;
-
-    let items: Vec<serde_json::Value> = if value.is_array() {
-        value.as_array().unwrap().clone()
-    } else {
-        vec![value]
-    };
-
-    let mut summary = CreateSummary::new();
-
-    for item in items {
-        let id = match item.get("id").and_then(|v| v.as_str()) {
-            Some(id) => id.to_string(),
-            None => {
-                summary.record_error("unknown".to_string(), "Missing required field: id".to_string());
-                continue;
-            }
-        };
-
-        if let Err(e) = slugify::validate_component_id(&id) {
-            summary.record_error(id, e.message.clone());
-            continue;
-        }
-
-        let mut project: Project = match serde_json::from_value(item.clone()) {
-            Ok(p) => p,
-            Err(e) => {
-                summary.record_error(id, format!("Parse error: {}", e));
-                continue;
-            }
-        };
-        project.id = id.clone();
-
-        if exists(&id) {
-            if skip_existing {
-                summary.record_skipped(id);
-            } else {
-                summary.record_error(id.clone(), format!("Project '{}' already exists", id));
-            }
-            continue;
-        }
-
-        if let Err(e) = save(&project) {
-            summary.record_error(id, e.message.clone());
-            continue;
-        }
-
-        summary.record_created(id);
-    }
-
-    Ok(summary)
+    config::create_from_json::<Project>(spec, skip_existing)
 }

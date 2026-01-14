@@ -74,7 +74,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 - Rename plugin terminology to module across CLI/docs
 - Remove active project concept; require explicit --project where needed
-- Update module manifest filename to homeboy.json
+- Update module manifest filename to `<moduleId>.json`
 
 ## 0.4.0
 
@@ -178,7 +178,7 @@ All notable changes to Homeboy CLI are documented in this file.
 ### Improvements
 - **Config schema**: Introduce `homeboy config` command group + `ConfigKeys` schema listing to standardize how config keys are described/exposed.
 - **Config records**: Standardize config identity via `slugify_id()` + `SlugIdentifiable::slug_id()` and enforce id/name consistency in `ConfigManager::save_server()` and `ConfigManager::save_component()`.
-- **App config**: Extend `AppConfig` with `installedModules: HashMap<String, InstalledModuleConfig>`; each module stores `settings: HashMap<String, Value>` and optional `sourceUrl`.
+- **App config**: Extend `AppConfig` with `installedModules: HashMap<String, InstalledModuleConfig>`; each module stores `settings: HashMap<String, Value>` and optional `sourceUrl` (stored in the module manifest).
 - **Module scoping**: Add `ModuleScope::{effective_settings, validate_project_compatibility, resolve_component_scope}` to merge settings across app/project/component and validate `ModuleManifest.requires` (for example: `components`).
 - **Module execution**: Tighten `homeboy module run` to require an installed/configured entry and resolve project/component context when CLI templates reference project variables.
 - **Command context**: Refactor SSH/base-path resolution to shared context helpers (used by `db`/`deploy`) for more consistent configuration errors.

@@ -63,7 +63,9 @@ homeboy logs show <projectId> <path> --follow   # interactive passthrough
 
 ## Configuration
 
-Configuration and state live under the OS config directory (from `dirs::config_dir()`), under a `homeboy/` folder:
+Configuration and state live under the OS config directory (from `dirs::config_dir()`), under a `homeboy/` folder.
+
+Common defaults:
 
 - **macOS**: `~/Library/Application Support/homeboy/`
 - **Linux**: `$XDG_CONFIG_HOME/homeboy/` (fallback: `~/.config/homeboy/`)
@@ -72,7 +74,7 @@ Configuration and state live under the OS config directory (from `dirs::config_d
 Common paths:
 
 - `projects/<id>.json`, `servers/<id>.json`, and `components/<id>.json` under the Homeboy config root
-- `modules/<moduleId>/homeboy.json` (module manifest; used by the module system)
+- `modules/<moduleId>/<moduleId>.json` (module manifest; used by the module system)
 
 Notes:
 

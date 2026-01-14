@@ -1,6 +1,7 @@
 use crate::error::Error;
 use crate::json;
 use crate::local_files::{self, FileSystem};
+use crate::paths;
 use crate::slugify;
 use crate::Result;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -45,8 +46,30 @@ pub(crate) fn list<T: ConfigEntity>() -> Result<Vec<T>> {
     Ok(items)
 }
 
+fn check_id_collision(id: &str, saving_type: &str) -> Result<()> {
+    let entity_types = [
+        ("project", paths::projects()),
+        ("server", paths::servers()),
+        ("component", paths::components()),
+    ];
+
+    for (entity_type, dir_result) in entity_types {
+        if entity_type == saving_type {
+            continue;
+        }
+        if let Ok(dir) = dir_result {
+            let path = dir.join(format!("{}.json", id));
+            if path.exists() {
+                return Err(Error::config_id_collision(id, saving_type, entity_type));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
     slugify::validate_component_id(entity.id())?;
+    check_id_collision(entity.id(), T::entity_type())?;
 
     let path = T::config_path(entity.id())?;
     local_files::ensure_app_dirs()?;
@@ -151,8 +174,64 @@ impl Default for BatchResult {
 }
 
 // ============================================================================
-// Generic JSON Merge
+// Generic JSON Operations
 // ============================================================================
+
+pub(crate) fn create_from_json<T: ConfigEntity>(
+    spec: &str,
+    skip_existing: bool,
+) -> Result<BatchResult> {
+    let value: serde_json::Value = json::from_str(spec)?;
+    let items: Vec<serde_json::Value> = if value.is_array() {
+        value.as_array().unwrap().clone()
+    } else {
+        vec![value]
+    };
+
+    let mut summary = BatchResult::new();
+
+    for item in items {
+        let id = match item.get("id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => {
+                summary.record_error("unknown".to_string(), "Missing required field: id".to_string());
+                continue;
+            }
+        };
+
+        if let Err(e) = slugify::validate_component_id(&id) {
+            summary.record_error(id, e.message.clone());
+            continue;
+        }
+
+        let mut entity: T = match serde_json::from_value(item.clone()) {
+            Ok(e) => e,
+            Err(e) => {
+                summary.record_error(id, format!("Parse error: {}", e));
+                continue;
+            }
+        };
+        entity.set_id(id.clone());
+
+        if exists::<T>(&id) {
+            if skip_existing {
+                summary.record_skipped(id);
+            } else {
+                summary.record_error(id.clone(), format!("{} '{}' already exists", T::entity_type(), id));
+            }
+            continue;
+        }
+
+        if let Err(e) = save(&entity) {
+            summary.record_error(id, e.message.clone());
+            continue;
+        }
+
+        summary.record_created(id);
+    }
+
+    Ok(summary)
+}
 
 pub(crate) fn merge_from_json<T: ConfigEntity>(
     id: Option<&str>,

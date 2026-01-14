@@ -100,6 +100,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         ErrorCode::ConfigMissingKey
         | ErrorCode::ConfigInvalidJson
         | ErrorCode::ConfigInvalidValue
+        | ErrorCode::ConfigIdCollision
         | ErrorCode::ValidationMissingArgument
         | ErrorCode::ValidationInvalidArgument
         | ErrorCode::ValidationInvalidJson

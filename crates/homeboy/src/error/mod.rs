@@ -16,6 +16,7 @@ pub enum ErrorCode {
     ConfigMissingKey,
     ConfigInvalidJson,
     ConfigInvalidValue,
+    ConfigIdCollision,
 
     ValidationMissingArgument,
     ValidationInvalidArgument,
@@ -53,6 +54,7 @@ impl ErrorCode {
             ErrorCode::ConfigMissingKey => "config.missing_key",
             ErrorCode::ConfigInvalidJson => "config.invalid_json",
             ErrorCode::ConfigInvalidValue => "config.invalid_value",
+            ErrorCode::ConfigIdCollision => "config.id_collision",
 
             ErrorCode::ValidationMissingArgument => "validation.missing_argument",
             ErrorCode::ValidationInvalidArgument => "validation.invalid_argument",
@@ -114,6 +116,14 @@ pub struct ConfigInvalidValueDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     pub problem: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigIdCollisionDetails {
+    pub id: String,
+    pub requested_type: String,
+    pub existing_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -405,6 +415,31 @@ impl Error {
             "Invalid configuration value",
             details,
         )
+    }
+
+    pub fn config_id_collision(
+        id: impl Into<String>,
+        requested_type: impl Into<String>,
+        existing_type: impl Into<String>,
+    ) -> Self {
+        let existing = existing_type.into();
+        let id_str = id.into();
+        let details = serde_json::to_value(ConfigIdCollisionDetails {
+            id: id_str.clone(),
+            requested_type: requested_type.into(),
+            existing_type: existing.clone(),
+        })
+        .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+
+        Self::new(
+            ErrorCode::ConfigIdCollision,
+            format!("ID '{}' already exists as a {}", id_str, existing),
+            details,
+        )
+        .with_hint(format!(
+            "Run 'homeboy {} rename {} <new-id>' to resolve the collision",
+            existing, id_str
+        ))
     }
 
     pub fn project_no_active(config_path: Option<String>) -> Self {
