@@ -8,6 +8,12 @@ For current behavior, prefer the code and other documentation (for example `docs
 
 ## Unreleased
 
+## 0.9.0
+
+- Refactor module system
+- Revamp configuration handling
+- Improve CLI integration
+
 ## 0.8.1
 
 - Docs: restructure desktop README and refine module spec wording
