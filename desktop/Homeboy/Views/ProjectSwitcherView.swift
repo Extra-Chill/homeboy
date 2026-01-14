@@ -4,36 +4,28 @@ import SwiftUI
 struct ProjectSwitcherView: View {
     @ObservedObject var configManager = ConfigurationManager.shared
     @EnvironmentObject var authManager: AuthManager
-    
+
     /// Optional closure to check if there's unsaved work before switching projects.
     /// Returns true if there's unsaved work that should prompt a confirmation.
     var hasUnsavedWork: (() -> Bool)?
-    
+
     @State private var showManageProjects = false
     @State private var showAddProject = false
     @State private var showDeleteConfirmation = false
     @State private var projectToDelete: String?
     @State private var showUnsavedWorkAlert = false
     @State private var pendingProjectSwitch: String?
-    
+
     // Add project form
     @State private var newProjectName = ""
-    @State private var newProjectId = ""
-    @State private var newProjectIdWasManuallyEdited = false
-    @FocusState private var newProjectNameFieldFocused: Bool
-    
+    @State private var newProjectDomain = ""
+    @State private var isCreating = false
+    @State private var createError: String?
+
     private var isFormValid: Bool {
-        !newProjectName.isEmpty && !newProjectId.isEmpty && configManager.isIdAvailable(newProjectId)
+        !newProjectName.isEmpty && !newProjectDomain.isEmpty && !isCreating
     }
-    
-    private var idValidationMessage: String? {
-        guard !newProjectId.isEmpty else { return nil }
-        if !configManager.isIdAvailable(newProjectId) {
-            return "A project with this ID already exists"
-        }
-        return nil
-    }
-    
+
     var body: some View {
         Menu {
             // Project list
@@ -49,9 +41,9 @@ struct ProjectSwitcherView: View {
                     }
                 }
             }
-            
+
             Divider()
-            
+
             // Manage projects
             Button {
                 showManageProjects = true
@@ -94,12 +86,15 @@ struct ProjectSwitcherView: View {
             }
             Button("Delete", role: .destructive) {
                 if let id = projectToDelete {
-                    configManager.deleteProject(id: id)
+                    Task {
+                        try? await configManager.deleteProject(id: id)
+                    }
                     projectToDelete = nil
                 }
             }
         } message: {
-            if let id = projectToDelete, let project = configManager.loadProject(id: id) {
+            if let id = projectToDelete,
+               let project = configManager.availableProjects.first(where: { $0.id == id }) {
                 Text("Are you sure you want to delete \"\(project.name)\"? This cannot be undone.")
             }
         }
@@ -117,9 +112,9 @@ struct ProjectSwitcherView: View {
             Text("You have unsaved changes. Switching projects will discard them.")
         }
     }
-    
+
     // MARK: - Manage Projects Sheet
-    
+
     private var manageProjectsSheet: some View {
         VStack(spacing: 0) {
             // Header
@@ -133,9 +128,9 @@ struct ProjectSwitcherView: View {
                 .buttonStyle(.borderedProminent)
             }
             .padding()
-            
+
             Divider()
-            
+
             // Project list
             List {
                 ForEach(configManager.availableProjects, id: \.id) { project in
@@ -149,9 +144,9 @@ struct ProjectSwitcherView: View {
                                     .foregroundColor(.secondary)
                             }
                         }
-                        
+
                         Spacer()
-                        
+
                         if project.id == configManager.activeProject?.id {
                             Text("Active")
                                 .font(.caption)
@@ -173,9 +168,9 @@ struct ProjectSwitcherView: View {
                     .padding(.vertical, 4)
                 }
             }
-            
+
             Divider()
-            
+
             // Add project button
             HStack {
                 Button {
@@ -190,9 +185,9 @@ struct ProjectSwitcherView: View {
         }
         .frame(width: 400, height: 350)
     }
-    
+
     // MARK: - Add Project Sheet
-    
+
     private var addProjectSheet: some View {
         VStack(spacing: 0) {
             // Header
@@ -202,47 +197,34 @@ struct ProjectSwitcherView: View {
                 Spacer()
             }
             .padding()
-            
+
             Divider()
-            
+
             // Form
             Form {
                 Section("Project Information") {
                     TextField("Project Name", text: $newProjectName)
                         .textFieldStyle(.roundedBorder)
-                        .focused($newProjectNameFieldFocused)
-                        .onChange(of: newProjectNameFieldFocused) { _, isFocused in
-                            // Auto-generate ID when name field loses focus
-                            if !isFocused && !newProjectIdWasManuallyEdited && newProjectId.isEmpty {
-                                newProjectId = ConfigurationManager.slugFromName(newProjectName)
-                            }
-                        }
-                    
-                    TextField("Project ID", text: $newProjectId)
+
+                    TextField("Domain", text: $newProjectDomain)
                         .textFieldStyle(.roundedBorder)
-                        .onChange(of: newProjectId) { oldValue, newValue in
-                            // Only mark as manually edited if user actually changed it
-                            if !oldValue.isEmpty || !newValue.isEmpty {
-                                newProjectIdWasManuallyEdited = true
-                            }
-                        }
-                    
-                    if let message = idValidationMessage {
-                        Text(message)
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    } else if !newProjectId.isEmpty {
-                        Text("Used for CLI commands and file storage")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+
+                    Text("e.g., example.com")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                if let error = createError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
                 }
             }
             .formStyle(.grouped)
             .padding()
-            
+
             Divider()
-            
+
             // Actions
             HStack {
                 Button("Cancel") {
@@ -250,9 +232,15 @@ struct ProjectSwitcherView: View {
                     showAddProject = false
                 }
                 .keyboardShortcut(.cancelAction)
-                
+
                 Spacer()
-                
+
+                if isCreating {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(.trailing, 8)
+                }
+
                 Button("Add Project") {
                     addProject()
                 }
@@ -264,52 +252,54 @@ struct ProjectSwitcherView: View {
         }
         .frame(width: 400, height: 360)
     }
-    
+
     // MARK: - Actions
-    
+
     private func switchToProject(_ projectId: String) {
         guard projectId != configManager.activeProject?.id else { return }
-        
+
         // Check for unsaved work
         if let checkUnsaved = hasUnsavedWork, checkUnsaved() {
             pendingProjectSwitch = projectId
             showUnsavedWorkAlert = true
             return
         }
-        
+
         performProjectSwitch(projectId)
     }
-    
+
     private func performProjectSwitch(_ projectId: String) {
         Task {
             await configManager.switchToProject(id: projectId)
             await authManager.resetForProjectSwitch()
         }
     }
-    
+
     private func addProject() {
-        let project = configManager.createProject(
-            id: newProjectId.trimmingCharacters(in: .whitespacesAndNewlines),
-            name: newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
-        )
+        isCreating = true
+        createError = nil
 
-        resetAddProjectForm()
-        showAddProject = false
+        Task {
+            do {
+                let project = try await configManager.createProject(
+                    name: newProjectName.trimmingCharacters(in: .whitespacesAndNewlines),
+                    domain: newProjectDomain.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
 
-        // Switch to the new project so user can configure it
-        switchToProject(project.id)
+                resetAddProjectForm()
+                showAddProject = false
+                switchToProject(project.id)
+            } catch {
+                createError = error.localizedDescription
+                isCreating = false
+            }
+        }
     }
 
     private func resetAddProjectForm() {
         newProjectName = ""
-        newProjectId = ""
-        newProjectIdWasManuallyEdited = false
+        newProjectDomain = ""
+        isCreating = false
+        createError = nil
     }
-}
-
-#Preview {
-    ProjectSwitcherView()
-        .environmentObject(AuthManager())
-        .frame(width: 220)
-        .padding()
 }

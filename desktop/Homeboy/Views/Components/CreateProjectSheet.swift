@@ -9,23 +9,15 @@ struct CreateProjectSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var projectName = ""
-    @State private var projectId = ""
-    @State private var idWasManuallyEdited = false
-    @FocusState private var nameFieldFocused: Bool
+    @State private var projectDomain = ""
+    @State private var isCreating = false
+    @State private var errorMessage: String?
 
     var isFirstProject: Bool = false
     var onProjectCreated: ((ProjectConfiguration) -> Void)?
 
     private var isFormValid: Bool {
-        !projectName.isEmpty && !projectId.isEmpty && configManager.isIdAvailable(projectId)
-    }
-
-    private var idValidationMessage: String? {
-        guard !projectId.isEmpty else { return nil }
-        if !configManager.isIdAvailable(projectId) {
-            return "A project with this ID already exists"
-        }
-        return nil
+        !projectName.isEmpty && !projectDomain.isEmpty && !isCreating
     }
 
     var body: some View {
@@ -56,32 +48,19 @@ struct CreateProjectSheet: View {
                 Section {
                     TextField("Project Name", text: $projectName)
                         .textFieldStyle(.roundedBorder)
-                        .focused($nameFieldFocused)
-                        .onChange(of: nameFieldFocused) { _, isFocused in
-                            // Auto-generate ID when name field loses focus
-                            if !isFocused && !idWasManuallyEdited && projectId.isEmpty {
-                                projectId = ConfigurationManager.slugFromName(projectName)
-                            }
-                        }
 
-                    TextField("Project ID", text: $projectId)
+                    TextField("Domain", text: $projectDomain)
                         .textFieldStyle(.roundedBorder)
-                        .onChange(of: projectId) { oldValue, newValue in
-                            // Only mark as manually edited if user actually changed it
-                            if !oldValue.isEmpty || !newValue.isEmpty {
-                                idWasManuallyEdited = true
-                            }
-                        }
 
-                    if let message = idValidationMessage {
-                        Text(message)
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    } else if !projectId.isEmpty {
-                        Text("Used for CLI commands and file storage")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                    Text("e.g., example.com")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                if let error = errorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
                 }
             }
             .formStyle(.grouped)
@@ -100,6 +79,12 @@ struct CreateProjectSheet: View {
 
                 Spacer()
 
+                if isCreating {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(.trailing, 8)
+                }
+
                 Button(isFirstProject ? "Create Project" : "Add Project") {
                     createProject()
                 }
@@ -113,18 +98,24 @@ struct CreateProjectSheet: View {
     }
 
     private func createProject() {
-        let project = configManager.createProject(
-            id: projectId.trimmingCharacters(in: .whitespacesAndNewlines),
-            name: projectName.trimmingCharacters(in: .whitespacesAndNewlines)
-        )
+        isCreating = true
+        errorMessage = nil
 
-        // Switch to the new project
         Task {
-            await configManager.switchToProject(id: project.id)
-        }
+            do {
+                let project = try await configManager.createProject(
+                    name: projectName.trimmingCharacters(in: .whitespacesAndNewlines),
+                    domain: projectDomain.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
 
-        onProjectCreated?(project)
-        dismiss()
+                await configManager.switchToProject(id: project.id)
+                onProjectCreated?(project)
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+                isCreating = false
+            }
+        }
     }
 }
 
