@@ -445,8 +445,22 @@ struct BulkCommitInput {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CommitSpec {
-    id: String,
+    #[serde(default)]
+    id: Option<String>,
     message: String,
+    #[serde(default)]
+    staged_only: bool,
+    #[serde(default)]
+    files: Option<Vec<String>>,
+}
+
+/// Options for commit operations.
+#[derive(Debug, Clone, Default)]
+pub struct CommitOptions {
+    /// Skip `git add` and commit only staged changes
+    pub staged_only: bool,
+    /// Stage and commit only these specific files
+    pub files: Option<Vec<String>>,
 }
 
 fn get_component_path(component_id: &str) -> Result<String> {
@@ -516,17 +530,44 @@ pub fn status_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     Ok(run_bulk_ids(&input.component_ids, "status", |id| status(Some(id))))
 }
 
-/// Stage all changes and commit for a component or current working directory.
-pub fn commit(component_id: Option<&str>, message: Option<&str>) -> Result<GitOutput> {
+/// Commit changes for a component or current working directory.
+///
+/// By default, stages all changes before committing. Use `options` to control staging:
+/// - `staged_only`: Skip staging, commit only what's already staged
+/// - `files`: Stage only these specific files before committing
+pub fn commit(
+    component_id: Option<&str>,
+    message: Option<&str>,
+    options: CommitOptions,
+) -> Result<GitOutput> {
     let msg = message.ok_or_else(|| {
         Error::validation_invalid_argument("message", "Missing commit message", None, None)
     })?;
     let (id, path) = resolve_target(component_id)?;
 
+    // Check for changes - behavior differs based on staged_only
     let status_output = execute_git(&path, &["status", "--porcelain=v1"])
         .map_err(|e| Error::other(e.to_string()))?;
+    let status_str = String::from_utf8_lossy(&status_output.stdout);
 
-    if String::from_utf8_lossy(&status_output.stdout).trim().is_empty() {
+    if options.staged_only {
+        // Check if there are staged changes (lines starting with non-space in first column)
+        let has_staged = status_str.lines().any(|line| {
+            let first_char = line.chars().next().unwrap_or(' ');
+            first_char != ' ' && first_char != '?'
+        });
+        if !has_staged {
+            return Ok(GitOutput {
+                component_id: id,
+                path,
+                action: "commit".to_string(),
+                success: true,
+                exit_code: 0,
+                stdout: "Nothing staged to commit".to_string(),
+                stderr: String::new(),
+            });
+        }
+    } else if status_str.trim().is_empty() {
         return Ok(GitOutput {
             component_id: id,
             path,
@@ -538,20 +579,31 @@ pub fn commit(component_id: Option<&str>, message: Option<&str>) -> Result<GitOu
         });
     }
 
-    let add_output = execute_git(&path, &["add", "."]).map_err(|e| Error::other(e.to_string()))?;
-    if !add_output.status.success() {
-        return Ok(GitOutput::from_output(id, path, "commit", add_output));
+    // Stage changes based on options
+    if !options.staged_only {
+        let add_args: Vec<&str> = match &options.files {
+            Some(files) => {
+                let mut args = vec!["add", "--"];
+                args.extend(files.iter().map(|s| s.as_str()));
+                args
+            }
+            None => vec!["add", "."],
+        };
+        let add_output =
+            execute_git(&path, &add_args).map_err(|e| Error::other(e.to_string()))?;
+        if !add_output.status.success() {
+            return Ok(GitOutput::from_output(id, path, "commit", add_output));
+        }
     }
 
-    let output = execute_git(&path, &["commit", "-m", msg])
-        .map_err(|e| Error::other(e.to_string()))?;
+    let output =
+        execute_git(&path, &["commit", "-m", msg]).map_err(|e| Error::other(e.to_string()))?;
     Ok(GitOutput::from_output(id, path, "commit", output))
 }
 
-/// Commit multiple components from JSON spec.
-pub fn commit_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
-    let raw = read_json_spec_to_string(json_spec)?;
-    let input: BulkCommitInput = serde_json::from_str(&raw).map_err(|e| {
+/// Commit multiple components from JSON spec (bulk format).
+fn commit_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
+    let input: BulkCommitInput = serde_json::from_str(json_spec).map_err(|e| {
         Error::validation_invalid_json(e, Some("parse bulk commit input".to_string()))
     })?;
 
@@ -560,7 +612,23 @@ pub fn commit_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     let mut failed = 0usize;
 
     for spec in &input.components {
-        match commit(Some(&spec.id), Some(&spec.message)) {
+        let id = match &spec.id {
+            Some(id) => id.clone(),
+            None => {
+                failed += 1;
+                results.push(ItemOutcome {
+                    id: "unknown".to_string(),
+                    result: None,
+                    error: Some("Missing 'id' field in bulk commit spec".to_string()),
+                });
+                continue;
+            }
+        };
+        let options = CommitOptions {
+            staged_only: spec.staged_only,
+            files: spec.files.clone(),
+        };
+        match commit(Some(&id), Some(&spec.message), options) {
             Ok(output) => {
                 if output.success {
                     succeeded += 1;
@@ -568,7 +636,7 @@ pub fn commit_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
                     failed += 1;
                 }
                 results.push(ItemOutcome {
-                    id: spec.id.clone(),
+                    id,
                     result: Some(output),
                     error: None,
                 });
@@ -576,7 +644,7 @@ pub fn commit_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
             Err(e) => {
                 failed += 1;
                 results.push(ItemOutcome {
-                    id: spec.id.clone(),
+                    id,
                     result: None,
                     error: Some(e.to_string()),
                 });
@@ -593,6 +661,46 @@ pub fn commit_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
             failed,
         },
     })
+}
+
+/// Output from commit_from_json - either single or bulk result.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum CommitJsonOutput {
+    Single(GitOutput),
+    Bulk(BulkResult<GitOutput>),
+}
+
+/// Commit from JSON spec. Auto-detects single vs bulk format.
+///
+/// Single format: `{"id":"x","message":"m"}` or `{"message":"m"}` (uses CWD/positional ID)
+/// Bulk format: `{"components":[{"id":"x","message":"m"},...]}`
+pub fn commit_from_json(id: Option<&str>, json_spec: &str) -> Result<CommitJsonOutput> {
+    let raw = read_json_spec_to_string(json_spec)?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        Error::validation_invalid_json(e, Some("parse commit json".to_string()))
+    })?;
+
+    // Auto-detect: bulk if has "components" array
+    if parsed.get("components").is_some() {
+        let bulk = commit_bulk(&raw)?;
+        return Ok(CommitJsonOutput::Bulk(bulk));
+    }
+
+    // Single spec - parse and extract fields
+    let spec: CommitSpec = serde_json::from_str(&raw).map_err(|e| {
+        Error::validation_invalid_json(e, Some("parse commit spec".to_string()))
+    })?;
+
+    // ID priority: positional arg > JSON body
+    let target_id = id.map(|s| s.to_string()).or(spec.id);
+    let options = CommitOptions {
+        staged_only: spec.staged_only,
+        files: spec.files,
+    };
+
+    let output = commit(target_id.as_deref(), Some(&spec.message), options)?;
+    Ok(CommitJsonOutput::Single(output))
 }
 
 /// Push local commits for a component or current working directory.

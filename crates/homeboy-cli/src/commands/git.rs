@@ -30,22 +30,35 @@ enum GitCommand {
         /// Component ID (non-JSON mode)
         component_id: Option<String>,
     },
-    /// Stage all changes and commit
+    /// Commit changes (by default stages all, use flags for granular control)
     Commit {
         /// Use current working directory (ad-hoc mode)
         #[arg(long)]
         cwd: bool,
 
-        /// JSON input spec for bulk operations.
-        /// Use "-" for stdin, "@file.json" for file, or inline JSON string.
-        #[arg(long)]
-        json: Option<String>,
-
-        /// Component ID (non-JSON mode)
+        /// Component ID (optional if provided in JSON body)
         component_id: Option<String>,
 
-        /// Commit message
+        /// JSON spec (positional, supports @file and - for stdin).
+        /// Single: {"id":"x","message":"m","stagedOnly":true,"files":[...]}
+        /// Bulk: {"components":[...]}
+        spec: Option<String>,
+
+        /// Explicit JSON spec (takes precedence over positional)
+        #[arg(long, value_name = "JSON")]
+        json: Option<String>,
+
+        /// Commit message (CLI mode)
+        #[arg(short, long)]
         message: Option<String>,
+
+        /// Commit only staged changes (skip automatic git add)
+        #[arg(long)]
+        staged_only: bool,
+
+        /// Stage and commit only these specific files
+        #[arg(long, num_args = 1..)]
+        files: Option<Vec<String>>,
     },
     /// Push local commits to remote
     Push {
@@ -127,19 +140,33 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
         }
         GitCommand::Commit {
             cwd,
-            json,
             component_id,
+            spec,
+            json,
             message,
+            staged_only,
+            files,
         } => {
-            if let Some(spec) = json {
-                let output = git::commit_bulk(&spec)?;
-                let exit_code = if output.summary.failed > 0 { 1 } else { 0 };
-                return Ok((GitCommandOutput::Bulk(output), exit_code));
+            // JSON mode: prioritize --json over positional spec
+            if let Some(json_spec) = json.or(spec) {
+                let target = if cwd { None } else { component_id.as_deref() };
+                let output = git::commit_from_json(target, &json_spec)?;
+                return match output {
+                    git::CommitJsonOutput::Single(o) => {
+                        let exit_code = o.exit_code;
+                        Ok((GitCommandOutput::Single(o), exit_code))
+                    }
+                    git::CommitJsonOutput::Bulk(b) => {
+                        let exit_code = if b.summary.failed > 0 { 1 } else { 0 };
+                        Ok((GitCommandOutput::Bulk(b), exit_code))
+                    }
+                };
             }
 
-            // --cwd or component_id (None = CWD), core validates message
+            // CLI flag mode
             let target = if cwd { None } else { component_id.as_deref() };
-            let output = git::commit(target, message.as_deref())?;
+            let options = git::CommitOptions { staged_only, files };
+            let output = git::commit(target, message.as_deref(), options)?;
             let exit_code = output.exit_code;
             Ok((GitCommandOutput::Single(output), exit_code))
         }

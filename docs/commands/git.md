@@ -15,38 +15,71 @@ Note: some subcommands accept a `--json` flag for bulk operations.
 ### Single Component Mode
 
 - `status <componentId>`
-- `commit <componentId> <message>`
+- `commit <componentId> [spec] [--json <spec>] [-m <message>] [--staged-only] [--files <paths>...]`
 - `push <componentId> [--tags]`
 - `pull <componentId>`
 - `tag <componentId> [tagName] [-m <message>]`
   - If `tagName` is omitted, Homeboy tags `v<component version>` (from `homeboy version show`).
+
+### Commit Options
+
+By default, `commit` stages all changes before committing. Use these flags for granular control:
+
+- `-m, --message <msg>`: Commit message (required in CLI mode, or in JSON body)
+- `--staged-only`: Commit only changes that are already staged. Skips the automatic `git add .` step.
+- `--files <paths>...`: Stage and commit only the specified files.
 
 ### CWD Mode (--cwd)
 
 All subcommands support `--cwd` for ad-hoc operations in any git directory without requiring component registration:
 
 - `status --cwd`
-- `commit --cwd <message>` (or omit `--cwd` and omit `<componentId>`)
+- `commit --cwd [-m <message>] [--staged-only] [--files <paths>...] [spec|--json <spec>]`
 - `push --cwd [--tags]` (or omit `--cwd` and omit `<componentId>`)
 - `pull --cwd` (or omit `--cwd` and omit `<componentId>`)
 - `tag --cwd <tagName> [-m <message>]`
   - Tag name is **required** when using `--cwd` (or when omitting `<componentId>`), since there is no component version to derive from.
+
+### JSON Spec Mode (commit)
+
+`homeboy git commit` accepts a **JSON spec** for single or bulk commits.
+
+- You can pass the spec positionally: `homeboy git commit <componentId> '<json>'`
+- Or explicitly: `homeboy git commit <componentId> --json '<json>'`
+- The JSON spec value supports:
+  - an inline JSON string
+  - `-` to read from stdin
+  - `@file.json` to read from a file
+
+Homeboy auto-detects **single vs bulk** by checking for a top-level `components` array.
 
 ### Bulk Mode (--json)
 
 All subcommands except `tag` support a `--json` flag for bulk operations across multiple components.
 
 - `status --json '<BulkIdsInput>'`
-- `commit --json '<BulkCommitInput>'`
+- `commit --json '<BulkCommitInput>'` (or positional spec)
 - `push --json '<BulkIdsInput>'`
 - `pull --json '<BulkIdsInput>'`
 
-The JSON spec can be:
-- An inline JSON string
-- `-` to read from stdin
-- `@file.json` to read from a file
-
 ## Bulk JSON Input Schemas
+
+### SingleCommitSpec (for commit JSON spec)
+
+```json
+{
+  "id": "extra-chill-multisite",
+  "message": "Update multisite docs",
+  "stagedOnly": false,
+  "files": ["README.md", "docs/index.md"]
+}
+```
+
+Notes:
+
+- `id` is optional when you also provide a `<componentId>` positional argument (or use `--cwd`).
+- `stagedOnly` defaults to `false`.
+- `files` is optional; when present, Homeboy runs `git add -- <files...>` instead of `git add .`.
 
 ### BulkCommitInput (for commit)
 
@@ -139,7 +172,19 @@ Notes:
 
 ```sh
 homeboy git status extra-chill-multisite
-homeboy git commit extra-chill-multisite "Update docs"  # message is positional
+
+# CLI mode
+homeboy git commit extra-chill-multisite -m "Update docs"
+
+# Commit only staged changes
+homeboy git commit extra-chill-multisite -m "Release notes" --staged-only
+
+# Commit only specific files
+homeboy git commit extra-chill-multisite -m "Update docs" --files README.md docs/index.md
+
+# JSON spec mode (single)
+homeboy git commit extra-chill-multisite '{"message":"Update docs","files":["README.md"]}'
+
 homeboy git push extra-chill-multisite --tags
 homeboy git pull extra-chill-multisite
 homeboy git tag extra-chill-multisite v1.0.0 -m "Release 1.0.0"
@@ -150,6 +195,9 @@ homeboy git tag extra-chill-multisite v1.0.0 -m "Release 1.0.0"
 ```sh
 # Bulk commit with per-component messages
 homeboy git commit --json '{"components":[{"id":"extra-chill-multisite","message":"Update multisite docs"},{"id":"extra-chill-api","message":"Update API docs"}]}'
+
+# Bulk commit with staged-only per component
+homeboy git commit --json '{"components":[{"id":"extra-chill-multisite","message":"Release prep","stagedOnly":true}]}'
 
 # Bulk status check
 homeboy git status --json '{"componentIds":["extra-chill-multisite","extra-chill-api","extra-chill-users"]}'
