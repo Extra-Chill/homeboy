@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::component;
 use crate::error::{Error, Result};
@@ -11,12 +11,35 @@ use crate::ssh::SshClient;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ContainedComponentInfo {
+    pub id: String,
+    pub build_artifact: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_command: Option<String>,
+    pub remote_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectContext {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextOutput {
     pub command: String,
     pub cwd: String,
     pub git_root: Option<String>,
     pub managed: bool,
     pub matched_components: Vec<String>,
+    pub contained_components: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub components: Option<Vec<ContainedComponentInfo>>,
     pub suggestion: Option<String>,
 }
 
@@ -41,8 +64,48 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
 
     let managed = !matched.is_empty();
 
+    // Check for contained components (monorepo pattern)
+    let contained: Vec<&component::Component> = components
+        .iter()
+        .filter(|c| path_is_parent_of(&cwd, &c.local_path))
+        .collect();
+
+    let contained_ids: Vec<String> = contained.iter().map(|c| c.id.clone()).collect();
+
+    // Find project if all contained components belong to one
+    let project_ctx = if !contained_ids.is_empty() {
+        find_project_for_components(&contained_ids).map(|p| ProjectContext {
+            id: p.id.clone(),
+            domain: p.domain.clone(),
+        })
+    } else {
+        None
+    };
+
+    // Build component details for monorepo context
+    let component_details = if !contained.is_empty() {
+        Some(contained.iter().map(|c| build_component_info(c)).collect())
+    } else {
+        None
+    };
+
+    // Generate context-aware suggestion
     let suggestion = if managed {
         None
+    } else if !contained_ids.is_empty() {
+        if let Some(ref proj) = project_ctx {
+            Some(format!(
+                "Monorepo root for project {} with {} components. Use `homeboy project show {}` for full details.",
+                proj.id,
+                contained_ids.len(),
+                proj.id
+            ))
+        } else {
+            Some(format!(
+                "Directory contains {} configured components. Use `homeboy component show <id>` to see a specific component's configuration.",
+                contained_ids.len()
+            ))
+        }
     } else {
         Some(
             "This directory is not managed by Homeboy. To initialize, create a project or component."
@@ -57,6 +120,9 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
             git_root,
             managed,
             matched_components: matched,
+            contained_components: contained_ids,
+            project: project_ctx,
+            components: component_details,
             suggestion,
         },
         0,
@@ -79,7 +145,7 @@ fn detect_git_root(cwd: &PathBuf) -> Option<String> {
     None
 }
 
-fn path_matches(cwd: &PathBuf, local_path: &str) -> bool {
+fn path_matches(cwd: &Path, local_path: &str) -> bool {
     let local = PathBuf::from(local_path);
 
     let cwd_canonical = cwd.canonicalize().ok();
@@ -90,6 +156,37 @@ fn path_matches(cwd: &PathBuf, local_path: &str) -> bool {
             cwd_path == local_path || cwd_path.starts_with(&local_path)
         }
         _ => false,
+    }
+}
+
+fn path_is_parent_of(parent: &Path, child_path: &str) -> bool {
+    let child = PathBuf::from(child_path);
+    match (parent.canonicalize().ok(), child.canonicalize().ok()) {
+        (Some(parent_canonical), Some(child_canonical)) => {
+            child_canonical.starts_with(&parent_canonical) && child_canonical != parent_canonical
+        }
+        _ => false,
+    }
+}
+
+fn find_project_for_components(component_ids: &[String]) -> Option<project::Project> {
+    if component_ids.is_empty() {
+        return None;
+    }
+    let projects = project::list().ok()?;
+    projects.into_iter().find(|p| {
+        component_ids
+            .iter()
+            .all(|id| p.component_ids.contains(id))
+    })
+}
+
+fn build_component_info(component: &component::Component) -> ContainedComponentInfo {
+    ContainedComponentInfo {
+        id: component.id.clone(),
+        build_artifact: component.build_artifact.clone(),
+        build_command: component.build_command.clone(),
+        remote_path: component.remote_path.clone(),
     }
 }
 
