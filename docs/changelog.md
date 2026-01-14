@@ -6,6 +6,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.12.0
+
+- Add `homeboy upgrade` command for self-updates
+- Improve `homeboy context` output for monorepo roots (show contained components)
+- Fix `homeboy changes` single-target JSON output envelope
+- Clarify recommended release workflow in docs
+
 ## 0.11.0
 
 - Add universal fuzzy matching for entity not-found errors
