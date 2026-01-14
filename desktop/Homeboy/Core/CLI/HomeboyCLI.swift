@@ -156,6 +156,49 @@ struct LogsOutput: Decodable {
     let entries: [LogsListEntry]?
     let log: LogsTail?
     let clearedPath: String?
+    let searchResult: LogSearchResult?
+}
+
+// MARK: - File Search Types
+
+struct FileFindOutput: Decodable {
+    let command: String
+    let projectId: String
+    let basePath: String?
+    let path: String
+    let pattern: String?
+    let matches: [String]
+    let matchCount: Int
+}
+
+struct FileGrepOutput: Decodable {
+    let command: String
+    let projectId: String
+    let basePath: String?
+    let path: String
+    let pattern: String
+    let matches: [FileGrepMatch]
+    let matchCount: Int
+}
+
+struct FileGrepMatch: Decodable {
+    let file: String
+    let line: Int
+    let content: String
+}
+
+// MARK: - Logs Search Types
+
+struct LogSearchResult: Decodable {
+    let path: String
+    let pattern: String
+    let matches: [LogSearchMatch]
+    let matchCount: Int
+}
+
+struct LogSearchMatch: Decodable {
+    let lineNumber: Int
+    let content: String
 }
 
 struct DbTunnelInfo: Decodable {
@@ -178,6 +221,78 @@ struct DbOutput: Decodable {
     let table: String?
     let sql: String?
     let tunnel: DbTunnelInfo?
+}
+
+// MARK: - Server CLI Output Models
+
+struct ServerOutput: Decodable {
+    let command: String
+    let serverId: String?
+    let server: ServerRecord?
+    let servers: [ServerListItem]?
+    let updated: [String]?
+    let deleted: [String]?
+}
+
+struct ServerListItem: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let host: String
+    let port: Int
+    let user: String
+    let identityFile: String?
+}
+
+struct ServerRecord: Decodable {
+    let id: String
+    let name: String
+    let host: String
+    let port: Int
+    let user: String
+    let identityFile: String?
+}
+
+// MARK: - Component CLI Output Models
+
+struct ComponentOutput: Decodable {
+    let command: String
+    let componentId: String?
+    let component: ComponentRecord?
+    let components: [ComponentListItem]?
+    let updated: [String]?
+    let deleted: [String]?
+}
+
+struct ComponentListItem: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let localPath: String
+    let remotePath: String
+    let buildArtifact: String?
+}
+
+struct ComponentRecord: Decodable {
+    let id: String
+    let name: String
+    let localPath: String
+    let remotePath: String
+    let buildArtifact: String?
+    let versionTargets: [VersionTarget]?
+
+    struct VersionTarget: Decodable {
+        let file: String
+        let pattern: String?
+    }
+}
+
+// MARK: - Project Mutation Output Models
+
+struct ProjectMutationOutput: Decodable {
+    let command: String
+    let projectId: String?
+    let project: ProjectRecord?
+    let updated: [String]?
+    let deleted: [String]?
 }
 
 @MainActor
@@ -213,6 +328,178 @@ final class HomeboyCLI {
             throw CLIBridgeError.invalidResponse("Project not found: \(id)")
         }
         return project
+    }
+
+    func projectCreate(
+        name: String,
+        domain: String,
+        serverId: String? = nil,
+        basePath: String? = nil,
+        tablePrefix: String? = nil
+    ) async throws -> ProjectRecord {
+        var args = ["project", "create", name, domain]
+        if let serverId {
+            args.append(contentsOf: ["--server-id", serverId])
+        }
+        if let basePath {
+            args.append(contentsOf: ["--base-path", basePath])
+        }
+        if let tablePrefix {
+            args.append(contentsOf: ["--table-prefix", tablePrefix])
+        }
+        let output: ProjectMutationOutput = try await cli.executeCommand(
+            args,
+            dataType: ProjectMutationOutput.self,
+            source: "Project Create"
+        )
+        guard let project = output.project else {
+            throw CLIBridgeError.invalidResponse("Project creation failed")
+        }
+        return project
+    }
+
+    func projectSet(id: String, json: String) async throws -> ProjectRecord {
+        let output: ProjectMutationOutput = try await cli.executeCommand(
+            ["project", "set", id, "--json", json],
+            dataType: ProjectMutationOutput.self,
+            source: "Project Set"
+        )
+        guard let project = output.project else {
+            throw CLIBridgeError.invalidResponse("Project update failed")
+        }
+        return project
+    }
+
+    func projectDelete(id: String) async throws {
+        let _: ProjectMutationOutput = try await cli.executeCommand(
+            ["project", "delete", id],
+            dataType: ProjectMutationOutput.self,
+            source: "Project Delete"
+        )
+    }
+
+    // MARK: - Server Commands
+
+    func serverList() async throws -> [ServerListItem] {
+        let output: ServerOutput = try await cli.executeCommand(
+            ["server", "list"],
+            dataType: ServerOutput.self,
+            source: "Server List"
+        )
+        return output.servers ?? []
+    }
+
+    func serverShow(id: String) async throws -> ServerRecord {
+        let output: ServerOutput = try await cli.executeCommand(
+            ["server", "show", id],
+            dataType: ServerOutput.self,
+            source: "Server Show"
+        )
+        guard let server = output.server else {
+            throw CLIBridgeError.invalidResponse("Server not found: \(id)")
+        }
+        return server
+    }
+
+    func serverCreate(
+        name: String,
+        host: String,
+        user: String,
+        port: Int = 22
+    ) async throws -> ServerRecord {
+        let output: ServerOutput = try await cli.executeCommand(
+            ["server", "create", name, host, user, "--port", String(port)],
+            dataType: ServerOutput.self,
+            source: "Server Create"
+        )
+        guard let server = output.server else {
+            throw CLIBridgeError.invalidResponse("Server creation failed")
+        }
+        return server
+    }
+
+    func serverSet(id: String, json: String) async throws -> ServerRecord {
+        let output: ServerOutput = try await cli.executeCommand(
+            ["server", "set", id, "--json", json],
+            dataType: ServerOutput.self,
+            source: "Server Set"
+        )
+        guard let server = output.server else {
+            throw CLIBridgeError.invalidResponse("Server update failed")
+        }
+        return server
+    }
+
+    func serverDelete(id: String) async throws {
+        let _: ServerOutput = try await cli.executeCommand(
+            ["server", "delete", id],
+            dataType: ServerOutput.self,
+            source: "Server Delete"
+        )
+    }
+
+    // MARK: - Component Commands
+
+    func componentList() async throws -> [ComponentListItem] {
+        let output: ComponentOutput = try await cli.executeCommand(
+            ["component", "list"],
+            dataType: ComponentOutput.self,
+            source: "Component List"
+        )
+        return output.components ?? []
+    }
+
+    func componentShow(id: String) async throws -> ComponentRecord {
+        let output: ComponentOutput = try await cli.executeCommand(
+            ["component", "show", id],
+            dataType: ComponentOutput.self,
+            source: "Component Show"
+        )
+        guard let component = output.component else {
+            throw CLIBridgeError.invalidResponse("Component not found: \(id)")
+        }
+        return component
+    }
+
+    func componentCreate(
+        name: String,
+        localPath: String,
+        remotePath: String,
+        buildArtifact: String? = nil
+    ) async throws -> ComponentRecord {
+        var args = ["component", "create", name, localPath, remotePath]
+        if let buildArtifact {
+            args.append(contentsOf: ["--build-artifact", buildArtifact])
+        }
+        let output: ComponentOutput = try await cli.executeCommand(
+            args,
+            dataType: ComponentOutput.self,
+            source: "Component Create"
+        )
+        guard let component = output.component else {
+            throw CLIBridgeError.invalidResponse("Component creation failed")
+        }
+        return component
+    }
+
+    func componentSet(id: String, json: String) async throws -> ComponentRecord {
+        let output: ComponentOutput = try await cli.executeCommand(
+            ["component", "set", id, "--json", json],
+            dataType: ComponentOutput.self,
+            source: "Component Set"
+        )
+        guard let component = output.component else {
+            throw CLIBridgeError.invalidResponse("Component update failed")
+        }
+        return component
+    }
+
+    func componentDelete(id: String) async throws {
+        let _: ComponentOutput = try await cli.executeCommand(
+            ["component", "delete", id],
+            dataType: ComponentOutput.self,
+            source: "Component Delete"
+        )
     }
 
     // MARK: - File Commands
@@ -352,5 +639,93 @@ final class HomeboyCLI {
             dataType: DbOutput.self,
             source: "Database Drop Table"
         )
+    }
+
+    func dbSearch(
+        projectId: String,
+        table: String,
+        column: String,
+        pattern: String,
+        exact: Bool = false,
+        limit: Int? = nil,
+        subtarget: String? = nil
+    ) async throws -> DbOutput {
+        var args = ["db", "search", projectId, table, "--column", column, "--pattern", pattern]
+        if exact {
+            args.append("--exact")
+        }
+        if let limit {
+            args.append(contentsOf: ["--limit", "\(limit)"])
+        }
+        if let subtarget {
+            args.append(contentsOf: ["--subtarget", subtarget])
+        }
+        return try await cli.executeCommand(args, dataType: DbOutput.self, source: "Database Search", timeout: 60)
+    }
+
+    // MARK: - File Search
+
+    func fileFind(
+        projectId: String,
+        path: String,
+        namePattern: String? = nil,
+        fileType: String? = nil,
+        maxDepth: Int? = nil
+    ) async throws -> FileFindOutput {
+        var args = ["file", "find", projectId, path]
+        if let name = namePattern {
+            args.append(contentsOf: ["--name", name])
+        }
+        if let type = fileType {
+            args.append(contentsOf: ["--type", type])
+        }
+        if let depth = maxDepth {
+            args.append(contentsOf: ["--max-depth", "\(depth)"])
+        }
+        return try await cli.executeCommand(args, dataType: FileFindOutput.self, source: "File Find", timeout: 60)
+    }
+
+    func fileGrep(
+        projectId: String,
+        path: String,
+        pattern: String,
+        nameFilter: String? = nil,
+        maxDepth: Int? = nil,
+        caseInsensitive: Bool = false
+    ) async throws -> FileGrepOutput {
+        var args = ["file", "grep", projectId, path, pattern]
+        if let name = nameFilter {
+            args.append(contentsOf: ["--name", name])
+        }
+        if let depth = maxDepth {
+            args.append(contentsOf: ["--max-depth", "\(depth)"])
+        }
+        if caseInsensitive {
+            args.append("-i")
+        }
+        return try await cli.executeCommand(args, dataType: FileGrepOutput.self, source: "File Grep", timeout: 60)
+    }
+
+    // MARK: - Logs Search
+
+    func logsSearch(
+        projectId: String,
+        path: String,
+        pattern: String,
+        caseInsensitive: Bool = false,
+        lines: Int? = nil,
+        context: Int? = nil
+    ) async throws -> LogsOutput {
+        var args = ["logs", "search", projectId, path, pattern]
+        if caseInsensitive {
+            args.append("-i")
+        }
+        if let lines {
+            args.append(contentsOf: ["-n", "\(lines)"])
+        }
+        if let context {
+            args.append(contentsOf: ["-C", "\(context)"])
+        }
+        return try await cli.executeCommand(args, dataType: LogsOutput.self, source: "Logs Search", timeout: 60)
     }
 }

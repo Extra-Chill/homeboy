@@ -90,7 +90,6 @@
 		D067D1266FD0989BC9E07C43 /* CLIBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40736E67E0624C5F3AA5913C /* CLIBridge.swift */; };
 		D17F7A98F3FB9E8F40991024 /* LogContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 514BD1BE8868C181AD9401CF /* LogContentView.swift */; };
 		D3D2FEA38CB8A09E0ED93B73 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A6FE3DEAD139D529B6724D8 /* APITypes.swift */; };
-		DD3128834B4A7FF474DB3C02 /* CLIInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42B48848AAF3B2E6808ED4E9 /* CLIInstaller.swift */; };
 		E1F7C14F08E1E4D8353F8064 /* CopyableTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4406A9EEECAF8249580937A7 /* CopyableTextView.swift */; };
 		E6130C3BA0E6F318EAB670A3 /* ConfigurationObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2FF4CDA2AE7652A449E74D8 /* ConfigurationObserver.swift */; };
 		E6403DF4F6747B97ED009C1A /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */; };
@@ -132,7 +131,6 @@
 		3E42F070FBBA9AFFEE6E6F44 /* ModuleInputsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleInputsView.swift; sourceTree = "<group>"; };
 		3E609811240E56A3A71CA778 /* ComponentConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComponentConfiguration.swift; sourceTree = "<group>"; };
 		40736E67E0624C5F3AA5913C /* CLIBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIBridge.swift; sourceTree = "<group>"; };
-		42B48848AAF3B2E6808ED4E9 /* CLIInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstaller.swift; sourceTree = "<group>"; };
 		432441A63F12FD70294090A6 /* ModuleSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleSetupView.swift; sourceTree = "<group>"; };
 		4406A9EEECAF8249580937A7 /* CopyableTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyableTextView.swift; sourceTree = "<group>"; };
 		4C0B9A725382C46F30D83C02 /* CLIError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIError.swift; sourceTree = "<group>"; };
@@ -354,7 +352,6 @@
 			isa = PBXGroup;
 			children = (
 				40736E67E0624C5F3AA5913C /* CLIBridge.swift */,
-				42B48848AAF3B2E6808ED4E9 /* CLIInstaller.swift */,
 				1815EE5F0948B590DB303B60 /* CLIModuleTypes.swift */,
 				811079398986364AA0E0542A /* CLIVersionChecker.swift */,
 				D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */,
@@ -647,7 +644,6 @@
 				1EBFEF675F781A40A250D009 /* BackupService.swift in Sources */,
 				D067D1266FD0989BC9E07C43 /* CLIBridge.swift in Sources */,
 				1D8C5CFC6CC66D4D2059241A /* CLIError.swift in Sources */,
-				DD3128834B4A7FF474DB3C02 /* CLIInstaller.swift in Sources */,
 				E9D7338A6D0F128987F91E83 /* CLIModuleTypes.swift in Sources */,
 				761826050ADDBB5E4B00E1AC /* CLIVersionChecker.swift in Sources */,
 				CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */,

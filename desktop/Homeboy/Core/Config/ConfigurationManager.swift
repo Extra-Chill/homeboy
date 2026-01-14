@@ -396,43 +396,40 @@ class ConfigurationManager: ObservableObject {
         }
     }
     
-    func saveProject(_ project: ProjectConfiguration) {
-        let projectPath = projectsDirectory.appendingPathComponent("\(project.id).json")
-        do {
-            let data = try jsonEncoder.encode(project)
-            try data.write(to: projectPath)
-            refreshAvailableProjects()
-        } catch {
-            print("[ConfigurationManager] Failed to save project '\(project.id)': \(error)")
+    /// Save project via CLI
+    func saveProject(_ project: ProjectConfiguration) async throws {
+        let json = try jsonEncoder.encode(project)
+        guard let jsonString = String(data: json, encoding: .utf8) else {
+            throw CLIBridgeError.invalidResponse("Failed to encode project to JSON")
         }
+        _ = try await HomeboyCLI.shared.projectSet(id: project.id, json: jsonString)
+        refreshAvailableProjects()
     }
-    
-    func saveActiveProject() {
+
+    func saveActiveProject() async throws {
         guard let project = activeProject else { return }
-        saveProject(project)
+        try await saveProject(project)
     }
     
     /// Updates the active project with a mutation closure, safely merging with disk.
     /// This prevents overwriting external changes (from CLI, text editor, etc.) by:
-    /// 1. Reading fresh project data from disk
+    /// 1. Reading fresh project data from CLI
     /// 2. Applying the mutation to the fresh data
-    /// 3. Saving the result and updating in-memory state
+    /// 3. Saving the result via CLI and updating in-memory state
     ///
     /// Use this instead of directly modifying `activeProject` and calling `saveActiveProject()`.
-    func updateActiveProject(_ mutation: (inout ProjectConfiguration) -> Void) {
+    func updateActiveProject(_ mutation: (inout ProjectConfiguration) -> Void) async throws {
         guard let projectId = activeProject?.id else { return }
-        
-        // Read fresh from disk to avoid overwriting external changes
-        guard var freshProject = loadProject(id: projectId) else {
-            print("[ConfigurationManager] Failed to load project for update: \(projectId)")
-            return
-        }
-        
+
+        // Read fresh from CLI to avoid overwriting external changes
+        let record = try await HomeboyCLI.shared.projectShow(id: projectId)
+        var freshProject = ProjectConfiguration(from: record)
+
         // Apply the mutation to fresh data
         mutation(&freshProject)
-        
-        // Save and update in-memory state
-        saveProject(freshProject)
+
+        // Save via CLI and update in-memory state
+        try await saveProject(freshProject)
         activeProject = freshProject
     }
     
@@ -480,36 +477,36 @@ class ConfigurationManager: ObservableObject {
         ConfigurationObserver.shared.publish(.projectDidSwitch(projectId: id))
     }
     
-    /// Creates a new project with the given ID and name.
-    func createProject(id: String, name: String) -> ProjectConfiguration {
-        let project = ProjectConfiguration.empty(id: id, name: name)
-        saveProject(project)
+    /// Creates a new project via CLI.
+    func createProject(name: String, domain: String) async throws -> ProjectConfiguration {
+        let record = try await HomeboyCLI.shared.projectCreate(name: name, domain: domain)
+        let project = ProjectConfiguration(from: record)
         needsProjectCreation = false
+        refreshAvailableProjects()
         return project
     }
     
-    /// Renames a project display name. The project ID remains unchanged.
-    func renameProject(_ project: ProjectConfiguration, to newName: String) -> Result<ProjectConfiguration, ProjectRenameError> {
+    /// Renames a project display name via CLI. The project ID remains unchanged.
+    func renameProject(_ project: ProjectConfiguration, to newName: String) async throws -> ProjectConfiguration {
         var updatedProject = project
         updatedProject.name = newName
-        saveProject(updatedProject)
-        
+        try await saveProject(updatedProject)
+
         // Update activeProject if it's the one being renamed
         if activeProject?.id == project.id {
             activeProject = updatedProject
         }
-        
-        return .success(updatedProject)
+
+        return updatedProject
     }
     
-    func deleteProject(id: String) {
+    /// Delete project via CLI
+    func deleteProject(id: String) async throws {
         guard id != activeProject?.id else {
-            print("[ConfigurationManager] Cannot delete active project")
-            return
+            throw CLIBridgeError.invalidResponse("Cannot delete active project")
         }
 
-        let projectPath = projectsDirectory.appendingPathComponent("\(id).json")
-        try? fileManager.removeItem(at: projectPath)
+        try await HomeboyCLI.shared.projectDelete(id: id)
         refreshAvailableProjects()
     }
 
@@ -607,15 +604,14 @@ class ConfigurationManager: ObservableObject {
         return readServer(id: serverId)
     }
     
-    func saveServer(_ server: ServerConfig) {
-        let serverPath = serversDirectory.appendingPathComponent("\(server.id).json")
-        do {
-            let data = try jsonEncoder.encode(server)
-            try data.write(to: serverPath)
-            refreshAvailableServers()
-        } catch {
-            print("[ConfigurationManager] Failed to save server '\(server.id)': \(error)")
+    /// Save server via CLI
+    func saveServer(_ server: ServerConfig) async throws {
+        let json = try jsonEncoder.encode(server)
+        guard let jsonString = String(data: json, encoding: .utf8) else {
+            throw CLIBridgeError.invalidResponse("Failed to encode server to JSON")
         }
+        _ = try await HomeboyCLI.shared.serverSet(id: server.id, json: jsonString)
+        refreshAvailableServers()
     }
     
     func loadServer(id: String) -> ServerConfig? {
@@ -649,16 +645,9 @@ class ConfigurationManager: ObservableObject {
         availableServerIds().compactMap { loadServer(id: $0) }
     }
     
-    func deleteServer(id: String) {
-        // Check if any project references this server
-        let projectsUsingServer = availableProjectIds().compactMap { loadProject(id: $0) }.filter { $0.serverId == id }
-        guard projectsUsingServer.isEmpty else {
-            print("[ConfigurationManager] Cannot delete server '\(id)': used by \(projectsUsingServer.count) project(s)")
-            return
-        }
-        
-        let serverPath = serversDirectory.appendingPathComponent("\(id).json")
-        try? fileManager.removeItem(at: serverPath)
+    /// Delete server via CLI (CLI handles project reference check)
+    func deleteServer(id: String) async throws {
+        try await HomeboyCLI.shared.serverDelete(id: id)
         refreshAvailableServers()
     }
 
@@ -686,15 +675,14 @@ class ConfigurationManager: ObservableObject {
         return component
     }
 
-    func saveComponent(_ component: ComponentConfiguration) {
-        let componentPath = componentsDirectory.appendingPathComponent("\(component.id).json")
-        do {
-            let data = try jsonEncoder.encode(component)
-            try data.write(to: componentPath)
-            refreshAvailableComponents()
-        } catch {
-            print("[ConfigurationManager] Failed to save component '\(component.id)': \(error)")
+    /// Save component via CLI
+    func saveComponent(_ component: ComponentConfiguration) async throws {
+        let json = try jsonEncoder.encode(component)
+        guard let jsonString = String(data: json, encoding: .utf8) else {
+            throw CLIBridgeError.invalidResponse("Failed to encode component to JSON")
         }
+        _ = try await HomeboyCLI.shared.componentSet(id: component.id, json: jsonString)
+        refreshAvailableComponents()
     }
 
     func loadComponent(id: String) -> ComponentConfiguration? {
@@ -738,19 +726,9 @@ class ConfigurationManager: ObservableObject {
         project.componentIds.compactMap { readComponent(id: $0) }
     }
 
-    func deleteComponent(id: String) {
-        // Check if any project references this component
-        let projectsUsingComponent = availableProjectIds()
-            .compactMap { loadProject(id: $0) }
-            .filter { $0.componentIds.contains(id) }
-
-        guard projectsUsingComponent.isEmpty else {
-            print("[ConfigurationManager] Cannot delete component '\(id)': used by \(projectsUsingComponent.count) project(s)")
-            return
-        }
-
-        let componentPath = componentsDirectory.appendingPathComponent("\(id).json")
-        try? fileManager.removeItem(at: componentPath)
+    /// Delete component via CLI (CLI handles project reference check)
+    func deleteComponent(id: String) async throws {
+        try await HomeboyCLI.shared.componentDelete(id: id)
         refreshAvailableComponents()
     }
 
