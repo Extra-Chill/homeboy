@@ -7,8 +7,8 @@ fn main() {
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing"));
     // Single source of truth for the `homeboy init` command content lives under
     // agent-instructions/commands/, but we also keep docs/ for general CLI docs.
-    let docs_root = manifest_dir.join("../..").join("docs");
-    let agent_instructions_root = manifest_dir.join("../..").join("agent-instructions");
+    let docs_root = manifest_dir.join("docs");
+    let agent_instructions_root = manifest_dir.join("agent-instructions");
 
     if !docs_root.exists() {
         panic!("Docs directory not found: {}", docs_root.display());

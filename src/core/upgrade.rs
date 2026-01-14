@@ -28,7 +28,7 @@ impl InstallMethod {
         match self {
             InstallMethod::Homebrew => "brew update && brew upgrade homeboy",
             InstallMethod::Cargo => "cargo install homeboy",
-            InstallMethod::Source => "git pull && cargo build --release -p homeboy-cli",
+            InstallMethod::Source => "git pull && cargo build --release",
             InstallMethod::Unknown => "Please reinstall using Homebrew or Cargo",
         }
     }
@@ -282,7 +282,7 @@ fn execute_upgrade(method: InstallMethod) -> Result<(bool, Option<String>)> {
             }
 
             let build_status = Command::new("cargo")
-                .args(["build", "--release", "-p", "homeboy-cli"])
+                .args(["build", "--release"])
                 .current_dir(&workspace_root)
                 .status()
                 .map_err(|e| Error::other(format!("Failed to run cargo build: {}", e)))?;

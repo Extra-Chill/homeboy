@@ -688,10 +688,12 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "atty",
+ "clap",
  "dirs",
  "keyring",
  "regex",
@@ -701,23 +703,6 @@ dependencies = [
  "shellexpand",
  "tempfile",
  "thiserror",
- "uuid",
- "zip",
-]
-
-[[package]]
-name = "homeboy-cli"
-version = "0.12.0"
-dependencies = [
- "anyhow",
- "atty",
- "clap",
- "homeboy",
- "regex",
- "serde",
- "serde_json",
- "shellexpand",
- "tempfile",
  "uuid",
  "zip",
 ]
