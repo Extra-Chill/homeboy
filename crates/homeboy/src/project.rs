@@ -653,7 +653,7 @@ pub fn unpin(project_id: &str, pin_type: PinType, path: &str) -> Result<()> {
     if after == before {
         return Err(Error::validation_invalid_argument(
             "path",
-            &format!("{} is not pinned", type_name),
+            format!("{} is not pinned", type_name),
             Some(project_id.to_string()),
             Some(vec![path.to_string()]),
         ));

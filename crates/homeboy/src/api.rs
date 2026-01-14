@@ -40,7 +40,7 @@ pub fn run(input: &str) -> Result<(ApiOutput, i32)> {
         _ => {
             return Err(Error::validation_invalid_argument(
                 "method",
-                &format!("Invalid HTTP method: {}", parsed.method),
+                format!("Invalid HTTP method: {}", parsed.method),
                 None,
                 Some(vec![
                     "GET".into(),

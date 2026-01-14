@@ -768,8 +768,8 @@ pub fn detect_version_targets(base_path: &str) -> Result<Vec<(String, String, St
             if path.extension().is_some_and(|ext| ext == "php") {
                 if let Ok(content) = fs::read_to_string(&path) {
                     // Only match if it looks like a WordPress plugin header
-                    if content.contains("Plugin Name:") || content.contains("Theme Name:") {
-                        if parse_version(&content, php_pattern).is_some() {
+                    if (content.contains("Plugin Name:") || content.contains("Theme Name:"))
+                        && parse_version(&content, php_pattern).is_some() {
                             let filename = path
                                 .file_name()
                                 .and_then(|n| n.to_str())
@@ -780,7 +780,6 @@ pub fn detect_version_targets(base_path: &str) -> Result<Vec<(String, String, St
                                 path.to_string_lossy().to_string(),
                             ));
                         }
-                    }
                 }
             }
         }

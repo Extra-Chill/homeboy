@@ -248,7 +248,7 @@ pub(crate) fn merge_from_json<T: ConfigEntity>(
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "id",
-                &format!("Provide {} ID as argument or in JSON body", T::entity_type()),
+                format!("Provide {} ID as argument or in JSON body", T::entity_type()),
                 None,
                 None,
             )
@@ -281,7 +281,7 @@ pub(crate) fn remove_from_json<T: ConfigEntity>(
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "id",
-                &format!("Provide {} ID as argument or in JSON body", T::entity_type()),
+                format!("Provide {} ID as argument or in JSON body", T::entity_type()),
                 None,
                 None,
             )
@@ -314,7 +314,7 @@ pub(crate) fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
 
     if new_path.exists() {
         return Err(Error::validation_invalid_argument(
-            &format!("{}.id", T::entity_type()),
+            format!("{}.id", T::entity_type()),
             format!(
                 "Cannot rename {} '{}' to '{}': destination already exists",
                 T::entity_type(),

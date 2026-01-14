@@ -6,7 +6,7 @@ pub(crate) fn slugify_id(value: &str, field_name: &str) -> Result<String> {
     if trimmed.is_empty() {
         return Err(Error::validation_invalid_argument(
             field_name,
-            &format!("{} cannot be empty", capitalize(field_name)),
+            format!("{} cannot be empty", capitalize(field_name)),
             None,
             None,
         ));
@@ -44,7 +44,7 @@ pub(crate) fn slugify_id(value: &str, field_name: &str) -> Result<String> {
     if out.is_empty() {
         return Err(Error::validation_invalid_argument(
             field_name,
-            &format!("{} must contain at least one letter or number", capitalize(field_name)),
+            format!("{} must contain at least one letter or number", capitalize(field_name)),
             None,
             None,
         ));

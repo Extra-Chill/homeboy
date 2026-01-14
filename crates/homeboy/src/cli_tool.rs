@@ -122,7 +122,7 @@ fn run_for_project_with_executor(
     let output = if project
         .server_id
         .as_ref()
-        .map_or(true, |s| s.is_empty())
+        .is_none_or(|s| s.is_empty())
     {
         local_executor(&command)
     } else {

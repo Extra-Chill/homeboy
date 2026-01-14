@@ -397,11 +397,11 @@ fn append_item_to_next_section(
     // Find where to insert: after last bullet, or after blank line following header if no bullets
     let mut insert_after = start;
     let mut has_bullets = false;
-    for i in start + 1..section_end {
-        if lines[i].trim().starts_with('-') {
+    for (i, line) in lines.iter().enumerate().take(section_end).skip(start + 1) {
+        if line.trim().starts_with('-') {
             insert_after = i;
             has_bullets = true;
-        } else if !has_bullets && lines[i].trim().is_empty() {
+        } else if !has_bullets && line.trim().is_empty() {
             // No bullets yet, insert after the blank line following the header
             insert_after = i;
         }

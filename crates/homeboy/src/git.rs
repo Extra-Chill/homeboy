@@ -708,7 +708,7 @@ pub fn get_diff(path: &str) -> Result<String> {
     }
     if !unstaged_diff.is_empty() {
         if !result.is_empty() {
-            result.push_str("\n");
+            result.push('\n');
         }
         result.push_str("=== Unstaged Changes ===\n");
         result.push_str(&unstaged_diff);
