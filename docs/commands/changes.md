@@ -46,8 +46,7 @@ This command reports:
     {
       "hash": "<sha>",
       "subject": "<subject>",
-      "author": "<author>",
-      "date": "<date>"
+      "category": "Feature|Fix|Breaking|Docs|Chore|Other"
     }
   ],
   "uncommitted": {
@@ -66,25 +65,35 @@ Notes:
 - `uncommittedDiff` is present when the working tree has changes.
 - `diff` is included only when `--git-diffs` is used.
 - Optional fields like `warning` / `error` may be omitted when unset.
-}
-```
 
 ### Bulk output (`--json` or `--project`)
 
 ```json
 {
-  "results": [ { "id": "<componentId>", "result": { ... }, "error": "<string>|null" } ],
+  "action": "changes",
+  "results": [
+    {
+      "id": "<componentId>",
+      "componentId": "<componentId>",
+      "path": "<local path>",
+      "success": true,
+      "commits": [...],
+      "uncommitted": {...},
+      "error": null
+    }
+  ],
   "summary": {
     "total": 2,
-    "withCommits": 1,
-    "withUncommitted": 1,
-    "clean": 0,
+    "succeeded": 2,
     "failed": 0
   }
 }
 ```
 
-(Exact `commits[]` and `summary` fields are defined by the CLI output structs.)
+Notes:
+
+- Each item in `results` contains `id` plus all `ChangesOutput` fields flattened in.
+- `error` is set when that component failed; `success` and other fields are omitted on failure.
 
 ## Exit code
 
@@ -92,6 +101,24 @@ Notes:
 - `1` in bulk/project modes when `summary.failed > 0`.
 
 > Note: single-target modes (`<componentId>` and `--cwd`) always return exit code `0` on success, even when the underlying git operations report `success: false` in the output.
+
+## jq examples
+
+Extract diffs for scripting:
+
+```sh
+# Single mode: extract uncommitted diff
+homeboy changes --cwd --git-diffs | jq -r '.data.uncommittedDiff // empty'
+
+# Single mode: extract commit-range diff
+homeboy changes --cwd --git-diffs | jq -r '.data.diff // empty'
+
+# Bulk mode: extract all diffs (one per component)
+homeboy changes --project myproject --git-diffs | jq -r '.data.results[].diff // empty'
+
+# Bulk mode: list components with uncommitted changes
+homeboy changes --project myproject | jq -r '.data.results[] | select(.uncommitted.hasChanges) | .id'
+```
 
 ## Related
 
