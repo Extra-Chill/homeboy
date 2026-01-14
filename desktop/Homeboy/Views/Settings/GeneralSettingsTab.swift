@@ -46,7 +46,9 @@ struct GeneralSettingsTab: View {
                 TextField("Domain", text: Binding(
                     get: { config.safeActiveProject.domain },
                     set: { newValue in
-                        config.updateActiveProject { $0.domain = newValue }
+                        Task {
+                            try? await config.updateActiveProject { $0.domain = newValue }
+                        }
                     }
                 ))
                 .textFieldStyle(.roundedBorder)
@@ -307,13 +309,14 @@ struct GeneralSettingsTab: View {
         guard let project = config.activeProject else { return }
         guard !editedName.isEmpty else { return }
 
-        let result = config.renameProject(project, to: editedName)
-        switch result {
-        case .success:
-            isEditing = false
-            renameError = nil
-        case .failure(let error):
-            renameError = error.toDisplayableError(source: "Project Rename")
+        Task {
+            do {
+                _ = try await config.renameProject(project, to: editedName)
+                isEditing = false
+                renameError = nil
+            } catch {
+                renameError = error.toDisplayableError(source: "Project Rename")
+            }
         }
     }
 }

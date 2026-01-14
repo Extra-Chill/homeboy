@@ -72,8 +72,10 @@ struct ComponentsSettingsTab: View {
     }
 
     private func deleteComponent(_ component: ComponentConfiguration) {
-        config.updateActiveProject { project in
-            project.componentIds.removeAll { $0 == component.id }
+        Task {
+            try? await config.updateActiveProject { project in
+                project.componentIds.removeAll { $0 == component.id }
+            }
         }
     }
 }
@@ -341,13 +343,17 @@ struct AddEditComponentSheet: View {
             isNetwork: isNetwork ? true : nil
         )
 
-        // Save the component to its standalone file
-        config.saveComponent(component)
+        Task {
+            // Save the component to its standalone file
+            try? await config.saveComponent(component)
 
-        config.updateActiveProject { project in
             // Add new component reference if not already present
-            if !isEditing && !project.componentIds.contains(id) {
-                project.componentIds.append(id)
+            if !isEditing {
+                try? await config.updateActiveProject { project in
+                    if !project.componentIds.contains(id) {
+                        project.componentIds.append(id)
+                    }
+                }
             }
         }
     }

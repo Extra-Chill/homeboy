@@ -18,7 +18,9 @@ struct WordPressSettingsTab: View {
                 TextField("Table Prefix", text: Binding(
                     get: { config.safeActiveProject.tablePrefix ?? "wp_" },
                     set: { newValue in
-                        config.updateActiveProject { $0.tablePrefix = newValue }
+                        Task {
+                            try? await config.updateActiveProject { $0.tablePrefix = newValue }
+                        }
                     }
                 ))
                 .textFieldStyle(.roundedBorder)
@@ -61,14 +63,18 @@ struct WordPressSettingsTab: View {
             Section("REST API Authentication") {
                 Toggle("Enable API Authentication", isOn: $apiEnabled)
                     .onChange(of: apiEnabled) { _, newValue in
-                        config.updateActiveProject { $0.api.enabled = newValue }
+                        Task {
+                            try? await config.updateActiveProject { $0.api.enabled = newValue }
+                        }
                     }
 
                 if apiEnabled {
                     TextField("API Base URL", text: $apiBaseURL)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: apiBaseURL) { _, newValue in
-                            config.updateActiveProject { $0.api.baseURL = newValue }
+                            Task {
+                                try? await config.updateActiveProject { $0.api.baseURL = newValue }
+                            }
                         }
                     Text("e.g., https://yoursite.com/wp-json/extrachill/v1")
                         .font(.caption)

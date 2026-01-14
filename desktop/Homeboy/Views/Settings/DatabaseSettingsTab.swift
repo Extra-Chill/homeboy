@@ -12,7 +12,9 @@ struct DatabaseSettingsTab: View {
                 TextField("MySQL Username", text: Binding(
                     get: { config.safeActiveProject.database.user },
                     set: { newValue in
-                        config.updateActiveProject { $0.database.user = newValue }
+                        Task {
+                            try? await config.updateActiveProject { $0.database.user = newValue }
+                        }
                     }
                 ))
                 .textFieldStyle(.roundedBorder)
@@ -29,7 +31,9 @@ struct DatabaseSettingsTab: View {
                 TextField("Database Name", text: Binding(
                     get: { config.safeActiveProject.database.name },
                     set: { newValue in
-                        config.updateActiveProject { $0.database.name = newValue }
+                        Task {
+                            try? await config.updateActiveProject { $0.database.name = newValue }
+                        }
                     }
                 ))
                 .textFieldStyle(.roundedBorder)

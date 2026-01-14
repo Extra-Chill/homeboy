@@ -82,7 +82,9 @@ struct ServersSettingsTab: View {
                                     serverToEdit = nil
                                     showServerSheet = true
                                 } else {
-                                    config.updateActiveProject { $0.serverId = newValue.isEmpty ? nil : newValue }
+                                    Task {
+                                        try? await config.updateActiveProject { $0.serverId = newValue.isEmpty ? nil : newValue }
+                                    }
                                 }
                             }
                         )) {
@@ -151,15 +153,17 @@ struct ServersSettingsTab: View {
                     TextField("Base Path", text: Binding(
                         get: { basePath },
                         set: { newValue in
-                            config.updateActiveProject { $0.basePath = newValue.isEmpty ? nil : newValue }
+                            Task {
+                                try? await config.updateActiveProject { $0.basePath = newValue.isEmpty ? nil : newValue }
+                            }
                             wpContentValidation = nil
-                            
+
                             // Resolve symlinks for SCP compatibility
                             if let serverId = config.safeActiveProject.serverId, !newValue.isEmpty {
                                 Task {
                                     let canonicalPath = await resolveCanonicalPath(newValue, serverId: serverId)
                                     if canonicalPath != newValue {
-                                        config.updateActiveProject { $0.basePath = canonicalPath }
+                                        try? await config.updateActiveProject { $0.basePath = canonicalPath }
                                     }
                                 }
                             }
@@ -224,9 +228,9 @@ struct ServersSettingsTab: View {
                     Task {
                         // Resolve symlinks to get canonical path for SCP compatibility
                         let canonicalPath = await resolveCanonicalPath(selectedPath, serverId: serverId)
-                        
-                        config.updateActiveProject { $0.basePath = canonicalPath }
-                        
+
+                        try? await config.updateActiveProject { $0.basePath = canonicalPath }
+
                         if isWordPressProject {
                             wpContentValidation = nil
                             await validateWPContentPath()
@@ -239,20 +243,26 @@ struct ServersSettingsTab: View {
             if let server = serverToEdit {
                 // Edit existing server
                 ServerEditSheet(config: config, server: server) { updatedServer in
-                    config.saveServer(updatedServer)
-                } onDelete: {
-                    // Clear selection if we deleted the active server
-                    if config.safeActiveProject.serverId == server.id {
-                        config.updateActiveProject { $0.serverId = nil }
+                    Task {
+                        try? await config.saveServer(updatedServer)
                     }
-                    config.deleteServer(id: server.id)
+                } onDelete: {
+                    Task {
+                        // Clear selection if we deleted the active server
+                        if config.safeActiveProject.serverId == server.id {
+                            try? await config.updateActiveProject { $0.serverId = nil }
+                        }
+                        try? await config.deleteServer(id: server.id)
+                    }
                 }
             } else {
                 // Add new server
                 ServerEditSheet(config: config) { newServer in
-                    config.saveServer(newServer)
-                    // Auto-select the new server
-                    config.updateActiveProject { $0.serverId = newServer.id }
+                    Task {
+                        try? await config.saveServer(newServer)
+                        // Auto-select the new server
+                        try? await config.updateActiveProject { $0.serverId = newServer.id }
+                    }
                 }
             }
         }
