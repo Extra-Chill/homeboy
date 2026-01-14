@@ -1,7 +1,8 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::git::{self, BulkGitOutput, GitOutput};
+use homeboy::git::{self, GitOutput};
+use homeboy::BulkResult;
 
 use crate::commands::version;
 
@@ -102,7 +103,7 @@ enum GitCommand {
 #[serde(untagged)]
 pub enum GitCommandOutput {
     Single(GitOutput),
-    Bulk(BulkGitOutput),
+    Bulk(BulkResult<GitOutput>),
 }
 
 pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<GitCommandOutput> {

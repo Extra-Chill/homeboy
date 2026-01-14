@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::component;
 use crate::error::{Error, Result};
 use crate::json::{is_json_input, parse_bulk_ids, BulkResult, BulkSummary, ItemOutcome};
-use crate::module::{load_module, ModuleManifest};
+use crate::module::{load_all_modules, ModuleManifest};
 use crate::ssh::execute_local_command_in_dir;
 use crate::template::{render, TemplateVars};
 
@@ -45,12 +45,7 @@ pub fn run(input: &str) -> Result<(BuildResult, i32)> {
 /// Returns (exit_code, error_message) - None error means success.
 pub fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
     let build_cmd = component.build_command.clone().or_else(|| {
-        detect_build_command(
-            &component.local_path,
-            &component.build_artifact,
-            &component.modules,
-        )
-        .map(|c| c.command)
+        detect_build_command(&component.local_path, &component.build_artifact).map(|c| c.command)
     });
 
     let Some(build_cmd) = build_cmd else {
@@ -138,8 +133,7 @@ fn execute_build(component_id: &str) -> Result<(BuildOutput, i32)> {
     let comp = component::load(component_id)?;
 
     let build_cmd = comp.build_command.clone().or_else(|| {
-        detect_build_command(&comp.local_path, &comp.build_artifact, &comp.modules)
-            .map(|c| c.command)
+        detect_build_command(&comp.local_path, &comp.build_artifact).map(|c| c.command)
     });
 
     let build_cmd = build_cmd.ok_or_else(|| {
@@ -181,18 +175,12 @@ fn file_exists(path: &Path) -> bool {
 }
 
 /// Detect build command using module configuration.
-pub fn detect_build_command(
-    local_path: &str,
-    build_artifact: &str,
-    modules: &[String],
-) -> Option<BuildCommandCandidate> {
+pub fn detect_build_command(local_path: &str, build_artifact: &str) -> Option<BuildCommandCandidate> {
     let root = PathBuf::from(local_path);
 
-    for module_id in modules {
-        if let Some(module) = load_module(module_id) {
-            if let Some(candidate) = detect_build_from_module(&root, build_artifact, &module) {
-                return Some(candidate);
-            }
+    for module in load_all_modules() {
+        if let Some(candidate) = detect_build_from_module(&root, build_artifact, &module) {
+            return Some(candidate);
         }
     }
 
@@ -240,12 +228,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_detection_without_modules() {
+    fn no_detection_for_unknown_artifact_type() {
         let temp_dir = tempfile::tempdir().unwrap();
         std::fs::write(temp_dir.path().join("build.sh"), "#!/bin/sh\necho ok\n").unwrap();
 
+        // Unknown artifact extension should not match any module
         let candidate =
-            detect_build_command(temp_dir.path().to_str().unwrap(), "dist/app.zip", &[]);
+            detect_build_command(temp_dir.path().to_str().unwrap(), "dist/app.unknownext");
         assert!(candidate.is_none());
     }
 

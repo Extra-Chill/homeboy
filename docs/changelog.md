@@ -6,6 +6,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## 0.8.0
+
+- Refactor JSON output envelope (remove warnings payload; simplify command JSON mapping)
+- Unify bulk command outputs under BulkResult/ItemOutcome with success/failure summaries
+- Remove per-project module enablement checks; use global module manifests for build/deploy/db/version defaults
+- Deploy output: rename components -> results and add total to summary
+
 ## 0.7.5
 
 - Fix Homebrew formula name: cargo-dist now generates homeboy.rb instead of homeboy-cli.rb

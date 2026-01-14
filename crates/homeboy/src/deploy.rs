@@ -9,7 +9,7 @@ use crate::component::{self, Component};
 use crate::context::{resolve_project_ssh_with_base_path, RemoteProjectContext};
 use crate::error::{Error, Result};
 use crate::json::read_json_spec_to_string;
-use crate::module::{load_module, DeployVerification};
+use crate::module::{load_all_modules, DeployVerification};
 use crate::project::{self, ProjectRecord};
 use crate::shell;
 use crate::ssh::SshClient;
@@ -358,6 +358,7 @@ impl ComponentDeployResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeploySummary {
+    pub total: u32,
     pub succeeded: u32,
     pub failed: u32,
     pub skipped: u32,
@@ -367,7 +368,7 @@ pub struct DeploySummary {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployOrchestrationResult {
-    pub components: Vec<ComponentDeployResult>,
+    pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
 }
 
@@ -400,8 +401,9 @@ pub fn deploy_components(
 
     if components_to_deploy.is_empty() {
         return Ok(DeployOrchestrationResult {
-            components: vec![],
+            results: vec![],
             summary: DeploySummary {
+                total: 0,
                 succeeded: 0,
                 failed: 0,
                 skipped: 0,
@@ -456,12 +458,13 @@ pub fn deploy_components(
             })
             .collect();
 
-        let succeeded = results.len() as u32;
+        let total = results.len() as u32;
 
         return Ok(DeployOrchestrationResult {
-            components: results,
+            results,
             summary: DeploySummary {
-                succeeded,
+                total,
+                succeeded: total,
                 failed: 0,
                 skipped: 0,
             },
@@ -523,7 +526,7 @@ pub fn deploy_components(
         };
 
         // Look up verification from modules
-        let verification = find_deploy_verification(&project.config.modules, &install_dir);
+        let verification = find_deploy_verification(&install_dir);
 
         // Deploy using core module
         let deploy_result = deploy_artifact(
@@ -582,8 +585,9 @@ pub fn deploy_components(
     }
 
     Ok(DeployOrchestrationResult {
-        components: results,
+        results,
         summary: DeploySummary {
+            total: succeeded + failed,
             succeeded,
             failed,
             skipped: 0,
@@ -695,9 +699,7 @@ fn fetch_remote_versions(
                 .and_then(|targets| targets.first())
                 .and_then(|t| t.pattern.as_deref());
 
-            if let Some(ver) =
-                parse_component_version(&output.stdout, pattern, version_file, &component.modules)
-            {
+            if let Some(ver) = parse_component_version(&output.stdout, pattern, version_file) {
                 versions.insert(component.id.clone(), ver);
             }
         }
@@ -711,24 +713,21 @@ fn parse_component_version(
     content: &str,
     pattern: Option<&str>,
     filename: &str,
-    modules: &[String],
 ) -> Option<String> {
     let pattern_str = match pattern {
         Some(p) => p.replace("\\\\", "\\"),
-        None => version::default_pattern_for_file(filename, modules)?,
+        None => version::default_pattern_for_file(filename)?,
     };
 
     version::parse_version(content, &pattern_str)
 }
 
 /// Find deploy verification config from modules.
-fn find_deploy_verification(modules: &[String], target_path: &str) -> Option<DeployVerification> {
-    for module_id in modules {
-        if let Some(module) = load_module(module_id) {
-            for verification in &module.deploy {
-                if target_path.contains(&verification.path_pattern) {
-                    return Some(verification.clone());
-                }
+fn find_deploy_verification(target_path: &str) -> Option<DeployVerification> {
+    for module in load_all_modules() {
+        for verification in &module.deploy {
+            if target_path.contains(&verification.path_pattern) {
+                return Some(verification.clone());
             }
         }
     }

@@ -33,9 +33,6 @@ enum ProjectCommand {
         name: Option<String>,
         /// Public site domain (CLI mode)
         domain: Option<String>,
-        /// Module to enable (can be specified multiple times)
-        #[arg(long = "module", value_name = "MODULE")]
-        modules: Vec<String>,
         /// Optional server ID
         #[arg(long)]
         server_id: Option<String>,
@@ -128,7 +125,6 @@ pub struct ProjectListItem {
     id: String,
     name: String,
     domain: String,
-    modules: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -234,7 +230,6 @@ pub fn run(
             skip_existing,
             name,
             domain,
-            modules,
             server_id,
             base_path,
             table_prefix,
@@ -260,7 +255,7 @@ pub fn run(
                 )
             })?;
 
-            create(&name, &domain, modules, server_id, base_path, table_prefix)
+            create(&name, &domain, server_id, base_path, table_prefix)
         }
         ProjectCommand::Set { project_id, json } => set(&project_id, &json),
         ProjectCommand::Repair { project_id } => repair(&project_id),
@@ -282,7 +277,6 @@ fn list() -> homeboy::Result<(ProjectOutput, i32)> {
             id: record.id,
             name: record.config.name,
             domain: record.config.domain,
-            modules: record.config.modules,
         })
         .collect();
 
@@ -341,7 +335,6 @@ fn create_json(spec: &str, skip_existing: bool) -> homeboy::Result<(ProjectOutpu
 fn create(
     name: &str,
     domain: &str,
-    modules: Vec<String>,
     server_id: Option<String>,
     base_path: Option<String>,
     table_prefix: Option<String>,
@@ -349,7 +342,6 @@ fn create(
     let result = project::create_from_cli(
         Some(name.to_string()),
         Some(domain.to_string()),
-        modules,
         server_id,
         base_path,
         table_prefix,

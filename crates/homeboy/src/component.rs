@@ -36,9 +36,6 @@ pub struct Component {
     pub remote_path: String,
     pub build_artifact: String,
 
-    #[serde(default)]
-    pub modules: Vec<String>,
-
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scoped_modules: Option<HashMap<String, ScopedModuleConfig>>,
 
@@ -70,7 +67,6 @@ impl Component {
             local_path,
             remote_path,
             build_artifact,
-            modules: Vec::new(),
             scoped_modules: None,
             version_targets: None,
             changelog_targets: None,

@@ -31,4 +31,4 @@ pub(crate) mod base_path;
 
 // Re-exports for convenient access
 pub use error::{Error, ErrorCode, Result};
-pub use json::MergeResult;
+pub use json::{BulkResult, BulkSummary, ItemOutcome, MergeResult};

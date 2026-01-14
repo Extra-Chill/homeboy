@@ -38,7 +38,7 @@ pub struct DeployOutput {
     pub all: bool,
     pub outdated: bool,
     pub dry_run: bool,
-    pub components: Vec<ComponentDeployResult>,
+    pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
 }
 
@@ -81,7 +81,7 @@ pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdRe
             all: args.all,
             outdated: args.outdated,
             dry_run: args.dry_run,
-            components: result.components,
+            results: result.results,
             summary: result.summary,
         },
         exit_code,

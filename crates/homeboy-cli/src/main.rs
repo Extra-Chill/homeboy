@@ -200,9 +200,7 @@ fn main() -> std::process::ExitCode {
             &global,
         );
 
-        let (json_result, exit_code) = output::map_cmd_result_to_json(
-            result.map(|(data, exit_code)| (data, vec![], exit_code)),
-        );
+        let (json_result, exit_code) = output::map_cmd_result_to_json(result);
         output::print_json_result(json_result);
         return std::process::ExitCode::from(exit_code_to_u8(exit_code));
     }

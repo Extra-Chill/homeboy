@@ -1,7 +1,8 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::git::{self, BulkChangesOutput, ChangesOutput};
+use homeboy::git::{self, ChangesOutput};
+use homeboy::BulkResult;
 
 use super::CmdResult;
 
@@ -38,7 +39,7 @@ pub struct ChangesArgs {
 #[serde(untagged)]
 pub enum ChangesCommandOutput {
     Single(ChangesOutput),
-    Bulk(BulkChangesOutput),
+    Bulk(BulkResult<ChangesOutput>),
 }
 
 pub fn run(
@@ -53,18 +54,21 @@ pub fn run(
 
     if let Some(json) = &args.json {
         let output = git::changes_bulk(json, args.include_diff)?;
-        return Ok((ChangesCommandOutput::Bulk(output), 0));
+        let exit_code = if output.summary.failed > 0 { 1 } else { 0 };
+        return Ok((ChangesCommandOutput::Bulk(output), exit_code));
     }
 
     // --project flag mode (with optional component filter from positional args)
     if let Some(project_id) = &args.project {
         if args.component_ids.is_empty() {
             let output = git::changes_project(project_id, args.include_diff)?;
-            return Ok((ChangesCommandOutput::Bulk(output), 0));
+            let exit_code = if output.summary.failed > 0 { 1 } else { 0 };
+            return Ok((ChangesCommandOutput::Bulk(output), exit_code));
         } else {
             let output =
                 git::changes_project_filtered(project_id, &args.component_ids, args.include_diff)?;
-            return Ok((ChangesCommandOutput::Bulk(output), 0));
+            let exit_code = if output.summary.failed > 0 { 1 } else { 0 };
+            return Ok((ChangesCommandOutput::Bulk(output), exit_code));
         }
     }
 
@@ -74,7 +78,8 @@ pub fn run(
         if !args.component_ids.is_empty() {
             let output =
                 git::changes_project_filtered(target_id, &args.component_ids, args.include_diff)?;
-            return Ok((ChangesCommandOutput::Bulk(output), 0));
+            let exit_code = if output.summary.failed > 0 { 1 } else { 0 };
+            return Ok((ChangesCommandOutput::Bulk(output), exit_code));
         }
 
         // Single target_id: try as component first

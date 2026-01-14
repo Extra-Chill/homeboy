@@ -12,8 +12,6 @@ pub struct CliResponse<T: Serialize> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub warnings: Option<Vec<CliWarning>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<CliError>,
 }
 
@@ -28,36 +26,11 @@ pub struct CliError {
     pub retryable: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct CliWarning {
-    pub code: String,
-    pub message: String,
-    pub details: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hints: Option<Vec<Hint>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retryable: Option<bool>,
-}
-
 impl<T: Serialize> CliResponse<T> {
     pub fn success(data: T) -> Self {
         Self {
             success: true,
             data: Some(data),
-            warnings: None,
-            error: None,
-        }
-    }
-
-    pub fn success_with_warnings(data: T, warnings: Vec<CliWarning>) -> Self {
-        Self {
-            success: true,
-            data: Some(data),
-            warnings: if warnings.is_empty() {
-                None
-            } else {
-                Some(warnings)
-            },
             error: None,
         }
     }
@@ -75,7 +48,6 @@ impl CliResponse<()> {
         Self {
             success: false,
             data: None,
-            warnings: None,
             error: Some(CliError {
                 code: err.code.as_str().to_string(),
                 message: err.message.clone(),
@@ -95,13 +67,6 @@ pub fn print_success<T: Serialize>(data: T) {
     println!("{}", CliResponse::success(data).to_json());
 }
 
-pub fn print_success_with_warnings<T: Serialize>(data: T, warnings: Vec<CliWarning>) {
-    println!(
-        "{}",
-        CliResponse::success_with_warnings(data, warnings).to_json()
-    );
-}
-
 pub fn print_result<T: Serialize>(result: Result<T>) {
     match result {
         Ok(data) => print_success(data),
@@ -109,27 +74,12 @@ pub fn print_result<T: Serialize>(result: Result<T>) {
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct CmdSuccess {
-    pub payload: serde_json::Value,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<CliWarning>,
-}
-
-pub type CmdResult = Result<(serde_json::Value, Vec<CliWarning>, i32)>;
-
 pub fn map_cmd_result_to_json<T: Serialize>(
-    result: Result<(T, Vec<CliWarning>, i32)>,
-) -> (Result<CmdSuccess>, i32) {
+    result: Result<(T, i32)>,
+) -> (Result<serde_json::Value>, i32) {
     match result {
-        Ok((data, warnings, exit_code)) => match serde_json::to_value(data) {
-            Ok(value) => (
-                Ok(CmdSuccess {
-                    payload: value,
-                    warnings,
-                }),
-                exit_code,
-            ),
+        Ok((data, exit_code)) => match serde_json::to_value(data) {
+            Ok(value) => (Ok(value), exit_code),
             Err(err) => (
                 Err(Error::internal_json(
                     err.to_string(),
@@ -179,9 +129,9 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
     }
 }
 
-pub fn print_json_result(result: Result<CmdSuccess>) {
+pub fn print_json_result(result: Result<serde_json::Value>) {
     match result {
-        Ok(success) => print_success_with_warnings(success.payload, success.warnings),
+        Ok(data) => print_success(data),
         Err(err) => println!("{}", CliResponse::<()>::from_error(&err).to_json()),
     }
 }

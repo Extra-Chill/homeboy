@@ -206,7 +206,6 @@ mod tests {
             config: Project {
                 name: String::new(),
                 domain: String::new(),
-                modules: vec![],
                 scoped_modules: None,
                 server_id: server_id.map(|s| s.to_string()),
                 base_path: None,

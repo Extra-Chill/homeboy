@@ -702,23 +702,23 @@ pub fn is_module_ready(module: &ModuleManifest) -> bool {
 
 /// Check if a module is compatible with a project.
 pub fn is_module_compatible(module: &ModuleManifest, project: Option<&Project>) -> bool {
-    let Some(project) = project else {
-        return true;
-    };
-
     let Some(ref requires) = module.requires else {
         return true;
     };
 
+    // Required modules must be installed globally
     for required_module in &requires.modules {
-        if !project.has_module(required_module) {
+        if load_module(required_module).is_none() {
             return false;
         }
     }
 
-    for component in &requires.components {
-        if !project.component_ids.contains(component) {
-            return false;
+    // Required components must be linked to the project (if project context exists)
+    if let Some(project) = project {
+        for component in &requires.components {
+            if !project.component_ids.contains(component) {
+                return false;
+            }
         }
     }
 
@@ -829,12 +829,13 @@ impl ModuleScope {
             return Ok(());
         };
 
+        // Required modules must be installed globally
         for required_module in &requires.modules {
-            if !project.has_module(required_module) {
+            if load_module(required_module).is_none() {
                 return Err(Error::validation_invalid_argument(
-                    "project.modules",
+                    "modules",
                     format!(
-                        "Module '{}' requires module '{}', but project does not have it enabled",
+                        "Module '{}' requires module '{}', but it is not installed",
                         module.id, required_module
                     ),
                     None,
@@ -843,6 +844,7 @@ impl ModuleScope {
             }
         }
 
+        // Required components must be linked to the project
         for required in &requires.components {
             if !project.component_ids.iter().any(|c| c == required) {
                 return Err(Error::validation_invalid_argument(

@@ -3,7 +3,7 @@ use crate::component::{Component, VersionTarget};
 use crate::error::{Error, Result};
 use crate::json::{self, set_json_pointer};
 use crate::local_files::{self, FileSystem};
-use crate::module::{load_module, ModuleManifest};
+use crate::module::{load_all_modules, ModuleManifest};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
@@ -55,12 +55,10 @@ pub fn replace_versions(
 
 /// Get version pattern from module configuration.
 /// Returns None if no module defines a pattern for this file type.
-pub fn default_pattern_for_file(filename: &str, modules: &[String]) -> Option<String> {
-    for module_id in modules {
-        if let Some(module) = load_module(module_id) {
-            if let Some(pattern) = find_version_pattern_in_module(&module, filename) {
-                return Some(pattern);
-            }
+pub fn default_pattern_for_file(filename: &str) -> Option<String> {
+    for module in load_all_modules() {
+        if let Some(pattern) = find_version_pattern_in_module(&module, filename) {
+            return Some(pattern);
         }
     }
     None
@@ -104,11 +102,10 @@ pub fn update_version_in_file(
     pattern: &str,
     old_version: &str,
     new_version: &str,
-    modules: &[String],
 ) -> Result<usize> {
     // JSON files with default pattern use structured update
     if Path::new(path).extension().is_some_and(|ext| ext == "json")
-        && default_pattern_for_file(path, modules).as_deref() == Some(pattern)
+        && default_pattern_for_file(path).as_deref() == Some(pattern)
     {
         let content = local_files::local().read(Path::new(path))?;
         let mut json: Value = json::from_str(&content)?;
@@ -184,23 +181,19 @@ pub fn update_version_in_file(
 /// Use this for simple version checks (e.g., deploy outdated detection).
 pub fn get_component_version(component: &Component) -> Option<String> {
     let target = component.version_targets.as_ref()?.first()?;
-    read_local_version(&component.local_path, target, &component.modules)
+    read_local_version(&component.local_path, target)
 }
 
 /// Read version from a local file for a component's version target.
 /// Returns None if file doesn't exist or version can't be parsed.
-pub fn read_local_version(
-    local_path: &str,
-    version_target: &VersionTarget,
-    modules: &[String],
-) -> Option<String> {
+pub fn read_local_version(local_path: &str, version_target: &VersionTarget) -> Option<String> {
     let path = resolve_version_file_path(local_path, &version_target.file);
     let content = local_files::local().read(Path::new(&path)).ok()?;
 
     let pattern: String = version_target
         .pattern
         .clone()
-        .or_else(|| default_pattern_for_file(&version_target.file, modules))?;
+        .or_else(|| default_pattern_for_file(&version_target.file))?;
 
     parse_version(&content, &pattern)
 }
@@ -245,11 +238,11 @@ pub struct BumpResult {
 }
 
 /// Resolve pattern for a version target, using explicit pattern or module default.
-fn resolve_target_pattern(target: &VersionTarget, modules: &[String]) -> Result<String> {
+fn resolve_target_pattern(target: &VersionTarget) -> Result<String> {
     target
         .pattern
         .clone()
-        .or_else(|| default_pattern_for_file(&target.file, modules))
+        .or_else(|| default_pattern_for_file(&target.file))
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "versionTargets[].pattern",
@@ -310,7 +303,7 @@ pub fn read_component_version(component: &Component) -> Result<ComponentVersionI
     }
 
     let primary = &targets[0];
-    let primary_pattern = resolve_target_pattern(primary, &component.modules)?;
+    let primary_pattern = resolve_target_pattern(primary)?;
     let primary_full_path = resolve_version_file_path(&component.local_path, &primary.file);
 
     let content = local_files::local().read(Path::new(&primary_full_path))?;
@@ -383,7 +376,7 @@ pub fn set_component_version(
 
     // Read current version from primary target
     let primary = &targets[0];
-    let primary_pattern = resolve_target_pattern(primary, &component.modules)?;
+    let primary_pattern = resolve_target_pattern(primary)?;
     let primary_full_path = resolve_version_file_path(&component.local_path, &primary.file);
 
     let primary_content = local_files::local().read(Path::new(&primary_full_path))?;
@@ -419,7 +412,7 @@ pub fn set_component_version(
     let mut target_infos = Vec::new();
 
     for target in targets {
-        let version_pattern = resolve_target_pattern(target, &component.modules)?;
+        let version_pattern = resolve_target_pattern(target)?;
         let full_path = resolve_version_file_path(&component.local_path, &target.file);
         let content = local_files::local().read(Path::new(&full_path))?;
 
@@ -465,7 +458,6 @@ pub fn set_component_version(
                 &version_pattern,
                 &old_version,
                 new_version,
-                &component.modules,
             )?;
 
             if replaced_count != match_count {
@@ -513,7 +505,7 @@ pub fn bump_component_version(
 
     // Read current version from primary target
     let primary = &targets[0];
-    let primary_pattern = resolve_target_pattern(primary, &component.modules)?;
+    let primary_pattern = resolve_target_pattern(primary)?;
     let primary_full_path = resolve_version_file_path(&component.local_path, &primary.file);
 
     let primary_content = local_files::local().read(Path::new(&primary_full_path))?;
@@ -601,7 +593,7 @@ pub fn bump_component_version(
     let mut target_infos = Vec::new();
 
     for target in targets {
-        let version_pattern = resolve_target_pattern(target, &component.modules)?;
+        let version_pattern = resolve_target_pattern(target)?;
         let full_path = resolve_version_file_path(&component.local_path, &target.file);
         let content = local_files::local().read(Path::new(&full_path))?;
 
@@ -647,7 +639,6 @@ pub fn bump_component_version(
                 &version_pattern,
                 &old_version,
                 &new_version,
-                &component.modules,
             )?;
 
             if replaced_count != match_count {

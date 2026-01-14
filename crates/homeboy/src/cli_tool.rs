@@ -117,13 +117,6 @@ fn run_for_project_with_executor(
 
     let project = project_loader(project_id)?;
 
-    if !project.config.has_module(&module.id) {
-        return Err(Error::other(format!(
-            "Project '{}' does not have the '{}' module enabled",
-            project_id, module.id
-        )));
-    }
-
     let (target_domain, command) = build_project_command(&project, cli_config, args)?;
 
     let output = if project

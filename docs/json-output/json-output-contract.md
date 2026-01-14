@@ -4,9 +4,9 @@ Homeboy prints JSON to stdout for most commands.
 
 Exceptions:
 
-- `homeboy docs` prints raw markdown content unless `--list` is used.
+- `homeboy docs` prints raw markdown content when `--list` is not used.
 - `homeboy init` prints raw markdown.
-- `homeboy changelog` prints raw markdown for `show` mode.
+- `homeboy changelog show` prints raw markdown.
 - `homeboy list` prints clap help text (raw; not JSON-wrapped).
 - `homeboy ssh` connect mode and `homeboy logs show --follow` use interactive passthrough output.
 

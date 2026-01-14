@@ -6,6 +6,8 @@
 homeboy docs [OPTIONS] [TOPIC]...
 ```
 
+> Note: `--list` is a flag and must appear before topic arguments. Because topics are parsed as trailing args, putting `--list` after a topic will be treated as part of the topic and likely result in a missing-docs-key error.
+
 ## Description
 
 This command renders documentation topics from two sources:
@@ -48,23 +50,12 @@ When `--list` is used, output is JSON.
 
 ### JSON content mode
 
-When rendering a topic in JSON mode (for example: `homeboy docs commands/deploy`), the `data` payload includes resolved metadata and `content`.
+`homeboy docs` does not render topic content as JSON.
 
-Example (formatted as plain text since embedded docs are Rust raw strings):
+- In JSON mode, `homeboy docs` is only supported for `--list`.
+- Without `--list`, output is raw markdown.
 
-    {
-      "mode": "content",
-      "topic": "commands/deploy",
-      "topic_label": "commands/deploy",
-      "resolved_key": "commands/deploy",
-      "segments": ["commands", "deploy"],
-      "slug": "deploy",
-      "content": "(markdown omitted)",
-      "source": "core",
-      "available_topics": ["index", "commands/deploy"]
-    }
-
-Note: embedded docs are compiled into Rust raw strings, so a specific quote-plus-hash byte sequence cannot appear in any embedded doc.
+(If you need machine-readable docs content, treat `homeboy docs <topic...>` as markdown text and parse it in your consumer.)
 
 ## Errors
 

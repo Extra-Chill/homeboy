@@ -5,7 +5,7 @@ use std::process::Command;
 
 use crate::component;
 use crate::error::{Error, Result};
-use crate::json::read_json_spec_to_string;
+use crate::json::{read_json_spec_to_string, BulkResult, BulkSummary, ItemOutcome};
 use crate::project;
 
 // ============================================================================
@@ -325,21 +325,6 @@ pub struct GitOutput {
     pub stderr: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BulkGitOutput {
-    pub action: String,
-    pub results: Vec<GitOutput>,
-    pub summary: BulkSummary,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BulkSummary {
-    pub total: usize,
-    pub succeeded: usize,
-    pub failed: usize,
-}
 
 // === Changes Output Types ===
 
@@ -381,22 +366,6 @@ pub struct ChangesOutput {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChangesSummary {
-    pub total: usize,
-    pub with_commits: usize,
-    pub with_uncommitted: usize,
-    pub clean: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BulkChangesOutput {
-    pub action: String,
-    pub results: Vec<ChangesOutput>,
-    pub summary: ChangesSummary,
-}
 
 // Input types for JSON parsing
 #[derive(Debug, Deserialize)]
@@ -452,36 +421,46 @@ pub fn status(component_id: &str) -> Result<GitOutput> {
 }
 
 /// Get git status for multiple components from JSON spec.
-pub fn status_bulk(json_spec: &str) -> Result<BulkGitOutput> {
+pub fn status_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     let raw = read_json_spec_to_string(json_spec)?;
     let input: BulkIdsInput = serde_json::from_str(&raw).map_err(|e| {
         Error::validation_invalid_json(e, Some("parse bulk status input".to_string()))
     })?;
 
     let mut results = Vec::new();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+
     for id in &input.component_ids {
         match status(id) {
-            Ok(output) => results.push(output),
-            Err(e) => results.push(GitOutput {
-                component_id: id.clone(),
-                path: String::new(),
-                action: "status".to_string(),
-                success: false,
-                exit_code: 1,
-                stdout: String::new(),
-                stderr: e.to_string(),
-            }),
+            Ok(output) => {
+                if output.success {
+                    succeeded += 1;
+                } else {
+                    failed += 1;
+                }
+                results.push(ItemOutcome {
+                    id: id.clone(),
+                    result: Some(output),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(ItemOutcome {
+                    id: id.clone(),
+                    result: None,
+                    error: Some(e.to_string()),
+                });
+            }
         }
     }
 
-    let succeeded = results.iter().filter(|r| r.success).count();
-    let failed = results.len() - succeeded;
-
-    Ok(BulkGitOutput {
+    Ok(BulkResult {
         action: "status".to_string(),
         results,
         summary: BulkSummary {
-            total: input.component_ids.len(),
+            total: succeeded + failed,
             succeeded,
             failed,
         },
@@ -541,36 +520,46 @@ pub fn commit(component_id: &str, message: &str) -> Result<GitOutput> {
 }
 
 /// Commit multiple components from JSON spec.
-pub fn commit_bulk(json_spec: &str) -> Result<BulkGitOutput> {
+pub fn commit_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     let raw = read_json_spec_to_string(json_spec)?;
     let input: BulkCommitInput = serde_json::from_str(&raw).map_err(|e| {
         Error::validation_invalid_json(e, Some("parse bulk commit input".to_string()))
     })?;
 
     let mut results = Vec::new();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+
     for spec in &input.components {
         match commit(&spec.id, &spec.message) {
-            Ok(output) => results.push(output),
-            Err(e) => results.push(GitOutput {
-                component_id: spec.id.clone(),
-                path: String::new(),
-                action: "commit".to_string(),
-                success: false,
-                exit_code: 1,
-                stdout: String::new(),
-                stderr: e.to_string(),
-            }),
+            Ok(output) => {
+                if output.success {
+                    succeeded += 1;
+                } else {
+                    failed += 1;
+                }
+                results.push(ItemOutcome {
+                    id: spec.id.clone(),
+                    result: Some(output),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(ItemOutcome {
+                    id: spec.id.clone(),
+                    result: None,
+                    error: Some(e.to_string()),
+                });
+            }
         }
     }
 
-    let succeeded = results.iter().filter(|r| r.success).count();
-    let failed = results.len() - succeeded;
-
-    Ok(BulkGitOutput {
+    Ok(BulkResult {
         action: "commit".to_string(),
         results,
         summary: BulkSummary {
-            total: input.components.len(),
+            total: succeeded + failed,
             succeeded,
             failed,
         },
@@ -602,38 +591,47 @@ pub fn push(component_id: &str, tags: bool) -> Result<GitOutput> {
 }
 
 /// Push multiple components from JSON spec.
-pub fn push_bulk(json_spec: &str) -> Result<BulkGitOutput> {
+pub fn push_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     let raw = read_json_spec_to_string(json_spec)?;
     let input: BulkIdsInput = serde_json::from_str(&raw).map_err(|e| {
         Error::validation_invalid_json(e, Some("parse bulk push input".to_string()))
     })?;
 
     let mut results = Vec::new();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
     let push_tags = input.tags;
 
     for id in &input.component_ids {
         match push(id, push_tags) {
-            Ok(output) => results.push(output),
-            Err(e) => results.push(GitOutput {
-                component_id: id.clone(),
-                path: String::new(),
-                action: "push".to_string(),
-                success: false,
-                exit_code: 1,
-                stdout: String::new(),
-                stderr: e.to_string(),
-            }),
+            Ok(output) => {
+                if output.success {
+                    succeeded += 1;
+                } else {
+                    failed += 1;
+                }
+                results.push(ItemOutcome {
+                    id: id.clone(),
+                    result: Some(output),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(ItemOutcome {
+                    id: id.clone(),
+                    result: None,
+                    error: Some(e.to_string()),
+                });
+            }
         }
     }
 
-    let succeeded = results.iter().filter(|r| r.success).count();
-    let failed = results.len() - succeeded;
-
-    Ok(BulkGitOutput {
+    Ok(BulkResult {
         action: "push".to_string(),
         results,
         summary: BulkSummary {
-            total: input.component_ids.len(),
+            total: succeeded + failed,
             succeeded,
             failed,
         },
@@ -659,36 +657,46 @@ pub fn pull(component_id: &str) -> Result<GitOutput> {
 }
 
 /// Pull multiple components from JSON spec.
-pub fn pull_bulk(json_spec: &str) -> Result<BulkGitOutput> {
+pub fn pull_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     let raw = read_json_spec_to_string(json_spec)?;
     let input: BulkIdsInput = serde_json::from_str(&raw).map_err(|e| {
         Error::validation_invalid_json(e, Some("parse bulk pull input".to_string()))
     })?;
 
     let mut results = Vec::new();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+
     for id in &input.component_ids {
         match pull(id) {
-            Ok(output) => results.push(output),
-            Err(e) => results.push(GitOutput {
-                component_id: id.clone(),
-                path: String::new(),
-                action: "pull".to_string(),
-                success: false,
-                exit_code: 1,
-                stdout: String::new(),
-                stderr: e.to_string(),
-            }),
+            Ok(output) => {
+                if output.success {
+                    succeeded += 1;
+                } else {
+                    failed += 1;
+                }
+                results.push(ItemOutcome {
+                    id: id.clone(),
+                    result: Some(output),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(ItemOutcome {
+                    id: id.clone(),
+                    result: None,
+                    error: Some(e.to_string()),
+                });
+            }
         }
     }
 
-    let succeeded = results.iter().filter(|r| r.success).count();
-    let failed = results.len() - succeeded;
-
-    Ok(BulkGitOutput {
+    Ok(BulkResult {
         action: "pull".to_string(),
         results,
         summary: BulkSummary {
-            total: input.component_ids.len(),
+            total: succeeded + failed,
             succeeded,
             failed,
         },
@@ -868,63 +876,49 @@ pub fn changes(
     })
 }
 
-fn build_bulk_changes_output(component_ids: &[String], include_diff: bool) -> BulkChangesOutput {
+fn build_bulk_changes_output(component_ids: &[String], include_diff: bool) -> BulkResult<ChangesOutput> {
     let mut results = Vec::new();
-    let mut with_commits = 0;
-    let mut with_uncommitted = 0;
-    let mut clean = 0;
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
 
     for id in component_ids {
         match changes(id, None, include_diff) {
             Ok(output) => {
-                if !output.commits.is_empty() {
-                    with_commits += 1;
+                if output.success {
+                    succeeded += 1;
+                } else {
+                    failed += 1;
                 }
-                if output.uncommitted.has_changes {
-                    with_uncommitted += 1;
-                }
-                if output.commits.is_empty() && !output.uncommitted.has_changes {
-                    clean += 1;
-                }
-                results.push(output);
+                results.push(ItemOutcome {
+                    id: id.clone(),
+                    result: Some(output),
+                    error: None,
+                });
             }
             Err(e) => {
-                results.push(ChangesOutput {
-                    component_id: id.clone(),
-                    path: String::new(),
-                    success: false,
-                    latest_tag: None,
-                    baseline_source: None,
-                    baseline_ref: None,
-                    commits: Vec::new(),
-                    uncommitted: UncommittedChanges {
-                        has_changes: false,
-                        staged: Vec::new(),
-                        unstaged: Vec::new(),
-                        untracked: Vec::new(),
-                    },
-                    diff: None,
-                    warning: None,
+                failed += 1;
+                results.push(ItemOutcome {
+                    id: id.clone(),
+                    result: None,
                     error: Some(e.to_string()),
                 });
             }
         }
     }
 
-    BulkChangesOutput {
+    BulkResult {
         action: "changes".to_string(),
         results,
-        summary: ChangesSummary {
-            total: component_ids.len(),
-            with_commits,
-            with_uncommitted,
-            clean,
+        summary: BulkSummary {
+            total: succeeded + failed,
+            succeeded,
+            failed,
         },
     }
 }
 
 /// Get changes for multiple components from JSON spec.
-pub fn changes_bulk(json_spec: &str, include_diff: bool) -> Result<BulkChangesOutput> {
+pub fn changes_bulk(json_spec: &str, include_diff: bool) -> Result<BulkResult<ChangesOutput>> {
     let raw = read_json_spec_to_string(json_spec)?;
     let input: BulkIdsInput = serde_json::from_str(&raw).map_err(|e| {
         Error::validation_invalid_json(e, Some("parse bulk changes input".to_string()))
@@ -937,7 +931,7 @@ pub fn changes_bulk(json_spec: &str, include_diff: bool) -> Result<BulkChangesOu
 }
 
 /// Get changes for all components in a project.
-pub fn changes_project(project_id: &str, include_diff: bool) -> Result<BulkChangesOutput> {
+pub fn changes_project(project_id: &str, include_diff: bool) -> Result<BulkResult<ChangesOutput>> {
     let proj = project::load(project_id)?;
     Ok(build_bulk_changes_output(&proj.component_ids, include_diff))
 }
@@ -947,7 +941,7 @@ pub fn changes_project_filtered(
     project_id: &str,
     component_ids: &[String],
     include_diff: bool,
-) -> Result<BulkChangesOutput> {
+) -> Result<BulkResult<ChangesOutput>> {
     let proj = project::load(project_id)?;
 
     // Filter to only components that are in the project

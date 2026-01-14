@@ -18,8 +18,6 @@ pub struct ProjectRecord {
 pub struct Project {
     pub name: String,
     pub domain: String,
-    #[serde(default)]
-    pub modules: Vec<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scoped_modules: Option<HashMap<String, ScopedModuleConfig>>,
@@ -57,10 +55,6 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn has_module(&self, module_id: &str) -> bool {
-        self.modules.contains(&module_id.to_string())
-    }
-
     pub fn has_sub_targets(&self) -> bool {
         !self.sub_targets.is_empty()
     }
@@ -450,7 +444,6 @@ pub struct RenameResult {
 pub fn create_from_cli(
     name: Option<String>,
     domain: Option<String>,
-    modules: Vec<String>,
     server_id: Option<String>,
     base_path: Option<String>,
     table_prefix: Option<String>,
@@ -482,7 +475,6 @@ pub fn create_from_cli(
     let project = Project {
         name,
         domain,
-        modules,
         scoped_modules: None,
         server_id,
         base_path,
@@ -508,7 +500,6 @@ pub fn update(
     project_id: &str,
     name: Option<String>,
     domain: Option<String>,
-    modules: Option<Vec<String>>,
     server_id: Option<Option<String>>,
     base_path: Option<Option<String>>,
     table_prefix: Option<Option<String>>,
@@ -525,11 +516,6 @@ pub fn update(
     if let Some(new_domain) = domain {
         project.domain = new_domain;
         updated.push("domain".to_string());
-    }
-
-    if let Some(new_modules) = modules {
-        project.modules = new_modules;
-        updated.push("modules".to_string());
     }
 
     if let Some(new_server_id) = server_id {

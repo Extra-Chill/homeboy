@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy-cli"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "atty",

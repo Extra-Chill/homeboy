@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
 use crate::context::{resolve_project_ssh, resolve_project_ssh_with_base_path};
-use crate::module::{load_module, DatabaseCliConfig};
+use crate::module::{load_all_modules, DatabaseCliConfig};
 use crate::project::{self, ProjectRecord};
 use crate::ssh::SshClient;
 use crate::template::{render_map, TemplateVars};
@@ -65,28 +65,18 @@ fn build_context(project_id: &str, subtarget: Option<&str>) -> Result<DbContext>
 
     let domain = resolve_domain(&project, subtarget);
 
-    let db_cli = project
-        .config
-        .modules
+    let modules = load_all_modules();
+
+    let db_cli = modules
         .iter()
-        .find_map(|module_id| {
-            load_module(module_id)
-                .and_then(|m| m.database)
-                .and_then(|db| db.cli)
-        })
+        .find_map(|m| m.database.as_ref().and_then(|db| db.cli.clone()))
         .ok_or_else(|| {
             Error::config("No module with database CLI configuration found".to_string())
         })?;
 
-    let cli_path = project
-        .config
-        .modules
+    let cli_path = modules
         .iter()
-        .find_map(|module_id| {
-            load_module(module_id)
-                .and_then(|m| m.cli)
-                .and_then(|cli| cli.default_cli_path)
-        })
+        .find_map(|m| m.cli.as_ref().and_then(|cli| cli.default_cli_path.clone()))
         .unwrap_or_default();
 
     Ok(DbContext {
