@@ -1,6 +1,10 @@
 # Changelog
 
-All notable code changes to this project are documented in this file.
+This file is a historical changelog and is not kept perfectly in sync with the current implementation.
+
+The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for most operations.
+
+For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
 ## Unreleased
 

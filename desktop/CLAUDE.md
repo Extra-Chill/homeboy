@@ -65,8 +65,8 @@ Homeboy/
 (Legacy Swift CLI sources have been removed.)
 
 The desktop app shells out to the system-installed `homeboy` binary via:
-- `Homeboy/Core/CLI/CLIBridge.swift` (command execution)
-- `Homeboy/Core/CLI/CLIVersionChecker.swift` (CLI discovery, installed/latest version checks)
+- `Homeboy/Core/CLI/CLIBridge.swift` (command execution; 30s default timeout)
+- `Homeboy/Core/CLI/CLIVersionChecker.swift` (CLI discovery + installed/latest version checks; latest version comes from GitHub releases API for `Extra-Chill/homeboy-cli`)
 
 CLI discovery checks these paths in order:
 
@@ -79,9 +79,9 @@ CLI discovery checks these paths in order:
 
 ## Module Plugin System
 
-The app supports installable modules via the `homeboy.json` manifest. Modules are stored at:
+The app supports installable modules via the `homeboy.json` manifest. In the current desktop implementation, modules are stored under the app's `AppPaths.modules`:
 ```
-~/Library/Application Support/homeboy/modules/<module-id>/
+~/Library/Application Support/Homeboy/modules/<module-id>/
 ```
 
 ### Key Files
@@ -168,14 +168,20 @@ Run `homeboy docs` for the canonical CLI documentation.
 
 ## Configuration
 
-The desktop app is macOS-only and stores configuration as JSON under the shared Homeboy config tree.
+The desktop app is macOS-only and stores configuration as JSON under the CLI config root (canonical) and its own app container as needed.
 
-Canonical cross-platform config root rules live in the CLI docs: [`../homeboy-core/docs/index.md`](../homeboy-core/docs/index.md).
+Config change reactivity is implemented by `ConfigurationObserver` (`Homeboy/Core/Config/ConfigurationObserver.swift`), which watches:
+- `AppPaths.projects`
+- `AppPaths.servers`
+- `AppPaths.modules`
+- `AppPaths.projectTypes`
 
-macOS locations:
+Canonical cross-platform config root rules live in the CLI docs: [`../homeboy/docs/index.md`](../homeboy/docs/index.md).
+
+macOS config tree used by the desktop app (`AppPaths`):
 
 ```
-~/Library/Application Support/homeboy/
+~/Library/Application Support/Homeboy/
 ├── projects/             # Project configuration
 │   └── <project-id>.json
 ├── servers/              # SSH server configuration
@@ -184,10 +190,13 @@ macOS locations:
 │   └── <component-id>.json
 ├── modules/              # Installed modules
 ├── keys/                 # SSH keys (per server)
-├── backups/              # Local backups (deploy/file operations)
-└── docs/                 # Reserved (not currently written by the CLI)
+├── project-types/        # Project type definitions
+├── playwright-browsers/  # Playwright downloads (module runtime)
+├── venv/                 # Shared python venv (if used)
+└── backups/              # Local backups (deploy/file operations)
 ```
 
+Note: the CLI documents its own cross-platform config root separately. Keep desktop docs aligned to code in `Homeboy/Core/Config/AppPaths.swift`.
 ## API Integration
 
 Supports JWT authentication with WordPress REST APIs.

@@ -11,26 +11,30 @@ Modules extend Homeboy with custom functionality. Each module is a self-containe
 
 ## Installation location
 
-Homeboy Desktop is macOS-only; module installation paths below are the macOS view of the shared Homeboy config tree.
+Homeboy Desktop is macOS-only. The CLI uses its own canonical config root, and modules are installed under the CLI’s config tree.
 
-The CLI documents the cross-platform config root (macOS/Linux/Windows): [`homeboy-core/docs/index.md`](../../homeboy-core/docs/index.md).
+The CLI documents the cross-platform config root (macOS/Linux/Windows): [`homeboy/docs/index.md`](../../homeboy/docs/index.md).
 
-macOS locations:
+macOS locations (desktop app implementation):
 
-- Modules:
+- Desktop config root (single source of truth: `AppPaths`):
   ```
-  ~/Library/Application Support/homeboy/modules/<module-id>/
+  ~/Library/Application Support/Homeboy/
   ```
-- Per-module Python venv:
+- Modules (installed/linked):
   ```
-  ~/Library/Application Support/homeboy/modules/<module-id>/venv/
+  ~/Library/Application Support/Homeboy/modules/<module-id>/
   ```
-- `docs/` directory:
+- Per-module Python venv (if the module creates one):
   ```
-  ~/Library/Application Support/homeboy/docs/
+  ~/Library/Application Support/Homeboy/modules/<module-id>/venv/
   ```
-  (Reserved. The CLI reads module docs from `modules/<moduleId>/docs/` rather than writing global docs.)
+- Module docs (optional; may be consumed by tooling):
+  ```
+  ~/Library/Application Support/Homeboy/modules/<module-id>/docs/
+  ```
 
+Note: the CLI embeds its core documentation in the binary (see `homeboy docs`).
 ## Module responsibilities
 
 Homeboy modules can:
@@ -40,7 +44,7 @@ Homeboy modules can:
 
 The manifest is a single unified `homeboy.json` file; modules include only fields they need.
 
-For the authoritative runtime behavior, see [`homeboy-core/docs/commands/module.md`](../../homeboy-core/docs/commands/module.md).
+For the authoritative runtime behavior, see [`homeboy/docs/commands/module.md`](../../homeboy/docs/commands/module.md).
 
 ## Manifest Schema
 
@@ -72,7 +76,7 @@ For the authoritative runtime behavior, see [`homeboy-core/docs/commands/module.
 
 ### Runtime Object
 
-Executable modules use the CLI runtime contract described in [`homeboy-core/docs/commands/module.md`](../../homeboy-core/docs/commands/module.md).
+Executable modules use the CLI runtime contract described in [`homeboy/docs/commands/module.md`](../../homeboy/docs/commands/module.md).
 
 The manifest's `runtime` object configures shell commands that the CLI runs (for example `runCommand`, `setupCommand`, and optional `readyCheck`). The CLI injects execution context and merged settings via environment variables.
 

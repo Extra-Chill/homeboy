@@ -5,16 +5,9 @@ import Foundation
 /// Configuration for the Remote File Editor pinned files
 struct RemoteFileConfig: Codable, Equatable {
     var pinnedFiles: [PinnedRemoteFile]
-    
+
     init(pinnedFiles: [PinnedRemoteFile] = []) {
         self.pinnedFiles = pinnedFiles
-    }
-    
-    /// Returns sensible defaults based on project type definition
-    static func defaults(for typeId: String) -> RemoteFileConfig {
-        let typeDefinition = ProjectTypeManager.shared.resolve(typeId)
-        let pinnedFiles = typeDefinition.defaultPinnedFiles.map { PinnedRemoteFile(path: $0) }
-        return RemoteFileConfig(pinnedFiles: pinnedFiles)
     }
 }
 
@@ -40,16 +33,9 @@ struct PinnedRemoteFile: Codable, Identifiable, Equatable {
 /// Configuration for the Remote Log Viewer pinned logs
 struct RemoteLogConfig: Codable, Equatable {
     var pinnedLogs: [PinnedRemoteLog]
-    
+
     init(pinnedLogs: [PinnedRemoteLog] = []) {
         self.pinnedLogs = pinnedLogs
-    }
-    
-    /// Returns sensible defaults based on project type definition
-    static func defaults(for typeId: String) -> RemoteLogConfig {
-        let typeDefinition = ProjectTypeManager.shared.resolve(typeId)
-        let pinnedLogs = typeDefinition.defaultPinnedLogs.map { PinnedRemoteLog(path: $0) }
-        return RemoteLogConfig(pinnedLogs: pinnedLogs)
     }
 }
 
@@ -75,16 +61,17 @@ struct PinnedRemoteLog: Codable, Identifiable, Equatable {
 // MARK: - Project Configuration
 
 /// Configuration for a single project (WordPress site, Node.js app, etc.)
+/// This struct represents the Desktop's view of a project, populated from CLI output.
 struct ProjectConfiguration: Codable, Identifiable {
     var id: String
     var name: String
     var domain: String
-    var projectType: String
-    
+
     var serverId: String?
     var basePath: String?
     var tablePrefix: String?
-    
+
+    var modules: [String]
     var remoteFiles: RemoteFileConfig
     var remoteLogs: RemoteLogConfig
     var database: DatabaseConfig
@@ -93,27 +80,17 @@ struct ProjectConfiguration: Codable, Identifiable {
     var subTargets: [SubTarget]
     var sharedTables: [String]
     var componentIds: [String]
-    var tableGroupings: [ItemGrouping]
-    var componentGroupings: [ItemGrouping]
-    var protectedTablePatterns: [String]
-    var unlockedTablePatterns: [String]
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, domain, projectType
+        case id, name, domain
         case serverId, basePath, tablePrefix
-        case remoteFiles, remoteLogs, database, tools, api
+        case modules, remoteFiles, remoteLogs, database, tools, api
         case subTargets, sharedTables, componentIds
-        case tableGroupings, componentGroupings, protectedTablePatterns, unlockedTablePatterns
     }
-    
-    /// Resolved project type definition from ProjectTypeManager
-    var typeDefinition: ProjectTypeDefinition {
-        ProjectTypeManager.shared.resolve(projectType)
-    }
-    
-    /// Whether this is a WordPress project
+
+    /// Whether this is a WordPress project (inferred from modules or table prefix)
     var isWordPress: Bool {
-        projectType == "wordpress"
+        modules.contains("wordpress") || tablePrefix?.hasPrefix("wp") == true
     }
     
     /// Whether this project has multiple targets configured
@@ -132,10 +109,10 @@ struct ProjectConfiguration: Codable, Identifiable {
         id: String,
         name: String,
         domain: String,
-        projectType: String,
         serverId: String? = nil,
         basePath: String? = nil,
         tablePrefix: String? = nil,
+        modules: [String] = [],
         remoteFiles: RemoteFileConfig,
         remoteLogs: RemoteLogConfig,
         database: DatabaseConfig,
@@ -143,19 +120,15 @@ struct ProjectConfiguration: Codable, Identifiable {
         api: APIConfig,
         subTargets: [SubTarget] = [],
         sharedTables: [String] = [],
-        componentIds: [String] = [],
-        tableGroupings: [ItemGrouping] = [],
-        componentGroupings: [ItemGrouping] = [],
-        protectedTablePatterns: [String] = [],
-        unlockedTablePatterns: [String] = []
+        componentIds: [String] = []
     ) {
         self.id = id
         self.name = name
         self.domain = domain
-        self.projectType = projectType
         self.serverId = serverId
         self.basePath = basePath
         self.tablePrefix = tablePrefix
+        self.modules = modules
         self.remoteFiles = remoteFiles
         self.remoteLogs = remoteLogs
         self.database = database
@@ -164,36 +137,100 @@ struct ProjectConfiguration: Codable, Identifiable {
         self.subTargets = subTargets
         self.sharedTables = sharedTables
         self.componentIds = componentIds
-        self.tableGroupings = tableGroupings
-        self.componentGroupings = componentGroupings
-        self.protectedTablePatterns = protectedTablePatterns
-        self.unlockedTablePatterns = unlockedTablePatterns
     }
-    
+
+    /// Creates a ProjectConfiguration from CLI's ProjectRecord
+    init(from record: ProjectRecord) {
+        self.id = record.id
+        self.name = record.config.name
+        self.domain = record.config.domain
+        self.serverId = record.config.serverId
+        self.basePath = record.config.basePath
+        self.tablePrefix = record.config.tablePrefix
+        self.modules = record.config.modules
+
+        // Convert CLI remote files
+        self.remoteFiles = RemoteFileConfig(
+            pinnedFiles: record.config.remoteFiles.pinnedFiles.compactMap { file in
+                guard let uuid = UUID(uuidString: file.id) else { return nil }
+                return PinnedRemoteFile(id: uuid, path: file.path, label: file.label)
+            }
+        )
+
+        // Convert CLI remote logs
+        self.remoteLogs = RemoteLogConfig(
+            pinnedLogs: record.config.remoteLogs.pinnedLogs.compactMap { log in
+                guard let uuid = UUID(uuidString: log.id) else { return nil }
+                return PinnedRemoteLog(id: uuid, path: log.path, label: log.label, tailLines: log.tailLines)
+            }
+        )
+
+        // Convert CLI database config
+        self.database = DatabaseConfig(
+            host: record.config.database.host,
+            port: record.config.database.port,
+            name: record.config.database.name,
+            user: record.config.database.user,
+            useSSHTunnel: record.config.database.useSshTunnel
+        )
+
+        // Convert CLI tools config
+        self.tools = ToolsConfig(
+            bandcampScraper: BandcampScraperConfig(
+                defaultTag: record.config.tools.bandcampScraper?.defaultTag ?? ""
+            ),
+            newsletter: NewsletterConfig(
+                sendyListId: record.config.tools.newsletter?.sendyListId ?? ""
+            )
+        )
+
+        // Convert CLI API config
+        self.api = APIConfig(
+            enabled: record.config.api.enabled,
+            baseURL: record.config.api.baseUrl
+        )
+
+        // Convert CLI subtargets (CLI doesn't have id, derive from name)
+        self.subTargets = record.config.subTargets.map { target in
+            SubTarget(
+                id: target.name.lowercased().replacingOccurrences(of: " ", with: "-"),
+                name: target.name,
+                domain: target.domain,
+                number: target.number,
+                isDefault: target.isDefault
+            )
+        }
+
+        self.sharedTables = record.config.sharedTables
+        self.componentIds = record.config.componentIds
+    }
+
+    /// Creates a ProjectConfiguration from CLI's ProjectListItem (minimal data for picker)
+    static func fromListItem(_ item: ProjectListItem) -> ProjectConfiguration {
+        var config = ProjectConfiguration.empty(id: item.id, name: item.name)
+        config.domain = item.domain
+        config.modules = item.modules
+        return config
+    }
+
     /// Creates a default empty project configuration.
-    /// Domain is intentionally empty - users configure it via Settings after project creation.
-    static func empty(id: String, name: String, projectType: String = "wordpress") -> ProjectConfiguration {
-        let typeDefinition = ProjectTypeManager.shared.resolve(projectType)
-        return ProjectConfiguration(
+    static func empty(id: String, name: String) -> ProjectConfiguration {
+        ProjectConfiguration(
             id: id,
             name: name,
             domain: "",
-            projectType: projectType,
             serverId: nil,
             basePath: nil,
-            tablePrefix: typeDefinition.database?.defaultTablePrefix,
-            remoteFiles: .defaults(for: projectType),
-            remoteLogs: .defaults(for: projectType),
+            tablePrefix: nil,
+            modules: [],
+            remoteFiles: RemoteFileConfig(),
+            remoteLogs: RemoteLogConfig(),
             database: DatabaseConfig(),
             tools: ToolsConfig(),
             api: APIConfig(),
             subTargets: [],
             sharedTables: [],
-            componentIds: [],
-            tableGroupings: [],
-            componentGroupings: [],
-            protectedTablePatterns: [],
-            unlockedTablePatterns: []
+            componentIds: []
         )
     }
     
@@ -204,58 +241,52 @@ struct ProjectConfiguration: Codable, Identifiable {
         id = try container.decode(String.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
         domain = try container.decode(String.self, forKey: .domain)
-        projectType = try container.decode(String.self, forKey: .projectType)
 
         serverId = try container.decodeIfPresent(String.self, forKey: .serverId)
         basePath = try container.decodeIfPresent(String.self, forKey: .basePath)
         tablePrefix = try container.decodeIfPresent(String.self, forKey: .tablePrefix)
 
+        modules = try container.decodeIfPresent([String].self, forKey: .modules) ?? []
         subTargets = try container.decodeIfPresent([SubTarget].self, forKey: .subTargets) ?? []
         sharedTables = try container.decodeIfPresent([String].self, forKey: .sharedTables) ?? []
 
         remoteFiles = try container.decodeIfPresent(RemoteFileConfig.self, forKey: .remoteFiles)
-            ?? .defaults(for: projectType)
+            ?? RemoteFileConfig()
         remoteLogs = try container.decodeIfPresent(RemoteLogConfig.self, forKey: .remoteLogs)
-            ?? .defaults(for: projectType)
+            ?? RemoteLogConfig()
 
-        database = try container.decode(DatabaseConfig.self, forKey: .database)
-        tools = try container.decode(ToolsConfig.self, forKey: .tools)
-        api = try container.decode(APIConfig.self, forKey: .api)
+        database = try container.decodeIfPresent(DatabaseConfig.self, forKey: .database)
+            ?? DatabaseConfig()
+        tools = try container.decodeIfPresent(ToolsConfig.self, forKey: .tools)
+            ?? ToolsConfig()
+        api = try container.decodeIfPresent(APIConfig.self, forKey: .api)
+            ?? APIConfig()
 
         componentIds = try container.decodeIfPresent([String].self, forKey: .componentIds) ?? []
-        tableGroupings = try container.decodeIfPresent([ItemGrouping].self, forKey: .tableGroupings) ?? []
-        componentGroupings = try container.decodeIfPresent([ItemGrouping].self, forKey: .componentGroupings) ?? []
-        protectedTablePatterns = try container.decodeIfPresent([String].self, forKey: .protectedTablePatterns) ?? []
-        unlockedTablePatterns = try container.decodeIfPresent([String].self, forKey: .unlockedTablePatterns) ?? []
     }
 
     /// Custom encoder
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        
+
         try container.encode(id, forKey: .id)
         try container.encode(name, forKey: .name)
         try container.encode(domain, forKey: .domain)
-        try container.encode(projectType, forKey: .projectType)
-        
+
         try container.encodeIfPresent(serverId, forKey: .serverId)
         try container.encodeIfPresent(basePath, forKey: .basePath)
         try container.encodeIfPresent(tablePrefix, forKey: .tablePrefix)
-        
+
+        try container.encode(modules, forKey: .modules)
         try container.encode(remoteFiles, forKey: .remoteFiles)
         try container.encode(remoteLogs, forKey: .remoteLogs)
         try container.encode(database, forKey: .database)
         try container.encode(tools, forKey: .tools)
         try container.encode(api, forKey: .api)
-        
+
         try container.encode(subTargets, forKey: .subTargets)
         try container.encode(sharedTables, forKey: .sharedTables)
         try container.encode(componentIds, forKey: .componentIds)
-        try container.encode(tableGroupings, forKey: .tableGroupings)
-        try container.encode(componentGroupings, forKey: .componentGroupings)
-        try container.encode(protectedTablePatterns, forKey: .protectedTablePatterns)
-        try container.encode(unlockedTablePatterns, forKey: .unlockedTablePatterns)
-        
     }
 }
 

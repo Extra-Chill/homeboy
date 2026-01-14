@@ -50,7 +50,7 @@ This README avoids duplicating CLI reference docs.
 
 - Canonical CLI reference: `homeboy docs`
 - Desktop/CLI integration notes: [docs/CLI.md](docs/CLI.md)
-- Embedded CLI markdown sources: [`../homeboy-core/docs/`](../homeboy-core/docs/index.md)
+- Embedded CLI markdown sources: [`../homeboy/docs/`](../homeboy/docs/index.md)
 
 Compatibility note: the CLI is the source of truth for command behavior and output. The desktop app may lag behind and not support newer commands/options until it is updated.
 
@@ -60,41 +60,25 @@ Compatibility note: the CLI is the source of truth for command behavior and outp
 - Xcode 15.0+
 - Python 3.12+ (Homebrew) - for modules with Python scripts
 
-## Setup
+## CLI dependency
 
-This README keeps desktop-specific setup and defers general setup to the root README.
+Homeboy Desktop relies on a system-installed `homeboy` CLI binary. The app discovers it at:
+- `/opt/homebrew/bin/homeboy`
+- `/usr/local/bin/homeboy`
+- `~/.cargo/bin/homeboy`
 
-- Canonical monorepo setup: [`../README.md`](../README.md)
+(See `Homeboy/Core/CLI/CLIVersionChecker.swift` for the canonical search order.)
 
-### 1. Clone and Open
+The desktop app uses a 30s default timeout for CLI commands (see `Homeboy/Core/CLI/CLIBridge.swift`).
+The app checks for updates via GitHub releases: `Extra-Chill/homeboy-cli`.
 
-```bash
-git clone https://github.com/Extra-Chill/homeboy.git
-cd homeboy
-```
+Note: update checking requires network access (GitHub API).
 
-### 2. Generate Xcode Project + Run
+For desktop  CLI integration details (including shared config paths and timeouts), see:
+- [docs/CLI.md](docs/CLI.md)
 
-The desktop app uses `project.yml` + XcodeGen.
-
-```bash
-xcodegen generate --spec homeboy-desktop/project.yml
-open homeboy-desktop/Homeboy.xcodeproj
-```
-
-Build and run from Xcode (Cmd+R).
-
-### 3. Configure Your Projects
-
-Homeboy works with **projects** (site profiles). On first launch, configure your project in **Settings**:
-- **General**: Project name, type, and local domain
-- **Servers**: Add an SSH server (host/user/port) and generate an SSH key
-- **Project Settings**: Set the remote base path (used by Deployer and remote file browsing)
-- **Database**: Database connection details (used by the Database Browser via the CLI)
-- **Components**: Plugins, themes, or packages for deployment
-- **API**: REST API base URL and authentication (used by module API actions)
-
-Project configurations are stored under `~/Library/Application Support/homeboy/projects/` (see `docs/CLI.md` for the full shared config tree).
+For monorepo setup details, see:
+- [Root README](../README.md)
 
 ### Project Types
 
@@ -102,17 +86,23 @@ Project type support is primarily defined by installed modules and the CLI; the 
 
 ## Installing Modules
 
+Homeboy Desktop delegates module installation to the `homeboy` CLI.
+
 1. Go to **Settings > Modules**
-2. Click **Install Module from Folder...**
-3. Select a folder containing a `homeboy.json` manifest
+2. Click **Install Module...**
+3. Select either:
+   - a local folder containing a `homeboy.json` manifest (linked/installed by CLI), or
+   - a Git URL (installed by CLI)
 4. The module appears in the sidebar under "Modules"
-5. If setup is required, click the module and follow the prompts
+5. If setup is required, click the module and run **Setup**
 
-Modules are installed to:
+Modules live under the Homeboy config root:
+
 ```
-~/Library/Application Support/homeboy/modules/
+~/Library/Application Support/Homeboy/modules/
 ```
 
+Note: the CLI has its own config root (`dirs::config_dir()/homeboy`). The desktop app currently uses `AppPaths` (and `ConfigurationObserver`) to read/write config under `~/Library/Application Support/Homeboy/`.
 ## Server Configuration (SSH)
 
 Remote features (deployments, remote file browsing, remote database access) require an SSH server.
@@ -136,7 +126,7 @@ For WordPress projects, set the **wp-content path** in project settings (you can
 This README stays desktop-focused and intentionally avoids duplicating CLI reference docs.
 
 - Desktop 1 CLI integration + config tree: [`docs/CLI.md`](docs/CLI.md)
-- Embedded CLI markdown sources (canonical command docs): [`../homeboy-core/docs/index.md`](../homeboy-core/docs/index.md)
+- Embedded CLI markdown sources (canonical command docs): [`../homeboy/docs/index.md`](../homeboy/docs/index.md)
 - Module manifest spec (`homeboy.json`): [`docs/MODULE-SPEC.md`](docs/MODULE-SPEC.md)
 
 ## API Authentication

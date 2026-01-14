@@ -59,7 +59,7 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
 
     @Published var modules: [LoadedModule] = []
     @Published var isLoading = false
-    @Published var error: String?
+    @Published var error: (any DisplayableError)?
 
     private let fileManager = FileManager.default
     private let jsonDecoder: JSONDecoder
@@ -107,8 +107,11 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
             let result = try response.decodeResponse(CLIModuleListData.self)
 
             guard result.success, let data = result.data else {
-                let message = result.error?.message ?? "Failed to load modules"
-                self.error = message
+                if let errorDetail = result.error {
+                    self.error = errorDetail.toCLIError(source: "Module Manager")
+                } else {
+                    self.error = AppError("Failed to load modules", source: "Module Manager")
+                }
                 self.modules = []
                 isLoading = false
                 return
@@ -128,7 +131,7 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
             modules = loadedModules.sorted { $0.name < $1.name }
 
         } catch {
-            self.error = error.localizedDescription
+            self.error = error.toDisplayableError(source: "Module Manager")
             modules = []
         }
 
@@ -188,9 +191,9 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
         await loadModules()
     }
 
-    /// Links a local module directory
+    /// Links a local module directory (uses install which auto-symlinks local paths)
     func linkModule(path: String) async throws {
-        let args = ["module", "link", path]
+        let args = ["module", "install", path]
         let response = try await CLIBridge.shared.execute(args)
 
         guard response.success else {
@@ -200,9 +203,9 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
         await loadModules()
     }
 
-    /// Unlinks a linked module (preserves source)
+    /// Unlinks a linked module (uses uninstall which handles symlinks)
     func unlinkModule(moduleId: String) async throws {
-        let args = ["module", "unlink", moduleId]
+        let args = ["module", "uninstall", moduleId, "--force"]
         let response = try await CLIBridge.shared.execute(args)
 
         guard response.success else {

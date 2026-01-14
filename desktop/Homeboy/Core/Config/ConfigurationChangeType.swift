@@ -8,8 +8,6 @@ enum ProjectField: String, CaseIterable {
     case database
     case components
     case subTargets
-    case tableGroupings
-    case componentGroupings
     case remoteFiles
     case remoteLogs
     case api

@@ -4,7 +4,7 @@ class PythonRunner: ObservableObject {
     @Published var isRunning = false
     @Published var isSettingUp = false
     @Published var output = ""
-    @Published var error: String?
+    @Published var error: (any DisplayableError)?
     
     private var process: Process?
     private let pythonPath = "/opt/homebrew/bin/python3"

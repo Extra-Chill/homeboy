@@ -5,26 +5,21 @@ import SwiftUI
 struct CreateProjectSheet: View {
     @ObservedObject var configManager = ConfigurationManager.shared
     @EnvironmentObject var authManager: AuthManager
-    
+
     @Environment(\.dismiss) private var dismiss
-    
+
     @State private var projectName = ""
     @State private var projectId = ""
     @State private var idWasManuallyEdited = false
-    @State private var projectType: String = ""
     @FocusState private var nameFieldFocused: Bool
-    
+
     var isFirstProject: Bool = false
     var onProjectCreated: ((ProjectConfiguration) -> Void)?
-    
-    private var availableProjectTypes: [ProjectTypeDefinition] {
-        ProjectTypeManager.shared.allTypes
-    }
-    
+
     private var isFormValid: Bool {
         !projectName.isEmpty && !projectId.isEmpty && configManager.isIdAvailable(projectId)
     }
-    
+
     private var idValidationMessage: String? {
         guard !projectId.isEmpty else { return nil }
         if !configManager.isIdAvailable(projectId) {
@@ -32,7 +27,7 @@ struct CreateProjectSheet: View {
         }
         return nil
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -53,9 +48,9 @@ struct CreateProjectSheet: View {
                 }
             }
             .padding()
-            
+
             Divider()
-            
+
             // Form
             Form {
                 Section {
@@ -68,7 +63,7 @@ struct CreateProjectSheet: View {
                                 projectId = ConfigurationManager.slugFromName(projectName)
                             }
                         }
-                    
+
                     TextField("Project ID", text: $projectId)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: projectId) { oldValue, newValue in
@@ -77,7 +72,7 @@ struct CreateProjectSheet: View {
                                 idWasManuallyEdited = true
                             }
                         }
-                    
+
                     if let message = idValidationMessage {
                         Text(message)
                             .font(.caption)
@@ -87,20 +82,13 @@ struct CreateProjectSheet: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    
-                    Picker("Project Type", selection: $projectType) {
-                        ForEach(availableProjectTypes) { type in
-                            Label(type.displayName, systemImage: type.icon)
-                                .tag(type.id)
-                        }
-                    }
                 }
             }
             .formStyle(.grouped)
             .padding()
-            
+
             Divider()
-            
+
             // Actions
             HStack {
                 if !isFirstProject {
@@ -109,9 +97,9 @@ struct CreateProjectSheet: View {
                     }
                     .keyboardShortcut(.cancelAction)
                 }
-                
+
                 Spacer()
-                
+
                 Button(isFirstProject ? "Create Project" : "Add Project") {
                     createProject()
                 }
@@ -121,25 +109,20 @@ struct CreateProjectSheet: View {
             }
             .padding()
         }
-        .frame(width: 400, height: isFirstProject ? 420 : 340)
-        .onAppear {
-            // Set default project type to first available
-            if let firstType = availableProjectTypes.first {
-                projectType = firstType.id
-            }
-        }
+        .frame(width: 400, height: isFirstProject ? 380 : 300)
     }
-    
+
     private func createProject() {
         let project = configManager.createProject(
             id: projectId.trimmingCharacters(in: .whitespacesAndNewlines),
-            name: projectName.trimmingCharacters(in: .whitespacesAndNewlines),
-            projectType: projectType
+            name: projectName.trimmingCharacters(in: .whitespacesAndNewlines)
         )
-        
+
         // Switch to the new project
-        configManager.switchToProject(id: project.id)
-        
+        Task {
+            await configManager.switchToProject(id: project.id)
+        }
+
         onProjectCreated?(project)
         dismiss()
     }

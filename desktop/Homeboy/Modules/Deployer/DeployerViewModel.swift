@@ -69,13 +69,6 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
     @Published var components: [DeployableComponent] = ConfigurationManager.loadComponentsForProject(ConfigurationManager.readCurrentProject()).map { DeployableComponent(from: $0) }
     @Published var selectedComponents: Set<String> = []
 
-    // Component groupings (universal system)
-    @Published var groupedComponents: [(grouping: ItemGrouping, components: [DeployableComponent], isExpanded: Bool)] = []
-    @Published var ungroupedComponents: [DeployableComponent] = []
-    @Published var isUngroupedExpanded: Bool = true
-
-    private var currentGroupings: [ItemGrouping] = []
-
     // Version tracking - single source of truth from CLI
     @Published fileprivate var componentData: [String: CLIComponentResult] = [:]
 
@@ -92,7 +85,7 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
     @Published var hasSSHKey = false
     @Published var hasBasePath = false
     @Published var serverName: String? = nil
-    @Published var error: AppError?
+    @Published var error: (any DisplayableError)?
     @Published var showDeployAllConfirmation = false
     @Published var showBuildConfirmation = false
     @Published var componentsNeedingBuild: [DeployableComponent] = []
@@ -136,15 +129,13 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
                 refreshVersions()
             }
         case .projectModified(_, let fields):
-            // Check if components or groupings changed
-            if fields.contains(.components) || fields.contains(.componentGroupings) {
+            // Check if components changed
+            if fields.contains(.components) {
                 let project = ConfigurationManager.readCurrentProject()
                 let newComponents = ConfigurationManager.loadComponentsForProject(project).map { DeployableComponent(from: $0) }
                 if Set(newComponents.map(\.id)) != Set(components.map(\.id)) {
                     components = newComponents
                 }
-                currentGroupings = ConfigurationManager.readCurrentProject().componentGroupings
-                refreshGroupedComponents()
             }
             // Re-check credentials if server or basePath changed
             if fields.contains(.server) || fields.contains(.basePath) {
@@ -181,10 +172,6 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
 
         // Refresh component list from config
         components = ConfigurationManager.loadComponentsForProject(project).map { DeployableComponent(from: $0) }
-
-        // Load groupings from config
-        currentGroupings = project.componentGroupings
-        refreshGroupedComponents()
     }
     
     // MARK: - Version Management
@@ -252,7 +239,7 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
                 }
             } catch {
                 isLoading = false
-                self.error = AppError(error.localizedDescription, source: "Deployer")
+                self.error = error.toDisplayableError(source: "Deployer")
                 consoleOutput += "> Error: \(error.localizedDescription)\n"
             }
         }
@@ -520,7 +507,7 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
                     deploymentStatus[component.id] = .failed(error.localizedDescription)
                 }
 
-                self.error = AppError(error.localizedDescription, source: "Deployer")
+                self.error = error.toDisplayableError(source: "Deployer")
             }
 
             // Finalize
@@ -573,136 +560,5 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
         output += "========================================\n"
         
         return output
-    }
-    
-    // MARK: - Grouping Management
-    
-    /// Create a new grouping from component IDs
-    func createGrouping(name: String, fromComponentIds componentIds: [String]) {
-        let newGrouping = GroupingManager.createGrouping(
-            name: name,
-            fromIds: componentIds,
-            existingGroupings: currentGroupings
-        )
-        currentGroupings.append(newGrouping)
-        saveGroupings()
-        refreshGroupedComponents()
-    }
-    
-    /// Add components to an existing grouping
-    func addComponentsToGrouping(componentIds: [String], groupingId: String) {
-        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
-        currentGroupings[index] = GroupingManager.addMembers(componentIds, to: currentGroupings[index])
-        saveGroupings()
-        refreshGroupedComponents()
-    }
-    
-    /// Remove components from a grouping
-    func removeComponentsFromGrouping(componentIds: [String], groupingId: String) {
-        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
-        currentGroupings[index] = GroupingManager.removeMembers(componentIds, from: currentGroupings[index])
-        saveGroupings()
-        refreshGroupedComponents()
-    }
-    
-    /// Rename a grouping
-    func renameGrouping(groupingId: String, newName: String) {
-        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
-        currentGroupings[index].name = newName
-        saveGroupings()
-        refreshGroupedComponents()
-    }
-    
-    /// Delete a grouping (components become ungrouped)
-    func deleteGrouping(groupingId: String) {
-        currentGroupings = GroupingManager.deleteGrouping(id: groupingId, from: currentGroupings)
-        saveGroupings()
-        refreshGroupedComponents()
-    }
-    
-    /// Move a grouping up in the list
-    func moveGroupingUp(groupingId: String) {
-        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
-        guard let index = sorted.firstIndex(where: { $0.id == groupingId }),
-              index > 0 else { return }
-        currentGroupings = GroupingManager.moveGrouping(in: currentGroupings, fromIndex: index, toIndex: index - 1)
-        saveGroupings()
-        refreshGroupedComponents()
-    }
-    
-    /// Move a grouping down in the list
-    func moveGroupingDown(groupingId: String) {
-        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
-        guard let index = sorted.firstIndex(where: { $0.id == groupingId }),
-              index < sorted.count - 1 else { return }
-        currentGroupings = GroupingManager.moveGrouping(in: currentGroupings, fromIndex: index, toIndex: index + 1)
-        saveGroupings()
-        refreshGroupedComponents()
-    }
-    
-    /// Check if a grouping can be moved up
-    func canMoveGroupingUp(groupingId: String) -> Bool {
-        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
-        guard let index = sorted.firstIndex(where: { $0.id == groupingId }) else { return false }
-        return index > 0
-    }
-    
-    /// Check if a grouping can be moved down
-    func canMoveGroupingDown(groupingId: String) -> Bool {
-        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
-        guard let index = sorted.firstIndex(where: { $0.id == groupingId }) else { return false }
-        return index < sorted.count - 1
-    }
-    
-    /// Toggle expansion state for a grouping
-    func toggleGroupExpansion(groupingId: String) {
-        guard let index = groupedComponents.firstIndex(where: { $0.grouping.id == groupingId }) else { return }
-        groupedComponents[index].isExpanded.toggle()
-    }
-    
-    /// Toggle expansion state for ungrouped section
-    func toggleUngroupedExpansion() {
-        isUngroupedExpanded.toggle()
-    }
-    
-    /// Find which grouping a component belongs to (by explicit membership)
-    func groupingForComponent(_ componentId: String) -> ItemGrouping? {
-        currentGroupings.first { $0.memberIds.contains(componentId) }
-    }
-    
-    /// Check if a component is in a group by explicit membership
-    func isComponentInGroupByMembership(_ componentId: String) -> Bool {
-        currentGroupings.contains { $0.memberIds.contains(componentId) }
-    }
-    
-    /// Get all available groupings for adding components
-    var availableGroupings: [ItemGrouping] {
-        currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
-    }
-    
-    // MARK: - Private Helpers
-    
-    private func saveGroupings() {
-        let groupings = currentGroupings
-        ConfigurationManager.shared.updateActiveProject { project in
-            project.componentGroupings = groupings
-        }
-    }
-    
-    private func refreshGroupedComponents() {
-        let result = GroupingManager.categorize(
-            items: components,
-            groupings: currentGroupings,
-            idExtractor: { $0.id }
-        )
-        
-        // Preserve expansion state where possible
-        let oldExpansionState = Dictionary(uniqueKeysWithValues: groupedComponents.map { ($0.grouping.id, $0.isExpanded) })
-        
-        groupedComponents = result.grouped.map { (grouping, items) in
-            let wasExpanded = oldExpansionState[grouping.id] ?? true
-            return (grouping: grouping, components: items, isExpanded: wasExpanded)
-        }
-        ungroupedComponents = result.ungrouped
     }
 }

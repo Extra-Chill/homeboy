@@ -4,6 +4,8 @@ Homeboy Desktop shells out to the standalone `homeboy` CLI binary for most core 
 
 ## CLI installation / discovery
 
+The desktop app also uses a 30s default timeout for CLI commands (`CLIBridge.execute`, `CLIBridge.executeWithStdin`).
+
 The desktop app relies on a system-installed `homeboy` binary and checks these paths in order:
 
 - `/opt/homebrew/bin/homeboy` (Apple Silicon Homebrew)
@@ -16,57 +18,52 @@ Verify installation:
 homeboy --version
 ```
 
-CLI source: `../homeboy-core/` (Rust workspace; `crates/homeboy-cli` is the CLI binary).
+CLI source: `../homeboy/` (Rust workspace; the CLI implements the canonical command/output contracts used by the desktop app).
 
 ## Shared configuration
 
-Homeboy Desktop is macOS-only, but it interoperates with the CLI in the same on-disk config tree used by the CLI.
+Homeboy Desktop is macOS-only, but it interoperates with the CLI by reading/writing configuration in the same general filesystem area; the CLI’s canonical config root is `dirs::config_dir()/homeboy`.
 
-Canonical config path rules live in the CLI docs: [`homeboy-core/docs/index.md`](../../homeboy-core/docs/index.md).
+Canonical config path rules live in the CLI docs: [`homeboy/docs/index.md`](../../homeboy/docs/index.md).
 
-macOS config location:
+macOS filesystem locations:
+
+- **Desktop config root** (current implementation): `~/Library/Application Support/Homeboy/` (see `Homeboy/Core/Config/AppPaths.swift`)
+
+The desktop config tree:
 
 ```
-~/Library/Application Support/homeboy/
+~/Library/Application Support/Homeboy/
 ├── projects/             # Project configurations
 ├── servers/              # SSH server configurations
 ├── components/           # Component definitions
 ├── modules/              # Installed modules
 ├── keys/                 # SSH keys (per server)
-├── backups/              # Backup files
-└── docs/                 # Reserved (not currently written by the CLI for docs topics)
+├── project-types/        # Project type definitions
+├── playwright-browsers/  # Playwright downloads (module runtime)
+├── venv/                 # Shared python venv (if used)
+└── backups/              # Backup files
 ```
 
-Projects and servers are editable via Homeboy.app or via the CLI.
+Projects and servers are editable via Homeboy.app.
 
+The CLI has its own cross-platform config root (documented in `homeboy/docs/index.md`); don’t assume it shares the exact same on-disk layout as the desktop app.
 ## CLI reference
 
 This document avoids duplicating CLI command docs.
 
-- Canonical CLI reference: `homeboy docs`
-- Markdown sources embedded into the CLI: [`homeboy-core/docs/`](../../homeboy-core/docs/index.md)
+Use the CLI as the source of truth:
+- `homeboy docs`
+- `homeboy docs <topic>`
+- Markdown sources embedded into the CLI: [`homeboy/docs/`](../../homeboy/docs/index.md)
 
 ### Desktop ↔ CLI responsibilities
 
-- The desktop app reads/writes configuration JSON under `~/Library/Application Support/homeboy/`.
+- The desktop app reads/writes configuration JSON under `~/Library/Application Support/Homeboy/` (see `AppPaths` and `ConfigurationObserver`).
 - The desktop app executes the CLI via `CLIBridge` and expects JSON output for most operations.
-- The CLI can also manage config directly; the app should react via its directory watchers.
+- The UI reacts to on-disk changes via `ConfigurationObserver` and publishes `ConfigurationChangeType` events.
 
-### Common CLI entrypoints
-
-(See `homeboy docs <topic>` for canonical flags, schemas, and JSON output.)
-
-```bash
-homeboy docs
-homeboy project list
-homeboy project show <projectId>
-homeboy server list
-homeboy deploy <projectId>
-homeboy ssh <projectId>
-homeboy db <projectId> tables
-homeboy logs list <projectId>
-homeboy file list <projectId>
-```
+If you edit config via CLI/scripts, verify the desktop app is pointed at the same paths; `AppPaths` is the desktop single source of truth.
 ### Config editing notes
 
 The desktop app’s Settings UI is the intended way to create and edit projects/servers.
@@ -79,91 +76,22 @@ The desktop app expects servers to be editable in Settings, and uses the CLI for
 
 For canonical server command docs and JSON output, run `homeboy docs server`.
 
-### wp
+### wp / pm2 / db / deploy / ssh / logs / file / module
 
-The desktop app shells out to the CLI for WordPress operations (WP-CLI) when needed.
+These areas are implemented by the CLI and surfaced by the desktop app via `CLIBridge`.
 
-For canonical usage, subtarget rules, and JSON output, run `homeboy docs wp`.
-
-### pm2
-
-For canonical PM2 usage, run `homeboy docs pm2`.
-
-### db
-
-The desktop app’s Database Browser uses the CLI for table listing, schema descriptions, and query execution.
-
-For canonical usage, safety rules (`query` vs destructive subcommands), and JSON output, run `homeboy docs db`.
-
-### deploy
-
-The desktop app uses `homeboy deploy` for component deployments.
-
-This document does not restate deploy flags or JSON shapes; the canonical reference is:
-
-- `homeboy docs commands/deploy`
-- [`homeboy-core/docs/commands/deploy.md`](../../homeboy-core/docs/commands/deploy.md)
-
-Note: deploy output is JSON-wrapped like other commands; there is no extra `--json` flag. Building artifacts is a separate concern (`homeboy build`).
-
-### ssh
-
-The desktop app uses the CLI for SSH connectivity checks and project-scoped remote operations.
-
-For canonical behavior (project vs server resolution) and JSON output, run `homeboy docs ssh`.
-
-### git
-
-For canonical git helper usage, run `homeboy docs git`.
-
-### version
-
-For canonical version management usage, run `homeboy docs version`.
-
-### module
-
-For canonical module CLI usage, run `homeboy docs module`.
-
-## Subtarget Support
-
-Some CLI commands accept an optional subtarget identifier (used for things like WordPress multisite and Node environments).
-
-For canonical subtarget resolution rules and examples, run `homeboy docs project` and `homeboy docs wp`/`homeboy docs pm2`.
-
-### component
-
-For canonical component configuration commands, run `homeboy docs component`.
-
-### logs
-
-For canonical remote log tooling, run `homeboy docs logs`.
-
-### file
-
-For canonical remote file tooling, run `homeboy docs file`.
-
-### pin
-
-Pin management lives under `homeboy project pin ...`.
-
-For canonical pin docs, run `homeboy docs commands/project` and see the `project pin` section.
-### docs
-
-For the full CLI reference, run `homeboy docs`.
+For canonical flags, output schemas, safety rules, and subtarget behavior, use `homeboy docs` / `homeboy docs <topic>`.
 
 ## Exit codes
 
 The desktop app relies on the CLI's mapped exit codes.
 
 Canonical mapping and error-code groups live in:
-- [`homeboy-core/docs/json-output/json-output-contract.md`](../../homeboy-core/docs/json-output/json-output-contract.md#exit-codes)
+- [`homeboy/docs/json-output/json-output-contract.md`](../../homeboy/docs/json-output/json-output-contract.md#exit-codes)
 
-## Error Messages
+## Error reporting
 
-| Error | Notes |
-|-------|-------|
-| Project not found | Create the project (CLI) or configure it in the desktop app |
-| Server not configured | Link a server on the project configuration |
-| SSH key not found | Generate an SSH key for the server in the desktop app |
-| Cannot delete active project | Switch active project, then delete |
-| Module not found | List installed modules and verify the module ID |
+The desktop app surfaces CLI failures as `AppError` instances (see [ERROR-HANDLING](ERROR-HANDLING.md)).
+
+Canonical error codes/messages and exit code mapping live in the CLI docs:
+- [`homeboy/docs/json-output/json-output-contract.md#exit-codes`](../../homeboy/docs/json-output/json-output-contract.md#exit-codes)

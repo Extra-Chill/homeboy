@@ -14,7 +14,7 @@ class RemoteFileBrowser: ObservableObject {
     @Published var currentPath: String = ""
     @Published var entries: [RemoteFileEntry] = []
     @Published var isLoading: Bool = false
-    @Published var error: AppError?
+    @Published var error: (any DisplayableError)?
     @Published var pathHistory: [String] = []
     @Published var selectedEntries: Set<String> = []
 
@@ -77,7 +77,7 @@ class RemoteFileBrowser: ObservableObject {
                 pathHistory.append(path)
             }
         } catch {
-            self.error = AppError(error.localizedDescription, source: "Remote File Browser", path: path)
+            self.error = error.toDisplayableError(source: "Remote File Browser", path: path)
         }
 
         isLoading = false

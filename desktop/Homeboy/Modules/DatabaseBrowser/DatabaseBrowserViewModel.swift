@@ -13,10 +13,8 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
 
     @Published var connectionStatus: DatabaseConnectionStatus = .disconnected
 
-    // Table groupings (universal system)
-    @Published var groupedTables: [(grouping: ItemGrouping, tables: [DatabaseTable], isExpanded: Bool)] = []
-    @Published var ungroupedTables: [DatabaseTable] = []
-    @Published var isUngroupedExpanded: Bool = true
+    // Tables (flat list)
+    @Published var tables: [DatabaseTable] = []
 
     // Selected table
     @Published var selectedTable: DatabaseTable?
@@ -38,13 +36,13 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     @Published var customQueryColumns: [DatabaseColumn] = []
     @Published var customQueryRows: [TableRow] = []
     @Published var selectedQueryRows: Set<Int> = []
-    @Published var customQueryError: String? = nil
+    @Published var customQueryError: (any DisplayableError)?
     @Published var isRunningCustomQuery: Bool = false
     @Published var customQueryRowCount: Int = 0
     @Published var hasExecutedQuery: Bool = false
 
     // Error handling
-    @Published var errorMessage: AppError?
+    @Published var errorMessage: (any DisplayableError)?
 
     // Row deletion
     @Published var pendingRowDeletion: PendingRowDeletion? = nil
@@ -58,23 +56,13 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     @Published var tableDeletionConfirmText: String = ""
     @Published var isDeletingTable: Bool = false
 
-    // Regenerate groupings confirmation
-    @Published var showRegenerateGroupingsConfirm: Bool = false
-
-    // Multi-selection for bulk operations
-    @Published var selectedTableNames: Set<String> = []
-
     // MARK: - CLI Bridge
- 
+
     private let cli = HomeboyCLI.shared
- 
+
     private var projectId: String {
         ConfigurationManager.shared.safeActiveProject.id
     }
-
-    // MARK: - Private State
-
-    private var currentGroupings: [ItemGrouping] = []
 
     // MARK: - Initialization
 
@@ -87,15 +75,7 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     func handleConfigChange(_ change: ConfigurationChangeType) {
         switch change {
         case .projectWillSwitch:
-            // Reset state on project switch
             disconnect()
-        case .projectModified(_, let fields):
-            // Only reload groupings if tableGroupings changed
-            if fields.contains(.tableGroupings) {
-                let project = ConfigurationManager.readCurrentProject()
-                currentGroupings = project.tableGroupings
-                refreshGroupedTables()
-            }
         default:
             break
         }
@@ -129,7 +109,7 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     }
 
     var totalTableCount: Int {
-        groupedTables.reduce(0) { $0 + $1.tables.count } + ungroupedTables.count
+        tables.count
     }
 
     var canConfirmRowDeletion: Bool {
@@ -139,11 +119,6 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     var canConfirmTableDeletion: Bool {
         guard let pending = pendingTableDeletion else { return false }
         return tableDeletionConfirmText == pending.table.name
-    }
-
-    func isTableProtected(_ table: DatabaseTable) -> Bool {
-        let project = ConfigurationManager.readCurrentProject()
-        return TableProtectionManager.isProtected(tableName: table.name, config: project)
     }
 
     // MARK: - Connection Methods
@@ -175,23 +150,7 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
             let describe = try await cli.dbDescribe(projectId: projectId, table: nil)
 
             if describe.success == true, let stdout = describe.stdout {
-                let allTables = parseTables(from: stdout)
-
-                currentGroupings = ConfigurationManager.readCurrentProject().tableGroupings
-
-                let grouped = currentGroupings.map { grouping in
-                    let groupingTables = allTables.filter { table in
-                        grouping.memberIds.contains(table.name)
-                    }
-                    return (grouping: grouping, tables: groupingTables, isExpanded: false)
-                }
-
-                let ungrouped = allTables.filter { table in
-                    !currentGroupings.contains(where: { $0.memberIds.contains(table.name) })
-                }
-
-                groupedTables = grouped
-                ungroupedTables = ungrouped
+                tables = parseTables(from: stdout)
             } else {
                 errorMessage = AppError("Failed to fetch tables: \(describe.stderr ?? "")", source: "Database Browser")
             }
@@ -398,16 +357,6 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         hasExecutedQuery = false
     }
 
-    func toggleGroupExpansion(groupingId: String) {
-        if let index = groupedTables.firstIndex(where: { $0.grouping.id == groupingId }) {
-            groupedTables[index].isExpanded.toggle()
-        }
-    }
-
-    func toggleUngroupedExpansion() {
-        isUngroupedExpanded.toggle()
-    }
-
     func requestRowDeletion(row: TableRow) {
         pendingRowDeletion = PendingRowDeletion(
             table: selectedTable?.name ?? "",
@@ -457,12 +406,12 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     func runCustomQuery() async {
         let query = customQueryText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            customQueryError = "Enter a query to run"
+            customQueryError = AppError("Enter a query to run", source: "Database Browser")
             return
         }
 
         guard cli.isInstalled else {
-            customQueryError = "Homeboy CLI is not installed"
+            customQueryError = AppError("Homeboy CLI is not installed", source: "Database Browser")
             return
         }
 
@@ -484,21 +433,19 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
                 customQueryRows = parseRows(from: stdout, columns: customQueryColumns)
                 hasExecutedQuery = true
             } else {
-                customQueryError = result.stderr
+                customQueryError = AppError(result.stderr ?? "Query failed", source: "Database Browser")
             }
         } catch {
-            customQueryError = error.localizedDescription
+            customQueryError = error.toDisplayableError(source: "Database Browser")
         }
     }
     
     // MARK: - Table Deletion
-    
+
     func requestTableDeletion(_ table: DatabaseTable) {
-        let isProtected = isTableProtected(table)
-        
         pendingTableDeletion = PendingTableDeletion(
             table: table,
-            isProtected: isProtected
+            isProtected: false
         )
         tableDeletionConfirmText = ""
         showTableDeletionConfirm = true
@@ -588,147 +535,6 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         
         return output
     }
-    
-    // MARK: - Grouping Management
-    
-    /// Create a new grouping from table names
-    func createGrouping(name: String, fromTableNames tableNames: [String]) {
-        let newGrouping = GroupingManager.createGrouping(
-            name: name,
-            fromIds: tableNames,
-            existingGroupings: currentGroupings
-        )
-        currentGroupings.append(newGrouping)
-        saveGroupings()
-        refreshGroupedTables()
-    }
-    
-    /// Add tables to an existing grouping
-    func addTablesToGrouping(tableNames: [String], groupingId: String) {
-        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
-        currentGroupings[index] = GroupingManager.addMembers(tableNames, to: currentGroupings[index])
-        saveGroupings()
-        refreshGroupedTables()
-    }
-    
-    /// Remove tables from a grouping
-    func removeTablesFromGrouping(tableNames: [String], groupingId: String) {
-        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
-        currentGroupings[index] = GroupingManager.removeMembers(tableNames, from: currentGroupings[index])
-        saveGroupings()
-        refreshGroupedTables()
-    }
-    
-    /// Rename a grouping
-    func renameGrouping(groupingId: String, newName: String) {
-        guard let index = currentGroupings.firstIndex(where: { $0.id == groupingId }) else { return }
-        currentGroupings[index].name = newName
-        saveGroupings()
-        refreshGroupedTables()
-    }
-    
-    /// Delete a grouping (tables become ungrouped)
-    func deleteGrouping(groupingId: String) {
-        currentGroupings = GroupingManager.deleteGrouping(id: groupingId, from: currentGroupings)
-        saveGroupings()
-        refreshGroupedTables()
-    }
-    
-    /// Move a grouping up in the list
-    func moveGroupingUp(groupingId: String) {
-        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
-        guard let index = sorted.firstIndex(where: { $0.id == groupingId }),
-              index > 0 else { return }
-        currentGroupings = GroupingManager.moveGrouping(in: currentGroupings, fromIndex: index, toIndex: index - 1)
-        saveGroupings()
-        refreshGroupedTables()
-    }
-    
-    /// Move a grouping down in the list
-    func moveGroupingDown(groupingId: String) {
-        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
-        guard let index = sorted.firstIndex(where: { $0.id == groupingId }),
-              index < sorted.count - 1 else { return }
-        currentGroupings = GroupingManager.moveGrouping(in: currentGroupings, fromIndex: index, toIndex: index + 1)
-        saveGroupings()
-        refreshGroupedTables()
-    }
-    
-    /// Check if a grouping can be moved up
-    func canMoveGroupingUp(groupingId: String) -> Bool {
-        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
-        guard let index = sorted.firstIndex(where: { $0.id == groupingId }) else { return false }
-        return index > 0
-    }
-    
-    /// Check if a grouping can be moved down
-    func canMoveGroupingDown(groupingId: String) -> Bool {
-        let sorted = currentGroupings.sorted { $0.sortOrder < $1.sortOrder }
-        guard let index = sorted.firstIndex(where: { $0.id == groupingId }) else { return false }
-        return index < sorted.count - 1
-    }
-    
-    /// Find which grouping a table belongs to (by explicit membership)
-    func groupingForTable(_ tableName: String) -> ItemGrouping? {
-        currentGroupings.first { $0.memberIds.contains(tableName) }
-    }
-    
-    /// Check if a table is in a group by explicit membership (not pattern)
-    func isTableInGroupByMembership(_ tableName: String) -> Bool {
-        currentGroupings.contains { $0.memberIds.contains(tableName) }
-    }
-
-    // MARK: - Regenerate Default Groupings
-
-    /// Request regeneration of default groupings (shows confirmation)
-    func requestRegenerateDefaultGroupings() {
-        showRegenerateGroupingsConfirm = true
-    }
-
-    /// Regenerate default groupings from project type definition (after confirmation)
-    func confirmRegenerateDefaultGroupings() {
-        let project = ConfigurationManager.readCurrentProject()
-        let groupings = SchemaResolver.resolveDefaultGroupings(for: project)
-        currentGroupings = groupings
-        saveGroupings()
-        refreshGroupedTables()
-        showRegenerateGroupingsConfirm = false
-    }
-
-    /// Cancel regenerate groupings confirmation
-    func cancelRegenerateDefaultGroupings() {
-        showRegenerateGroupingsConfirm = false
-    }
-
-    // MARK: - Multi-Selection Management
-
-    /// Toggle a table's selection state for bulk operations
-    func toggleTableSelection(_ tableName: String) {
-        if selectedTableNames.contains(tableName) {
-            selectedTableNames.remove(tableName)
-        } else {
-            selectedTableNames.insert(tableName)
-        }
-    }
-
-    /// Clear all table selections
-    func clearTableSelection() {
-        selectedTableNames.removeAll()
-    }
-
-    /// Select all tables in a specific group
-    func selectAllTablesInGroup(groupingId: String) {
-        if let group = groupedTables.first(where: { $0.grouping.id == groupingId }) {
-            for table in group.tables {
-                selectedTableNames.insert(table.name)
-            }
-        }
-    }
-
-    /// Select all ungrouped tables
-    func selectAllUngroupedTables() {
-        selectedRows = []
-    }
 
     func retry() async {
         if let table = selectedTable {
@@ -736,102 +542,12 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
         }
     }
 
-     func disconnect() {
+    func disconnect() {
         connectionStatus = .disconnected
         selectedTable = nil
         columns = []
         rows = []
         customQueryRows = []
-    }
-
-    /// Add all selected tables to a grouping
-    func addSelectedTablesToGrouping(groupingId: String) {
-        guard !selectedTableNames.isEmpty else { return }
-        addTablesToGrouping(tableNames: Array(selectedTableNames), groupingId: groupingId)
-        selectedTableNames.removeAll()
-    }
-
-    /// Protect all selected tables
-    func protectSelectedTables() {
-        let tablesToProtect = selectedTableNames
-        ConfigurationManager.shared.updateActiveProject { project in
-            for tableName in tablesToProtect {
-                TableProtectionManager.protect(tableName: tableName, in: &project)
-            }
-        }
-        selectedTableNames.removeAll()
-    }
-
-    /// Unprotect all selected tables
-    func unprotectSelectedTables() {
-        let tablesToUnprotect = selectedTableNames
-        ConfigurationManager.shared.updateActiveProject { project in
-            for tableName in tablesToUnprotect {
-                TableProtectionManager.unprotect(tableName: tableName, in: &project)
-            }
-        }
-        selectedTableNames.removeAll()
-    }
-    
-    // MARK: - Table Protection Management
-
-    /// Protect a table from deletion
-    func protectTable(_ tableName: String) {
-        ConfigurationManager.shared.updateActiveProject { project in
-            TableProtectionManager.protect(tableName: tableName, in: &project)
-        }
-    }
-
-    /// Remove protection from a table
-    func unprotectTable(_ tableName: String) {
-        ConfigurationManager.shared.updateActiveProject { project in
-            TableProtectionManager.unprotect(tableName: tableName, in: &project)
-        }
-    }
-
-    /// Unlock a core protected table (allows deletion)
-    func unlockTable(_ tableName: String) {
-        ConfigurationManager.shared.updateActiveProject { project in
-            TableProtectionManager.unlock(tableName: tableName, in: &project)
-        }
-    }
-    
-    /// Check if a table is a core protected table
-    func isCoreProtectedTable(_ tableName: String) -> Bool {
-        let project = ConfigurationManager.readCurrentProject()
-        return TableProtectionManager.isCoreProtected(tableName: tableName, config: project)
-    }
-    
-    /// Check if a table has been unlocked
-    func isTableUnlocked(_ tableName: String) -> Bool {
-        let project = ConfigurationManager.readCurrentProject()
-        return TableProtectionManager.isUnlocked(tableName: tableName, config: project)
-    }
-    
-    // MARK: - Private Helpers
-    
-    private func saveGroupings() {
-        let groupings = currentGroupings
-        ConfigurationManager.shared.updateActiveProject { project in
-            project.tableGroupings = groupings
-        }
-    }
-    
-    private func refreshGroupedTables() {
-        let allTables = groupedTables.flatMap { $0.tables } + ungroupedTables
-        let result = GroupingManager.categorize(
-            items: allTables,
-            groupings: currentGroupings,
-            idExtractor: { $0.name }
-        )
-        
-        // Preserve expansion state where possible
-        let oldExpansionState = Dictionary(uniqueKeysWithValues: groupedTables.map { ($0.grouping.id, $0.isExpanded) })
-        
-        groupedTables = result.grouped.map { (grouping, items) in
-            let wasExpanded = oldExpansionState[grouping.id] ?? false
-            return (grouping: grouping, tables: items, isExpanded: wasExpanded)
-        }
-        ungroupedTables = result.ungrouped
+        tables = []
     }
 }

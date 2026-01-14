@@ -24,7 +24,7 @@ struct FileBrowserSidebarView: View {
     @State private var newItemName = ""
     @State private var entryToRename: RemoteFileEntry?
     @State private var entryToDelete: RemoteFileEntry?
-    @State private var operationError: AppError?
+    @State private var operationError: (any DisplayableError)?
     @State private var sortDescriptor: DataTableSortDescriptor<RemoteFileEntry>?
     
     init(
@@ -323,7 +323,7 @@ struct FileBrowserSidebarView: View {
     
     // MARK: - Error / Loading States
     
-    private func errorSection(_ error: AppError) -> some View {
+    private func errorSection(_ error: any DisplayableError) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.title)
@@ -450,35 +450,35 @@ struct FileBrowserSidebarView: View {
             let path = try await browser.createFile(named: name)
             onFileSelected(path)
         } catch {
-            operationError = AppError("Failed to create file: \(error.localizedDescription)", source: "File Browser")
+            operationError = error.toDisplayableError(source: "File Browser")
         }
     }
-    
+
     private func createFolder(named name: String) async {
         do {
             _ = try await browser.createDirectory(named: name)
         } catch {
-            operationError = AppError("Failed to create folder: \(error.localizedDescription)", source: "File Browser")
+            operationError = error.toDisplayableError(source: "File Browser")
         }
     }
-    
+
     private func renameEntry(_ entry: RemoteFileEntry, to newName: String) async {
         let oldPath = entry.path
         do {
             let newPath = try await browser.renameEntry(entry, newName: newName)
             onFileRenamed?(oldPath, newPath)
         } catch {
-            operationError = AppError("Failed to rename: \(error.localizedDescription)", source: "File Browser")
+            operationError = error.toDisplayableError(source: "File Browser")
         }
     }
-    
+
     private func deleteEntry(_ entry: RemoteFileEntry) async {
         let path = entry.path
         do {
             try await browser.deleteEntry(entry)
             onFileDeleted?(path)
         } catch {
-            operationError = AppError("Failed to delete: \(error.localizedDescription)", source: "File Browser")
+            operationError = error.toDisplayableError(source: "File Browser")
         }
     }
 }

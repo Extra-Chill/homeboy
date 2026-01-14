@@ -310,12 +310,6 @@ final class ConfigurationObserver: ObservableObject {
         if oldConfig.subTargets != newConfig.subTargets {
             fields.insert(.subTargets)
         }
-        if !isEqual(oldConfig.tableGroupings, newConfig.tableGroupings) {
-            fields.insert(.tableGroupings)
-        }
-        if !isEqual(oldConfig.componentGroupings, newConfig.componentGroupings) {
-            fields.insert(.componentGroupings)
-        }
         if oldConfig.remoteFiles != newConfig.remoteFiles {
             fields.insert(.remoteFiles)
         }

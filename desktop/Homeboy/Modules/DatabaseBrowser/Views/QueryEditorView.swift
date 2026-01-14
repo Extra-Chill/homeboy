@@ -213,8 +213,8 @@ struct QueryEditorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
-    private func errorView(_ error: String) -> some View {
-        ErrorView(error, source: "Query Editor")
+    private func errorView(_ error: any DisplayableError) -> some View {
+        ErrorView(error)
     }
 }
 

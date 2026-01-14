@@ -5,12 +5,12 @@ struct GeneralSettingsTab: View {
     @ObservedObject var config: ConfigurationManager
 
     @State private var editedName: String = ""
-    @State private var renameError: String?
+    @State private var renameError: (any DisplayableError)?
     @State private var isEditing: Bool = false
 
     @State private var cliVersionInfo: CLIVersionChecker.VersionInfo?
     @State private var isCheckingVersion: Bool = false
-    @State private var versionCheckError: AppError?
+    @State private var versionCheckError: (any DisplayableError)?
     @State private var isUpgrading: Bool = false
     @State private var upgradeOutput: String = ""
 
@@ -40,9 +40,7 @@ struct GeneralSettingsTab: View {
                 }
 
                 if let error = renameError {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundColor(.red)
+                    InlineErrorView(error)
                 }
 
                 TextField("Domain", text: Binding(
@@ -315,7 +313,7 @@ struct GeneralSettingsTab: View {
             isEditing = false
             renameError = nil
         case .failure(let error):
-            renameError = error.localizedDescription
+            renameError = error.toDisplayableError(source: "Project Rename")
         }
     }
 }

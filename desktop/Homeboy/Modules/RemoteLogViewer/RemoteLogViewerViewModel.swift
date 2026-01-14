@@ -58,7 +58,7 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
     @Published var openLogs: [OpenLog] = []
     @Published var selectedLogId: UUID?
     @Published var isLoading: Bool = false
-    @Published var error: AppError?
+    @Published var error: (any DisplayableError)?
     @Published var showClearConfirmation: Bool = false
 
     // MARK: - CLI Bridge
@@ -166,7 +166,7 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
                 }
             }
         } catch {
-            self.error = AppError(error.localizedDescription, source: "Log Viewer", path: log.displayName)
+            self.error = error.toDisplayableError(source: "Log Viewer", path: log.displayName)
         }
 
         isLoading = false
@@ -271,12 +271,12 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
             Task {
                 do {
                     // Remove old pin
-                    let removeArgs = ["pin", "remove", projectId, log.path, "--type", "log"]
+                    let removeArgs = ["project", "pin", "remove", projectId, log.path, "--type", "log"]
                     let removeResponse = try await cli.execute(removeArgs, timeout: 30)
 
                     if removeResponse.success {
                         // Re-add with new tail lines
-                        let addArgs = ["pin", "add", projectId, log.path, "--type", "log", "--tail", String(lines)]
+                        let addArgs = ["project", "pin", "add", projectId, log.path, "--type", "log", "--tail", String(lines)]
                         let addResponse = try await cli.execute(addArgs, timeout: 30)
 
                         if !addResponse.success {
@@ -317,8 +317,8 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
 
         Task {
             do {
-                // homeboy pin add <project> <path> --type log --tail <lines> --json
-                let args = ["pin", "add", projectId, log.path, "--type", "log", "--tail", String(log.tailLines)]
+                // homeboy project pin add <project> <path> --type log --tail <lines> --json
+                let args = ["project", "pin", "add", projectId, log.path, "--type", "log", "--tail", String(log.tailLines)]
                 let response = try await cli.execute(args, timeout: 30)
 
                 if response.success {
@@ -344,8 +344,8 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
 
         Task {
             do {
-                // homeboy pin remove <project> <path> --type log --json
-                let args = ["pin", "remove", projectId, log.path, "--type", "log"]
+                // homeboy project pin remove <project> <path> --type log --json
+                let args = ["project", "pin", "remove", projectId, log.path, "--type", "log"]
                 let response = try await cli.execute(args, timeout: 30)
 
                 if response.success {

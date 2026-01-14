@@ -31,7 +31,7 @@ struct ModulesSettingsTab: View {
                 }
                 
                 Button {
-                    moduleManager.loadModules()
+                    Task { await moduleManager.loadModules() }
                 } label: {
                     Label("Refresh Modules", systemImage: "arrow.clockwise")
                 }
@@ -39,14 +39,14 @@ struct ModulesSettingsTab: View {
             
             Section("Module Directory") {
                 HStack {
-                    Text(moduleManager.modulesDirectory.path)
+                    Text(AppPaths.modules.path)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.secondary)
-                    
+
                     Spacer()
-                    
+
                     Button {
-                        NSWorkspace.shared.open(moduleManager.modulesDirectory)
+                        NSWorkspace.shared.open(AppPaths.modules)
                     } label: {
                         Image(systemName: "folder")
                     }
@@ -66,7 +66,7 @@ struct ModulesSettingsTab: View {
         ) {
             Button("Uninstall", role: .destructive) {
                 if let module = selectedModuleForUninstall {
-                    _ = moduleManager.uninstallModule(moduleId: module.id)
+                    Task { try? await moduleManager.uninstallModule(moduleId: module.id) }
                 }
                 selectedModuleForUninstall = nil
             }

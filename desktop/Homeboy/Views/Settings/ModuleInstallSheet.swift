@@ -6,7 +6,7 @@ struct ModuleInstallSheet: View {
     
     @State private var selectedPath: URL?
     @State private var isInstalling = false
-    @State private var error: AppError?
+    @State private var error: (any DisplayableError)?
     @State private var success = false
     
     var body: some View {
@@ -117,24 +117,27 @@ struct ModuleInstallSheet: View {
     
     private func installModule() {
         guard let path = selectedPath else { return }
-        
+
         isInstalling = true
         error = nil
         success = false
-        
-        let result = moduleManager.installModule(from: path)
-        
-        switch result {
-        case .success:
-            success = true
-            // Auto-dismiss after brief delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                dismiss()
+
+        Task {
+            do {
+                try await moduleManager.installModule(from: path.path)
+                await MainActor.run {
+                    success = true
+                    isInstalling = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        dismiss()
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = error.toDisplayableError(source: "Module Installer")
+                    isInstalling = false
+                }
             }
-        case .failure(let err):
-            error = AppError(err.localizedDescription, source: "Module Installer")
         }
-        
-        isInstalling = false
     }
 }

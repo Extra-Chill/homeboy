@@ -38,10 +38,25 @@ struct CLIBridgeResult<T: Decodable>: Decodable {
     let error: CLIBridgeErrorDetail?
 }
 
-/// Error detail from CLI response
-struct CLIBridgeErrorDetail: Decodable {
+/// Error detail from CLI response matching the full CLI JSON contract
+struct CLIBridgeErrorDetail: Decodable, Sendable {
     let code: String
     let message: String
+    let details: [String: JSONValue]?
+    let hints: [CLIHint]?
+    let retryable: Bool?
+
+    /// Convert to a CLIError with source context for UI display
+    func toCLIError(source: String) -> CLIError {
+        CLIError(
+            code: code,
+            message: message,
+            details: details ?? [:],
+            hints: hints ?? [],
+            retryable: retryable,
+            source: source
+        )
+    }
 }
 
 /// Errors that can occur during CLI bridge operations
@@ -50,6 +65,7 @@ enum CLIBridgeError: LocalizedError {
     case executionFailed(exitCode: Int32, message: String)
     case invalidResponse(String)
     case timeout
+    case cliError(CLIError)
 
     var errorDescription: String? {
         switch self {
@@ -61,7 +77,17 @@ enum CLIBridgeError: LocalizedError {
             return "Invalid CLI response: \(reason)"
         case .timeout:
             return "CLI command timed out"
+        case .cliError(let error):
+            return error.message
         }
+    }
+
+    /// Extract the underlying CLIError if this is a structured CLI error
+    var cliError: CLIError? {
+        if case .cliError(let error) = self {
+            return error
+        }
+        return nil
     }
 }
 
@@ -306,7 +332,7 @@ actor CLIBridge {
                 if let stdinData = stdin.data(using: .utf8) {
                     stdinPipe.fileHandleForWriting.write(stdinData)
                 }
-                stdinPipe.fileHandleForWriting.closeFile()
+                try? stdinPipe.fileHandleForWriting.close()
             } catch {
                 timeoutWorkItem.cancel()
                 Task {
@@ -328,14 +354,25 @@ actor CLIBridge {
     }
 
     /// Executes a command expecting a standard CLIResponse structure
-    func executeCommand<T: Decodable>(_ args: [String], dataType: T.Type, timeout: TimeInterval = 30) async throws -> T {
+    /// - Parameters:
+    ///   - args: Arguments to pass to the CLI
+    ///   - dataType: Expected data type for successful response
+    ///   - source: Source identifier for error context (e.g., "Deployer", "Database Browser")
+    ///   - timeout: Maximum time to wait for the command to complete
+    func executeCommand<T: Decodable>(
+        _ args: [String],
+        dataType: T.Type,
+        source: String = "CLI",
+        timeout: TimeInterval = 30
+    ) async throws -> T {
         let response = try await execute(args, timeout: timeout)
         let result = try response.decodeResponse(dataType)
 
         guard result.success else {
-            let message = result.error?.message ?? "Unknown error"
-            let code = result.error?.code ?? "UNKNOWN"
-            throw CLIBridgeError.executionFailed(exitCode: 1, message: "[\(code)] \(message)")
+            if let errorDetail = result.error {
+                throw CLIBridgeError.cliError(errorDetail.toCLIError(source: source))
+            }
+            throw CLIBridgeError.executionFailed(exitCode: 1, message: "Unknown error")
         }
 
         guard let data = result.data else {

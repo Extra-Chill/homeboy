@@ -33,7 +33,7 @@ struct CLIErrorDetail: Decodable {
     let message: String
 }
 
-/// Response wrapper for module install/uninstall/link operations
+/// Response wrapper for module install/uninstall operations
 struct CLIModuleOperationResponse: Decodable {
     let success: Bool
     let data: CLIModuleOperationData?

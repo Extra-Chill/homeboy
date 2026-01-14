@@ -21,7 +21,8 @@ struct ServerEditSheet: View {
     @State private var isGeneratingKey = false
     @State private var isTestingConnection = false
     @State private var selectedConnectionTestProjectId: String = ""
-    @State private var connectionTestResult: (success: Bool, message: String)?
+    @State private var connectionTestSuccess: Bool?
+    @State private var connectionTestError: (any DisplayableError)?
     
     @State private var showDeleteConfirmation = false
     @State private var deleteConfirmText = ""
@@ -163,18 +164,16 @@ struct ServerEditSheet: View {
                          }
                      }
 
-                     if let result = connectionTestResult {
-                         if result.success {
-                             HStack {
-                                 Image(systemName: "checkmark.circle.fill")
-                                     .foregroundColor(.green)
-                                 Text(result.message)
-                                     .font(.caption)
-                                     .foregroundColor(.green)
-                             }
-                         } else {
-                             InlineErrorView(result.message, source: "SSH Connection Test")
+                     if connectionTestSuccess == true {
+                         HStack {
+                             Image(systemName: "checkmark.circle.fill")
+                                 .foregroundColor(.green)
+                             Text("Connection successful")
+                                 .font(.caption)
+                                 .foregroundColor(.green)
                          }
+                     } else if let error = connectionTestError {
+                         InlineErrorView(error)
                      }
                  }
                 
@@ -215,7 +214,8 @@ struct ServerEditSheet: View {
         .frame(width: 500, height: 600)
         .onAppear { loadExistingServer() }
         .onChange(of: selectedConnectionTestProjectId) { _, _ in
-            connectionTestResult = nil
+            connectionTestSuccess = nil
+            connectionTestError = nil
         }
         .alert("Delete Server", isPresented: $showDeleteConfirmation) {
             TextField("Type server name to confirm", text: $deleteConfirmText)
@@ -272,7 +272,8 @@ struct ServerEditSheet: View {
                 await refreshKeyStatusFromCLI()
             } catch {
                 isGeneratingKey = false
-                connectionTestResult = (false, "Key generation failed: \(error.localizedDescription)")
+                connectionTestSuccess = false
+                connectionTestError = error.toDisplayableError(source: "SSH Key Generation")
             }
         }
     }
@@ -286,7 +287,8 @@ struct ServerEditSheet: View {
                     publicKey = key
                 }
             } catch {
-                connectionTestResult = (false, error.localizedDescription)
+                connectionTestSuccess = false
+                connectionTestError = error.toDisplayableError(source: "SSH Key")
             }
         }
     }
@@ -315,11 +317,13 @@ struct ServerEditSheet: View {
     
     private func testConnection() {
         isTestingConnection = true
-        connectionTestResult = nil
+        connectionTestSuccess = nil
+        connectionTestError = nil
 
         guard !selectedConnectionTestProjectId.isEmpty else {
             isTestingConnection = false
-            connectionTestResult = (false, "Select a project to test the connection.")
+            connectionTestSuccess = false
+            connectionTestError = AppError("Select a project to test the connection.", source: "SSH Connection Test")
             return
         }
 
@@ -328,16 +332,19 @@ struct ServerEditSheet: View {
                 let response = try await HomeboyCLI.shared.sshCommand(projectId: selectedConnectionTestProjectId, command: "echo 'Connection successful'")
 
                 isTestingConnection = false
-                let output = response.output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
                 if response.exitCode == 0 {
-                    connectionTestResult = (true, output.isEmpty ? "Connection successful" : output)
+                    connectionTestSuccess = true
+                    connectionTestError = nil
                 } else {
-                    connectionTestResult = (false, output.isEmpty ? "SSH connection failed" : output)
+                    let output = response.output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                    connectionTestSuccess = false
+                    connectionTestError = AppError(output.isEmpty ? "SSH connection failed" : output, source: "SSH Connection Test")
                 }
             } catch {
                 isTestingConnection = false
-                connectionTestResult = (false, error.localizedDescription)
+                connectionTestSuccess = false
+                connectionTestError = error.toDisplayableError(source: "SSH Connection Test")
             }
         }
     }

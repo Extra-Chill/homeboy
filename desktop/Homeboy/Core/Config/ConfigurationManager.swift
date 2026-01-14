@@ -356,19 +356,44 @@ class ConfigurationManager: ObservableObject {
 
 
     // MARK: - Load Configuration
-    
-    private func load() {
-        refreshAvailableProjects()
 
-        if let firstId = availableProjectIds().first, let firstProject = loadProject(id: firstId) {
-            activeProject = firstProject
-            needsProjectCreation = false
-        } else {
-            activeProject = nil
+    private func load() {
+        // Synchronous initialization - just set up defaults
+        // Actual project loading happens via loadProjectsFromCLI() called from HomeboyApp
+        activeProject = nil
+        needsProjectCreation = true
+    }
+
+    // MARK: - CLI Integration
+
+    /// Load projects from CLI (primary data source)
+    /// Called from HomeboyApp.swift on startup
+    func loadProjectsFromCLI() async {
+        do {
+            let items = try await HomeboyCLI.shared.projectList()
+            availableProjects = items.map { ProjectConfiguration.fromListItem($0) }
+
+            // Load first project as active if none selected
+            if activeProject == nil, let first = items.first {
+                await loadProjectFromCLI(id: first.id)
+            }
+
+            needsProjectCreation = items.isEmpty
+        } catch {
+            print("[ConfigurationManager] CLI project list failed: \(error)")
             needsProjectCreation = true
         }
+    }
 
-        startWatchingActiveProject()
+    /// Load full project config from CLI
+    func loadProjectFromCLI(id: String) async {
+        do {
+            let record = try await HomeboyCLI.shared.projectShow(id: id)
+            activeProject = ProjectConfiguration(from: record)
+            startWatchingActiveProject()
+        } catch {
+            print("[ConfigurationManager] CLI project show failed: \(error)")
+        }
     }
     
     func saveProject(_ project: ProjectConfiguration) {
@@ -412,42 +437,21 @@ class ConfigurationManager: ObservableObject {
     }
     
     // MARK: - Load Project
-    
+
     func loadProject(id: String) -> ProjectConfiguration? {
         let projectPath = projectsDirectory.appendingPathComponent("\(id).json")
         guard fileManager.fileExists(atPath: projectPath.path) else {
             return nil
         }
-        
+
         do {
             let data = try Data(contentsOf: projectPath)
-            var project = try jsonDecoder.decode(ProjectConfiguration.self, from: data)
-            
-            // Migration: Generate default table groupings if empty
-            if project.tableGroupings.isEmpty {
-                project = migrateTableGroupings(project)
-                saveProject(project)
-            }
-            
+            let project = try jsonDecoder.decode(ProjectConfiguration.self, from: data)
             return project
         } catch {
             print("[ConfigurationManager] Failed to load project '\(id)': \(error)")
             return nil
         }
-    }
-    
-    /// Generates default table groupings for projects that don't have them.
-    /// Uses the project type's schema definition to resolve groupings.
-    private func migrateTableGroupings(_ project: ProjectConfiguration) -> ProjectConfiguration {
-        var updated = project
-        let groupings = SchemaResolver.resolveDefaultGroupings(for: project)
-        
-        if !groupings.isEmpty {
-            updated.tableGroupings = groupings
-            print("[ConfigurationManager] Generated \(groupings.count) table groupings for project '\(project.id)'")
-        }
-        
-        return updated
     }
     
     // MARK: - Project Management
@@ -464,28 +468,21 @@ class ConfigurationManager: ObservableObject {
         }
     }
     
-    func switchToProject(id: String) {
-        guard let project = loadProject(id: id) else {
-            print("[ConfigurationManager] Cannot switch to project '\(id)': not found")
-            return
-        }
-
+    func switchToProject(id: String) async {
         let oldId = activeProject?.id
 
         // Publish willSwitch via ConfigurationObserver
         ConfigurationObserver.shared.publish(.projectWillSwitch(from: oldId, to: id))
 
-        activeProject = project
-
-        startWatchingActiveProject()
+        await loadProjectFromCLI(id: id)
 
         // Publish didSwitch via ConfigurationObserver
         ConfigurationObserver.shared.publish(.projectDidSwitch(projectId: id))
     }
     
-    /// Creates a new project with the given ID, name, and type.
-    func createProject(id: String, name: String, projectType: String) -> ProjectConfiguration {
-        let project = ProjectConfiguration.empty(id: id, name: name, projectType: projectType)
+    /// Creates a new project with the given ID and name.
+    func createProject(id: String, name: String) -> ProjectConfiguration {
+        let project = ProjectConfiguration.empty(id: id, name: name)
         saveProject(project)
         needsProjectCreation = false
         return project

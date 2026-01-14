@@ -17,7 +17,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
     @Published var consoleOutput = ""
     @Published var results: [[String: AnyCodableValue]] = []
     @Published var selectedRows: Set<Int> = []
-    @Published var error: AppError?
+    @Published var error: (any DisplayableError)?
     @Published var actionResult: String?
     @Published var isPerformingAction = false
     
@@ -117,6 +117,27 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         }
     }
     
+    private func parseScriptOutput(from output: String) -> Result<ScriptOutput, Error> {
+        // Find JSON in output - modules may output non-JSON before the result
+        guard let jsonStart = output.lastIndex(of: "{"),
+              let jsonEnd = output.lastIndex(of: "}"),
+              jsonStart < jsonEnd else {
+            return .failure(NSError(domain: "ModuleViewModel", code: 1, userInfo: [NSLocalizedDescriptionKey: "No JSON output found"]))
+        }
+
+        let jsonString = String(output[jsonStart...jsonEnd])
+        guard let data = jsonString.data(using: .utf8) else {
+            return .failure(NSError(domain: "ModuleViewModel", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid UTF-8 in output"]))
+        }
+
+        do {
+            let scriptOutput = try JSONDecoder().decode(ScriptOutput.self, from: data)
+            return .success(scriptOutput)
+        } catch {
+            return .failure(error)
+        }
+    }
+
     private func handleRunResult(_ result: Result<ScriptOutput, Error>, module: LoadedModule) {
         isRunning = false
         
@@ -162,7 +183,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
                 try await ModuleManager.shared.setupModule(moduleId: module.id)
                 ModuleManager.shared.updateModuleState(moduleId: module.id, state: .ready)
             } catch {
-                self.error = AppError(error.localizedDescription, source: "Module: \(moduleId)")
+                self.error = error.toDisplayableError(source: "Module: \(moduleId)")
             }
 
             isSettingUp = false

@@ -6,7 +6,7 @@ class AuthManager: ObservableObject {
     @Published var user: User?
     @Published var isLoading = true
     @Published var isAuthenticated = false
-    @Published var error: AppError?
+    @Published var error: (any DisplayableError)?
     
     /// Returns true if API authentication is configured for the current project
     var isAuthConfigured: Bool {
@@ -63,7 +63,7 @@ class AuthManager: ObservableObject {
         } catch let apiError as APIError {
             self.error = AppError(apiError.message, source: "Authentication")
         } catch {
-            self.error = AppError(error.localizedDescription, source: "Authentication")
+            self.error = error.toDisplayableError(source: "Authentication")
         }
         
         isLoading = false

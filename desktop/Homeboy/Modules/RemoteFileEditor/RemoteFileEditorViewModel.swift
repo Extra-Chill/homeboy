@@ -71,7 +71,7 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
     @Published var selectedFileId: UUID?
     @Published var isLoading: Bool = false
     @Published var isSaving: Bool = false
-    @Published var error: AppError?
+    @Published var error: (any DisplayableError)?
 
     // Sidebar state (persisted per-module)
     @AppStorage("fileEditor.sidebarCollapsed") var sidebarCollapsed: Bool = false
@@ -187,7 +187,7 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
                 }
             }
         } catch {
-            self.error = AppError(error.localizedDescription, source: "File Editor", path: file.displayName)
+            self.error = error.toDisplayableError(source: "File Editor", path: file.displayName)
         }
 
         isLoading = false
@@ -312,8 +312,8 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
         Task {
             do {
-                // homeboy pin add <project> <path> --type file --json
-                let args = ["pin", "add", projectId, file.path, "--type", "file"]
+                // homeboy project pin add <project> <path> --type file --json
+                let args = ["project", "pin", "add", projectId, file.path, "--type", "file"]
                 let response = try await cli.execute(args, timeout: 30)
 
                 if response.success {
@@ -339,8 +339,8 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
         Task {
             do {
-                // homeboy pin remove <project> <path> --type file --json
-                let args = ["pin", "remove", projectId, file.path, "--type", "file"]
+                // homeboy project pin remove <project> <path> --type file --json
+                let args = ["project", "pin", "remove", projectId, file.path, "--type", "file"]
                 let response = try await cli.execute(args, timeout: 30)
 
                 if response.success {
@@ -427,12 +427,12 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
                 Task {
                     do {
                         // Remove old pin
-                        let removeArgs = ["pin", "remove", projectId, oldRelative, "--type", "file"]
+                        let removeArgs = ["project", "pin", "remove", projectId, oldRelative, "--type", "file"]
                         let removeResponse = try await cli.execute(removeArgs, timeout: 30)
 
                         if removeResponse.success {
                             // Add new pin
-                            let addArgs = ["pin", "add", projectId, newRelative, "--type", "file"]
+                            let addArgs = ["project", "pin", "add", projectId, newRelative, "--type", "file"]
                             _ = try await cli.execute(addArgs, timeout: 30)
                         }
                     } catch {

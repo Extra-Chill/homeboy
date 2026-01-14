@@ -20,12 +20,7 @@ struct ProjectSwitcherView: View {
     @State private var newProjectName = ""
     @State private var newProjectId = ""
     @State private var newProjectIdWasManuallyEdited = false
-    @State private var newProjectType: String = ""
     @FocusState private var newProjectNameFieldFocused: Bool
-
-    private var availableProjectTypes: [ProjectTypeDefinition] {
-        ProjectTypeManager.shared.allTypes
-    }
     
     private var isFormValid: Bool {
         !newProjectName.isEmpty && !newProjectId.isEmpty && configManager.isIdAvailable(newProjectId)
@@ -241,13 +236,6 @@ struct ProjectSwitcherView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    
-                    Picker("Project Type", selection: $newProjectType) {
-                        ForEach(availableProjectTypes) { type in
-                            Label(type.displayName, systemImage: type.icon)
-                                .tag(type.id)
-                        }
-                    }
                 }
             }
             .formStyle(.grouped)
@@ -294,7 +282,7 @@ struct ProjectSwitcherView: View {
     
     private func performProjectSwitch(_ projectId: String) {
         Task {
-            configManager.switchToProject(id: projectId)
+            await configManager.switchToProject(id: projectId)
             await authManager.resetForProjectSwitch()
         }
     }
@@ -302,22 +290,20 @@ struct ProjectSwitcherView: View {
     private func addProject() {
         let project = configManager.createProject(
             id: newProjectId.trimmingCharacters(in: .whitespacesAndNewlines),
-            name: newProjectName.trimmingCharacters(in: .whitespacesAndNewlines),
-            projectType: newProjectType
+            name: newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
         )
-        
+
         resetAddProjectForm()
         showAddProject = false
-        
+
         // Switch to the new project so user can configure it
         switchToProject(project.id)
     }
-    
+
     private func resetAddProjectForm() {
         newProjectName = ""
         newProjectId = ""
         newProjectIdWasManuallyEdited = false
-        newProjectType = availableProjectTypes.first?.id ?? ""
     }
 }
 

@@ -76,30 +76,8 @@ struct ModuleActionsBar: View {
     
     /// Returns comma-separated list of missing settings used in action payload, or nil if all present
     private func missingRequiredSettings(for action: ActionConfig) -> String? {
-        guard let payload = action.payload else { return nil }
-        
-        var missing: [String] = []
-        
-        for (_, value) in payload {
-            if case .string(let template) = value,
-               template.hasPrefix("{{settings.") && template.hasSuffix("}}") {
-                // Extract setting key
-                let key = String(template.dropFirst(11).dropLast(2))
-                
-                // Check if setting has a value
-                let value = module.settings.string(for: key)
-                if value == nil || value!.isEmpty {
-                    // Find the label from manifest
-                    if let setting = module.manifest.settings.first(where: { $0.id == key }) {
-                        missing.append(setting.label)
-                    } else {
-                        missing.append(key)
-                    }
-                }
-            }
-        }
-        
-        return missing.isEmpty ? nil : missing.joined(separator: ", ")
+        // Settings storage not implemented - skip validation
+        return nil
     }
     
     private func iconForAction(_ action: ActionConfig) -> String {

@@ -16,19 +16,17 @@ struct HomeboyApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(authManager)
-                .onAppear {
+                .task {
                     if !CLIVersionChecker.shared.isInstalled {
                         showCLISetup = true
                     } else {
-                        // CLI installed - check for updates
-                        Task {
-                            let info = await CLIVersionChecker.shared.checkForUpdate()
-                            await MainActor.run {
-                                cliVersionInfo = info
-                                if info.updateAvailable {
-                                    showCLIUpdate = true
-                                }
-                            }
+                        // CLI installed - load projects and check for updates
+                        await ConfigurationManager.shared.loadProjectsFromCLI()
+
+                        let info = await CLIVersionChecker.shared.checkForUpdate()
+                        cliVersionInfo = info
+                        if info.updateAvailable {
+                            showCLIUpdate = true
                         }
                     }
                 }
@@ -155,6 +153,7 @@ struct CLIUpdateSheet: View {
 
     @State private var isUpgrading = false
     @State private var upgradeOutput = ""
+    @State private var upgradeError: (any DisplayableError)?
 
     var body: some View {
         VStack(spacing: 24) {
@@ -174,7 +173,9 @@ struct CLIUpdateSheet: View {
                     .foregroundColor(.secondary)
             }
 
-            if isUpgrading {
+            if let error = upgradeError {
+                InlineErrorView(error)
+            } else if isUpgrading {
                 VStack(spacing: 12) {
                     ProgressView()
                     Text("Upgrading...")
@@ -207,6 +208,7 @@ struct CLIUpdateSheet: View {
     private func upgradeCLI() {
         isUpgrading = true
         upgradeOutput = ""
+        upgradeError = nil
 
         Task {
             let success = await runBrewUpgrade()
@@ -222,7 +224,7 @@ struct CLIUpdateSheet: View {
     private func runBrewUpgrade() async -> Bool {
         let brewPaths = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
         guard let brewPath = brewPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            await MainActor.run { upgradeOutput = "Homebrew not found" }
+            await MainActor.run { upgradeError = AppError("Homebrew not found", source: "CLI Upgrade") }
             return false
         }
 
@@ -250,7 +252,7 @@ struct CLIUpdateSheet: View {
 
             return process.terminationStatus == 0
         } catch {
-            await MainActor.run { upgradeOutput = "Failed: \(error.localizedDescription)" }
+            await MainActor.run { upgradeError = error.toDisplayableError(source: "CLI Upgrade") }
             return false
         }
     }

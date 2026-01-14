@@ -252,7 +252,7 @@ struct RemoteFileEditorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
-    private func errorView(_ error: AppError) -> some View {
+    private func errorView(_ error: any DisplayableError) -> some View {
         ErrorView(error) {
             Task { await viewModel.fetchSelectedFile() }
         }
