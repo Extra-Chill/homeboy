@@ -21,7 +21,7 @@ mod tty;
 
 use commands::{
     api, auth, build, changelog, changes, cli, component, context, db, deploy, file, git, init,
-    logs, module, project, server, ssh, version,
+    logs, module, project, server, ssh, upgrade, version,
 };
 use homeboy::module::load_all_modules;
 
@@ -81,6 +81,11 @@ enum Commands {
     Auth(auth::AuthArgs),
     /// Make API requests to a project
     Api(api::ApiArgs),
+    /// Upgrade Homeboy to the latest version
+    Upgrade(upgrade::UpgradeArgs),
+    /// Alias for upgrade
+    #[command(hide = true)]
+    Update(upgrade::UpgradeArgs),
     /// List available commands (alias for --help)
     List,
 }
@@ -169,7 +174,6 @@ fn try_parse_module_cli_command(
         return None;
     }
 
-    let sub_matches = sub_matches;
     let project_id = sub_matches.get_one::<String>("project_id")?.clone();
     let args: Vec<String> = sub_matches
         .get_many::<String>("args")

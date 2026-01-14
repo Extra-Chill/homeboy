@@ -23,6 +23,7 @@ pub mod module;
 pub mod project;
 pub mod server;
 pub mod ssh;
+pub mod upgrade;
 pub mod version;
 
 pub(crate) fn run_markdown(
@@ -109,6 +110,9 @@ pub(crate) fn run_json(
         }
         crate::Commands::Api(args) => {
             crate::output::map_cmd_result_to_json(api::run(args, global))
+        }
+        crate::Commands::Upgrade(args) | crate::Commands::Update(args) => {
+            crate::output::map_cmd_result_to_json(upgrade::run(args, global))
         }
         crate::Commands::List => {
             let err = homeboy::Error::validation_invalid_argument(

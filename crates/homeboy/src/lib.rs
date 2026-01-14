@@ -16,6 +16,7 @@ pub mod remote_files;
 pub mod server;
 pub mod ssh;
 pub mod token;
+pub mod upgrade;
 pub mod version;
 
 // Internal modules - not part of public API
