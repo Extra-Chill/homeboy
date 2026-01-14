@@ -13,16 +13,16 @@ The Copyable system standardizes errors/warnings/console output so users can cop
 
 ## ViewModel pattern
 
-ViewModels publish errors as `@Published var error: (any DisplayableError)?`.
+ViewModels typically publish errors as `@Published var error: (any DisplayableError)?` so the UI can render either `AppError` or `CLIError` (both conform to `DisplayableError`).
 
 ```swift
-@Published var error: AppError?
+@Published var error: (any DisplayableError)?
 
 func performAction() async {
     do {
         try await riskyOperation()
     } catch {
-        error = error.toDisplayableError(source: "My Module")
+        self.error = error.toDisplayableError(source: "My Module")
     }
 }
 ```

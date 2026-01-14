@@ -63,9 +63,9 @@ Compatibility note: the CLI is the source of truth for command behavior and outp
 ## CLI dependency
 
 Homeboy Desktop relies on a system-installed `homeboy` CLI binary. The app discovers it at:
-- `/opt/homebrew/bin/homeboy`
-- `/usr/local/bin/homeboy`
-- `~/.cargo/bin/homeboy`
+- `/opt/homebrew/bin/homeboy` (Apple Silicon Homebrew)
+- `/usr/local/bin/homeboy` (Intel Homebrew / manual)
+- `~/.cargo/bin/homeboy` (Cargo)
 
 (See `Homeboy/Core/CLI/CLIVersionChecker.swift` for the canonical search order.)
 
@@ -74,7 +74,7 @@ The app checks for updates via GitHub releases: `Extra-Chill/homeboy-cli`.
 
 Note: update checking requires network access (GitHub API).
 
-For desktop  CLI integration details (including shared config paths and timeouts), see:
+For desktop  CLI integration details (including config paths and timeouts), see:
 - [docs/CLI.md](docs/CLI.md)
 
 For monorepo setup details, see:
@@ -86,23 +86,20 @@ Project type support is primarily defined by installed modules and the CLI; the 
 
 ## Installing Modules
 
-Homeboy Desktop delegates module installation to the `homeboy` CLI.
+Homeboy Desktop installs/links modules by shelling out to the `homeboy` CLI.
 
 1. Go to **Settings > Modules**
-2. Click **Install Module...**
-3. Select either:
-   - a local folder containing a `homeboy.json` manifest (linked/installed by CLI), or
-   - a Git URL (installed by CLI)
-4. The module appears in the sidebar under "Modules"
-5. If setup is required, click the module and run **Setup**
+2. Click **Install Module from Folder...**
+3. Select a local folder containing a `homeboy.json` manifest
+4. Homeboy runs `homeboy module install <path>` under the hood
 
-Modules live under the Homeboy config root:
+Installed modules live under the desktop app config root:
 
 ```
 ~/Library/Application Support/Homeboy/modules/
 ```
 
-Note: the CLI has its own config root (`dirs::config_dir()/homeboy`). The desktop app currently uses `AppPaths` (and `ConfigurationObserver`) to read/write config under `~/Library/Application Support/Homeboy/`.
+Note: the desktop app reads/writes its own config under `AppPaths` and does not assume it shares on-disk config with the CLI (`dirs::config_dir()/homeboy`).
 ## Server Configuration (SSH)
 
 Remote features (deployments, remote file browsing, remote database access) require an SSH server.

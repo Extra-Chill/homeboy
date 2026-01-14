@@ -11,28 +11,20 @@ Modules extend Homeboy with custom functionality. Each module is a self-containe
 
 ## Installation location
 
-Homeboy Desktop is macOS-only. The CLI uses its own canonical config root, and modules are installed under the CLI’s config tree.
+Homeboy Desktop is macOS-only.
 
-The CLI documents the cross-platform config root (macOS/Linux/Windows): [`homeboy/docs/index.md`](../../homeboy/docs/index.md).
-
-macOS locations (desktop app implementation):
+The desktop app stores installed modules under its `AppPaths` root:
 
 - Desktop config root (single source of truth: `AppPaths`):
   ```
   ~/Library/Application Support/Homeboy/
   ```
-- Modules (installed/linked):
+- Modules:
   ```
   ~/Library/Application Support/Homeboy/modules/<module-id>/
   ```
-- Per-module Python venv (if the module creates one):
-  ```
-  ~/Library/Application Support/Homeboy/modules/<module-id>/venv/
-  ```
-- Module docs (optional; may be consumed by tooling):
-  ```
-  ~/Library/Application Support/Homeboy/modules/<module-id>/docs/
-  ```
+
+Homeboy Desktop installs/links modules by running the CLI (`homeboy module install ...`), but the desktop app does not assume it shares the same on-disk config root as the CLI (`dirs::config_dir()/homeboy`).
 
 Note: the CLI embeds its core documentation in the binary (see `homeboy docs`).
 ## Module responsibilities

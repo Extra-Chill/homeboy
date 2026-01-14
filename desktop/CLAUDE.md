@@ -13,6 +13,13 @@ Native macOS SwiftUI application for development and deployment automation. Proj
 
 ## Commands
 
+### Rust workspace validation
+
+When a change touches the Rust workspace (`../homeboy/`), always validate using the **release target**:
+
+- `cargo test --release`
+- `cargo run --release -p homeboy-cli -- <args>`
+
 ```bash
 # Regenerate Xcode project after adding/removing files or changing project.yml settings
 xcodegen generate --spec homeboy-desktop/project.yml
@@ -117,16 +124,16 @@ The Copyable system provides user-friendly error reporting with one-click copy t
 - `Views/Components/InlineWarningView.swift` - Compact inline warning
 
 ### ViewModel Pattern
-All ViewModels use `@Published var error: AppError?` for consistent error handling:
+ViewModels typically use `@Published var error: (any DisplayableError)?` so view state can carry either an app-native `AppError` or a full-fidelity `CLIError`.
 
 ```swift
-@Published var error: AppError?
+@Published var error: (any DisplayableError)?
 
-// Setting error with source context
-error = AppError("Database credentials not configured", source: "Database Browser")
-
-// Setting error with file path
-error = AppError(error.localizedDescription, source: "Log Viewer", path: file.displayName)
+do {
+    try await riskyOperation()
+} catch {
+    self.error = error.toDisplayableError(source: "Database Browser")
+}
 ```
 
 See `docs/ERROR-HANDLING.md` for the complete Copyable system specification.
@@ -168,7 +175,7 @@ Run `homeboy docs` for the canonical CLI documentation.
 
 ## Configuration
 
-The desktop app is macOS-only and stores configuration as JSON under the CLI config root (canonical) and its own app container as needed.
+The desktop app is macOS-only and stores configuration as JSON under its `AppPaths` root (`~/Library/Application Support/Homeboy/`). The CLI uses a separate canonical config root (`dirs::config_dir()/homeboy`).
 
 Config change reactivity is implemented by `ConfigurationObserver` (`Homeboy/Core/Config/ConfigurationObserver.swift`), which watches:
 - `AppPaths.projects`

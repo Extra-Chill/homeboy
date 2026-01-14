@@ -9,7 +9,7 @@ The desktop app also uses a 30s default timeout for CLI commands (`CLIBridge.exe
 The desktop app relies on a system-installed `homeboy` binary and checks these paths in order:
 
 - `/opt/homebrew/bin/homeboy` (Apple Silicon Homebrew)
-- `/usr/local/bin/homeboy` (Intel Homebrew)
+- `/usr/local/bin/homeboy` (Intel Homebrew / manual)
 - `~/.cargo/bin/homeboy` (Cargo)
 
 Verify installation:
@@ -22,7 +22,7 @@ CLI source: `../homeboy/` (Rust workspace; the CLI implements the canonical comm
 
 ## Shared configuration
 
-Homeboy Desktop is macOS-only, but it interoperates with the CLI by reading/writing configuration in the same general filesystem area; the CLI’s canonical config root is `dirs::config_dir()/homeboy`.
+Homeboy Desktop is macOS-only. It interoperates with the CLI conceptually, but it does not currently use the exact same on-disk config root; the CLI’s canonical config root is `dirs::config_dir()/homeboy`, while the desktop app uses `AppPaths` rooted at `~/Library/Application Support/Homeboy/`.
 
 Canonical config path rules live in the CLI docs: [`homeboy/docs/index.md`](../../homeboy/docs/index.md).
 
@@ -63,7 +63,7 @@ Use the CLI as the source of truth:
 - The desktop app executes the CLI via `CLIBridge` and expects JSON output for most operations.
 - The UI reacts to on-disk changes via `ConfigurationObserver` and publishes `ConfigurationChangeType` events.
 
-If you edit config via CLI/scripts, verify the desktop app is pointed at the same paths; `AppPaths` is the desktop single source of truth.
+The desktop app reads/writes configuration from `AppPaths` and does not assume it shares on-disk config with the CLI. If you edit CLI config directly, don’t expect the desktop app to pick it up unless you’re editing the desktop app’s `AppPaths` tree.
 ### Config editing notes
 
 The desktop app’s Settings UI is the intended way to create and edit projects/servers.
