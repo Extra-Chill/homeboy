@@ -66,7 +66,7 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
 
     var cancellables = Set<AnyCancellable>()
 
-    @Published var components: [DeployableComponent] = ConfigurationManager.loadComponentsForProject(ConfigurationManager.readCurrentProject()).map { DeployableComponent(from: $0) }
+    @Published var components: [DeployableComponent] = []
     @Published var selectedComponents: Set<String> = []
 
     // Version tracking - single source of truth from CLI
@@ -85,6 +85,7 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
     @Published var hasSSHKey = false
     @Published var hasBasePath = false
     @Published var serverName: String? = nil
+    @Published var isCheckingConfig = true
     @Published var error: (any DisplayableError)?
     @Published var showDeployAllConfirmation = false
     @Published var showBuildConfirmation = false
@@ -131,8 +132,8 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
         case .projectModified(_, let fields):
             // Check if components changed
             if fields.contains(.components) {
-                let project = ConfigurationManager.readCurrentProject()
-                let newComponents = ConfigurationManager.loadComponentsForProject(project).map { DeployableComponent(from: $0) }
+                let project = ConfigurationManager.shared.activeProject ?? ConfigurationManager.shared.safeActiveProject
+                let newComponents = ConfigurationManager.shared.loadComponentsForProject(project).map { DeployableComponent(from: $0) }
                 if Set(newComponents.map(\.id)) != Set(components.map(\.id)) {
                     components = newComponents
                 }
@@ -147,31 +148,50 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
     }
     
     func checkConfiguration() {
-        let project = ConfigurationManager.readCurrentProject()
+        let project = ConfigurationManager.shared.activeProject ?? ConfigurationManager.shared.safeActiveProject
 
-        // Check 1: Server credentials (host + user configured)
-        if let serverId = project.serverId,
-           let server = ConfigurationManager.readServer(id: serverId),
-           server.isValid {
-            hasCredentials = true
-            serverName = server.name
-        } else {
-            hasCredentials = false
-            serverName = nil
-        }
-
-        // Check 2: SSH key exists for the server
-        if let serverId = project.serverId {
-            hasSSHKey = SSHKeyManager.hasKeyFile(forServer: serverId)
-        } else {
-            hasSSHKey = false
-        }
-
-        // Check 3: Base path configured
+        // Check base path (synchronous)
         hasBasePath = project.basePath != nil && !project.basePath!.isEmpty
 
-        // Refresh component list from config
-        components = ConfigurationManager.loadComponentsForProject(project).map { DeployableComponent(from: $0) }
+        // Refresh component list
+        components = ConfigurationManager.shared.loadComponentsForProject(project).map { DeployableComponent(from: $0) }
+
+        // Mark as checking before async call
+        isCheckingConfig = true
+
+        // Load server config via CLI (async)
+        Task {
+            await loadServerConfigFromCLI(serverId: project.serverId)
+            isCheckingConfig = false
+        }
+    }
+
+    private func loadServerConfigFromCLI(serverId: String?) async {
+        guard let serverId = serverId else {
+            hasCredentials = false
+            hasSSHKey = false
+            serverName = nil
+            return
+        }
+
+        do {
+            let server = try await HomeboyCLI.shared.serverShow(id: serverId)
+
+            // Check credentials (host + user configured)
+            hasCredentials = !server.host.isEmpty && !server.user.isEmpty
+            serverName = serverId
+
+            // Check SSH key at CLI's path (identityFile)
+            if let keyPath = server.identityFile {
+                hasSSHKey = FileManager.default.fileExists(atPath: keyPath)
+            } else {
+                hasSSHKey = false
+            }
+        } catch {
+            hasCredentials = false
+            hasSSHKey = false
+            serverName = nil
+        }
     }
     
     // MARK: - Version Management
@@ -216,8 +236,10 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
 
                 if response.success {
                     // Parse the JSON response through CLIResponse wrapper
+                    let decoder = JSONDecoder()
+                    decoder.keyDecodingStrategy = .convertFromSnakeCase
                     if let data = response.output.data(using: .utf8),
-                       let wrapper = try? JSONDecoder().decode(CLIResponse<CLIDeploymentResult>.self, from: data),
+                       let wrapper = try? decoder.decode(CLIResponse<CLIDeploymentResult>.self, from: data),
                        let result = wrapper.data {
 
                         // Store CLI results directly - single source of truth
@@ -455,8 +477,10 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
 
                 if response.success {
                     // Parse JSON output through CLIResponse wrapper
+                    let decoder = JSONDecoder()
+                    decoder.keyDecodingStrategy = .convertFromSnakeCase
                     if let data = response.output.data(using: .utf8),
-                       let wrapper = try? JSONDecoder().decode(CLIResponse<CLIDeploymentResult>.self, from: data),
+                       let wrapper = try? decoder.decode(CLIResponse<CLIDeploymentResult>.self, from: data),
                        let result = wrapper.data {
 
                         // Convert to DeploymentReports

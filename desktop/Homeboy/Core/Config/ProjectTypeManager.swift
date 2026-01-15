@@ -69,6 +69,7 @@ final class ProjectTypeManager {
         }
 
         let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
         for itemURL in contents {
             var isDir: ObjCBool = false
             guard fileManager.fileExists(atPath: itemURL.path, isDirectory: &isDir), isDir.boolValue else {
@@ -106,6 +107,7 @@ final class ProjectTypeManager {
         }
 
         let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
         for file in files where file.pathExtension == "json" {
             guard let data = try? Data(contentsOf: file),
                   let type = try? decoder.decode(ProjectTypeDefinition.self, from: data) else {

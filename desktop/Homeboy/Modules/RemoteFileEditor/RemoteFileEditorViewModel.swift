@@ -166,8 +166,10 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
             if response.success {
                 // Parse JSON response through CLIResponse wrapper
+                let decoder = JSONDecoder()
+                decoder.keyDecodingStrategy = .convertFromSnakeCase
                 if let data = response.output.data(using: .utf8),
-                   let wrapper = try? JSONDecoder().decode(CLIResponse<FileReadResponse>.self, from: data),
+                   let wrapper = try? decoder.decode(CLIResponse<FileReadResponse>.self, from: data),
                    let fileContent = wrapper.data {
                     openFiles[index].content = fileContent.content
                     openFiles[index].originalContent = fileContent.content

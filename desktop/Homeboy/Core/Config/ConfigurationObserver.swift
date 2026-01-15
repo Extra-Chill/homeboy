@@ -25,7 +25,11 @@ final class ConfigurationObserver: ObservableObject {
 
 
     private let fileManager = FileManager.default
-    private let jsonDecoder = JSONDecoder()
+    private let jsonDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }()
     private let jsonEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

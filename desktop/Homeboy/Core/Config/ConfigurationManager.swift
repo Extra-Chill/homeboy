@@ -43,10 +43,16 @@ enum ComponentError: LocalizedError {
 class ConfigurationManager: ObservableObject {
     static let shared = ConfigurationManager()
     
+    /// Shared decoder configured for snake_case keys from CLI JSON
+    private static var decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }()
+
     /// Thread-safe static accessor for reading project configuration from any context.
     nonisolated static func readCurrentProject() -> ProjectConfiguration {
         let fileManager = FileManager.default
-        let decoder = JSONDecoder()
 
         guard let files = try? fileManager.contentsOfDirectory(at: AppPaths.projects, includingPropertiesForKeys: nil) else {
             return ProjectConfiguration.empty(id: "default", name: "Default")
@@ -68,7 +74,7 @@ class ConfigurationManager: ObservableObject {
     /// Thread-safe static accessor for reading any project by ID.
     nonisolated static func readProject(id: String) -> ProjectConfiguration? {
         guard let data = try? Data(contentsOf: AppPaths.project(id: id)),
-              let config = try? JSONDecoder().decode(ProjectConfiguration.self, from: data) else {
+              let config = try? decoder.decode(ProjectConfiguration.self, from: data) else {
             return nil
         }
         return config
@@ -134,7 +140,7 @@ class ConfigurationManager: ObservableObject {
     
     private let fileManager = FileManager.default
     private let jsonEncoder: JSONEncoder
-    private let jsonDecoder: JSONDecoder
+    private var jsonDecoder: JSONDecoder
     
     // File watching for external changes (CLI, text editor, etc.)
     private var projectFileSource: DispatchSourceFileSystemObject?
@@ -169,6 +175,7 @@ class ConfigurationManager: ObservableObject {
         jsonEncoder = JSONEncoder()
         jsonEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         jsonDecoder = JSONDecoder()
+        jsonDecoder.keyDecodingStrategy = .convertFromSnakeCase
 
         activeProject = nil
 
@@ -361,7 +368,7 @@ class ConfigurationManager: ObservableObject {
         // Synchronous initialization - just set up defaults
         // Actual project loading happens via loadProjectsFromCLI() called from HomeboyApp
         activeProject = nil
-        needsProjectCreation = true
+        // needsProjectCreation stays false until loadProjectsFromCLI() determines there are no projects
     }
 
     // MARK: - CLI Integration
@@ -388,8 +395,12 @@ class ConfigurationManager: ObservableObject {
     /// Load full project config from CLI
     func loadProjectFromCLI(id: String) async {
         do {
-            let record = try await HomeboyCLI.shared.projectShow(id: id)
-            activeProject = ProjectConfiguration(from: record)
+            let output = try await HomeboyCLI.shared.projectShow(id: id)
+            guard let projectId = output.projectId, let config = output.project else {
+                print("[ConfigurationManager] CLI project show returned no data")
+                return
+            }
+            activeProject = ProjectConfiguration(projectId: projectId, config: config)
             startWatchingActiveProject()
         } catch {
             print("[ConfigurationManager] CLI project show failed: \(error)")
@@ -422,8 +433,11 @@ class ConfigurationManager: ObservableObject {
         guard let projectId = activeProject?.id else { return }
 
         // Read fresh from CLI to avoid overwriting external changes
-        let record = try await HomeboyCLI.shared.projectShow(id: projectId)
-        var freshProject = ProjectConfiguration(from: record)
+        let output = try await HomeboyCLI.shared.projectShow(id: projectId)
+        guard let id = output.projectId, let config = output.project else {
+            throw CLIBridgeError.invalidResponse("Project not found: \(projectId)")
+        }
+        var freshProject = ProjectConfiguration(projectId: id, config: config)
 
         // Apply the mutation to fresh data
         mutation(&freshProject)
@@ -479,8 +493,11 @@ class ConfigurationManager: ObservableObject {
     
     /// Creates a new project via CLI.
     func createProject(name: String, domain: String) async throws -> ProjectConfiguration {
-        let record = try await HomeboyCLI.shared.projectCreate(name: name, domain: domain)
-        let project = ProjectConfiguration(from: record)
+        let output = try await HomeboyCLI.shared.projectCreate(name: name, domain: domain)
+        guard let projectId = output.projectId, let config = output.project else {
+            throw CLIBridgeError.invalidResponse("Project creation failed")
+        }
+        let project = ProjectConfiguration(projectId: projectId, config: config)
         needsProjectCreation = false
         refreshAvailableProjects()
         return project
@@ -591,7 +608,7 @@ class ConfigurationManager: ObservableObject {
     /// Thread-safe static accessor for reading a server configuration from any context.
     nonisolated static func readServer(id: String) -> ServerConfig? {
         guard let data = try? Data(contentsOf: AppPaths.server(id: id)),
-              let server = try? JSONDecoder().decode(ServerConfig.self, from: data) else {
+              let server = try? decoder.decode(ServerConfig.self, from: data) else {
             return nil
         }
         return server
@@ -669,7 +686,7 @@ class ConfigurationManager: ObservableObject {
     /// Thread-safe static accessor for reading a component configuration from any context.
     nonisolated static func readComponent(id: String) -> ComponentConfiguration? {
         guard let data = try? Data(contentsOf: AppPaths.component(id: id)),
-              let component = try? JSONDecoder().decode(ComponentConfiguration.self, from: data) else {
+              let component = try? decoder.decode(ComponentConfiguration.self, from: data) else {
             return nil
         }
         return component

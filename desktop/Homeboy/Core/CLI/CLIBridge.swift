@@ -8,6 +8,13 @@ struct CLIBridgeResponse: Sendable {
     let errorOutput: String
     let exitCode: Int32
 
+    /// Shared decoder configured for snake_case keys
+    private static var decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }()
+
     /// Attempts to decode the output as a JSON response with the given data type
     func decode<T: Decodable>(_ type: T.Type) throws -> T {
         guard success else {
@@ -18,7 +25,7 @@ struct CLIBridgeResponse: Sendable {
             throw CLIBridgeError.invalidResponse("Output is not valid UTF-8")
         }
 
-        return try JSONDecoder().decode(type, from: data)
+        return try Self.decoder.decode(type, from: data)
     }
 
     /// Attempts to decode as a standard CLIResponse structure
@@ -27,7 +34,7 @@ struct CLIBridgeResponse: Sendable {
             throw CLIBridgeError.invalidResponse("Output is not valid UTF-8")
         }
 
-        return try JSONDecoder().decode(CLIBridgeResult<T>.self, from: data)
+        return try Self.decoder.decode(CLIBridgeResult<T>.self, from: data)
     }
 }
 

@@ -131,7 +131,9 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         }
 
         do {
-            let scriptOutput = try JSONDecoder().decode(ScriptOutput.self, from: data)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let scriptOutput = try decoder.decode(ScriptOutput.self, from: data)
             return .success(scriptOutput)
         } catch {
             return .failure(error)

@@ -62,11 +62,12 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
     @Published var error: (any DisplayableError)?
 
     private let fileManager = FileManager.default
-    private let jsonDecoder: JSONDecoder
+    private var jsonDecoder: JSONDecoder
     private let jsonEncoder: JSONEncoder
 
     private init() {
         jsonDecoder = JSONDecoder()
+        jsonDecoder.keyDecodingStrategy = .convertFromSnakeCase
         jsonEncoder = JSONEncoder()
         jsonEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
