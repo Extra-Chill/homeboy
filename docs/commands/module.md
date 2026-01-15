@@ -104,9 +104,9 @@ Executable modules define their runtime behavior in their module manifest (`modu
 ```json
 {
   "runtime": {
-    "runCommand": "./venv/bin/python3 {{entrypoint}} {{args}}",
-    "setupCommand": "python3 -m venv venv && ./venv/bin/pip install -r requirements.txt",
-    "readyCheck": "test -f ./venv/bin/python3",
+    "run_command": "./venv/bin/python3 {{entrypoint}} {{args}}",
+    "setup_command": "python3 -m venv venv && ./venv/bin/pip install -r requirements.txt",
+    "ready_check": "test -f ./venv/bin/python3",
     "entrypoint": "main.py",
     "env": {
       "MY_VAR": "{{modulePath}}/data"
@@ -115,9 +115,9 @@ Executable modules define their runtime behavior in their module manifest (`modu
 }
 ```
 
-- `runCommand`: Shell command to execute the module. Template variables: `{{modulePath}}`, `{{entrypoint}}`, `{{args}}`, plus project context vars.
-- `setupCommand`: Optional shell command to set up the module (run during install/update).
-- `readyCheck`: Optional shell command to check if module is ready (exit 0 = ready).
+- `run_command`: Shell command to execute the module. Template variables: `{{modulePath}}`, `{{entrypoint}}`, `{{args}}`, plus project context vars.
+- `setup_command`: Optional shell command to set up the module (run during install/update).
+- `ready_check`: Optional shell command to check if module is ready (exit 0 = ready).
 - `env`: Optional environment variables to set when running.
 
 ## JSON output
