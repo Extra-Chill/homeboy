@@ -98,6 +98,7 @@ fn response_mode(command: &Commands) -> ResponseMode {
         Commands::Logs(args) if logs::is_interactive(args) => {
             ResponseMode::Raw(RawOutputMode::InteractivePassthrough)
         }
+        Commands::Docs(args) if crate::commands::docs::is_json_mode(args) => ResponseMode::Json,
         Commands::Docs(_) => ResponseMode::Raw(RawOutputMode::Markdown),
         Commands::Changelog(args) if changelog::is_show_markdown(args) => {
             ResponseMode::Raw(RawOutputMode::Markdown)

@@ -10,10 +10,11 @@ Homeboy is intended to make it easier to iterate quickly across many projects at
 
 ## Agent usage (recommended)
 
-Add this to your agent instructions (CLAUDE.md, .cursorrules, etc.):
+Add this to your agent instructions (AGENTS.md, CLAUDE.md, .cursorrules, etc.):
 
-> Use Homeboy for deployments, server/db ops, and version/build management.
+> Use Homeboy for deployments, server/db ops, version/build management, and documentation.
 > Run `homeboy init` first to understand context, then `homeboy docs <topic>` for commands.
+> For documentation tasks, see `homeboy docs documentation/index`.
 
 This keeps agent actions consistent and prevents assumptions about project structure.
 
