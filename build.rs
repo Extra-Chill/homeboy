@@ -5,10 +5,7 @@ use std::path::{Path, PathBuf};
 fn main() {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing"));
-    // Single source of truth for the `homeboy init` command content lives under
-    // agent-instructions/commands/, but we also keep docs/ for general CLI docs.
     let docs_root = manifest_dir.join("docs");
-    let agent_instructions_root = manifest_dir.join("agent-instructions");
 
     if !docs_root.exists() {
         panic!("Docs directory not found: {}", docs_root.display());
@@ -16,14 +13,13 @@ fn main() {
 
     let mut doc_paths = Vec::new();
     collect_md_files(&docs_root, &mut doc_paths);
-    collect_md_files(&agent_instructions_root, &mut doc_paths);
     doc_paths.sort();
 
     for path in &doc_paths {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    let generated = generate_docs_rs(&docs_root, &agent_instructions_root, &doc_paths);
+    let generated = generate_docs_rs(&docs_root, &doc_paths);
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR missing"));
     fs::write(out_dir.join("generated_docs.rs"), generated)
@@ -49,16 +45,12 @@ fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn generate_docs_rs(
-    docs_root: &Path,
-    agent_instructions_root: &Path,
-    doc_paths: &[PathBuf],
-) -> String {
+fn generate_docs_rs(docs_root: &Path, doc_paths: &[PathBuf]) -> String {
     let mut out = String::new();
     out.push_str("pub static GENERATED_DOCS: &[(&str, &str)] = &[\n");
 
     for path in doc_paths {
-        let key = key_for_path(docs_root, agent_instructions_root, path);
+        let key = key_for_path(docs_root, path);
         let content = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("Failed to read doc {}: {}", path.display(), err));
 
@@ -73,17 +65,10 @@ fn generate_docs_rs(
     out
 }
 
-fn key_for_path(docs_root: &Path, agent_instructions_root: &Path, path: &Path) -> String {
-    let relative = if let Ok(relative) = path.strip_prefix(docs_root) {
-        relative
-    } else if let Ok(relative) = path.strip_prefix(agent_instructions_root) {
-        relative
-    } else {
-        panic!(
-            "Doc path is not under docs or agent-instructions: {}",
-            path.display()
-        );
-    };
+fn key_for_path(docs_root: &Path, path: &Path) -> String {
+    let relative = path
+        .strip_prefix(docs_root)
+        .unwrap_or_else(|_| panic!("Doc path is not under docs: {}", path.display()));
 
     let mut key = relative.to_string_lossy().replace('\\', "/");
 

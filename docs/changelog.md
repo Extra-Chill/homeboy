@@ -6,6 +6,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## [0.19.3] - 2026-01-15
+
+- Remove agent-instructions directory - docs are the single source of truth
+- Simplify build.rs to only embed docs/
+- Update README with streamlined agent setup instructions
+
 ## [0.19.2] - 2026-01-15
 
 - Add post_version_bump_commands hook to run commands after version bumps

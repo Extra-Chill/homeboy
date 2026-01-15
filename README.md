@@ -10,12 +10,12 @@ Homeboy is intended to make it easier to iterate quickly across many projects at
 
 ## Agent usage (recommended)
 
-Homeboy works best when a coding agent is instructed to use it.
+Add this to your agent instructions (CLAUDE.md, .cursorrules, etc.):
 
-- Add the Homeboy skill file at `agent-instructions/skills/homeboy/SKILL.md` to your agent’s skill set (whatever your agent framework calls this: “skills”, “tools”, or “system prompt attachments”).
-- In your agent instructions, tell the agent: “Use Homeboy for deploy, server/ssh, db, and project/component tasks.”
+> Use Homeboy for deployments, server/db ops, and version/build management.
+> Run `homeboy init` first to understand context, then `homeboy docs <topic>` for commands.
 
-This keeps agent actions consistent, safe, and fast.
+This keeps agent actions consistent and prevents assumptions about project structure.
 
 ## `homeboy init`
 
@@ -83,15 +83,6 @@ Notes:
 - Homeboy stores persistent SSH keys under `keys/`.
 
 See [CLI documentation](docs/index.md) for details.
-
-## Agent instructions
-
-Homeboy includes agent-oriented instruction files under `agent-instructions/`.
-
-- `agent-instructions/skills/`: skills that can be added to coding agents
-- `agent-instructions/commands/`: reusable command recipes (slash-command style)
-
-These files are not used by Homeboy at runtime; they are meant for humans and coding agents.
 
 ## SSH
 
