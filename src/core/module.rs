@@ -291,6 +291,8 @@ pub struct ActionConfig {
     pub requires_auth: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<std::collections::HashMap<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -699,6 +701,24 @@ pub fn run_action_with_payload(
                 client.post(endpoint, &payload)
             }
         }
+        "command" => {
+            let command_template = action
+                .command
+                .as_ref()
+                .ok_or_else(|| Error::other("Command action missing 'command' field"))?;
+
+            let settings = get_module_settings(module_id, project_id)?;
+            let interpolated = interpolate_command(command_template, payload, &settings);
+
+            let output = crate::ssh::execute_local_command(&interpolated);
+            Ok(serde_json::json!({
+                "command": interpolated,
+                "stdout": output.stdout,
+                "stderr": output.stderr,
+                "success": output.success,
+                "exit_code": output.exit_code,
+            }))
+        }
         other => Err(Error::other(format!("Unknown action type: {}", other))),
     }
 }
@@ -857,6 +877,13 @@ fn interpolate_payload_value(
                     .and_then(|payload| payload.get(key))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null))
+            } else if template.starts_with("{{release.") && template.ends_with("}}") {
+                let key = &template[10..template.len() - 2];
+                Ok(payload
+                    .and_then(|p| p.get("release"))
+                    .and_then(|r| r.get(key))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null))
             } else {
                 Ok(serde_json::Value::String(template.clone()))
             }
@@ -880,6 +907,56 @@ fn interpolate_payload_value(
         }
         _ => Ok(value.clone()),
     }
+}
+
+fn interpolate_command(
+    template: &str,
+    context: Option<&serde_json::Value>,
+    settings: &HashMap<String, serde_json::Value>,
+) -> String {
+    let mut result = template.to_string();
+
+    // Replace {{release.*}} patterns
+    let release_pattern = regex::Regex::new(r"\{\{release\.(\w+)\}\}").unwrap();
+    result = release_pattern
+        .replace_all(&result, |caps: &regex::Captures| {
+            let key = &caps[1];
+            context
+                .and_then(|c| c.get("release"))
+                .and_then(|r| r.get(key))
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("path")
+                                .and_then(|p| p.as_str())
+                                .or_else(|| item.as_str())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default()
+        })
+        .to_string();
+
+    // Replace {{settings.*}} patterns
+    let settings_pattern = regex::Regex::new(r"\{\{settings\.(\w+)\}\}").unwrap();
+    result = settings_pattern
+        .replace_all(&result, |caps: &regex::Captures| {
+            let key = &caps[1];
+            settings
+                .get(key)
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default()
+        })
+        .to_string();
+
+    result
 }
 
 // ============================================================================
