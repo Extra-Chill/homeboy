@@ -64,20 +64,20 @@ homeboy upgrade --force
 `homeboy upgrade --check` data payload:
 
 - `command`: `upgrade.check`
-- `currentVersion`: Current installed version
-- `latestVersion`: Latest available version from crates.io (may be null if network fails)
-- `updateAvailable`: Boolean indicating if an update is available
-- `installMethod`: Detected installation method (`homebrew`, `cargo`, `source`, or `unknown`)
+- `current_version`: Current installed version
+- `latest_version`: Latest available version from crates.io (may be null if network fails)
+- `update_available`: Boolean indicating if an update is available
+- `install_method`: Detected installation method (`homebrew`, `cargo`, `source`, or `unknown`)
 
 `homeboy upgrade` data payload:
 
 - `command`: `upgrade`
-- `installMethod`: Installation method used for upgrade
-- `previousVersion`: Version before upgrade
-- `newVersion`: Version after upgrade (may be null)
+- `install_method`: Installation method used for upgrade
+- `previous_version`: Version before upgrade
+- `new_version`: Version after upgrade (may be null)
 - `upgraded`: Boolean indicating if upgrade was performed
 - `message`: Human-readable status message
-- `restartRequired`: Boolean indicating if a restart is needed
+- `restart_required`: Boolean indicating if a restart is needed
 
 ## Exit code
 

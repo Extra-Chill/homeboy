@@ -75,21 +75,21 @@ homeboy file grep mysite /var/www "add_action" --name "*.php" --max-depth 3
 Fields:
 
 - `command`: `file.list` | `file.read` | `file.write` | `file.delete` | `file.rename`
-- `projectId`
-- `basePath`: project base path if configured
-- `path` / `oldPath` / `newPath`: resolved full remote paths
+- `project_id`
+- `base_path`: project base path if configured
+- `path` / `old_path` / `new_path`: resolved full remote paths
 - `recursive`: present for delete
 - `entries`: for `list` (parsed from `ls -la`)
 - `content`: for `read`
-- `bytesWritten`: for `write` (number of bytes written after stripping one trailing `\n` if present)
+- `bytes_written`: for `write` (number of bytes written after stripping one trailing `\n` if present)
 - `stdout`, `stderr`: included for error context when applicable
-- `exitCode`, `success`
+- `exit_code`, `success`
 
 List entries (`entries[]`):
 
 - `name`
 - `path`
-- `isDirectory`
+- `is_directory`
 - `size`
 - `permissions` (permission bits excluding the leading file type)
 
@@ -98,24 +98,24 @@ List entries (`entries[]`):
 Fields:
 
 - `command`: `file.find`
-- `projectId`
-- `basePath`: project base path if configured
+- `project_id`
+- `base_path`: project base path if configured
 - `path`: search path
 - `pattern`: name pattern if specified
 - `matches`: array of matching file paths
-- `matchCount`: number of matches
+- `match_count`: number of matches
 
 ### Grep output
 
 Fields:
 
 - `command`: `file.grep`
-- `projectId`
-- `basePath`: project base path if configured
+- `project_id`
+- `base_path`: project base path if configured
 - `path`: search path
 - `pattern`: search pattern
 - `matches`: array of match objects
-- `matchCount`: number of matches
+- `match_count`: number of matches
 
 Match objects (`matches[]`):
 

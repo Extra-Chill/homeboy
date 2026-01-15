@@ -45,7 +45,7 @@ If no component IDs are provided and neither `--all` nor `--outdated` is set, Ho
       "local_version": "<v>|null",
       "remote_version": "<v>|null",
       "error": "<string>|null",
-      "artifactPath": "<path>|null",
+      "artifact_path": "<path>|null",
       "remote_path": "<path>|null",
       "build_command": "<cmd>|null",
       "build_exit_code": "<int>|null",
@@ -58,10 +58,10 @@ If no component IDs are provided and neither `--all` nor `--outdated` is set, Ho
 
 Notes:
 
-- `deployReason` is omitted when not applicable.
-- `artifactPath` is the component build artifact path as configured; it may be relative.
+- `deploy_reason` is omitted when not applicable.
+- `artifact_path` is the component build artifact path as configured; it may be relative.
 
-Note: `buildExitCode`/`deployExitCode` are numbers when present (not strings).
+Note: `build_exit_code`/`deploy_exit_code` are numbers when present (not strings).
 
 Exit code is `0` when `summary.failed == 0`, otherwise `1`.
 

@@ -77,7 +77,7 @@ Key subcommands:
 Top-level fields:
 
 - `command`: action identifier (examples: `server.create`, `server.key.generate`)
-- `serverId`: present for single-server actions
+- `server_id`: present for single-server actions
 - `server`: server configuration (where applicable)
 - `servers`: list for `list`
 - `updated`: list of updated field names (values are command-specific)
@@ -87,9 +87,9 @@ Top-level fields:
 Key payload (`key`):
 
 - `action`: `generate` | `show` | `import` | `use` | `unset`
-- `serverId`
-- `publicKey` (when available)
-- `identityFile` (when set/known)
+- `server_id`
+- `public_key` (when available)
+- `identity_file` (when set/known)
 - `imported` (original path used for import; `~` is expanded)
 
 ## Related

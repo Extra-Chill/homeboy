@@ -80,8 +80,8 @@ Executes an action defined in the module manifest.
 
 Homeboy builds an **effective settings** map for each module by merging settings across scopes, in order (later scopes override earlier ones):
 
-1. Project (`projects/<projectId>.json`): `scopedModules.<moduleId>.settings`
-2. Component (`components/<componentId>.json`): `scopedModules.<moduleId>.settings`
+1. Project (`projects/<projectId>.json`): `scoped_modules.<moduleId>.settings`
+2. Component (`components/<componentId>.json`): `scoped_modules.<moduleId>.settings`
 
 When running a module, Homeboy passes an execution context via environment variables:
 
@@ -126,13 +126,13 @@ Executable modules define their runtime behavior in their module manifest (`modu
 
 Top-level variants (`data.command`):
 
-- `module.list`: `{ projectId?, modules: ModuleEntry[] }`
-- `module.run`: `{ moduleId, projectId? }`
-- `module.setup`: `{ moduleId }`
-- `module.install`: `{ moduleId, source, path, linked }`
-- `module.update`: `{ moduleId, url, path }`
-- `module.uninstall`: `{ moduleId, path, wasLinked }`
-- `module.action`: `{ moduleId, actionId, projectId?, response }`
+- `module.list`: `{ project_id?, modules: ModuleEntry[] }`
+- `module.run`: `{ module_id, project_id? }`
+- `module.setup`: `{ module_id }`
+- `module.install`: `{ module_id, source, path, linked }`
+- `module.update`: `{ module_id, url, path }`
+- `module.uninstall`: `{ module_id, path, was_linked }`
+- `module.action`: `{ module_id, action_id, project_id?, response }`
 
 Module entry (`modules[]`):
 

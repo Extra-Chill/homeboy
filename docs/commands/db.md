@@ -85,17 +85,17 @@ homeboy db tunnel <projectId> [--local-port <port>]
 
 Common fields:
 
-- `command`: `db.tables` | `db.describe` | `db.query` | `db.search` | `db.deleteRow` | `db.dropTable` | `db.tunnel`
-- `projectId`
-- `exitCode`, `success`
+- `command`: `db.tables` | `db.describe` | `db.query` | `db.search` | `db.delete_row` | `db.drop_table` | `db.tunnel`
+- `project_id`
+- `exit_code`, `success`
 - `stdout`, `stderr` (for remote command execution)
 
 Action-specific fields:
 
 - `tables` (for `db.tables`)
-- `table` (for `describe`, `deleteRow`, `dropTable`)
-- `sql` (for `query`, `deleteRow`, `dropTable`)
-- `tunnel` (for `tunnel`): `{ localPort, remoteHost, remotePort, database, user }`
+- `table` (for `describe`, `delete_row`, `drop_table`)
+- `sql` (for `query`, `delete_row`, `drop_table`)
+- `tunnel` (for `tunnel`): `{ local_port, remote_host, remote_port, database, user }`
 
 ## Exit code
 

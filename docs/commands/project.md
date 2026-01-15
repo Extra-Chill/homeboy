@@ -272,9 +272,9 @@ Removes all components from the project.
 homeboy project components set <projectId> <componentId> [<componentId>...]
 ```
 
-Replaces the full `componentIds` list on the project (deduped, order-preserving). Component IDs must exist in `homeboy component list`.
+Replaces the full `component_ids` list on the project (deduped, order-preserving). Component IDs must exist in `homeboy component list`.
 
-You can also do this via `project set` by merging `componentIds`:
+You can also do this via `project set` by merging `component_ids`:
 
 ```sh
 homeboy project set <projectId> --json '{"component_ids":["chubes-theme","chubes-blocks"]}'

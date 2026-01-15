@@ -47,17 +47,17 @@ Note: `logs show` accepts `--lines` even in follow mode, but it is ignored when 
 > Note: `logs list`, `logs show` (without `--follow`), `logs clear`, and `logs search` output JSON wrapped in the global JSON envelope described in the [JSON output contract](../json-output/json-output-contract.md). The object below refers to `data`.
 
 - `command`: `logs.list` | `logs.show` | `logs.follow` | `logs.clear` | `logs.search`
-- `projectId`
+- `project_id`
 - `entries`: present for `list`
 - `log`: present for `show` (non-follow)
-- `clearedPath`: present for `clear`
-- `searchResult`: present for `search`
+- `cleared_path`: present for `clear`
+- `search_result`: present for `search`
 
 Entry objects (`entries[]`):
 
 - `path`
 - `label`
-- `tailLines`
+- `tail_lines`
 
 Log object (`log`):
 
@@ -65,16 +65,16 @@ Log object (`log`):
 - `lines`
 - `content` (tail output)
 
-Search result object (`searchResult`):
+Search result object (`search_result`):
 
 - `path`: full resolved path
 - `pattern`: search pattern used
 - `matches`: array of match objects
-- `matchCount`: number of matches
+- `match_count`: number of matches
 
 Match objects (`matches[]`):
 
-- `lineNumber`: line number in the file
+- `line_number`: line number in the file
 - `content`: matching line content
 
 ## Follow mode (`logs show --follow`)

@@ -25,7 +25,7 @@ This command reports:
 Release workflow note:
 
 - `commits[]` is intended as input to help you author complete release notes.
-- `uncommitted`/`uncommittedDiff` is a reminder that you have local edits; if they are intended for the release, commit them as scoped changes before version bumping. If they are not intended for the release, resolve them before version bumping.
+- `uncommitted`/`uncommitted_diff` is a reminder that you have local edits; if they are intended for the release, commit them as scoped changes before version bumping. If they are not intended for the release, resolve them before version bumping.
 
 ## Options
 
@@ -50,9 +50,9 @@ Release workflow note:
   "component_id": "<componentId>",
   "path": "<local path>",
   "success": true,
-  "latestTag": "<tag>|null",
-  "baselineSource": "tag|version_commit|last_n_commits",
-  "baselineRef": "<ref>|null",
+  "latest_tag": "<tag>|null",
+  "baseline_source": "tag|version_commit|last_n_commits",
+  "baseline_ref": "<ref>|null",
   "commits": [
     {
       "hash": "<sha>",
@@ -61,20 +61,20 @@ Release workflow note:
     }
   ],
   "uncommitted": {
-    "hasChanges": true,
+    "has_changes": true,
     "staged": ["..."],
     "unstaged": ["..."],
     "untracked": ["..."],
     "hint": "Large untracked list detected..."
   },
-  "uncommittedDiff": "<diff>",
+  "uncommitted_diff": "<diff>",
   "diff": "<diff>"
 }
 ```
 
 Notes:
 
-- `uncommittedDiff` is present when the working tree has changes.
+- `uncommitted_diff` is present when the working tree has changes.
 - `diff` is included only when `--git-diffs` is used.
 - `uncommitted.hint` appears when untracked output is unusually large.
 - Optional fields like `warning` / `error` may be omitted when unset.
@@ -119,7 +119,7 @@ Extract diffs for scripting:
 
 ```sh
 # Single mode: extract uncommitted diff
-homeboy changes --cwd --git-diffs | jq -r '.data.uncommittedDiff // empty'
+homeboy changes --cwd --git-diffs | jq -r '.data.uncommitted_diff // empty'
 
 # Single mode: extract commit-range diff
 homeboy changes --cwd --git-diffs | jq -r '.data.diff // empty'
@@ -128,7 +128,7 @@ homeboy changes --cwd --git-diffs | jq -r '.data.diff // empty'
 homeboy changes --project myproject --git-diffs | jq -r '.data.results[].diff // empty'
 
 # Bulk mode: list components with uncommitted changes
-homeboy changes --project myproject | jq -r '.data.results[] | select(.uncommitted.hasChanges) | .id'
+homeboy changes --project myproject | jq -r '.data.results[] | select(.uncommitted.has_changes) | .id'
 ```
 
 ## Related

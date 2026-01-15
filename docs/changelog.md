@@ -6,12 +6,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+- fix: `homeboy changes` surfaces noisy untracked hints and respects `.gitignore`
+
 ## [0.19.0] - 2026-01-15
 
 - feat: add `homeboy config` command for global configuration
 - feat: configurable SCP flags, permissions, version detection patterns
 - feat: configurable install method detection and upgrade commands
-- feat: `homeboy changes` auto-detects project and shows all component changes
 - fix: `homeboy docs` uses raw markdown output only, removes --list flag
 
 ## [0.18.0] - 2026-01-15

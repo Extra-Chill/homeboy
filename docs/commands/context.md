@@ -40,9 +40,9 @@ Payload shape:
 
 - `command` (string): `context.show` (or `context.discover` when using `--discover`)
 - `cwd` (string): current working directory
-- `gitRoot` (string|null): `git rev-parse --show-toplevel` when available
-- `managed` (bool): `true` when `matchedComponents` is non-empty
-- `matchedComponents` (string[]): component IDs whose `localPath` matches `cwd` (exact match or ancestor)
+- `git_root` (string|null): `git rev-parse --show-toplevel` when available
+- `managed` (bool): `true` when `matched_components` is non-empty
+- `matched_components` (string[]): component IDs whose `local_path` matches `cwd` (exact match or ancestor)
 - `suggestion` (string|null): guidance when `managed` is `false`
 
 ## Repository discovery (`--discover`)
@@ -52,9 +52,9 @@ When `--discover` is used, Homeboy scans subdirectories (default depth: `2`) and
 JSON payload (as `data`) is a `DiscoverOutput`:
 
 - `command`: `context.discover`
-- `basePath`: base directory used for discovery
+- `base_path`: base directory used for discovery
 - `depth`: max depth
-- `repos`: array of `{ path, name, isManaged, matchedComponent }`
+- `repos`: array of `{ path, name, is_managed, matched_component }`
 
 ## Related
 

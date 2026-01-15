@@ -52,12 +52,12 @@ Creates a new changelog file with the Keep a Changelog format (`## [X.Y.Z] - YYY
 Options:
 
 - `--path <path>`: Custom path for changelog file (relative to component/cwd). Default: `CHANGELOG.md`
-- `--configure`: Also update component config to add `changelogTargets`
+- `--configure`: Also update component config to add `changelog_target`
 - `--cwd`: Use current working directory instead of a component
 
 Requirements:
 
-- Component must have `versionTargets` configured (to determine initial version)
+- Component must have `version_targets` configured (to determine initial version)
 - Errors if changelog file already exists at target path
 
 ### CWD Mode (--cwd)
@@ -78,10 +78,10 @@ Adds one or more changelog items to the configured "next" section in the compone
 Configuration / defaults (strict by default):
 
 - Changelog path resolution:
-  - If `changelogTargets` is set in the component config, the first target's `file` is used (relative to `component.localPath` unless it's absolute).
+  - If `changelog_target` is set in the component config, that path is used (relative to `component.local_path` unless it's absolute).
   - Otherwise, Homeboy auto-detects (in order): `CHANGELOG.md`, then `docs/changelog.md`.
-  - If neither exists, the command errors and asks you to create a changelog file or set `component.changelogTargets[0].file`.
-  - If both exist, the command errors and asks you to set `component.changelogTargets[0].file` to disambiguate.
+  - If neither exists, the command errors and asks you to create a changelog file or set `component.changelog_target`.
+  - If both exist, the command errors and asks you to set `component.changelog_target` to disambiguate.
 - "Next section" resolution:
   - If no label is configured, Homeboy defaults to `Unreleased`.
   - If no aliases are configured, Homeboy matches both `Unreleased` and `[Unreleased]`.
@@ -108,7 +108,7 @@ This section applies only when JSON output is used.
 ```json
 {
   "command": "show",
-  "topicLabel": "changelog",
+  "topic_label": "changelog",
   "content": "<markdown content>"
 }
 ```
@@ -120,9 +120,9 @@ This section applies only when JSON output is used.
   "command": "add",
   "component_id": "<componentId>",
   "changelog_path": "<absolute/or/resolved/path.md>",
-  "nextSectionLabel": "<label>",
+  "next_section_label": "<label>",
   "messages": ["<message>", "<message>"],
-  "itemsAdded": 2,
+  "items_added": 2,
   "changed": true
 }
 ```
@@ -134,8 +134,8 @@ This section applies only when JSON output is used.
   "command": "init",
   "component_id": "<componentId>",
   "changelog_path": "<absolute/path/to/CHANGELOG.md>",
-  "initialVersion": "0.3.2",
-  "nextSectionLabel": "Unreleased",
+  "initial_version": "0.3.2",
+  "next_section_label": "Unreleased",
   "created": true,
   "configured": false
 }

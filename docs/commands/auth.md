@@ -44,7 +44,7 @@ JSON output is wrapped in the global envelope.
 - `{ "command": "logout", "project_id": "..." }`
 - `{ "command": "status", "project_id": "...", "authenticated": true }`
 
-Note: `command` is a tagged enum value (`login|logout|status`), and fields are camelCase (`projectId`).
+Note: `command` is a tagged enum value (`login|logout|status`), and fields use snake_case (`project_id`).
 
 ## Related
 

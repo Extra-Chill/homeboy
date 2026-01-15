@@ -42,7 +42,7 @@ Both subcommands support `--cwd` for ad-hoc operations in any directory without 
 
 This command:
 
-- Bumps all configured `versionTargets` using semantic versioning (X.Y.Z).
+- Bumps all configured `version_targets` using semantic versioning (X.Y.Z).
 - Finalizes the component changelog by moving the current "next" section (usually `Unreleased`) into a new `## [<newVersion>] - YYYY-MM-DD` section.
 
 Changelog entries must be added *before* running this command (recommended: `homeboy changelog add --json ...`).
@@ -68,28 +68,28 @@ Arguments:
 `homeboy version show` data payload:
 
 - `command`: `version.show`
-- `componentId`
+- `component_id`
 - `version` (detected current version)
-- `targets`: array of `{ file, pattern, fullPath, matchCount }`
+- `targets`: array of `{ file, pattern, full_path, match_count }`
 
 `homeboy version bump` data payload:
 
 - `command`: `version.bump`
-- `componentId`
-- `oldVersion` (version before bump)
-- `newVersion` (version after bump)
-- `targets`: array of `{ file, pattern, fullPath, matchCount }`
-- `changelogPath` (resolved changelog path)
-- `changelogFinalized` (always `true` on success)
-- `changelogChanged` (whether the changelog file was modified)
+- `component_id`
+- `old_version` (version before bump)
+- `new_version` (version after bump)
+- `targets`: array of `{ file, pattern, full_path, match_count }`
+- `changelog_path` (resolved changelog path)
+- `changelog_finalized` (always `true` on success)
+- `changelog_changed` (whether the changelog file was modified)
 
 `homeboy version set` data payload:
 
 - `command`: `version.set`
-- `componentId`
-- `oldVersion`
-- `newVersion`
-- `targets`: array of `{ file, pattern, fullPath, matchCount }`
+- `component_id`
+- `old_version`
+- `new_version`
+- `targets`: array of `{ file, pattern, full_path, match_count }`
 
 Errors:
 
@@ -108,8 +108,8 @@ Notes:
 
 ## Notes
 
-- Components must have `versionTargets` configured (non-empty). Homeboy uses the first target as the primary version source.
-- Each `versionTargets[]` entry has `file` and optional `pattern`. When `pattern` is omitted, a default pattern is selected based on the `file` name.
+- Components must have `version_targets` configured (non-empty). Homeboy uses the first target as the primary version source.
+- Each `version_targets[]` entry has `file` and optional `pattern`. When `pattern` is omitted, a default pattern is selected based on the `file` name.
 
 ## Related
 

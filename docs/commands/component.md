@@ -24,10 +24,10 @@ Options:
 - `--json <spec>`: JSON input spec for create/update (supports single or bulk)
 - `--skip-existing`: skip items that already exist (JSON mode only)
 - `--local-path <path>`: absolute path to local source directory (required; ID derived from directory name; `~` is expanded)
-- `--remote-path <path>`: remote path relative to project `basePath` (required)
-- `--build-artifact <path>`: build artifact path relative to `localPath` (required)
+- `--remote-path <path>`: remote path relative to project `base_path` (required)
+- `--build-artifact <path>`: build artifact path relative to `local_path` (required)
 - `--version-target <TARGET>`: version target in format `file` or `file::pattern` (repeatable)
-- `--build-command <command>`: build command to run in `localPath` (required for `homeboy build`)
+- `--build-command <command>`: build command to run in `local_path` (required for `homeboy build`)
 - `--extract-command <command>`: command to run after upload (optional; supports `{artifact}` and `{targetDir}`)
 
 ### `show`
@@ -114,7 +114,7 @@ Lists all projects that reference the given component. Returns both project IDs 
   "component": {},
   "components": [],
   "import": null,
-  "projectIds": ["project-1", "project-2"],
+  "project_ids": ["project-1", "project-2"],
   "projects": []
 }
 ```
@@ -122,9 +122,9 @@ Lists all projects that reference the given component. Returns both project IDs 
 Notes:
 
 - In JSON import mode (`homeboy component create --json ...`), `command` is still `component.create` and `import` is populated.
-- `updatedFields` is empty for all actions except `set`/`rename`.
+- `updated_fields` is empty for all actions except `set`/`rename`.
 - `rename` does not include the old ID; capture it from your input if needed.
-- `projectIds` and `projects` are only populated for `component.projects`.
+- `project_ids` and `projects` are only populated for `component.projects`.
 
 
 ## Related
