@@ -10,6 +10,7 @@ Installable modules for [Homeboy](https://github.com/Extra-Chill/homeboy) that e
 | `nodejs` | `pm2` | PM2 process management |
 | `rust` | `cargo` | Cargo CLI integration |
 | `github` | `gh` | GitHub CLI for issues, PRs, and repos |
+| `homebrew` | `brew` | Homebrew tap publishing |
 
 ## Installation
 

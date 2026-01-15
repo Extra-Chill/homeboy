@@ -10,5 +10,20 @@
     "display_name": "GitHub CLI",
     "command_template": "cd {{sitePath}} && {{cliPath}} {{args}}",
     "default_cli_path": "gh"
+  },
+  "actions": [
+    {
+      "id": "release.publish",
+      "label": "Publish GitHub Release",
+      "type": "command",
+      "command": "bash ./scripts/publish-github.sh",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    }
+  ],
+  "runtime": {
+    "run_command": "{{modulePath}}/scripts/publish-github.sh"
   }
 }

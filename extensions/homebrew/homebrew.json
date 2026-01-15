@@ -1,0 +1,22 @@
+{
+  "name": "Homebrew",
+  "version": "1.0.0",
+  "icon": "mug.fill",
+  "description": "Homebrew tap publishing",
+  "author": "Extra Chill",
+  "actions": [
+    {
+      "id": "release.publish",
+      "label": "Publish Homebrew Formula",
+      "type": "command",
+      "command": "bash ./scripts/publish-homebrew.sh",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    }
+  ],
+  "runtime": {
+    "run_command": "{{modulePath}}/scripts/publish-homebrew.sh"
+  }
+}

@@ -8,5 +8,27 @@
     "display_name": "Cargo",
     "command_template": "cd {{sitePath}} && {{cliPath}} {{args}}",
     "default_cli_path": "cargo"
-  }
+  },
+  "actions": [
+    {
+      "id": "release.package",
+      "label": "Package release artifacts",
+      "type": "command",
+      "command": "bash ./scripts/package.sh",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.publish",
+      "label": "Publish to crates.io",
+      "type": "command",
+      "command": "bash ./scripts/publish-crates.sh",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    }
+  ]
 }
