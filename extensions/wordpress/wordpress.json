@@ -67,7 +67,7 @@
   "deploy": [
     {
       "path_pattern": "/wp-content/plugins/",
-      "verify_command": "find {{targetDir}} -maxdepth 2 -name '*.php' -exec grep -l 'Plugin Name:' {{}} + 2>/dev/null | head -1",
+      "verify_command": "find {{targetDir}} -maxdepth 2 -name '*.php' -exec grep -l 'Plugin Name:' {} + 2>/dev/null | head -1",
       "verify_error_message": "No WordPress plugin header found in {{targetDir}}"
     },
     {
