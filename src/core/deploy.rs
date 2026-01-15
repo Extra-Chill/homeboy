@@ -10,6 +10,7 @@ use crate::context::{resolve_project_ssh_with_base_path, RemoteProjectContext};
 use crate::error::{Error, Result};
 use crate::config::read_json_spec_to_string;
 use crate::module::{load_all_modules, DeployVerification};
+use crate::permissions;
 use crate::project::{self, Project};
 use crate::shell;
 use crate::ssh::SshClient;
@@ -103,6 +104,7 @@ pub fn deploy_artifact(
 
         // Create target directory
         let mkdir_cmd = format!("mkdir -p {}", shell::quote_path(remote_path));
+        eprintln!("[deploy] Creating directory: {}", remote_path);
         let mkdir_output = ssh_client.execute(&mkdir_cmd);
         if !mkdir_output.success {
             return Ok(DeployResult::failure(
@@ -125,6 +127,7 @@ pub fn deploy_artifact(
             let rendered_cmd = render_extract_command(cmd_template, &vars);
 
             let extract_cmd = format!("cd {} && {}", shell::quote_path(remote_path), rendered_cmd);
+            eprintln!("[deploy] Extracting: {}", rendered_cmd);
 
             let extract_output = ssh_client.execute(&extract_cmd);
             if !extract_output.success {
@@ -133,6 +136,10 @@ pub fn deploy_artifact(
                     format!("Extract command failed: {}", extract_output.stderr),
                 ));
             }
+
+            // Fix file permissions after extraction
+            eprintln!("[deploy] Fixing file permissions");
+            permissions::fix_deployed_permissions(ssh_client, remote_path);
         }
     }
 
@@ -180,6 +187,7 @@ fn upload_directory(
         .unwrap_or(remote_path);
 
     let mkdir_cmd = format!("mkdir -p {}", shell::quote_path(parent));
+    eprintln!("[deploy] Creating parent directory: {}", parent);
     let mkdir_output = ssh_client.execute(&mkdir_cmd);
     if !mkdir_output.success {
         return Ok(DeployResult::failure(
@@ -200,7 +208,8 @@ fn upload_file(
 }
 
 fn scp_file(ssh_client: &SshClient, local_path: &Path, remote_path: &str) -> Result<DeployResult> {
-    let mut scp_args: Vec<String> = vec![];
+    // Force legacy SCP protocol (-O) for compatibility with servers that have issues with SFTP
+    let mut scp_args: Vec<String> = vec!["-O".to_string()];
 
     if let Some(identity_file) = &ssh_client.identity_file {
         scp_args.push("-i".to_string());
@@ -215,8 +224,16 @@ fn scp_file(ssh_client: &SshClient, local_path: &Path, remote_path: &str) -> Res
     scp_args.push(local_path.to_string_lossy().to_string());
     scp_args.push(format!(
         "{}@{}:{}",
-        ssh_client.user, ssh_client.host, remote_path
+        ssh_client.user, ssh_client.host, shell::quote_path(remote_path)
     ));
+
+    eprintln!(
+        "[deploy] Uploading: {} -> {}@{}:{}",
+        local_path.display(),
+        ssh_client.user,
+        ssh_client.host,
+        remote_path
+    );
 
     let output = Command::new("scp").args(&scp_args).output();
 
@@ -235,7 +252,8 @@ fn scp_recursive(
     local_path: &Path,
     remote_path: &str,
 ) -> Result<DeployResult> {
-    let mut scp_args: Vec<String> = vec!["-r".to_string()];
+    // Force legacy SCP protocol (-O) for compatibility, -r for recursive
+    let mut scp_args: Vec<String> = vec!["-O".to_string(), "-r".to_string()];
 
     if let Some(identity_file) = &ssh_client.identity_file {
         scp_args.push("-i".to_string());
@@ -250,8 +268,16 @@ fn scp_recursive(
     scp_args.push(local_path.to_string_lossy().to_string());
     scp_args.push(format!(
         "{}@{}:{}",
-        ssh_client.user, ssh_client.host, remote_path
+        ssh_client.user, ssh_client.host, shell::quote_path(remote_path)
     ));
+
+    eprintln!(
+        "[deploy] Uploading directory: {} -> {}@{}:{}",
+        local_path.display(),
+        ssh_client.user,
+        ssh_client.host,
+        remote_path
+    );
 
     let output = Command::new("scp").args(&scp_args).output();
 

@@ -17,6 +17,7 @@ pub mod output;
 pub mod project;
 pub mod files;
 pub mod server;
+pub mod shell;
 pub mod ssh;
 pub mod token;
 pub mod upgrade;
@@ -29,7 +30,7 @@ pub(crate) mod http;
 pub(crate) mod keychain;
 pub(crate) mod local_files;
 pub(crate) mod paths;
-pub(crate) mod shell;
+pub(crate) mod permissions;
 pub(crate) mod slugify;
 pub(crate) mod template;
 

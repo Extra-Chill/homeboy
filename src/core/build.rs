@@ -4,6 +4,7 @@ use crate::component;
 use crate::error::{Error, Result};
 use crate::config::{is_json_input, parse_bulk_ids};
 use crate::output::{BulkResult, BulkSummary, ItemOutcome};
+use crate::permissions;
 use crate::ssh::execute_local_command_in_dir;
 
 // === Public API ===
@@ -52,6 +53,9 @@ pub fn build_component(component: &component::Component) -> (Option<i32>, Option
             )),
         );
     };
+
+    // Fix local permissions before build to ensure zip has correct permissions
+    permissions::fix_local_permissions(&component.local_path);
 
     let output = execute_local_command_in_dir(&build_cmd, Some(&component.local_path));
 
@@ -133,6 +137,9 @@ fn execute_build(component_id: &str) -> Result<(BuildOutput, i32)> {
             component_id
         ))
     })?;
+
+    // Fix local permissions before build to ensure zip has correct permissions
+    permissions::fix_local_permissions(&comp.local_path);
 
     let output = execute_local_command_in_dir(&build_cmd, Some(&comp.local_path));
 

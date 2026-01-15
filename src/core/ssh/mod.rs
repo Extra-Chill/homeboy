@@ -28,6 +28,8 @@ pub struct SshResolveResult {
     pub server_id: String,
     /// Resolved server configuration
     pub server: Server,
+    /// Project base_path (only when resolved via project)
+    pub base_path: Option<String>,
 }
 
 /// Resolve SSH connection context from arguments.
@@ -43,7 +45,7 @@ pub fn resolve_context(args: &SshResolveArgs) -> Result<SshResolveResult> {
     }
 
     // Resolution logic
-    let (resolved_type, project_id, server_id, server) = resolve_internal(args)?;
+    let (resolved_type, project_id, server_id, server, base_path) = resolve_internal(args)?;
 
     // Validation: Server must have required fields
     if !server.is_valid() {
@@ -62,33 +64,50 @@ pub fn resolve_context(args: &SshResolveArgs) -> Result<SshResolveResult> {
         project_id,
         server_id,
         server,
+        base_path,
     })
 }
 
-fn resolve_internal(args: &SshResolveArgs) -> Result<(String, Option<String>, String, Server)> {
+fn resolve_internal(
+    args: &SshResolveArgs,
+) -> Result<(String, Option<String>, String, Server, Option<String>)> {
     // --project flag: force project resolution
     if let Some(project_id) = &args.project {
         let project = project::load(project_id)?;
+        let base_path = project.base_path.clone();
         let (server_id, server) = resolve_from_project(&project)?;
-        return Ok(("project".to_string(), Some(project.id), server_id, server));
+        return Ok((
+            "project".to_string(),
+            Some(project.id),
+            server_id,
+            server,
+            base_path,
+        ));
     }
 
     // --server flag: force server resolution
     if let Some(server_id) = &args.server {
         let server = server::load(server_id)?;
-        return Ok(("server".to_string(), None, server_id.clone(), server));
+        return Ok(("server".to_string(), None, server_id.clone(), server, None));
     }
 
     // Bare id: try project first, then server
     let id = args.id.as_ref().unwrap(); // Safe: validated above
 
     if let Ok(project) = project::load(id) {
+        let base_path = project.base_path.clone();
         let (server_id, server) = resolve_from_project(&project)?;
-        return Ok(("project".to_string(), Some(project.id), server_id, server));
+        return Ok((
+            "project".to_string(),
+            Some(project.id),
+            server_id,
+            server,
+            base_path,
+        ));
     }
 
     if let Ok(server) = server::load(id) {
-        return Ok(("server".to_string(), None, id.clone(), server));
+        return Ok(("server".to_string(), None, id.clone(), server, None));
     }
 
     Err(Error::validation_invalid_argument(
@@ -102,7 +121,7 @@ fn resolve_internal(args: &SshResolveArgs) -> Result<(String, Option<String>, St
 fn resolve_from_project(project: &Project) -> Result<(String, Server)> {
     let server_id = project.server_id.clone().ok_or_else(|| {
         Error::validation_invalid_argument(
-            "project.serverId",
+            "project.server_id",
             "Server not configured for project",
             None,
             None,
