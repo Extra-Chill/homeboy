@@ -56,7 +56,7 @@ Options:
 - `--json <spec>`: JSON input spec for create/update (single object or bulk; see below)
 - `--skip-existing`: skip items that already exist (JSON mode only)
 - `--server-id <serverId>`: optional server ID
-- `--base-path <path>`: optional remote base path
+- `--base-path <path>`: optional base path (local or remote depending on server configuration)
 - `--table-prefix <prefix>`: optional table prefix (only used by modules that care about table naming)
 
 Arguments (CLI mode):
@@ -112,6 +112,41 @@ JSON mode:
   }
 }
 ```
+
+## Local Projects
+
+Projects without a `--server-id` execute commands locally instead of via SSH. Homeboy is environment-agnostic - it works the same way regardless of whether your local environment uses Docker, native installs, or any other setup.
+
+### Creating a Local Project
+
+```sh
+homeboy project create <id> <domain> --base-path <local-path>
+```
+
+Example:
+
+```sh
+homeboy project create my-site my-site.local \
+    --base-path "/path/to/site/public"
+```
+
+### What Works Locally
+
+All commands execute locally when no `server_id` is configured:
+
+- **CLI tools** (`homeboy wp`, `homeboy composer`) - execute in local shell
+- **Database** (`homeboy db`) - uses module templates, executes locally
+- **Logs** (`homeboy logs`) - reads files from `base_path`
+- **Files** (`homeboy files`) - browses/edits files at `base_path`
+- **Module platform behaviors** - project discovery, version patterns, etc.
+
+### What Requires a Server
+
+Only these commands require `server_id`:
+- `homeboy deploy` - uploads artifacts to remote server
+- `homeboy db tunnel` - creates SSH tunnel for database access
+
+## Subcommands (continued)
 
 ### `set`
 

@@ -1,11 +1,12 @@
-//! Remote log file operations.
+//! Log file operations.
 //!
-//! Provides viewing, following, and clearing of remote log files
-//! without exposing SSH, shell quoting, or path utilities.
+//! Provides viewing, following, and clearing of log files.
+//! Routes to local or SSH execution based on project configuration.
 
 use crate::base_path;
-use crate::context::resolve_project_ssh;
-use crate::error::{Result, TargetDetails};
+use crate::context::require_project_base_path;
+use crate::error::Result;
+use crate::executor::{execute_for_project, execute_for_project_interactive};
 use crate::project;
 use crate::shell;
 use serde::Serialize;
@@ -60,19 +61,12 @@ pub fn list(project_id: &str) -> Result<Vec<LogEntry>> {
 
 /// Shows the last N lines of a log file.
 pub fn show(project_id: &str, path: &str, lines: u32) -> Result<LogContent> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let project = project::load(project_id)?;
+    let base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&base_path), path)?;
 
     let command = format!("tail -n {} {}", lines, shell::quote_path(&full_path));
-    let target = TargetDetails {
-        project_id: Some(project_id.to_string()),
-        server_id: Some(ctx.server_id.clone()),
-        host: Some(ctx.client.host.clone()),
-    };
-    let output = ctx
-        .client
-        .execute(&command)
-        .into_remote_result(&command, target)?;
+    let output = execute_for_project(&project, &command)?;
 
     Ok(LogContent {
         path: full_path,
@@ -86,30 +80,22 @@ pub fn show(project_id: &str, path: &str, lines: u32) -> Result<LogContent> {
 /// Note: This requires an interactive terminal. The caller is responsible
 /// for ensuring terminal availability before calling.
 pub fn follow(project_id: &str, path: &str) -> Result<i32> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let project = project::load(project_id)?;
+    let base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&base_path), path)?;
 
     let tail_cmd = format!("tail -f {}", shell::quote_path(&full_path));
-    let code = ctx.client.execute_interactive(Some(&tail_cmd));
-
-    Ok(code)
+    execute_for_project_interactive(&project, &tail_cmd)
 }
 
 /// Clears the contents of a log file. Returns the full path that was cleared.
 pub fn clear(project_id: &str, path: &str) -> Result<String> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let project = project::load(project_id)?;
+    let base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&base_path), path)?;
 
     let command = format!(": > {}", shell::quote_path(&full_path));
-    let target = TargetDetails {
-        project_id: Some(project_id.to_string()),
-        server_id: Some(ctx.server_id.clone()),
-        host: Some(ctx.client.host.clone()),
-    };
-    let _output = ctx
-        .client
-        .execute(&command)
-        .into_remote_result(&command, target)?;
+    execute_for_project(&project, &command)?;
 
     Ok(full_path)
 }
@@ -123,8 +109,9 @@ pub fn search(
     lines: Option<u32>,
     context: Option<u32>,
 ) -> Result<LogSearchResult> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let project = project::load(project_id)?;
+    let base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&base_path), path)?;
 
     let mut grep_flags = String::from("-n");
     if case_insensitive {
@@ -151,7 +138,7 @@ pub fn search(
         )
     };
 
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&project, &command)?;
 
     // grep returns exit code 1 when no matches found, which is not an error
     let matches = parse_grep_output(&output.stdout);

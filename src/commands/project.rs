@@ -370,7 +370,9 @@ fn list() -> homeboy::Result<(ProjectOutput, i32)> {
 fn show(project_id: &str) -> homeboy::Result<(ProjectOutput, i32)> {
     let project = project::load(project_id)?;
 
-    let hint = if project.component_ids.is_empty() {
+    let hint = if project.server_id.is_none() {
+        Some("Local project: Commands execute on this machine. Only deploy requires a server.".to_string())
+    } else if project.component_ids.is_empty() {
         Some(format!(
             "No components linked. Use: homeboy project components add {} <component-id>",
             project.id

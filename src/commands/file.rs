@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::remote_files::{self, FileEntry, GrepMatch};
+use homeboy::files::{self, FileEntry, GrepMatch};
 
 #[derive(Args)]
 pub struct FileArgs {
@@ -209,7 +209,7 @@ pub fn run(
 }
 
 fn list(project_id: &str, path: &str) -> homeboy::Result<(FileOutput, i32)> {
-    let result = remote_files::list(project_id, path)?;
+    let result = files::list(project_id, path)?;
 
     Ok((
         FileOutput {
@@ -233,7 +233,7 @@ fn list(project_id: &str, path: &str) -> homeboy::Result<(FileOutput, i32)> {
 }
 
 fn read(project_id: &str, path: &str) -> homeboy::Result<(FileOutput, i32)> {
-    let result = remote_files::read(project_id, path)?;
+    let result = files::read(project_id, path)?;
 
     Ok((
         FileOutput {
@@ -257,8 +257,8 @@ fn read(project_id: &str, path: &str) -> homeboy::Result<(FileOutput, i32)> {
 }
 
 fn write(project_id: &str, path: &str) -> homeboy::Result<(FileOutput, i32)> {
-    let content = remote_files::read_stdin()?;
-    let result = remote_files::write(project_id, path, &content)?;
+    let content = files::read_stdin()?;
+    let result = files::write(project_id, path, &content)?;
 
     Ok((
         FileOutput {
@@ -282,7 +282,7 @@ fn write(project_id: &str, path: &str) -> homeboy::Result<(FileOutput, i32)> {
 }
 
 fn delete(project_id: &str, path: &str, recursive: bool) -> homeboy::Result<(FileOutput, i32)> {
-    let result = remote_files::delete(project_id, path, recursive)?;
+    let result = files::delete(project_id, path, recursive)?;
 
     Ok((
         FileOutput {
@@ -306,7 +306,7 @@ fn delete(project_id: &str, path: &str, recursive: bool) -> homeboy::Result<(Fil
 }
 
 fn rename(project_id: &str, old_path: &str, new_path: &str) -> homeboy::Result<(FileOutput, i32)> {
-    let result = remote_files::rename(project_id, old_path, new_path)?;
+    let result = files::rename(project_id, old_path, new_path)?;
 
     Ok((
         FileOutput {
@@ -336,7 +336,7 @@ fn find(
     file_type: Option<&str>,
     max_depth: Option<u32>,
 ) -> homeboy::Result<(FileFindOutput, i32)> {
-    let result = remote_files::find(project_id, path, name_pattern, file_type, max_depth)?;
+    let result = files::find(project_id, path, name_pattern, file_type, max_depth)?;
     let match_count = result.matches.len();
 
     Ok((
@@ -361,7 +361,7 @@ fn grep(
     max_depth: Option<u32>,
     case_insensitive: bool,
 ) -> homeboy::Result<(FileGrepOutput, i32)> {
-    let result = remote_files::grep(
+    let result = files::grep(
         project_id,
         path,
         pattern,

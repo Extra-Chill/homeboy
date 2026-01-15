@@ -2,10 +2,10 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
-use crate::context::{resolve_project_ssh, resolve_project_ssh_with_base_path};
+use crate::context::{require_project_base_path, resolve_project_ssh};
+use crate::executor::execute_for_project;
 use crate::module::{load_all_modules, DatabaseCliConfig};
 use crate::project::{self, Project};
-use crate::ssh::SshClient;
 use crate::template::{render_map, TemplateVars};
 use crate::token;
 use crate::{Error, Result};
@@ -51,8 +51,7 @@ pub struct DbTunnelResult {
 }
 
 struct DbContext {
-    project_id: String,
-    client: SshClient,
+    project: Project,
     base_path: String,
     domain: String,
     cli_path: String,
@@ -61,7 +60,7 @@ struct DbContext {
 
 fn build_context(project_id: &str, subtarget: Option<&str>) -> Result<DbContext> {
     let project = project::load(project_id)?;
-    let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
+    let base_path = require_project_base_path(project_id, &project)?;
 
     let domain = resolve_domain(&project, subtarget, project_id)?;
 
@@ -80,8 +79,7 @@ fn build_context(project_id: &str, subtarget: Option<&str>) -> Result<DbContext>
         .unwrap_or_default();
 
     Ok(DbContext {
-        project_id: project_id.to_string(),
-        client: ctx.client,
+        project,
         base_path,
         domain,
         cli_path,
@@ -129,7 +127,7 @@ pub fn list_tables(project_id: &str, subtarget: Option<&str>) -> Result<DbResult
     vars.insert(TemplateVars::CLI_PATH.to_string(), ctx.cli_path.clone());
     let command = render_map(&ctx.db_cli.tables_command, &vars);
 
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&ctx.project, &command)?;
     let tables = if output.success {
         Some(parse_json_tables(&output.stdout))
     } else {
@@ -137,7 +135,7 @@ pub fn list_tables(project_id: &str, subtarget: Option<&str>) -> Result<DbResult
     };
 
     Ok(DbResult {
-        project_id: ctx.project_id,
+        project_id: ctx.project.id.clone(),
         base_path: Some(ctx.base_path),
         domain: Some(ctx.domain),
         cli_path: Some(ctx.cli_path),
@@ -165,10 +163,10 @@ pub fn describe_table(
     vars.insert(TemplateVars::TABLE.to_string(), table.to_string());
     let command = render_map(&ctx.db_cli.describe_command, &vars);
 
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&ctx.project, &command)?;
 
     Ok(DbResult {
-        project_id: ctx.project_id,
+        project_id: ctx.project.id.clone(),
         base_path: Some(ctx.base_path),
         domain: Some(ctx.domain),
         cli_path: Some(ctx.cli_path),
@@ -216,10 +214,10 @@ pub fn query(project_id: &str, sql: &str, subtarget: Option<&str>) -> Result<DbR
     vars.insert(TemplateVars::DOMAIN.to_string(), ctx.domain.clone());
     let command = render_map(&ctx.db_cli.query_command, &vars);
 
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&ctx.project, &command)?;
 
     Ok(DbResult {
-        project_id: ctx.project_id,
+        project_id: ctx.project.id.clone(),
         base_path: Some(ctx.base_path),
         domain: Some(ctx.domain),
         cli_path: Some(ctx.cli_path),
@@ -279,10 +277,10 @@ pub fn search(
     vars.insert(TemplateVars::DOMAIN.to_string(), ctx.domain.clone());
     let command = render_map(&ctx.db_cli.query_command, &vars);
 
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&ctx.project, &command)?;
 
     Ok(DbResult {
-        project_id: ctx.project_id,
+        project_id: ctx.project.id.clone(),
         base_path: Some(ctx.base_path),
         domain: Some(ctx.domain),
         cli_path: Some(ctx.cli_path),
@@ -319,10 +317,10 @@ pub fn delete_row(
     vars.insert(TemplateVars::DOMAIN.to_string(), ctx.domain.clone());
     let command = render_map(&ctx.db_cli.query_command, &vars);
 
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&ctx.project, &command)?;
 
     Ok(DbResult {
-        project_id: ctx.project_id,
+        project_id: ctx.project.id.clone(),
         base_path: Some(ctx.base_path),
         domain: Some(ctx.domain),
         cli_path: Some(ctx.cli_path),
@@ -354,10 +352,10 @@ pub fn drop_table(
     vars.insert(TemplateVars::DOMAIN.to_string(), ctx.domain.clone());
     let command = render_map(&ctx.db_cli.query_command, &vars);
 
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&ctx.project, &command)?;
 
     Ok(DbResult {
-        project_id: ctx.project_id,
+        project_id: ctx.project.id.clone(),
         base_path: Some(ctx.base_path),
         domain: Some(ctx.domain),
         cli_path: Some(ctx.cli_path),

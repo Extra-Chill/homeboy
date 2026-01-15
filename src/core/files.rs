@@ -1,8 +1,15 @@
+//! File operations.
+//!
+//! Provides file browsing, reading, writing, and searching.
+//! Routes to local or SSH execution based on project configuration.
+
 use serde::Serialize;
 use std::io::{self, Read};
 
-use crate::context::resolve_project_ssh;
+use crate::context::require_project_base_path;
 use crate::error::{Error, Result};
+use crate::executor::execute_for_project;
+use crate::project;
 use crate::{base_path, shell, token};
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,12 +125,13 @@ pub fn read_stdin() -> Result<String> {
     Ok(content)
 }
 
-/// List directory contents on remote server.
+/// List directory contents.
 pub fn list(project_id: &str, path: &str) -> Result<ListResult> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
     let command = format!("ls -la {}", shell::quote_path(&full_path));
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&project, &command)?;
 
     if !output.success {
         return Err(Error::other(format!("LIST_FAILED: {}", output.stderr)));
@@ -132,89 +140,93 @@ pub fn list(project_id: &str, path: &str) -> Result<ListResult> {
     let entries = parse_ls_output(&output.stdout, &full_path);
 
     Ok(ListResult {
-        base_path: ctx.base_path.clone(),
+        base_path: Some(project_base_path),
         path: full_path,
         entries,
     })
 }
 
-/// Read file content from remote server.
+/// Read file content.
 pub fn read(project_id: &str, path: &str) -> Result<ReadResult> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
     let command = format!("cat {}", shell::quote_path(&full_path));
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&project, &command)?;
 
     if !output.success {
         return Err(Error::other(format!("READ_FAILED: {}", output.stderr)));
     }
 
     Ok(ReadResult {
-        base_path: ctx.base_path.clone(),
+        base_path: Some(project_base_path),
         path: full_path,
         content: output.stdout,
     })
 }
 
-/// Write content to file on remote server.
+/// Write content to file.
 pub fn write(project_id: &str, path: &str, content: &str) -> Result<WriteResult> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
     let command = format!(
         "cat > {} << 'HOMEBOYEOF'\n{}\nHOMEBOYEOF",
         shell::quote_path(&full_path),
         content
     );
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&project, &command)?;
 
     if !output.success {
         return Err(Error::other(format!("WRITE_FAILED: {}", output.stderr)));
     }
 
     Ok(WriteResult {
-        base_path: ctx.base_path.clone(),
+        base_path: Some(project_base_path),
         path: full_path,
         bytes_written: content.len(),
     })
 }
 
-/// Delete file or directory on remote server.
+/// Delete file or directory.
 pub fn delete(project_id: &str, path: &str, recursive: bool) -> Result<DeleteResult> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
     let flags = if recursive { "-rf" } else { "-f" };
     let command = format!("rm {} {}", flags, shell::quote_path(&full_path));
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&project, &command)?;
 
     if !output.success {
         return Err(Error::other(format!("DELETE_FAILED: {}", output.stderr)));
     }
 
     Ok(DeleteResult {
-        base_path: ctx.base_path.clone(),
+        base_path: Some(project_base_path),
         path: full_path,
         recursive,
     })
 }
 
-/// Rename or move file on remote server.
+/// Rename or move file.
 pub fn rename(project_id: &str, old_path: &str, new_path: &str) -> Result<RenameResult> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_old = base_path::join_remote_path(ctx.base_path.as_deref(), old_path)?;
-    let full_new = base_path::join_remote_path(ctx.base_path.as_deref(), new_path)?;
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_old = base_path::join_remote_path(Some(&project_base_path), old_path)?;
+    let full_new = base_path::join_remote_path(Some(&project_base_path), new_path)?;
     let command = format!(
         "mv {} {}",
         shell::quote_path(&full_old),
         shell::quote_path(&full_new)
     );
-    let output = ctx.client.execute(&command);
+    let output = execute_for_project(&project, &command)?;
 
     if !output.success {
         return Err(Error::other(format!("RENAME_FAILED: {}", output.stderr)));
     }
 
     Ok(RenameResult {
-        base_path: ctx.base_path.clone(),
+        base_path: Some(project_base_path),
         old_path: full_old,
         new_path: full_new,
     })
@@ -280,7 +292,7 @@ fn parse_grep_output(output: &str) -> Vec<GrepMatch> {
     matches
 }
 
-/// Find files on remote server matching pattern.
+/// Find files matching pattern.
 pub fn find(
     project_id: &str,
     path: &str,
@@ -288,8 +300,9 @@ pub fn find(
     file_type: Option<&str>,
     max_depth: Option<u32>,
 ) -> Result<FindResult> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
 
     let mut cmd = format!("find {}", shell::quote_path(&full_path));
 
@@ -315,20 +328,20 @@ pub fn find(
     // Sort output for consistent results
     cmd.push_str(" 2>/dev/null | sort");
 
-    let output = ctx.client.execute(&cmd);
+    let output = execute_for_project(&project, &cmd)?;
 
     // find returns exit code 0 even with no matches
     let matches = parse_find_output(&output.stdout);
 
     Ok(FindResult {
-        base_path: ctx.base_path.clone(),
+        base_path: Some(project_base_path),
         path: full_path,
         pattern: name_pattern.map(|s| s.to_string()),
         matches,
     })
 }
 
-/// Search file contents on remote server using grep.
+/// Search file contents using grep.
 pub fn grep(
     project_id: &str,
     path: &str,
@@ -337,8 +350,9 @@ pub fn grep(
     max_depth: Option<u32>,
     case_insensitive: bool,
 ) -> Result<GrepResult> {
-    let ctx = resolve_project_ssh(project_id)?;
-    let full_path = base_path::join_remote_path(ctx.base_path.as_deref(), path)?;
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
 
     if pattern.trim().is_empty() {
         return Err(Error::other("Search pattern required".to_string()));
@@ -364,13 +378,13 @@ pub fn grep(
     // Suppress error messages for unreadable files
     cmd.push_str(" 2>/dev/null");
 
-    let output = ctx.client.execute(&cmd);
+    let output = execute_for_project(&project, &cmd)?;
 
     // grep returns exit code 1 when no matches found, which is not an error
     let matches = parse_grep_output(&output.stdout);
 
     Ok(GrepResult {
-        base_path: ctx.base_path.clone(),
+        base_path: Some(project_base_path),
         path: full_path,
         pattern: pattern.to_string(),
         matches,
