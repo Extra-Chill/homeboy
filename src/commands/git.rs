@@ -65,6 +65,10 @@ enum GitCommand {
         /// Stage all files except these (mutually exclusive with --files)
         #[arg(long, num_args = 1.., conflicts_with = "files")]
         exclude: Option<Vec<String>>,
+
+        /// Explicit include list (repeatable)
+        #[arg(long, num_args = 1.., conflicts_with = "exclude", conflicts_with = "files")]
+        include: Option<Vec<String>>,
     },
     /// Push local commits to remote
     Push {
@@ -153,6 +157,7 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
             staged_only,
             files,
             exclude,
+            include,
         } => {
             // When --cwd is set, component_id is ignored. If user passed a positional
             // argument it was likely intended as the message/spec. Shift it.
@@ -216,9 +221,14 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
             // CLI flag mode - use inferred message or explicit -m flag
             let final_message = inferred_message.or(message);
             let target = if cwd { None } else { component_id.as_deref() };
+            let mut resolved_files = files;
+            if resolved_files.is_none() {
+                resolved_files = include;
+            }
+
             let options = git::CommitOptions {
                 staged_only,
-                files,
+                files: resolved_files,
                 exclude,
             };
             let output = git::commit(target, final_message.as_deref(), options)?;

@@ -8,6 +8,10 @@ use homeboy::changelog::{self, AddItemsOutput, InitOutput};
 
 #[derive(Args)]
 pub struct ChangelogArgs {
+    /// Show Homeboy's own changelog (release notes)
+    #[arg(long = "self")]
+    pub show_self: bool,
+
     #[command(subcommand)]
     pub command: Option<ChangelogCommand>,
 }
@@ -70,12 +74,22 @@ pub enum ChangelogOutput {
 }
 
 pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
-    match args.command {
-        None => show_markdown(),
-        Some(ChangelogCommand::Add { .. }) | Some(ChangelogCommand::Init { .. }) => {
+    match (&args.command, args.show_self) {
+        (None, true) => show_markdown(),
+        (None, false) => Err(homeboy::Error::validation_invalid_argument(
+            "command",
+            "No subcommand provided. Use a subcommand (add, init) or --self to view Homeboy's changelog",
+            None,
+            Some(vec![
+                "homeboy changelog add <component_id> <message>".to_string(),
+                "homeboy changelog init <component_id>".to_string(),
+                "homeboy changelog --self".to_string(),
+            ]),
+        )),
+        (Some(ChangelogCommand::Add { .. }) | Some(ChangelogCommand::Init { .. }), _) => {
             Err(homeboy::Error::validation_invalid_argument(
                 "command",
-                "Markdown output is only supported for 'changelog'",
+                "Markdown output is only supported for 'changelog --self'",
                 None,
                 None,
             ))
@@ -84,28 +98,38 @@ pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
 }
 
 pub fn is_show_markdown(args: &ChangelogArgs) -> bool {
-    args.command.is_none()
+    args.command.is_none() && args.show_self
 }
 
 pub fn run(
     args: ChangelogArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ChangelogOutput> {
-    match args.command {
-        None => {
+    match (&args.command, args.show_self) {
+        (None, true) => {
             let (out, code) = show_json()?;
             Ok((ChangelogOutput::Show(out), code))
         }
-        Some(ChangelogCommand::Add {
+        (None, false) => Err(homeboy::Error::validation_invalid_argument(
+            "command",
+            "No subcommand provided. Use a subcommand (add, init) or --self to view Homeboy's changelog",
+            None,
+            Some(vec![
+                "homeboy changelog add <component_id> <message>".to_string(),
+                "homeboy changelog init <component_id>".to_string(),
+                "homeboy changelog --self".to_string(),
+            ]),
+        )),
+        (Some(ChangelogCommand::Add {
             cwd,
             json,
             component_id,
             message,
-        }) => {
+        }), _) => {
             // Priority: --cwd > --json > component_id (auto-detects JSON)
-            let messages: Vec<String> = message.into_iter().collect();
+            let messages: Vec<String> = message.iter().cloned().collect();
 
-            if cwd {
+            if *cwd {
                 let output = changelog::add_items_cwd(&messages)?;
                 return Ok((ChangelogOutput::Add(output), 0));
             }
@@ -120,18 +144,18 @@ pub fn run(
             let output = changelog::add_items(component_id.as_deref(), &messages)?;
             Ok((ChangelogOutput::Add(output), 0))
         }
-        Some(ChangelogCommand::Init {
+        (Some(ChangelogCommand::Init {
             cwd,
             path,
             configure,
             component_id,
-        }) => {
-            if cwd {
+        }), _) => {
+            if *cwd {
                 let output = changelog::init_cwd(path.as_deref())?;
                 return Ok((ChangelogOutput::Init(output), 0));
             }
 
-            let id = component_id.ok_or_else(|| {
+            let id = component_id.as_ref().ok_or_else(|| {
                 homeboy::Error::validation_invalid_argument(
                     "componentId",
                     "Missing component ID (or use --cwd). List components: homeboy component list",
@@ -140,7 +164,7 @@ pub fn run(
                 )
             })?;
 
-            let output = changelog::init(&id, path.as_deref(), configure)?;
+            let output = changelog::init(id, path.as_deref(), *configure)?;
             Ok((ChangelogOutput::Init(output), 0))
         }
     }

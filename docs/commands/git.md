@@ -15,7 +15,7 @@ Note: some subcommands accept a `--json` flag for bulk operations.
 ### Single Component Mode
 
 - `status <component_id>`
-- `commit <component_id> [message-or-spec] [--json <spec>] [-m <message>] [--staged-only] [--files <paths>...]`
+- `commit <component_id> [message-or-spec] [--json <spec>] [-m <message>] [--staged-only] [--files <paths>...] [--include <paths>...] [--exclude <paths>...]`
 - `push <component_id> [--tags]`
 - `pull <component_id>`
 - `tag <component_id> [tag_name] [-m <message>]`
@@ -28,13 +28,15 @@ By default, `commit` stages all changes before committing. Use these flags for g
 - `-m, --message <msg>`: Commit message (required in CLI mode, or in JSON body)
 - `--staged-only`: Commit only changes that are already staged. Skips the automatic `git add .` step.
 - `--files <paths>...`: Stage and commit only the specified files.
+- `--include <paths>...`: Alias for `--files` (repeatable).
+- `--exclude <paths>...`: Stage all files except the specified paths.
 
 ### CWD Mode (--cwd)
 
 All subcommands support `--cwd` for ad-hoc operations in any git directory without requiring component registration:
 
 - `status --cwd`
-- `commit --cwd [message] [-m <message>] [--staged-only] [--files <paths>...] [--json <spec>]`
+- `commit --cwd [message] [-m <message>] [--staged-only] [--files <paths>...] [--include <paths>...] [--exclude <paths>...] [--json <spec>]`
 - `push --cwd [--tags]` (or omit `--cwd` and omit `<component_id>`)
 - `pull --cwd` (or omit `--cwd` and omit `<component_id>`)
 - `tag --cwd <tag_name> [-m <message>]`
@@ -87,7 +89,7 @@ All subcommands except `tag` support a `--json` flag for bulk operations across 
   "id": "extra-chill-multisite",
   "message": "Update multisite docs",
   "staged_only": false,
-  "files": ["README.md", "docs/index.md"]
+  "include_files": ["README.md", "docs/index.md"]
 }
 ```
 
@@ -95,7 +97,8 @@ Notes:
 
 - `id` is optional when you also provide a `<component_id>` positional argument (or use `--cwd`).
 - `staged_only` defaults to `false`.
-- `files` is optional; when present, Homeboy runs `git add -- <files...>` instead of `git add .`.
+- `include_files` is optional; when present, Homeboy runs `git add -- <files...>` instead of `git add .`.
+- `exclude_files` is optional; when present, Homeboy stages all changes and then unstages the excluded paths.
 
 ### BulkCommitInput (for commit)
 
@@ -197,6 +200,9 @@ homeboy git commit extra-chill-multisite -m "Release notes" --staged-only
 
 # Commit only specific files
 homeboy git commit extra-chill-multisite -m "Update docs" --files README.md docs/index.md
+
+# Commit all but exclude paths
+homeboy git commit extra-chill-multisite -m "Update docs" --exclude Cargo.lock
 
 # JSON spec mode (single)
 homeboy git commit extra-chill-multisite '{"message":"Update docs","files":["README.md"]}'

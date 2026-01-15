@@ -33,7 +33,7 @@ pub struct Component {
     pub build_artifact: String,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scoped_modules: Option<HashMap<String, ScopedModuleConfig>>,
+    pub modules: Option<HashMap<String, ScopedModuleConfig>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_targets: Option<Vec<VersionTarget>>,

@@ -245,7 +245,7 @@ pub fn finalize_next_section(
             None,
             Some(vec![
                 "Add a next section heading like '## Unreleased' (or configure changelogNextSectionLabel/aliases).".to_string(),
-                "Run `homeboy changelog init` to create a Keep a Changelog template.".to_string(),
+                "Run `homeboy changelog init <component_id>` to add an Unreleased section or create a Keep a Changelog template.".to_string(),
             ]),
         )
     })?;
@@ -629,7 +629,9 @@ pub fn add_items_cwd(messages: &[String]) -> Result<AddItemsOutput> {
             "changelog",
             "No changelog file found in current directory. Looked for: CHANGELOG.md, docs/changelog.md, HISTORY.md, changelog.md",
             None,
-            None,
+            Some(vec![
+                "Run `homeboy changelog init --cwd` to create a Keep a Changelog template.".to_string(),
+            ]),
         )
     })?;
 
@@ -700,8 +702,7 @@ pub fn init(component_id: &str, path: Option<&str>, configure: bool) -> Result<I
         let content = fs::read_to_string(&changelog_path)
             .map_err(|e| Error::internal_io(e.to_string(), Some("read changelog".to_string())))?;
 
-        let (new_content, changed) =
-            ensure_next_section(&content, &settings.next_section_aliases)?;
+        let (new_content, changed) = ensure_next_section(&content, &settings.next_section_aliases)?;
 
         if changed {
             local_files::local().write(&changelog_path, &new_content)?;
@@ -741,6 +742,8 @@ pub fn init(component_id: &str, path: Option<&str>, configure: bool) -> Result<I
 }
 
 /// Initialize a changelog in the current working directory.
+/// If the changelog file doesn't exist, creates a new one with Keep a Changelog template.
+/// If the changelog file exists, ensures it has an Unreleased section.
 pub fn init_cwd(path: Option<&str>) -> Result<InitOutput> {
     let cwd = std::env::current_dir()
         .map_err(|e| Error::other(format!("Failed to get current directory: {}", e)))?;
@@ -753,30 +756,36 @@ pub fn init_cwd(path: Option<&str>) -> Result<InitOutput> {
         cwd.join("CHANGELOG.md")
     };
 
-    // Check if file already exists
+    // Handle existing file: ensure Unreleased section exists
     if changelog_path.exists() {
-        return Err(Error::validation_invalid_argument(
-            "changelog",
-            format!(
-                "Changelog already exists at {}. View with: cat {}",
-                changelog_path.display(),
-                changelog_path.display()
-            ),
-            None,
-            None,
-        ));
+        let content = fs::read_to_string(&changelog_path)
+            .map_err(|e| Error::internal_io(e.to_string(), Some("read changelog".to_string())))?;
+
+        let (new_content, changed) = ensure_next_section(&content, &settings.next_section_aliases)?;
+
+        if changed {
+            local_files::local().write(&changelog_path, &new_content)?;
+        }
+
+        return Ok(InitOutput {
+            component_id: "cwd".to_string(),
+            changelog_path: changelog_path.to_string_lossy().to_string(),
+            initial_version: String::new(),
+            next_section_label: settings.next_section_label,
+            created: false,
+            changed,
+            configured: false,
+        });
     }
 
-    // Try to detect version from CWD (errors if no version files found)
+    // File doesn't exist: create new changelog with template
     let version_info = version::read_version_cwd()?;
     let initial_version = version_info.version;
 
-    // Ensure parent directory exists
     if let Some(parent) = changelog_path.parent() {
         local_files::local().ensure_dir(parent)?;
     }
 
-    // Generate and write template
     let content = generate_template(&initial_version, &settings.next_section_label);
     local_files::local().write(&changelog_path, &content)?;
 
@@ -786,6 +795,7 @@ pub fn init_cwd(path: Option<&str>) -> Result<InitOutput> {
         initial_version,
         next_section_label: settings.next_section_label,
         created: true,
+        changed: true,
         configured: false,
     })
 }

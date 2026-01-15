@@ -466,8 +466,10 @@ struct CommitSpec {
     message: String,
     #[serde(default)]
     staged_only: bool,
-    #[serde(default)]
+    #[serde(default, alias = "include_files")]
     files: Option<Vec<String>>,
+    #[serde(default, alias = "exclude_files")]
+    exclude_files: Option<Vec<String>>,
 }
 
 /// Options for commit operations.
@@ -740,7 +742,7 @@ fn commit_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
         let options = CommitOptions {
             staged_only: spec.staged_only,
             files: spec.files.clone(),
-            exclude: None,
+            exclude: spec.exclude_files.clone(),
         };
         match commit(Some(&id), Some(&spec.message), options) {
             Ok(output) => {
@@ -809,7 +811,7 @@ pub fn commit_from_json(id: Option<&str>, json_spec: &str) -> Result<CommitJsonO
     let options = CommitOptions {
         staged_only: spec.staged_only,
         files: spec.files,
-        exclude: None,
+        exclude: spec.exclude_files,
     };
 
     let output = commit(target_id.as_deref(), Some(&spec.message), options)?;
