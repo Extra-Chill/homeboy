@@ -95,7 +95,6 @@ fn response_mode(command: &Commands) -> ResponseMode {
             ResponseMode::Raw(RawOutputMode::InteractivePassthrough)
         }
         Commands::Docs(args) if !args.list => ResponseMode::Raw(RawOutputMode::Markdown),
-        Commands::Init(_) => ResponseMode::Raw(RawOutputMode::Markdown),
         Commands::Changelog(args) if changelog::is_show_markdown(args) => {
             ResponseMode::Raw(RawOutputMode::Markdown)
         }

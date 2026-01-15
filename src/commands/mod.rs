@@ -175,7 +175,6 @@ pub(crate) fn run_markdown(
 ) -> homeboy::Result<(String, i32)> {
     match command {
         crate::Commands::Docs(args) => docs::run_markdown(args),
-        crate::Commands::Init(args) => init::run_markdown(args),
         crate::Commands::Changelog(args) => changelog::run_markdown(args),
         _ => Err(homeboy::Error::validation_invalid_argument(
             "output_mode",
@@ -191,14 +190,8 @@ pub(crate) fn run_json(
     global: &GlobalArgs,
 ) -> (homeboy::Result<serde_json::Value>, i32) {
     match command {
-        crate::Commands::Init(_) => {
-            let err = homeboy::Error::validation_invalid_argument(
-                "output_mode",
-                "Init command uses markdown output mode",
-                None,
-                None,
-            );
-            crate::output::map_cmd_result_to_json::<serde_json::Value>(Err(err))
+        crate::Commands::Init(args) => {
+            crate::output::map_cmd_result_to_json(init::run_json(args))
         }
         crate::Commands::Project(args) => {
             crate::output::map_cmd_result_to_json(project::run(args, global))
