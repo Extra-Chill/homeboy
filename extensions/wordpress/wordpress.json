@@ -7,7 +7,7 @@
   "config_schema": "wordpress",
 
   "discovery": {
-    "find_command": "find /home -maxdepth 5 -name 'wp-config.php' -type f 2>/dev/null",
+    "find_command": "find /home /var/www /srv -maxdepth 6 -name 'wp-config.php' -type f 2>/dev/null | head -20",
     "base_path_transform": "dirname",
     "display_name_command": "cd {{basePath}} && wp option get blogname --skip-themes --skip-plugins 2>/dev/null || basename {{basePath}}"
   },
@@ -62,5 +62,33 @@
         "pattern_template": "{{sitePrefix}}*"
       }
     }
-  }
+  },
+
+  "deploy": [
+    {
+      "path_pattern": "/wp-content/plugins/",
+      "verify_command": "find {{targetDir}} -maxdepth 2 -name '*.php' -exec grep -l 'Plugin Name:' {{}} + 2>/dev/null | head -1",
+      "verify_error_message": "No WordPress plugin header found in {{targetDir}}"
+    },
+    {
+      "path_pattern": "/wp-content/themes/",
+      "verify_command": "grep -l 'Theme Name:' {{targetDir}}/style.css 2>/dev/null",
+      "verify_error_message": "No WordPress theme header found in {{targetDir}}/style.css"
+    }
+  ],
+
+  "version_patterns": [
+    {
+      "extension": ".php",
+      "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+    }
+  ],
+
+  "build": {
+    "artifact_extensions": [".zip"],
+    "script_names": ["build.sh"],
+    "command_template": "sh {{script}}"
+  },
+
+  "commands": ["wp"]
 }
