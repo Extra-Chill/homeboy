@@ -369,11 +369,7 @@ pub struct SetResult {
 }
 
 /// Set a component's version directly (without incrementing).
-pub fn set_component_version(
-    component: &Component,
-    new_version: &str,
-    dry_run: bool,
-) -> Result<SetResult> {
+pub fn set_component_version(component: &Component, new_version: &str) -> Result<SetResult> {
     let targets = component
         .version_targets
         .as_ref()
@@ -465,20 +461,14 @@ pub fn set_component_version(
 
         let match_count = versions.len();
 
-        if !dry_run {
-            let replaced_count = update_version_in_file(
-                &full_path,
-                &version_pattern,
-                &old_version,
-                new_version,
-            )?;
+        let replaced_count =
+            update_version_in_file(&full_path, &version_pattern, &old_version, new_version)?;
 
-            if replaced_count != match_count {
-                return Err(Error::internal_unexpected(format!(
-                    "Unexpected replacement count in {}",
-                    target.file
-                )));
-            }
+        if replaced_count != match_count {
+            return Err(Error::internal_unexpected(format!(
+                "Unexpected replacement count in {}",
+                target.file
+            )));
         }
 
         target_infos.push(VersionTargetInfo {
@@ -497,25 +487,17 @@ pub fn set_component_version(
 }
 
 /// Set version by component ID.
-pub fn set_version(
-    component_id: Option<&str>,
-    new_version: &str,
-    dry_run: bool,
-) -> Result<SetResult> {
+pub fn set_version(component_id: Option<&str>, new_version: &str) -> Result<SetResult> {
     let id = component_id.ok_or_else(|| {
         Error::validation_invalid_argument("componentId", "Missing componentId", None, None)
     })?;
     let component = component::load(id)?;
-    set_component_version(&component, new_version, dry_run)
+    set_component_version(&component, new_version)
 }
 
 /// Bump a component's version and finalize changelog.
 /// bump_type: "patch", "minor", or "major"
-pub fn bump_component_version(
-    component: &Component,
-    bump_type: &str,
-    dry_run: bool,
-) -> Result<BumpResult> {
+pub fn bump_component_version(component: &Component, bump_type: &str) -> Result<BumpResult> {
     let targets = component
         .version_targets
         .as_ref()
@@ -611,7 +593,7 @@ pub fn bump_component_version(
         false,
     )?;
 
-    if changelog_changed && !dry_run {
+    if changelog_changed {
         local_files::local().write(&changelog_path, &finalized_changelog)?;
     }
 
@@ -659,20 +641,14 @@ pub fn bump_component_version(
 
         let match_count = versions.len();
 
-        if !dry_run {
-            let replaced_count = update_version_in_file(
-                &full_path,
-                &version_pattern,
-                &old_version,
-                &new_version,
-            )?;
+        let replaced_count =
+            update_version_in_file(&full_path, &version_pattern, &old_version, &new_version)?;
 
-            if replaced_count != match_count {
-                return Err(Error::internal_unexpected(format!(
-                    "Unexpected replacement count in {}",
-                    target.file
-                )));
-            }
+        if replaced_count != match_count {
+            return Err(Error::internal_unexpected(format!(
+                "Unexpected replacement count in {}",
+                target.file
+            )));
         }
 
         target_infos.push(VersionTargetInfo {
@@ -694,11 +670,7 @@ pub fn bump_component_version(
 }
 
 /// Bump version by component ID.
-pub fn bump_version(
-    component_id: Option<&str>,
-    bump_type: &str,
-    dry_run: bool,
-) -> Result<BumpResult> {
+pub fn bump_version(component_id: Option<&str>, bump_type: &str) -> Result<BumpResult> {
     let id = component_id.ok_or_else(|| {
         Error::validation_invalid_argument(
             "componentId",
@@ -708,7 +680,7 @@ pub fn bump_version(
         )
     })?;
     let component = component::load(id)?;
-    bump_component_version(&component, bump_type, dry_run)
+    bump_component_version(&component, bump_type)
 }
 
 // === CWD Version Operations ===
@@ -769,17 +741,18 @@ pub fn detect_version_targets(base_path: &str) -> Result<Vec<(String, String, St
                 if let Ok(content) = fs::read_to_string(&path) {
                     // Only match if it looks like a WordPress plugin header
                     if (content.contains("Plugin Name:") || content.contains("Theme Name:"))
-                        && parse_version(&content, php_pattern).is_some() {
-                            let filename = path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown.php");
-                            found.push((
-                                filename.to_string(),
-                                php_pattern.to_string(),
-                                path.to_string_lossy().to_string(),
-                            ));
-                        }
+                        && parse_version(&content, php_pattern).is_some()
+                    {
+                        let filename = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown.php");
+                        found.push((
+                            filename.to_string(),
+                            php_pattern.to_string(),
+                            path.to_string_lossy().to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -850,7 +823,7 @@ pub fn read_version_cwd() -> Result<ComponentVersionInfo> {
 }
 
 /// Bump version in auto-detected version files in the current working directory.
-pub fn bump_version_cwd(bump_type: &str, dry_run: bool) -> Result<BumpResult> {
+pub fn bump_version_cwd(bump_type: &str) -> Result<BumpResult> {
     let cwd = get_cwd_path()?;
     let detected = detect_version_targets(&cwd)?;
 
@@ -918,7 +891,7 @@ pub fn bump_version_cwd(bump_type: &str, dry_run: bool) -> Result<BumpResult> {
                 &new_version,
                 false,
             ) {
-                if changed && !dry_run {
+                if changed {
                     let _ = fs::write(cl_path, &finalized);
                 }
                 (true, changed, cl_path.to_string_lossy().to_string())
@@ -973,21 +946,19 @@ pub fn bump_version_cwd(bump_type: &str, dry_run: bool) -> Result<BumpResult> {
 
         let match_count = versions.len();
 
-        if !dry_run {
-            let (new_content, _) =
-                replace_versions(&content, pattern, &new_version).ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                        "versionPattern",
-                        format!("Failed to replace version in {}", file),
-                        None,
-                        None,
-                    )
-                })?;
-
-            fs::write(full_path, &new_content).map_err(|e| {
-                Error::internal_io(e.to_string(), Some("write version file".to_string()))
+        let (new_content, _) =
+            replace_versions(&content, pattern, &new_version).ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "versionPattern",
+                    format!("Failed to replace version in {}", file),
+                    None,
+                    None,
+                )
             })?;
-        }
+
+        fs::write(full_path, &new_content).map_err(|e| {
+            Error::internal_io(e.to_string(), Some("write version file".to_string()))
+        })?;
 
         target_infos.push(VersionTargetInfo {
             file: file.clone(),

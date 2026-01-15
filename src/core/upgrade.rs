@@ -162,7 +162,7 @@ fn version_is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-pub fn run_upgrade(force: bool, dry_run: bool) -> Result<UpgradeResult> {
+pub fn run_upgrade(force: bool) -> Result<UpgradeResult> {
     let install_method = detect_install_method();
     let previous_version = current_version().to_string();
 
@@ -193,21 +193,6 @@ pub fn run_upgrade(force: bool, dry_run: bool) -> Result<UpgradeResult> {
         }
     }
 
-    if dry_run {
-        return Ok(UpgradeResult {
-            command: "upgrade".to_string(),
-            install_method,
-            previous_version,
-            new_version: None,
-            upgraded: false,
-            message: format!(
-                "Would run: {}",
-                install_method.upgrade_instructions()
-            ),
-            restart_required: false,
-        });
-    }
-
     // Execute the upgrade
     let (success, new_version) = execute_upgrade(install_method)?;
 
@@ -218,10 +203,7 @@ pub fn run_upgrade(force: bool, dry_run: bool) -> Result<UpgradeResult> {
         new_version: new_version.clone(),
         upgraded: success,
         message: if success {
-            format!(
-                "Upgraded to {}",
-                new_version.as_deref().unwrap_or("latest")
-            )
+            format!("Upgraded to {}", new_version.as_deref().unwrap_or("latest"))
         } else {
             "Upgrade command completed but version unchanged".to_string()
         },

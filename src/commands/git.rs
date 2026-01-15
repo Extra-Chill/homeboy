@@ -282,7 +282,11 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
                 }
             };
 
-            let output = git::tag(component_id.as_deref(), Some(&final_tag), message.as_deref())?;
+            let output = git::tag(
+                component_id.as_deref(),
+                Some(&final_tag),
+                message.as_deref(),
+            )?;
             let exit_code = output.exit_code;
             Ok((GitCommandOutput::Single(output), exit_code))
         }

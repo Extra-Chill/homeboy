@@ -44,7 +44,10 @@ pub(crate) fn slugify_id(value: &str, field_name: &str) -> Result<String> {
     if out.is_empty() {
         return Err(Error::validation_invalid_argument(
             field_name,
-            format!("{} must contain at least one letter or number", capitalize(field_name)),
+            format!(
+                "{} must contain at least one letter or number",
+                capitalize(field_name)
+            ),
             None,
             None,
         ));
@@ -65,17 +68,14 @@ pub(crate) fn extract_component_id(local_path: &str) -> Result<String> {
     let expanded = shellexpand::tilde(local_path).to_string();
     let path = std::path::Path::new(&expanded);
 
-    let basename = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "local_path",
-                "Could not extract directory name from path",
-                Some(local_path.to_string()),
-                None,
-            )
-        })?;
+    let basename = path.file_name().and_then(|s| s.to_str()).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "local_path",
+            "Could not extract directory name from path",
+            Some(local_path.to_string()),
+            None,
+        )
+    })?;
 
     let id = basename.to_lowercase();
     validate_component_id(&id)?;

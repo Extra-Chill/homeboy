@@ -1,8 +1,6 @@
 pub type CmdResult<T> = homeboy::Result<(T, i32)>;
 
-pub(crate) struct GlobalArgs {
-    pub(crate) dry_run: bool,
-}
+pub(crate) struct GlobalArgs {}
 
 pub mod api;
 pub mod auth;
@@ -60,15 +58,11 @@ pub(crate) fn run_json(
         crate::Commands::Project(args) => {
             crate::output::map_cmd_result_to_json(project::run(args, global))
         }
-        crate::Commands::Ssh(args) => {
-            crate::output::map_cmd_result_to_json(ssh::run(args, global))
-        }
+        crate::Commands::Ssh(args) => crate::output::map_cmd_result_to_json(ssh::run(args, global)),
         crate::Commands::Server(args) => {
             crate::output::map_cmd_result_to_json(server::run(args, global))
         }
-        crate::Commands::Db(args) => {
-            crate::output::map_cmd_result_to_json(db::run(args, global))
-        }
+        crate::Commands::Db(args) => crate::output::map_cmd_result_to_json(db::run(args, global)),
         crate::Commands::File(args) => {
             crate::output::map_cmd_result_to_json(file::run(args, global))
         }
@@ -93,9 +87,7 @@ pub(crate) fn run_json(
         crate::Commands::Changelog(args) => {
             crate::output::map_cmd_result_to_json(changelog::run(args, global))
         }
-        crate::Commands::Git(args) => {
-            crate::output::map_cmd_result_to_json(git::run(args, global))
-        }
+        crate::Commands::Git(args) => crate::output::map_cmd_result_to_json(git::run(args, global)),
         crate::Commands::Version(args) => {
             crate::output::map_cmd_result_to_json(version::run(args, global))
         }
@@ -108,9 +100,7 @@ pub(crate) fn run_json(
         crate::Commands::Auth(args) => {
             crate::output::map_cmd_result_to_json(auth::run(args, global))
         }
-        crate::Commands::Api(args) => {
-            crate::output::map_cmd_result_to_json(api::run(args, global))
-        }
+        crate::Commands::Api(args) => crate::output::map_cmd_result_to_json(api::run(args, global)),
         crate::Commands::Upgrade(args) | crate::Commands::Update(args) => {
             crate::output::map_cmd_result_to_json(upgrade::run(args, global))
         }

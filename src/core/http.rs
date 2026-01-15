@@ -280,10 +280,9 @@ impl ApiClient {
 
         // Check if all keychain variables have values
         for (var_name, source) in &auth.variables {
-            if source.source == "keychain"
-                && !keychain::exists(&self.project_id, var_name) {
-                    return false;
-                }
+            if source.source == "keychain" && !keychain::exists(&self.project_id, var_name) {
+                return false;
+            }
         }
 
         true

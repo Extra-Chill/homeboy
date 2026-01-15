@@ -178,7 +178,13 @@ pub fn run(
             file_type,
             max_depth,
         } => {
-            let (out, code) = find(&project_id, &path, name.as_deref(), file_type.as_deref(), max_depth)?;
+            let (out, code) = find(
+                &project_id,
+                &path,
+                name.as_deref(),
+                file_type.as_deref(),
+                max_depth,
+            )?;
             Ok((FileCommandOutput::Find(out), code))
         }
         FileCommand::Grep {
@@ -189,7 +195,14 @@ pub fn run(
             max_depth,
             ignore_case,
         } => {
-            let (out, code) = grep(&project_id, &path, &pattern, name.as_deref(), max_depth, ignore_case)?;
+            let (out, code) = grep(
+                &project_id,
+                &path,
+                &pattern,
+                name.as_deref(),
+                max_depth,
+                ignore_case,
+            )?;
             Ok((FileCommandOutput::Grep(out), code))
         }
     }
@@ -348,7 +361,14 @@ fn grep(
     max_depth: Option<u32>,
     case_insensitive: bool,
 ) -> homeboy::Result<(FileGrepOutput, i32)> {
-    let result = remote_files::grep(project_id, path, pattern, name_filter, max_depth, case_insensitive)?;
+    let result = remote_files::grep(
+        project_id,
+        path,
+        pattern,
+        name_filter,
+        max_depth,
+        case_insensitive,
+    )?;
     let match_count = result.matches.len();
 
     Ok((

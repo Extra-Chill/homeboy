@@ -166,6 +166,8 @@ pub enum ModuleOutput {
         module_id: String,
         updated_fields: Vec<String>,
     },
+    #[serde(rename = "module.set")]
+    SetBatch { batch: homeboy::BatchResult },
 }
 
 #[derive(Serialize)]
@@ -327,12 +329,17 @@ fn run_action(
 }
 
 fn set_module(module_id: Option<&str>, json: &str) -> CmdResult<ModuleOutput> {
-    let result = homeboy::module::merge_manifest_from_json(module_id, json)?;
-    Ok((
-        ModuleOutput::Set {
-            module_id: result.id,
-            updated_fields: result.updated_fields,
-        },
-        0,
-    ))
+    match homeboy::module::merge(module_id, json)? {
+        homeboy::MergeOutput::Single(result) => Ok((
+            ModuleOutput::Set {
+                module_id: result.id,
+                updated_fields: result.updated_fields,
+            },
+            0,
+        )),
+        homeboy::MergeOutput::Bulk(batch) => {
+            let exit_code = if batch.errors > 0 { 1 } else { 0 };
+            Ok((ModuleOutput::SetBatch { batch }, exit_code))
+        }
+    }
 }

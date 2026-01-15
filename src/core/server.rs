@@ -12,7 +12,7 @@ use std::process::Command;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Server {
-    #[serde(skip)]
+    #[serde(skip_deserializing, default)]
     pub id: String,
     pub host: String,
     pub user: String,
@@ -61,6 +61,10 @@ impl ConfigEntity for Server {
     }
 }
 
+// ============================================================================
+// Core CRUD - Thin wrappers around config module
+// ============================================================================
+
 pub fn load(id: &str) -> Result<Server> {
     config::load::<Server>(id)
 }
@@ -73,35 +77,6 @@ pub fn save(server: &Server) -> Result<()> {
     config::save(server)
 }
 
-pub enum MergeOutput {
-    Single(json::MergeResult),
-    Bulk(config::BatchResult),
-}
-
-/// Unified merge that auto-detects single vs bulk operations.
-/// Array input triggers batch merge, object input triggers single merge.
-pub fn merge(id: Option<&str>, json_spec: &str) -> Result<MergeOutput> {
-    let raw = json::read_json_spec_to_string(json_spec)?;
-
-    if json::is_json_array(&raw) {
-        return Ok(MergeOutput::Bulk(config::merge_batch_from_json::<Server>(&raw)?));
-    }
-
-    Ok(MergeOutput::Single(merge_from_json(id, &raw)?))
-}
-
-/// Merge JSON into server config. Accepts JSON string, @file, or - for stdin.
-/// ID can be provided as argument or extracted from JSON body.
-pub fn merge_from_json(id: Option<&str>, json_spec: &str) -> Result<json::MergeResult> {
-    config::merge_from_json::<Server>(id, json_spec)
-}
-
-/// Remove items from server config arrays. Accepts JSON string, @file, or - for stdin.
-/// ID can be provided as argument or extracted from JSON body.
-pub fn remove_from_json(id: Option<&str>, json_spec: &str) -> Result<json::RemoveResult> {
-    config::remove_from_json::<Server>(id, json_spec)
-}
-
 pub fn delete(id: &str) -> Result<()> {
     config::delete::<Server>(id)
 }
@@ -110,97 +85,31 @@ pub fn exists(id: &str) -> bool {
     config::exists::<Server>(id)
 }
 
+pub fn find_by_host(host: &str) -> Option<Server> {
+    list().ok()?.into_iter().find(|s| s.host == host)
+}
+
+pub fn merge(id: Option<&str>, json_spec: &str) -> Result<config::MergeOutput> {
+    config::merge::<Server>(id, json_spec)
+}
+
+pub fn remove_from_json(id: Option<&str>, json_spec: &str) -> Result<json::RemoveResult> {
+    config::remove_from_json::<Server>(id, json_spec)
+}
+
 pub fn key_path(id: &str) -> Result<std::path::PathBuf> {
     paths::key(id)
 }
 
 // ============================================================================
-// CLI Entry Points - Accept Option<T> and handle validation
+// Operations
 // ============================================================================
-
-#[derive(Debug, Clone)]
-pub struct CreateResult {
-    pub id: String,
-    pub server: Server,
-}
 
 #[derive(Debug, Clone)]
 pub struct UpdateResult {
     pub id: String,
     pub server: Server,
     pub updated_fields: Vec<String>,
-}
-
-/// Unified create output - can be single or bulk
-#[derive(Debug)]
-pub enum CreateOutput {
-    Single(CreateResult),
-    Bulk(CreateSummary),
-}
-
-/// Unified create - auto-detects JSON in spec_or_id
-pub fn create(
-    spec_or_id: Option<&str>,
-    host: Option<&str>,
-    user: Option<&str>,
-    port: Option<u16>,
-    skip_existing: bool,
-) -> Result<CreateOutput> {
-    // Auto-detect JSON
-    if let Some(input) = spec_or_id {
-        if json::is_json_input(input) {
-            return Ok(CreateOutput::Bulk(create_from_json(input, skip_existing)?));
-        }
-    }
-    // Fall through to CLI mode
-    Ok(CreateOutput::Single(create_from_cli(
-        spec_or_id.map(String::from),
-        host.map(String::from),
-        user.map(String::from),
-        port,
-    )?))
-}
-
-pub fn create_from_cli(
-    id: Option<String>,
-    host: Option<String>,
-    user: Option<String>,
-    port: Option<u16>,
-) -> Result<CreateResult> {
-    let id = id.ok_or_else(|| {
-        Error::validation_invalid_argument("id", "Missing required argument: id", None, None)
-    })?;
-
-    slugify::validate_component_id(&id)?;
-
-    let host = host.ok_or_else(|| {
-        Error::validation_invalid_argument("host", "Missing required argument: host", None, None)
-    })?;
-
-    let user = user.ok_or_else(|| {
-        Error::validation_invalid_argument("user", "Missing required argument: user", None, None)
-    })?;
-
-    if exists(&id) {
-        return Err(Error::validation_invalid_argument(
-            "server.id",
-            format!("Server '{}' already exists", id),
-            Some(id),
-            None,
-        ));
-    }
-
-    let server = Server {
-        id: id.clone(),
-        host,
-        user,
-        port: port.unwrap_or(22),
-        identity_file: None,
-    };
-
-    save(&server)?;
-
-    Ok(CreateResult { id, server })
 }
 
 pub fn update(
@@ -236,11 +145,10 @@ pub fn update(
     })
 }
 
-pub fn rename(id: &str, new_id: &str) -> Result<CreateResult> {
+pub fn rename(id: &str, new_id: &str) -> Result<Server> {
     let new_id = new_id.to_lowercase();
     config::rename::<Server>(id, &new_id)?;
-    let server = load(&new_id)?;
-    Ok(CreateResult { id: new_id, server })
+    load(&new_id)
 }
 
 pub fn delete_safe(id: &str) -> Result<()> {
@@ -275,21 +183,9 @@ pub fn set_identity_file(id: &str, identity_file: Option<String>) -> Result<Serv
 }
 
 // ============================================================================
-// JSON Import
-// ============================================================================
-
-pub use config::BatchResult as CreateSummary;
-pub use config::BatchResultItem as CreateSummaryItem;
-
-pub fn create_from_json(spec: &str, skip_existing: bool) -> Result<CreateSummary> {
-    config::create_from_json::<Server>(spec, skip_existing)
-}
-
-// ============================================================================
 // SSH Key Management
 // ============================================================================
 
-/// Result of generating an SSH key pair
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyGenerateResult {
@@ -298,7 +194,6 @@ pub struct KeyGenerateResult {
     pub identity_file: String,
 }
 
-/// Result of importing an SSH key
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyImportResult {
@@ -308,7 +203,6 @@ pub struct KeyImportResult {
     pub imported_from: String,
 }
 
-/// Generate a new SSH key pair for a server.
 pub fn generate_key(server_id: &str) -> Result<KeyGenerateResult> {
     load(server_id)?;
 
@@ -358,7 +252,6 @@ pub fn generate_key(server_id: &str) -> Result<KeyGenerateResult> {
     })
 }
 
-/// Get the public key for a server.
 pub fn get_public_key(server_id: &str) -> Result<String> {
     load(server_id)?;
 
@@ -376,7 +269,6 @@ pub fn get_public_key(server_id: &str) -> Result<String> {
     Ok(public_key.trim().to_string())
 }
 
-/// Import an existing SSH private key for a server.
 pub fn import_key(server_id: &str, source_path: &str) -> Result<KeyImportResult> {
     load(server_id)?;
 
@@ -439,7 +331,6 @@ pub fn import_key(server_id: &str, source_path: &str) -> Result<KeyImportResult>
     })
 }
 
-/// Set identity file for a server by referencing an existing key path.
 pub fn use_key(server_id: &str, key_path: &str) -> Result<Server> {
     let expanded_path = shellexpand::tilde(key_path).to_string();
 
@@ -453,7 +344,6 @@ pub fn use_key(server_id: &str, key_path: &str) -> Result<Server> {
     set_identity_file(server_id, Some(expanded_path))
 }
 
-/// Clear the identity file for a server.
 pub fn unset_key(server_id: &str) -> Result<Server> {
     set_identity_file(server_id, None)
 }

@@ -2,6 +2,7 @@ use crate::config::{self, ConfigEntity};
 use crate::error::{Error, Result};
 use crate::json;
 use crate::paths;
+use crate::server;
 use crate::slugify;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -325,31 +326,10 @@ pub fn exists(id: &str) -> bool {
     config::exists::<Project>(id)
 }
 
-pub enum MergeOutput {
-    Single(json::MergeResult),
-    Bulk(config::BatchResult),
+pub fn merge(id: Option<&str>, json_spec: &str) -> Result<config::MergeOutput> {
+    config::merge::<Project>(id, json_spec)
 }
 
-/// Unified merge that auto-detects single vs bulk operations.
-/// Array input triggers batch merge, object input triggers single merge.
-pub fn merge(id: Option<&str>, json_spec: &str) -> Result<MergeOutput> {
-    let raw = json::read_json_spec_to_string(json_spec)?;
-
-    if json::is_json_array(&raw) {
-        return Ok(MergeOutput::Bulk(config::merge_batch_from_json::<Project>(&raw)?));
-    }
-
-    Ok(MergeOutput::Single(merge_from_json(id, &raw)?))
-}
-
-/// Merge JSON into project config. Accepts JSON string, @file, or - for stdin.
-/// ID can be provided as argument or extracted from JSON body.
-pub fn merge_from_json(id: Option<&str>, json_spec: &str) -> Result<json::MergeResult> {
-    config::merge_from_json::<Project>(id, json_spec)
-}
-
-/// Remove items from project config arrays. Accepts JSON string, @file, or - for stdin.
-/// ID can be provided as argument or extracted from JSON body.
 pub fn remove_from_json(id: Option<&str>, json_spec: &str) -> Result<json::RemoveResult> {
     config::remove_from_json::<Project>(id, json_spec)
 }
@@ -436,6 +416,13 @@ pub fn create_from_cli(
         ));
     }
 
+    if let Some(ref sid) = server_id {
+        if !server::exists(sid) {
+            let suggestions = config::find_similar_ids::<crate::server::Server>(sid);
+            return Err(Error::server_not_found(sid.clone(), suggestions));
+        }
+    }
+
     let project = Project {
         id: id.clone(),
         domain,
@@ -477,6 +464,12 @@ pub fn update(
     }
 
     if let Some(new_server_id) = server_id {
+        if let Some(ref sid) = new_server_id {
+            if !server::exists(sid) {
+                let suggestions = config::find_similar_ids::<crate::server::Server>(sid);
+                return Err(Error::server_not_found(sid.clone(), suggestions));
+            }
+        }
         project.server_id = new_server_id;
         updated.push("serverId".to_string());
     }
@@ -649,7 +642,12 @@ pub fn pin(project_id: &str, pin_type: PinType, path: &str, options: PinOptions)
 
     match pin_type {
         PinType::File => {
-            if project.remote_files.pinned_files.iter().any(|f| f.path == path) {
+            if project
+                .remote_files
+                .pinned_files
+                .iter()
+                .any(|f| f.path == path)
+            {
                 return Err(Error::validation_invalid_argument(
                     "path",
                     "File is already pinned",
@@ -663,7 +661,12 @@ pub fn pin(project_id: &str, pin_type: PinType, path: &str, options: PinOptions)
             });
         }
         PinType::Log => {
-            if project.remote_logs.pinned_logs.iter().any(|l| l.path == path) {
+            if project
+                .remote_logs
+                .pinned_logs
+                .iter()
+                .any(|l| l.path == path)
+            {
                 return Err(Error::validation_invalid_argument(
                     "path",
                     "Log is already pinned",
@@ -720,5 +723,5 @@ pub use config::BatchResult as CreateSummary;
 pub use config::BatchResultItem as CreateSummaryItem;
 
 pub fn create_from_json(spec: &str, skip_existing: bool) -> Result<CreateSummary> {
-    config::create_from_json::<Project>(spec, skip_existing)
+    config::create_batch::<Project>(spec, skip_existing)
 }

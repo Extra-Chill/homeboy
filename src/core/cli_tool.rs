@@ -85,13 +85,7 @@ fn build_component_command(
 }
 
 fn run_for_project(tool: &str, project_id: &str, args: &[String]) -> Result<CliToolResult> {
-    run_for_project_with_executor(
-        tool,
-        project_id,
-        args,
-        project::load,
-        execute_local_command,
-    )
+    run_for_project_with_executor(tool, project_id, args, project::load, execute_local_command)
 }
 
 fn run_for_project_with_executor(
@@ -119,11 +113,7 @@ fn run_for_project_with_executor(
 
     let (target_domain, command) = build_project_command(&project, cli_config, args)?;
 
-    let output = if project
-        .server_id
-        .as_ref()
-        .is_none_or(|s| s.is_empty())
-    {
+    let output = if project.server_id.as_ref().is_none_or(|s| s.is_empty()) {
         local_executor(&command)
     } else {
         let ctx = resolve_project_ssh(project_id)?;

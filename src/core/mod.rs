@@ -33,5 +33,6 @@ pub(crate) mod config;
 pub(crate) mod slugify;
 
 // Re-exports for convenient access
+pub use config::{BatchResult, MergeOutput};
 pub use error::{Error, ErrorCode, Result};
 pub use json::{BulkResult, BulkSummary, ItemOutcome, MergeResult};

@@ -17,11 +17,6 @@ These are provided by clap:
 - `--version` / `-V`: print version and exit
 - `--help` / `-h`: print help and exit
 
-Homeboy also defines:
-
-- `--dry-run`: global dry-run mode.
-
-`--dry-run` is a global option.
 
 ## Subcommands
 

@@ -300,7 +300,11 @@ pub fn find(
     if let Some(t) = file_type {
         match t {
             "f" | "d" | "l" => cmd.push_str(&format!(" -type {}", t)),
-            _ => return Err(Error::other("Invalid file type. Use 'f', 'd', or 'l'.".to_string())),
+            _ => {
+                return Err(Error::other(
+                    "Invalid file type. Use 'f', 'd', or 'l'.".to_string(),
+                ))
+            }
         }
     }
 

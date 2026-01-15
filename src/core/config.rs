@@ -14,6 +14,12 @@ pub(crate) trait ConfigEntity: Serialize + DeserializeOwned {
     fn config_dir() -> Result<PathBuf>;
     fn not_found_error(id: String, suggestions: Vec<String>) -> Error;
     fn entity_type() -> &'static str;
+
+    /// Entity-specific validation. Override to add custom validation rules.
+    /// Called by `config::create()` before saving.
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) fn load<T: ConfigEntity>(id: &str) -> Result<T> {
@@ -77,6 +83,40 @@ pub(crate) fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
     let content = json::to_string_pretty(entity)?;
     local_files::local().write(&path, &content)?;
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateResult<T> {
+    pub id: String,
+    pub entity: T,
+}
+
+/// Universal create function for any ConfigEntity.
+/// Validates ID, checks for existence, runs entity-specific validation, then saves.
+pub(crate) fn create<T: ConfigEntity>(entity: T) -> Result<CreateResult<T>> {
+    slugify::validate_component_id(entity.id())?;
+    entity.validate()?;
+
+    if exists::<T>(entity.id()) {
+        return Err(Error::validation_invalid_argument(
+            &format!("{}.id", T::entity_type()),
+            format!("{} '{}' already exists", T::entity_type(), entity.id()),
+            Some(entity.id().to_string()),
+            None,
+        ));
+    }
+
+    check_id_collision(entity.id(), T::entity_type())?;
+
+    let path = T::config_path(entity.id())?;
+    local_files::ensure_app_dirs()?;
+    let content = json::to_string_pretty(&entity)?;
+    local_files::local().write(&path, &content)?;
+
+    Ok(CreateResult {
+        id: entity.id().to_string(),
+        entity,
+    })
 }
 
 pub(crate) fn delete<T: ConfigEntity>(id: &str) -> Result<()> {
@@ -187,10 +227,36 @@ impl Default for BatchResult {
 }
 
 // ============================================================================
+// Merge Operations
+// ============================================================================
+
+/// Unified output for merge operations (single or bulk).
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum MergeOutput {
+    Single(json::MergeResult),
+    Bulk(BatchResult),
+}
+
+/// Unified merge that auto-detects single vs bulk operations.
+/// Array input triggers batch merge, object input triggers single merge.
+pub fn merge<T: ConfigEntity>(id: Option<&str>, json_spec: &str) -> Result<MergeOutput> {
+    let raw = json::read_json_spec_to_string(json_spec)?;
+
+    if json::is_json_array(&raw) {
+        return Ok(MergeOutput::Bulk(merge_batch_from_json::<T>(&raw)?));
+    }
+
+    Ok(MergeOutput::Single(merge_from_json::<T>(id, &raw)?))
+}
+
+// ============================================================================
 // Generic JSON Operations
 // ============================================================================
 
-pub(crate) fn create_from_json<T: ConfigEntity>(
+/// Batch create entities from JSON. Parses JSON array (or single object),
+/// validates each entity, and saves. Supports skip_existing flag.
+pub(crate) fn create_batch<T: ConfigEntity>(
     spec: &str,
     skip_existing: bool,
 ) -> Result<BatchResult> {
@@ -207,7 +273,10 @@ pub(crate) fn create_from_json<T: ConfigEntity>(
         let id = match item.get("id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
             None => {
-                summary.record_error("unknown".to_string(), "Missing required field: id".to_string());
+                summary.record_error(
+                    "unknown".to_string(),
+                    "Missing required field: id".to_string(),
+                );
                 continue;
             }
         };
@@ -226,11 +295,20 @@ pub(crate) fn create_from_json<T: ConfigEntity>(
         };
         entity.set_id(id.clone());
 
+        // Entity-specific validation
+        if let Err(e) = entity.validate() {
+            summary.record_error(id, e.message.clone());
+            continue;
+        }
+
         if exists::<T>(&id) {
             if skip_existing {
                 summary.record_skipped(id);
             } else {
-                summary.record_error(id.clone(), format!("{} '{}' already exists", T::entity_type(), id));
+                summary.record_error(
+                    id.clone(),
+                    format!("{} '{}' already exists", T::entity_type(), id),
+                );
             }
             continue;
         }
@@ -259,7 +337,10 @@ pub(crate) fn merge_from_json<T: ConfigEntity>(
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "id",
-                format!("Provide {} ID as argument or in JSON body", T::entity_type()),
+                format!(
+                    "Provide {} ID as argument or in JSON body",
+                    T::entity_type()
+                ),
                 None,
                 None,
             )
@@ -280,9 +361,8 @@ pub(crate) fn merge_from_json<T: ConfigEntity>(
     })
 }
 
-pub(crate) fn merge_batch_from_json<T: ConfigEntity>(spec: &str) -> Result<BatchResult> {
-    let raw = json::read_json_spec_to_string(spec)?;
-    let value: serde_json::Value = json::from_str(&raw)?;
+pub(crate) fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchResult> {
+    let value: serde_json::Value = json::from_str(raw_json)?;
 
     let items: Vec<serde_json::Value> = if value.is_array() {
         value.as_array().unwrap().clone()
@@ -312,6 +392,7 @@ pub(crate) fn merge_batch_from_json<T: ConfigEntity>(spec: &str) -> Result<Batch
         match load::<T>(&id) {
             Ok(mut entity) => match json::merge_config(&mut entity, patch) {
                 Ok(_) => {
+                    entity.set_id(id.clone());
                     if let Err(e) = save(&entity) {
                         result.record_error(id, e.message.clone());
                     } else {
@@ -345,7 +426,10 @@ pub(crate) fn remove_from_json<T: ConfigEntity>(
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "id",
-                format!("Provide {} ID as argument or in JSON body", T::entity_type()),
+                format!(
+                    "Provide {} ID as argument or in JSON body",
+                    T::entity_type()
+                ),
                 None,
                 None,
             )
@@ -394,8 +478,9 @@ pub(crate) fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
     entity.set_id(new_id.clone());
 
     local_files::ensure_app_dirs()?;
-    std::fs::rename(&old_path, &new_path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("rename {}", T::entity_type()))))?;
+    std::fs::rename(&old_path, &new_path).map_err(|e| {
+        Error::internal_io(e.to_string(), Some(format!("rename {}", T::entity_type())))
+    })?;
 
     if let Err(error) = save(&entity) {
         let _ = std::fs::rename(&new_path, &old_path);

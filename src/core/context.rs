@@ -184,11 +184,9 @@ fn find_project_for_components(component_ids: &[String]) -> Option<project::Proj
         return None;
     }
     let projects = project::list().ok()?;
-    projects.into_iter().find(|p| {
-        component_ids
-            .iter()
-            .all(|id| p.component_ids.contains(id))
-    })
+    projects
+        .into_iter()
+        .find(|p| component_ids.iter().all(|id| p.component_ids.contains(id)))
 }
 
 fn build_component_info(component: &component::Component) -> ContainedComponentInfo {

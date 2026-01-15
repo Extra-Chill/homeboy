@@ -32,10 +32,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(version = VERSION)]
 #[command(about = "CLI tool for development and deployment automation")]
 struct Cli {
-    /// Dry-run: show what would happen without writing.
-    #[arg(long, global = true)]
-    dry_run: bool,
-
     #[command(subcommand)]
     command: Commands,
 }
@@ -192,9 +188,7 @@ fn main() -> std::process::ExitCode {
     let cmd = build_augmented_command(&module_info);
     let matches = cmd.get_matches();
 
-    let global = GlobalArgs {
-        dry_run: matches.get_flag("dry_run"),
-    };
+    let global = GlobalArgs {};
 
     if let Some(module_cmd) = try_parse_module_cli_command(&matches, &module_info) {
         let result = cli::run(

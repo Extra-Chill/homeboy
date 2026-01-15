@@ -116,7 +116,15 @@ pub fn run(
             exact,
             limit,
             subtarget,
-        } => search(&project_id, &table, &column, &pattern, exact, limit, subtarget.as_deref()),
+        } => search(
+            &project_id,
+            &table,
+            &column,
+            &pattern,
+            exact,
+            limit,
+            subtarget.as_deref(),
+        ),
         DbCommand::DeleteRow { project_id, args } => delete_row(&project_id, &args),
         DbCommand::DropTable { project_id, args } => drop_table(&project_id, &args),
         DbCommand::Tunnel {

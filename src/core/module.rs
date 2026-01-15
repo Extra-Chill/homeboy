@@ -70,7 +70,11 @@ pub struct ModuleManifest {
     pub requires: Option<RequirementsConfig>,
 
     // Extensibility: preserve unknown fields for external consumers (GUI, workflows)
-    #[serde(flatten, default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    #[serde(
+        flatten,
+        default,
+        skip_serializing_if = "std::collections::HashMap::is_empty"
+    )]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 
     // Internal path (not serialized)
@@ -393,8 +397,8 @@ pub fn save_manifest(manifest: &ModuleManifest) -> Result<()> {
     config::save(manifest)
 }
 
-pub fn merge_manifest_from_json(id: Option<&str>, json_spec: &str) -> Result<json::MergeResult> {
-    config::merge_from_json::<ModuleManifest>(id, json_spec)
+pub fn merge(id: Option<&str>, json_spec: &str) -> Result<config::MergeOutput> {
+    config::merge::<ModuleManifest>(id, json_spec)
 }
 
 /// Environment variable names for module execution context.
@@ -1144,17 +1148,14 @@ fn install_from_path(source_path: &str, id_override: Option<&str>) -> Result<Ins
     }
 
     // Derive module ID from directory name or override
-    let dir_name = source
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "source",
-                "Could not determine directory name",
-                Some(source_path.to_string()),
-                None,
-            )
-        })?;
+    let dir_name = source.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "source",
+            "Could not determine directory name",
+            Some(source_path.to_string()),
+            None,
+        )
+    })?;
 
     let module_id = match id_override {
         Some(id) => slugify_id(id)?,
@@ -1240,8 +1241,8 @@ pub fn update(module_id: &str, force: bool) -> Result<UpdateResult> {
         ));
     }
 
-    let module =
-        load_module(module_id).ok_or_else(|| Error::module_not_found(module_id.to_string(), vec![]))?;
+    let module = load_module(module_id)
+        .ok_or_else(|| Error::module_not_found(module_id.to_string(), vec![]))?;
 
     let source_url = module.source_url.ok_or_else(|| {
         Error::validation_invalid_argument(

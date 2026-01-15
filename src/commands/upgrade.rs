@@ -27,12 +27,12 @@ pub fn run(args: UpgradeArgs, global: &GlobalArgs) -> CmdResult<Value> {
         return Ok((json, 0));
     }
 
-    let result = upgrade::run_upgrade(args.force, global.dry_run)?;
+    let result = upgrade::run_upgrade(args.force)?;
     let json = serde_json::to_value(&result)
         .map_err(|e| homeboy::Error::internal_json(e.to_string(), None))?;
 
     // If upgrade succeeded and restart is needed, do it
-    if result.upgraded && result.restart_required && !args.no_restart && !global.dry_run {
+    if result.upgraded && result.restart_required && !args.no_restart {
         // Print the result first so the user sees it
         println!(
             "{}",

@@ -121,27 +121,24 @@ pub fn save(component: &Component) -> Result<()> {
     config::save(component)
 }
 
-pub enum MergeOutput {
-    Single(json::MergeResult),
-    Bulk(config::BatchResult),
-}
-
 /// Unified merge that auto-detects single vs bulk operations.
 /// Array input triggers batch merge, object input triggers single merge.
-pub fn merge(id: Option<&str>, json_spec: &str) -> Result<MergeOutput> {
+/// Single merge supports auto-rename if JSON contains a different `id` field.
+pub fn merge(id: Option<&str>, json_spec: &str) -> Result<config::MergeOutput> {
     let raw = json::read_json_spec_to_string(json_spec)?;
 
     if json::is_json_array(&raw) {
-        return Ok(MergeOutput::Bulk(config::merge_batch_from_json::<Component>(&raw)?));
+        return Ok(config::MergeOutput::Bulk(config::merge_batch_from_json::<
+            Component,
+        >(&raw)?));
     }
 
-    Ok(MergeOutput::Single(merge_from_json(id, &raw)?))
+    Ok(config::MergeOutput::Single(merge_from_json(id, &raw)?))
 }
 
-/// Merge JSON into component config. Accepts JSON string, @file, or - for stdin.
-/// ID can be provided as argument or extracted from JSON body.
+/// Merge JSON into component config with auto-rename support.
 /// If JSON contains an `id` field that differs from the target, automatically renames the component.
-pub fn merge_from_json(id: Option<&str>, json_spec: &str) -> Result<json::MergeResult> {
+fn merge_from_json(id: Option<&str>, json_spec: &str) -> Result<json::MergeResult> {
     let raw = json::read_json_spec_to_string(json_spec)?;
     let parsed: serde_json::Value = json::from_str(&raw)?;
 
@@ -334,7 +331,10 @@ pub fn rename(id: &str, new_id: &str) -> Result<CreateResult> {
     config::rename::<Component>(id, &new_id)?;
     update_project_references(id, &new_id)?;
     let component = load(&new_id)?;
-    Ok(CreateResult { id: new_id, component })
+    Ok(CreateResult {
+        id: new_id,
+        component,
+    })
 }
 
 /// Update all projects that reference the old component ID to use the new ID.
@@ -401,5 +401,5 @@ pub use config::BatchResult as CreateSummary;
 pub use config::BatchResultItem as CreateSummaryItem;
 
 pub fn create_from_json(spec: &str, skip_existing: bool) -> Result<CreateSummary> {
-    config::create_from_json::<Component>(spec, skip_existing)
+    config::create_batch::<Component>(spec, skip_existing)
 }

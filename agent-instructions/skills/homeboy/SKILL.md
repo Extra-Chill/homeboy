@@ -39,7 +39,7 @@ homeboy help <command>         # CLI help for any command/subcommand
 
 ## Safety Guidelines
 
-1. **Deploy**: Always run with `--dry-run` first to preview changes
+1. **Deploy**: Confirm target, scope, and impact first
 2. **Database**: Most `db` operations are read-only (tables, describe, query). Write operations exist (delete-row, drop-table) but require explicit confirmation.
 3. **SSH**: Exercise caution with destructive commands on production servers
 4. **PM2**: `restart` affects live services - confirm intent before executing
@@ -76,7 +76,7 @@ homeboy db query <project> "SELECT * FROM some_table LIMIT 10"
 
 ### Deployment
 ```bash
-homeboy deploy <project> --dry-run --all    # Preview all deployments
+homeboy deploy <project> --all             # Deploy all components
 homeboy deploy <project> --outdated         # Deploy changed components only
 homeboy deploy <project> <component-id>     # Deploy specific component
 ```

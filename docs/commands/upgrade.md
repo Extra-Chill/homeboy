@@ -7,8 +7,6 @@ homeboy upgrade [OPTIONS]
 homeboy update [OPTIONS]  # alias
 ```
 
-This command accepts the global flag `--dry-run` (see [Root command](../cli/homeboy-root-command.md)).
-
 ## Description
 
 Upgrades Homeboy to the latest version. The command auto-detects the installation method (Homebrew, Cargo, or source build) and runs the appropriate upgrade process.
@@ -57,12 +55,6 @@ Force reinstall:
 
 ```sh
 homeboy upgrade --force
-```
-
-Preview what would happen:
-
-```sh
-homeboy --dry-run upgrade
 ```
 
 ## JSON output

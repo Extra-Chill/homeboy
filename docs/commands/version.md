@@ -6,8 +6,6 @@
 homeboy version <COMMAND>
 ```
 
-This command accepts the global flag `--dry-run` (see [Root command](../cli/homeboy-root-command.md)).
-
 ## Subcommands
 
 ### `show`
@@ -63,12 +61,6 @@ Arguments:
 - `<componentId>`: component ID
 - `<patch|minor|major>`: version bump type
 
-Dry-run mode:
-
-```sh
-homeboy --dry-run version bump <componentId> <patch|minor|major>
-```
-
 ## JSON output
 
 > Note: all command output is wrapped in the global JSON envelope described in the [JSON output contract](../json-output/json-output-contract.md). `homeboy version` returns a `VersionOutput` object as the `data` payload.
@@ -90,7 +82,6 @@ homeboy --dry-run version bump <componentId> <patch|minor|major>
 - `changelogPath` (resolved changelog path)
 - `changelogFinalized` (always `true` on success)
 - `changelogChanged` (whether the changelog file was modified)
-- `dryRun` (mirrors global `--dry-run`)
 
 `homeboy version set` data payload:
 
@@ -99,7 +90,6 @@ homeboy --dry-run version bump <componentId> <patch|minor|major>
 - `oldVersion`
 - `newVersion`
 - `targets`: array of `{ file, pattern, fullPath, matchCount }`
-- `dryRun` (mirrors global `--dry-run`)
 
 Errors:
 

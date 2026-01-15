@@ -3,18 +3,26 @@ use serde::Serialize;
 
 use homeboy::server::{self, Server};
 
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerOutput {
     command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     server_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     server: Option<Server>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     servers: Option<Vec<Server>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     updated: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     deleted: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<ServerKeyOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     import: Option<server::CreateSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch: Option<server::CreateSummary>,
 }
 
 #[derive(Serialize)]
@@ -149,11 +157,8 @@ pub fn run(
                         command: "server.create".to_string(),
                         server_id: Some(result.id),
                         server: Some(result.server),
-                        servers: None,
                         updated: Some(vec!["created".to_string()]),
-                        deleted: None,
-                        key: None,
-                        import: None,
+                        ..Default::default()
                     },
                     0,
                 )),
@@ -162,13 +167,8 @@ pub fn run(
                     Ok((
                         ServerOutput {
                             command: "server.create".to_string(),
-                            server_id: None,
-                            server: None,
-                            servers: None,
-                            updated: None,
-                            deleted: None,
-                            key: None,
                             import: Some(summary),
+                            ..Default::default()
                         },
                         exit_code,
                     ))
@@ -214,39 +214,47 @@ fn run_key(args: KeyArgs) -> homeboy::Result<(ServerOutput, i32)> {
 }
 
 fn show(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
-    let svr = server::load(server_id)?;
+    let svr = server::load(server_id)
+        .or_else(|original_error| server::find_by_host(server_id).ok_or(original_error))?;
 
     Ok((
         ServerOutput {
             command: "server.show".to_string(),
-            server_id: Some(server_id.to_string()),
+            server_id: Some(svr.id.clone()),
             server: Some(svr),
-            servers: None,
-            updated: None,
-            deleted: None,
-            key: None,
-            import: None,
+            ..Default::default()
         },
         0,
     ))
 }
 
 fn set(server_id: Option<&str>, json: &str) -> homeboy::Result<(ServerOutput, i32)> {
-    let result = server::merge_from_json(server_id, json)?;
-    let server = server::load(&result.id)?;
-    Ok((
-        ServerOutput {
-            command: "server.set".to_string(),
-            server_id: Some(result.id),
-            server: Some(server),
-            servers: None,
-            updated: Some(result.updated_fields),
-            deleted: None,
-            key: None,
-            import: None,
-        },
-        0,
-    ))
+    match server::merge(server_id, json)? {
+        homeboy::MergeOutput::Single(result) => {
+            let svr = server::load(&result.id)?;
+            Ok((
+                ServerOutput {
+                    command: "server.set".to_string(),
+                    server_id: Some(result.id),
+                    server: Some(svr),
+                    updated: Some(result.updated_fields),
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
+        homeboy::MergeOutput::Bulk(summary) => {
+            let exit_code = if summary.errors > 0 { 1 } else { 0 };
+            Ok((
+                ServerOutput {
+                    command: "server.set".to_string(),
+                    batch: Some(summary),
+                    ..Default::default()
+                },
+                exit_code,
+            ))
+        }
+    }
 }
 
 fn delete(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
@@ -256,12 +264,8 @@ fn delete(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
         ServerOutput {
             command: "server.delete".to_string(),
             server_id: Some(server_id.to_string()),
-            server: None,
-            servers: None,
-            updated: None,
             deleted: Some(vec![server_id.to_string()]),
-            key: None,
-            import: None,
+            ..Default::default()
         },
         0,
     ))
@@ -273,13 +277,8 @@ fn list() -> homeboy::Result<(ServerOutput, i32)> {
     Ok((
         ServerOutput {
             command: "server.list".to_string(),
-            server_id: None,
-            server: None,
             servers: Some(servers),
-            updated: None,
-            deleted: None,
-            key: None,
-            import: None,
+            ..Default::default()
         },
         0,
     ))
@@ -293,9 +292,7 @@ fn key_generate(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
             command: "server.key.generate".to_string(),
             server_id: Some(server_id.to_string()),
             server: Some(result.server),
-            servers: None,
             updated: Some(vec!["identity_file".to_string()]),
-            deleted: None,
             key: Some(ServerKeyOutput {
                 action: "generate".to_string(),
                 server_id: server_id.to_string(),
@@ -303,7 +300,7 @@ fn key_generate(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
                 identity_file: Some(result.identity_file),
                 imported: None,
             }),
-            import: None,
+            ..Default::default()
         },
         0,
     ))
@@ -316,10 +313,6 @@ fn key_show(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
         ServerOutput {
             command: "server.key.show".to_string(),
             server_id: Some(server_id.to_string()),
-            server: None,
-            servers: None,
-            updated: None,
-            deleted: None,
             key: Some(ServerKeyOutput {
                 action: "show".to_string(),
                 server_id: server_id.to_string(),
@@ -327,7 +320,7 @@ fn key_show(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
                 identity_file: None,
                 imported: None,
             }),
-            import: None,
+            ..Default::default()
         },
         0,
     ))
@@ -342,9 +335,7 @@ fn key_use(server_id: &str, private_key_path: &str) -> homeboy::Result<(ServerOu
             command: "server.key.use".to_string(),
             server_id: Some(server_id.to_string()),
             server: Some(server),
-            servers: None,
             updated: Some(vec!["identity_file".to_string()]),
-            deleted: None,
             key: Some(ServerKeyOutput {
                 action: "use".to_string(),
                 server_id: server_id.to_string(),
@@ -352,7 +343,7 @@ fn key_use(server_id: &str, private_key_path: &str) -> homeboy::Result<(ServerOu
                 identity_file,
                 imported: None,
             }),
-            import: None,
+            ..Default::default()
         },
         0,
     ))
@@ -366,9 +357,7 @@ fn key_unset(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
             command: "server.key.unset".to_string(),
             server_id: Some(server_id.to_string()),
             server: Some(server),
-            servers: None,
             updated: Some(vec!["identity_file".to_string()]),
-            deleted: None,
             key: Some(ServerKeyOutput {
                 action: "unset".to_string(),
                 server_id: server_id.to_string(),
@@ -376,7 +365,7 @@ fn key_unset(server_id: &str) -> homeboy::Result<(ServerOutput, i32)> {
                 identity_file: None,
                 imported: None,
             }),
-            import: None,
+            ..Default::default()
         },
         0,
     ))
@@ -390,9 +379,7 @@ fn key_import(server_id: &str, private_key_path: &str) -> homeboy::Result<(Serve
             command: "server.key.import".to_string(),
             server_id: Some(server_id.to_string()),
             server: Some(result.server),
-            servers: None,
             updated: Some(vec!["identity_file".to_string()]),
-            deleted: None,
             key: Some(ServerKeyOutput {
                 action: "import".to_string(),
                 server_id: server_id.to_string(),
@@ -400,7 +387,7 @@ fn key_import(server_id: &str, private_key_path: &str) -> homeboy::Result<(Serve
                 identity_file: Some(result.identity_file),
                 imported: Some(result.imported_from),
             }),
-            import: None,
+            ..Default::default()
         },
         0,
     ))

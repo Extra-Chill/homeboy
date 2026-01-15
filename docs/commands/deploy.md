@@ -3,7 +3,7 @@
 ## Synopsis
 
 ```sh
-homeboy deploy <projectId> [<componentIds...>] [--all] [--outdated] [--dry-run] [--json '<spec>']
+homeboy deploy <projectId> [<componentIds...>] [--all] [--outdated] [--json '<spec>']
 # If no component IDs are provided, you must use --all or --outdated.
 ```
 
@@ -17,7 +17,6 @@ Options:
 - `--all`: deploy all configured components
 - `--outdated`: deploy only outdated components
   - Determined from the first version target for each component.
-- `--dry-run`: show what would be deployed without executing
 - `--json`: JSON input spec for bulk operations (`{"componentIds": ["component-id", ...]}`)
 
 If no component IDs are provided and neither `--all` nor `--outdated` is set, Homeboy returns an error.
@@ -32,12 +31,11 @@ If no component IDs are provided and neither `--all` nor `--outdated` is set, Ho
   "projectId": "<projectId>",
   "all": false,
   "outdated": false,
-  "dryRun": false,
   "results": [
     {
       "id": "<componentId>",
       "name": "<name>",
-      "status": "would_deploy|deployed|failed|skipped",
+      "status": "deployed|failed|skipped",
       "deployReason": "explicitly_selected|all_selected|version_mismatch|unknown_local_version|unknown_remote_version",
       "localVersion": "<v>|null",
       "remoteVersion": "<v>|null",

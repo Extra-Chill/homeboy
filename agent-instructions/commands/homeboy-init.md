@@ -115,7 +115,7 @@ homeboy component set <componentId> --version-target "<file>" --build-command "<
 1. Run `homeboy context` - confirm `managed: true`
 2. Report what was created with all derived values
 3. Suggest next steps:
-   - Project: `homeboy deploy <projectId> --dry-run --all`
+   - Project: `homeboy deploy <projectId> --all`
    - Component: `homeboy build <componentId>` or `homeboy version show <componentId>`
 
 ## Example: Smart Questioning

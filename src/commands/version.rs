@@ -84,7 +84,6 @@ pub struct VersionBumpOutput {
     changelog_path: String,
     changelog_finalized: bool,
     changelog_changed: bool,
-    dry_run: bool,
 }
 
 #[derive(Serialize)]
@@ -95,7 +94,6 @@ pub struct VersionSetOutput {
     old_version: String,
     new_version: String,
     targets: Vec<VersionTargetInfo>,
-    dry_run: bool,
 }
 
 pub fn run(
@@ -130,9 +128,9 @@ pub fn run(
         } => {
             // Priority: --cwd > component_id
             let (result, component_id_str) = if cwd {
-                (bump_version_cwd(bump_type.as_str(), global.dry_run)?, "cwd".to_string())
+                (bump_version_cwd(bump_type.as_str())?, "cwd".to_string())
             } else {
-                let result = bump_version(component_id.as_deref(), bump_type.as_str(), global.dry_run)?;
+                let result = bump_version(component_id.as_deref(), bump_type.as_str())?;
                 let id = component_id.unwrap_or_else(|| "cwd".to_string());
                 (result, id)
             };
@@ -146,7 +144,6 @@ pub fn run(
                 changelog_path: result.changelog_path,
                 changelog_finalized: result.changelog_finalized,
                 changelog_changed: result.changelog_changed,
-                dry_run: global.dry_run,
             };
             let json = serde_json::to_value(out)
                 .map_err(|e| homeboy::Error::internal_json(e.to_string(), None))?;
@@ -157,7 +154,7 @@ pub fn run(
             new_version,
         } => {
             // Core validates componentId
-            let result = set_version(component_id.as_deref(), &new_version, global.dry_run)?;
+            let result = set_version(component_id.as_deref(), &new_version)?;
             let component_id_str = component_id.unwrap_or_else(|| "unknown".to_string());
 
             let out = VersionSetOutput {
@@ -166,7 +163,6 @@ pub fn run(
                 old_version: result.old_version,
                 new_version: result.new_version,
                 targets: result.targets,
-                dry_run: global.dry_run,
             };
             let json = serde_json::to_value(out)
                 .map_err(|e| homeboy::Error::internal_json(e.to_string(), None))?;

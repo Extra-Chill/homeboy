@@ -80,7 +80,7 @@ enum ComponentCommand {
     },
 }
 
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentOutput {
     pub command: String,
@@ -131,14 +131,8 @@ pub fn run(
                 ComponentOutput {
                     command: "component.create".to_string(),
                     component_id: Some(result.id),
-                    success: true,
-                    updated_fields: vec![],
                     component: Some(result.component),
-                    components: vec![],
-                    import: None,
-                    batch: None,
-                    project_ids: None,
-                    projects: None,
+                    ..Default::default()
                 },
                 0,
             ))
@@ -169,15 +163,9 @@ fn create_json(spec: &str, skip_existing: bool) -> CmdResult<ComponentOutput> {
     Ok((
         ComponentOutput {
             command: "component.create".to_string(),
-            component_id: None,
             success: summary.errors == 0,
-            updated_fields: vec![],
-            component: None,
-            components: vec![],
             import: Some(summary),
-            batch: None,
-            project_ids: None,
-            projects: None,
+            ..Default::default()
         },
         exit_code,
     ))
@@ -190,14 +178,8 @@ fn show(id: &str) -> CmdResult<ComponentOutput> {
         ComponentOutput {
             command: "component.show".to_string(),
             component_id: Some(id.to_string()),
-            success: true,
-            updated_fields: vec![],
             component: Some(component),
-            components: vec![],
-            import: None,
-            batch: None,
-            project_ids: None,
-            projects: None,
+            ..Default::default()
         },
         0,
     ))
@@ -205,38 +187,27 @@ fn show(id: &str) -> CmdResult<ComponentOutput> {
 
 fn set(id: Option<&str>, json: &str) -> CmdResult<ComponentOutput> {
     match component::merge(id, json)? {
-        component::MergeOutput::Single(result) => {
+        homeboy::MergeOutput::Single(result) => {
             let comp = component::load(&result.id)?;
             Ok((
                 ComponentOutput {
                     command: "component.set".to_string(),
                     component_id: Some(result.id),
-                    success: true,
                     updated_fields: result.updated_fields,
                     component: Some(comp),
-                    components: vec![],
-                    import: None,
-                    batch: None,
-                    project_ids: None,
-                    projects: None,
+                    ..Default::default()
                 },
                 0,
             ))
         }
-        component::MergeOutput::Bulk(summary) => {
+        homeboy::MergeOutput::Bulk(summary) => {
             let exit_code = if summary.errors > 0 { 1 } else { 0 };
             Ok((
                 ComponentOutput {
                     command: "component.set".to_string(),
-                    component_id: None,
                     success: summary.errors == 0,
-                    updated_fields: vec![],
-                    component: None,
-                    components: vec![],
-                    import: None,
                     batch: Some(summary),
-                    project_ids: None,
-                    projects: None,
+                    ..Default::default()
                 },
                 exit_code,
             ))
@@ -251,14 +222,7 @@ fn delete(id: &str) -> CmdResult<ComponentOutput> {
         ComponentOutput {
             command: "component.delete".to_string(),
             component_id: Some(id.to_string()),
-            success: true,
-            updated_fields: vec![],
-            component: None,
-            components: vec![],
-            import: None,
-            batch: None,
-            project_ids: None,
-            projects: None,
+            ..Default::default()
         },
         0,
     ))
@@ -271,14 +235,9 @@ fn rename(id: &str, new_id: &str) -> CmdResult<ComponentOutput> {
         ComponentOutput {
             command: "component.rename".to_string(),
             component_id: Some(result.id.clone()),
-            success: true,
             updated_fields: vec!["id".to_string()],
             component: Some(result.component),
-            components: vec![],
-            import: None,
-            batch: None,
-            project_ids: None,
-            projects: None,
+            ..Default::default()
         },
         0,
     ))
@@ -290,15 +249,8 @@ fn list() -> CmdResult<ComponentOutput> {
     Ok((
         ComponentOutput {
             command: "component.list".to_string(),
-            component_id: None,
-            success: true,
-            updated_fields: vec![],
-            component: None,
             components,
-            import: None,
-            batch: None,
-            project_ids: None,
-            projects: None,
+            ..Default::default()
         },
         0,
     ))
@@ -318,14 +270,9 @@ fn projects(id: &str) -> CmdResult<ComponentOutput> {
         ComponentOutput {
             command: "component.projects".to_string(),
             component_id: Some(id.to_string()),
-            success: true,
-            updated_fields: vec![],
-            component: None,
-            components: vec![],
-            import: None,
-            batch: None,
             project_ids: Some(project_ids),
             projects: Some(projects_list),
+            ..Default::default()
         },
         0,
     ))

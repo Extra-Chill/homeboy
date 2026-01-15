@@ -6,7 +6,7 @@
 homeboy git <COMMAND>
 ```
 
-This command does not accept `--dry-run` and output is always JSON-wrapped (see [JSON output contract](../json-output/json-output-contract.md)).
+Output is always JSON-wrapped (see [JSON output contract](../json-output/json-output-contract.md)).
 
 Note: some subcommands accept a `--json` flag for bulk operations.
 

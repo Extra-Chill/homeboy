@@ -197,9 +197,7 @@ fn scp_file(ssh_client: &SshClient, local_path: &Path, remote_path: &str) -> Res
     scp_args.push(local_path.to_string_lossy().to_string());
     scp_args.push(format!(
         "{}@{}:{}",
-        ssh_client.user,
-        ssh_client.host,
-        shell::quote_path(remote_path)
+        ssh_client.user, ssh_client.host, remote_path
     ));
 
     let output = Command::new("scp").args(&scp_args).output();
@@ -234,9 +232,7 @@ fn scp_recursive(
     scp_args.push(local_path.to_string_lossy().to_string());
     scp_args.push(format!(
         "{}@{}:{}",
-        ssh_client.user,
-        ssh_client.host,
-        shell::quote_path(remote_path)
+        ssh_client.user, ssh_client.host, remote_path
     ));
 
     let output = Command::new("scp").args(&scp_args).output();
@@ -261,7 +257,6 @@ pub struct DeployConfig {
     pub component_ids: Vec<String>,
     pub all: bool,
     pub outdated: bool,
-    pub dry_run: bool,
 }
 
 /// Reason why a component was selected for deployment.
@@ -416,58 +411,11 @@ pub fn deploy_components(
         .collect();
 
     // Gather remote versions if needed
-    let remote_versions = if config.dry_run || config.outdated {
+    let remote_versions = if config.outdated {
         fetch_remote_versions(&components_to_deploy, base_path, &ctx.client)
     } else {
         HashMap::new()
     };
-
-    // Dry run - just report what would happen
-    if config.dry_run {
-        let results: Vec<ComponentDeployResult> = components_to_deploy
-            .iter()
-            .map(|component| {
-                let local_version = local_versions.get(&component.id).cloned();
-                let remote_version = remote_versions.get(&component.id).cloned();
-
-                // Determine why this component would be deployed
-                let reason = if config.all {
-                    DeployReason::AllSelected
-                } else if !config.component_ids.is_empty() {
-                    DeployReason::ExplicitlySelected
-                } else if config.outdated {
-                    // Outdated logic: check version status
-                    match (&local_version, &remote_version) {
-                        (None, _) => DeployReason::UnknownLocalVersion,
-                        (_, None) => DeployReason::UnknownRemoteVersion,
-                        (Some(local), Some(remote)) if local != remote => {
-                            DeployReason::VersionMismatch
-                        }
-                        _ => DeployReason::VersionMismatch,
-                    }
-                } else {
-                    DeployReason::ExplicitlySelected
-                };
-
-                ComponentDeployResult::new(component, base_path)
-                    .with_status("would_deploy")
-                    .with_deploy_reason(reason)
-                    .with_versions(local_version, remote_version)
-            })
-            .collect();
-
-        let total = results.len() as u32;
-
-        return Ok(DeployOrchestrationResult {
-            results,
-            summary: DeploySummary {
-                total,
-                succeeded: total,
-                failed: 0,
-                skipped: 0,
-            },
-        });
-    }
 
     // Execute deployments
     let mut results: Vec<ComponentDeployResult> = vec![];
@@ -707,11 +655,7 @@ fn fetch_remote_versions(
 }
 
 /// Parse version from content using pattern or module defaults.
-fn parse_component_version(
-    content: &str,
-    pattern: Option<&str>,
-    filename: &str,
-) -> Option<String> {
+fn parse_component_version(content: &str, pattern: Option<&str>, filename: &str) -> Option<String> {
     let pattern_str = match pattern {
         Some(p) => p.replace("\\\\", "\\"),
         None => version::default_pattern_for_file(filename)?,

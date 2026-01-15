@@ -456,8 +456,9 @@ struct AddItemsInput {
 pub fn add_items_bulk(json_spec: &str) -> Result<AddItemsOutput> {
     let raw = read_json_spec_to_string(json_spec)?;
 
-    let input: AddItemsInput = serde_json::from_str(&raw)
-        .map_err(|e| Error::validation_invalid_json(e, Some("parse changelog add input".to_string())))?;
+    let input: AddItemsInput = serde_json::from_str(&raw).map_err(|e| {
+        Error::validation_invalid_json(e, Some("parse changelog add input".to_string()))
+    })?;
 
     add_items(Some(&input.component_id), &input.messages)
 }

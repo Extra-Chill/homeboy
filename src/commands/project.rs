@@ -216,14 +216,19 @@ enum ProjectPinType {
     Log,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectOutput {
     command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     project: Option<Project>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     projects: Option<Vec<ProjectListItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     components: Option<ProjectComponentsOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pin: Option<ProjectPinOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     updated: Option<Vec<String>>,
@@ -269,15 +274,7 @@ pub fn run(
                         command: "project.create".to_string(),
                         project_id: Some(result.id),
                         project: Some(result.project),
-                        projects: None,
-                        components: None,
-                        pin: None,
-                        updated: None,
-                        removed: None,
-                        deleted: None,
-                        import: None,
-                        batch: None,
-                        hint: None,
+                        ..Default::default()
                     },
                     0,
                 )),
@@ -286,17 +283,8 @@ pub fn run(
                     Ok((
                         ProjectOutput {
                             command: "project.create".to_string(),
-                            project_id: None,
-                            project: None,
-                            projects: None,
-                            components: None,
-                            pin: None,
-                            updated: None,
-                            removed: None,
-                            deleted: None,
                             import: Some(summary),
-                            batch: None,
-                            hint: None,
+                            ..Default::default()
                         },
                         exit_code,
                     ))
@@ -354,17 +342,8 @@ fn list() -> homeboy::Result<(ProjectOutput, i32)> {
     Ok((
         ProjectOutput {
             command: "project.list".to_string(),
-            project_id: None,
-            project: None,
             projects: Some(items),
-            components: None,
-            pin: None,
-            updated: None,
-            removed: None,
-            deleted: None,
-            import: None,
-            batch: None,
-            hint: None,
+            ..Default::default()
         },
         0,
     ))
@@ -387,15 +366,8 @@ fn show(project_id: &str) -> homeboy::Result<(ProjectOutput, i32)> {
             command: "project.show".to_string(),
             project_id: Some(project.id.clone()),
             project: Some(project),
-            projects: None,
-            components: None,
-            pin: None,
-            updated: None,
-            removed: None,
-            deleted: None,
-            import: None,
-            batch: None,
             hint,
+            ..Default::default()
         },
         0,
     ))
@@ -403,39 +375,23 @@ fn show(project_id: &str) -> homeboy::Result<(ProjectOutput, i32)> {
 
 fn set(project_id: Option<&str>, json: &str) -> homeboy::Result<(ProjectOutput, i32)> {
     match project::merge(project_id, json)? {
-        project::MergeOutput::Single(result) => Ok((
+        homeboy::MergeOutput::Single(result) => Ok((
             ProjectOutput {
                 command: "project.set".to_string(),
                 project_id: Some(result.id.clone()),
                 project: Some(project::load(&result.id)?),
-                projects: None,
-                components: None,
-                pin: None,
                 updated: Some(result.updated_fields),
-                removed: None,
-                deleted: None,
-                import: None,
-                batch: None,
-                hint: None,
+                ..Default::default()
             },
             0,
         )),
-        project::MergeOutput::Bulk(summary) => {
+        homeboy::MergeOutput::Bulk(summary) => {
             let exit_code = if summary.errors > 0 { 1 } else { 0 };
             Ok((
                 ProjectOutput {
                     command: "project.set".to_string(),
-                    project_id: None,
-                    project: None,
-                    projects: None,
-                    components: None,
-                    pin: None,
-                    updated: None,
-                    removed: None,
-                    deleted: None,
-                    import: None,
                     batch: Some(summary),
-                    hint: None,
+                    ..Default::default()
                 },
                 exit_code,
             ))
@@ -450,15 +406,8 @@ fn remove(project_id: Option<&str>, json: &str) -> homeboy::Result<(ProjectOutpu
             command: "project.remove".to_string(),
             project_id: Some(result.id.clone()),
             project: Some(project::load(&result.id)?),
-            projects: None,
-            components: None,
-            pin: None,
-            updated: None,
             removed: Some(result.removed_from),
-            deleted: None,
-            import: None,
-            batch: None,
-            hint: None,
+            ..Default::default()
         },
         0,
     ))
@@ -472,15 +421,8 @@ fn rename(project_id: &str, new_id: &str) -> homeboy::Result<(ProjectOutput, i32
             command: "project.rename".to_string(),
             project_id: Some(result.new_id.clone()),
             project: Some(project::load(&result.new_id)?),
-            projects: None,
-            components: None,
-            pin: None,
             updated: Some(vec!["id".to_string()]),
-            removed: None,
-            deleted: None,
-            import: None,
-            batch: None,
-            hint: None,
+            ..Default::default()
         },
         0,
     ))
@@ -493,16 +435,8 @@ fn delete(project_id: &str) -> homeboy::Result<(ProjectOutput, i32)> {
         ProjectOutput {
             command: "project.delete".to_string(),
             project_id: Some(project_id.to_string()),
-            project: None,
-            projects: None,
-            components: None,
-            pin: None,
-            updated: None,
-            removed: None,
             deleted: Some(vec![project_id.to_string()]),
-            import: None,
-            batch: None,
-            hint: None,
+            ..Default::default()
         },
         0,
     ))
@@ -540,21 +474,13 @@ fn components_list(project_id: &str) -> homeboy::Result<(ProjectOutput, i32)> {
         ProjectOutput {
             command: "project.components.list".to_string(),
             project_id: Some(project_id.to_string()),
-            project: None,
-            projects: None,
             components: Some(ProjectComponentsOutput {
                 action: "list".to_string(),
                 project_id: project_id.to_string(),
                 component_ids: project.component_ids.clone(),
                 components,
             }),
-            pin: None,
-            updated: None,
-            removed: None,
-            deleted: None,
-            import: None,
-            batch: None,
-            hint: None,
+            ..Default::default()
         },
         0,
     ))
@@ -611,21 +537,14 @@ fn write_project_components(
         ProjectOutput {
             command: format!("project.components.{action}"),
             project_id: Some(project_id.to_string()),
-            project: None,
-            projects: None,
             components: Some(ProjectComponentsOutput {
                 action: action.to_string(),
                 project_id: project_id.to_string(),
                 component_ids: project.component_ids.clone(),
                 components,
             }),
-            pin: None,
             updated: Some(vec!["componentIds".to_string()]),
-            removed: None,
-            deleted: None,
-            import: None,
-            batch: None,
-            hint: None,
+            ..Default::default()
         },
         0,
     ))
@@ -687,9 +606,6 @@ fn pin_list(project_id: &str, pin_type: ProjectPinType) -> homeboy::Result<(Proj
         ProjectOutput {
             command: "project.pin.list".to_string(),
             project_id: Some(project_id.to_string()),
-            project: None,
-            projects: None,
-            components: None,
             pin: Some(ProjectPinOutput {
                 action: "list".to_string(),
                 project_id: project_id.to_string(),
@@ -698,12 +614,7 @@ fn pin_list(project_id: &str, pin_type: ProjectPinType) -> homeboy::Result<(Proj
                 added: None,
                 removed: None,
             }),
-            updated: None,
-            removed: None,
-            deleted: None,
-            import: None,
-            batch: None,
-            hint: None,
+            ..Default::default()
         },
         0,
     ))
@@ -735,9 +646,6 @@ fn pin_add(
         ProjectOutput {
             command: "project.pin.add".to_string(),
             project_id: Some(project_id.to_string()),
-            project: None,
-            projects: None,
-            components: None,
             pin: Some(ProjectPinOutput {
                 action: "add".to_string(),
                 project_id: project_id.to_string(),
@@ -749,12 +657,7 @@ fn pin_add(
                 }),
                 removed: None,
             }),
-            updated: None,
-            removed: None,
-            deleted: None,
-            import: None,
-            batch: None,
-            hint: None,
+            ..Default::default()
         },
         0,
     ))
@@ -776,9 +679,6 @@ fn pin_remove(
         ProjectOutput {
             command: "project.pin.remove".to_string(),
             project_id: Some(project_id.to_string()),
-            project: None,
-            projects: None,
-            components: None,
             pin: Some(ProjectPinOutput {
                 action: "remove".to_string(),
                 project_id: project_id.to_string(),
@@ -790,12 +690,7 @@ fn pin_remove(
                     r#type: type_string.to_string(),
                 }),
             }),
-            updated: None,
-            removed: None,
-            deleted: None,
-            import: None,
-            batch: None,
-            hint: None,
+            ..Default::default()
         },
         0,
     ))

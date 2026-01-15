@@ -412,7 +412,9 @@ fn detect_baseline(path: &str, since_tag: Option<&str>) -> Result<BaselineInfo> 
             latest_tag: None,
             source: Some(BaselineSource::VersionCommit),
             reference: Some(hash),
-            warning: Some("No tags found. Using most recent version commit as baseline.".to_string()),
+            warning: Some(
+                "No tags found. Using most recent version commit as baseline.".to_string(),
+            ),
         });
     }
 
@@ -504,12 +506,24 @@ where
     for id in ids {
         match op(id) {
             Ok(output) => {
-                if output.success { succeeded += 1; } else { failed += 1; }
-                results.push(ItemOutcome { id: id.clone(), result: Some(output), error: None });
+                if output.success {
+                    succeeded += 1;
+                } else {
+                    failed += 1;
+                }
+                results.push(ItemOutcome {
+                    id: id.clone(),
+                    result: Some(output),
+                    error: None,
+                });
             }
             Err(e) => {
                 failed += 1;
-                results.push(ItemOutcome { id: id.clone(), result: None, error: Some(e.to_string()) });
+                results.push(ItemOutcome {
+                    id: id.clone(),
+                    result: None,
+                    error: Some(e.to_string()),
+                });
             }
         }
     }
@@ -517,7 +531,11 @@ where
     BulkResult {
         action: action.to_string(),
         results,
-        summary: BulkSummary { total: succeeded + failed, succeeded, failed },
+        summary: BulkSummary {
+            total: succeeded + failed,
+            succeeded,
+            failed,
+        },
     }
 }
 
@@ -527,7 +545,9 @@ pub fn status_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     let input: BulkIdsInput = serde_json::from_str(&raw).map_err(|e| {
         Error::validation_invalid_json(e, Some("parse bulk status input".to_string()))
     })?;
-    Ok(run_bulk_ids(&input.component_ids, "status", |id| status(Some(id))))
+    Ok(run_bulk_ids(&input.component_ids, "status", |id| {
+        status(Some(id))
+    }))
 }
 
 /// Commit changes for a component or current working directory.
@@ -589,8 +609,7 @@ pub fn commit(
             }
             None => vec!["add", "."],
         };
-        let add_output =
-            execute_git(&path, &add_args).map_err(|e| Error::other(e.to_string()))?;
+        let add_output = execute_git(&path, &add_args).map_err(|e| Error::other(e.to_string()))?;
         if !add_output.status.success() {
             return Ok(GitOutput::from_output(id, path, "commit", add_output));
         }
@@ -677,9 +696,8 @@ pub enum CommitJsonOutput {
 /// Bulk format: `{"components":[{"id":"x","message":"m"},...]}`
 pub fn commit_from_json(id: Option<&str>, json_spec: &str) -> Result<CommitJsonOutput> {
     let raw = read_json_spec_to_string(json_spec)?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-        Error::validation_invalid_json(e, Some("parse commit json".to_string()))
-    })?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| Error::validation_invalid_json(e, Some("parse commit json".to_string())))?;
 
     // Auto-detect: bulk if has "components" array
     if parsed.get("components").is_some() {
@@ -688,9 +706,8 @@ pub fn commit_from_json(id: Option<&str>, json_spec: &str) -> Result<CommitJsonO
     }
 
     // Single spec - parse and extract fields
-    let spec: CommitSpec = serde_json::from_str(&raw).map_err(|e| {
-        Error::validation_invalid_json(e, Some("parse commit spec".to_string()))
-    })?;
+    let spec: CommitSpec = serde_json::from_str(&raw)
+        .map_err(|e| Error::validation_invalid_json(e, Some("parse commit spec".to_string())))?;
 
     // ID priority: positional arg > JSON body
     let target_id = id.map(|s| s.to_string()).or(spec.id);
@@ -706,7 +723,11 @@ pub fn commit_from_json(id: Option<&str>, json_spec: &str) -> Result<CommitJsonO
 /// Push local commits for a component or current working directory.
 pub fn push(component_id: Option<&str>, tags: bool) -> Result<GitOutput> {
     let (id, path) = resolve_target(component_id)?;
-    let args: Vec<&str> = if tags { vec!["push", "--tags"] } else { vec!["push"] };
+    let args: Vec<&str> = if tags {
+        vec!["push", "--tags"]
+    } else {
+        vec!["push"]
+    };
     let output = execute_git(&path, &args).map_err(|e| Error::other(e.to_string()))?;
     Ok(GitOutput::from_output(id, path, "push", output))
 }
@@ -718,7 +739,9 @@ pub fn push_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
         Error::validation_invalid_json(e, Some("parse bulk push input".to_string()))
     })?;
     let push_tags = input.tags;
-    Ok(run_bulk_ids(&input.component_ids, "push", |id| push(Some(id), push_tags)))
+    Ok(run_bulk_ids(&input.component_ids, "push", |id| {
+        push(Some(id), push_tags)
+    }))
 }
 
 /// Pull remote changes for a component or current working directory.
@@ -734,11 +757,17 @@ pub fn pull_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     let input: BulkIdsInput = serde_json::from_str(&raw).map_err(|e| {
         Error::validation_invalid_json(e, Some("parse bulk pull input".to_string()))
     })?;
-    Ok(run_bulk_ids(&input.component_ids, "pull", |id| pull(Some(id))))
+    Ok(run_bulk_ids(&input.component_ids, "pull", |id| {
+        pull(Some(id))
+    }))
 }
 
 /// Create a git tag for a component or current working directory.
-pub fn tag(component_id: Option<&str>, tag_name: Option<&str>, message: Option<&str>) -> Result<GitOutput> {
+pub fn tag(
+    component_id: Option<&str>,
+    tag_name: Option<&str>,
+    message: Option<&str>,
+) -> Result<GitOutput> {
     let name = tag_name.ok_or_else(|| {
         Error::validation_invalid_argument("tagName", "Missing tag name", None, None)
     })?;
@@ -827,8 +856,11 @@ pub fn get_diff(path: &str) -> Result<String> {
 
 /// Get diff between baseline ref and HEAD (commit range diff).
 pub fn get_range_diff(path: &str, baseline_ref: &str) -> Result<String> {
-    let output = execute_git(path, &["diff", &format!("{}..HEAD", baseline_ref), "--", "."])
-        .map_err(|e| Error::other(e.to_string()))?;
+    let output = execute_git(
+        path,
+        &["diff", &format!("{}..HEAD", baseline_ref), "--", "."],
+    )
+    .map_err(|e| Error::other(e.to_string()))?;
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -847,7 +879,9 @@ pub fn changes(
                 return Err(Error::git_command_failed("Not a git repository")
                     .with_hint("Provide a component ID instead: homeboy <command> <component-id>")
                     .with_hint("Run 'homeboy component list' to see registered components")
-                    .with_hint("Run 'homeboy context --discover' to find git repos in subdirectories"));
+                    .with_hint(
+                        "Run 'homeboy context --discover' to find git repos in subdirectories",
+                    ));
             }
             ("cwd".to_string(), p)
         }
@@ -861,9 +895,17 @@ pub fn changes(
     };
 
     let uncommitted = get_uncommitted_changes(&path)?;
-    let uncommitted_diff = if uncommitted.has_changes { Some(get_diff(&path)?) } else { None };
+    let uncommitted_diff = if uncommitted.has_changes {
+        Some(get_diff(&path)?)
+    } else {
+        None
+    };
     let diff = if include_diff {
-        baseline.reference.as_ref().map(|r| get_range_diff(&path, r)).transpose()?
+        baseline
+            .reference
+            .as_ref()
+            .map(|r| get_range_diff(&path, r))
+            .transpose()?
     } else {
         None
     };
@@ -884,7 +926,10 @@ pub fn changes(
     })
 }
 
-fn build_bulk_changes_output(component_ids: &[String], include_diff: bool) -> BulkResult<ChangesOutput> {
+fn build_bulk_changes_output(
+    component_ids: &[String],
+    include_diff: bool,
+) -> BulkResult<ChangesOutput> {
     let mut results = Vec::new();
     let mut succeeded = 0usize;
     let mut failed = 0usize;
