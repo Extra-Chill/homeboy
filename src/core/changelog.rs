@@ -80,22 +80,33 @@ pub fn resolve_effective_settings(component: Option<&Component>) -> EffectiveCha
 }
 
 pub fn resolve_changelog_path(component: &Component) -> Result<PathBuf> {
-    let target = component.changelog_target.as_ref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "component.changelog_target",
-            "No changelog configured for component".to_string(),
-            None,
-            Some(vec![
-                format!(
-                    "Create and configure: homeboy changelog init {} --configure",
-                    component.id
-                ),
-                "Or bypass changelog: homeboy version set <version>".to_string(),
-            ]),
-        )
-    })?;
+    // If explicitly configured, use that
+    if let Some(target) = component.changelog_target.as_ref() {
+        return resolve_target_path(&component.local_path, target);
+    }
 
-    resolve_target_path(&component.local_path, target)
+    // Auto-detect from well-known locations
+    if let Some(path) = detect_changelog_path(&component.local_path) {
+        return Ok(path);
+    }
+
+    // No changelog found - provide helpful error
+    Err(Error::validation_invalid_argument(
+        "component.changelog_target",
+        "No changelog found for component",
+        None,
+        Some(vec![
+            format!(
+                "Configure existing: homeboy component set {} --changelog-target \"CHANGELOG.md\"",
+                component.id
+            ),
+            format!(
+                "Create new: homeboy changelog init {} --configure",
+                component.id
+            ),
+            "Bypass changelog: homeboy version set <version>".to_string(),
+        ]),
+    ))
 }
 
 fn resolve_target_path(local_path: &str, file: &str) -> Result<PathBuf> {
@@ -581,9 +592,10 @@ pub fn default_settings() -> EffectiveChangelogSettings {
 /// Well-known changelog file names for auto-detection
 const CHANGELOG_CANDIDATES: &[&str] = &[
     "CHANGELOG.md",
+    "changelog.md",
+    "docs/CHANGELOG.md",
     "docs/changelog.md",
     "HISTORY.md",
-    "changelog.md",
 ];
 
 /// Detect changelog file in a directory by checking for well-known files.

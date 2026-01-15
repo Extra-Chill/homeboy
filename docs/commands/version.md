@@ -107,6 +107,24 @@ Notes:
 - Components must have `version_targets` configured (non-empty). Homeboy uses the first target as the primary version source.
 - Each `version_targets[]` entry has `file` and optional `pattern`. When `pattern` is omitted, Homeboy checks module-provided version patterns for that file type; if none are provided, the command errors.
 
+### Changelog Requirements
+
+`version bump` requires a changelog file. Homeboy auto-detects changelogs at well-known locations:
+
+1. `CHANGELOG.md`
+2. `changelog.md`
+3. `docs/CHANGELOG.md`
+4. `docs/changelog.md`
+5. `HISTORY.md`
+
+If your changelog is at a non-standard location, configure `changelog_target`:
+
+```sh
+homeboy component set <id> --changelog-target "path/to/CHANGELOG.md"
+```
+
+To bypass changelog finalization entirely, use `version set` instead of `version bump`.
+
 ## Related
 
 - [build](build.md)

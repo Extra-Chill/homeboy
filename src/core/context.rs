@@ -205,16 +205,28 @@ fn build_component_info(component: &component::Component) -> ContainedComponentI
         });
     }
 
-    // Check for CHANGELOG.md without changelogTarget
-    if component.changelog_target.is_none() && local_path.join("CHANGELOG.md").exists() {
-        gaps.push(ComponentGap {
-            field: "changelogTarget".to_string(),
-            reason: "CHANGELOG.md exists".to_string(),
-            command: format!(
-                "homeboy component set {} --changelog-target \"CHANGELOG.md\"",
-                component.id
-            ),
-        });
+    // Check for changelog without changelogTarget
+    if component.changelog_target.is_none() {
+        let changelog_candidates = [
+            "CHANGELOG.md",
+            "changelog.md",
+            "docs/CHANGELOG.md",
+            "docs/changelog.md",
+        ];
+
+        for candidate in changelog_candidates {
+            if local_path.join(candidate).exists() {
+                gaps.push(ComponentGap {
+                    field: "changelogTarget".to_string(),
+                    reason: format!("{} exists", candidate),
+                    command: format!(
+                        "homeboy component set {} --changelog-target \"{}\"",
+                        component.id, candidate
+                    ),
+                });
+                break;
+            }
+        }
     }
 
     ContainedComponentInfo {

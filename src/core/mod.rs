@@ -16,6 +16,7 @@ pub mod logs;
 pub mod module;
 pub mod output;
 pub mod project;
+pub mod release;
 pub mod server;
 pub mod shell;
 pub mod ssh;

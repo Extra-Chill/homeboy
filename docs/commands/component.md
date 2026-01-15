@@ -56,6 +56,7 @@ homeboy component show <id>
 homeboy component set <id> --json <JSON>
 homeboy component set <id> '<JSON>'
 homeboy component set --json <JSON>   # id may be provided in JSON body
+homeboy component set <id> --key value   # dynamic flags
 ```
 
 Updates a component by merging a JSON object into `components/<id>.json`.
@@ -63,11 +64,42 @@ Updates a component by merging a JSON object into `components/<id>.json`.
 Options:
 
 - `--json <JSON>`: JSON object to merge into config (supports `@file` and `-` for stdin)
+- `--key value`: Dynamic flags that map directly to JSON keys (e.g., `--changelog-target "CHANGELOG.md"`)
 
 Notes:
 
-- `set` no longer supports individual field flags; use `--json` and provide the fields you want to update.
 - If the JSON contains an `id` field that differs from `<id>`, the component is automatically renamed first (equivalent to calling `rename`), then the remaining fields are merged. Project references are updated automatically.
+
+#### Release configuration
+
+Components may define a `release` block for component-scoped release planning:
+
+```json
+{
+  "release": {
+    "enabled": true,
+    "steps": [
+      { "id": "build", "type": "build", "label": "Build", "needs": [], "config": {} }
+    ],
+    "settings": { "distTarget": "homeboy" }
+  }
+}
+```
+
+#### Setting changelog_target
+
+To configure changelog tracking for a component:
+
+```sh
+# Using dynamic flag (recommended)
+homeboy component set <id> --changelog-target "CHANGELOG.md"
+homeboy component set <id> --changelog-target "docs/CHANGELOG.md"
+
+# Using JSON format
+homeboy component set <id> '{"changelog_target": "docs/CHANGELOG.md"}'
+```
+
+Note: `changelog_target` is a string path relative to `local_path`, not an object.
 
 ### `delete`
 
