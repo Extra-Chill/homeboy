@@ -30,6 +30,20 @@ Options:
 - `--build-command <command>`: build command to run in `local_path` (required for `homeboy build`)
 - `--extract-command <command>`: command to run after upload (optional; supports `{artifact}` and `{targetDir}`)
 
+#### Extract Command Execution Context
+
+The `extract_command` runs **inside the target directory**. During deploy, Homeboy:
+1. Creates the target directory (`remote_path` joined to project `base_path`)
+2. Uploads the artifact into that directory
+3. cd's into the target directory
+4. Executes your `extract_command`
+
+**Template variables:**
+- `{artifact}` - The uploaded artifact filename (not a path, just the filename)
+- `{targetDir}` - The full target directory path
+
+**Important:** Since the command runs inside the target directory, your extract logic must account for where files end up relative to the current directory. The agent configuring the component must understand the build output structure to write a correct extract_command.
+
 ### `show`
 
 ```sh
