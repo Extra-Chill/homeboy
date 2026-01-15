@@ -45,3 +45,5 @@ homeboy gh my-component pr status
 ## Creating Modules
 
 Each module is a directory containing a `homeboy.json` manifest. See existing modules for examples.
+
+Note: not every module includes embedded markdown docs; module docs are optional.

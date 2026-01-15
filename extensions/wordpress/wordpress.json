@@ -1,0 +1,66 @@
+{
+  "name": "WordPress",
+  "version": "1.0.0",
+  "icon": "w.circle.fill",
+  "description": "WordPress project type with WP-CLI integration",
+  "author": "Extra Chill",
+  "config_schema": "wordpress",
+
+  "discovery": {
+    "find_command": "find /home -maxdepth 5 -name 'wp-config.php' -type f 2>/dev/null",
+    "base_path_transform": "dirname",
+    "display_name_command": "cd {{basePath}} && wp option get blogname --skip-themes --skip-plugins 2>/dev/null || basename {{basePath}}"
+  },
+
+  "cli": {
+    "tool": "wp",
+    "display_name": "WP-CLI",
+    "command_template": "cd {{sitePath}} && {{cliPath}} {{args}} --url={{domain}}",
+    "default_cli_path": "wp"
+  },
+
+  "default_pinned_files": ["wp-config.php", ".htaccess", "robots.txt"],
+  "default_pinned_logs": ["wp-content/debug.log"],
+
+  "database": {
+    "cli": {
+      "tables_command": "cd {{sitePath}} && {{cliPath}} db query \"SHOW TABLE STATUS\" --format={{format}} --url={{domain}}",
+      "describe_command": "cd {{sitePath}} && {{cliPath}} db query \"DESCRIBE {{table}}\" --format={{format}} --url={{domain}}",
+      "query_command": "cd {{sitePath}} && {{cliPath}} db query \"{{query}}\" --format={{format}} --url={{domain}}"
+    },
+
+    "default_table_prefix": "wp_",
+    "prefix_detection_suffixes": ["options", "posts", "users"],
+
+    "table_suffixes": {
+      "core": ["commentmeta", "comments", "links", "options", "postmeta",
+               "posts", "termmeta", "terms", "term_relationships", "term_taxonomy"],
+      "users": ["users", "usermeta"],
+      "network": ["blogs", "blogmeta", "site", "sitemeta", "registration_log", "signups"]
+    },
+
+    "protected_suffixes": ["options", "posts", "postmeta", "users", "usermeta",
+                          "comments", "commentmeta", "terms", "termmeta",
+                          "term_relationships", "term_taxonomy", "links",
+                          "blogs", "blogmeta", "site", "sitemeta",
+                          "registration_log", "signups"],
+
+    "default_grouping": {
+      "id": "wordpress-tables",
+      "name": "WordPress Tables",
+      "pattern_template": "{{prefix}}*"
+    },
+
+    "multisite_grouping": {
+      "network": {
+        "id": "wordpress-network",
+        "name": "Network Tables"
+      },
+      "site": {
+        "id_template": "wordpress-site-{{blogId}}",
+        "name_template": "{{siteName}}",
+        "pattern_template": "{{sitePrefix}}*"
+      }
+    }
+  }
+}

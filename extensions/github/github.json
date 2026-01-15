@@ -1,5 +1,4 @@
 {
-  "id": "github",
   "name": "GitHub",
   "version": "1.0.0",
   "icon": "arrow.triangle.branch",
@@ -8,8 +7,8 @@
 
   "cli": {
     "tool": "gh",
-    "displayName": "GitHub CLI",
-    "commandTemplate": "cd {{sitePath}} && {{cliPath}} {{args}}",
-    "defaultCLIPath": "gh"
+    "display_name": "GitHub CLI",
+    "command_template": "cd {{sitePath}} && {{cliPath}} {{args}}",
+    "default_cli_path": "gh"
   }
 }
