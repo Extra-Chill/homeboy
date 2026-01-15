@@ -5,14 +5,6 @@ struct RemoteLogViewerView: View {
     @State private var showCopiedFeedback = false
     @State private var showBrowser = false
 
-    private var serverId: String {
-        ConfigurationManager.shared.safeActiveProject.serverId ?? ""
-    }
-
-    private var basePath: String? {
-        ConfigurationManager.shared.safeActiveProject.basePath
-    }
-
     var body: some View {
         logViewerContent
             .frame(minWidth: 700, minHeight: 400)
@@ -23,8 +15,8 @@ struct RemoteLogViewerView: View {
             }
             .sheet(isPresented: $showBrowser) {
                 RemoteFileBrowserView(
-                    projectId: serverId,
-                    startingPath: basePath,
+                    projectId: ConfigurationManager.shared.safeActiveProject.id,
+                    startingPath: ConfigurationManager.shared.safeActiveProject.basePath,
                     mode: .selectFile,
                     onSelectPath: { path in
                         openLogFromBrowser(path)

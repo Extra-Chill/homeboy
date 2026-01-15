@@ -139,59 +139,57 @@ struct ProjectConfiguration: Codable, Identifiable {
         self.componentIds = componentIds
     }
 
-    /// Creates a ProjectConfiguration from CLI's ProjectRecord
-    init(from record: ProjectRecord) {
-        self.id = record.id
-        self.name = record.config.name
-        self.domain = record.config.domain
-        self.serverId = record.config.serverId
-        self.basePath = record.config.basePath
-        self.tablePrefix = record.config.tablePrefix
-        self.modules = record.config.modules
+    /// Creates a ProjectConfiguration from CLI's project show output
+    init(projectId: String, config: ProjectConfigCLI) {
+        self.id = projectId
+        self.name = projectId  // CLI doesn't provide name, use id
+        self.domain = config.domain ?? ""
+        self.serverId = config.serverId
+        self.basePath = config.basePath
+        self.tablePrefix = config.tablePrefix
+        self.modules = []  // CLI doesn't provide modules in config
 
-        // Convert CLI remote files
+        // Convert CLI remote files (generate UUIDs since CLI doesn't provide them)
         self.remoteFiles = RemoteFileConfig(
-            pinnedFiles: record.config.remoteFiles.pinnedFiles.compactMap { file in
-                guard let uuid = UUID(uuidString: file.id) else { return nil }
-                return PinnedRemoteFile(id: uuid, path: file.path, label: file.label)
+            pinnedFiles: config.remoteFiles.pinnedFiles.map { file in
+                PinnedRemoteFile(id: UUID(), path: file.path, label: nil)
             }
         )
 
-        // Convert CLI remote logs
+        // Convert CLI remote logs (generate UUIDs since CLI doesn't provide them)
         self.remoteLogs = RemoteLogConfig(
-            pinnedLogs: record.config.remoteLogs.pinnedLogs.compactMap { log in
-                guard let uuid = UUID(uuidString: log.id) else { return nil }
-                return PinnedRemoteLog(id: uuid, path: log.path, label: log.label, tailLines: log.tailLines)
+            pinnedLogs: config.remoteLogs.pinnedLogs.map { log in
+                PinnedRemoteLog(id: UUID(), path: log.path, label: nil, tailLines: log.tailLines)
             }
         )
 
         // Convert CLI database config
         self.database = DatabaseConfig(
-            host: record.config.database.host,
-            port: record.config.database.port,
-            name: record.config.database.name,
-            user: record.config.database.user,
-            useSSHTunnel: record.config.database.useSshTunnel
+            host: config.database.host,
+            port: config.database.port,
+            name: config.database.name,
+            user: config.database.user,
+            useSSHTunnel: config.database.useSshTunnel
         )
 
         // Convert CLI tools config
         self.tools = ToolsConfig(
             bandcampScraper: BandcampScraperConfig(
-                defaultTag: record.config.tools.bandcampScraper?.defaultTag ?? ""
+                defaultTag: config.tools.bandcampScraper?.defaultTag ?? ""
             ),
             newsletter: NewsletterConfig(
-                sendyListId: record.config.tools.newsletter?.sendyListId ?? ""
+                sendyListId: config.tools.newsletter?.sendyListId ?? ""
             )
         )
 
         // Convert CLI API config
         self.api = APIConfig(
-            enabled: record.config.api.enabled,
-            baseURL: record.config.api.baseUrl
+            enabled: config.api.enabled,
+            baseURL: config.api.baseUrl
         )
 
-        // Convert CLI subtargets (CLI doesn't have id, derive from name)
-        self.subTargets = record.config.subTargets.map { target in
+        // Convert CLI subtargets
+        self.subTargets = config.subTargets.map { target in
             SubTarget(
                 id: target.name.lowercased().replacingOccurrences(of: " ", with: "-"),
                 name: target.name,
@@ -201,15 +199,14 @@ struct ProjectConfiguration: Codable, Identifiable {
             )
         }
 
-        self.sharedTables = record.config.sharedTables
-        self.componentIds = record.config.componentIds
+        self.sharedTables = config.sharedTables
+        self.componentIds = config.componentIds
     }
 
     /// Creates a ProjectConfiguration from CLI's ProjectListItem (minimal data for picker)
     static func fromListItem(_ item: ProjectListItem) -> ProjectConfiguration {
-        var config = ProjectConfiguration.empty(id: item.id, name: item.name)
-        config.domain = item.domain
-        config.modules = item.modules
+        var config = ProjectConfiguration.empty(id: item.id, name: item.id)
+        config.domain = item.domain ?? ""
         return config
     }
 

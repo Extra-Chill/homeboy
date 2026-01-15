@@ -8,6 +8,11 @@ For current behavior, prefer the code and other documentation (for example `docs
 
 ## Unreleased
 
+## 0.10.0
+
+- Add snake_case JSON decoding strategy for CLI output compatibility
+- Companion change to homeboy CLI 0.16.0 snake_case migration
+
 ## 0.9.0
 
 - Refactor module system

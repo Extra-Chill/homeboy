@@ -11,71 +11,54 @@ struct ProjectListOutput: Decodable {
     let projects: [ProjectListItem]?
 }
 
-/// Summary item from project list
+/// Summary item from project list (matches CLI output)
 struct ProjectListItem: Decodable, Identifiable {
     let id: String
-    let name: String
-    let domain: String
-    let modules: [String]
+    let domain: String?
 }
 
 /// Output from `homeboy project show <id>`
 struct ProjectShowOutput: Decodable {
     let command: String
-    let project: ProjectRecord?
+    let project: ProjectConfigCLI?
     let projectId: String?
 }
 
-/// Full project record with id and config
-struct ProjectRecord: Decodable {
-    let id: String
-    let config: ProjectConfig
-}
-
-/// Project configuration matching CLI's Project struct
-struct ProjectConfig: Decodable {
-    let name: String
-    let domain: String
-    let modules: [String]
-    let scopedModules: [String: ScopedModuleConfig]?
+/// Project configuration matching CLI's Project struct (no wrapper)
+struct ProjectConfigCLI: Decodable {
+    let domain: String?
     let serverId: String?
     let basePath: String?
     let tablePrefix: String?
+    let componentIds: [String]
     let remoteFiles: RemoteFileConfigCLI
     let remoteLogs: RemoteLogConfigCLI
     let database: DatabaseConfigCLI
     let tools: ToolsConfigCLI
     let api: ApiConfigCLI
-    let changelogNextSectionLabel: String?
-    let changelogNextSectionAliases: [String]?
     let subTargets: [SubTargetCLI]
     let sharedTables: [String]
-    let componentIds: [String]
-}
-
-struct ScopedModuleConfig: Decodable {
-    let settings: [String: AnyCodableValue]?
 }
 
 struct RemoteFileConfigCLI: Decodable {
     let pinnedFiles: [PinnedRemoteFileCLI]
 }
 
-struct PinnedRemoteFileCLI: Decodable {
-    let id: String
+struct PinnedRemoteFileCLI: Decodable, Identifiable {
     let path: String
-    let label: String?
+
+    var id: String { path }
 }
 
 struct RemoteLogConfigCLI: Decodable {
     let pinnedLogs: [PinnedRemoteLogCLI]
 }
 
-struct PinnedRemoteLogCLI: Decodable {
-    let id: String
+struct PinnedRemoteLogCLI: Decodable, Identifiable {
     let path: String
-    let label: String?
     let tailLines: Int
+
+    var id: String { path }
 }
 
 struct DatabaseConfigCLI: Decodable {
@@ -228,28 +211,30 @@ struct DbOutput: Decodable {
 struct ServerOutput: Decodable {
     let command: String
     let serverId: String?
-    let server: ServerRecord?
-    let servers: [ServerListItem]?
+    let server: ServerRecordCLI?
+    let servers: [ServerListItemCLI]?
     let updated: [String]?
     let deleted: [String]?
 }
 
-struct ServerListItem: Decodable, Identifiable {
-    let id: String
-    let name: String
+/// Server from CLI list (no id, no name in output)
+struct ServerListItemCLI: Decodable, Identifiable {
     let host: String
     let port: Int
     let user: String
     let identityFile: String?
+
+    var id: String { host }
 }
 
-struct ServerRecord: Decodable {
-    let id: String
-    let name: String
+/// Server from CLI show (no id, no name in output)
+struct ServerRecordCLI: Decodable, Identifiable {
     let host: String
     let port: Int
     let user: String
     let identityFile: String?
+
+    var id: String { host }
 }
 
 // MARK: - Component CLI Output Models
@@ -257,23 +242,23 @@ struct ServerRecord: Decodable {
 struct ComponentOutput: Decodable {
     let command: String
     let componentId: String?
-    let component: ComponentRecord?
-    let components: [ComponentListItem]?
+    let component: ComponentRecordCLI?
+    let components: [ComponentListItemCLI]?
     let updated: [String]?
     let deleted: [String]?
 }
 
-struct ComponentListItem: Decodable, Identifiable {
+/// Component from CLI list (no name field)
+struct ComponentListItemCLI: Decodable, Identifiable {
     let id: String
-    let name: String
     let localPath: String
     let remotePath: String
     let buildArtifact: String?
 }
 
-struct ComponentRecord: Decodable {
+/// Component from CLI show (no name field)
+struct ComponentRecordCLI: Decodable, Identifiable {
     let id: String
-    let name: String
     let localPath: String
     let remotePath: String
     let buildArtifact: String?
@@ -290,7 +275,7 @@ struct ComponentRecord: Decodable {
 struct ProjectMutationOutput: Decodable {
     let command: String
     let projectId: String?
-    let project: ProjectRecord?
+    let project: ProjectConfigCLI?
     let updated: [String]?
     let deleted: [String]?
 }
@@ -318,16 +303,16 @@ final class HomeboyCLI {
         return output.projects ?? []
     }
 
-    func projectShow(id: String) async throws -> ProjectRecord {
+    func projectShow(id: String) async throws -> ProjectShowOutput {
         let output: ProjectShowOutput = try await cli.executeCommand(
             ["project", "show", id],
             dataType: ProjectShowOutput.self,
             source: "Project Show"
         )
-        guard let project = output.project else {
+        guard output.project != nil else {
             throw CLIBridgeError.invalidResponse("Project not found: \(id)")
         }
-        return project
+        return output
     }
 
     func projectCreate(
@@ -336,7 +321,7 @@ final class HomeboyCLI {
         serverId: String? = nil,
         basePath: String? = nil,
         tablePrefix: String? = nil
-    ) async throws -> ProjectRecord {
+    ) async throws -> ProjectMutationOutput {
         var args = ["project", "create", name, domain]
         if let serverId {
             args.append(contentsOf: ["--server-id", serverId])
@@ -352,22 +337,22 @@ final class HomeboyCLI {
             dataType: ProjectMutationOutput.self,
             source: "Project Create"
         )
-        guard let project = output.project else {
+        guard output.project != nil else {
             throw CLIBridgeError.invalidResponse("Project creation failed")
         }
-        return project
+        return output
     }
 
-    func projectSet(id: String, json: String) async throws -> ProjectRecord {
+    func projectSet(id: String, json: String) async throws -> ProjectMutationOutput {
         let output: ProjectMutationOutput = try await cli.executeCommand(
             ["project", "set", id, "--json", json],
             dataType: ProjectMutationOutput.self,
             source: "Project Set"
         )
-        guard let project = output.project else {
+        guard output.project != nil else {
             throw CLIBridgeError.invalidResponse("Project update failed")
         }
-        return project
+        return output
     }
 
     func projectDelete(id: String) async throws {
@@ -380,7 +365,7 @@ final class HomeboyCLI {
 
     // MARK: - Server Commands
 
-    func serverList() async throws -> [ServerListItem] {
+    func serverList() async throws -> [ServerListItemCLI] {
         let output: ServerOutput = try await cli.executeCommand(
             ["server", "list"],
             dataType: ServerOutput.self,
@@ -389,7 +374,7 @@ final class HomeboyCLI {
         return output.servers ?? []
     }
 
-    func serverShow(id: String) async throws -> ServerRecord {
+    func serverShow(id: String) async throws -> ServerRecordCLI {
         let output: ServerOutput = try await cli.executeCommand(
             ["server", "show", id],
             dataType: ServerOutput.self,
@@ -406,7 +391,7 @@ final class HomeboyCLI {
         host: String,
         user: String,
         port: Int = 22
-    ) async throws -> ServerRecord {
+    ) async throws -> ServerRecordCLI {
         let output: ServerOutput = try await cli.executeCommand(
             ["server", "create", name, host, user, "--port", String(port)],
             dataType: ServerOutput.self,
@@ -418,7 +403,7 @@ final class HomeboyCLI {
         return server
     }
 
-    func serverSet(id: String, json: String) async throws -> ServerRecord {
+    func serverSet(id: String, json: String) async throws -> ServerRecordCLI {
         let output: ServerOutput = try await cli.executeCommand(
             ["server", "set", id, "--json", json],
             dataType: ServerOutput.self,
@@ -440,7 +425,7 @@ final class HomeboyCLI {
 
     // MARK: - Component Commands
 
-    func componentList() async throws -> [ComponentListItem] {
+    func componentList() async throws -> [ComponentListItemCLI] {
         let output: ComponentOutput = try await cli.executeCommand(
             ["component", "list"],
             dataType: ComponentOutput.self,
@@ -449,7 +434,7 @@ final class HomeboyCLI {
         return output.components ?? []
     }
 
-    func componentShow(id: String) async throws -> ComponentRecord {
+    func componentShow(id: String) async throws -> ComponentRecordCLI {
         let output: ComponentOutput = try await cli.executeCommand(
             ["component", "show", id],
             dataType: ComponentOutput.self,
@@ -466,7 +451,7 @@ final class HomeboyCLI {
         localPath: String,
         remotePath: String,
         buildArtifact: String? = nil
-    ) async throws -> ComponentRecord {
+    ) async throws -> ComponentRecordCLI {
         var args = ["component", "create", name, localPath, remotePath]
         if let buildArtifact {
             args.append(contentsOf: ["--build-artifact", buildArtifact])
@@ -482,7 +467,7 @@ final class HomeboyCLI {
         return component
     }
 
-    func componentSet(id: String, json: String) async throws -> ComponentRecord {
+    func componentSet(id: String, json: String) async throws -> ComponentRecordCLI {
         let output: ComponentOutput = try await cli.executeCommand(
             ["component", "set", id, "--json", json],
             dataType: ComponentOutput.self,

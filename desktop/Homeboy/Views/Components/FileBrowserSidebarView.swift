@@ -328,17 +328,21 @@ struct FileBrowserSidebarView: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.title)
                 .foregroundColor(.orange)
-            
+
             Text(error.body)
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-            
-            Button("Retry") {
-                Task { await browser.refresh() }
+
+            HStack(spacing: 8) {
+                CopyButton(content: error, style: .labeledError)
+
+                Button("Retry") {
+                    Task { await browser.refresh() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)

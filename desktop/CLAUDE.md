@@ -86,13 +86,13 @@ CLI discovery checks these paths in order:
 
 ## Module Plugin System
 
-The app supports installable modules via the `homeboy.json` manifest. In the current desktop implementation, modules are stored under the app's `AppPaths.modules`:
+The app supports installable modules via the `{module-id}.json` manifest. Modules are stored in the shared config directory:
 ```
-~/Library/Application Support/Homeboy/modules/<module-id>/
+~/.config/homeboy/modules/<module-id>/
 ```
 
 ### Key Files
-- `Core/Modules/ModuleManifest.swift` - Codable types for `homeboy.json`
+- `Core/Modules/ModuleManifest.swift` - Codable types for `{module-id}.json`
 - `Core/Modules/ModuleManager.swift` - Module discovery and loading
 - `Core/Modules/ModuleRunner.swift` - Script execution
 - `Core/Modules/ModuleInstaller.swift` - Venv and dependency installation
@@ -175,7 +175,7 @@ Run `homeboy docs` for the canonical CLI documentation.
 
 ## Configuration
 
-The desktop app is macOS-only and stores configuration as JSON under its `AppPaths` root (`~/Library/Application Support/Homeboy/`). The CLI uses a separate canonical config root (`dirs::config_dir()/homeboy`).
+**Desktop is a pure UI wrapper.** All configuration is stored in the CLI's canonical config directory (`~/.config/homeboy/`). The Desktop reads from this directory for reactivity/caching but all writes go through CLI commands via `CLIBridge`.
 
 Config change reactivity is implemented by `ConfigurationObserver` (`Homeboy/Core/Config/ConfigurationObserver.swift`), which watches:
 - `AppPaths.projects`
@@ -183,12 +183,10 @@ Config change reactivity is implemented by `ConfigurationObserver` (`Homeboy/Cor
 - `AppPaths.modules`
 - `AppPaths.projectTypes`
 
-Canonical cross-platform config root rules live in the CLI docs: [`../homeboy/docs/index.md`](../homeboy/docs/index.md).
-
-macOS config tree used by the desktop app (`AppPaths`):
+Shared config tree (`~/.config/homeboy/`):
 
 ```
-~/Library/Application Support/Homeboy/
+~/.config/homeboy/
 ├── projects/             # Project configuration
 │   └── <project-id>.json
 ├── servers/              # SSH server configuration
@@ -203,7 +201,7 @@ macOS config tree used by the desktop app (`AppPaths`):
 └── backups/              # Local backups (deploy/file operations)
 ```
 
-Note: the CLI documents its own cross-platform config root separately. Keep desktop docs aligned to code in `Homeboy/Core/Config/AppPaths.swift`.
+Keep desktop docs aligned to code in `Homeboy/Core/Config/AppPaths.swift`.
 ## API Integration
 
 Supports JWT authentication with WordPress REST APIs.

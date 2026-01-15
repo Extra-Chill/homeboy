@@ -6,9 +6,9 @@ struct RemoteFileEditorView: View {
     @State private var showCopiedFeedback = false
     
     init() {
-        let serverId = ConfigurationManager.shared.safeActiveProject.serverId ?? ""
+        let projectId = ConfigurationManager.shared.safeActiveProject.id
         let basePath = ConfigurationManager.shared.safeActiveProject.basePath
-        _browser = StateObject(wrappedValue: RemoteFileBrowser(projectId: serverId, startingPath: basePath))
+        _browser = StateObject(wrappedValue: RemoteFileBrowser(projectId: projectId, startingPath: basePath))
     }
     
     var body: some View {

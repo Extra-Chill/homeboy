@@ -7,7 +7,9 @@ struct DeployerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !viewModel.hasCredentials || !viewModel.hasSSHKey || !viewModel.hasBasePath {
+            if viewModel.isCheckingConfig {
+                checkingConfigView
+            } else if !viewModel.hasCredentials || !viewModel.hasSSHKey || !viewModel.hasBasePath {
                 configurationRequiredView
             } else {
                 headerSection
@@ -46,6 +48,17 @@ struct DeployerView: View {
             let names = viewModel.componentsNeedingBuild.map { $0.name }.joined(separator: ", ")
             Text("The following components need to be deployed:\n\n\(names)")
         }
+    }
+
+    // MARK: - Checking Config View
+
+    private var checkingConfigView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+            Text("Checking configuration...")
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Configuration Required View

@@ -133,7 +133,7 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
     /// Fetches the currently selected log from the server via CLI
     func fetchSelectedLog() async {
         guard let index = selectedLogIndex else { return }
-        guard cli.isInstalled else {
+        guard HomeboyCLI.shared.isInstalled else {
             error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "Log Viewer")
             return
         }
@@ -144,26 +144,27 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         let log = openLogs[index]
 
         do {
-            // Build command: homeboy logs show <project> <path> -n <lines>
-            var args = ["logs", "show", projectId, log.path]
-            if log.tailLines > 0 {
-                args.append(contentsOf: ["-n", String(log.tailLines)])
-            }
+            let output = try await HomeboyCLI.shared.logsShow(
+                projectId: projectId,
+                path: log.path,
+                lines: log.tailLines > 0 ? log.tailLines : nil
+            )
 
-            let response = try await cli.execute(args, timeout: 60)
-
-            if response.success {
-                openLogs[index].content = response.output
+            if let logData = output.log {
+                openLogs[index].content = logData.content
                 openLogs[index].fileExists = true
                 openLogs[index].lastFetched = Date()
             } else {
-                // Check if error indicates file not found
-                if response.errorOutput.contains("not found") || response.errorOutput.contains("No such file") {
-                    openLogs[index].fileExists = false
-                    openLogs[index].content = ""
-                } else {
-                    self.error = AppError(response.errorOutput, source: "Log Viewer", path: log.displayName)
-                }
+                openLogs[index].fileExists = false
+                openLogs[index].content = ""
+            }
+        } catch let cliError as CLIBridgeError {
+            if let structuredError = cliError.cliError,
+               structuredError.code == "file_not_found" {
+                openLogs[index].fileExists = false
+                openLogs[index].content = ""
+            } else {
+                self.error = cliError.cliError ?? AppError(cliError.localizedDescription, source: "Log Viewer", path: log.displayName)
             }
         } catch {
             self.error = error.toDisplayableError(source: "Log Viewer", path: log.displayName)
@@ -175,7 +176,7 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
     /// Clears the currently selected log file via CLI
     func clearSelectedLog() async {
         guard let index = selectedLogIndex else { return }
-        guard cli.isInstalled else {
+        guard HomeboyCLI.shared.isInstalled else {
             error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "Log Viewer")
             return
         }
@@ -186,19 +187,11 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         let log = openLogs[index]
 
         do {
-            // homeboy logs clear <project> <path> --json
-            let args = ["logs", "clear", projectId, log.path]
-            let response = try await cli.execute(args, timeout: 30)
-
-            if response.success {
-                // Update state
-                openLogs[index].content = ""
-                openLogs[index].lastFetched = Date()
-            } else {
-                self.error = AppError("Failed to clear log: \(response.errorOutput)", source: "Log Viewer", path: log.displayName)
-            }
+            _ = try await HomeboyCLI.shared.logsClear(projectId: projectId, path: log.path)
+            openLogs[index].content = ""
+            openLogs[index].lastFetched = Date()
         } catch {
-            self.error = AppError("Failed to clear log: \(error.localizedDescription)", source: "Log Viewer", path: log.displayName)
+            self.error = error.toDisplayableError(source: "Log Viewer", path: log.displayName)
         }
 
         isLoading = false

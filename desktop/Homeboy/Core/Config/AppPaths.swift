@@ -9,7 +9,9 @@ enum AppPaths {
     }
 
     static var homeboy: URL {
-        appSupport.appendingPathComponent(appName)
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config")
+            .appendingPathComponent("homeboy")
     }
 
     static var projects: URL {

@@ -40,21 +40,26 @@ struct ContentContext {
         self.additionalInfo = additionalInfo
     }
     
-    /// Creates context from current active project and server configuration
+    /// Creates context from current active project and server configuration.
+    /// Must be called from main thread (UI code).
     static func current(source: String, additionalInfo: [String: String] = [:]) -> ContentContext {
-        let project = ConfigurationManager.readCurrentProject()
-        let server = ConfigurationManager.readCurrentServer()
-        
-        return ContentContext(
-            source: source,
-            projectName: project.name,
-            serverName: server?.name,
-            serverHost: server?.host,
-            additionalInfo: additionalInfo
-        )
+        // Error creation always happens from UI code on main thread
+        MainActor.assumeIsolated {
+            let project = ConfigurationManager.shared.activeProject
+            let server = ConfigurationManager.shared.serverForActiveProject()
+
+            return ContentContext(
+                source: source,
+                projectName: project?.name ?? project?.id,
+                serverName: server?.name ?? server?.id,
+                serverHost: server?.host,
+                additionalInfo: additionalInfo
+            )
+        }
     }
-    
-    /// Creates context with a specific path included
+
+    /// Creates context with a specific path included.
+    /// Must be called from main thread (UI code).
     static func current(source: String, path: String?, additionalInfo: [String: String] = [:]) -> ContentContext {
         var info = additionalInfo
         if let path = path, !path.isEmpty {
