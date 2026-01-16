@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.22.1] - 2026-01-16
+
+- Update documentation to remove all --cwd references
+
 ## [0.22.0] - 2026-01-16
 
 - **BREAKING**: Remove `--cwd` flag entirely from CLI - component IDs are THE way to use Homeboy (decouples commands from directory location)
