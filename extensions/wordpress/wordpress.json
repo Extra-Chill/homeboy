@@ -77,6 +77,23 @@
     }
   ],
 
+  "deploy_override": [
+    {
+      "path_pattern": "/wp-content/plugins/",
+      "staging_path": "/tmp/homeboy-staging",
+      "install_command": "cd {{siteRoot}} && {{cliPath}} plugin install {{stagingArtifact}} --force --activate --url={{domain}}",
+      "cleanup_command": "rm -f {{stagingArtifact}}",
+      "skip_permissions_fix": true
+    },
+    {
+      "path_pattern": "/wp-content/themes/",
+      "staging_path": "/tmp/homeboy-staging",
+      "install_command": "cd {{siteRoot}} && {{cliPath}} theme install {{stagingArtifact}} --force --url={{domain}}",
+      "cleanup_command": "rm -f {{stagingArtifact}}",
+      "skip_permissions_fix": true
+    }
+  ],
+
   "version_patterns": [
     {
       "extension": ".php",
