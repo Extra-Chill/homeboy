@@ -15,36 +15,22 @@ fn docs_index() -> &'static HashMap<&'static str, &'static str> {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedDoc {
-    pub topic_label: String,
-    pub key: String,
-    pub segments: Vec<String>,
     pub content: String,
-    pub source: String,
 }
 
 pub fn resolve(topic: &[String]) -> homeboy::Result<ResolvedDoc> {
-    let (topic_label, key, segments) = normalize_topic(topic);
+    let (_, key, _) = normalize_topic(topic);
 
     // First check embedded core docs
     if let Some(content) = docs_index().get(key.as_str()).copied() {
         return Ok(ResolvedDoc {
-            topic_label,
-            key,
-            segments,
             content: content.to_string(),
-            source: "core".to_string(),
         });
     }
 
     // Then check module docs
-    if let Some((content, module_id)) = load_module_doc(&key) {
-        return Ok(ResolvedDoc {
-            topic_label,
-            key,
-            segments,
-            content,
-            source: module_id,
-        });
+    if let Some((content, _module_id)) = load_module_doc(&key) {
+        return Ok(ResolvedDoc { content });
     }
 
     Err(homeboy::Error::docs_topic_not_found(&key))

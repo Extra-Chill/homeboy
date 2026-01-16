@@ -69,7 +69,7 @@
       ],
       "checksum": "homeboy-aarch64-apple-darwin.tar.xz.sha256",
       "checksums": {
-        "sha256": "170a2e78120a47b059b6bbda1fa3d97092bc658f9560be22987ed214daa0eff3"
+        "sha256": "9360d90483c925fd9041bee02c6a2efd7b4b87fe15af7d19b284e5d6dc1df66e"
       }
     },
     "homeboy-aarch64-apple-darwin.tar.xz.sha256": {
@@ -101,7 +101,7 @@
       "path": "/Users/chubes/Developer/Extra Chill Platform/homeboy-ecosystem/homeboy/target/distrib/source.tar.gz",
       "checksum": "source.tar.gz.sha256",
       "checksums": {
-        "sha256": "79ecf3f71bfd4f3f36692b3c04cb6de61f4b347d00841faf7528d741a445ee32"
+        "sha256": "599c21eeb10cfed2dedcc9d6250510813acf5697e6dc0ac8061d78b372e7e500"
       }
     },
     "source.tar.gz.sha256": {

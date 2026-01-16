@@ -422,7 +422,7 @@ pub mod exec_context {
 use crate::component::{self, Component};
 use crate::http::ApiClient;
 use crate::project::{self, Project};
-use crate::ssh::execute_local_command_interactive;
+use crate::ssh::{execute_local_command_in_dir, execute_local_command_interactive};
 use crate::template;
 use std::collections::HashMap;
 
@@ -430,6 +430,18 @@ use std::collections::HashMap;
 pub struct ModuleRunResult {
     pub exit_code: i32,
     pub project_id: Option<String>,
+}
+
+pub struct ModuleExecutionResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+}
+
+pub enum ModuleExecutionMode {
+    Interactive,
+    Captured,
 }
 
 /// Result of running module setup.

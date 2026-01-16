@@ -29,7 +29,7 @@ Bulk JSON input uses `component_ids` (snake_case):
 
 Positional and flag component IDs can be mixed; both are merged into the deployment list.
 
-If no component IDs are provided and neither `--all` nor `--outdated` is set, Homeboy returns an error.
+If no component IDs are provided and neither `--all` nor `--outdated` is set, Homeboy returns an error. If `--outdated` finds no outdated components, Homeboy returns an error.
 
 ## JSON output
 
@@ -65,7 +65,7 @@ If no component IDs are provided and neither `--all` nor `--outdated` is set, Ho
 Notes:
 
 - `deploy_reason` is omitted when not applicable.
-- `artifact_path` is the component build artifact path as configured; it may be relative.
+- `artifact_path` is the component build artifact path as configured; it may be relative but must include a filename.
 
 Note: `build_exit_code`/`deploy_exit_code` are numbers when present (not strings).
 

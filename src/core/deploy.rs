@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -6,7 +6,7 @@ use std::process::Command;
 use crate::base_path;
 use crate::build;
 use crate::component::{self, Component};
-use crate::config::read_json_spec_to_string;
+use crate::config;
 use crate::context::{resolve_project_ssh_with_base_path, RemoteProjectContext};
 use crate::defaults;
 use crate::error::{Error, Result};
@@ -18,18 +18,9 @@ use crate::ssh::SshClient;
 use crate::template::{render_map, TemplateVars};
 use crate::version;
 
-#[derive(Debug, Deserialize)]
-
-struct BulkComponentsInput {
-    component_ids: Vec<String>,
-}
-
 /// Parse bulk component IDs from a JSON spec.
 pub fn parse_bulk_component_ids(json_spec: &str) -> Result<Vec<String>> {
-    let raw = read_json_spec_to_string(json_spec)?;
-    let input: BulkComponentsInput = serde_json::from_str(&raw).map_err(|e| {
-        Error::validation_invalid_json(e, Some("parse bulk deploy input".to_string()))
-    })?;
+    let input = config::parse_bulk_ids(json_spec)?;
     Ok(input.component_ids)
 }
 
@@ -96,8 +87,16 @@ pub fn deploy_artifact(
         let artifact_filename = local_path
             .file_name()
             .and_then(|name| name.to_str())
-            .map(|name| format!("{}{}", artifact_prefix, name))
-            .unwrap_or_else(|| format!("{}artifact", artifact_prefix));
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "buildArtifact",
+                    "Build artifact path must include a file name",
+                    Some(local_path.display().to_string()),
+                    None,
+                )
+            })?
+            .to_string();
+        let artifact_filename = format!("{}{}", artifact_prefix, artifact_filename);
 
         let upload_path = if extract_command.is_some() {
             format!("{}/{}", remote_path, artifact_filename)
@@ -142,7 +141,7 @@ pub fn deploy_artifact(
 
             // Fix file permissions after extraction
             eprintln!("[deploy] Fixing file permissions");
-            permissions::fix_deployed_permissions(ssh_client, remote_path);
+            permissions::fix_deployed_permissions(ssh_client, remote_path)?;
         }
     }
 
@@ -433,7 +432,7 @@ pub fn deploy_components(
     ctx: &RemoteProjectContext,
     base_path: &str,
 ) -> Result<DeployOrchestrationResult> {
-    let all_components = load_project_components(&project.component_ids);
+    let all_components = load_project_components(&project.component_ids)?;
     if all_components.is_empty() {
         return Err(Error::other(
             "No components configured for project".to_string(),
@@ -637,6 +636,32 @@ fn plan_components(
             .filter(|c| config.component_ids.contains(&c.id))
             .cloned()
             .collect();
+
+        let missing: Vec<String> = config
+            .component_ids
+            .iter()
+            .filter(|id| !selected.iter().any(|c| &c.id == *id))
+            .cloned()
+            .collect();
+
+        if !missing.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "componentIds",
+                "Unknown component IDs",
+                None,
+                Some(missing),
+            ));
+        }
+
+        if selected.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "componentIds",
+                "No components selected",
+                None,
+                None,
+            ));
+        }
+
         return Ok(selected);
     }
 
@@ -659,6 +684,15 @@ fn plan_components(
             .cloned()
             .collect();
 
+        if selected.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "outdated",
+                "No outdated components found",
+                None,
+                None,
+            ));
+        }
+
         return Ok(selected);
     }
 
@@ -668,20 +702,19 @@ fn plan_components(
 }
 
 /// Load components by ID and normalize artifact paths.
-fn load_project_components(component_ids: &[String]) -> Vec<Component> {
+fn load_project_components(component_ids: &[String]) -> Result<Vec<Component>> {
     let mut components = Vec::new();
 
     for id in component_ids {
-        if let Ok(mut loaded) = component::load(id) {
-            // Resolve relative build artifact path
-            if !loaded.build_artifact.starts_with('/') {
-                loaded.build_artifact = format!("{}/{}", loaded.local_path, loaded.build_artifact);
-            }
-            components.push(loaded);
+        let mut loaded = component::load(id)?;
+        // Resolve relative build artifact path
+        if !loaded.build_artifact.starts_with('/') {
+            loaded.build_artifact = format!("{}/{}", loaded.local_path, loaded.build_artifact);
         }
+        components.push(loaded);
     }
 
-    components
+    Ok(components)
 }
 
 /// Fetch versions from remote server for components.

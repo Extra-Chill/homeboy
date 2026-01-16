@@ -25,7 +25,7 @@ Options:
 - `--skip-existing`: skip items that already exist (JSON mode only)
 - `--local-path <path>`: absolute path to local source directory (required; ID derived from directory name; `~` is expanded)
 - `--remote-path <path>`: remote path relative to project `base_path` (required)
-- `--build-artifact <path>`: build artifact path relative to `local_path` (required)
+- `--build-artifact <path>`: build artifact path relative to `local_path` (required; must include a filename)
 - `--version-target <TARGET>`: version target in format `file` or `file::pattern` (repeatable)
 - `--build-command <command>`: build command to run in `local_path` (required for `homeboy build`)
 - `--extract-command <command>`: command to run after upload (optional; supports `{artifact}` and `{targetDir}`)
