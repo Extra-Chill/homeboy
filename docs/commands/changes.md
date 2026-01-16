@@ -26,6 +26,7 @@ Release workflow note:
 
 - `commits[]` is intended as input to help you author complete release notes.
 - `uncommitted`/`uncommitted_diff` is a reminder that you have local edits; if they are intended for the release, commit them as scoped changes before version bumping. If they are not intended for the release, resolve them before version bumping.
+- Use `homeboy changelog add` to capture release notes before running `homeboy version bump` or `homeboy release`.
 
 ## Options
 

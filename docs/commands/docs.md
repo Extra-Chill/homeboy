@@ -7,6 +7,8 @@ homeboy docs [TOPIC]...
 homeboy docs list
 homeboy docs scaffold [--source <dir>] [--docs-dir <dir>]
 homeboy docs generate --json '<spec>'
+homeboy docs generate @spec.json
+homeboy docs generate -
 ```
 
 ## Description

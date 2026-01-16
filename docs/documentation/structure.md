@@ -107,10 +107,10 @@ These belong elsewhere, not in `/docs`:
 
 ## Scaffold Command
 
-Use `homeboy docs scaffold` to generate the initial file structure. The command:
-1. Analyzes code structure
-2. Creates appropriate subdirectories
-3. Creates `.md` files with H1 titles
+Use `homeboy docs scaffold` to analyze the codebase. The command:
+1. Scans source directories
+2. Lists existing documentation files
+3. Identifies potentially undocumented areas
 4. Returns instructions for next steps
 
-This saves context by handling file creation logistics, allowing focus on content writing.
+This is read-only analysis. Use `homeboy docs generate` to create files.

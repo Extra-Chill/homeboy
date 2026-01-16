@@ -50,9 +50,9 @@ homeboy docs documentation/structure
 ### Change Detection
 Use `homeboy changes` to identify what code has changed, informing which documentation may be stale.
 
-## Integration with CLAUDE.md
+## Integration with Agent Context Files
 
-Projects using Homeboy should add to their CLAUDE.md:
+Projects using Homeboy can add documentation guidance to their agent context file (CLAUDE.md, AGENTS.md, COPILOT.md, or similar):
 
 ```markdown
 ## Documentation Standards
@@ -62,4 +62,4 @@ When maintaining docs, follow `homeboy docs documentation/alignment`.
 When generating docs, follow `homeboy docs documentation/generation`.
 ```
 
-This ensures AI agents naturally discover documentation standards without special commands.
+This ensures AI agents discover documentation standards through their standard context loading.

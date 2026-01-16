@@ -39,7 +39,7 @@ A few common entrypoints:
 
 ```bash
 homeboy docs
-homeboy docs --list
+homeboy docs list
 homeboy docs commands/project
 
 homeboy list
@@ -61,6 +61,19 @@ homeboy logs show <project_id> <path> --follow   # interactive passthrough
 - [Docs index](docs/index.md)
 - [Commands index](docs/commands/commands-index.md)
 - [JSON output contract](docs/json-output/json-output-contract.md)
+
+## Release workflow
+
+Homeboy replaces the need for GitHub Actions by running a local release pipeline defined per component.
+
+Recommended flow:
+
+- Review changes: `homeboy changes <component_id>`
+- Add release notes: `homeboy changelog add <component_id> "message"`
+- Bump version: `homeboy version bump <component_id> <patch|minor|major>`
+- Run release pipeline: `homeboy release run <component_id>`
+
+See `docs/commands/release.md` for release step configuration details.
 
 ## Configuration
 

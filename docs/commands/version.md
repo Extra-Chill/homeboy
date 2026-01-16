@@ -34,13 +34,17 @@ homeboy version set [<component_id>] <new_version>
 
 Both subcommands support `--cwd` for ad-hoc operations in any directory without requiring component registration. When using `--cwd`, Homeboy auto-detects version files by checking the configured `version_candidates` list (defaults include `Cargo.toml`, `package.json`, `composer.json`, and `style.css`), then scanning `*.php` files that contain a WordPress plugin or theme header.
 
-This command:
+`homeboy version bump`:
 
 - Bumps all configured `version_targets` using semantic versioning (X.Y.Z).
 - Finalizes the component changelog by moving the current "next" section (usually `Unreleased`) into a new `## [<new_version>] - YYYY-MM-DD` section.
 - Runs any `post_version_bump_commands` configured on the component.
 
-Changelog entries must be added *before* running this command (recommended: `homeboy changelog add --json ...`).
+`homeboy version set`:
+
+- Writes the new version directly to targets without touching the changelog.
+
+Changelog entries must be added *before* running `version bump` (recommended: `homeboy changelog add --json ...`).
 
 Recommended release workflow (non-enforced):
 
@@ -49,7 +53,7 @@ Recommended release workflow (non-enforced):
 - Add changelog items as user-facing release notes that capture anything impacting user or developer experience (not a copy of commit subjects).
 - Run `homeboy version bump ...` when the only remaining local changes are release metadata (changelog + version).
 
-In this version of Homeboy, the `--json` flag is on `changelog add` (not on `changelog`).
+Note: `--json` for changelog entries is on `homeboy changelog add` (not `homeboy changelog`).
 
 Arguments:
 

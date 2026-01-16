@@ -180,7 +180,7 @@ Modules can provide their own top-level CLI commands and documentation topics.
 Discover what’s available on your machine:
 
 ```sh
-homeboy docs --list
+homeboy docs list
 ```
 
 Render a module-provided topic:

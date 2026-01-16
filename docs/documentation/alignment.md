@@ -25,7 +25,14 @@ Only update what needs correction. Preserve accurate existing content. Do not re
 ## Workflow
 
 ### 1. Detect Changes
-Run `homeboy changes --cwd` to identify what code has changed. This informs which documentation may be stale.
+Run `homeboy changes --cwd` to identify what code has changed. The output includes:
+- **commits**: Changes since last tag, each with a `category` (Feature, Fix, Breaking, Docs, Chore, Other)
+- **uncommitted**: Current working tree changes (staged, unstaged, untracked files)
+
+Use this to identify documentation focus areas:
+- **Feature/Breaking commits**: Likely need documentation updates
+- **File paths in changes**: Map to related documentation (e.g., changes in `src/auth/` suggest reviewing auth docs)
+- **Uncommitted changes**: Active development that may affect docs once committed
 
 ### 2. Discover Documentation
 Find all `.md` files in the codebase:
@@ -50,18 +57,6 @@ Ensure consistency across all `.md` files:
 - File paths referenced should exist
 - Function/class names should be accurate
 - Architectural descriptions should match implementation
-
-## Link Policy
-
-WordPress handles documentation navigation, not inline markdown links.
-
-**Remove**:
-- Internal `.md` links between documentation files
-- Example: `[Settings](admin/settings.md)` → `Settings`
-
-**Preserve**:
-- Anchor links within documents: `[Jump to section](#section)`
-- External URLs: `[WordPress Codex](https://codex.wordpress.org)`
 
 ## Forbidden Content
 

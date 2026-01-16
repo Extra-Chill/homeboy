@@ -18,7 +18,7 @@
 - [logs](logs.md)
 - [module](module.md)
 - [project](project.md)
-- [release](release.md)
+- [release](release.md) (local release pipeline)
 - [server](server.md)
 - [ssh](ssh.md)
 - [upgrade](upgrade.md)

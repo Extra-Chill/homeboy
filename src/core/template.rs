@@ -12,6 +12,11 @@ impl TemplateVars {
     pub const QUERY: &'static str = "query";
     pub const FORMAT: &'static str = "format";
     pub const TARGET_DIR: &'static str = "targetDir";
+    pub const DB_HOST: &'static str = "db_host";
+    pub const DB_PORT: &'static str = "db_port";
+    pub const DB_NAME: &'static str = "db_name";
+    pub const DB_USER: &'static str = "db_user";
+    pub const DB_PASSWORD: &'static str = "db_password";
 }
 
 pub fn render(template: &str, variables: &[(&str, &str)]) -> String {

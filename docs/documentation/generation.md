@@ -52,18 +52,6 @@ For each file:
 ### 8. Coverage Validation
 Verify ALL discovered components have been documented before completion.
 
-## Link Policy
-
-WordPress handles documentation navigation, not inline markdown links.
-
-**Do Not Create**:
-- Internal links between documentation files
-- Example: `[See API](api-reference.md)` - will create broken link
-
-**Do Create**:
-- Anchor links within the same document: `[Jump to installation](#installation)`
-- External URLs: `[PHP Documentation](https://php.net)`
-
 ## Forbidden Content
 
 Never generate:

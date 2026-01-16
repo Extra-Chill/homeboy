@@ -6,6 +6,9 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+- Add release workflow guidance across docs and README
+- Expose database template vars for db CLI commands
+
 ## [0.20.3] - 2026-01-15
 
 - **Release system now fully replaces GitHub Actions** - Complete local release pipeline with package, GitHub release, Homebrew tap, and crates.io publishing
@@ -402,7 +405,7 @@ All notable changes to Homeboy CLI are documented in this file.
 ## 0.1.1
 
 ### Breaking Changes
-- **Config Rename**: `local_cli` renamed to `local_environment` in project configuration JSON files (matches desktop app 0.7.0).
+- **Config Rename**: `local_cli` renamed to `local_environment` in project configuration JSON files.
 
 ### Improvements
 - **Deploy Command**: Improved deployment workflow.
@@ -417,4 +420,4 @@ Initial release.
 - Remote SSH operations (wp, pm2, ssh, db, file, logs)
 - Deploy and pin commands
 - CLI module execution
-- Shared configuration with desktop app
+- Shared configuration across clients
