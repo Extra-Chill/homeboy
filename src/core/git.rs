@@ -559,11 +559,6 @@ fn parse_ahead_behind(counts: &str) -> (Option<u32>, Option<u32>) {
     (ahead, behind)
 }
 
-fn get_cwd_path() -> Result<String> {
-    std::env::current_dir()
-        .map_err(|e| Error::other(format!("Failed to get current directory: {}", e)))
-        .map(|p| p.to_string_lossy().to_string())
-}
 
 fn build_untracked_hint(path: &str, untracked_count: usize) -> Option<String> {
     if untracked_count < VERBOSE_UNTRACKED_THRESHOLD {
@@ -610,13 +605,21 @@ fn build_untracked_hint(path: &str, untracked_count: usize) -> Option<String> {
 }
 
 fn resolve_target(component_id: Option<&str>) -> Result<(String, String)> {
-    match component_id {
-        Some(id) => Ok((id.to_string(), get_component_path(id)?)),
-        None => Ok(("cwd".to_string(), get_cwd_path()?)),
-    }
+    let id = component_id.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "componentId",
+            "Missing componentId",
+            None,
+            Some(vec![
+                "Provide a component ID: homeboy git <command> <component-id>".to_string(),
+                "List available components: homeboy component list".to_string(),
+            ]),
+        )
+    })?;
+    Ok((id.to_string(), get_component_path(id)?))
 }
 
-/// Get git status for a component or current working directory.
+/// Get git status for a component.
 pub fn status(component_id: Option<&str>) -> Result<GitOutput> {
     let (id, path) = resolve_target(component_id)?;
     let output = execute_git(&path, &["status", "--porcelain=v1"])
@@ -679,7 +682,7 @@ pub fn status_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     }))
 }
 
-/// Commit changes for a component or current working directory.
+/// Commit changes for a component.
 ///
 /// By default, stages all changes before committing. Use `options` to control staging:
 /// - `staged_only`: Skip staging, commit only what's already staged
@@ -885,7 +888,7 @@ pub fn commit_from_json(id: Option<&str>, json_spec: &str) -> Result<CommitJsonO
     Ok(CommitJsonOutput::Single(output))
 }
 
-/// Push local commits for a component or current working directory.
+/// Push local commits for a component.
 pub fn push(component_id: Option<&str>, tags: bool) -> Result<GitOutput> {
     let (id, path) = resolve_target(component_id)?;
     let args: Vec<&str> = if tags {
@@ -909,7 +912,7 @@ pub fn push_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     }))
 }
 
-/// Pull remote changes for a component or current working directory.
+/// Pull remote changes for a component.
 pub fn pull(component_id: Option<&str>) -> Result<GitOutput> {
     let (id, path) = resolve_target(component_id)?;
     let output = execute_git(&path, &["pull"]).map_err(|e| Error::other(e.to_string()))?;
@@ -927,7 +930,7 @@ pub fn pull_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
     }))
 }
 
-/// Create a git tag for a component or current working directory.
+/// Create a git tag for a component.
 pub fn tag(
     component_id: Option<&str>,
     tag_name: Option<&str>,
@@ -1035,27 +1038,24 @@ pub fn get_range_diff(path: &str, baseline_ref: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Get all changes for a component or current working directory.
+/// Get all changes for a component.
 pub fn changes(
     component_id: Option<&str>,
     since_tag: Option<&str>,
     include_diff: bool,
 ) -> Result<ChangesOutput> {
-    let (id, path) = match component_id {
-        Some(cid) => (cid.to_string(), get_component_path(cid)?),
-        None => {
-            let p = get_cwd_path()?;
-            if !is_git_repo(&p) {
-                return Err(Error::git_command_failed("Not a git repository")
-                    .with_hint("Provide a component ID instead: homeboy <command> <component-id>")
-                    .with_hint("Run 'homeboy component list' to see registered components")
-                    .with_hint(
-                        "Run 'homeboy context --discover' to find git repos in subdirectories",
-                    ));
-            }
-            ("cwd".to_string(), p)
-        }
-    };
+    let id = component_id.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "componentId",
+            "Missing componentId",
+            None,
+            Some(vec![
+                "Provide a component ID: homeboy changes <component-id>".to_string(),
+                "List available components: homeboy component list".to_string(),
+            ]),
+        )
+    })?;
+    let path = get_component_path(id)?;
 
     let baseline = detect_baseline(&path, since_tag)?;
 
@@ -1081,7 +1081,7 @@ pub fn changes(
     };
 
     Ok(ChangesOutput {
-        component_id: id,
+        component_id: id.to_string(),
         path,
         success: true,
         latest_tag: baseline.latest_tag,

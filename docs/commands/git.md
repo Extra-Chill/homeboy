@@ -31,30 +31,6 @@ By default, `commit` stages all changes before committing. Use these flags for g
 - `--include <paths>...`: Alias for `--files` (repeatable).
 - `--exclude <paths>...`: Stage all files except the specified paths.
 
-### CWD Mode (--cwd)
-
-All subcommands support `--cwd` for ad-hoc operations in any git directory without requiring component registration:
-
-- `status --cwd`
-- `commit --cwd [message] [-m <message>] [--staged-only] [--files <paths>...] [--include <paths>...] [--exclude <paths>...] [--json <spec>]`
-- `push --cwd [--tags]` (or omit `--cwd` and omit `<component_id>`)
-- `pull --cwd` (or omit `--cwd` and omit `<component_id>`)
-- `tag --cwd <tag_name> [-m <message>]`
-  - Tag name is **required** when using `--cwd` (or when omitting `<component_id>`), since there is no component version to derive from.
-
-**CWD commit examples:**
-
-```sh
-# Positional message (auto-shifted from component_id position)
-homeboy git commit --cwd "Fix the bug"
-
-# Explicit -m flag (also works)
-homeboy git commit --cwd -m "Fix the bug"
-
-# JSON spec with --cwd
-homeboy git commit --cwd --json '{"message":"Fix bug","staged_only":true}'
-```
-
 ### JSON Spec Mode (commit)
 
 `homeboy git commit` accepts a **JSON spec** for single or bulk commits.
@@ -95,7 +71,7 @@ All subcommands except `tag` support a `--json` flag for bulk operations across 
 
 Notes:
 
-- `id` is optional when you also provide a `<component_id>` positional argument (or use `--cwd`).
+- `id` is optional when you also provide a `<component_id>` positional argument.
 - `staged_only` defaults to `false`.
 - `include_files` is optional; when present, Homeboy runs `git add -- <files...>` instead of `git add .`.
 - `exclude_files` is optional; when present, Homeboy stages all changes and then unstages the excluded paths.

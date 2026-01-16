@@ -6,7 +6,7 @@ use crate::project;
 use crate::slugify;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
@@ -344,52 +344,4 @@ pub fn delete_safe(id: &str) -> Result<()> {
     }
 
     delete(id)
-}
-
-// ============================================================================
-// CWD Resolution
-// ============================================================================
-
-/// Resolve a component from the current working directory.
-/// Uses path matching to find which configured component contains this directory.
-pub fn resolve_from_cwd() -> Result<Component> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| Error::other(format!("Failed to get current directory: {}", e)))?;
-
-    let components = list().unwrap_or_default();
-
-    let matched = components
-        .into_iter()
-        .find(|c| path_matches(&cwd, &c.local_path));
-
-    matched.ok_or_else(|| {
-        let cwd_display = cwd.display().to_string();
-        Error::validation_invalid_argument(
-            "cwd",
-            format!(
-                "Current directory is not managed by any configured component: {}",
-                cwd_display
-            ),
-            None,
-            Some(vec![
-                "Run `homeboy init` to see what Homeboy knows about this directory.".to_string(),
-                "Run `homeboy component list` to see all configured components.".to_string(),
-                format!(
-                    "Create a component: `homeboy component create <id> --local-path \"{}\"`",
-                    cwd_display
-                ),
-                "If this directory is inside an existing component, check the component's localPath configuration.".to_string(),
-            ]),
-        )
-    })
-}
-
-fn path_matches(cwd: &Path, local_path: &str) -> bool {
-    let local = PathBuf::from(local_path);
-    match (cwd.canonicalize().ok(), local.canonicalize().ok()) {
-        (Some(cwd_path), Some(local_canonical)) => {
-            cwd_path == local_canonical || cwd_path.starts_with(&local_canonical)
-        }
-        _ => false,
-    }
 }

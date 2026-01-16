@@ -15,10 +15,6 @@ pub struct ChangesArgs {
     /// Component IDs to filter (when target_id is a project)
     pub component_ids: Vec<String>,
 
-    /// Use current working directory (ad-hoc mode, no component registration required)
-    #[arg(long)]
-    pub cwd: bool,
-
     /// Show changes for all components in a project (alternative to positional project mode)
     #[arg(long)]
     pub project: Option<String>,
@@ -47,12 +43,7 @@ pub fn run(
     args: ChangesArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ChangesCommandOutput> {
-    // Priority: --cwd > --json > --project flag > positional args
-    if args.cwd {
-        let output = git::changes(None, None, args.git_diffs)?;
-        return Ok((ChangesCommandOutput::Single(Box::new(output)), 0));
-    }
-
+    // Priority: --json > --project flag > positional args
     if let Some(json) = &args.json {
         let output = git::changes_bulk(json, args.git_diffs)?;
         let exit_code = if output.summary.failed > 0 { 1 } else { 0 };

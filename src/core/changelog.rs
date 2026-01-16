@@ -678,9 +678,12 @@ pub fn add_items(component_id: Option<&str>, messages: &[String]) -> Result<AddI
     let id = component_id.ok_or_else(|| {
         Error::validation_invalid_argument(
             "componentId",
-            "Missing componentId (or use --cwd)",
+            "Missing componentId",
             None,
-            None,
+            Some(vec![
+                "Provide a component ID: homeboy changelog add <component-id> -m \"message\"".to_string(),
+                "List available components: homeboy component list".to_string(),
+            ]),
         )
     })?;
 
@@ -701,37 +704,6 @@ pub fn add_items(component_id: Option<&str>, messages: &[String]) -> Result<AddI
 
     Ok(AddItemsOutput {
         component_id: id.to_string(),
-        changelog_path: path.to_string_lossy().to_string(),
-        next_section_label: settings.next_section_label,
-        messages: messages.to_vec(),
-        items_added,
-        changed,
-    })
-}
-
-// === CWD Changelog Operations ===
-
-/// Add changelog items in the current working directory.
-pub fn add_items_cwd(messages: &[String]) -> Result<AddItemsOutput> {
-    if messages.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "message",
-            "Missing message",
-            None,
-            None,
-        ));
-    }
-
-    // Resolve CWD to component - requires explicit configuration
-    let component = component::resolve_from_cwd()?;
-    let settings = resolve_effective_settings(Some(&component));
-
-    // Use component's changelog_target (errors if not configured)
-    let (path, changed, items_added) =
-        read_and_add_next_section_items(&component, &settings, messages)?;
-
-    Ok(AddItemsOutput {
-        component_id: component.id.clone(),
         changelog_path: path.to_string_lossy().to_string(),
         next_section_label: settings.next_section_label,
         messages: messages.to_vec(),
@@ -822,13 +794,6 @@ pub fn init(component_id: &str, path: Option<&str>, configure: bool) -> Result<I
         changed: true,
         configured,
     })
-}
-
-/// Initialize a changelog in the current working directory.
-/// Resolves CWD to a component and delegates to component-based init.
-pub fn init_cwd(path: Option<&str>) -> Result<InitOutput> {
-    let component = component::resolve_from_cwd()?;
-    init(&component.id, path, false)
 }
 
 #[cfg(test)]

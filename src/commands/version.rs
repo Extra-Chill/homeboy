@@ -2,10 +2,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use homeboy::git::{commit, CommitOptions};
-use homeboy::version::{
-    bump_version, bump_version_cwd, increment_version, read_version, read_version_cwd, set_version,
-    VersionTargetInfo,
-};
+use homeboy::version::{bump_version, increment_version, read_version, set_version, VersionTargetInfo};
 
 use super::CmdResult;
 
@@ -38,10 +35,6 @@ pub struct VersionArgs {
 enum VersionCommand {
     /// Show current version of a component
     Show {
-        /// Use current working directory (ad-hoc mode with auto-detection)
-        #[arg(long)]
-        cwd: bool,
-
         /// Component ID
         component_id: Option<String>,
     },
@@ -55,15 +48,12 @@ enum VersionCommand {
         #[arg(long)]
         no_commit: bool,
 
-        /// Use current working directory (ad-hoc mode with auto-detection)
-        #[arg(long)]
-        cwd: bool,
-
-        /// Version bump type
-        bump_type: BumpType,
-
-        /// Component ID (optional when using --cwd)
+        /// Component ID
         component_id: Option<String>,
+
+        /// Version bump type (patch, minor, major)
+        #[arg(last = true)]
+        bump_type: BumpType,
     },
     /// Set version directly (without incrementing or changelog finalization)
     #[command(visible_aliases = ["edit", "merge"])]
@@ -134,19 +124,13 @@ pub struct VersionSetOutput {
 
 pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<VersionOutput> {
     match args.command {
-        VersionCommand::Show { cwd, component_id } => {
-            // Priority: --cwd > component_id
-            let (info, resolved_id) = if cwd {
-                (read_version_cwd()?, None)
-            } else {
-                let info = read_version(component_id.as_deref())?;
-                (info, component_id)
-            };
+        VersionCommand::Show { component_id } => {
+            let info = read_version(component_id.as_deref())?;
 
             Ok((
                 VersionOutput::Show(VersionShowOutput {
                     command: "version.show".to_string(),
-                    component_id: resolved_id,
+                    component_id,
                     version: info.version,
                     targets: info.targets,
                 }),
@@ -156,17 +140,11 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         VersionCommand::Bump {
             dry_run,
             no_commit,
-            cwd,
             bump_type,
             component_id,
         } => {
             if dry_run {
-                let (info, resolved_id) = if cwd {
-                    (read_version_cwd()?, None)
-                } else {
-                    let info = read_version(component_id.as_deref())?;
-                    (info, component_id)
-                };
+                let info = read_version(component_id.as_deref())?;
 
                 let new_version =
                     increment_version(&info.version, bump_type.as_str()).ok_or_else(|| {
@@ -186,7 +164,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 return Ok((
                     VersionOutput::Bump(VersionBumpOutput {
                         command: "version.bump".to_string(),
-                        component_id: resolved_id,
+                        component_id,
                         old_version: info.version,
                         new_version,
                         targets: info.targets,
@@ -200,13 +178,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 ));
             }
 
-            // Priority: --cwd > component_id
-            let (result, resolved_id) = if cwd {
-                (bump_version_cwd(bump_type.as_str())?, None)
-            } else {
-                let result = bump_version(component_id.as_deref(), bump_type.as_str())?;
-                (result, component_id)
-            };
+            let result = bump_version(component_id.as_deref(), bump_type.as_str())?;
 
             // Auto-commit unless --no-commit
             let git_commit = if no_commit {
@@ -232,7 +204,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 };
 
                 // Attempt commit - graceful failure (version files already updated)
-                match commit(resolved_id.as_deref(), Some(&commit_message), options) {
+                match commit(component_id.as_deref(), Some(&commit_message), options) {
                     Ok(output) => {
                         let stdout = if output.stdout.is_empty() {
                             None
@@ -268,7 +240,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             Ok((
                 VersionOutput::Bump(VersionBumpOutput {
                     command: "version.bump".to_string(),
-                    component_id: resolved_id,
+                    component_id,
                     old_version: result.old_version,
                     new_version: result.new_version,
                     targets: result.targets,

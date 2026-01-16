@@ -25,7 +25,7 @@ Only update what needs correction. Preserve accurate existing content. Do not re
 ## Workflow
 
 ### 1. Detect Changes
-Run `homeboy changes --cwd` to identify what code has changed. The output includes:
+Run `homeboy changes <component-id>` to identify what code has changed. The output includes:
 - **commits**: Changes since last tag, each with a `category` (Feature, Fix, Breaking, Docs, Chore, Other)
 - **uncommitted**: Current working tree changes (staged, unstaged, untracked files)
 

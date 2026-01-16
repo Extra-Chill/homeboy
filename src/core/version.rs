@@ -375,9 +375,12 @@ pub fn read_version(component_id: Option<&str>) -> Result<ComponentVersionInfo> 
     let id = component_id.ok_or_else(|| {
         Error::validation_invalid_argument(
             "componentId",
-            "Missing componentId (or use --cwd)",
+            "Missing componentId",
             None,
-            None,
+            Some(vec![
+                "Provide a component ID: homeboy version show <component-id>".to_string(),
+                "List available components: homeboy component list".to_string(),
+            ]),
         )
     })?;
     let component = component::load(id)?;
@@ -702,16 +705,17 @@ pub fn bump_version(component_id: Option<&str>, bump_type: &str) -> Result<BumpR
     let id = component_id.ok_or_else(|| {
         Error::validation_invalid_argument(
             "componentId",
-            "Missing componentId (or use --cwd)",
+            "Missing componentId",
             None,
-            None,
+            Some(vec![
+                "Provide a component ID: homeboy version bump <component-id> <bump-type>".to_string(),
+                "List available components: homeboy component list".to_string(),
+            ]),
         )
     })?;
     let component = component::load(id)?;
     bump_component_version(&component, bump_type)
 }
-
-// === CWD Version Operations ===
 
 /// Detect version targets in a directory by checking for well-known version files.
 pub fn detect_version_targets(base_path: &str) -> Result<Vec<(String, String, String)>> {
@@ -760,16 +764,4 @@ pub fn detect_version_targets(base_path: &str) -> Result<Vec<(String, String, St
     }
 
     Ok(found)
-}
-
-/// Read version from current working directory by resolving to a component.
-pub fn read_version_cwd() -> Result<ComponentVersionInfo> {
-    let component = component::resolve_from_cwd()?;
-    read_version(Some(&component.id))
-}
-
-/// Bump version in current working directory by resolving to a component.
-pub fn bump_version_cwd(bump_type: &str) -> Result<BumpResult> {
-    let component = component::resolve_from_cwd()?;
-    bump_version(Some(&component.id), bump_type)
 }

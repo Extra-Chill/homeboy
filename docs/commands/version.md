@@ -11,35 +11,30 @@ homeboy version <COMMAND>
 ### `show`
 
 ```sh
-homeboy version show [<component_id>]
-homeboy version show --cwd
+homeboy version show <component_id>
 ```
 
 ### `bump`
 
 ```sh
-homeboy version bump [<component_id>] <patch|minor|major>
-homeboy version bump --cwd <patch|minor|major>
-homeboy version bump [<component_id>] <patch|minor|major> --no-commit
+homeboy version bump <component_id> <patch|minor|major>
+homeboy version bump <component_id> <patch|minor|major> --no-commit
 ```
 
 Flags:
 
 - `--dry-run`: Simulate the bump without making any changes
 - `--no-commit`: Skip automatic git commit after bump
-- `--cwd`: Use current working directory (ad-hoc mode with auto-detection)
 
 ### `set`
 
 ```sh
-homeboy version set [<component_id>] <new_version>
+homeboy version set <component_id> <new_version>
 ```
 
 `set` writes the version targets directly without incrementing and does not finalize the changelog.
 
-### CWD Mode (--cwd)
-
-Both subcommands support `--cwd` for ad-hoc operations in any directory without requiring component registration. When using `--cwd`, Homeboy auto-detects version files by checking the configured `version_candidates` list (defaults include `Cargo.toml`, `package.json`, `composer.json`, and `style.css`), then scanning `*.php` files that contain a WordPress plugin or theme header.
+## Description
 
 `homeboy version bump`:
 
@@ -75,14 +70,14 @@ Arguments:
 `homeboy version show` data payload:
 
 - `command`: `version.show`
-- `component_id` (omitted in `--cwd` mode)
+- `component_id`
 - `version` (detected current version)
 - `targets`: array of `{ file, pattern, full_path, match_count }`
 
 `homeboy version bump` data payload:
 
 - `command`: `version.bump`
-- `component_id` (omitted in `--cwd` mode)
+- `component_id`
 - `old_version` (version before bump)
 - `new_version` (version after bump)
 - `targets`: array of `{ file, pattern, full_path, match_count }`

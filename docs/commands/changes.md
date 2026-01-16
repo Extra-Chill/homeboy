@@ -4,7 +4,6 @@
 
 ```sh
 homeboy changes <component_id> [--since <tag>] [--git-diffs]
-homeboy changes --cwd [--git-diffs]
 homeboy changes --json <spec> [--git-diffs]
 
 # Project mode
@@ -14,7 +13,7 @@ homeboy changes <project_id> <component_id> [<component_id>...] [--git-diffs]
 
 ## Description
 
-Show changes since the latest git tag for one component, multiple components (bulk JSON), all components attached to a project, or the current working directory.
+Show changes since the latest git tag for one component, multiple components (bulk JSON), or all components attached to a project.
 
 This command reports:
 
@@ -30,9 +29,8 @@ Release workflow note:
 
 ## Options
 
-- `--cwd`: use current working directory (ad-hoc mode, no component registration required)
 - `--json <spec>`: bulk mode input
-  - Priority: `--cwd > --json > --project > positional`
+  - Priority: `--json > --project > positional`
   - `<spec>` supports `-` (stdin), `@file.json`, or an inline JSON string
   - Spec format: `{ "component_ids": ["id1", "id2"] }`
 - `--project <project_id>`: show changes for all components attached to a project
@@ -120,10 +118,10 @@ Extract diffs for scripting:
 
 ```sh
 # Single mode: extract uncommitted diff
-homeboy changes --cwd --git-diffs | jq -r '.data.uncommitted_diff // empty'
+homeboy changes my-component --git-diffs | jq -r '.data.uncommitted_diff // empty'
 
 # Single mode: extract commit-range diff
-homeboy changes --cwd --git-diffs | jq -r '.data.diff // empty'
+homeboy changes my-component --git-diffs | jq -r '.data.diff // empty'
 
 # Bulk mode: extract all diffs (one per component)
 homeboy changes --project myproject --git-diffs | jq -r '.data.results[].diff // empty'

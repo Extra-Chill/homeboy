@@ -27,7 +27,7 @@ This prints raw markdown to stdout.
 
 ```sh
 homeboy changelog add <component_id> <message>
-homeboy changelog add --cwd <message>
+homeboy changelog add <component_id> -m "first" -m "second"
 homeboy changelog add --json <spec>
 ```
 
@@ -35,7 +35,6 @@ Notes:
 
 - The changelog entry is the positional `<message>` value. Use `--json` for multiple messages in one run.
 - Changelog messages are intended to be user-facing release notes (capture anything impacting user or developer experience), not a 1:1 copy of commit subjects.
-- When `--cwd` is used, Homeboy auto-detects the changelog file (see CWD Mode below).
 - When `--json` is provided, other args are ignored and the payload's `messages` array is applied in order.
 
 ### `init`
@@ -44,32 +43,23 @@ Notes:
 homeboy changelog init <component_id>
 homeboy changelog init <component_id> --path "docs/CHANGELOG.md"
 homeboy changelog init <component_id> --configure
-homeboy changelog init --cwd
 ```
 
 Creates a new changelog file with the Keep a Changelog format (`## [X.Y.Z] - YYYY-MM-DD`).
 
 Options:
 
-- `--path <path>`: Custom path for changelog file (relative to component/cwd). Default: `CHANGELOG.md`
+- `--path <path>`: Custom path for changelog file (relative to component). Default: `CHANGELOG.md`
 - `--configure`: Also update component config to add `changelog_target`
-- `--cwd`: Use current working directory instead of a component
 
 Requirements:
 
 - Component must have `version_targets` configured (to determine initial version)
 - Errors if changelog file already exists at target path
 
-### CWD Mode (--cwd)
+## Changelog Resolution
 
-Both `add` and `init` subcommands support `--cwd` for ad-hoc operations in any directory without requiring component registration.
-
-For `add`, Homeboy auto-detects the changelog file by checking for (in order):
-
-1. `CHANGELOG.md`
-2. `docs/changelog.md`
-3. `HISTORY.md`
-4. `changelog.md`
+For `add`, Homeboy resolves the changelog from the component's `changelog_target` configuration.
 
 Adds one or more changelog items to the configured "next" section in the component's changelog file.
 

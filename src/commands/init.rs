@@ -235,7 +235,7 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
     // If agent context file exists, add documentation guidance
     if std::path::Path::new("CLAUDE.md").exists() || std::path::Path::new("AGENTS.md").exists() {
         next_steps.push(
-            "For documentation tasks: Run `homeboy changes --cwd` first, then follow `homeboy docs documentation/alignment`. No clarification needed.".to_string(),
+            "For documentation tasks: Run `homeboy changes <component-id>` first, then follow `homeboy docs documentation/alignment`. No clarification needed.".to_string(),
         );
     }
 

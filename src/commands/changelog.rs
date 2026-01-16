@@ -18,10 +18,6 @@ pub struct ChangelogArgs {
 pub enum ChangelogCommand {
     /// Add changelog items to the configured "next" section
     Add {
-        /// Use current working directory (ad-hoc mode with auto-detection)
-        #[arg(long)]
-        cwd: bool,
-
         /// JSON input spec for batch operations.
         ///
         /// Use "-" to read from stdin, "@file.json" to read from a file, or an inline JSON string.
@@ -41,11 +37,7 @@ pub enum ChangelogCommand {
 
     /// Initialize a new changelog file
     Init {
-        /// Use current working directory (ad-hoc mode)
-        #[arg(long)]
-        cwd: bool,
-
-        /// Path for the changelog file (relative to component/cwd)
+        /// Path for the changelog file (relative to component)
         #[arg(long)]
         path: Option<String>,
 
@@ -123,24 +115,18 @@ pub fn run(
             ]),
         )),
         (Some(ChangelogCommand::Add {
-            cwd,
             json,
             component_id,
             positional_message,
             messages,
         }), _) => {
-            // Priority: --cwd > --json > component_id (auto-detects JSON)
+            // Priority: --json > component_id (auto-detects JSON)
             // Merge positional message with -m flags (positional goes first)
             let mut all_messages: Vec<String> = Vec::new();
             if let Some(msg) = positional_message {
                 all_messages.push(msg.clone());
             }
             all_messages.extend(messages.iter().cloned());
-
-            if *cwd {
-                let output = changelog::add_items_cwd(&all_messages)?;
-                return Ok((ChangelogOutput::Add(output), 0));
-            }
 
             // Explicit --json takes precedence
             if let Some(spec) = json.as_deref() {
@@ -153,22 +139,19 @@ pub fn run(
             Ok((ChangelogOutput::Add(output), 0))
         }
         (Some(ChangelogCommand::Init {
-            cwd,
             path,
             configure,
             component_id,
         }), _) => {
-            if *cwd {
-                let output = changelog::init_cwd(path.as_deref())?;
-                return Ok((ChangelogOutput::Init(output), 0));
-            }
-
             let id = component_id.as_ref().ok_or_else(|| {
                 homeboy::Error::validation_invalid_argument(
                     "componentId",
-                    "Missing component ID (or use --cwd). List components: homeboy component list",
+                    "Missing componentId",
                     None,
-                    None,
+                    Some(vec![
+                        "Provide a component ID: homeboy changelog init <component-id>".to_string(),
+                        "List available components: homeboy component list".to_string(),
+                    ]),
                 )
             })?;
 
