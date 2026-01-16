@@ -21,13 +21,13 @@ if [[ -z "$tag" ]]; then
 fi
 
 artifact_types=$(echo "$HOMEBOY_SETTINGS_JSON" | jq -c '.config.artifactTypes // empty')
-artifacts=$(echo "$payload" | jq -r '.artifacts // [] | .[] | .path')
+readarray -t artifacts < <(echo "$payload" | jq -r '.artifacts // [] | .[] | .path')
 
 if [[ -n "$artifact_types" && "$artifact_types" != "null" ]]; then
-  artifacts=$(echo "$payload" | jq -r --argjson allowed "$artifact_types" '.artifacts[] | select(.type as $t | $allowed | index($t)) | .path')
+  readarray -t artifacts < <(echo "$payload" | jq -r --argjson allowed "$artifact_types" '.artifacts[] | select(.artifact_type as $t | $allowed | index($t)) | .path')
 fi
 
-if [[ -z "$artifacts" ]]; then
+if [[ ${#artifacts[@]} -eq 0 ]]; then
   echo "No artifacts to upload" >&2
   exit 1
 fi
@@ -37,4 +37,4 @@ trap 'rm -f "$notes_file"' EXIT
 
 echo "$notes" > "$notes_file"
 
-gh release create "$tag" --title "$tag" --notes-file "$notes_file" $artifacts
+gh release create "$tag" --title "$tag" --notes-file "$notes_file" "${artifacts[@]}"

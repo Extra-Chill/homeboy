@@ -12,8 +12,8 @@ if [[ -z "$payload" ]]; then
   exit 1
 fi
 
-artifacts=$(echo "$payload" | jq -r '.artifacts // [] | .[] | select(.path | endswith(".rb")) | .path')
-if [[ -z "$artifacts" ]]; then
+readarray -t artifacts < <(echo "$payload" | jq -r '.artifacts // [] | .[] | select(.path | endswith(".rb")) | .path')
+if [[ ${#artifacts[@]} -eq 0 ]]; then
   echo "No .rb artifacts provided" >&2
   exit 1
 fi
@@ -26,7 +26,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 git clone "https://github.com/${tap_repo}.git" "$tmp_dir"
 
-for formula in $artifacts; do
+for formula in "${artifacts[@]}"; do
   if [[ ! -f "$formula" ]]; then
     echo "Formula not found: $formula" >&2
     exit 1
