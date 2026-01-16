@@ -16,6 +16,9 @@ pub struct ChangelogArgs {
 
 #[derive(Subcommand)]
 pub enum ChangelogCommand {
+    /// Show Homeboy's own changelog (alias for --self)
+    Show,
+
     /// Add changelog items to the configured "next" section
     Add {
         /// JSON input spec for batch operations.
