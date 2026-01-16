@@ -28,7 +28,7 @@ tap_repo=${tap_repo:-"Extra-Chill/homebrew-tap"}
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
 
-git clone "https://github.com/${tap_repo}.git" "$tmp_dir"
+gh repo clone "${tap_repo}" "$tmp_dir"
 
 for formula in "${artifacts[@]}"; do
   if [[ ! -f "$formula" ]]; then
@@ -50,4 +50,4 @@ if git diff --cached --quiet; then
 fi
 
 git commit -m "Update Homebrew formulae"
-git push
+git push origin main
