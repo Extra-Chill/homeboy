@@ -43,4 +43,9 @@ trap 'rm -f "$notes_file"' EXIT
 
 echo "$notes" > "$notes_file"
 
-gh release create "$tag" --title "$tag" --notes-file "$notes_file" "${artifacts[@]}"
+if gh release view "$tag" &>/dev/null; then
+  echo "Release $tag exists, updating assets..."
+  gh release upload "$tag" "${artifacts[@]}" --clobber
+else
+  gh release create "$tag" --title "$tag" --notes-file "$notes_file" "${artifacts[@]}"
+fi
