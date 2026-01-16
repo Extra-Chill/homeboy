@@ -12,6 +12,15 @@ use crate::project;
 
 const DEFAULT_NEXT_SECTION_LABEL: &str = "Unreleased";
 
+const KEEP_A_CHANGELOG_SUBSECTIONS: &[&str] = &[
+    "### Added",
+    "### Changed",
+    "### Deprecated",
+    "### Removed",
+    "### Fixed",
+    "### Security",
+];
+
 #[derive(Debug, Clone)]
 pub struct EffectiveChangelogSettings {
     pub next_section_label: String,
@@ -222,6 +231,48 @@ pub fn read_and_add_next_section_items(
     Ok((path, changed, items_added))
 }
 
+#[derive(Debug, PartialEq)]
+enum SectionContentStatus {
+    Valid,           // Has bullet items (direct or under subsections)
+    SubsectionsOnly, // Has ### headers but no bullets
+    Empty,           // Nothing meaningful
+}
+
+fn validate_section_content(body_lines: &[&str]) -> SectionContentStatus {
+    let mut has_subsection_headers = false;
+    let mut has_bullets = false;
+
+    for line in body_lines {
+        let trimmed = line.trim();
+
+        // Stop at next ## heading
+        if trimmed.starts_with("## ") {
+            break;
+        }
+
+        // Detect subsection headers
+        if KEEP_A_CHANGELOG_SUBSECTIONS
+            .iter()
+            .any(|h| trimmed.starts_with(h))
+        {
+            has_subsection_headers = true;
+        }
+
+        // Detect bullet items (- or *)
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            has_bullets = true;
+        }
+    }
+
+    if has_bullets {
+        SectionContentStatus::Valid
+    } else if has_subsection_headers {
+        SectionContentStatus::SubsectionsOnly
+    } else {
+        SectionContentStatus::Empty
+    }
+}
+
 pub fn finalize_next_section(
     changelog_content: &str,
     next_section_aliases: &[String],
@@ -252,21 +303,36 @@ pub fn finalize_next_section(
 
     let end = find_section_end(&lines, start);
     let body_lines = &lines[start + 1..end];
-    let has_content = body_lines.iter().any(|line| !line.trim().is_empty());
+    let content_status = validate_section_content(body_lines);
 
-    if !has_content {
+    if content_status != SectionContentStatus::Valid {
         if allow_empty {
             return Ok((changelog_content.to_string(), false));
         }
 
+        let (message, hints) = match content_status {
+            SectionContentStatus::SubsectionsOnly => (
+                "Next changelog section has subsection headers but no bullet items",
+                vec![
+                    "Add bullet items under subsections (e.g., `- Description of change`).".to_string(),
+                    "Keep a Changelog subsections (### Added, ### Fixed, etc.) require content.".to_string(),
+                ],
+            ),
+            SectionContentStatus::Empty => (
+                "Next changelog section is empty",
+                vec![
+                    "Add changelog items before bumping (e.g., `homeboy changelog add <componentId> -m \"...\"`).".to_string(),
+                    "Ensure the section contains at least one bullet item.".to_string(),
+                ],
+            ),
+            _ => unreachable!(),
+        };
+
         return Err(Error::validation_invalid_argument(
             "changelog",
-            "Next changelog section is empty",
+            message,
             None,
-            Some(vec![
-                "Add changelog items before bumping (e.g., `homeboy changelog add <componentId> -m \"...\"`).".to_string(),
-                "Ensure the next section contains at least one bullet item.".to_string(),
-            ]),
+            Some(hints),
         ));
     }
 
@@ -345,7 +411,8 @@ fn find_section_end(lines: &[&str], start: usize) -> usize {
     let mut index = start + 1;
     while index < lines.len() {
         let trimmed = lines[index].trim();
-        if trimmed.starts_with("##") {
+        // Match only H2 headers (## ), not H3 subsections (###)
+        if trimmed.starts_with("## ") || trimmed == "##" {
             break;
         }
         index += 1;
@@ -459,24 +526,54 @@ fn append_item_to_next_section(
         }
     }
 
-    // Find where to insert: after last bullet, or after blank line following header if no bullets
+    // Detect if section uses Keep a Changelog subsections
+    let has_subsections = lines[start + 1..section_end]
+        .iter()
+        .any(|l| KEEP_A_CHANGELOG_SUBSECTIONS.iter().any(|h| l.trim().starts_with(h)));
+
+    // Find where to insert
     let mut insert_after = start;
     let mut has_bullets = false;
+    let mut first_subsection_idx: Option<usize> = None;
+
     for (i, line) in lines.iter().enumerate().take(section_end).skip(start + 1) {
-        if line.trim().starts_with('-') {
+        let trimmed = line.trim();
+
+        // Track first subsection header (for fallback insertion point)
+        if first_subsection_idx.is_none()
+            && KEEP_A_CHANGELOG_SUBSECTIONS
+                .iter()
+                .any(|h| trimmed.starts_with(h))
+        {
+            first_subsection_idx = Some(i);
+        }
+
+        if trimmed.starts_with('-') || trimmed.starts_with('*') {
             insert_after = i;
             has_bullets = true;
-        } else if !has_bullets && line.trim().is_empty() {
-            // No bullets yet, insert after the blank line following the header
+        } else if !has_bullets && !has_subsections && trimmed.is_empty() {
+            // No bullets yet and no subsections, insert after blank line following header
             insert_after = i;
+        }
+    }
+
+    // If subsections exist but no bullets found, insert after the first subsection header
+    if has_subsections && !has_bullets {
+        if let Some(idx) = first_subsection_idx {
+            insert_after = idx;
         }
     }
 
     let mut out = String::new();
     for (idx, line) in lines.iter().enumerate() {
         // Skip trailing blank lines after bullets (we'll add one at the end)
-        // Only skip if there are actual bullets
-        if has_bullets && idx > insert_after && idx < section_end && lines[idx].trim().is_empty() {
+        // Only skip if there are actual bullets and we're in the simple (non-subsection) case
+        if has_bullets
+            && !has_subsections
+            && idx > insert_after
+            && idx < section_end
+            && lines[idx].trim().is_empty()
+        {
             continue;
         }
 
@@ -487,8 +584,8 @@ fn append_item_to_next_section(
         if idx == insert_after {
             out.push_str(&bullet);
             out.push('\n');
-            // Add blank line after bullets (before next section)
-            if section_end < lines.len() {
+            // Add blank line after bullets (before next section) only in simple case
+            if !has_subsections && section_end < lines.len() {
                 out.push('\n');
             }
         }
@@ -875,5 +972,107 @@ mod tests {
     fn get_latest_finalized_version_returns_none_when_no_versions() {
         let content = "# Changelog\n\n## Unreleased\n\n- Item\n";
         assert_eq!(get_latest_finalized_version(content), None);
+    }
+
+    // === Keep a Changelog Subsection Tests ===
+
+    #[test]
+    fn validate_section_content_with_direct_bullets() {
+        let lines = vec!["- Item one", "- Item two"];
+        assert_eq!(validate_section_content(&lines), SectionContentStatus::Valid);
+    }
+
+    #[test]
+    fn validate_section_content_with_subsection_bullets() {
+        let lines = vec!["### Added", "", "- New feature", "", "### Fixed", "", "- Bug fix"];
+        assert_eq!(validate_section_content(&lines), SectionContentStatus::Valid);
+    }
+
+    #[test]
+    fn validate_section_content_subsections_only() {
+        let lines = vec!["### Added", "", "### Changed", ""];
+        assert_eq!(
+            validate_section_content(&lines),
+            SectionContentStatus::SubsectionsOnly
+        );
+    }
+
+    #[test]
+    fn validate_section_content_empty() {
+        let lines = vec!["", ""];
+        assert_eq!(validate_section_content(&lines), SectionContentStatus::Empty);
+    }
+
+    #[test]
+    fn finalize_preserves_subsection_structure() {
+        let content =
+            "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature\n\n### Fixed\n\n- Bug\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        let (out, changed) = finalize_next_section(content, &aliases, "0.2.0", false).unwrap();
+
+        assert!(changed);
+        assert!(out.contains("## [0.2.0]"));
+        assert!(out.contains("### Added"));
+        assert!(out.contains("### Fixed"));
+        assert!(out.contains("- Feature"));
+        assert!(out.contains("- Bug"));
+    }
+
+    #[test]
+    fn finalize_errors_on_empty_subsections() {
+        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n### Changed\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        let result = finalize_next_section(content, &aliases, "0.2.0", false);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Error details contain "problem" field with the specific message
+        let problem = err.details.get("problem").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            problem.contains("subsection"),
+            "Error should mention subsection headers: {}",
+            problem
+        );
+    }
+
+    #[test]
+    fn append_item_works_with_subsection_structure() {
+        let content =
+            "# Changelog\n\n## Unreleased\n\n### Added\n\n- Existing\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        let (out, changed) = append_item_to_next_section(content, &aliases, "New item").unwrap();
+
+        assert!(changed);
+        assert!(out.contains("- New item"));
+        // Item should be inserted after "- Existing"
+        assert!(out.contains("- Existing\n- New item"));
+    }
+
+    #[test]
+    fn append_item_to_empty_subsection() {
+        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n### Fixed\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        let (out, changed) = append_item_to_next_section(content, &aliases, "New item").unwrap();
+
+        assert!(changed);
+        assert!(out.contains("- New item"));
+        // Item should be inserted after the first subsection header
+        assert!(out.contains("### Added\n- New item"));
+    }
+
+    #[test]
+    fn append_item_preserves_multiple_subsections() {
+        let content =
+            "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature 1\n\n### Fixed\n\n- Bug 1\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        let (out, changed) = append_item_to_next_section(content, &aliases, "New item").unwrap();
+
+        assert!(changed);
+        assert!(out.contains("- New item"));
+        // Should preserve subsection structure
+        assert!(out.contains("### Added"));
+        assert!(out.contains("### Fixed"));
+        assert!(out.contains("- Feature 1"));
+        assert!(out.contains("- Bug 1"));
     }
 }

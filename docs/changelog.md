@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+- Full Keep a Changelog subsection support for changelog parsing
+
 ## [0.20.9] - 2026-01-15
 
 - Omit empty Unreleased section when finalizing releases
