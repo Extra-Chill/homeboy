@@ -6,6 +6,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## [0.20.5] - 2026-01-15
+
+- Add git.commit as core release step (auto-inserted before git.tag)
+- Add pre-flight validation to fail early on uncommitted changes
+- Add PartialSuccess pipeline status with summary output
+- Remove GitHub Actions release workflow (replaced by local system)
+
 ## [0.20.4] - 2026-01-15
 
 - Add release workflow guidance across docs and README
