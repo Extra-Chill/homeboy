@@ -6,6 +6,8 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ## Unreleased
 
+## [0.20.4] - 2026-01-15
+
 - Add release workflow guidance across docs and README
 - Expose database template vars for db CLI commands
 
