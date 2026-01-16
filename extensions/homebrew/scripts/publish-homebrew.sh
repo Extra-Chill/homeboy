@@ -12,7 +12,11 @@ if [[ -z "$payload" ]]; then
   exit 1
 fi
 
-readarray -t artifacts < <(echo "$payload" | jq -r '.artifacts // [] | .[] | select(.path | endswith(".rb")) | .path')
+artifacts=()
+while IFS= read -r path; do
+  [[ -n "$path" ]] && artifacts+=("$path")
+done <<< "$(echo "$payload" | jq -r '.artifacts // [] | .[] | select(.path | endswith(".rb")) | .path')"
+
 if [[ ${#artifacts[@]} -eq 0 ]]; then
   echo "No .rb artifacts provided" >&2
   exit 1

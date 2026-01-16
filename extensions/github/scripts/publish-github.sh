@@ -21,10 +21,16 @@ if [[ -z "$tag" ]]; then
 fi
 
 artifact_types=$(echo "$HOMEBOY_SETTINGS_JSON" | jq -c '.config.artifactTypes // empty')
-readarray -t artifacts < <(echo "$payload" | jq -r '.artifacts // [] | .[] | .path')
 
+artifacts=()
 if [[ -n "$artifact_types" && "$artifact_types" != "null" ]]; then
-  readarray -t artifacts < <(echo "$payload" | jq -r --argjson allowed "$artifact_types" '.artifacts[] | select(.artifact_type as $t | $allowed | index($t)) | .path')
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && artifacts+=("$path")
+  done <<< "$(echo "$payload" | jq -r --argjson allowed "$artifact_types" '.artifacts[] | select(.artifact_type as $t | $allowed | index($t)) | .path')"
+else
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && artifacts+=("$path")
+  done <<< "$(echo "$payload" | jq -r '.artifacts // [] | .[] | .path')"
 fi
 
 if [[ ${#artifacts[@]} -eq 0 ]]; then
