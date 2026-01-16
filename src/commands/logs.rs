@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::logs::{self, LogContent, LogEntry, LogSearchResult};
+use homeboy::logs::{self, LogContent, LogEntry, LogSearchResult, PinnedLogsContent};
 
 use crate::commands::CmdResult;
 
@@ -18,12 +18,12 @@ pub enum LogsCommand {
         /// Project ID
         project_id: String,
     },
-    /// Show log file content
+    /// Show log file content (shows all pinned logs if path omitted)
     Show {
         /// Project ID
         project_id: String,
-        /// Log file path
-        path: String,
+        /// Log file path (optional - shows all pinned logs if omitted)
+        path: Option<String>,
         /// Number of lines to show
         #[arg(short = 'n', long, default_value = "100")]
         lines: u32,
@@ -67,10 +67,16 @@ pub fn run(args: LogsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<L
         LogsCommand::List { project_id } => list(&project_id),
         LogsCommand::Show {
             project_id,
-            path,
+            path: Some(path),
             lines,
             follow,
         } => show(&project_id, &path, lines, follow),
+        LogsCommand::Show {
+            project_id,
+            path: None,
+            lines,
+            follow,
+        } => show_pinned(&project_id, lines, follow),
         LogsCommand::Clear { project_id, path } => clear(&project_id, &path),
         LogsCommand::Search {
             project_id,
@@ -93,6 +99,8 @@ pub struct LogsOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log: Option<LogContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned_logs: Option<PinnedLogsContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cleared_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_result: Option<LogSearchResult>,
@@ -107,6 +115,7 @@ fn list(project_id: &str) -> CmdResult<LogsOutput> {
             project_id: project_id.to_string(),
             entries: Some(entries),
             log: None,
+            pinned_logs: None,
             cleared_path: None,
             search_result: None,
         },
@@ -124,6 +133,7 @@ fn show(project_id: &str, path: &str, lines: u32, follow: bool) -> CmdResult<Log
                 project_id: project_id.to_string(),
                 entries: None,
                 log: None,
+                pinned_logs: None,
                 cleared_path: None,
                 search_result: None,
             },
@@ -138,12 +148,42 @@ fn show(project_id: &str, path: &str, lines: u32, follow: bool) -> CmdResult<Log
                 project_id: project_id.to_string(),
                 entries: None,
                 log: Some(content),
+                pinned_logs: None,
                 cleared_path: None,
                 search_result: None,
             },
             0,
         ))
     }
+}
+
+fn show_pinned(project_id: &str, lines: u32, follow: bool) -> CmdResult<LogsOutput> {
+    if follow {
+        return Err(homeboy::Error::validation_invalid_argument(
+            "follow",
+            "Cannot follow multiple pinned logs. Specify a log path to follow.",
+            None,
+            Some(vec![
+                format!("homeboy logs show {} <path> --follow", project_id),
+                format!("homeboy logs list {}", project_id),
+            ]),
+        ));
+    }
+
+    let content = logs::show_pinned(project_id, lines)?;
+
+    Ok((
+        LogsOutput {
+            command: "logs.show_pinned".to_string(),
+            project_id: project_id.to_string(),
+            entries: None,
+            log: None,
+            pinned_logs: Some(content),
+            cleared_path: None,
+            search_result: None,
+        },
+        0,
+    ))
 }
 
 fn clear(project_id: &str, path: &str) -> CmdResult<LogsOutput> {
@@ -155,6 +195,7 @@ fn clear(project_id: &str, path: &str) -> CmdResult<LogsOutput> {
             project_id: project_id.to_string(),
             entries: None,
             log: None,
+            pinned_logs: None,
             cleared_path: Some(cleared_path),
             search_result: None,
         },
@@ -178,6 +219,7 @@ fn search(
             project_id: project_id.to_string(),
             entries: None,
             log: None,
+            pinned_logs: None,
             cleared_path: None,
             search_result: Some(result),
         },

@@ -5,7 +5,7 @@
 
 use crate::base_path;
 use crate::context::require_project_base_path;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::executor::{execute_for_project, execute_for_project_interactive};
 use crate::project;
 use crate::shell;
@@ -43,6 +43,20 @@ pub struct LogSearchResult {
     pub match_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PinnedLogContent {
+    pub path: String,
+    pub label: Option<String>,
+    pub lines: u32,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PinnedLogsContent {
+    pub logs: Vec<PinnedLogContent>,
+    pub total_logs: usize,
+}
+
 /// Lists pinned log files for a project.
 pub fn list(project_id: &str) -> Result<Vec<LogEntry>> {
     let project = project::load(project_id)?;
@@ -57,6 +71,47 @@ pub fn list(project_id: &str) -> Result<Vec<LogEntry>> {
             tail_lines: log.tail_lines,
         })
         .collect())
+}
+
+/// Shows all pinned logs for a project.
+pub fn show_pinned(project_id: &str, lines: u32) -> Result<PinnedLogsContent> {
+    let project = project::load(project_id)?;
+
+    if project.remote_logs.pinned_logs.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "pinned_logs",
+            "No pinned logs configured for this project",
+            None,
+            Some(vec![
+                format!(
+                    "Pin a log: homeboy project set {} --pin-log /path/to/app.log",
+                    project_id
+                ),
+                format!("List pinned logs: homeboy logs list {}", project_id),
+            ]),
+        ));
+    }
+
+    let base_path = require_project_base_path(project_id, &project)?;
+
+    let mut logs = Vec::new();
+    for pinned_log in &project.remote_logs.pinned_logs {
+        let log_lines = if lines > 0 { lines } else { pinned_log.tail_lines };
+        let full_path = base_path::join_remote_path(Some(&base_path), &pinned_log.path)?;
+
+        let command = format!("tail -n {} {}", log_lines, shell::quote_path(&full_path));
+        let output = execute_for_project(&project, &command)?;
+
+        logs.push(PinnedLogContent {
+            path: full_path,
+            label: pinned_log.label.clone(),
+            lines: log_lines,
+            content: output.stdout,
+        });
+    }
+
+    let total_logs = logs.len();
+    Ok(PinnedLogsContent { logs, total_logs })
 }
 
 /// Shows the last N lines of a log file.
