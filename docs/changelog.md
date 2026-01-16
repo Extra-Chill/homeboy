@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.22.3] - 2026-01-16
+
+### Added
+- Add --type flag to changelog add command for Keep a Changelog subsection placement
+
+### Fixed
+- Improve deploy error message when component ID provided instead of project ID
+
 ## [0.22.2] - 2026-01-16
 
 - Add --changelog-target flag to component create command
