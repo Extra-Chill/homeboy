@@ -8,7 +8,8 @@
   "cli": {
     "tool": "gh",
     "display_name": "GitHub CLI",
-    "command_template": "cd {{sitePath}} && {{cliPath}} {{args}}",
+    "command_template": "{{cliPath}} {{args}}",
+    "working_dir_template": "{{sitePath}}",
     "default_cli_path": "gh"
   },
   "actions": [

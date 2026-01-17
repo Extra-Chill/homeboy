@@ -6,7 +6,8 @@
   "cli": {
     "tool": "cargo",
     "display_name": "Cargo",
-    "command_template": "cd {{sitePath}} && {{cliPath}} {{args}}",
+    "command_template": "{{cliPath}} {{args}}",
+    "working_dir_template": "{{sitePath}}",
     "default_cli_path": "cargo"
   },
   "actions": [

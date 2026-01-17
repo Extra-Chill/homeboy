@@ -208,6 +208,63 @@ build_frontend_assets() {
     fi
 }
 
+# Build nested frontend assets (Data Machine pattern - multiple package.json in subdirectories)
+build_nested_packages() {
+    print_status "Checking for nested package.json files..."
+
+    local nested_packages=()
+
+    # Find directories with package.json (excluding node_modules)
+    while IFS= read -r -d '' pkg_dir; do
+        # Skip root package.json and node_modules
+        if [ "$pkg_dir" != "." ] && [[ ! "$pkg_dir" =~ node_modules ]]; then
+            nested_packages+=("$pkg_dir")
+        fi
+    done < <(find . -name "package.json" -not -path "*/node_modules/*" -exec dirname {} \; | sed 's|^\./||' | sort -u | while read -r dir; do
+        if [ -n "$dir" ]; then
+            printf '%s\0' "$dir"
+        fi
+    done)
+
+    if [ ${#nested_packages[@]} -eq 0 ]; then
+        print_status "No nested package.json files found"
+        return 0
+    fi
+
+    print_status "Found ${#nested_packages[@]} nested package(s) to build"
+
+    for pkg_dir in "${nested_packages[@]}"; do
+        print_status "Building nested package: $pkg_dir"
+
+        cd "$pkg_dir"
+
+        # Check if it has a build script
+        if grep -q '"build"' "package.json"; then
+            # Install dependencies if node_modules doesn't exist
+            if [ ! -d "node_modules" ]; then
+                print_status "  Installing dependencies for $pkg_dir..."
+                npm ci --silent --no-audit --no-fund 2>&1
+            fi
+
+            # Run build
+            print_status "  Running build for $pkg_dir..."
+            if npm run build --silent 2>&1; then
+                print_success "  Built $pkg_dir successfully"
+            else
+                print_error "  Build failed for $pkg_dir"
+                cd - > /dev/null
+                exit 1
+            fi
+        else
+            print_status "  No build script found in $pkg_dir, skipping"
+        fi
+
+        cd - > /dev/null
+    done
+
+    print_success "All nested packages built successfully"
+}
+
 # Create rsync exclude patterns
 create_rsync_excludes() {
     local exclude_file="$1"
@@ -230,13 +287,14 @@ AGENTS.md
 *.swp
 *.swo
 *~
-build
-dist
+/build/
+/dist/
 *.zip
 *.tar.gz
 .DS_Store
 ._*
 node_modules
+src
 *.log
 *.tmp
 *.temp
@@ -248,6 +306,7 @@ phpunit.xml*
 .github
 composer.lock
 package-lock.json
+webpack.config.js
 EOF
     fi
 }
@@ -400,6 +459,7 @@ build_project() {
     clean_previous_builds
     install_production_deps
     build_frontend_assets
+    build_nested_packages
     copy_project_files
 
     if ! validate_php; then

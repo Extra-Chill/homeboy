@@ -15,7 +15,8 @@
   "cli": {
     "tool": "wp",
     "display_name": "WP-CLI",
-    "command_template": "cd {{sitePath}} && {{cliPath}} {{args}} --url={{domain}}",
+    "command_template": "{{cliPath}} {{args}} --url={{domain}}",
+    "working_dir_template": "{{sitePath}}",
     "default_cli_path": "wp",
     "settings_flags": {
       "user": "--user={{value}}"
