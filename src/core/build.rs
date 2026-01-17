@@ -1,11 +1,97 @@
 use serde::Serialize;
+use std::path::PathBuf;
 
-use crate::component;
+use crate::component::{self, Component};
 use crate::config::{is_json_input, parse_bulk_ids};
 use crate::error::{Error, Result};
+use crate::module;
 use crate::output::{BulkResult, BulkSummary, ItemOutcome};
+use crate::paths;
 use crate::permissions;
+use crate::shell;
 use crate::ssh::execute_local_command_in_dir;
+
+// === Build Command Resolution ===
+
+#[derive(Debug, Clone)]
+pub enum ResolvedBuildCommand {
+    ComponentDefined(String),
+    ModuleProvided { command: String, source: String },
+    LocalScript { command: String, script_name: String },
+}
+
+impl ResolvedBuildCommand {
+    pub fn command(&self) -> &str {
+        match self {
+            ResolvedBuildCommand::ComponentDefined(cmd) => cmd,
+            ResolvedBuildCommand::ModuleProvided { command, .. } => command,
+            ResolvedBuildCommand::LocalScript { command, .. } => command,
+        }
+    }
+}
+
+/// Resolve build command for a component using the following priority:
+/// 1. Explicit component.build_command (always wins)
+/// 2. Module's bundled script (module.build.module_script)
+/// 3. Local script matching module's script_names pattern
+pub fn resolve_build_command(component: &Component) -> Result<ResolvedBuildCommand> {
+    // 1. Explicit component override takes precedence
+    if let Some(cmd) = &component.build_command {
+        return Ok(ResolvedBuildCommand::ComponentDefined(cmd.clone()));
+    }
+
+    // 2. Check module for bundled script or local script patterns
+    if let Some(modules) = &component.modules {
+        for module_id in modules.keys() {
+            if let Some(module) = module::load_module(module_id) {
+                if let Some(build) = &module.build {
+                    // Check for module's bundled script
+                    if let Some(module_script) = &build.module_script {
+                        if let Ok(module_dir) = paths::module(module_id) {
+                            let script_path = module_dir.join(module_script);
+                            if script_path.exists() {
+                                let quoted_path = shell::quote_path(&script_path.to_string_lossy());
+                                let command = build
+                                    .command_template
+                                    .as_ref()
+                                    .map(|t| t.replace("{{script}}", &quoted_path))
+                                    .unwrap_or_else(|| format!("sh {}", quoted_path));
+                                return Ok(ResolvedBuildCommand::ModuleProvided {
+                                    command,
+                                    source: format!("{}:{}", module_id, module_script),
+                                });
+                            }
+                        }
+                    }
+
+                    // Check for local script matching module's script_names
+                    let local_path = PathBuf::from(&component.local_path);
+                    for script_name in &build.script_names {
+                        let local_script = local_path.join(script_name);
+                        if local_script.exists() {
+                            let command = build
+                                .command_template
+                                .as_ref()
+                                .map(|t| t.replace("{{script}}", script_name))
+                                .unwrap_or_else(|| format!("sh {}", script_name));
+                            return Ok(ResolvedBuildCommand::LocalScript {
+                                command,
+                                script_name: script_name.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(Error::other(format!(
+        "Component '{}' has no build configuration. Either:\n\
+         - Configure buildCommand: homeboy component set {} --json '{{\"buildCommand\": \"<command>\"}}'\n\
+         - Link a module with build support: homeboy component set {} --json '{{\"modules\": {{\"wordpress\": {{}}}}}}'",
+        component.id, component.id, component.id
+    )))
+}
 
 // === Public API ===
 
@@ -43,16 +129,12 @@ pub fn run(input: &str) -> Result<(BuildResult, i32)> {
 /// Build a component for deploy context.
 /// Returns (exit_code, error_message) - None error means success.
 pub fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
-    let Some(build_cmd) = component.build_command.clone() else {
-        return (
-            Some(1),
-            Some(format!(
-                "Component '{}' has no buildCommand configured. Configure one with: homeboy component set {} --json '{{\"buildCommand\": \"<command>\"}}'",
-                component.id,
-                component.id
-            )),
-        );
+    let resolved = match resolve_build_command(component) {
+        Ok(r) => r,
+        Err(e) => return (Some(1), Some(e.to_string())),
     };
+
+    let build_cmd = resolved.command().to_string();
 
     // Fix local permissions before build to ensure zip has correct permissions
     permissions::fix_local_permissions(&component.local_path);
@@ -129,14 +211,8 @@ fn run_bulk(json_spec: &str) -> Result<(BuildResult, i32)> {
 
 fn execute_build(component_id: &str) -> Result<(BuildOutput, i32)> {
     let comp = component::load(component_id)?;
-
-    let build_cmd = comp.build_command.clone().ok_or_else(|| {
-        Error::other(format!(
-            "Component '{}' has no buildCommand configured. Configure one with: homeboy component set {} --json '{{\"buildCommand\": \"<command>\"}}'",
-            component_id,
-            component_id
-        ))
-    })?;
+    let resolved = resolve_build_command(&comp)?;
+    let build_cmd = resolved.command().to_string();
 
     // Fix local permissions before build to ensure zip has correct permissions
     permissions::fix_local_permissions(&comp.local_path);

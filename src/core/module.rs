@@ -218,6 +218,8 @@ pub struct BuildConfig {
     pub script_names: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_script: Option<String>,
 }
 
 // Executable tool configs (from former modules)

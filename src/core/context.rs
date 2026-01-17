@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::component;
 use crate::error::{Error, Result};
+use crate::module;
+use crate::paths;
 use crate::project::{self, Project};
 use crate::server::{self, Server};
 use crate::ssh::SshClient;
@@ -193,16 +195,40 @@ fn build_component_info(component: &component::Component) -> ContainedComponentI
     let mut gaps = Vec::new();
     let local_path = PathBuf::from(&component.local_path);
 
-    // Check for build script without buildCommand
-    if component.build_command.is_none() && local_path.join("build.sh").exists() {
-        gaps.push(ComponentGap {
-            field: "buildCommand".to_string(),
-            reason: "build.sh exists".to_string(),
-            command: format!(
-                "homeboy component set {} --build-command \"./build.sh\"",
-                component.id
-            ),
-        });
+    // Check for build configuration gaps
+    // Skip gap detection if:
+    // 1. Component has explicit buildCommand, OR
+    // 2. Component's module provides a bundled build script
+    if component.build_command.is_none() {
+        let module_provides_build = component
+            .modules
+            .as_ref()
+            .map(|modules| {
+                modules.keys().any(|module_id| {
+                    module::load_module(module_id)
+                        .and_then(|m| m.build)
+                        .and_then(|b| b.module_script)
+                        .and_then(|script| {
+                            paths::module(module_id)
+                                .ok()
+                                .map(|dir| dir.join(&script).exists())
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        // Only flag as gap if module doesn't provide build and local build.sh exists
+        if !module_provides_build && local_path.join("build.sh").exists() {
+            gaps.push(ComponentGap {
+                field: "buildCommand".to_string(),
+                reason: "build.sh exists".to_string(),
+                command: format!(
+                    "homeboy component set {} --build-command \"./build.sh\"",
+                    component.id
+                ),
+            });
+        }
     }
 
     // Check for changelog without changelogTarget
