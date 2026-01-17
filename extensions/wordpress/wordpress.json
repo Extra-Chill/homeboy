@@ -16,7 +16,10 @@
     "tool": "wp",
     "display_name": "WP-CLI",
     "command_template": "cd {{sitePath}} && {{cliPath}} {{args}} --url={{domain}}",
-    "default_cli_path": "wp"
+    "default_cli_path": "wp",
+    "settings_flags": {
+      "user": "--user={{value}}"
+    }
   },
 
   "default_pinned_files": ["wp-config.php", ".htaccess", "robots.txt"],
@@ -81,14 +84,14 @@
     {
       "path_pattern": "/wp-content/plugins/",
       "staging_path": "/tmp/homeboy-staging",
-      "install_command": "cd {{siteRoot}} && {{cliPath}} plugin install {{stagingArtifact}} --force --activate --url={{domain}}",
+      "install_command": "cd {{siteRoot}} && plugin_slug=$(basename {{targetDir}}) && ({{cliPath}} plugin deactivate $plugin_slug --url={{domain}} 2>/dev/null || ([ -d {{targetDir}} ] && echo 'WARNING: Removing broken plugin directory' && rm -rf {{targetDir}}) || true) && {{cliPath}} plugin install {{stagingArtifact}} --force --activate --url={{domain}}",
       "cleanup_command": "rm -f {{stagingArtifact}}",
       "skip_permissions_fix": true
     },
     {
       "path_pattern": "/wp-content/themes/",
       "staging_path": "/tmp/homeboy-staging",
-      "install_command": "cd {{siteRoot}} && {{cliPath}} theme install {{stagingArtifact}} --force --url={{domain}}",
+      "install_command": "cd {{siteRoot}} && theme_slug=$(basename {{targetDir}}) && ({{cliPath}} theme deactivate --url={{domain}} 2>/dev/null; [ -d {{targetDir}} ] && echo 'WARNING: Removing existing theme directory' && rm -rf {{targetDir}} || true) && {{cliPath}} theme install {{stagingArtifact}} --force --url={{domain}}",
       "cleanup_command": "rm -f {{stagingArtifact}}",
       "skip_permissions_fix": true
     }
@@ -104,7 +107,8 @@
   "build": {
     "artifact_extensions": [".zip"],
     "script_names": ["build.sh"],
-    "command_template": "sh {{script}}"
+    "command_template": "bash {{script}}",
+    "module_script": "scripts/build.sh"
   },
 
   "commands": ["wp"]
