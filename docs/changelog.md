@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.26.0] - 2026-01-18
+
+### Added
+- Added: automatic docs topic resolution with fallback prefixes for common shortcuts (e.g., 'version' → 'commands/version', 'generation' → 'documentation/generation')
+
+### Changed
+- Changed: config directory moved to universal ~/.config/homeboy/ on all platforms (previously ~/Library/Application Support/homeboy on macOS). Users may need to migrate config files manually.
+
 ## [0.25.4] - 2026-01-18
 
 - Fixed: changelog init now checks for existing changelog files before creating new ones, preventing duplicates

@@ -49,7 +49,7 @@ homeboy version set [<component_id>] <new_version>
 
 - Writes the new version directly to targets without touching the changelog.
 
-Changelog entries must be added *before* running `version bump` (recommended: `homeboy changelog add --json ...`).
+Changelog entries must be added *before* running `version bump` (recommended: `homeboy changelog add --json ...`). Make sure the changelog includes ALL changes since the last update, not just the ones you personally worked on. 
 
 Recommended release workflow (non-enforced):
 

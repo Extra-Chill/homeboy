@@ -21,16 +21,35 @@ pub struct ResolvedDoc {
 pub fn resolve(topic: &[String]) -> homeboy::Result<ResolvedDoc> {
     let (_, key, _) = normalize_topic(topic);
 
-    // First check embedded core docs
+    // Try exact match first (existing behavior)
     if let Some(content) = docs_index().get(key.as_str()).copied() {
         return Ok(ResolvedDoc {
             content: content.to_string(),
         });
     }
 
-    // Then check module docs
+    // Then check module docs (existing behavior)
     if let Some((content, _module_id)) = load_module_doc(&key) {
         return Ok(ResolvedDoc { content });
+    }
+
+    // Try fallback prefixes for common shortcuts
+    let fallback_keys = vec![
+        format!("commands/{}", key),
+        format!("documentation/{}", key),
+        format!("{}/{}-index", key, key),
+    ];
+
+    for fallback_key in fallback_keys {
+        if let Some(content) = docs_index().get(fallback_key.as_str()).copied() {
+            return Ok(ResolvedDoc {
+                content: content.to_string(),
+            });
+        }
+
+        if let Some((content, _module_id)) = load_module_doc(&fallback_key) {
+            return Ok(ResolvedDoc { content });
+        }
     }
 
     Err(homeboy::Error::docs_topic_not_found(&key))
