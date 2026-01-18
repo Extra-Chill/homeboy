@@ -877,6 +877,13 @@ fn execute_module_runtime(
     working_dir: Option<&str>,
     mode: ModuleExecutionMode,
 ) -> Result<ModuleExecutionOutcome> {
+    // Shell execution is required for module runtime commands by design:
+    // - Runtime commands execute bash scripts (set -euo pipefail, arrays, jq)
+    // - Scripts use bash features (arrays, variable expansion, subshells)
+    // - Commands like "{{modulePath}}/scripts/publish-github.sh" need shell
+    // - Environment variable passing requires shell environment
+    // - Direct execution cannot handle bash scripts or shell features
+    // See executor.rs for detailed execution strategy decision tree
     let module = load_module(module_id)
         .ok_or_else(|| Error::other(format!("Module '{}' not found", module_id)))?;
     let runtime = module_runtime(&module)?;

@@ -1,4 +1,39 @@
 // Unified command execution - routes to local or SSH based on project config
+//
+// ## Execution Strategy Decision Tree
+//
+// ### Direct Execution (Preferred for CLI tools)
+// Use when:
+// - Simple command structure (program + args)
+// - No shell operators (&&, ||, |, >, >>, <, <<, &, `, $(), EOF, ;)
+// - working_dir_template available for directory changes
+// - CLI tool commands with clean template syntax: "{{cliPath}} {{args}}"
+//
+// Benefits:
+// - No shell overhead (faster)
+// - No shell escaping bugs (safer, simpler)
+// - Direct argument passing (no quoting complexity)
+//
+// ### Shell Execution (Required for complex operations)
+// Use when:
+// - Pipes and redirects (|, >, >>, <, <<)
+// - Command chaining (&&, ||, ;)
+// - Variable assignment and subshells
+// - Bash script execution
+// - Log operations with pipes (tail -f logs | grep error)
+// - Database queries with complex SQL strings
+// - Deploy install commands with subshells and conditional logic
+// - Discovery commands with fallback operators (||)
+//
+// Module runtime and build commands use shell execution by design:
+// - Runtime commands execute bash scripts (set -euo pipefail, arrays, jq)
+// - Build commands use shell scripts (rsync, composer, npm, etc.)
+// - These scripts require shell features and cannot use direct execution
+//
+// ### Routing Logic
+// execute_for_project() -> routes to local or SSH based on server_id
+// execute_for_project_interactive() -> routes local/SSH with inherited stdio
+// execute_for_project_direct() -> tries direct first, falls back to shell
 
 use crate::context::resolve_project_ssh;
 use crate::error::{Error, Result};
