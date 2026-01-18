@@ -177,6 +177,7 @@ pub mod project;
 pub mod release;
 pub mod server;
 pub mod ssh;
+pub mod test;
 pub mod upgrade;
 pub mod version;
 
@@ -209,6 +210,7 @@ pub(crate) fn run_json(
         crate::Commands::Server(args) => {
             crate::output::map_cmd_result_to_json(server::run(args, global))
         }
+        crate::Commands::Test(args) => crate::output::map_cmd_result_to_json(test::run_json(args)),
         crate::Commands::Db(args) => crate::output::map_cmd_result_to_json(db::run(args, global)),
         crate::Commands::File(args) => {
             crate::output::map_cmd_result_to_json(file::run(args, global))

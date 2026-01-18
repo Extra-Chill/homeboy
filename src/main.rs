@@ -21,7 +21,7 @@ mod tty;
 
 use commands::{
     api, auth, build, changelog, changes, cli, component, config, context, db, deploy, file, git,
-    init, logs, module, project, release, server, ssh, upgrade, version,
+    init, logs, module, project, release, server, ssh, test, upgrade, version,
 };
 use homeboy::module::load_all_modules;
 
@@ -45,6 +45,8 @@ enum Commands {
     Ssh(ssh::SshArgs),
     /// Manage SSH server configurations
     Server(server::ServerArgs),
+    /// Run tests for a component
+    Test(test::TestArgs),
     /// Database operations
     Db(db::DbArgs),
     /// Remote file operations

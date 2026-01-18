@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.26.4] - 2026-01-18
+
+- feat: new test command for running component test suites with module-based infrastructure
+
 ## [0.26.3] - 2026-01-18
 
 - feat: enhanced module list JSON output with CLI tool info, available actions, and runtime status flags

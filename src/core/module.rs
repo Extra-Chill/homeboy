@@ -494,7 +494,7 @@ struct ModuleExecutionContext {
 /// Run a module's setup command (if defined).
 pub fn run_setup(module_id: &str) -> Result<ModuleSetupResult> {
     let module = load_module(module_id)
-        .ok_or_else(|| Error::other(format!("Module '{}' not found", module_id)))?;
+        .ok_or_else(|| Error::other(format!("Module {} not found", module_id)))?;
 
     let runtime = match module.runtime.as_ref() {
         Some(r) => r,
@@ -577,7 +577,7 @@ pub(crate) fn execute_action(
     payload: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value> {
     let module = load_module(module_id)
-        .ok_or_else(|| Error::other(format!("Module '{}' not found", module_id)))?;
+        .ok_or_else(|| Error::other(format!("Module {} not found", module_id)))?;
 
     if module.actions.is_empty() {
         return Err(Error::other(format!(
@@ -746,9 +746,20 @@ fn resolve_module_context(
     let mut resolved_project_id = None;
     let mut resolved_component_id = None;
 
+    // Handle component-only execution (no project required)
+    if let Some(cid) = component_id {
+        if let Ok(loaded_component) = component::load(cid) {
+            component = Some(loaded_component);
+            resolved_component_id = Some(cid.to_string());
+        }
+    }
+
     if requires_project {
         let pid = project_id.ok_or_else(|| {
-            Error::other("This module requires a project; pass --project <id>".to_string())
+            Error::config(format!(
+                "Module {} requires a project context, but no project ID was provided",
+                module.id
+            ))
         })?;
 
         let loaded_project = project::load(pid)?;
@@ -759,10 +770,7 @@ fn resolve_module_context(
 
         if let Some(ref comp_id) = resolved_component_id {
             component = Some(component::load(comp_id).map_err(|_| {
-                Error::config(format!(
-                    "Component '{}' required by module '{}' is not configured",
-                    comp_id, module.id
-                ))
+                Error::config(format!("Component {} required by module {} is not configured", comp_id, &module.id))
             })?);
         }
 
@@ -910,7 +918,7 @@ fn execute_module_runtime(
     // - Direct execution cannot handle bash scripts or shell features
     // See executor.rs for detailed execution strategy decision tree
     let module = load_module(module_id)
-        .ok_or_else(|| Error::other(format!("Module '{}' not found", module_id)))?;
+        .ok_or_else(|| Error::other(format!("Module {} not found", module_id)))?;
     let runtime = module_runtime(&module)?;
     let run_command = runtime.run_command.as_ref().ok_or_else(|| {
         Error::other(format!(
@@ -1006,6 +1014,18 @@ pub fn build_exec_env(
 
     if let Some(cid) = component_id {
         env.push((exec_context::COMPONENT_ID.to_string(), cid.to_string()));
+
+        // Resolve and set component path
+        match component::load(cid) {
+            Ok(component) => {
+                env.push(("HOMEBOY_COMPONENT_PATH".to_string(), component.local_path));
+            }
+            Err(e) => {
+                // For debugging: if component loading fails, still set a placeholder path
+                env.push(("HOMEBOY_COMPONENT_PATH".to_string(), format!("/debug/component-not-found/{}", cid)));
+                env.push(("HOMEBOY_COMPONENT_LOAD_ERROR".to_string(), e.to_string()));
+            }
+        }
     }
 
     if let Some(mp) = module_path {
@@ -1440,7 +1460,7 @@ fn install_from_url(url: &str, id_override: Option<&str>) -> Result<InstallResul
     if module_dir.exists() {
         return Err(Error::validation_invalid_argument(
             "module_id",
-            format!("Module '{}' already exists", module_id),
+            format!("Module {} already exists", module_id),
             Some(module_id),
             None,
         ));
