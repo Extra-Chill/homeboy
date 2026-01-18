@@ -435,6 +435,10 @@ pub mod exec_context {
     pub const PROJECT_ID: &str = "HOMEBOY_PROJECT_ID";
     /// Component ID (only set when module requires component context).
     pub const COMPONENT_ID: &str = "HOMEBOY_COMPONENT_ID";
+    /// Filesystem path to the module directory.
+    pub const MODULE_PATH: &str = "HOMEBOY_MODULE_PATH";
+    /// Filesystem path to the project directory (base_path).
+    pub const PROJECT_PATH: &str = "HOMEBOY_PROJECT_PATH";
 
     /// Current version of the exec context protocol.
     pub const CURRENT_VERSION: &str = "1";
@@ -639,6 +643,16 @@ pub(crate) fn execute_action(
             let module_path = module.module_path.as_deref().unwrap_or(".");
             let vars = vec![("module_path", module_path)];
 
+            let project_base_path = if let Some(pid) = project_id {
+                if let Ok(proj) = project::load(pid) {
+                    proj.base_path.as_deref().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let working_dir = payload
                 .get("release")
                 .and_then(|r| r.get("local_path"))
@@ -649,7 +663,7 @@ pub(crate) fn execute_action(
                 command_template,
                 &vars,
                 Some(working_dir),
-                &build_action_env(module_id, project_id, &payload),
+                &build_action_env(module_id, project_id, &payload, Some(module_path), project_base_path.as_deref()),
                 ModuleExecutionMode::Captured,
             )?;
             Ok(serde_json::json!({
@@ -805,12 +819,21 @@ fn build_runtime_env(
     context: &ModuleExecutionContext,
     vars: &[(&str, &str)],
     settings_json: &str,
+    module_path: &str,
 ) -> Vec<(String, String)> {
+    let project_base_path = context
+        .project
+        .as_ref()
+        .and_then(|p| p.base_path.as_deref());
+
     let mut env = build_exec_env(
         &context.module_id,
         context.project_id.as_deref(),
         context.component_id.as_deref(),
         settings_json,
+        Some(module_path),
+        project_base_path,
+        Some(&context.settings),
     );
 
     if let Some(ref module_env) = runtime.env {
@@ -827,9 +850,11 @@ fn build_action_env(
     module_id: &str,
     project_id: Option<&str>,
     payload: &serde_json::Value,
+    module_path: Option<&str>,
+    project_base_path: Option<&str>,
 ) -> Vec<(String, String)> {
     let settings_json = payload.to_string();
-    build_exec_env(module_id, project_id, None, &settings_json)
+    build_exec_env(module_id, project_id, None, &settings_json, module_path, project_base_path, None)
 }
 
 fn execute_module_command(
@@ -916,7 +941,7 @@ fn execute_module_runtime(
         context.project.as_ref(),
         &context.project_id,
     );
-    let env_pairs = build_runtime_env(runtime, &context, &vars, &settings_json);
+    let env_pairs = build_runtime_env(runtime, &context, &vars, &settings_json, module_path);
 
     let execution = execute_module_command(
         run_command,
@@ -959,6 +984,9 @@ pub fn build_exec_env(
     project_id: Option<&str>,
     component_id: Option<&str>,
     settings_json: &str,
+    module_path: Option<&str>,
+    project_base_path: Option<&str>,
+    settings: Option<&HashMap<String, serde_json::Value>>,
 ) -> Vec<(String, String)> {
     let mut env = vec![
         (
@@ -978,6 +1006,25 @@ pub fn build_exec_env(
 
     if let Some(cid) = component_id {
         env.push((exec_context::COMPONENT_ID.to_string(), cid.to_string()));
+    }
+
+    if let Some(mp) = module_path {
+        env.push((exec_context::MODULE_PATH.to_string(), mp.to_string()));
+    }
+
+    if let Some(pbp) = project_base_path {
+        env.push((exec_context::PROJECT_PATH.to_string(), pbp.to_string()));
+    }
+
+    if let Some(settings_map) = settings {
+        for (key, value) in settings_map {
+            let env_key = format!("HOMEBOY_SETTINGS_{}", key.to_uppercase());
+            let env_value = match value {
+                serde_json::Value::String(s) => s.clone(),
+                _ => value.to_string(),
+            };
+            env.push((env_key, env_value));
+        }
     }
 
     env

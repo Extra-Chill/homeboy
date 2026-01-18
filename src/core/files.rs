@@ -258,6 +258,27 @@ pub struct GrepResult {
     pub matches: Vec<GrepMatch>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+
+pub struct EditResult {
+    pub base_path: Option<String>,
+    pub path: String,
+    pub original_lines: Vec<String>,
+    pub modified_lines: Vec<String>,
+    pub changes_made: Vec<LineChange>,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+
+pub struct LineChange {
+    pub line_number: usize,
+    pub original: String,
+    pub modified: String,
+    pub operation: String,
+}
+
 /// Parse find output into list of matching paths.
 fn parse_find_output(output: &str) -> Vec<String> {
     output
@@ -388,5 +409,459 @@ pub fn grep(
         path: full_path,
         pattern: pattern.to_string(),
         matches,
+    })
+}
+
+pub fn edit_replace_line(
+    project_id: &str,
+    path: &str,
+    line_num: usize,
+    content: &str,
+) -> Result<EditResult> {
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+
+    let read_result = read(project_id, path)?;
+    let original_lines: Vec<String> = read_result
+        .content
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+
+    if line_num == 0 || line_num > original_lines.len() {
+        return Err(Error::validation_invalid_argument(
+            "line_num",
+            format!("Line number {} is out of range (file has {} lines)", line_num, original_lines.len()),
+            None,
+            None,
+        ));
+    }
+
+    let mut modified_lines = original_lines.clone();
+    let line_index = line_num - 1;
+    let original_content = modified_lines[line_index].clone();
+    modified_lines[line_index] = content.to_string();
+
+    let modified_content = modified_lines.join("\n");
+    write(project_id, path, &modified_content)?;
+
+    let changes = vec![LineChange {
+        line_number: line_num,
+        original: original_content,
+        modified: content.to_string(),
+        operation: "replace".to_string(),
+    }];
+
+    Ok(EditResult {
+        base_path: Some(project_base_path),
+        path: full_path,
+        original_lines,
+        modified_lines,
+        changes_made: changes,
+        success: true,
+        error: None,
+    })
+}
+
+pub fn edit_insert_after_line(
+    project_id: &str,
+    path: &str,
+    line_num: usize,
+    content: &str,
+) -> Result<EditResult> {
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+
+    let read_result = read(project_id, path)?;
+    let original_lines: Vec<String> = read_result
+        .content
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+
+    if line_num == 0 || line_num > original_lines.len() {
+        return Err(Error::validation_invalid_argument(
+            "line_num",
+            format!("Line number {} is out of range (file has {} lines)", line_num, original_lines.len()),
+            None,
+            None,
+        ));
+    }
+
+    let mut modified_lines = original_lines.clone();
+    modified_lines.insert(line_num, content.to_string());
+
+    let modified_content = modified_lines.join("\n");
+    write(project_id, path, &modified_content)?;
+
+    let changes = vec![LineChange {
+        line_number: line_num + 1,
+        original: String::new(),
+        modified: content.to_string(),
+        operation: "insert".to_string(),
+    }];
+
+    Ok(EditResult {
+        base_path: Some(project_base_path),
+        path: full_path,
+        original_lines,
+        modified_lines,
+        changes_made: changes,
+        success: true,
+        error: None,
+    })
+}
+
+pub fn edit_insert_before_line(
+    project_id: &str,
+    path: &str,
+    line_num: usize,
+    content: &str,
+) -> Result<EditResult> {
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+
+    let read_result = read(project_id, path)?;
+    let original_lines: Vec<String> = read_result
+        .content
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+
+    if line_num == 0 || line_num > original_lines.len() {
+        return Err(Error::validation_invalid_argument(
+            "line_num",
+            format!("Line number {} is out of range (file has {} lines)", line_num, original_lines.len()),
+            None,
+            None,
+        ));
+    }
+
+    let mut modified_lines = original_lines.clone();
+    modified_lines.insert(line_num - 1, content.to_string());
+
+    let modified_content = modified_lines.join("\n");
+    write(project_id, path, &modified_content)?;
+
+    let changes = vec![LineChange {
+        line_number: line_num,
+        original: String::new(),
+        modified: content.to_string(),
+        operation: "insert".to_string(),
+    }];
+
+    Ok(EditResult {
+        base_path: Some(project_base_path),
+        path: full_path,
+        original_lines,
+        modified_lines,
+        changes_made: changes,
+        success: true,
+        error: None,
+    })
+}
+
+pub fn edit_delete_line(project_id: &str, path: &str, line_num: usize) -> Result<EditResult> {
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+
+    let read_result = read(project_id, path)?;
+    let original_lines: Vec<String> = read_result
+        .content
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+
+    if line_num == 0 || line_num > original_lines.len() {
+        return Err(Error::validation_invalid_argument(
+            "line_num",
+            format!("Line number {} is out of range (file has {} lines)", line_num, original_lines.len()),
+            None,
+            None,
+        ));
+    }
+
+    let mut modified_lines = original_lines.clone();
+    let removed_content = modified_lines.remove(line_num - 1);
+
+    let modified_content = modified_lines.join("\n");
+    write(project_id, path, &modified_content)?;
+
+    let changes = vec![LineChange {
+        line_number: line_num,
+        original: removed_content,
+        modified: String::new(),
+        operation: "delete".to_string(),
+    }];
+
+    Ok(EditResult {
+        base_path: Some(project_base_path),
+        path: full_path,
+        original_lines,
+        modified_lines,
+        changes_made: changes,
+        success: true,
+        error: None,
+    })
+}
+
+pub fn edit_delete_lines(
+    project_id: &str,
+    path: &str,
+    start_line: usize,
+    end_line: usize,
+) -> Result<EditResult> {
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+
+    let read_result = read(project_id, path)?;
+    let original_lines: Vec<String> = read_result
+        .content
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+
+    if start_line == 0 || start_line > original_lines.len() || end_line == 0
+        || end_line > original_lines.len() || start_line > end_line
+    {
+        return Err(Error::validation_invalid_argument(
+            "line_range",
+            format!("Invalid line range {}-{} (file has {} lines)", start_line, end_line, original_lines.len()),
+            None,
+            None,
+        ));
+    }
+
+    let mut modified_lines = original_lines.clone();
+    let start_index = start_line - 1;
+    let end_index = end_line;
+    let removed_lines: Vec<String> = modified_lines.drain(start_index..end_index).collect();
+
+    let modified_content = modified_lines.join("\n");
+    write(project_id, path, &modified_content)?;
+
+    let changes: Vec<LineChange> = removed_lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| LineChange {
+            line_number: start_line + i,
+            original: line.clone(),
+            modified: String::new(),
+            operation: "delete".to_string(),
+        })
+        .collect();
+
+    Ok(EditResult {
+        base_path: Some(project_base_path),
+        path: full_path,
+        original_lines,
+        modified_lines,
+        changes_made: changes,
+        success: true,
+        error: None,
+    })
+}
+
+pub fn edit_replace_pattern(
+    project_id: &str,
+    path: &str,
+    pattern: &str,
+    replacement: &str,
+    all: bool,
+) -> Result<EditResult> {
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+
+    let read_result = read(project_id, path)?;
+    let original_lines: Vec<String> = read_result
+        .content
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+
+    let modified_content = if all {
+        let mut result = read_result.content.clone();
+        while result.contains(pattern) {
+            result = result.replacen(pattern, replacement, 1);
+        }
+        result
+    } else {
+        read_result.content.replacen(pattern, replacement, 1)
+    };
+
+    write(project_id, path, &modified_content)?;
+
+    let modified_lines: Vec<String> = modified_content
+        .lines()
+        .map(|s: &str| s.to_string())
+        .collect();
+
+    let changes: Vec<LineChange> = original_lines
+        .iter()
+        .enumerate()
+        .zip(modified_lines.iter())
+        .filter_map(|((i, orig), modified)| {
+            if orig != modified {
+                Some(LineChange {
+                    line_number: i + 1,
+                    original: orig.clone(),
+                    modified: modified.clone(),
+                    operation: if all { "replace_all" } else { "replace" }.to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(EditResult {
+        base_path: Some(project_base_path),
+        path: full_path,
+        original_lines,
+        modified_lines,
+        changes_made: changes,
+        success: true,
+        error: None,
+    })
+}
+
+pub fn edit_delete_pattern(project_id: &str, path: &str, pattern: &str) -> Result<EditResult> {
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+
+    let read_result = read(project_id, path)?;
+    let original_lines: Vec<String> = read_result
+        .content
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+
+    let modified_lines: Vec<String> = original_lines
+        .iter()
+        .filter(|line| !line.contains(pattern))
+        .map(|s| s.to_string())
+        .collect();
+
+    let modified_content = modified_lines.join("\n");
+    write(project_id, path, &modified_content)?;
+
+    let changes: Vec<LineChange> = original_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(pattern))
+        .map(|(i, line)| LineChange {
+            line_number: i + 1,
+            original: line.clone(),
+            modified: String::new(),
+            operation: "delete".to_string(),
+        })
+        .collect();
+
+    Ok(EditResult {
+        base_path: Some(project_base_path),
+        path: full_path,
+        original_lines,
+        modified_lines,
+        changes_made: changes,
+        success: true,
+        error: None,
+    })
+}
+
+pub fn edit_append(project_id: &str, path: &str, content: &str) -> Result<EditResult> {
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+
+    let read_result = read(project_id, path)?;
+    let original_lines: Vec<String> = read_result
+        .content
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+
+    let command = format!(
+        "echo {} >> {}",
+        shell::quote_arg(content),
+        shell::quote_path(&full_path)
+    );
+
+    let output = execute_for_project(&project, &command)?;
+
+    if !output.success {
+        return Err(Error::other(format!("EDIT_FAILED: {}", output.stderr)));
+    }
+
+    let mut modified_lines = original_lines.clone();
+    modified_lines.push(content.to_string());
+
+    let changes = vec![LineChange {
+        line_number: modified_lines.len(),
+        original: String::new(),
+        modified: content.to_string(),
+        operation: "append".to_string(),
+    }];
+
+    Ok(EditResult {
+        base_path: Some(project_base_path),
+        path: full_path,
+        original_lines,
+        modified_lines,
+        changes_made: changes,
+        success: true,
+        error: None,
+    })
+}
+
+pub fn edit_prepend(project_id: &str, path: &str, content: &str) -> Result<EditResult> {
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+
+    let read_result = read(project_id, path)?;
+    let original_lines: Vec<String> = read_result
+        .content
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+
+    let command = format!(
+        "echo {} | cat - {} > /tmp/prepend.$$ && mv /tmp/prepend.$$ {}",
+        shell::quote_arg(content),
+        shell::quote_path(&full_path),
+        shell::quote_path(&full_path)
+    );
+
+    let output = execute_for_project(&project, &command)?;
+
+    if !output.success {
+        return Err(Error::other(format!("EDIT_FAILED: {}", output.stderr)));
+    }
+
+    let mut modified_lines = original_lines.clone();
+    modified_lines.insert(0, content.to_string());
+
+    let changes = vec![LineChange {
+        line_number: 1,
+        original: String::new(),
+        modified: content.to_string(),
+        operation: "prepend".to_string(),
+    }];
+
+    Ok(EditResult {
+        base_path: Some(project_base_path),
+        path: full_path,
+        original_lines,
+        modified_lines,
+        changes_made: changes,
+        success: true,
+        error: None,
     })
 }

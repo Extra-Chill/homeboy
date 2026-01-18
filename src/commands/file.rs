@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::files::{self, FileEntry, GrepMatch};
+use homeboy::files::{self, FileEntry, GrepMatch, LineChange};
 
 #[derive(Args)]
 pub struct FileArgs {
@@ -85,6 +85,70 @@ enum FileCommand {
         #[arg(short = 'i', long)]
         ignore_case: bool,
     },
+    /// Edit file with line-based or pattern-based operations
+    Edit(EditArgs),
+}
+
+#[derive(Args)]
+struct EditArgs {
+    /// Project ID
+    project_id: String,
+    /// Remote file path
+    file_path: String,
+    /// Show changes without applying
+    #[arg(short = 'n', long)]
+    dry_run: bool,
+    /// Apply even if multiple pattern matches (warns by default)
+    #[arg(short, long)]
+    force: bool,
+    #[command(flatten)]
+    line_ops: LineOperations,
+    #[command(flatten)]
+    pattern_ops: PatternOperations,
+    #[command(flatten)]
+    file_mods: FileModifications,
+}
+
+#[derive(Args, Default)]
+struct LineOperations {
+    #[arg(long)]
+    replace_line: Option<usize>,
+    #[arg(long, value_name = "CONTENT", requires = "replace_line")]
+    replace_line_content: Option<String>,
+    #[arg(long)]
+    insert_after: Option<usize>,
+    #[arg(long, value_name = "CONTENT", requires = "insert_after")]
+    insert_after_content: Option<String>,
+    #[arg(long)]
+    insert_before: Option<usize>,
+    #[arg(long, value_name = "CONTENT", requires = "insert_before")]
+    insert_before_content: Option<String>,
+    #[arg(long)]
+    delete_line: Option<usize>,
+    #[arg(long, value_names = ["START", "END"])]
+    delete_lines: Option<Vec<usize>>,
+}
+
+#[derive(Args, Default)]
+struct PatternOperations {
+    #[arg(long, value_name = "PATTERN")]
+    replace_pattern: Option<String>,
+    #[arg(long, value_name = "CONTENT", requires = "replace_pattern")]
+    replace_pattern_content: Option<String>,
+    #[arg(long)]
+    replace_all_pattern: Option<String>,
+    #[arg(long, value_name = "CONTENT", requires = "replace_all_pattern")]
+    replace_all_content: Option<String>,
+    #[arg(long, value_name = "PATTERN")]
+    delete_pattern: Option<String>,
+}
+
+#[derive(Args, Default)]
+struct FileModifications {
+    #[arg(long, value_name = "CONTENT")]
+    append: Option<String>,
+    #[arg(long, value_name = "CONTENT")]
+    prepend: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -131,11 +195,25 @@ pub struct FileGrepOutput {
 }
 
 #[derive(Serialize)]
+
+pub struct FileEditOutput {
+    command: String,
+    project_id: String,
+    base_path: Option<String>,
+    path: String,
+    changes_made: Vec<LineChange>,
+    change_count: usize,
+    success: bool,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum FileCommandOutput {
     Standard(FileOutput),
     Find(FileFindOutput),
     Grep(FileGrepOutput),
+    Edit(FileEditOutput),
 }
 
 pub fn run(
@@ -204,6 +282,10 @@ pub fn run(
                 ignore_case,
             )?;
             Ok((FileCommandOutput::Grep(out), code))
+        }
+        FileCommand::Edit(args) => {
+            let (out, code) = edit(args)?;
+            Ok((FileCommandOutput::Edit(out), code))
         }
     }
 }
@@ -380,6 +462,117 @@ fn grep(
             pattern: result.pattern,
             matches: result.matches,
             match_count,
+        },
+        0,
+    ))
+}
+
+fn edit(args: EditArgs) -> homeboy::Result<(FileEditOutput, i32)> {
+    let EditArgs {
+        project_id,
+        file_path,
+        dry_run: _,
+        force: _,
+        line_ops,
+        pattern_ops,
+        file_mods,
+    } = args;
+
+    let result = if let Some(line_num) = line_ops.replace_line {
+        let content = line_ops
+            .replace_line_content
+            .ok_or_else(|| {
+                homeboy::Error::validation_invalid_argument(
+                    "content",
+                    "Content required for --replace-line",
+                    None,
+                    None,
+                )
+            })?;
+        files::edit_replace_line(&project_id, &file_path, line_num, &content)?
+    } else if let Some(line_num) = line_ops.insert_after {
+        let content = line_ops
+            .insert_after_content
+            .ok_or_else(|| {
+                homeboy::Error::validation_invalid_argument(
+                    "content",
+                    "Content required for --insert-after",
+                    None,
+                    None,
+                )
+            })?;
+        files::edit_insert_after_line(&project_id, &file_path, line_num, &content)?
+    } else if let Some(line_num) = line_ops.insert_before {
+        let content = line_ops
+            .insert_before_content
+            .ok_or_else(|| {
+                homeboy::Error::validation_invalid_argument(
+                    "content",
+                    "Content required for --insert-before",
+                    None,
+                    None,
+                )
+            })?;
+        files::edit_insert_before_line(&project_id, &file_path, line_num, &content)?
+    } else if let Some(line_num) = line_ops.delete_line {
+        files::edit_delete_line(&project_id, &file_path, line_num)?
+    } else if let Some(lines) = line_ops.delete_lines {
+        if lines.len() != 2 {
+            return Err(homeboy::Error::validation_invalid_argument(
+                "delete_lines",
+                "DELETE_LINES requires exactly 2 values: START END",
+                None,
+                None,
+            ));
+        }
+        files::edit_delete_lines(&project_id, &file_path, lines[0], lines[1])?
+    } else if let Some(pattern) = pattern_ops.replace_pattern {
+        let replacement = pattern_ops.replace_pattern_content.ok_or_else(|| {
+            homeboy::Error::validation_invalid_argument(
+                "content",
+                "Content required for --replace-pattern",
+                None,
+                None,
+            )
+        })?;
+        files::edit_replace_pattern(&project_id, &file_path, &pattern, &replacement, false)?
+    } else if let Some(pattern) = pattern_ops.replace_all_pattern {
+        let replacement = pattern_ops.replace_all_content.ok_or_else(|| {
+            homeboy::Error::validation_invalid_argument(
+                "content",
+                "Content required for --replace-all-pattern",
+                None,
+                None,
+            )
+        })?;
+        files::edit_replace_pattern(&project_id, &file_path, &pattern, &replacement, true)?
+    } else if let Some(pattern) = pattern_ops.delete_pattern {
+        files::edit_delete_pattern(&project_id, &file_path, &pattern)?
+    } else if let Some(content) = file_mods.append {
+        files::edit_append(&project_id, &file_path, &content)?
+    } else if let Some(content) = file_mods.prepend {
+        files::edit_prepend(&project_id, &file_path, &content)?
+    } else {
+        return Err(homeboy::Error::validation_invalid_argument(
+            "operation",
+            "No edit operation specified. Use one of: --replace-line, --insert-after, --insert-before, --delete-line, --delete-lines, --replace-pattern, --replace-all-pattern, --delete-pattern, --append, --prepend",
+            None,
+            None,
+        ));
+    };
+
+    let change_count = result.changes_made.len();
+
+    Ok((
+        FileEditOutput {
+            command: "file.edit".to_string(),
+            project_id: project_id.to_string(),
+            base_path: result.base_path,
+            path: result.path,
+            changes_made: result.changes_made,
+            change_count,
+            success: result.success,
+            error: result.error,
         },
         0,
     ))
