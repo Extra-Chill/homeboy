@@ -114,6 +114,63 @@ HOMEBOY_DEBUG=1 homeboy test my-component
 - **Component-level**: Lints only PHP files in the component directory
 - Lint failures abort the test run with exit code 1
 
+## ESLint (JavaScript)
+
+The test runner uses ESLint with WordPress JavaScript coding standards for linting JavaScript files before running tests.
+
+### Automatic Detection
+
+ESLint only runs when JavaScript files exist in the component. The test runner automatically detects JS/JSX/TS/TSX files (excluding node_modules, vendor, build, dist, and minified files).
+
+### Running Lint Manually
+
+```bash
+# From module directory
+npm run lint:js /path/to/component
+
+# Or directly with eslint
+./node_modules/.bin/eslint --config .eslintrc.json --ext .js,.jsx,.ts,.tsx /path/to/component
+```
+
+### Configuration
+
+The `.eslintrc.json` file configures ESLint with:
+- **@wordpress/eslint-plugin/recommended** standard
+- Browser and ES2021 environment
+- WordPress globals (`wp`, `jQuery`, `ajaxurl`)
+- Excluded directories: `node_modules/`, `vendor/`, `build/`, `dist/`, `tests/`, `*.min.js`
+
+### Text Domain Auto-Detection
+
+Same as PHPCS - the test runner automatically detects the text domain from the plugin header and passes it to ESLint's `@wordpress/i18n-text-domain` rule.
+
+To verify detection is working:
+```bash
+HOMEBOY_DEBUG=1 homeboy test my-component
+# Output includes: DEBUG: Text domain: my-plugin
+```
+
+### Centralized Infrastructure
+
+**Important:** Components should NOT have local `.eslintrc` or `.eslintrc.json` files. The WordPress module provides centralized ESLint infrastructure to ensure consistent standards across all components.
+
+### Rules Configuration
+
+**Enforced Rules:**
+- `@wordpress/dependency-group` - Import grouping (error)
+- `@wordpress/i18n-translator-comments` - Translator comments (warn)
+- `@wordpress/no-unsafe-wp-apis` - Unsafe API usage (warn)
+- `no-console` - Console statements (warn)
+
+**Disabled Rules:**
+- `import/no-extraneous-dependencies` - Allows flexible dependency management
+
+### ESLint Behavior
+
+- **Presence-based**: Only runs if JS/JSX/TS/TSX files exist in the component
+- **Non-blocking on missing**: If npm dependencies aren't installed, warns and continues
+- ESLint failures abort the test run with exit code 1
+
 ## Debug Mode
 
 Enable debug output to see environment variables and execution context:

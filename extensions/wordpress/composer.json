@@ -27,6 +27,7 @@
     "setup": [
       "@composer install"
     ],
-    "test": "phpunit --configuration={{modulePath}}/phpunit.xml.dist"
+    "test": "phpunit --configuration={{modulePath}}/phpunit.xml.dist",
+    "lint": "phpcs"
   }
 }

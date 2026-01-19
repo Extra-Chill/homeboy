@@ -151,6 +151,62 @@ run_lint() {
     fi
 }
 
+# Lint JavaScript files using ESLint
+run_eslint() {
+    # Check if component has JavaScript files
+    local js_files
+    js_files=$(find "$PLUGIN_PATH" -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \) \
+        -not -path "*/node_modules/*" \
+        -not -path "*/vendor/*" \
+        -not -path "*/build/*" \
+        -not -path "*/dist/*" \
+        -not -name "*.min.js" \
+        2>/dev/null | head -1)
+
+    if [ -z "$js_files" ]; then
+        if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+            echo "DEBUG: No JavaScript files found, skipping ESLint"
+        fi
+        return 0
+    fi
+
+    echo "Linting JavaScript files with ESLint..."
+
+    local eslint="${MODULE_PATH}/node_modules/.bin/eslint"
+    if [ ! -f "$eslint" ]; then
+        echo "Warning: ESLint not found, skipping JavaScript linting"
+        return 0
+    fi
+
+    # Auto-detect text domain (same pattern as PHPCS)
+    local TEXT_DOMAIN=""
+    local MAIN_PLUGIN_FILE
+    MAIN_PLUGIN_FILE=$(find "$PLUGIN_PATH" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
+    if [ -n "$MAIN_PLUGIN_FILE" ]; then
+        TEXT_DOMAIN=$(grep -m1 "Text Domain:" "$MAIN_PLUGIN_FILE" 2>/dev/null | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
+    fi
+
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: Running ESLint with config: ${MODULE_PATH}/.eslintrc.json"
+        echo "DEBUG: Target path: $PLUGIN_PATH"
+        echo "DEBUG: Text domain: ${TEXT_DOMAIN:-NOT_DETECTED}"
+    fi
+
+    # Build ESLint command with text domain rule if detected
+    local eslint_args=(--config "${MODULE_PATH}/.eslintrc.json" --ext .js,.jsx,.ts,.tsx)
+    if [ -n "$TEXT_DOMAIN" ]; then
+        eslint_args+=(--rule "@wordpress/i18n-text-domain: [error, { allowedTextDomain: \"$TEXT_DOMAIN\" }]")
+    fi
+    eslint_args+=("$PLUGIN_PATH")
+
+    if "$eslint" "${eslint_args[@]}"; then
+        echo "ESLint linting passed"
+    else
+        echo "ESLint linting failed. Aborting tests."
+        exit 1
+    fi
+}
+
 # Export paths for bootstrap
 if [ -n "${COMPONENT_ID:-}" ]; then
     export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
@@ -171,8 +227,13 @@ fi
 export WP_TESTS_DIR="$WP_TESTS_DIR"
 export ABSPATH="$ABSPATH"
 
-# Run linting before tests
-run_lint
+# Run linting before tests (unless skipped)
+if [[ "${HOMEBOY_SKIP_LINT:-}" != "1" ]]; then
+    run_lint
+    run_eslint
+else
+    echo "Skipping linting (--skip-lint)"
+fi
 
 # Validate test directory structure - check for conflicting local infrastructure
 LOCAL_BOOTSTRAP="${TEST_DIR}/bootstrap.php"
