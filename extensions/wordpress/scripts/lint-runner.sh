@@ -1,5 +1,25 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
+
+# Bash 4.0+ required for associative arrays
+if ((BASH_VERSINFO[0] < 4)); then
+    echo "Error: This script requires bash 4.0+ (found ${BASH_VERSION})" >&2
+    case "$(uname -s)" in
+        Darwin)
+            echo "macOS ships with bash 3.2. Install newer bash: brew install bash" >&2
+            ;;
+        Linux)
+            echo "Update bash via your package manager (apt, dnf, pacman, etc.)" >&2
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            echo "Update Git Bash or use WSL with a modern bash version" >&2
+            ;;
+        *)
+            echo "Install bash 4.0 or later for your platform" >&2
+            ;;
+    esac
+    exit 1
+fi
 
 # Standalone PHP linting script using PHPCS/PHPCBF
 # Supports auto-fix mode via HOMEBOY_AUTO_FIX=1
@@ -13,6 +33,27 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
     echo "HOMEBOY_AUTO_FIX=${HOMEBOY_AUTO_FIX:-NOT_SET}"
     echo "HOMEBOY_SUMMARY_MODE=${HOMEBOY_SUMMARY_MODE:-NOT_SET}"
+    echo "HOMEBOY_SNIFFS=${HOMEBOY_SNIFFS:-NOT_SET}"
+    echo "HOMEBOY_EXCLUDE_SNIFFS=${HOMEBOY_EXCLUDE_SNIFFS:-NOT_SET}"
+    echo "HOMEBOY_CATEGORY=${HOMEBOY_CATEGORY:-NOT_SET}"
+fi
+
+# Category to sniff mappings
+declare -A CATEGORY_SNIFFS
+CATEGORY_SNIFFS["security"]="WordPress.Security.EscapeOutput,WordPress.Security.NonceVerification,WordPress.Security.ValidatedSanitizedInput,WordPress.DB.PreparedSQL,WordPress.DB.PreparedSQLPlaceholders"
+CATEGORY_SNIFFS["i18n"]="WordPress.WP.I18n"
+CATEGORY_SNIFFS["yoda"]="WordPress.PHP.YodaConditions"
+CATEGORY_SNIFFS["whitespace"]="WordPress.WhiteSpace"
+
+# Resolve category to sniffs
+EFFECTIVE_SNIFFS="${HOMEBOY_SNIFFS:-}"
+if [ -n "${HOMEBOY_CATEGORY:-}" ]; then
+    if [ -n "${CATEGORY_SNIFFS[${HOMEBOY_CATEGORY}]:-}" ]; then
+        EFFECTIVE_SNIFFS="${CATEGORY_SNIFFS[${HOMEBOY_CATEGORY}]}"
+        echo "Filtering to category: ${HOMEBOY_CATEGORY}"
+    else
+        echo "Warning: Unknown category '${HOMEBOY_CATEGORY}'. Available: security, i18n, yoda, whitespace"
+    fi
 fi
 
 # Determine execution context
@@ -40,9 +81,11 @@ if [ -n "${HOMEBOY_LINT_FILE:-}" ]; then
     echo "Linting single file: ${HOMEBOY_LINT_FILE}"
 elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
     cd "$PLUGIN_PATH"
-    shopt -s nullglob globstar
-    MATCHED_FILES=( ${HOMEBOY_LINT_GLOB} )
-    shopt -u nullglob globstar
+
+    # Use eval for brace expansion (works in both bash and zsh)
+    # The glob comes from Rust as "{file1,file2,file3}" format
+    MATCHED_FILES=()
+    eval 'for f in '"${HOMEBOY_LINT_GLOB}"'; do [ -e "$f" ] && MATCHED_FILES+=("$f"); done'
 
     if [ ${#MATCHED_FILES[@]} -eq 0 ]; then
         echo "Error: No files match pattern: ${HOMEBOY_LINT_GLOB}"
@@ -97,40 +140,43 @@ fi
 
 # Auto-fix mode: run custom fixers, then phpcbf, then phpcs
 if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
-    # Run Yoda condition fixer (handles cases phpcbf can't fix)
-    if [ -f "$YODA_FIXER" ]; then
-        php "$YODA_FIXER" "$PLUGIN_PATH"
-    fi
+    # Run custom fixers on each target file/directory
+    for lint_target in "${LINT_FILES[@]}"; do
+        # Run Yoda condition fixer (handles cases phpcbf can't fix)
+        if [ -f "$YODA_FIXER" ]; then
+            php "$YODA_FIXER" "$lint_target"
+        fi
 
-    # Run in_array strict fixer (add true as third param)
-    if [ -f "$IN_ARRAY_FIXER" ]; then
-        php "$IN_ARRAY_FIXER" "$PLUGIN_PATH"
-    fi
+        # Run in_array strict fixer (add true as third param)
+        if [ -f "$IN_ARRAY_FIXER" ]; then
+            php "$IN_ARRAY_FIXER" "$lint_target"
+        fi
 
-    # Run short ternary fixer (expand ?: to ? : for simple vars)
-    if [ -f "$SHORT_TERNARY_FIXER" ]; then
-        php "$SHORT_TERNARY_FIXER" "$PLUGIN_PATH"
-    fi
+        # Run short ternary fixer (expand ?: to ? : for simple vars)
+        if [ -f "$SHORT_TERNARY_FIXER" ]; then
+            php "$SHORT_TERNARY_FIXER" "$lint_target"
+        fi
 
-    # Run escape i18n fixer (_e -> esc_html_e)
-    if [ -f "$ESCAPE_I18N_FIXER" ]; then
-        php "$ESCAPE_I18N_FIXER" "$PLUGIN_PATH"
-    fi
+        # Run escape i18n fixer (_e -> esc_html_e)
+        if [ -f "$ESCAPE_I18N_FIXER" ]; then
+            php "$ESCAPE_I18N_FIXER" "$lint_target"
+        fi
 
-    # Run echo translate fixer (echo __() -> echo esc_html__())
-    if [ -f "$ECHO_TRANSLATE_FIXER" ]; then
-        php "$ECHO_TRANSLATE_FIXER" "$PLUGIN_PATH"
-    fi
+        # Run echo translate fixer (echo __() -> echo esc_html__())
+        if [ -f "$ECHO_TRANSLATE_FIXER" ]; then
+            php "$ECHO_TRANSLATE_FIXER" "$lint_target"
+        fi
 
-    # Run safe redirect fixer (wp_redirect -> wp_safe_redirect)
-    if [ -f "$SAFE_REDIRECT_FIXER" ]; then
-        php "$SAFE_REDIRECT_FIXER" "$PLUGIN_PATH"
-    fi
+        # Run safe redirect fixer (wp_redirect -> wp_safe_redirect)
+        if [ -f "$SAFE_REDIRECT_FIXER" ]; then
+            php "$SAFE_REDIRECT_FIXER" "$lint_target"
+        fi
 
-    # Run wp_die translate fixer (wp_die(__()) -> wp_die(esc_html__()))
-    if [ -f "$WP_DIE_TRANSLATE_FIXER" ]; then
-        php "$WP_DIE_TRANSLATE_FIXER" "$PLUGIN_PATH"
-    fi
+        # Run wp_die translate fixer (wp_die(__()) -> wp_die(esc_html__()))
+        if [ -f "$WP_DIE_TRANSLATE_FIXER" ]; then
+            php "$WP_DIE_TRANSLATE_FIXER" "$lint_target"
+        fi
+    done
 
     # Run phpcbf for remaining auto-fixable issues
     if [ -f "$PHPCBF_BIN" ]; then
@@ -165,20 +211,111 @@ fi
 # Validation
 echo "Validating with PHPCS..."
 
-# Build phpcs command arguments as array for proper path escaping
-phpcs_args=(--standard="$PHPCS_CONFIG")
+# Build base phpcs arguments
+phpcs_base_args=(--standard="$PHPCS_CONFIG")
 if [ -n "$TEXT_DOMAIN" ]; then
-    phpcs_args+=(--runtime-set text_domain "$TEXT_DOMAIN")
-fi
-if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
-    phpcs_args+=(--report=summary)
+    phpcs_base_args+=(--runtime-set text_domain "$TEXT_DOMAIN")
 fi
 if [[ "${HOMEBOY_ERRORS_ONLY:-}" == "1" ]]; then
-    phpcs_args+=(--warning-severity=0)
+    phpcs_base_args+=(--warning-severity=0)
 fi
-phpcs_args+=("${LINT_FILES[@]}")
+# Sniff filtering
+if [ -n "$EFFECTIVE_SNIFFS" ]; then
+    phpcs_base_args+=(--sniffs="$EFFECTIVE_SNIFFS")
+fi
+if [ -n "${HOMEBOY_EXCLUDE_SNIFFS:-}" ]; then
+    phpcs_base_args+=(--exclude="${HOMEBOY_EXCLUDE_SNIFFS}")
+fi
 
-if "$PHPCS_BIN" "${phpcs_args[@]}"; then
+# First run: Get JSON report for summary header
+set +e
+json_output=$("$PHPCS_BIN" "${phpcs_base_args[@]}" --report=json "${LINT_FILES[@]}" 2>/dev/null)
+json_exit=$?
+set -e
+
+# Parse JSON and print summary header (only if issues exist)
+if [ -n "$json_output" ] && command -v php &> /dev/null; then
+    summary=$(php -r '
+        $json = json_decode($GLOBALS["argv"][1], true);
+        if (!$json || !isset($json["totals"])) exit;
+        $totals = $json["totals"];
+        $errors = $totals["errors"] ?? 0;
+        $warnings = $totals["warnings"] ?? 0;
+        $fixable = $totals["fixable"] ?? 0;
+        $files = count($json["files"] ?? []);
+        $filesWithIssues = 0;
+        foreach ($json["files"] ?? [] as $file) {
+            if (($file["errors"] ?? 0) > 0 || ($file["warnings"] ?? 0) > 0) {
+                $filesWithIssues++;
+            }
+        }
+        if ($errors > 0 || $warnings > 0) {
+            echo "============================================\n";
+            echo "LINT SUMMARY: " . $errors . " errors, " . $warnings . " warnings\n";
+            echo "Fixable: " . $fixable . " | Files with issues: " . $filesWithIssues . " of " . $files . "\n";
+            echo "============================================\n";
+        }
+    ' "$json_output" 2>/dev/null)
+
+    if [ -n "$summary" ]; then
+        echo ""
+        echo "$summary"
+    fi
+fi
+
+# Summary mode: show summary header + top violations, skip full report
+if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
+    if [ -n "$json_output" ] && command -v php &> /dev/null; then
+        top_violations=$(php -r '
+            $json = json_decode($GLOBALS["argv"][1], true);
+            if (!$json || !isset($json["totals"])) exit(1);
+
+            // Count violations by source
+            $sources = [];
+            foreach ($json["files"] ?? [] as $file) {
+                foreach ($file["messages"] ?? [] as $msg) {
+                    $source = $msg["source"] ?? "Unknown";
+                    if (!isset($sources[$source])) {
+                        $sources[$source] = 0;
+                    }
+                    $sources[$source]++;
+                }
+            }
+
+            if (empty($sources)) exit(0);
+
+            // Sort by count descending
+            arsort($sources);
+
+            // Print top 10 violations
+            echo "\nTOP VIOLATIONS:\n";
+            $count = 0;
+            foreach ($sources as $source => $num) {
+                printf("  %-55s %5d\n", $source, $num);
+                $count++;
+                if ($count >= 10) break;
+            }
+        ' "$json_output" 2>/dev/null)
+
+        if [ -n "$top_violations" ]; then
+            echo "$top_violations"
+        fi
+    fi
+
+    # Exit with appropriate code
+    if [ "$json_exit" -eq 0 ]; then
+        echo ""
+        echo "PHPCS linting passed"
+        exit 0
+    else
+        echo ""
+        echo "PHPCS linting failed"
+        exit 1
+    fi
+fi
+
+# Full report mode (default)
+if "$PHPCS_BIN" "${phpcs_base_args[@]}" "${LINT_FILES[@]}"; then
     echo "PHPCS linting passed"
     exit 0
 else
