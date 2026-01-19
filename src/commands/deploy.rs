@@ -7,10 +7,10 @@ use super::CmdResult;
 
 #[derive(Args)]
 pub struct DeployArgs {
-    /// Project ID
+    /// Project ID (or component ID - order is auto-detected)
     pub project_id: String,
 
-    /// Component IDs to deploy
+    /// Component IDs to deploy (or project ID if first arg is a component)
     pub component_ids: Vec<String>,
 
     /// JSON input spec for bulk operations
@@ -47,22 +47,63 @@ pub struct DeployOutput {
     pub summary: DeploySummary,
 }
 
-pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DeployOutput> {
-    let project_id = &args.project_id;
+/// Detects whether user provided project-first or component-first order.
+/// Supports both `deploy <project> <component>` and `deploy <component> <project>`.
+fn resolve_argument_order(
+    first: &str,
+    rest: &[String],
+) -> homeboy::Result<(String, Vec<String>)> {
+    let projects = homeboy::project::list_ids().unwrap_or_default();
+    let components = homeboy::component::list_ids().unwrap_or_default();
 
-    // Validate project exists
-    let available_projects = homeboy::project::list_ids().unwrap_or_default();
-    if !available_projects.contains(project_id) {
-        return Err(homeboy::Error::validation_invalid_argument(
+    if projects.contains(&first.to_string()) {
+        // Standard order: project first
+        Ok((first.to_string(), rest.to_vec()))
+    } else if components.contains(&first.to_string()) {
+        // Reversed order: component first, find project in rest
+        if let Some(project_idx) = rest.iter().position(|r| projects.contains(r)) {
+            let project = rest[project_idx].clone();
+            let mut comps = vec![first.to_string()];
+            comps.extend(
+                rest.iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != project_idx)
+                    .map(|(_, s)| s.clone()),
+            );
+            Ok((project, comps))
+        } else {
+            Err(homeboy::Error::validation_invalid_argument(
+                "project_id",
+                "No project ID found in arguments",
+                None,
+                Some(vec![format!(
+                    "Available projects: {}",
+                    projects.join(", ")
+                )]),
+            ))
+        }
+    } else {
+        // First arg is neither - provide helpful error
+        Err(homeboy::Error::validation_invalid_argument(
             "project_id",
-            format!("Project '{}' not found", project_id),
+            format!("'{}' is not a known project or component", first),
             None,
-            Some(vec![format!(
-                "Available projects: {}",
-                available_projects.join(", ")
-            )]),
-        ));
+            Some(vec![
+                format!("Available projects: {}", projects.join(", ")),
+                format!("Available components: {}", components.join(", ")),
+            ]),
+        ))
     }
+}
+
+pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DeployOutput> {
+    // Resolve argument order (supports both project-first and component-first)
+    let (project_id, component_ids) =
+        resolve_argument_order(&args.project_id, &args.component_ids)?;
+
+    // Update args with resolved values
+    args.project_id = project_id.clone();
+    args.component_ids = component_ids;
 
     // Parse JSON input if provided
     if let Some(ref spec) = args.json {
@@ -78,7 +119,7 @@ pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdRe
         check: args.check,
     };
 
-    let result = deploy::run(project_id, &config).map_err(|e| {
+    let result = deploy::run(&project_id, &config).map_err(|e| {
         if e.message.contains("No components configured for project") {
             e.with_hint(format!(
                 "Run 'homeboy project components add {} <component-id>' to add components",

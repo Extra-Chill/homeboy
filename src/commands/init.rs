@@ -49,13 +49,20 @@ pub struct ProjectListItem {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sub_targets: Vec<String>,
 }
 
 impl From<Project> for ProjectListItem {
     fn from(p: Project) -> Self {
         Self {
-            id: p.id,
+            id: p.id.clone(),
             domain: p.domain,
+            sub_targets: p
+                .sub_targets
+                .iter()
+                .filter_map(|st| project::slugify_id(&st.name).ok())
+                .collect(),
         }
     }
 }
@@ -243,6 +250,23 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
 
     if let Some(suggestion) = context_output.suggestion.as_ref() {
         next_steps.push(format!("Suggestion: {}", suggestion));
+    }
+
+    // Check for linked modules with CLI tools (e.g., WordPress module's `homeboy wp`)
+    let cli_modules: Vec<_> = all_modules
+        .iter()
+        .filter(|m| linked_module_ids.contains(&m.id))
+        .filter_map(|m| m.cli.as_ref().map(|c| (c.tool.clone(), c.display_name.clone())))
+        .collect();
+
+    if !cli_modules.is_empty() && !projects.is_empty() {
+        let project_id = &projects[0].id;
+        for (tool, display_name) in &cli_modules {
+            next_steps.push(format!(
+                "Run remote {} commands: `homeboy {} {} <command>`",
+                display_name, tool, project_id
+            ));
+        }
     }
 
     let version_snapshot = resolve_version_snapshot(&components);
