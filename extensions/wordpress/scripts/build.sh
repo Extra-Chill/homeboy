@@ -381,12 +381,31 @@ validate_build() {
 # Run tests (before production deps are installed)
 run_tests() {
     if [ -f "composer.json" ] && grep -q '"test"' composer.json; then
-        print_status "Running tests..."
-        if ! composer test; then
-            print_error "Tests failed. Build aborted."
-            return 1
+        # Check for test override settings
+        SKIP_TESTS="${HOMEBOY_SKIP_TESTS:-}"
+        USE_LOCAL_TESTS="${HOMEBOY_USE_LOCAL_TESTS:-}"
+
+        if [ "$SKIP_TESTS" = "true" ] || [ "$SKIP_TESTS" = "1" ]; then
+            print_status "Skipping tests (HOMEBOY_SKIP_TESTS=$SKIP_TESTS)"
+        elif [ "$USE_LOCAL_TESTS" = "true" ] || [ "$USE_LOCAL_TESTS" = "1" ]; then
+            print_status "Using local test infrastructure (HOMEBOY_USE_LOCAL_TESTS=$USE_LOCAL_TESTS)"
+            if [ -f "vendor/bin/phpunit" ]; then
+                vendor/bin/phpunit --testdox 2>&1
+            elif [ -f "tests/vendor/bin/phpunit" ]; then
+                tests/vendor/bin/phpunit --testdox 2>&1
+            else
+                print_error "No local PHPUnit found. Run 'composer install' or install module's test infrastructure."
+                return 1
+            fi
+        else
+            # Run tests with module infrastructure (default)
+            print_status "Running tests with module infrastructure..."
+            if ! bash "${MODULE_PATH}/scripts/test-runner.sh"; then
+                print_error "Tests failed. Build aborted."
+                return 1
+            fi
+            print_success "Tests passed"
         fi
-        print_success "Tests passed"
     fi
     return 0
 }

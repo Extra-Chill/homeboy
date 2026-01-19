@@ -66,6 +66,44 @@ Without `HOMEBOY_DEBUG=1`, the test runner runs silently except for PHPUnit outp
 - When run non-interactively (piped output), output is captured and returned as JSON
 - The homeboy binary exits with the same exit code as the child process (PHPUnit)
 
+## Local Test Infrastructure
+
+**IMPORTANT:** Components should NOT have local test infrastructure files:
+- `tests/bootstrap.php`
+- `phpunit.xml`
+
+The WordPress module provides complete testing infrastructure including WordPress environment setup, database configuration, PHPUnit configuration, and test discovery. Local test infrastructure files will cause the test runner to fail with a clear error message.
+
+### Removing Local Infrastructure
+
+If your component has these files, remove them:
+
+```bash
+rm tests/bootstrap.php
+rm phpunit.xml
+```
+
+Your test files remain - only infrastructure files are removed.
+
+### Build-Time Overrides
+
+**Skip tests during build:**
+```bash
+HOMEBOY_SKIP_TESTS=1 homeboy build my-component
+```
+
+**Use local test infrastructure (rare, requires full WP setup):**
+```bash
+HOMEBOY_USE_LOCAL_TESTS=1 homeboy build my-component
+```
+
+When using local test infrastructure, you must have:
+- PHPUnit installed (via `composer install`)
+- WordPress test suite (wp-phpunit/wp-phpunit)
+- PHPUnit Polyfills (yoast/phpunit-polyfills)
+- Database configuration
+- Complete bootstrap setup
+
 ## Database Options
 
 The test runner supports both SQLite and MySQL databases:

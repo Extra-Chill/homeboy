@@ -102,13 +102,60 @@ elif [ "$DATABASE_TYPE" = "mysql" ]; then
         "$MYSQL_HOST" "$MYSQL_DATABASE" "$MYSQL_USER" "$MYSQL_PASSWORD"
 fi
 
+# Lint PHP files
+run_lint() {
+    echo "Linting PHP files..."
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "Linting path: $PLUGIN_PATH"
+    fi
+
+    local php_parse="${MODULE_PATH}/vendor/bin/php-parse"
+    if [ ! -f "$php_parse" ]; then
+        echo "Warning: php-parse not found at $php_parse, skipping linting"
+        return 0
+    fi
+
+    local lint_errors=0
+    local file_count=0
+
+    while IFS= read -r -d '' file; do
+        if [ "$file_count" -eq 0 ]; then
+            if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+                echo "Found PHP files to lint"
+            fi
+        fi
+        ((file_count++))
+        
+        if ! "$php_parse" "$file" > /dev/null 2>&1; then
+            echo "Linting error in: $file"
+            "$php_parse" "$file" 2>&1
+            lint_errors=1
+        fi
+    done < <(find "$PLUGIN_PATH" -name "*.php" -not -path "*/vendor/*" -not -path "*/node_modules/*" -print0)
+
+    if [ "$file_count" -eq 0 ]; then
+        echo "No PHP files found to lint"
+    else
+        echo "Linted $file_count PHP file(s)"
+    fi
+
+    if [ $lint_errors -eq 1 ]; then
+        echo "PHP linting failed. Aborting tests."
+        exit 1
+    fi
+
+    echo "PHP linting passed"
+}
+
 # Export paths for bootstrap
 if [ -n "${COMPONENT_ID:-}" ]; then
     export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
     export HOMEBOY_COMPONENT_PATH="$COMPONENT_PATH"
     export HOMEBOY_PLUGIN_PATH="$PLUGIN_PATH"
     TEST_DIR="${PLUGIN_PATH}/tests"
-    echo "DEBUG: Using component test directory: $TEST_DIR"
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: Using component test directory: $TEST_DIR"
+    fi
 else
     export HOMEBOY_PROJECT_PATH="$PROJECT_PATH"
     export HOMEBOY_PLUGIN_PATH="$PLUGIN_PATH"
@@ -120,8 +167,45 @@ fi
 export WP_TESTS_DIR="$WP_TESTS_DIR"
 export ABSPATH="$ABSPATH"
 
+# Run linting before tests
+run_lint
+
+# Validate test directory structure - check for conflicting local infrastructure
+LOCAL_BOOTSTRAP="${TEST_DIR}/bootstrap.php"
+LOCAL_PHPUNIT_XML="${TEST_DIR}/phpunit.xml"
+
+if [ -f "$LOCAL_BOOTSTRAP" ]; then
+    echo "Error: Homeboy WordPress module is not compatible with local bootstrap tests"
+    echo ""
+    echo "The WordPress module provides complete test infrastructure including:"
+    echo "  - WordPress environment setup and bootstrap"
+    echo "  - Database configuration (SQLite/MySQL)"
+    echo "  - PHPUnit configuration"
+    echo "  - Test discovery and execution"
+    echo ""
+    echo "Local bootstrap file found:"
+    echo "  $LOCAL_BOOTSTRAP"
+    echo ""
+    echo "Component test files (*.php) can remain - only infrastructure files must be removed."
+    echo "Please remove: $LOCAL_BOOTSTRAP"
+    exit 1
+fi
+
+if [ -f "$LOCAL_PHPUNIT_XML" ]; then
+    echo "Error: Local phpunit.xml conflicts with module configuration"
+    echo ""
+    echo "The WordPress module provides complete PHPUnit configuration."
+    echo "Local phpunit.xml file found:"
+    echo "  $LOCAL_PHPUNIT_XML"
+    echo ""
+    echo "Please remove: $LOCAL_PHPUNIT_XML"
+    exit 1
+fi
+
 # Run PHPUnit with module bootstrap
+echo "Running PHPUnit tests..."
 "${MODULE_PATH}/vendor/bin/phpunit" \
   --bootstrap="${MODULE_PATH}/tests/bootstrap.php" \
+  --configuration="${MODULE_PATH}/phpunit.xml.dist" \
   --testdox \
   "${TEST_DIR}"
