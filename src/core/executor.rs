@@ -85,6 +85,7 @@ pub fn execute_for_project_interactive(project: &Project, command: &str) -> Resu
 pub fn execute_for_project_direct(
     project: &Project,
     cli_config: &CliConfig,
+    module_id: &str,
     args: &[String],
     target_domain: &str,
 ) -> Result<CommandOutput> {
@@ -95,7 +96,7 @@ pub fn execute_for_project_direct(
         .ok_or_else(|| Error::config("Base path not configured".to_string()))?;
 
     // Try direct execution first
-    if let Ok(output) = try_execute_direct(base_path.clone(), cli_config, args, target_domain) {
+    if let Ok(output) = try_execute_direct(base_path.clone(), cli_config, project, module_id, args, target_domain) {
         return Ok(output);
     }
 
@@ -107,6 +108,8 @@ pub fn execute_for_project_direct(
 fn try_execute_direct(
     base_path: String,
     cli_config: &CliConfig,
+    project: &Project,
+    module_id: &str,
     args: &[String],
     target_domain: &str,
 ) -> Result<CommandOutput> {
@@ -118,7 +121,7 @@ fn try_execute_direct(
     }
 
     // Parse the template
-    let parsed = parse_direct_template(base_path, cli_config, args, target_domain)?;
+    let parsed = parse_direct_template(base_path, cli_config, project, module_id, args, target_domain)?;
 
     // Execute directly (no shell)
     let mut cmd = Command::new(&parsed.program);
@@ -170,6 +173,8 @@ struct ParsedDirectCommand {
 fn parse_direct_template(
     base_path: String,
     cli_config: &CliConfig,
+    project: &Project,
+    module_id: &str,
     args: &[String],
     target_domain: &str,
 ) -> Result<ParsedDirectCommand> {
@@ -190,7 +195,7 @@ fn parse_direct_template(
         template.split_whitespace().map(|s| s.to_string()).collect();
 
     // Find and replace {{args}} placeholder with actual args
-    let final_args: Vec<String> =
+    let mut final_args: Vec<String> =
         if let Some(pos) = command_parts.iter().position(|p| p == "{{args}}") {
             command_parts.remove(pos);
             let mut result = Vec::new();
@@ -200,6 +205,24 @@ fn parse_direct_template(
         } else {
             command_parts
         };
+
+    // Apply settings_flags from project module config
+    if !cli_config.settings_flags.is_empty() {
+        if let Some(modules) = &project.modules {
+            if let Some(module_config) = modules.get(module_id) {
+                for (setting_key, flag_template) in &cli_config.settings_flags {
+                    if let Some(value) = module_config.settings.get(setting_key) {
+                        if let Some(value_str) = value.as_str() {
+                            if !value_str.is_empty() {
+                                let flag = flag_template.replace("{{value}}", value_str);
+                                final_args.push(flag);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Extract working directory from working_dir_template
     let working_dir = cli_config.working_dir_template.as_ref().and_then(|t| {
@@ -215,7 +238,7 @@ fn parse_direct_template(
         .cloned()
         .unwrap_or_else(|| cli_path.clone());
 
-    let args = if final_args.len() > 1 {
+    let parsed_args = if final_args.len() > 1 {
         final_args[1..].to_vec()
     } else {
         vec![]
@@ -223,7 +246,7 @@ fn parse_direct_template(
 
     Ok(ParsedDirectCommand {
         program,
-        args,
+        args: parsed_args,
         working_dir,
     })
 }

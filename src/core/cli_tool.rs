@@ -125,6 +125,7 @@ fn run_for_project_with_executor(
         let result = executor::execute_for_project_direct(
             &project,
             cli_config,
+            &module.id,
             &command_args,
             &target_domain,
         );
