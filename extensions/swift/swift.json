@@ -1,0 +1,23 @@
+{
+  "name": "Swift",
+  "version": "1.0.0",
+  "icon": "swift",
+  "description": "Swift testing infrastructure for macOS, iOS, and Swift CLI projects",
+  "author": "Extra Chill",
+
+  "runtime": {
+    "setup_command": "bash {{module_path}}/scripts/setup.sh",
+    "ready_check": "which swift",
+    "run_command": "bash {{module_path}}/scripts/test-runner.sh"
+  },
+
+  "settings": [
+    {
+      "id": "test_type",
+      "label": "Test Type",
+      "type": "string",
+      "default": "script",
+      "description": "Test type: 'script' (swift scripts) or 'xcodebuild' (XCTest)"
+    }
+  ]
+}

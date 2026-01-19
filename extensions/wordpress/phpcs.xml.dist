@@ -29,9 +29,6 @@
     <!-- Show sniff codes in reports for easier targeting -->
     <arg value="s"/>
 
-    <!-- Show progress -->
-    <arg value="p"/>
-
     <!-- Use colors in output -->
     <arg name="colors"/>
 

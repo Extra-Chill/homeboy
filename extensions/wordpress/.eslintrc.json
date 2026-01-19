@@ -19,6 +19,7 @@
     "tests/"
   ],
   "rules": {
+    "prettier/prettier": "off",
     "@wordpress/dependency-group": "error",
     "@wordpress/i18n-translator-comments": "warn",
     "@wordpress/no-unsafe-wp-apis": "warn",

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
@@ -102,121 +102,26 @@ elif [ "$DATABASE_TYPE" = "mysql" ]; then
         "$MYSQL_HOST" "$MYSQL_DATABASE" "$MYSQL_USER" "$MYSQL_PASSWORD"
 fi
 
-# Lint PHP files using PHPCS
+# Run linting using external lint-runner.sh with summary mode
 run_lint() {
-    echo "Linting PHP files with PHPCS..."
-    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "Linting path: $PLUGIN_PATH"
-    fi
-
-    local phpcs="${MODULE_PATH}/vendor/bin/phpcs"
-    if [ ! -f "$phpcs" ]; then
-        echo "Warning: phpcs not found at $phpcs, skipping linting"
+    local lint_runner="${MODULE_PATH}/scripts/lint-runner.sh"
+    if [ ! -f "$lint_runner" ]; then
+        echo "Warning: lint-runner.sh not found, skipping linting"
         return 0
     fi
 
-    local phpcs_config="${MODULE_PATH}/phpcs.xml.dist"
-    if [ ! -f "$phpcs_config" ]; then
-        echo "Warning: phpcs.xml.dist not found at $phpcs_config, skipping linting"
-        return 0
-    fi
-
-    # Auto-detect text domain from plugin header
-    local TEXT_DOMAIN=""
-    local MAIN_PLUGIN_FILE
-    MAIN_PLUGIN_FILE=$(find "$PLUGIN_PATH" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
-    if [ -n "$MAIN_PLUGIN_FILE" ]; then
-        TEXT_DOMAIN=$(grep -m1 "Text Domain:" "$MAIN_PLUGIN_FILE" 2>/dev/null | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
-    fi
-
-    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: Running PHPCS with config: $phpcs_config"
-        echo "DEBUG: Target path: $PLUGIN_PATH"
-        echo "DEBUG: Main plugin file: ${MAIN_PLUGIN_FILE:-NOT_FOUND}"
-        echo "DEBUG: Text domain: ${TEXT_DOMAIN:-NOT_DETECTED}"
-    fi
-
-    # Build phpcs command with optional text domain
-    local phpcs_args=(--standard="$phpcs_config")
-    if [ -n "$TEXT_DOMAIN" ]; then
-        phpcs_args+=(--runtime-set text_domain "$TEXT_DOMAIN")
-    fi
-    phpcs_args+=("$PLUGIN_PATH")
-
+    # Run linting in summary mode for concise test output
     local lint_exit=0
-    "$phpcs" "${phpcs_args[@]}" || lint_exit=$?
+    HOMEBOY_SUMMARY_MODE=1 bash "$lint_runner" || lint_exit=$?
 
     if [ $lint_exit -eq 0 ]; then
-        echo "PHPCS linting passed"
+        echo ""
     elif [ $lint_exit -le 2 ]; then
         echo ""
-        echo "⚠ PHPCS found style issues (see above). Proceeding to tests..."
+        echo "Linting found issues (see above). Proceeding to tests..."
         echo ""
     else
-        echo "PHPCS encountered a fatal error (exit code $lint_exit). Aborting."
-        exit 1
-    fi
-}
-
-# Lint JavaScript files using ESLint
-run_eslint() {
-    # Check if component has JavaScript files
-    local js_files
-    js_files=$(find "$PLUGIN_PATH" -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \) \
-        -not -path "*/node_modules/*" \
-        -not -path "*/vendor/*" \
-        -not -path "*/build/*" \
-        -not -path "*/dist/*" \
-        -not -name "*.min.js" \
-        2>/dev/null | head -1)
-
-    if [ -z "$js_files" ]; then
-        if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-            echo "DEBUG: No JavaScript files found, skipping ESLint"
-        fi
-        return 0
-    fi
-
-    echo "Linting JavaScript files with ESLint..."
-
-    local eslint="${MODULE_PATH}/node_modules/.bin/eslint"
-    if [ ! -f "$eslint" ]; then
-        echo "Warning: ESLint not found, skipping JavaScript linting"
-        return 0
-    fi
-
-    # Auto-detect text domain (same pattern as PHPCS)
-    local TEXT_DOMAIN=""
-    local MAIN_PLUGIN_FILE
-    MAIN_PLUGIN_FILE=$(find "$PLUGIN_PATH" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
-    if [ -n "$MAIN_PLUGIN_FILE" ]; then
-        TEXT_DOMAIN=$(grep -m1 "Text Domain:" "$MAIN_PLUGIN_FILE" 2>/dev/null | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
-    fi
-
-    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: Running ESLint with config: ${MODULE_PATH}/.eslintrc.json"
-        echo "DEBUG: Target path: $PLUGIN_PATH"
-        echo "DEBUG: Text domain: ${TEXT_DOMAIN:-NOT_DETECTED}"
-    fi
-
-    # Build ESLint command with text domain rule if detected
-    local eslint_args=(--config "${MODULE_PATH}/.eslintrc.json" --ext .js,.jsx,.ts,.tsx)
-    if [ -n "$TEXT_DOMAIN" ]; then
-        eslint_args+=(--rule "@wordpress/i18n-text-domain: [error, { allowedTextDomain: \"$TEXT_DOMAIN\" }]")
-    fi
-    eslint_args+=("$PLUGIN_PATH")
-
-    local lint_exit=0
-    "$eslint" "${eslint_args[@]}" || lint_exit=$?
-
-    if [ $lint_exit -eq 0 ]; then
-        echo "ESLint linting passed"
-    elif [ $lint_exit -eq 1 ]; then
-        echo ""
-        echo "⚠ ESLint found style issues (see above). Proceeding to tests..."
-        echo ""
-    else
-        echo "ESLint encountered a fatal error (exit code $lint_exit). Aborting."
+        echo "Linting encountered a fatal error (exit code $lint_exit). Aborting."
         exit 1
     fi
 }
@@ -244,7 +149,6 @@ export ABSPATH="$ABSPATH"
 # Run linting before tests (unless skipped)
 if [[ "${HOMEBOY_SKIP_LINT:-}" != "1" ]]; then
     run_lint
-    run_eslint
 else
     echo "Skipping linting (--skip-lint)"
 fi
@@ -295,4 +199,5 @@ echo "Running PHPUnit tests..."
   --bootstrap="${MODULE_PATH}/tests/bootstrap.php" \
   --configuration="${MODULE_PATH}/phpunit.xml.dist" \
   --testdox \
-  "${TEST_DIR}"
+  "${TEST_DIR}" \
+  "$@"

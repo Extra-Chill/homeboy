@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Universal Build Script for WordPress Plugins and Themes
 #

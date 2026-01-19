@@ -4,17 +4,52 @@
 ## Synopsis
 
 ```sh
-homeboy wp <projectId> <args...>
+homeboy wp <projectId> [subtarget] <args...>
 ```
 
 ## Arguments and flags
 
 - `projectId`: project ID
-- `<args...>`: CLI tool arguments (trailing var args; hyphen values allowed)
+- `subtarget`: (optional) subtarget identifier for multisite projects
+- `<args...>`: WP-CLI arguments (trailing var args; hyphen values allowed)
 
 ## Execution
 
 Commands execute locally if the project has no `serverId` configured, or via SSH if `serverId` is set.
+
+## Shell Quoting
+
+Arguments are passed directly to WP-CLI. The shell processes quotes **before** homeboy receives them, so understanding quote behavior is essential.
+
+### Do NOT quote multi-word commands
+
+```sh
+# WRONG - shell passes single arg: "datamachine-events health-check --scope=upcoming"
+homeboy wp extra-chill events "datamachine-events health-check --scope=upcoming"
+
+# CORRECT - shell passes separate args to homeboy
+homeboy wp extra-chill events datamachine-events health-check --scope=upcoming
+```
+
+### DO quote values with spaces
+
+```sh
+# CORRECT - quotes protect the value, not the command structure
+homeboy wp extra-chill post create --post_title="My New Post"
+homeboy wp extra-chill user create bob@example.com --display_name="Bob Smith"
+```
+
+### Subtarget example
+
+For projects with subtargets, specify the subtarget after the project ID:
+
+```sh
+# Run WP-CLI on the 'events' subtarget
+homeboy wp extra-chill events core version
+
+# Run a plugin command on a subtarget
+homeboy wp extra-chill events datamachine-events health-check --scope=upcoming
+```
 
 ## JSON output
 

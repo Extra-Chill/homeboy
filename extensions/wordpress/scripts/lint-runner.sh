@@ -302,23 +302,68 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         fi
     fi
 
-    # Exit with appropriate code
+    PHPCS_PASSED=0
     if [ "$json_exit" -eq 0 ]; then
         echo ""
         echo "PHPCS linting passed"
-        exit 0
+        PHPCS_PASSED=1
     else
         echo ""
         echo "PHPCS linting failed"
+    fi
+
+    # Run ESLint in summary mode
+    ESLINT_RUNNER="${MODULE_PATH}/scripts/eslint-runner.sh"
+    ESLINT_PASSED=1
+
+    if [ -f "$ESLINT_RUNNER" ]; then
+        echo ""
+        set +e
+        bash "$ESLINT_RUNNER"
+        ESLINT_EXIT=$?
+        set -e
+
+        if [ "$ESLINT_EXIT" -ne 0 ]; then
+            ESLINT_PASSED=0
+        fi
+    fi
+
+    # Exit based on combined results
+    if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ]; then
+        exit 0
+    else
         exit 1
     fi
 fi
 
 # Full report mode (default)
+PHPCS_PASSED=0
 if "$PHPCS_BIN" "${phpcs_base_args[@]}" "${LINT_FILES[@]}"; then
     echo "PHPCS linting passed"
-    exit 0
+    PHPCS_PASSED=1
 else
     echo "PHPCS linting failed"
+fi
+
+# Run ESLint for JavaScript files
+ESLINT_RUNNER="${MODULE_PATH}/scripts/eslint-runner.sh"
+ESLINT_PASSED=1
+
+if [ -f "$ESLINT_RUNNER" ]; then
+    echo ""
+    set +e
+    bash "$ESLINT_RUNNER"
+    ESLINT_EXIT=$?
+    set -e
+
+    if [ "$ESLINT_EXIT" -ne 0 ]; then
+        ESLINT_PASSED=0
+    fi
+fi
+
+# Exit based on combined results
+if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ]; then
+    exit 0
+else
     exit 1
 fi
