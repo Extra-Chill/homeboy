@@ -436,4 +436,96 @@ actor CLIBridge {
             }
         }
     }
+
+    // MARK: - Project CRUD
+
+    func projectList() async throws -> [ProjectConfiguration] {
+        let response = try await execute(["project", "list", "--json"])
+        let result = try response.decodeResponse([ProjectConfiguration].self)
+        return result.data ?? []
+    }
+
+    func projectShow(id: String) async throws -> ProjectConfiguration {
+        let response = try await execute(["project", "show", id, "--json"])
+        let result = try response.decodeResponse(ProjectConfiguration.self)
+        return result.data!
+    }
+
+    func projectCreate(name: String, domain: String) async throws -> ProjectConfiguration {
+        let spec = [
+            "name": name,
+            "domain": domain
+        ] as [String: Any]
+
+        let data = try JSONSerialization.data(withJSONObject: spec)
+        let jsonString = String(data: data, encoding: .utf8)!
+
+        let response = try await execute(["project", "create", "--json", jsonString])
+        let result = try response.decodeResponse(ProjectConfiguration.self)
+        return result.data!
+    }
+
+    func projectSet(_ project: ProjectConfiguration) async throws -> Void {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let data = try encoder.encode(project)
+        let jsonString = String(data: data, encoding: .utf8)!
+        _ = try await execute(["project", "set", "--json", jsonString])
+    }
+
+    func projectDelete(id: String) async throws -> Void {
+        _ = try await execute(["project", "delete", id])
+    }
+
+    // MARK: - Server CRUD
+
+    func serverList() async throws -> [ServerConfig] {
+        let response = try await execute(["server", "list", "--json"])
+        let result = try response.decodeResponse([ServerConfig].self)
+        return result.data ?? []
+    }
+
+    func serverShow(id: String) async throws -> ServerConfig {
+        let response = try await execute(["server", "show", id, "--json"])
+        let result = try response.decodeResponse(ServerConfig.self)
+        return result.data!
+    }
+
+    func serverSet(_ server: ServerConfig) async throws -> Void {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let data = try encoder.encode(server)
+        let jsonString = String(data: data, encoding: .utf8)!
+        _ = try await execute(["server", "set", "--json", jsonString])
+    }
+
+    func serverDelete(id: String) async throws -> Void {
+        _ = try await execute(["server", "delete", id])
+    }
+
+    // MARK: - Component CRUD
+
+    func componentList() async throws -> [ComponentConfiguration] {
+        let response = try await execute(["component", "list", "--json"])
+        let result = try response.decodeResponse([ComponentConfiguration].self)
+        return result.data ?? []
+    }
+
+    func componentShow(id: String) async throws -> ComponentConfiguration {
+        let response = try await execute(["component", "show", id, "--json"])
+        let result = try response.decodeResponse(ComponentConfiguration.self)
+        return result.data!
+    }
+
+    func componentSet(_ component: ComponentConfiguration) async throws -> Void {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let data = try encoder.encode(component)
+        let jsonString = String(data: data, encoding: .utf8)!
+        _ = try await execute(["component", "set", "--json", jsonString])
+    }
+
+    func componentDelete(id: String) async throws -> Void {
+        _ = try await execute(["component", "delete", id])
+    }
 }

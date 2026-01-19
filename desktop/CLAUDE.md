@@ -86,9 +86,9 @@ CLI discovery checks these paths in order:
 
 ## Module Plugin System
 
-The app supports installable modules via the `{module-id}.json` manifest. Modules are stored in the shared config directory:
+The app supports installable modules via the `{module-id}.json` manifest. Modules are stored in the desktop app's config directory:
 ```
-~/.config/homeboy/modules/<module-id>/
+~/Library/Application Support/Homeboy/modules/<module-id>/
 ```
 
 ### Key Files
@@ -175,7 +175,7 @@ Run `homeboy docs` for the canonical CLI documentation.
 
 ## Configuration
 
-**Desktop is a pure UI wrapper.** All configuration is stored in the CLI's canonical config directory (`~/.config/homeboy/`). The Desktop reads from this directory for reactivity/caching but all writes go through CLI commands via `CLIBridge`.
+**Desktop is a pure UI wrapper.** The desktop app stores configuration in its own config directory (`~/Library/Application Support/Homeboy/`). The Desktop reads from this directory for reactivity/caching. The desktop app does NOT share on-disk config with the CLI, which uses `~/.config/homeboy/` (documented in `homeboy/docs/index.md`).
 
 Config change reactivity is implemented by `ConfigurationObserver` (`Homeboy/Core/Config/ConfigurationObserver.swift`), which watches:
 - `AppPaths.projects`
@@ -183,10 +183,10 @@ Config change reactivity is implemented by `ConfigurationObserver` (`Homeboy/Cor
 - `AppPaths.modules`
 - `AppPaths.projectTypes`
 
-Shared config tree (`~/.config/homeboy/`):
+Desktop app config tree (`~/Library/Application Support/Homeboy/`):
 
 ```
-~/.config/homeboy/
+~/Library/Application Support/Homeboy/
 ├── projects/             # Project configuration
 │   └── <project-id>.json
 ├── servers/              # SSH server configuration
