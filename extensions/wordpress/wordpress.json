@@ -15,7 +15,7 @@
   "cli": {
     "tool": "wp",
     "display_name": "WP-CLI",
-    "command_template": "{{cliPath}} {{args}} --url={{domain}}",
+    "command_template": "{{cliPath}} {{args}} --path={{sitePath}} --url={{domain}}",
     "working_dir_template": "{{sitePath}}",
     "default_cli_path": "wp",
     "settings_flags": {
@@ -85,7 +85,7 @@
     {
       "path_pattern": "/wp-content/plugins/",
       "staging_path": "/tmp/homeboy-staging",
-      "install_command": "cd {{siteRoot}} && plugin_slug=$(basename {{targetDir}}) && ({{cliPath}} plugin deactivate $plugin_slug --url={{domain}} 2>/dev/null || ([ -d {{targetDir}} ] && echo 'WARNING: Removing broken plugin directory' && rm -rf {{targetDir}}) || true) && {{cliPath}} plugin install {{stagingArtifact}} --force --activate --url={{domain}}",
+      "install_command": "cd {{siteRoot}} && plugin_slug=$(basename {{targetDir}}) && ({{cliPath}} plugin deactivate $plugin_slug --url={{domain}} 2>/dev/null || ([ -d {{targetDir}} ] && echo 'WARNING: Removing broken plugin directory' && rm -rf {{targetDir}}) || true) && {{cliPath}} plugin install {{stagingArtifact}} --force --url={{domain}}",
       "cleanup_command": "rm -f {{stagingArtifact}}",
       "skip_permissions_fix": true
     },
@@ -112,5 +112,54 @@
     "module_script": "scripts/build.sh"
   },
 
-  "commands": ["wp"]
+  "runtime": {
+    "setup_command": "bash {{module_path}}/scripts/setup.sh",
+    "ready_check": "test -f {{module_path}}/vendor/wp-phpunit/wp-phpunit/includes/bootstrap.php",
+    "run_command": "bash {{module_path}}/scripts/test-runner.sh"
+  },
+
+  "testing": {
+    "supported_databases": ["sqlite", "mysql"],
+    "default_database": "sqlite"
+  },
+
+  "settings": [
+    {
+      "id": "database_type",
+      "label": "Database Type",
+      "type": "string",
+      "default": "sqlite",
+      "description": "Database backend for tests. Valid values: 'sqlite' (in-memory, fastest) or 'mysql' (for production parity)"
+    },
+    {
+      "id": "mysql_host",
+      "label": "MySQL Host",
+      "type": "string",
+      "default": "localhost",
+      "description": "MySQL host (when using mysql database type)"
+    },
+    {
+      "id": "mysql_database",
+      "label": "MySQL Database",
+      "type": "string",
+      "default": "wordpress_test",
+      "description": "MySQL database name (when using mysql database type)"
+    },
+    {
+      "id": "mysql_user",
+      "label": "MySQL User",
+      "type": "string",
+      "default": "root",
+      "description": "MySQL user (when using mysql database type)"
+    },
+    {
+      "id": "mysql_password",
+      "label": "MySQL Password",
+      "type": "string",
+      "default": "",
+      "description": "MySQL password (when using mysql database type)"
+    }
+  ],
+
+  "commands": ["wp", "wp-test"]
 }

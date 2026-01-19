@@ -270,8 +270,8 @@ create_rsync_excludes() {
     local exclude_file="$1"
 
     if [ -f ".buildignore" ]; then
-        # Convert .buildignore to rsync exclude format
-        sed 's|^/||; s|/$||; /^#/d; /^$/d' .buildignore > "$exclude_file"
+        # Convert .buildignore to rsync exclude format (preserve leading slash for root-only patterns)
+        sed 's|/$||; /^#/d; /^$/d' .buildignore > "$exclude_file"
     else
         # Default excludes if no .buildignore file
         cat > "$exclude_file" << 'EOF'

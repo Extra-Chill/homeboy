@@ -1,0 +1,28 @@
+{
+  "name": "homeboy/module-wordpress",
+  "description": "WordPress module with embedded test infrastructure",
+  "type": "homeboy-module",
+  "license": "GPL-2.0-or-later",
+
+  "require": {
+    "php": ">=7.4",
+    "wp-phpunit/wp-phpunit": "^6.8"
+  },
+
+  "require-dev": {
+    "phpunit/phpunit": "^9.0"
+  },
+
+  "config": {
+    "allow-plugins": {
+      "dealerdirect/phpcodesniffer-composer-installer": true
+    }
+  },
+
+  "scripts": {
+    "setup": [
+      "@composer install"
+    ],
+    "test": "phpunit --configuration={{modulePath}}/phpunit.xml.dist"
+  }
+}
