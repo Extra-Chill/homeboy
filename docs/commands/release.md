@@ -38,6 +38,10 @@ Notes:
 - Release config is read from the component (`components/<id>.json`).
 - If no release config exists for the component, the command errors and suggests adding one via `homeboy component set`.
 - Module actions are resolved from `component.modules`.
+- **Prerequisites validation**: The plan command validates release prerequisites and surfaces warnings:
+  - Empty changelog: "No unreleased changelog entries. Run `homeboy changelog add` first."
+  - Subsection headers only: "Changelog has subsection headers but no items. Add entries with `homeboy changelog add`."
+  - No changelog configured: "No changelog configured for this component."
 
 ### `run`
 

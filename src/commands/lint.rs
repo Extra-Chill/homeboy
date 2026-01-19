@@ -1,6 +1,8 @@
 use clap::Args;
 use serde::Serialize;
 
+use homeboy::component;
+use homeboy::git;
 use homeboy::module::ModuleRunner;
 
 use super::CmdResult;
@@ -25,6 +27,10 @@ pub struct LintArgs {
     /// Lint only files matching glob pattern (e.g., "inc/**/*.php")
     #[arg(long)]
     glob: Option<String>,
+
+    /// Lint only files modified in the working tree (staged, unstaged, untracked)
+    #[arg(long)]
+    changed_only: bool,
 
     /// Show only errors, suppress warnings
     #[arg(long)]
@@ -54,12 +60,55 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
 }
 
 pub fn run_json(args: LintArgs) -> CmdResult<LintOutput> {
+    // Resolve glob from --changed-only flag
+    let effective_glob = if args.changed_only {
+        let component = component::load(&args.component)?;
+        let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
+
+        // Collect all changed files
+        let mut changed_files: Vec<String> = Vec::new();
+        changed_files.extend(uncommitted.staged);
+        changed_files.extend(uncommitted.unstaged);
+        changed_files.extend(uncommitted.untracked);
+
+        // Filter to only .php files
+        let php_files: Vec<&str> = changed_files
+            .iter()
+            .filter(|f| f.ends_with(".php"))
+            .map(|s| s.as_str())
+            .collect();
+
+        if php_files.is_empty() {
+            // No PHP files changed - return early with success
+            return Ok((
+                LintOutput {
+                    status: "passed".to_string(),
+                    component: args.component,
+                    stdout: "No PHP files in working tree changes".to_string(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    hints: None,
+                },
+                0,
+            ));
+        }
+
+        // Build brace expansion glob: {file1.php,file2.php,...}
+        if php_files.len() == 1 {
+            Some(php_files[0].to_string())
+        } else {
+            Some(format!("{{{}}}", php_files.join(",")))
+        }
+    } else {
+        args.glob.clone()
+    };
+
     let output = ModuleRunner::new(&args.component, "lint-runner.sh")
         .settings(&args.setting)
         .env_if(args.fix, "HOMEBOY_AUTO_FIX", "1")
         .env_if(args.summary, "HOMEBOY_SUMMARY_MODE", "1")
         .env_opt("HOMEBOY_LINT_FILE", &args.file)
-        .env_opt("HOMEBOY_LINT_GLOB", &args.glob)
+        .env_opt("HOMEBOY_LINT_GLOB", &effective_glob)
         .env_if(args.errors_only, "HOMEBOY_ERRORS_ONLY", "1")
         .run()?;
 

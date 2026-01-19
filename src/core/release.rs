@@ -991,6 +991,44 @@ pub fn resolve_component_release(component: &Component) -> Option<ReleaseConfig>
     component.release.clone()
 }
 
+fn validate_plan_prerequisites(component: &Component) -> Vec<String> {
+    use crate::core::local_files::FileSystem;
+    let mut warnings = Vec::new();
+
+    // Check changelog status
+    match changelog::resolve_changelog_path(component) {
+        Ok(changelog_path) => {
+            if let Ok(content) = crate::core::local_files::local().read(&changelog_path) {
+                let settings = changelog::resolve_effective_settings(Some(component));
+                if let Ok(Some(status)) =
+                    changelog::check_next_section_content(&content, &settings.next_section_aliases)
+                {
+                    match status.as_str() {
+                        "empty" => {
+                            warnings.push(
+                                "No unreleased changelog entries. Run `homeboy changelog add` first."
+                                    .to_string(),
+                            );
+                        }
+                        "subsection_headers_only" => {
+                            warnings.push(
+                                "Changelog has subsection headers but no items. Add entries with `homeboy changelog add`."
+                                    .to_string(),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            warnings.push("No changelog configured for this component.".to_string());
+        }
+    }
+
+    warnings
+}
+
 pub fn plan(component_id: &str, module_id: Option<&str>) -> Result<ReleasePlan> {
     let component = component::load(component_id)?;
     let modules = resolve_modules(&component, module_id)?;
@@ -1024,6 +1062,10 @@ pub fn plan(component_id: &str, module_id: Option<&str>) -> Result<ReleasePlan> 
         .map(ReleasePlanStep::from)
         .collect();
 
+    // Validate plan prerequisites and merge warnings
+    let mut warnings = pipeline_plan.warnings;
+    warnings.extend(validate_plan_prerequisites(&component));
+
     let mut hints = build_plan_hints(component_id, &steps, &modules);
     if commit_auto_inserted {
         hints.insert(
@@ -1040,7 +1082,7 @@ pub fn plan(component_id: &str, module_id: Option<&str>) -> Result<ReleasePlan> 
         component_id: component_id.to_string(),
         enabled,
         steps,
-        warnings: pipeline_plan.warnings,
+        warnings,
         hints,
     })
 }
