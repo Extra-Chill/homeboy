@@ -121,17 +121,28 @@ pub fn run_json(args: LintArgs) -> CmdResult<LintOutput> {
 
     let status = if output.success { "passed" } else { "failed" };
 
-    let hints = if !output.success && !args.fix {
-        Some(vec![
-            format!(
-                "Run 'homeboy lint {} --fix' to auto-fix formatting issues",
-                args.component
-            ),
-            "Some issues may require manual fixes".to_string(),
-        ])
-    } else {
-        None
-    };
+    let mut hints = Vec::new();
+
+    // Fix hint when linting fails
+    if !output.success && !args.fix {
+        hints.push(format!(
+            "Run 'homeboy lint {} --fix' to auto-fix formatting issues",
+            args.component
+        ));
+        hints.push("Some issues may require manual fixes".to_string());
+    }
+
+    // Capability hints when running component-wide lint (no targeting options used)
+    if args.file.is_none() && args.glob.is_none() && !args.changed_only {
+        hints.push(
+            "For targeted linting: --file <path>, --glob <pattern>, or --changed-only".to_string(),
+        );
+    }
+
+    // Always include docs reference
+    hints.push("Full options: homeboy docs commands/lint".to_string());
+
+    let hints = if hints.is_empty() { None } else { Some(hints) };
 
     Ok((
         LintOutput {

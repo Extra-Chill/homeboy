@@ -30,6 +30,8 @@ pub struct TestOutput {
     stdout: String,
     stderr: String,
     exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hints: Option<Vec<String>>,
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {
@@ -48,6 +50,26 @@ pub fn run_json(args: TestArgs) -> CmdResult<TestOutput> {
 
     let status = if output.success { "passed" } else { "failed" };
 
+    let mut hints = Vec::new();
+
+    // Filter hint when tests fail and no passthrough args were used
+    if !output.success && args.args.is_empty() {
+        hints.push(format!(
+            "To run specific tests: homeboy test {} -- --filter=TestName",
+            args.component
+        ));
+    }
+
+    // Capability hint when not using passthrough args
+    if args.args.is_empty() {
+        hints.push("Pass args to test runner: homeboy test <component> -- [args]".to_string());
+    }
+
+    // Always include docs reference
+    hints.push("Full options: homeboy docs commands/test".to_string());
+
+    let hints = if hints.is_empty() { None } else { Some(hints) };
+
     Ok((
         TestOutput {
             status: status.to_string(),
@@ -55,6 +77,7 @@ pub fn run_json(args: TestArgs) -> CmdResult<TestOutput> {
             stdout: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code,
+            hints,
         },
         output.exit_code,
     ))
