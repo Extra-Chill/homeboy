@@ -165,7 +165,18 @@ pub fn build_component(component: &component::Component) -> (Option<i32>, Option
     // Fix local permissions before build to ensure zip has correct permissions
     permissions::fix_local_permissions(&component.local_path);
 
-    let output = execute_local_command_in_dir(&build_cmd, Some(&component.local_path), None);
+    // Get module path env vars for build command (matches pre-build script behavior)
+    let env_vars = get_build_env_vars(component);
+    let env_refs: Vec<(&str, &str)> = env_vars
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    let output = execute_local_command_in_dir(
+        &build_cmd,
+        Some(&component.local_path),
+        if env_refs.is_empty() { None } else { Some(&env_refs) },
+    );
 
     if output.success {
         (Some(output.exit_code), None)
@@ -260,7 +271,18 @@ fn execute_build(component_id: &str) -> Result<(BuildOutput, i32)> {
     // Fix local permissions before build to ensure zip has correct permissions
     permissions::fix_local_permissions(&comp.local_path);
 
-    let output = execute_local_command_in_dir(&build_cmd, Some(&comp.local_path), None);
+    // Get module path env vars for build command (matches pre-build script behavior)
+    let env_vars = get_build_env_vars(&comp);
+    let env_refs: Vec<(&str, &str)> = env_vars
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    let output = execute_local_command_in_dir(
+        &build_cmd,
+        Some(&comp.local_path),
+        if env_refs.is_empty() { None } else { Some(&env_refs) },
+    );
 
     Ok((
         BuildOutput {
@@ -329,6 +351,30 @@ fn run_pre_build_scripts(comp: &Component) -> Result<Option<(i32, String)>> {
     }
 
     Ok(None)
+}
+
+/// Get environment variables for build commands (module path, component path).
+/// Matches the env vars passed to pre-build scripts for consistency.
+fn get_build_env_vars(comp: &Component) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+
+    if let Some(modules) = &comp.modules {
+        for module_id in modules.keys() {
+            if let Ok(module) = module::load_module(module_id) {
+                if module.build.is_some() {
+                    if let Ok(module_path) = paths::module(module_id) {
+                        let module_path_str = module_path.to_string_lossy().to_string();
+                        env.push(("HOMEBOY_MODULE_PATH".to_string(), module_path_str));
+                        env.push(("HOMEBOY_COMPONENT_PATH".to_string(), comp.local_path.clone()));
+                        env.push(("HOMEBOY_PLUGIN_PATH".to_string(), comp.local_path.clone()));
+                        break; // Use first module with build config
+                    }
+                }
+            }
+        }
+    }
+
+    env
 }
 
 #[cfg(test)]

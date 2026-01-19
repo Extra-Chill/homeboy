@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.27.8] - 2026-01-19
+
+### Fixed
+- Pass HOMEBOY_MODULE_PATH environment variable to build commands
+
 ## [0.27.7] - 2026-01-19
 
 ### Fixed
