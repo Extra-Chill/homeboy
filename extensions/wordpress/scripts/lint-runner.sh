@@ -68,6 +68,9 @@ PHPCBF_BIN="${MODULE_PATH}/vendor/bin/phpcbf"
 YODA_FIXER="${MODULE_PATH}/scripts/yoda-fixer.php"
 IN_ARRAY_FIXER="${MODULE_PATH}/scripts/in-array-strict-fixer.php"
 SHORT_TERNARY_FIXER="${MODULE_PATH}/scripts/short-ternary-fixer.php"
+ESCAPE_I18N_FIXER="${MODULE_PATH}/scripts/escape-i18n-fixer.php"
+ECHO_TRANSLATE_FIXER="${MODULE_PATH}/scripts/echo-translate-fixer.php"
+SAFE_REDIRECT_FIXER="${MODULE_PATH}/scripts/safe-redirect-fixer.php"
 PHPCS_CONFIG="${MODULE_PATH}/phpcs.xml.dist"
 
 # Validate tools exist
@@ -106,6 +109,21 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
     # Run short ternary fixer (expand ?: to ? : for simple vars)
     if [ -f "$SHORT_TERNARY_FIXER" ]; then
         php "$SHORT_TERNARY_FIXER" "$PLUGIN_PATH"
+    fi
+
+    # Run escape i18n fixer (_e -> esc_html_e)
+    if [ -f "$ESCAPE_I18N_FIXER" ]; then
+        php "$ESCAPE_I18N_FIXER" "$PLUGIN_PATH"
+    fi
+
+    # Run echo translate fixer (echo __() -> echo esc_html__())
+    if [ -f "$ECHO_TRANSLATE_FIXER" ]; then
+        php "$ECHO_TRANSLATE_FIXER" "$PLUGIN_PATH"
+    fi
+
+    # Run safe redirect fixer (wp_redirect -> wp_safe_redirect)
+    if [ -f "$SAFE_REDIRECT_FIXER" ]; then
+        php "$SAFE_REDIRECT_FIXER" "$PLUGIN_PATH"
     fi
 
     # Run phpcbf for remaining auto-fixable issues

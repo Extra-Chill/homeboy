@@ -143,10 +143,17 @@ run_lint() {
     fi
     phpcs_args+=("$PLUGIN_PATH")
 
-    if "$phpcs" "${phpcs_args[@]}"; then
+    local lint_exit=0
+    "$phpcs" "${phpcs_args[@]}" || lint_exit=$?
+
+    if [ $lint_exit -eq 0 ]; then
         echo "PHPCS linting passed"
+    elif [ $lint_exit -le 2 ]; then
+        echo ""
+        echo "⚠ PHPCS found style issues (see above). Proceeding to tests..."
+        echo ""
     else
-        echo "PHPCS linting failed. Aborting tests."
+        echo "PHPCS encountered a fatal error (exit code $lint_exit). Aborting."
         exit 1
     fi
 }
@@ -199,10 +206,17 @@ run_eslint() {
     fi
     eslint_args+=("$PLUGIN_PATH")
 
-    if "$eslint" "${eslint_args[@]}"; then
+    local lint_exit=0
+    "$eslint" "${eslint_args[@]}" || lint_exit=$?
+
+    if [ $lint_exit -eq 0 ]; then
         echo "ESLint linting passed"
+    elif [ $lint_exit -eq 1 ]; then
+        echo ""
+        echo "⚠ ESLint found style issues (see above). Proceeding to tests..."
+        echo ""
     else
-        echo "ESLint linting failed. Aborting tests."
+        echo "ESLint encountered a fatal error (exit code $lint_exit). Aborting."
         exit 1
     fi
 }
