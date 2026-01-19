@@ -5,7 +5,6 @@ use crate::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::paths;
 use crate::project;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,23 +39,17 @@ impl Server {
 }
 
 impl ConfigEntity for Server {
+    const ENTITY_TYPE: &'static str = "server";
+    const DIR_NAME: &'static str = "servers";
+
     fn id(&self) -> &str {
         &self.id
     }
     fn set_id(&mut self, id: String) {
         self.id = id;
     }
-    fn config_path(id: &str) -> Result<PathBuf> {
-        paths::server(id)
-    }
-    fn config_dir() -> Result<PathBuf> {
-        paths::servers()
-    }
     fn not_found_error(id: String, suggestions: Vec<String>) -> Error {
         Error::server_not_found(id, suggestions)
-    }
-    fn entity_type() -> &'static str {
-        "server"
     }
 }
 

@@ -4,6 +4,26 @@ use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Type of action that can be executed by a module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionType {
+    Api,
+    Command,
+}
+
+/// HTTP method for API actions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethod {
+    #[default]
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
 /// Unified module manifest that can provide platform behavior AND/OR executable tools.
 /// All fields are optional - modules include only what they need.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,23 +115,22 @@ impl ModuleManifest {
 }
 
 impl ConfigEntity for ModuleManifest {
+    const ENTITY_TYPE: &'static str = "module";
+    const DIR_NAME: &'static str = "modules";
+
     fn id(&self) -> &str {
         &self.id
     }
     fn set_id(&mut self, id: String) {
         self.id = id;
     }
-    fn config_path(id: &str) -> Result<PathBuf> {
-        paths::module_manifest(id)
-    }
-    fn config_dir() -> Result<PathBuf> {
-        paths::modules()
-    }
     fn not_found_error(id: String, suggestions: Vec<String>) -> Error {
         Error::module_not_found(id, suggestions)
     }
-    fn entity_type() -> &'static str {
-        "module"
+
+    /// Override: modules use `{dir}/{id}/{id}.json` pattern.
+    fn config_path(id: &str) -> Result<PathBuf> {
+        paths::module_manifest(id)
     }
 }
 
@@ -308,11 +327,11 @@ pub struct ActionConfig {
     pub id: String,
     pub label: String,
     #[serde(rename = "type")]
-    pub action_type: String,
+    pub action_type: ActionType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
+    pub method: Option<HttpMethod>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires_auth: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

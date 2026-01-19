@@ -6,11 +6,21 @@
 use crate::error::{Error, ErrorCode, Result};
 use crate::keychain;
 use crate::project::{ApiConfig, AuthConfig, AuthFlowConfig, VariableSource};
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::{Client, RequestBuilder, Response};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// HTTP method for API requests.
+#[derive(Clone, Copy)]
+enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
 
 fn config_error(msg: impl Into<String>) -> Error {
     Error::new(ErrorCode::ConfigInvalidValue, msg, Value::Null)
@@ -67,74 +77,63 @@ impl ApiClient {
         })
     }
 
-    /// Makes a GET request.
-    pub fn get(&self, endpoint: &str) -> Result<Value> {
+    /// Executes an HTTP request with optional body and authentication.
+    fn execute_request(
+        &self,
+        method: HttpMethod,
+        endpoint: &str,
+        body: Option<&Value>,
+    ) -> Result<Value> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let mut request = self.client.get(&url);
 
-        if let Some(header) = self.resolve_auth_header()? {
+        let request: RequestBuilder = match method {
+            HttpMethod::Get => self.client.get(&url),
+            HttpMethod::Post => self.client.post(&url),
+            HttpMethod::Put => self.client.put(&url),
+            HttpMethod::Patch => self.client.patch(&url),
+            HttpMethod::Delete => self.client.delete(&url),
+        };
+
+        let request = if let Some(body) = body {
+            request.json(body)
+        } else {
+            request
+        };
+
+        let request = if let Some(header) = self.resolve_auth_header()? {
             let (name, value) = parse_header(&header)?;
-            request = request.header(name, value);
-        }
+            request.header(name, value)
+        } else {
+            request
+        };
 
         let response = request.send().map_err(http_error)?;
         parse_json_response(response)
+    }
+
+    /// Makes a GET request.
+    pub fn get(&self, endpoint: &str) -> Result<Value> {
+        self.execute_request(HttpMethod::Get, endpoint, None)
     }
 
     /// Makes a POST request with JSON body.
     pub fn post(&self, endpoint: &str, body: &Value) -> Result<Value> {
-        let url = format!("{}{}", self.base_url, endpoint);
-        let mut request = self.client.post(&url).json(body);
-
-        if let Some(header) = self.resolve_auth_header()? {
-            let (name, value) = parse_header(&header)?;
-            request = request.header(name, value);
-        }
-
-        let response = request.send().map_err(http_error)?;
-        parse_json_response(response)
+        self.execute_request(HttpMethod::Post, endpoint, Some(body))
     }
 
     /// Makes a PUT request with JSON body.
     pub fn put(&self, endpoint: &str, body: &Value) -> Result<Value> {
-        let url = format!("{}{}", self.base_url, endpoint);
-        let mut request = self.client.put(&url).json(body);
-
-        if let Some(header) = self.resolve_auth_header()? {
-            let (name, value) = parse_header(&header)?;
-            request = request.header(name, value);
-        }
-
-        let response = request.send().map_err(http_error)?;
-        parse_json_response(response)
+        self.execute_request(HttpMethod::Put, endpoint, Some(body))
     }
 
     /// Makes a PATCH request with JSON body.
     pub fn patch(&self, endpoint: &str, body: &Value) -> Result<Value> {
-        let url = format!("{}{}", self.base_url, endpoint);
-        let mut request = self.client.patch(&url).json(body);
-
-        if let Some(header) = self.resolve_auth_header()? {
-            let (name, value) = parse_header(&header)?;
-            request = request.header(name, value);
-        }
-
-        let response = request.send().map_err(http_error)?;
-        parse_json_response(response)
+        self.execute_request(HttpMethod::Patch, endpoint, Some(body))
     }
 
     /// Makes a DELETE request.
     pub fn delete(&self, endpoint: &str) -> Result<Value> {
-        let url = format!("{}{}", self.base_url, endpoint);
-        let mut request = self.client.delete(&url);
-
-        if let Some(header) = self.resolve_auth_header()? {
-            let (name, value) = parse_header(&header)?;
-            request = request.header(name, value);
-        }
-
-        let response = request.send().map_err(http_error)?;
-        parse_json_response(response)
+        self.execute_request(HttpMethod::Delete, endpoint, None)
     }
 
     /// Makes a POST request without auth (for login flows).

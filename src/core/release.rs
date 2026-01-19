@@ -1,6 +1,90 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use std::collections::HashMap;
+
+/// Type of release pipeline step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseStepType {
+    Build,
+    Changelog,
+    Version,
+    GitCommit,
+    GitTag,
+    GitPush,
+    Changes,
+    ModuleRun,
+    ModuleAction(String),
+}
+
+impl ReleaseStepType {
+    pub fn as_str(&self) -> &str {
+        match self {
+            ReleaseStepType::Build => "build",
+            ReleaseStepType::Changelog => "changelog",
+            ReleaseStepType::Version => "version",
+            ReleaseStepType::GitCommit => "git.commit",
+            ReleaseStepType::GitTag => "git.tag",
+            ReleaseStepType::GitPush => "git.push",
+            ReleaseStepType::Changes => "changes",
+            ReleaseStepType::ModuleRun => "module.run",
+            ReleaseStepType::ModuleAction(s) => s.as_str(),
+        }
+    }
+
+    pub fn is_core_step(&self) -> bool {
+        matches!(
+            self,
+            ReleaseStepType::Build
+                | ReleaseStepType::Changelog
+                | ReleaseStepType::Version
+                | ReleaseStepType::GitCommit
+                | ReleaseStepType::GitTag
+                | ReleaseStepType::GitPush
+                | ReleaseStepType::Changes
+        )
+    }
+}
+
+impl From<&str> for ReleaseStepType {
+    fn from(s: &str) -> Self {
+        match s {
+            "build" => ReleaseStepType::Build,
+            "changelog" => ReleaseStepType::Changelog,
+            "version" => ReleaseStepType::Version,
+            "git.commit" => ReleaseStepType::GitCommit,
+            "git.tag" => ReleaseStepType::GitTag,
+            "git.push" => ReleaseStepType::GitPush,
+            "changes" => ReleaseStepType::Changes,
+            "module.run" => ReleaseStepType::ModuleRun,
+            other => ReleaseStepType::ModuleAction(other.to_string()),
+        }
+    }
+}
+
+impl From<String> for ReleaseStepType {
+    fn from(s: String) -> Self {
+        ReleaseStepType::from(s.as_str())
+    }
+}
+
+impl Serialize for ReleaseStepType {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReleaseStepType {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(ReleaseStepType::from(s))
+    }
+}
 
 use crate::component::{self, Component};
 use crate::core::local_files::FileSystem;
@@ -77,7 +161,7 @@ pub struct ReleaseConfig {
 pub struct ReleaseStep {
     pub id: String,
     #[serde(rename = "type")]
-    pub step_type: String,
+    pub step_type: ReleaseStepType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -90,7 +174,7 @@ impl From<ReleaseStep> for PipelineStep {
     fn from(step: ReleaseStep) -> Self {
         PipelineStep {
             id: step.id,
-            step_type: step.step_type,
+            step_type: step.step_type.as_str().to_string(),
             label: step.label,
             needs: step.needs,
             config: step.config,
@@ -195,13 +279,14 @@ impl ReleaseCapabilityResolver {
 
 impl PipelineCapabilityResolver for ReleaseCapabilityResolver {
     fn is_supported(&self, step_type: &str) -> bool {
-        step_type == "module.run"
-            || is_core_step(step_type)
+        let st = ReleaseStepType::from(step_type);
+        st == ReleaseStepType::ModuleRun
+            || st.is_core_step()
             || self.supports_module_action(step_type)
     }
 
     fn missing(&self, step_type: &str) -> Vec<String> {
-        if step_type == "module.run" {
+        if ReleaseStepType::from(step_type) == ReleaseStepType::ModuleRun {
             return Vec::new();
         }
         let action_id = format!("release.{}", step_type);
@@ -254,13 +339,14 @@ impl ReleaseStepExecutor {
     }
 
     fn execute_core_step(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
-        match step.step_type.as_str() {
-            "build" => self.run_build(step),
-            "changes" => self.run_changes(step),
-            "version" => self.run_version(step),
-            "git.commit" => self.run_git_commit(step),
-            "git.tag" => self.run_git_tag(step),
-            "git.push" => self.run_git_push(step),
+        let step_type = ReleaseStepType::from(step.step_type.as_str());
+        match step_type {
+            ReleaseStepType::Build => self.run_build(step),
+            ReleaseStepType::Changes => self.run_changes(step),
+            ReleaseStepType::Version => self.run_version(step),
+            ReleaseStepType::GitCommit => self.run_git_commit(step),
+            ReleaseStepType::GitTag => self.run_git_tag(step),
+            ReleaseStepType::GitPush => self.run_git_push(step),
             _ => Err(Error::validation_invalid_argument(
                 "release.steps",
                 format!("Unsupported core step '{}'", step.step_type),
@@ -621,7 +707,7 @@ impl ReleaseStepExecutor {
         step: &PipelineStep,
         response: &serde_json::Value,
     ) -> Result<()> {
-        if step.step_type != "package" {
+        if !matches!(ReleaseStepType::from(step.step_type.as_str()), ReleaseStepType::ModuleAction(ref s) if s == "package") {
             return Ok(());
         }
 
@@ -745,11 +831,13 @@ impl ReleaseStepExecutor {
 
 impl PipelineStepExecutor for ReleaseStepExecutor {
     fn execute_step(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
-        if is_core_step(&step.step_type) {
+        let step_type = ReleaseStepType::from(step.step_type.as_str());
+
+        if step_type.is_core_step() {
             return self.execute_core_step(step);
         }
 
-        if step.step_type == "module.run" {
+        if step_type == ReleaseStepType::ModuleRun {
             return self.run_module_runtime(step);
         }
 
@@ -1003,7 +1091,7 @@ pub fn run(component_id: &str, module_id: Option<&str>) -> Result<ReleaseRun> {
 
 fn validate_preflight(component: &Component, steps: &[ReleaseStep]) -> Result<()> {
     let uncommitted = crate::git::get_uncommitted_changes(&component.local_path)?;
-    let has_commit_step = steps.iter().any(|s| s.step_type == "git.commit");
+    let has_commit_step = steps.iter().any(|s| s.step_type == ReleaseStepType::GitCommit);
 
     if uncommitted.has_changes && !has_commit_step {
         return Err(Error::validation_invalid_argument(
@@ -1051,16 +1139,9 @@ fn validate_preflight(component: &Component, steps: &[ReleaseStep]) -> Result<()
     Ok(())
 }
 
-fn is_core_step(step_type: &str) -> bool {
-    matches!(
-        step_type,
-        "build" | "changelog" | "version" | "git.commit" | "git.tag" | "git.push" | "changes"
-    )
-}
-
 fn auto_insert_commit_step(steps: Vec<ReleaseStep>) -> (Vec<ReleaseStep>, bool) {
-    let has_tag = steps.iter().any(|s| s.step_type == "git.tag");
-    let has_commit = steps.iter().any(|s| s.step_type == "git.commit");
+    let has_tag = steps.iter().any(|s| s.step_type == ReleaseStepType::GitTag);
+    let has_commit = steps.iter().any(|s| s.step_type == ReleaseStepType::GitCommit);
 
     if !has_tag || has_commit {
         return (steps, false);
@@ -1070,10 +1151,10 @@ fn auto_insert_commit_step(steps: Vec<ReleaseStep>) -> (Vec<ReleaseStep>, bool) 
     let mut inserted = false;
 
     for step in steps {
-        if step.step_type == "git.tag" && !inserted {
+        if step.step_type == ReleaseStepType::GitTag && !inserted {
             let commit_step = ReleaseStep {
                 id: "git.commit".to_string(),
-                step_type: "git.commit".to_string(),
+                step_type: ReleaseStepType::GitCommit,
                 label: Some("Commit release changes".to_string()),
                 needs: step.needs.clone(),
                 config: HashMap::new(),

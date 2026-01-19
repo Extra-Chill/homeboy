@@ -60,21 +60,6 @@ pub fn backups() -> Result<PathBuf> {
     Ok(homeboy()?.join("backups"))
 }
 
-/// Project file path
-pub fn project(id: &str) -> Result<PathBuf> {
-    Ok(projects()?.join(format!("{}.json", id)))
-}
-
-/// Server file path
-pub fn server(id: &str) -> Result<PathBuf> {
-    Ok(servers()?.join(format!("{}.json", id)))
-}
-
-/// Component file path
-pub fn component(id: &str) -> Result<PathBuf> {
-    Ok(components()?.join(format!("{}.json", id)))
-}
-
 /// Module directory path
 pub fn module(id: &str) -> Result<PathBuf> {
     Ok(modules()?.join(id))

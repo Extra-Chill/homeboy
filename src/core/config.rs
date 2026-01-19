@@ -445,15 +445,38 @@ pub(crate) fn parse_bulk_ids(json_spec: &str) -> Result<BulkIdsInput> {
 // ============================================================================
 
 pub(crate) trait ConfigEntity: Serialize + DeserializeOwned {
+    /// The entity type name (e.g., "project", "server", "component", "module").
+    const ENTITY_TYPE: &'static str;
+
+    /// The directory name within the config root (e.g., "projects", "servers").
+    const DIR_NAME: &'static str;
+
+    // Required methods - only these need implementation
     fn id(&self) -> &str;
     fn set_id(&mut self, id: String);
-    fn config_path(id: &str) -> Result<PathBuf>;
-    fn config_dir() -> Result<PathBuf>;
+
+    /// Entity-specific "not found" error. Required to preserve specific error codes.
     fn not_found_error(id: String, suggestions: Vec<String>) -> Error;
-    fn entity_type() -> &'static str;
+
+    // Default implementations
+
+    /// Returns the entity type name.
+    fn entity_type() -> &'static str {
+        Self::ENTITY_TYPE
+    }
+
+    /// Returns the config directory path.
+    fn config_dir() -> Result<PathBuf> {
+        Ok(paths::homeboy()?.join(Self::DIR_NAME))
+    }
+
+    /// Returns the config file path for a given ID.
+    /// Default: `{dir}/{id}.json`. Override for non-standard paths.
+    fn config_path(id: &str) -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join(format!("{}.json", id)))
+    }
 
     /// Entity-specific validation. Override to add custom validation rules.
-    /// Called by `config::create()` before saving.
     fn validate(&self) -> Result<()> {
         Ok(())
     }
@@ -477,20 +500,36 @@ pub(crate) fn list<T: ConfigEntity>() -> Result<Vec<T>> {
 
     let mut items: Vec<T> = entries
         .into_iter()
-        .filter(|e| e.is_json() && !e.is_dir)
         .filter_map(|e| {
-            let id = e.path.file_stem()?.to_string_lossy().to_string();
-            let content = match local_files::local().read(&e.path) {
+            // Determine the path to the JSON file and the ID
+            let (json_path, id) = if e.is_dir {
+                // For directories (module structure): look for {dir}/{dir}.json
+                let dir_name = e.path.file_name()?.to_string_lossy().to_string();
+                let nested_json = e.path.join(format!("{}.json", dir_name));
+                if nested_json.exists() {
+                    (nested_json, dir_name)
+                } else {
+                    return None;
+                }
+            } else if e.is_json() {
+                // For flat files: use existing behavior
+                let id = e.path.file_stem()?.to_string_lossy().to_string();
+                (e.path.clone(), id)
+            } else {
+                return None;
+            };
+
+            let content = match local_files::local().read(&json_path) {
                 Ok(c) => c,
                 Err(err) => {
-                    eprintln!("[config] Warning: failed to read {}: {}", e.path.display(), err);
+                    eprintln!("[config] Warning: failed to read {}: {}", json_path.display(), err);
                     return None;
                 }
             };
             let mut entity: T = match from_str(&content) {
                 Ok(e) => e,
                 Err(err) => {
-                    eprintln!("[config] Warning: failed to parse {}: {}", e.path.display(), err);
+                    eprintln!("[config] Warning: failed to parse {}: {}", json_path.display(), err);
                     return None;
                 }
             };

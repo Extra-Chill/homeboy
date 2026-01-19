@@ -1,6 +1,5 @@
 use serde::Serialize;
 use std::path::PathBuf;
-use std::process::Command;
 
 use crate::component::{self, Component};
 use crate::config::{is_json_input, parse_bulk_ids};
@@ -307,22 +306,25 @@ fn run_pre_build_scripts(comp: &Component) -> Result<Option<(i32, String)>> {
             continue;
         }
 
-        let output = Command::new(&script_path)
-            .env("HOMEBOY_MODULE_PATH", module_path.to_string_lossy().to_string())
-            .env("HOMEBOY_COMPONENT_PATH", &comp.local_path)
-            .env("HOMEBOY_PLUGIN_PATH", &comp.local_path)
-            .output()
-            .map_err(|e| Error::internal_io(
-                format!("Failed to execute pre-build script: {}", e),
-                Some(format!("Script: {}", script_path.display())),
-            ))?;
+        let env: [(&str, &str); 3] = [
+            ("HOMEBOY_MODULE_PATH", &module_path.to_string_lossy()),
+            ("HOMEBOY_COMPONENT_PATH", &comp.local_path),
+            ("HOMEBOY_PLUGIN_PATH", &comp.local_path),
+        ];
 
-        let exit_code = output.status.code().unwrap_or(1);
-        if exit_code != 0 {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let combined = if stderr.is_empty() { stdout } else { stderr };
-            return Ok(Some((exit_code, combined)));
+        let output = execute_local_command_in_dir(
+            &script_path.to_string_lossy(),
+            None,
+            Some(&env),
+        );
+
+        if !output.success {
+            let combined = if output.stderr.is_empty() {
+                output.stdout
+            } else {
+                output.stderr
+            };
+            return Ok(Some((output.exit_code, combined)));
         }
     }
 

@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 
 use super::exec_context;
-use super::manifest::{ActionConfig, ModuleManifest, RuntimeConfig};
+use super::manifest::{ActionConfig, ActionType, HttpMethod, ModuleManifest, RuntimeConfig};
 use super::scope::ModuleScope;
 use super::load_module;
 
@@ -160,8 +160,8 @@ pub(crate) fn execute_action(
         Vec::new()
     };
 
-    match action.action_type.as_str() {
-        "api" => {
+    match action.action_type {
+        ActionType::Api => {
             let pid =
                 project_id.ok_or_else(|| Error::other("--project is required for API actions"))?;
 
@@ -179,18 +179,20 @@ pub(crate) fn execute_action(
                 .as_ref()
                 .ok_or_else(|| Error::other("API action missing 'endpoint'"))?;
 
-            let method = action.method.as_deref().unwrap_or("POST");
+            let method = action.method.as_ref().unwrap_or(&HttpMethod::Post);
             let project = project::load(pid)?;
             let settings = ModuleScope::effective_settings(module_id, Some(&project), None)?;
             let payload = interpolate_action_payload(action, &selected, &settings, payload)?;
 
-            if method == "GET" {
-                client.get(endpoint)
-            } else {
-                client.post(endpoint, &payload)
+            match method {
+                HttpMethod::Get => client.get(endpoint),
+                HttpMethod::Post => client.post(endpoint, &payload),
+                HttpMethod::Put => client.put(endpoint, &payload),
+                HttpMethod::Patch => client.patch(endpoint, &payload),
+                HttpMethod::Delete => client.delete(endpoint),
             }
         }
-        "command" => {
+        ActionType::Command => {
             let command_template = action
                 .command
                 .as_ref()
@@ -233,7 +235,6 @@ pub(crate) fn execute_action(
                 "payload": payload
             }))
         }
-        other => Err(Error::other(format!("Unknown action type: {}", other))),
     }
 }
 

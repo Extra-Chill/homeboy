@@ -198,6 +198,16 @@ pub(crate) fn run_markdown(
     }
 }
 
+/// Dispatch a command to its handler and map result to JSON.
+macro_rules! dispatch {
+    ($args:expr, $module:ident) => {
+        crate::output::map_cmd_result_to_json($module::run_json($args))
+    };
+    ($args:expr, $global:expr, $module:ident) => {
+        crate::output::map_cmd_result_to_json($module::run($args, $global))
+    };
+}
+
 pub(crate) fn run_json(
     command: crate::Commands,
     global: &GlobalArgs,
@@ -205,64 +215,37 @@ pub(crate) fn run_json(
     crate::tty::status("homeboy is working...");
 
     match command {
-        crate::Commands::Init(args) => crate::output::map_cmd_result_to_json(init::run_json(args)),
-        crate::Commands::Project(args) => {
-            crate::output::map_cmd_result_to_json(project::run(args, global))
-        }
-        crate::Commands::Ssh(args) => crate::output::map_cmd_result_to_json(ssh::run(args, global)),
-        crate::Commands::Server(args) => {
-            crate::output::map_cmd_result_to_json(server::run(args, global))
-        }
-        crate::Commands::Test(args) => crate::output::map_cmd_result_to_json(test::run_json(args)),
-        crate::Commands::Lint(args) => crate::output::map_cmd_result_to_json(lint::run_json(args)),
-        crate::Commands::Db(args) => crate::output::map_cmd_result_to_json(db::run(args, global)),
-        crate::Commands::File(args) => {
-            crate::output::map_cmd_result_to_json(file::run(args, global))
-        }
-        crate::Commands::Logs(args) => {
-            crate::output::map_cmd_result_to_json(logs::run(args, global))
-        }
-        crate::Commands::Deploy(args) => {
-            crate::output::map_cmd_result_to_json(deploy::run(args, global))
-        }
-        crate::Commands::Component(args) => {
-            crate::output::map_cmd_result_to_json(component::run(args, global))
-        }
-        crate::Commands::Config(args) => {
-            crate::output::map_cmd_result_to_json(config::run(args, global))
-        }
-        crate::Commands::Context(args) => {
-            crate::output::map_cmd_result_to_json(context::run(args, global))
-        }
-        crate::Commands::Module(args) => {
-            crate::output::map_cmd_result_to_json(module::run(args, global))
-        }
-        crate::Commands::Docs(args) => {
-            crate::output::map_cmd_result_to_json(docs::run(args, global))
-        }
-        crate::Commands::Changelog(args) => {
-            crate::output::map_cmd_result_to_json(changelog::run(args, global))
-        }
-        crate::Commands::Git(args) => crate::output::map_cmd_result_to_json(git::run(args, global)),
-        crate::Commands::Version(args) => {
-            crate::output::map_cmd_result_to_json(version::run(args, global))
-        }
-        crate::Commands::Build(args) => {
-            crate::output::map_cmd_result_to_json(build::run(args, global))
-        }
-        crate::Commands::Changes(args) => {
-            crate::output::map_cmd_result_to_json(changes::run(args, global))
-        }
-        crate::Commands::Release(args) => {
-            crate::output::map_cmd_result_to_json(release::run(args, global))
-        }
-        crate::Commands::Auth(args) => {
-            crate::output::map_cmd_result_to_json(auth::run(args, global))
-        }
-        crate::Commands::Api(args) => crate::output::map_cmd_result_to_json(api::run(args, global)),
+        // Commands without global context
+        crate::Commands::Init(args) => dispatch!(args, init),
+        crate::Commands::Test(args) => dispatch!(args, test),
+        crate::Commands::Lint(args) => dispatch!(args, lint),
+
+        // Commands with global context
+        crate::Commands::Project(args) => dispatch!(args, global, project),
+        crate::Commands::Ssh(args) => dispatch!(args, global, ssh),
+        crate::Commands::Server(args) => dispatch!(args, global, server),
+        crate::Commands::Db(args) => dispatch!(args, global, db),
+        crate::Commands::File(args) => dispatch!(args, global, file),
+        crate::Commands::Logs(args) => dispatch!(args, global, logs),
+        crate::Commands::Deploy(args) => dispatch!(args, global, deploy),
+        crate::Commands::Component(args) => dispatch!(args, global, component),
+        crate::Commands::Config(args) => dispatch!(args, global, config),
+        crate::Commands::Context(args) => dispatch!(args, global, context),
+        crate::Commands::Module(args) => dispatch!(args, global, module),
+        crate::Commands::Docs(args) => dispatch!(args, global, docs),
+        crate::Commands::Changelog(args) => dispatch!(args, global, changelog),
+        crate::Commands::Git(args) => dispatch!(args, global, git),
+        crate::Commands::Version(args) => dispatch!(args, global, version),
+        crate::Commands::Build(args) => dispatch!(args, global, build),
+        crate::Commands::Changes(args) => dispatch!(args, global, changes),
+        crate::Commands::Release(args) => dispatch!(args, global, release),
+        crate::Commands::Auth(args) => dispatch!(args, global, auth),
+        crate::Commands::Api(args) => dispatch!(args, global, api),
         crate::Commands::Upgrade(args) | crate::Commands::Update(args) => {
-            crate::output::map_cmd_result_to_json(upgrade::run(args, global))
+            dispatch!(args, global, upgrade)
         }
+
+        // Special case: List uses raw output mode
         crate::Commands::List => {
             let err = homeboy::Error::validation_invalid_argument(
                 "output_mode",

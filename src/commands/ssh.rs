@@ -8,20 +8,15 @@ use super::CmdResult;
 
 #[derive(Args)]
 pub struct SshArgs {
-    /// Project ID or server ID (project wins when both exist)
-    #[arg(conflicts_with_all = ["project", "server"])]
-    pub id: Option<String>,
-
-    /// Force project resolution
-    #[arg(long, conflicts_with_all = ["server", "id"])]
-    pub project: Option<String>,
-
-    /// Force server resolution
-    #[arg(long, conflicts_with_all = ["project", "id"])]
-    pub server: Option<String>,
+    /// Target ID (project or server; project wins when ambiguous)
+    pub target: Option<String>,
 
     /// Command to execute (omit for interactive shell)
     pub command: Option<String>,
+
+    /// Force interpretation as server ID
+    #[arg(long)]
+    pub as_server: bool,
 
     #[command(subcommand)]
     pub subcommand: Option<SshSubcommand>,
@@ -62,11 +57,19 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
             Ok((SshOutput::List(SshListOutput { servers }), 0))
         }
         None => {
-            // Core handles all validation and resolution
-            let resolve_args = SshResolveArgs {
-                id: args.id.clone(),
-                project: args.project.clone(),
-                server: args.server.clone(),
+            // Build resolve args based on simplified CLI args
+            let resolve_args = if args.as_server {
+                SshResolveArgs {
+                    id: None,
+                    project: None,
+                    server: args.target.clone(),
+                }
+            } else {
+                SshResolveArgs {
+                    id: args.target.clone(),
+                    project: None,
+                    server: None,
+                }
             };
             let result = resolve_context(&resolve_args)?;
 

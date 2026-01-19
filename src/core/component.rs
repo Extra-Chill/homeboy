@@ -2,12 +2,10 @@ use crate::config::{self, ConfigEntity};
 use crate::error::{Error, Result};
 use crate::module;
 use crate::output::{CreateOutput, MergeOutput, MergeResult, RemoveResult};
-use crate::paths;
 use crate::project::{self, NullableUpdate};
 use crate::slugify;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
@@ -94,23 +92,17 @@ where
 }
 
 impl ConfigEntity for Component {
+    const ENTITY_TYPE: &'static str = "component";
+    const DIR_NAME: &'static str = "components";
+
     fn id(&self) -> &str {
         &self.id
     }
     fn set_id(&mut self, id: String) {
         self.id = id;
     }
-    fn config_path(id: &str) -> Result<PathBuf> {
-        paths::component(id)
-    }
-    fn config_dir() -> Result<PathBuf> {
-        paths::components()
-    }
     fn not_found_error(id: String, suggestions: Vec<String>) -> Error {
         Error::component_not_found(id, suggestions)
-    }
-    fn entity_type() -> &'static str {
-        "component"
     }
 }
 

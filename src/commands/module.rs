@@ -190,7 +190,7 @@ pub struct ActionSummary {
     pub id: String,
     pub label: String,
     #[serde(rename = "type")]
-    pub action_type: String,
+    pub action_type: homeboy::module::ActionType,
 }
 
 #[derive(Serialize)]

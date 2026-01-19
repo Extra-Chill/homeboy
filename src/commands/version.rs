@@ -220,55 +220,12 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             let git_commit = if no_commit {
                 None
             } else {
-                // Collect files to stage: version targets + changelog
-                let mut files_to_stage: Vec<String> =
-                    result.targets.iter().map(|t| t.full_path.clone()).collect();
-
-                if !result.changelog_path.is_empty() {
-                    files_to_stage.push(result.changelog_path.clone());
-                }
-
-                let commit_message = format!("release: v{}", result.new_version);
-
-                let options = CommitOptions {
-                    staged_only: false,
-                    files: Some(files_to_stage.clone()),
-                    exclude: None,
-                    amend: false,
-                };
-
-                // Attempt commit - graceful failure (version files already updated)
-                match commit(component_id.as_deref(), Some(&commit_message), options) {
-                    Ok(output) => {
-                        let stdout = if output.stdout.is_empty() {
-                            None
-                        } else {
-                            Some(output.stdout)
-                        };
-                        let stderr = if output.stderr.is_empty() {
-                            None
-                        } else {
-                            Some(output.stderr)
-                        };
-                        Some(GitCommitInfo {
-                            success: output.success,
-                            message: commit_message,
-                            files_staged: files_to_stage,
-                            stdout,
-                            stderr,
-                        })
-                    }
-                    Err(e) => {
-                        // Report failure but don't rollback version changes
-                        Some(GitCommitInfo {
-                            success: false,
-                            message: commit_message,
-                            files_staged: files_to_stage,
-                            stdout: None,
-                            stderr: Some(e.to_string()),
-                        })
-                    }
-                }
+                create_version_commit(
+                    component_id.as_deref(),
+                    &result.new_version,
+                    &result.targets,
+                    &result.changelog_path,
+                )
             };
 
             Ok((
@@ -295,54 +252,12 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             let result = set_version(component_id.as_deref(), &new_version)?;
 
             // Auto-commit version and changelog changes
-            let mut files_to_stage: Vec<String> =
-                result.targets.iter().map(|t| t.full_path.clone()).collect();
-
-            if !result.changelog_path.is_empty() {
-                files_to_stage.push(result.changelog_path.clone());
-            }
-
-            let commit_message = format!("release: v{}", result.new_version);
-
-            let options = CommitOptions {
-                staged_only: false,
-                files: Some(files_to_stage.clone()),
-                exclude: None,
-                amend: false,
-            };
-
-            // Attempt commit - graceful failure (version files already updated)
-            let git_commit = match commit(component_id.as_deref(), Some(&commit_message), options) {
-                Ok(output) => {
-                    let stdout = if output.stdout.is_empty() {
-                        None
-                    } else {
-                        Some(output.stdout)
-                    };
-                    let stderr = if output.stderr.is_empty() {
-                        None
-                    } else {
-                        Some(output.stderr)
-                    };
-                    Some(GitCommitInfo {
-                        success: output.success,
-                        message: commit_message,
-                        files_staged: files_to_stage,
-                        stdout,
-                        stderr,
-                    })
-                }
-                Err(e) => {
-                    // Report failure but don't rollback version changes
-                    Some(GitCommitInfo {
-                        success: false,
-                        message: commit_message,
-                        files_staged: files_to_stage,
-                        stdout: None,
-                        stderr: Some(e.to_string()),
-                    })
-                }
-            };
+            let git_commit = create_version_commit(
+                component_id.as_deref(),
+                &result.new_version,
+                &result.targets,
+                &result.changelog_path,
+            );
 
             Ok((
                 VersionOutput::Set(VersionSetOutput {
@@ -359,6 +274,58 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 0,
             ))
         }
+    }
+}
+
+/// Creates a git commit for version changes, returning commit info.
+fn create_version_commit(
+    component_id: Option<&str>,
+    new_version: &str,
+    targets: &[VersionTargetInfo],
+    changelog_path: &str,
+) -> Option<GitCommitInfo> {
+    let mut files_to_stage: Vec<String> = targets.iter().map(|t| t.full_path.clone()).collect();
+
+    if !changelog_path.is_empty() {
+        files_to_stage.push(changelog_path.to_string());
+    }
+
+    let commit_message = format!("release: v{}", new_version);
+
+    let options = CommitOptions {
+        staged_only: false,
+        files: Some(files_to_stage.clone()),
+        exclude: None,
+        amend: false,
+    };
+
+    match commit(component_id, Some(&commit_message), options) {
+        Ok(output) => {
+            let stdout = if output.stdout.is_empty() {
+                None
+            } else {
+                Some(output.stdout)
+            };
+            let stderr = if output.stderr.is_empty() {
+                None
+            } else {
+                Some(output.stderr)
+            };
+            Some(GitCommitInfo {
+                success: output.success,
+                message: commit_message,
+                files_staged: files_to_stage,
+                stdout,
+                stderr,
+            })
+        }
+        Err(e) => Some(GitCommitInfo {
+            success: false,
+            message: commit_message,
+            files_staged: files_to_stage,
+            stdout: None,
+            stderr: Some(e.to_string()),
+        }),
     }
 }
 

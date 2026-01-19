@@ -1,12 +1,10 @@
 use crate::config::{self, ConfigEntity};
 use crate::error::{Error, Result};
 use crate::output::{CreateOutput, MergeOutput, RemoveResult};
-use crate::paths;
 use crate::server;
 use crate::slugify;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 /// Represents a nullable optional field in update operations.
 ///
@@ -82,23 +80,17 @@ impl Project {
 }
 
 impl ConfigEntity for Project {
+    const ENTITY_TYPE: &'static str = "project";
+    const DIR_NAME: &'static str = "projects";
+
     fn id(&self) -> &str {
         &self.id
     }
     fn set_id(&mut self, id: String) {
         self.id = id;
     }
-    fn config_path(id: &str) -> Result<PathBuf> {
-        paths::project(id)
-    }
-    fn config_dir() -> Result<PathBuf> {
-        paths::projects()
-    }
     fn not_found_error(id: String, suggestions: Vec<String>) -> Error {
         Error::project_not_found(id, suggestions)
-    }
-    fn entity_type() -> &'static str {
-        "project"
     }
 
     fn validate(&self) -> Result<()> {

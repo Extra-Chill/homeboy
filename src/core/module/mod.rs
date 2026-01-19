@@ -2,14 +2,19 @@ mod manifest;
 mod execution;
 mod scope;
 mod lifecycle;
+mod runner;
 
 pub mod exec_context;
 
+// Re-export runner types
+pub use runner::{ModuleRunner, RunnerOutput};
+
 // Re-export manifest types
 pub use manifest::{
-    ActionConfig, BuildConfig, CliConfig, DatabaseCliConfig, DatabaseConfig, DeployOverride,
-    DeployVerification, DiscoveryConfig, InputConfig, ModuleManifest, OutputConfig, OutputSchema,
-    RequirementsConfig, RuntimeConfig, SelectOption, SettingConfig, VersionPatternConfig,
+    ActionConfig, ActionType, BuildConfig, CliConfig, DatabaseCliConfig, DatabaseConfig,
+    DeployOverride, DeployVerification, DiscoveryConfig, HttpMethod, InputConfig, ModuleManifest,
+    OutputConfig, OutputSchema, RequirementsConfig, RuntimeConfig, SelectOption, SettingConfig,
+    VersionPatternConfig,
 };
 
 // Re-export execution types and functions

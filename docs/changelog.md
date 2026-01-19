@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+### Added
+- Add ModuleRunner builder for unified test/lint script orchestration
+- Add ReleaseStepType enum for typed release pipeline steps
+
+### Changed
+- Refactor lint and test commands to use ModuleRunner, reducing code duplication
+- Simplify deploy, version, and SSH commands with shared utilities
+
 ## [0.27.4] - 2026-01-18
 
 ### Added
