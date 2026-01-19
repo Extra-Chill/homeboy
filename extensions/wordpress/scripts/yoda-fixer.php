@@ -10,6 +10,8 @@
  * Usage: php yoda-fixer.php <path>
  */
 
+require_once __DIR__ . '/fixer-helpers.php';
+
 if ($argc < 2) {
     echo "Usage: php yoda-fixer.php <path>\n";
     exit(1);
@@ -22,32 +24,10 @@ if (!file_exists($path)) {
     exit(1);
 }
 
-$total_fixes = 0;
-$files_fixed = 0;
+$result = fixer_process_path($path, 'process_file');
 
-if (is_dir($path)) {
-    $iterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS)
-    );
-
-    foreach ($iterator as $file) {
-        if ($file->getExtension() === 'php') {
-            $fixes = process_file($file->getPathname());
-            if ($fixes > 0) {
-                $files_fixed++;
-                $total_fixes += $fixes;
-            }
-        }
-    }
-} else {
-    $total_fixes = process_file($path);
-    if ($total_fixes > 0) {
-        $files_fixed = 1;
-    }
-}
-
-if ($total_fixes > 0) {
-    echo "Yoda fixer: Fixed $total_fixes condition(s) in $files_fixed file(s)\n";
+if ($result['total_fixes'] > 0) {
+    echo "Yoda fixer: Fixed {$result['total_fixes']} condition(s) in {$result['files_fixed']} file(s)\n";
 } else {
     echo "Yoda fixer: No fixable conditions found\n";
 }

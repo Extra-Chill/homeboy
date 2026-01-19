@@ -22,6 +22,19 @@
 
 set -e
 
+# Cleanup on exit (restore dev deps if build fails unexpectedly)
+cleanup() {
+    local exit_code=$?
+    if [ -d "build/$PROJECT_NAME" ] && [ $exit_code -ne 0 ]; then
+        rm -rf "build/$PROJECT_NAME"
+    fi
+    if [ -f "composer.json" ]; then
+        composer install --no-interaction --quiet 2>&1 || true
+    fi
+    exit $exit_code
+}
+trap cleanup EXIT
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -414,8 +427,8 @@ run_tests() {
 }
 
 # PHP syntax validation (runs on built files)
-validate_php() {
-    print_status "Running PHP syntax check..."
+validate_php_syntax() {
+    print_status "Running PHP syntax check on build..."
 
     local build_dir="build/$PROJECT_NAME"
     local php_errors=0
@@ -484,8 +497,8 @@ build_project() {
     build_nested_packages
     copy_project_files
 
-    if ! validate_php; then
-        print_error "PHP validation failed"
+    if ! validate_php_syntax; then
+        print_error "PHP syntax validation failed"
         rm -rf "build/$PROJECT_NAME"
         restore_dev_deps
         exit 1

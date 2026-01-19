@@ -249,36 +249,44 @@ else
     echo "Skipping linting (--skip-lint)"
 fi
 
-# Validate test directory structure - check for conflicting local infrastructure
+# Validate test directory structure - warn about conflicting local infrastructure
 LOCAL_BOOTSTRAP="${TEST_DIR}/bootstrap.php"
 LOCAL_PHPUNIT_XML="${TEST_DIR}/phpunit.xml"
+LOCAL_PHPUNIT_XML_ROOT="${PLUGIN_PATH}/phpunit.xml"
+LOCAL_PHPUNIT_XML_DIST_ROOT="${PLUGIN_PATH}/phpunit.xml.dist"
 
 if [ -f "$LOCAL_BOOTSTRAP" ]; then
-    echo "Error: Homeboy WordPress module is not compatible with local bootstrap tests"
     echo ""
-    echo "The WordPress module provides complete test infrastructure including:"
-    echo "  - WordPress environment setup and bootstrap"
-    echo "  - Database configuration (SQLite/MySQL)"
-    echo "  - PHPUnit configuration"
-    echo "  - Test discovery and execution"
+    echo "⚠ Warning: Local bootstrap.php found and will be IGNORED"
+    echo "  Location: $LOCAL_BOOTSTRAP"
+    echo "  Homeboy WordPress module provides complete test infrastructure."
+    echo "  Consider removing: $LOCAL_BOOTSTRAP"
     echo ""
-    echo "Local bootstrap file found:"
-    echo "  $LOCAL_BOOTSTRAP"
-    echo ""
-    echo "Component test files (*.php) can remain - only infrastructure files must be removed."
-    echo "Please remove: $LOCAL_BOOTSTRAP"
-    exit 1
 fi
 
 if [ -f "$LOCAL_PHPUNIT_XML" ]; then
-    echo "Error: Local phpunit.xml conflicts with module configuration"
     echo ""
-    echo "The WordPress module provides complete PHPUnit configuration."
-    echo "Local phpunit.xml file found:"
-    echo "  $LOCAL_PHPUNIT_XML"
+    echo "⚠ Warning: Local phpunit.xml found in tests/ and will be IGNORED"
+    echo "  Location: $LOCAL_PHPUNIT_XML"
+    echo "  Homeboy WordPress module provides PHPUnit configuration."
+    echo "  Consider removing: $LOCAL_PHPUNIT_XML"
     echo ""
-    echo "Please remove: $LOCAL_PHPUNIT_XML"
-    exit 1
+fi
+
+if [ -f "$LOCAL_PHPUNIT_XML_ROOT" ]; then
+    echo ""
+    echo "⚠ Warning: Local phpunit.xml found in root and will be IGNORED"
+    echo "  Location: $LOCAL_PHPUNIT_XML_ROOT"
+    echo "  Consider removing: $LOCAL_PHPUNIT_XML_ROOT"
+    echo ""
+fi
+
+if [ -f "$LOCAL_PHPUNIT_XML_DIST_ROOT" ]; then
+    echo ""
+    echo "⚠ Warning: Local phpunit.xml.dist found in root and will be IGNORED"
+    echo "  Location: $LOCAL_PHPUNIT_XML_DIST_ROOT"
+    echo "  Consider removing: $LOCAL_PHPUNIT_XML_DIST_ROOT"
+    echo ""
 fi
 
 # Run PHPUnit with module bootstrap
