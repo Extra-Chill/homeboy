@@ -65,6 +65,9 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
     var cancellables = Set<AnyCancellable>()
 
+    // Reference to the file browser for reconnection
+    weak var browser: RemoteFileBrowser?
+
     // MARK: - Published State
 
     @Published var openFiles: [OpenFile] = []
@@ -104,7 +107,8 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
     // MARK: - Initialization
 
-    init() {
+    init(browser: RemoteFileBrowser? = nil) {
+        self.browser = browser
         loadPinnedFiles()
         observeConfiguration()
     }
@@ -119,6 +123,14 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
             selectedFileId = nil
             error = nil
             loadPinnedFiles()
+
+            // Reconnect browser to new project
+            Task {
+                let projectId = ConfigurationManager.shared.safeActiveProject.id
+                let basePath = ConfigurationManager.shared.safeActiveProject.basePath
+                await browser?.reconnect(projectId: projectId, startingPath: basePath)
+            }
+
             if selectedFileId != nil {
                 Task {
                     await fetchSelectedFile()

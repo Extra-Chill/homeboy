@@ -8,10 +8,6 @@ struct HomeboyApp: App {
     @State private var showCLIUpdate = false
     @State private var cliVersionInfo: CLIVersionChecker.VersionInfo?
 
-    init() {
-        ConfigurationManager.shared.syncBundledProjectTypes()
-    }
-
     var body: some Scene {
         WindowGroup {
             ContentView()

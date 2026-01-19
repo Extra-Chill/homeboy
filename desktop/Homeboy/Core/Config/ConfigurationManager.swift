@@ -53,6 +53,8 @@ class ConfigurationManager: ObservableObject {
     /// Thread-safe static accessor for reading project configuration from any context.
     nonisolated static func readCurrentProject() -> ProjectConfiguration {
         let fileManager = FileManager.default
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
 
         guard let files = try? fileManager.contentsOfDirectory(at: AppPaths.projects, includingPropertiesForKeys: nil) else {
             return ProjectConfiguration.empty(id: "default", name: "Default")
@@ -73,6 +75,8 @@ class ConfigurationManager: ObservableObject {
 
     /// Thread-safe static accessor for reading any project by ID.
     nonisolated static func readProject(id: String) -> ProjectConfiguration? {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
         guard let data = try? Data(contentsOf: AppPaths.project(id: id)),
               let config = try? decoder.decode(ProjectConfiguration.self, from: data) else {
             return nil
@@ -320,47 +324,6 @@ class ConfigurationManager: ObservableObject {
             print("[ConfigurationManager] Failed to create directories: \(error)")
         }
     }
-    
-    // MARK: - Project Type Sync
-
-    private var projectTypesDirectory: URL {
-        AppPaths.projectTypes
-    }
-    
-    /// Syncs bundled project types to Application Support.
-    /// Called on app launch to ensure CLI has access to project type definitions.
-    /// Bundled types are always overwritten (they are the canonical "core" versions).
-    func syncBundledProjectTypes() {
-        do {
-            // Ensure project-types directory exists
-            try fileManager.createDirectory(at: projectTypesDirectory, withIntermediateDirectories: true)
-            
-            // Find bundled project types
-            guard let bundledTypeURLs = Bundle.main.urls(forResourcesWithExtension: "json", subdirectory: "project-types") else {
-                print("[ConfigurationManager] No bundled project types found")
-                return
-            }
-            
-            // Copy each bundled type to Application Support (overwrite existing)
-            for bundledURL in bundledTypeURLs {
-                let filename = bundledURL.lastPathComponent
-                let destinationURL = projectTypesDirectory.appendingPathComponent(filename)
-                
-                // Remove existing file if present
-                if fileManager.fileExists(atPath: destinationURL.path) {
-                    try fileManager.removeItem(at: destinationURL)
-                }
-                
-                // Copy bundled file
-                try fileManager.copyItem(at: bundledURL, to: destinationURL)
-            }
-            
-            print("[ConfigurationManager] Synced \(bundledTypeURLs.count) project type(s) to Application Support")
-        } catch {
-            print("[ConfigurationManager] Failed to sync project types: \(error)")
-        }
-    }
-
 
     // MARK: - Load Configuration
 
@@ -607,6 +570,8 @@ class ConfigurationManager: ObservableObject {
     
     /// Thread-safe static accessor for reading a server configuration from any context.
     nonisolated static func readServer(id: String) -> ServerConfig? {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
         guard let data = try? Data(contentsOf: AppPaths.server(id: id)),
               let server = try? decoder.decode(ServerConfig.self, from: data) else {
             return nil
@@ -685,6 +650,8 @@ class ConfigurationManager: ObservableObject {
 
     /// Thread-safe static accessor for reading a component configuration from any context.
     nonisolated static func readComponent(id: String) -> ComponentConfiguration? {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
         guard let data = try? Data(contentsOf: AppPaths.component(id: id)),
               let component = try? decoder.decode(ComponentConfiguration.self, from: data) else {
             return nil

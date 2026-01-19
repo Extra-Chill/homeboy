@@ -24,7 +24,6 @@
 		29AC5918A42B81DE1D250360 /* ContentContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC77F3DE919D687C5088735B /* ContentContext.swift */; };
 		2A0D8EC80F531D2458B4F000 /* DatabaseSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99F53066BAD2365203BC1A21 /* DatabaseSettingsTab.swift */; };
 		2BDBF9B46483155A6701C845 /* ConfigurationChangeType.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4847DDB6175D9E32C423C8C /* ConfigurationChangeType.swift */; };
-		305E5C164DFA751B1ABFE77B /* LocalEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 076C7293F0318D0DF7C1263E /* LocalEnvironment.swift */; };
 		30856C36D38963CB5A540EFC /* WarningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20129FFBFEEBA4948B8DA194 /* WarningView.swift */; };
 		3188A425BBDAED4249534CE8 /* WordPressSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9172819247F48893F5F20EA2 /* WordPressSettingsTab.swift */; };
 		337BB8150B603A86CAECBE7F /* CopyButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4784FCC0B29C23649013882 /* CopyButton.swift */; };
@@ -49,7 +48,6 @@
 		5C04267FDCF7C82C4BE9B087 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7A27F9F448DAC4DF35613F9 /* APIClient.swift */; };
 		5CA76C92A6AF0C42784FD35D /* ErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */; };
 		61876E7ACDA5C3D7A5D2E40F /* AppPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C840B787B398287BC5EEE6 /* AppPaths.swift */; };
-		67B0C8541A262E38CBA8AECA /* ProjectTypeDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 599231AFF8DD800C0BA6DF12 /* ProjectTypeDefinition.swift */; };
 		6DA58994C9A0D94854E44A62 /* RemoteLogViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A6E91E37345CFC1CFCF9AA6 /* RemoteLogViewerView.swift */; };
 		71419F89166E98CC7C4A3A98 /* SSHService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD23DCF3987518BDD613AA7A /* SSHService.swift */; };
 		72D058E4C987B44B3C2FE75F /* RemoteFileEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */; };
@@ -81,7 +79,6 @@
 		B27446E0A3706D997A75D1E9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A690A4DC66BE109010668691 /* ContentView.swift */; };
 		B9C42108AC64D21BAEEE580A /* DeployableComponent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */; };
 		BBA251CB27591D879DAD4038 /* RemoteFileEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B19BDE6DDAAF5D914C29785 /* RemoteFileEditorView.swift */; };
-		BD32FAF6FB2583B8A5A24363 /* ProjectTypeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */; };
 		C24FBE4BE4FE4BA046D565C3 /* RemotePathResolver+WordPress.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFBA996DE0C810FC22480A51 /* RemotePathResolver+WordPress.swift */; };
 		C6F738277B8D48B8F03655CA /* bandcamp_scraper.cpython-314.pyc in Resources */ = {isa = PBXBuildFile; fileRef = 75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */; };
 		C727FE57ACE75A3152D4C972 /* NativeDataTable.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2800F57FE83EEBB76CC1F1A /* NativeDataTable.swift */; };
@@ -89,11 +86,11 @@
 		CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA88D343E94C4C34E1069813 /* CodeTextView.swift */; };
 		D067D1266FD0989BC9E07C43 /* CLIBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40736E67E0624C5F3AA5913C /* CLIBridge.swift */; };
 		D17F7A98F3FB9E8F40991024 /* LogContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 514BD1BE8868C181AD9401CF /* LogContentView.swift */; };
+		D987654321FEDCBA09876543 /* LogTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D123456789ABCDEF01234567 /* LogTextView.swift */; };
 		D3D2FEA38CB8A09E0ED93B73 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A6FE3DEAD139D529B6724D8 /* APITypes.swift */; };
 		E1F7C14F08E1E4D8353F8064 /* CopyableTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4406A9EEECAF8249580937A7 /* CopyableTextView.swift */; };
 		E6130C3BA0E6F318EAB670A3 /* ConfigurationObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2FF4CDA2AE7652A449E74D8 /* ConfigurationObserver.swift */; };
 		E6403DF4F6747B97ED009C1A /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */; };
-		E77C55FA6D3BBCCD6422EDBA /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC3095C66C75EB70DD73775 /* PythonRunner.swift */; };
 		E832787BA1F926FB3A085E09 /* InlineErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943FB329E82EA8D3985C41BE /* InlineErrorView.swift */; };
 		E8A0E0A1E7364CFEB6EB48AF /* SchemaResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */; };
 		E9D7338A6D0F128987F91E83 /* CLIModuleTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1815EE5F0948B590DB303B60 /* CLIModuleTypes.swift */; };
@@ -106,7 +103,6 @@
 
 /* Begin PBXFileReference section */
 		0354F3771ED337E0EDCAC7B5 /* ModuleResultsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleResultsView.swift; sourceTree = "<group>"; };
-		076C7293F0318D0DF7C1263E /* LocalEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalEnvironment.swift; sourceTree = "<group>"; };
 		0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEntry.swift; sourceTree = "<group>"; };
 		0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
 		0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineWarningView.swift; sourceTree = "<group>"; };
@@ -114,7 +110,6 @@
 		14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseTypes.swift; sourceTree = "<group>"; };
 		1682E9BF7F10ED915C606359 /* RemoteFileEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorViewModel.swift; sourceTree = "<group>"; };
 		1815EE5F0948B590DB303B60 /* CLIModuleTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIModuleTypes.swift; sourceTree = "<group>"; };
-		1EC3095C66C75EB70DD73775 /* PythonRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonRunner.swift; sourceTree = "<group>"; };
 		20129FFBFEEBA4948B8DA194 /* WarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WarningView.swift; sourceTree = "<group>"; };
 		2026B5BAE550AC7BD82744DA /* BackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupService.swift; sourceTree = "<group>"; };
 		21BD4D2024772E1CFC5F01C2 /* ModuleViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleViewModel.swift; sourceTree = "<group>"; };
@@ -137,8 +132,8 @@
 		4C3C30739F765981B37603DD /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		4ED098FFBF749CD6DD355B1B /* CollapsibleSplitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollapsibleSplitView.swift; sourceTree = "<group>"; };
 		514BD1BE8868C181AD9401CF /* LogContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogContentView.swift; sourceTree = "<group>"; };
+		D123456789ABCDEF01234567 /* LogTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogTextView.swift; sourceTree = "<group>"; };
 		572D0318B7820B97ABDBC10A /* ModuleActionsBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleActionsBar.swift; sourceTree = "<group>"; };
-		599231AFF8DD800C0BA6DF12 /* ProjectTypeDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectTypeDefinition.swift; sourceTree = "<group>"; };
 		5A6E91E37345CFC1CFCF9AA6 /* RemoteLogViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteLogViewerView.swift; sourceTree = "<group>"; };
 		5B19BDE6DDAAF5D914C29785 /* RemoteFileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorView.swift; sourceTree = "<group>"; };
 		5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSSHModule.swift; sourceTree = "<group>"; };
@@ -187,7 +182,6 @@
 		CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeploymentService.swift; sourceTree = "<group>"; };
 		D4847DDB6175D9E32C423C8C /* ConfigurationChangeType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationChangeType.swift; sourceTree = "<group>"; };
 		D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyableContent.swift; sourceTree = "<group>"; };
-		D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectTypeManager.swift; sourceTree = "<group>"; };
 		D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyCLI.swift; sourceTree = "<group>"; };
 		DF490ADD191341069884F61B /* QueryEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryEditorView.swift; sourceTree = "<group>"; };
 		DF87669DD8D8EEF387C64926 /* ServersSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServersSettingsTab.swift; sourceTree = "<group>"; };
@@ -412,6 +406,7 @@
 				943FB329E82EA8D3985C41BE /* InlineErrorView.swift */,
 				0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */,
 				514BD1BE8868C181AD9401CF /* LogContentView.swift */,
+				D123456789ABCDEF01234567 /* LogTextView.swift */,
 				66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */,
 				20129FFBFEEBA4948B8DA194 /* WarningView.swift */,
 			);
@@ -428,7 +423,6 @@
 				951F19759C5A27A308A4C3E9 /* Copyable */,
 				7AE0A313AE35403617204739 /* Database */,
 				03381E1786CD41871C8760AF /* Modules */,
-				F6D1CE4F29491269C0D26638 /* Process */,
 				2DE44D1E578B8119641FCA42 /* SSH */,
 			);
 			path = Core;
@@ -522,8 +516,6 @@
 				B6676A7C26F7EE42CD5B9E7A /* ConfigurationObserving.swift */,
 				A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */,
 				C794768AF4898995F64DB92D /* ProjectConfiguration.swift */,
-				599231AFF8DD800C0BA6DF12 /* ProjectTypeDefinition.swift */,
-				D5C1EDE8A6A0E4E24C36183F /* ProjectTypeManager.swift */,
 				3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */,
 				13F8D60E3516F29F554438A0 /* VersionParser.swift */,
 			);
@@ -543,15 +535,6 @@
 				9172819247F48893F5F20EA2 /* WordPressSettingsTab.swift */,
 			);
 			path = Settings;
-			sourceTree = "<group>";
-		};
-		F6D1CE4F29491269C0D26638 /* Process */ = {
-			isa = PBXGroup;
-			children = (
-				076C7293F0318D0DF7C1263E /* LocalEnvironment.swift */,
-				1EC3095C66C75EB70DD73775 /* PythonRunner.swift */,
-			);
-			path = Process;
 			sourceTree = "<group>";
 		};
 		FD3ABA12405D5624F39CB5B6 /* Modules */ = {
@@ -681,8 +664,8 @@
 				EEA581470DC8B48027F54228 /* InlineWarningView.swift in Sources */,
 				5BDE52F8E2A18B1F50AD060A /* JSONValue.swift in Sources */,
 				5A9B1A9B7984F57035A97D82 /* KeychainService.swift in Sources */,
-				305E5C164DFA751B1ABFE77B /* LocalEnvironment.swift in Sources */,
 				D17F7A98F3FB9E8F40991024 /* LogContentView.swift in Sources */,
+				D987654321FEDCBA09876543 /* LogTextView.swift in Sources */,
 				8416680F81D345B2751765CC /* LoginView.swift in Sources */,
 				36948AE7BAD67E09B8873D53 /* ModuleActionsBar.swift in Sources */,
 				AC4B413EC80B0BD0F7AABB1D /* ModuleConsoleView.swift in Sources */,
@@ -699,9 +682,6 @@
 				76A91937D9017A5B0D9B0BA5 /* PinnableTabBar.swift in Sources */,
 				023E9AE450BF036FF40C0E76 /* ProjectConfiguration.swift in Sources */,
 				7EE844A0691D39F31A685114 /* ProjectSwitcherView.swift in Sources */,
-				67B0C8541A262E38CBA8AECA /* ProjectTypeDefinition.swift in Sources */,
-				BD32FAF6FB2583B8A5A24363 /* ProjectTypeManager.swift in Sources */,
-				E77C55FA6D3BBCCD6422EDBA /* PythonRunner.swift in Sources */,
 				9ACBEB5DF2D256960184C815 /* QueryEditorView.swift in Sources */,
 				38D566E59E85DF4E4D14C48F /* RemoteFileBrowser.swift in Sources */,
 				22221233AC86561D48490886 /* RemoteFileBrowserView.swift in Sources */,
@@ -805,7 +785,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 0.9.0;
+				MARKETING_VERSION = 0.10.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
 				PRODUCT_NAME = Homeboy;
 				SDKROOT = macosx;
@@ -830,7 +810,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 0.9.0;
+				MARKETING_VERSION = 0.10.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
 				PRODUCT_NAME = Homeboy;
 				SDKROOT = macosx;

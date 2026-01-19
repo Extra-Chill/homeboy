@@ -18,7 +18,7 @@ Native macOS SwiftUI application for development and deployment automation. Proj
 When a change touches the Rust workspace (`../homeboy/`), always validate using the **release target**:
 
 - `cargo test --release`
-- `cargo run --release -p homeboy-cli -- <args>`
+- `cargo run --release -p homeboy -- <args>`
 
 ```bash
 # Regenerate Xcode project after adding/removing files or changing project.yml settings
@@ -175,18 +175,19 @@ Run `homeboy docs` for the canonical CLI documentation.
 
 ## Configuration
 
-**Desktop is a pure UI wrapper.** The desktop app stores configuration in its own config directory (`~/Library/Application Support/Homeboy/`). The Desktop reads from this directory for reactivity/caching. The desktop app does NOT share on-disk config with the CLI, which uses `~/.config/homeboy/` (documented in `homeboy/docs/index.md`).
+**Desktop is a pure UI wrapper.** All configuration storage and retrieval goes through CLI via CLIBridge. The desktop app does NOT write configuration files directly.
+
+Configuration directory: `~/.config/homeboy/` (managed by CLI, universal across platforms)
 
 Config change reactivity is implemented by `ConfigurationObserver` (`Homeboy/Core/Config/ConfigurationObserver.swift`), which watches:
 - `AppPaths.projects`
 - `AppPaths.servers`
 - `AppPaths.modules`
-- `AppPaths.projectTypes`
 
-Desktop app config tree (`~/Library/Application Support/Homeboy/`):
+Desktop app config tree (`~/.config/homeboy/`):
 
 ```
-~/Library/Application Support/Homeboy/
+~/.config/homeboy/
 ├── projects/             # Project configuration
 │   └── <project-id>.json
 ├── servers/              # SSH server configuration
@@ -195,9 +196,6 @@ Desktop app config tree (`~/Library/Application Support/Homeboy/`):
 │   └── <component-id>.json
 ├── modules/              # Installed modules
 ├── keys/                 # SSH keys (per server)
-├── project-types/        # Project type definitions
-├── playwright-browsers/  # Playwright downloads (module runtime)
-├── venv/                 # Shared python venv (if used)
 └── backups/              # Local backups (deploy/file operations)
 ```
 

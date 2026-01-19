@@ -1,36 +1,21 @@
 import SwiftUI
+import AppKit
 
 /// A read-only view for displaying log file content
-/// Supports monospace font, text selection, and future enhancements like error highlighting
+/// Supports monospace font, text selection, CMD+F find bar, and auto-scrolling
 struct LogContentView: View {
     let content: String
     let isLoading: Bool
-    
+
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView([.horizontal, .vertical]) {
-                Text(content)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-                    .id("logContent")
-            }
-            .background(Color(nsColor: .textBackgroundColor))
-            .onChange(of: content) { _, _ in
-                // Auto-scroll to bottom when content changes
-                withAnimation {
-                    proxy.scrollTo("logContent", anchor: .bottom)
+        LogTextView(content: content, isLoading: isLoading)
+            .overlay {
+                if isLoading {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color(nsColor: .windowBackgroundColor).opacity(0.7))
                 }
             }
-        }
-        .overlay {
-            if isLoading {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(nsColor: .windowBackgroundColor).opacity(0.7))
-            }
-        }
     }
 }
 

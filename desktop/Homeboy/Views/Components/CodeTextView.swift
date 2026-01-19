@@ -1,23 +1,12 @@
 import SwiftUI
 import AppKit
 
-/// NSTextView subclass that properly handles Cmd+F for find bar
-class FindableTextView: NSTextView {
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "f" {
-            performFindPanelAction(nil)
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-}
-
 /// NSTextView wrapper with native macOS find bar support (Cmd+F)
 struct CodeTextView: NSViewRepresentable {
     @Binding var text: String
-    
+
     func makeNSView(context: Context) -> NSScrollView {
-        let textView = FindableTextView()
+        let textView = NSTextView()
         
         // Text styling
         textView.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)

@@ -1,14 +1,16 @@
 import SwiftUI
 
 struct RemoteFileEditorView: View {
-    @StateObject private var viewModel = RemoteFileEditorViewModel()
     @StateObject private var browser: RemoteFileBrowser
+    @StateObject private var viewModel: RemoteFileEditorViewModel
     @State private var showCopiedFeedback = false
-    
+
     init() {
         let projectId = ConfigurationManager.shared.safeActiveProject.id
         let basePath = ConfigurationManager.shared.safeActiveProject.basePath
-        _browser = StateObject(wrappedValue: RemoteFileBrowser(projectId: projectId, startingPath: basePath))
+        let browser = RemoteFileBrowser(projectId: projectId, startingPath: basePath)
+        _browser = StateObject(wrappedValue: browser)
+        _viewModel = StateObject(wrappedValue: RemoteFileEditorViewModel(browser: browser))
     }
     
     var body: some View {
@@ -41,6 +43,8 @@ struct RemoteFileEditorView: View {
         }
         .frame(minWidth: 700, minHeight: 400)
         .task {
+            // Ensure browser reference is set in view model
+            viewModel.browser = browser
             await browser.connect()
             if viewModel.selectedFileId != nil {
                 await viewModel.fetchSelectedFile()

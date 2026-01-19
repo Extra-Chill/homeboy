@@ -36,6 +36,18 @@ final class ConfigurationObserver: ObservableObject {
         return encoder
     }()
 
+    private var projectsDir: URL {
+        AppPaths.projects
+    }
+
+    private var serversDir: URL {
+        AppPaths.servers
+    }
+
+    private var modulesDir: URL {
+        AppPaths.modules
+    }
+
     private init() {
         setupWatchers()
         refreshAllSnapshots()
@@ -57,7 +69,6 @@ final class ConfigurationObserver: ObservableObject {
         watchDirectory(AppPaths.projects, key: "projects")
         watchDirectory(AppPaths.servers, key: "servers")
         watchDirectory(AppPaths.modules, key: "modules")
-        watchDirectory(AppPaths.projectTypes, key: "projectTypes")
     }
 
     private func watchFile(_ url: URL, key: String) {
@@ -144,8 +155,6 @@ final class ConfigurationObserver: ObservableObject {
             detectServerChanges()
         case "modules":
             detectModuleChanges()
-        case "projectTypes":
-            detectProjectTypeChanges()
         default:
             break
         }
@@ -161,20 +170,20 @@ final class ConfigurationObserver: ObservableObject {
 
 
     private func loadAllProjectData() -> [String: Data] {
-        loadAllJsonData(from: AppPaths.projects)
+        loadAllJsonData(from: projectsDir)
     }
 
     private func loadAllServerData() -> [String: Data] {
-        loadAllJsonData(from: AppPaths.servers)
+        loadAllJsonData(from: serversDir)
     }
 
     private func loadAllModuleManifestData() -> [String: Data] {
         var result: [String: Data] = [:]
-        guard let moduleIds = try? fileManager.contentsOfDirectory(atPath: AppPaths.modules.path) else {
+        guard let moduleIds = try? fileManager.contentsOfDirectory(atPath: modulesDir.path) else {
             return result
         }
         for moduleId in moduleIds {
-            let manifestPath = AppPaths.module(id: moduleId).appendingPathComponent("homeboy.json")
+            let manifestPath = modulesDir.appendingPathComponent(moduleId).appendingPathComponent("homeboy.json")
             if let data = try? Data(contentsOf: manifestPath) {
                 result[moduleId] = data
             }
@@ -275,17 +284,6 @@ final class ConfigurationObserver: ObservableObject {
         }
 
         moduleManifestSnapshots = currentManifests
-    }
-
-    private func detectProjectTypeChanges() {
-        // Project types are synced from bundle, so we just notify when they change
-        guard let files = try? fileManager.contentsOfDirectory(at: AppPaths.projectTypes, includingPropertiesForKeys: nil) else {
-            return
-        }
-        for file in files where file.pathExtension == "json" {
-            let typeId = file.deletingPathExtension().lastPathComponent
-            publish(.projectTypeModified(typeId: typeId))
-        }
     }
 
     // MARK: - Field Detection

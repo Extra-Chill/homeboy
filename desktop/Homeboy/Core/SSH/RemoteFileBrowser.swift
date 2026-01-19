@@ -30,8 +30,8 @@ class RemoteFileBrowser: ObservableObject {
         entries.filter { selectedEntries.contains($0.id) }
     }
 
-    private let projectId: String
-    private let startingPath: String?
+    private var projectId: String
+    private var startingPath: String?
     private let cli = HomeboyCLI.shared
 
     /// Initialize with a project ID and optional starting path
@@ -47,6 +47,13 @@ class RemoteFileBrowser: ObservableObject {
         } else {
             await goToPath("/")
         }
+    }
+
+    /// Reconnect with new project context
+    func reconnect(projectId: String, startingPath: String?) async {
+        self.projectId = projectId
+        self.startingPath = startingPath
+        await connect()
     }
 
     /// Navigate to the remote root directory

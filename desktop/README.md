@@ -93,13 +93,13 @@ Homeboy Desktop installs/links modules by shelling out to the `homeboy` CLI.
 3. Select a local folder containing a `homeboy.json` manifest
 4. Homeboy runs `homeboy module install <path>` under the hood
 
-Installed modules live under the desktop app config root:
+Installed modules live under CLI's config directory:
 
 ```
-~/Library/Application Support/Homeboy/modules/
+~/.config/homeboy/modules/
 ```
 
-Note: the desktop app reads/writes its own config under `AppPaths` and does not assume it shares on-disk config with the CLI (`dirs::config_dir()/homeboy`).
+Note: the desktop app does NOT manage its own config storage. All configuration is stored by the CLI at `~/.config/homeboy/`. Desktop app reads/writes configuration via CLI commands through CLIBridge.
 ## Server Configuration (SSH)
 
 Remote features (deployments, remote file browsing, remote database access) require an SSH server.
