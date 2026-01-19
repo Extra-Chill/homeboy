@@ -202,6 +202,8 @@ pub(crate) fn run_json(
     command: crate::Commands,
     global: &GlobalArgs,
 ) -> (homeboy::Result<serde_json::Value>, i32) {
+    crate::tty::status("homeboy is working...");
+
     match command {
         crate::Commands::Init(args) => crate::output::map_cmd_result_to_json(init::run_json(args)),
         crate::Commands::Project(args) => {

@@ -36,3 +36,10 @@ pub fn prompt(message: &str) -> homeboy::Result<String> {
 pub fn prompt_password(message: &str) -> homeboy::Result<String> {
     prompt(message)
 }
+
+/// Print status message to stderr if running in a terminal.
+pub fn status(message: &str) {
+    if io::stderr().is_terminal() {
+        eprintln!("{}", message);
+    }
+}

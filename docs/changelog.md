@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.27.4] - 2026-01-18
+
+### Added
+- Immediate 'homeboy is working...' feedback for TTY sessions
+
 ## [0.27.3] - 2026-01-18
 
 ### Security
