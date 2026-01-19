@@ -102,49 +102,53 @@ elif [ "$DATABASE_TYPE" = "mysql" ]; then
         "$MYSQL_HOST" "$MYSQL_DATABASE" "$MYSQL_USER" "$MYSQL_PASSWORD"
 fi
 
-# Lint PHP files
+# Lint PHP files using PHPCS
 run_lint() {
-    echo "Linting PHP files..."
+    echo "Linting PHP files with PHPCS..."
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
         echo "Linting path: $PLUGIN_PATH"
     fi
 
-    local php_parse="${MODULE_PATH}/vendor/bin/php-parse"
-    if [ ! -f "$php_parse" ]; then
-        echo "Warning: php-parse not found at $php_parse, skipping linting"
+    local phpcs="${MODULE_PATH}/vendor/bin/phpcs"
+    if [ ! -f "$phpcs" ]; then
+        echo "Warning: phpcs not found at $phpcs, skipping linting"
         return 0
     fi
 
-    local lint_errors=0
-    local file_count=0
-
-    while IFS= read -r -d '' file; do
-        if [ "$file_count" -eq 0 ]; then
-            if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-                echo "Found PHP files to lint"
-            fi
-        fi
-        ((file_count++))
-        
-        if ! "$php_parse" "$file" > /dev/null 2>&1; then
-            echo "Linting error in: $file"
-            "$php_parse" "$file" 2>&1
-            lint_errors=1
-        fi
-    done < <(find "$PLUGIN_PATH" -name "*.php" -not -path "*/vendor/*" -not -path "*/node_modules/*" -print0)
-
-    if [ "$file_count" -eq 0 ]; then
-        echo "No PHP files found to lint"
-    else
-        echo "Linted $file_count PHP file(s)"
+    local phpcs_config="${MODULE_PATH}/phpcs.xml.dist"
+    if [ ! -f "$phpcs_config" ]; then
+        echo "Warning: phpcs.xml.dist not found at $phpcs_config, skipping linting"
+        return 0
     fi
 
-    if [ $lint_errors -eq 1 ]; then
-        echo "PHP linting failed. Aborting tests."
+    # Auto-detect text domain from plugin header
+    local TEXT_DOMAIN=""
+    local MAIN_PLUGIN_FILE
+    MAIN_PLUGIN_FILE=$(find "$PLUGIN_PATH" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
+    if [ -n "$MAIN_PLUGIN_FILE" ]; then
+        TEXT_DOMAIN=$(grep -m1 "Text Domain:" "$MAIN_PLUGIN_FILE" 2>/dev/null | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
+    fi
+
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: Running PHPCS with config: $phpcs_config"
+        echo "DEBUG: Target path: $PLUGIN_PATH"
+        echo "DEBUG: Main plugin file: ${MAIN_PLUGIN_FILE:-NOT_FOUND}"
+        echo "DEBUG: Text domain: ${TEXT_DOMAIN:-NOT_DETECTED}"
+    fi
+
+    # Build phpcs command with optional text domain
+    local phpcs_args=(--standard="$phpcs_config")
+    if [ -n "$TEXT_DOMAIN" ]; then
+        phpcs_args+=(--runtime-set text_domain "$TEXT_DOMAIN")
+    fi
+    phpcs_args+=("$PLUGIN_PATH")
+
+    if "$phpcs" "${phpcs_args[@]}"; then
+        echo "PHPCS linting passed"
+    else
+        echo "PHPCS linting failed. Aborting tests."
         exit 1
     fi
-
-    echo "PHP linting passed"
 }
 
 # Export paths for bootstrap

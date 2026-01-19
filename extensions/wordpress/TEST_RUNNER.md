@@ -44,6 +44,76 @@ export HOMEBOY_SETTINGS_JSON='{"database_type":"sqlite"}'
 bash "$HOMEBOY_MODULE_PATH/scripts/test-runner.sh"
 ```
 
+## PHPCS Linting
+
+The test runner uses PHP_CodeSniffer (PHPCS) with WordPress coding standards for linting before running tests.
+
+### Running Lint Manually
+
+```bash
+# From module directory
+composer lint
+
+# Or directly with phpcs
+./vendor/bin/phpcs --standard=phpcs.xml.dist /path/to/component
+```
+
+### Configuration
+
+The `phpcs.xml.dist` file configures PHPCS with:
+- **WordPress-Extra** standard (includes WordPress-Core + WordPress-Docs)
+- PHP 7.4+ compatibility
+- Excluded directories: `vendor/`, `node_modules/`, `build/`, `dist/`, `tests/`
+
+### Text Domain Auto-Detection
+
+The test runner automatically detects the text domain from the plugin header. No configuration is needed.
+
+**How it works:**
+1. Finds the main plugin file (contains `Plugin Name:` header)
+2. Extracts the `Text Domain:` value from the plugin header
+3. Passes to PHPCS via `--runtime-set text_domain <value>`
+
+**Example plugin header:**
+```php
+/**
+ * Plugin Name: My Plugin
+ * Text Domain: my-plugin
+ */
+```
+
+To verify detection is working:
+```bash
+HOMEBOY_DEBUG=1 homeboy test my-component
+# Output includes: DEBUG: Text domain: my-plugin
+```
+
+### Centralized Infrastructure
+
+**Important:** Components should NOT have local `phpcs.xml.dist` files. The WordPress module provides centralized PHPCS infrastructure to ensure consistent standards across all components.
+
+### Rules Configuration
+
+**Excluded Rules (PSR-4 Compatibility):**
+- `WordPress.Files.FileName.NotHyphenatedLowercase` - PSR-4 uses PascalCase.php
+- `WordPress.Files.FileName.InvalidClassFileName` - PSR-4 class naming
+- `WordPress.NamingConventions.ValidFunctionName.MethodNameInvalid` - PSR-4 uses camelCase methods
+- `WordPress.NamingConventions.ValidVariableName.*` - PSR-4 uses camelCase variables
+
+**Enforced Rules (Security/Best Practices):**
+- `WordPress.PHP.YodaConditions` - Prevents accidental assignment
+- `WordPress.DB.PreparedSQL` - SQL injection prevention
+- `WordPress.Security.*` - XSS prevention
+- `WordPress.WP.AlternativeFunctions` - Proper WordPress API usage
+- `WordPress.WP.I18n` - Internationalization (text domain auto-detected)
+- `WordPress.PHP.StrictInArray` - Type safety
+
+### Linting Behavior
+
+- **Project-level**: Lints all PHP files in the project directory
+- **Component-level**: Lints only PHP files in the component directory
+- Lint failures abort the test run with exit code 1
+
 ## Debug Mode
 
 Enable debug output to see environment variables and execution context:
