@@ -81,6 +81,13 @@ function process_file($filepath) {
 
         // Check for comparison pattern: $var COMPARISON_OP literal
         if (is_variable_token($token)) {
+            // Skip static property access (self::$var, static::$var, ClassName::$var)
+            if (is_preceded_by_double_colon($tokens, $i)) {
+                $new_content .= token_to_string($token);
+                $i++;
+                continue;
+            }
+
             $result = try_fix_yoda($tokens, $i, $count);
             if ($result !== null) {
                 $new_content .= $result['replacement'];
@@ -168,6 +175,26 @@ function is_inline_whitespace($token) {
     }
 
     return $token[0] === T_WHITESPACE && strpos($token[1], "\n") === false;
+}
+
+/**
+ * Check if token at index is preceded by double colon (static property access).
+ *
+ * @param array $tokens Token array.
+ * @param int   $index  Current index.
+ * @return bool True if preceded by ::
+ */
+function is_preceded_by_double_colon($tokens, $index) {
+    $j = $index - 1;
+    while ($j >= 0) {
+        $token = $tokens[$j];
+        if (is_array($token) && $token[0] === T_WHITESPACE) {
+            $j--;
+            continue;
+        }
+        return is_array($token) && $token[0] === T_DOUBLE_COLON;
+    }
+    return false;
 }
 
 /**

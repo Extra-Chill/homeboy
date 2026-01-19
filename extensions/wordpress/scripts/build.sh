@@ -29,6 +29,9 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# Module path from Homeboy environment (required)
+MODULE_PATH="${HOMEBOY_MODULE_PATH}"
+
 # Output functions
 print_status() {
     echo -e "${BLUE}[BUILD]${NC} $1"
@@ -294,14 +297,14 @@ AGENTS.md
 .DS_Store
 ._*
 node_modules
-src
+/src
 *.log
 *.tmp
 *.temp
 .env*
 build.sh
 .buildignore
-tests
+/tests
 phpunit.xml*
 .github
 composer.lock

@@ -127,6 +127,13 @@
 
   "settings": [
     {
+      "id": "user",
+      "label": "WP-CLI User",
+      "type": "string",
+      "default": "",
+      "description": "WordPress user for WP-CLI commands (email, login, or ID). When configured, automatically appended as --user flag."
+    },
+    {
       "id": "database_type",
       "label": "Database Type",
       "type": "string",

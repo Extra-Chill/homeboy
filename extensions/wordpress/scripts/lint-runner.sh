@@ -27,10 +27,39 @@ else
     PLUGIN_PATH="$COMPONENT_PATH"
 fi
 
-echo "Running PHP linting..."
+# Determine lint target (file, glob, or full component)
+# Use array to properly handle paths with spaces
+LINT_FILES=("$PLUGIN_PATH")
+
+if [ -n "${HOMEBOY_LINT_FILE:-}" ]; then
+    LINT_FILES=("${PLUGIN_PATH}/${HOMEBOY_LINT_FILE}")
+    if [ ! -f "${LINT_FILES[0]}" ]; then
+        echo "Error: File not found: ${LINT_FILES[0]}"
+        exit 1
+    fi
+    echo "Linting single file: ${HOMEBOY_LINT_FILE}"
+elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
+    cd "$PLUGIN_PATH"
+    shopt -s nullglob globstar
+    MATCHED_FILES=( ${HOMEBOY_LINT_GLOB} )
+    shopt -u nullglob globstar
+
+    if [ ${#MATCHED_FILES[@]} -eq 0 ]; then
+        echo "Error: No files match pattern: ${HOMEBOY_LINT_GLOB}"
+        exit 1
+    fi
+
+    echo "Linting ${#MATCHED_FILES[@]} files matching: ${HOMEBOY_LINT_GLOB}"
+    LINT_FILES=("${MATCHED_FILES[@]}")
+    cd - > /dev/null
+else
+    echo "Running PHP linting..."
+fi
+
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "Module path: $MODULE_PATH"
     echo "Plugin path: $PLUGIN_PATH"
+    echo "Lint files: ${LINT_FILES[*]}"
     echo "Auto-fix: ${HOMEBOY_AUTO_FIX:-0}"
 fi
 
@@ -53,15 +82,12 @@ if [ ! -f "$PHPCS_CONFIG" ]; then
 fi
 
 # Auto-detect text domain from plugin header
-TEXT_DOMAIN_ARG=""
+TEXT_DOMAIN=""
 MAIN_PLUGIN_FILE=$(find "$PLUGIN_PATH" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
 if [ -n "$MAIN_PLUGIN_FILE" ]; then
     TEXT_DOMAIN=$(grep -m1 "Text Domain:" "$MAIN_PLUGIN_FILE" 2>/dev/null | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
-    if [ -n "$TEXT_DOMAIN" ]; then
-        TEXT_DOMAIN_ARG="--runtime-set text_domain $TEXT_DOMAIN"
-        if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-            echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
-        fi
+    if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
     fi
 fi
 
@@ -85,10 +111,17 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
     # Run phpcbf for remaining auto-fixable issues
     if [ -f "$PHPCBF_BIN" ]; then
         echo "Running auto-fix (phpcbf)..."
+
+        # Build phpcbf command arguments as array for proper path escaping
+        phpcbf_args=(--standard="$PHPCS_CONFIG")
+        if [ -n "$TEXT_DOMAIN" ]; then
+            phpcbf_args+=(--runtime-set text_domain "$TEXT_DOMAIN")
+        fi
+        phpcbf_args+=("${LINT_FILES[@]}")
+
         # phpcbf exit codes: 0=no changes, 1=changes made, 2=some errors unfixable
         set +e
-        # shellcheck disable=SC2086
-        "$PHPCBF_BIN" --standard="$PHPCS_CONFIG" $TEXT_DOMAIN_ARG "$PLUGIN_PATH"
+        "$PHPCBF_BIN" "${phpcbf_args[@]}"
         PHPCBF_EXIT=$?
         set -e
 
@@ -105,16 +138,23 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
     fi
 fi
 
-# Summary mode: use --report=summary for compact output
-REPORT_ARG=""
-if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
-    REPORT_ARG="--report=summary"
-fi
-
 # Validation
 echo "Validating with PHPCS..."
-# shellcheck disable=SC2086
-if "$PHPCS_BIN" --standard="$PHPCS_CONFIG" $TEXT_DOMAIN_ARG $REPORT_ARG "$PLUGIN_PATH"; then
+
+# Build phpcs command arguments as array for proper path escaping
+phpcs_args=(--standard="$PHPCS_CONFIG")
+if [ -n "$TEXT_DOMAIN" ]; then
+    phpcs_args+=(--runtime-set text_domain "$TEXT_DOMAIN")
+fi
+if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
+    phpcs_args+=(--report=summary)
+fi
+if [[ "${HOMEBOY_ERRORS_ONLY:-}" == "1" ]]; then
+    phpcs_args+=(--warning-severity=0)
+fi
+phpcs_args+=("${LINT_FILES[@]}")
+
+if "$PHPCS_BIN" "${phpcs_args[@]}"; then
     echo "PHPCS linting passed"
     exit 0
 else
