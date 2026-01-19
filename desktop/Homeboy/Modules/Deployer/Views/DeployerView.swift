@@ -11,6 +11,8 @@ struct DeployerView: View {
                 checkingConfigView
             } else if !viewModel.hasCredentials || !viewModel.hasSSHKey || !viewModel.hasBasePath {
                 configurationRequiredView
+            } else if viewModel.components.isEmpty {
+                emptyComponentsView
             } else {
                 headerSection
                 Divider()
@@ -110,6 +112,50 @@ struct DeployerView: View {
             .padding()
             .background(Color(nsColor: .controlBackgroundColor))
             .cornerRadius(8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Empty Components View
+
+    private var emptyComponentsView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "shippingbox")
+                .font(.system(size: 60))
+                .foregroundColor(.secondary)
+
+            Text("No Components")
+                .font(.title)
+
+            if let loadError = viewModel.loadError {
+                VStack(alignment: .leading, spacing: 8) {
+                    InlineErrorView(loadError)
+
+                    if !viewModel.failedComponentIds.isEmpty {
+                        Text("Failed to load:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        ForEach(viewModel.failedComponentIds, id: \.self) { id in
+                            Text("  - \(id)")
+                                .font(.caption.monospaced())
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(8)
+            } else {
+                Text("No components are linked to this project. Add components in project settings or use the CLI.")
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 400)
+            }
+
+            Button("Refresh") {
+                viewModel.checkConfiguration()
+            }
+            .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

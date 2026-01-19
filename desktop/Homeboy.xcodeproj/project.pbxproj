@@ -73,6 +73,7 @@
 		9CD0D78AD51869E4BCA3363C /* ComponentConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E609811240E56A3A71CA778 /* ComponentConfiguration.swift */; };
 		A051F697BD41C8D9A5298333 /* DataTableColumn.swift in Sources */ = {isa = PBXBuildFile; fileRef = C503C8896286EA38288A139F /* DataTableColumn.swift */; };
 		A34392C1F77DDF4B0B386D8C /* DataTableConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = F915FEEAF97ADD6EAADF6E4A /* DataTableConstants.swift */; };
+		A79AD1D6F7DD14F02410D120 /* LogTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 670327C19CE0F089CFF35DD1 /* LogTextView.swift */; };
 		AACC7F3153886939005FC50C /* WordPressSSHModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BEFBC62BD4867D4AE7E8D6E /* WordPressSSHModule.swift */; };
 		AB378FCB8518F6BED6EEFB6F /* DisplayableError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C195A8A1462489E882BC187 /* DisplayableError.swift */; };
 		AC4B413EC80B0BD0F7AABB1D /* ModuleConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F014356904A59206993DA47 /* ModuleConsoleView.swift */; };
@@ -86,7 +87,6 @@
 		CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA88D343E94C4C34E1069813 /* CodeTextView.swift */; };
 		D067D1266FD0989BC9E07C43 /* CLIBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40736E67E0624C5F3AA5913C /* CLIBridge.swift */; };
 		D17F7A98F3FB9E8F40991024 /* LogContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 514BD1BE8868C181AD9401CF /* LogContentView.swift */; };
-		D987654321FEDCBA09876543 /* LogTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D123456789ABCDEF01234567 /* LogTextView.swift */; };
 		D3D2FEA38CB8A09E0ED93B73 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A6FE3DEAD139D529B6724D8 /* APITypes.swift */; };
 		E1F7C14F08E1E4D8353F8064 /* CopyableTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4406A9EEECAF8249580937A7 /* CopyableTextView.swift */; };
 		E6130C3BA0E6F318EAB670A3 /* ConfigurationObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2FF4CDA2AE7652A449E74D8 /* ConfigurationObserver.swift */; };
@@ -132,7 +132,6 @@
 		4C3C30739F765981B37603DD /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		4ED098FFBF749CD6DD355B1B /* CollapsibleSplitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollapsibleSplitView.swift; sourceTree = "<group>"; };
 		514BD1BE8868C181AD9401CF /* LogContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogContentView.swift; sourceTree = "<group>"; };
-		D123456789ABCDEF01234567 /* LogTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogTextView.swift; sourceTree = "<group>"; };
 		572D0318B7820B97ABDBC10A /* ModuleActionsBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleActionsBar.swift; sourceTree = "<group>"; };
 		5A6E91E37345CFC1CFCF9AA6 /* RemoteLogViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteLogViewerView.swift; sourceTree = "<group>"; };
 		5B19BDE6DDAAF5D914C29785 /* RemoteFileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorView.swift; sourceTree = "<group>"; };
@@ -140,6 +139,7 @@
 		5F014356904A59206993DA47 /* ModuleConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleConsoleView.swift; sourceTree = "<group>"; };
 		60913533AA72054F3D79625C /* ArtifactVersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactVersionParser.swift; sourceTree = "<group>"; };
 		66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnableTabBar.swift; sourceTree = "<group>"; };
+		670327C19CE0F089CFF35DD1 /* LogTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogTextView.swift; sourceTree = "<group>"; };
 		69348F2856AF692571BB880E /* ModuleContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleContainerView.swift; sourceTree = "<group>"; };
 		6C195A8A1462489E882BC187 /* DisplayableError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayableError.swift; sourceTree = "<group>"; };
 		75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */ = {isa = PBXFileReference; path = "bandcamp_scraper.cpython-314.pyc"; sourceTree = "<group>"; };
@@ -406,7 +406,7 @@
 				943FB329E82EA8D3985C41BE /* InlineErrorView.swift */,
 				0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */,
 				514BD1BE8868C181AD9401CF /* LogContentView.swift */,
-				D123456789ABCDEF01234567 /* LogTextView.swift */,
+				670327C19CE0F089CFF35DD1 /* LogTextView.swift */,
 				66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */,
 				20129FFBFEEBA4948B8DA194 /* WarningView.swift */,
 			);
@@ -665,7 +665,7 @@
 				5BDE52F8E2A18B1F50AD060A /* JSONValue.swift in Sources */,
 				5A9B1A9B7984F57035A97D82 /* KeychainService.swift in Sources */,
 				D17F7A98F3FB9E8F40991024 /* LogContentView.swift in Sources */,
-				D987654321FEDCBA09876543 /* LogTextView.swift in Sources */,
+				A79AD1D6F7DD14F02410D120 /* LogTextView.swift in Sources */,
 				8416680F81D345B2751765CC /* LoginView.swift in Sources */,
 				36948AE7BAD67E09B8873D53 /* ModuleActionsBar.swift in Sources */,
 				AC4B413EC80B0BD0F7AABB1D /* ModuleConsoleView.swift in Sources */,

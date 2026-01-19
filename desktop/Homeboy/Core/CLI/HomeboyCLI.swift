@@ -598,7 +598,7 @@ final class HomeboyCLI {
         if let table {
             args.append(table)
         }
-        return try await cli.executeCommand(args, dataType: DbOutput.self, source: "Database Describe")
+        return try await cli.executeCommand(args, dataType: DbOutput.self, source: "Database Describe", timeout: 60)
     }
 
     func dbQuery(projectId: String, sql: String) async throws -> DbOutput {

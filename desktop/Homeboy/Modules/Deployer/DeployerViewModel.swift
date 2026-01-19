@@ -40,19 +40,19 @@ private struct CLIErrorResponse: Decodable {
 }
 
 private struct CLIDeploymentResult: Decodable {
-    let components: [CLIComponentResult]
+    let results: [CLIComponentResult]
     let summary: CLIDeploymentSummary
 }
 
 fileprivate struct CLIComponentResult: Decodable {
     let id: String
-    let name: String
     let status: String
-    let duration: Double?
-    let sourceVersion: String?
-    let artifactVersion: String?
+    let localVersion: String?
     let remoteVersion: String?
+    let componentStatus: String?
     let error: String?
+    let artifactPath: String?
+    let remotePath: String?
 }
 
 private struct CLIDeploymentSummary: Decodable {
@@ -92,6 +92,8 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
     @Published var componentsNeedingBuild: [DeployableComponent] = []
     @Published var deploymentProgress: (current: Int, total: Int)? = nil
     @Published var deploymentReports: [DeploymentReport] = []
+    @Published var loadError: AppError?
+    @Published var failedComponentIds: [String] = []
 
     // MARK: - CLI Bridge
 
@@ -153,8 +155,20 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
         // Check base path (synchronous)
         hasBasePath = project.basePath != nil && !project.basePath!.isEmpty
 
-        // Refresh component list
-        components = ConfigurationManager.shared.loadComponentsForProject(project).map { DeployableComponent(from: $0) }
+        // Refresh component list with error tracking
+        loadError = nil
+        failedComponentIds = []
+        let (loadedComponents, failedIds) = ConfigurationManager.shared.loadComponentsForProjectWithErrors(project)
+        components = loadedComponents.map { DeployableComponent(from: $0) }
+        failedComponentIds = failedIds
+
+        // Surface load error if any components failed
+        if !failedIds.isEmpty {
+            loadError = AppError(
+                "Failed to load \(failedIds.count) component(s): \(failedIds.joined(separator: ", "))",
+                source: "Deployer"
+            )
+        }
 
         // Mark as checking before async call
         isCheckingConfig = true
@@ -204,8 +218,7 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
         hasher.combine(componentData.count)
         for (key, value) in componentData.sorted(by: { $0.key < $1.key }) {
             hasher.combine(key)
-            hasher.combine(value.sourceVersion ?? "")
-            hasher.combine(value.artifactVersion ?? "")
+            hasher.combine(value.localVersion ?? "")
             hasher.combine(value.remoteVersion ?? "")
             hasher.combine(value.status)
         }
@@ -244,14 +257,14 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
 
                         // Store CLI results directly - single source of truth
                         var newData: [String: CLIComponentResult] = [:]
-                        for comp in result.components {
+                        for comp in result.results {
                             newData[comp.id] = comp
                         }
 
                         self.componentData = newData
 
-                        let currentCount = result.components.filter { $0.status == "current" }.count
-                        consoleOutput += "> Processed \(result.components.count) components (\(currentCount) current)\n"
+                        let currentCount = result.results.filter { $0.status == "current" || $0.componentStatus == "up_to_date" }.count
+                        consoleOutput += "> Processed \(result.results.count) components (\(currentCount) current)\n"
                     } else {
                         consoleOutput += "> Warning: Could not parse version response\n"
                     }
@@ -278,8 +291,30 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
             return .unknown
         }
 
-        // Map CLI status strings to DeployStatus enum
+        // Map componentStatus (from CLI dry-run/check) to DeployStatus
+        if let compStatus = data.componentStatus {
+            switch compStatus {
+            case "up_to_date":
+                return .current
+            case "needs_update", "behind_remote":
+                return .needsUpdate
+            case "not_deployed":
+                return .notDeployed
+            case "build_required":
+                return .buildRequired
+            default:
+                break
+            }
+        }
+
+        // Fallback to status field for deployment results
         switch data.status {
+        case "deployed":
+            return .current
+        case "failed":
+            return .failed(data.error ?? "Deployment failed")
+        case "planned", "checked":
+            return .needsUpdate
         case "current":
             return .current
         case "needs_update":
@@ -300,12 +335,12 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
 
     /// Get display string for source version
     func sourceVersionDisplay(for component: DeployableComponent) -> String {
-        componentData[component.id]?.sourceVersion ?? "—"
+        componentData[component.id]?.localVersion ?? "—"
     }
 
     /// Get display string for artifact version
     func artifactVersionDisplay(for component: DeployableComponent) -> String {
-        componentData[component.id]?.artifactVersion ?? "—"
+        "—"  // CLI doesn't provide separate artifact version
     }
 
     // MARK: - Selection
@@ -485,10 +520,10 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
 
                         // Convert to DeploymentReports
                         var reports: [DeploymentReport] = []
-                        for comp in result.components {
+                        for comp in result.results {
                             let report = DeploymentReport(
                                 componentId: comp.id,
-                                componentName: comp.name,
+                                componentName: comp.id,  // CLI uses id, no separate name field
                                 success: comp.status == "deployed",
                                 output: "",
                                 errorMessage: comp.error,
@@ -545,14 +580,11 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
     private func formatCLIDeploymentReport(_ result: CLIDeploymentResult, output: String) -> String {
         var report = ""
 
-        for comp in result.components {
+        for comp in result.results {
             report += "========================================\n"
-            report += "> \(comp.name): \(comp.status.uppercased())\n"
-            if let local = comp.sourceVersion, let remote = comp.remoteVersion {
+            report += "> \(comp.id): \(comp.status.uppercased())\n"
+            if let local = comp.localVersion, let remote = comp.remoteVersion {
                 report += "> Version: \(remote) → \(local)\n"
-            }
-            if let duration = comp.duration {
-                report += "> Duration: \(String(format: "%.1f", duration))s\n"
             }
             if let error = comp.error {
                 report += "> Error: \(error)\n"

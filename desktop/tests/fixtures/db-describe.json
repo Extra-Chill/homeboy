@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "data": {
+    "command": "db.describe",
+    "project_id": "extrachill",
+    "exit_code": 0,
+    "success": true,
+    "stdout": "[{\"Name\":\"wp_posts\",\"Rows\":\"1234\",\"Engine\":\"InnoDB\"},{\"Name\":\"wp_users\",\"Rows\":\"567\",\"Engine\":\"InnoDB\"},{\"Name\":\"wp_options\",\"Rows\":\"890\",\"Engine\":\"InnoDB\"}]",
+    "stderr": null,
+    "tables": null,
+    "table": null,
+    "sql": null,
+    "tunnel": null
+  }
+}

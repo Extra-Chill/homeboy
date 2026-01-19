@@ -137,6 +137,17 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
     private func connect() async {
         connectionStatus = .connecting
         errorMessage = nil
+        await fetchTables()
+
+        // Set connected status if tables loaded successfully, otherwise disconnect
+        if !tables.isEmpty && errorMessage == nil {
+            connectionStatus = .connected
+        } else if errorMessage != nil {
+            connectionStatus = .disconnected
+        } else {
+            // No tables found but no error - still disconnected
+            connectionStatus = .disconnected
+        }
     }
 
     func fetchTables() async {
@@ -151,10 +162,13 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
 
             if describe.success == true, let stdout = describe.stdout {
                 tables = parseTables(from: stdout)
+                connectionStatus = .connected
             } else {
+                connectionStatus = .disconnected
                 errorMessage = AppError("Failed to fetch tables: \(describe.stderr ?? "")", source: "Database Browser")
             }
         } catch {
+            connectionStatus = .disconnected
             errorMessage = AppError("Failed to fetch tables: \(error.localizedDescription)", source: "Database Browser")
         }
 
@@ -186,8 +200,14 @@ class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
             if select.success == true, let stdout = select.stdout {
                 rows = parseRows(from: stdout, columns: columns)
             }
+
+            // Successfully loaded table data
+            connectionStatus = .connected
+            selectedTable = table
+            currentPage = 1
         } catch {
             errorMessage = AppError("Failed to load table: \(error.localizedDescription)", source: "Database Browser")
+            connectionStatus = .disconnected
         }
 
         isLoadingTableData = false

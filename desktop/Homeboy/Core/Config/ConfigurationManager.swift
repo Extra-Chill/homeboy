@@ -705,6 +705,23 @@ class ConfigurationManager: ObservableObject {
         project.componentIds.compactMap { loadComponent(id: $0) }
     }
 
+    /// Load components for a project with error tracking.
+    /// Returns a tuple of (successfully loaded components, IDs that failed to load).
+    func loadComponentsForProjectWithErrors(_ project: ProjectConfiguration) -> ([ComponentConfiguration], [String]) {
+        var loaded: [ComponentConfiguration] = []
+        var failed: [String] = []
+
+        for componentId in project.componentIds {
+            if let component = loadComponent(id: componentId) {
+                loaded.append(component)
+            } else {
+                failed.append(componentId)
+            }
+        }
+
+        return (loaded, failed)
+    }
+
     /// Thread-safe version for loading components for a project
     nonisolated static func loadComponentsForProject(_ project: ProjectConfiguration) -> [ComponentConfiguration] {
         project.componentIds.compactMap { readComponent(id: $0) }

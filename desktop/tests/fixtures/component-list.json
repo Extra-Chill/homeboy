@@ -1,0 +1,687 @@
+{
+  "success": true,
+  "data": {
+    "command": "component.list",
+    "component": null,
+    "component_id": null,
+    "components": [
+      {
+        "changelog_target": "docs/CHANGELOG.md",
+        "id": "ai-http-client",
+        "local_path": "/Users/chubes/Developer/ai-http-client",
+        "modules": {
+          "github": {
+            "settings": {}
+          }
+        },
+        "release": {
+          "enabled": true,
+          "steps": [
+            {
+              "config": {
+                "mode": "validate"
+              },
+              "id": "version",
+              "type": "version"
+            },
+            {
+              "id": "git.commit",
+              "needs": [
+                "version"
+              ],
+              "type": "git.commit"
+            },
+            {
+              "id": "git.tag",
+              "needs": [
+                "git.commit"
+              ],
+              "type": "git.tag"
+            },
+            {
+              "config": {
+                "tags": true
+              },
+              "id": "git.push",
+              "needs": [
+                "git.tag"
+              ],
+              "type": "git.push"
+            },
+            {
+              "id": "publish",
+              "needs": [
+                "git.push"
+              ],
+              "type": "publish"
+            }
+          ]
+        },
+        "remote_path": "",
+        "version_targets": [
+          {
+            "file": "ai-http-client.php",
+            "pattern": "@version\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/blocks-everywhere.zip",
+        "id": "blocks-everywhere",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/blocks-everywhere",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/blocks-everywhere",
+        "version_targets": [
+          {
+            "file": "blocks-everywhere.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/chubes-docs.zip",
+        "extract_command": "unzip -o {artifact} && cp -rf chubes-docs/* . && rm -rf chubes-docs {artifact}",
+        "id": "chubes-docs",
+        "local_path": "/Users/chubes/Developer/chubes-net/chubes-docs",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/chubes-docs",
+        "version_targets": [
+          {
+            "file": "chubes-docs.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          },
+          {
+            "file": "chubes-docs.php",
+            "pattern": "CHUBES_DOCS_VERSION',\\s*'([0-9]+\\.[0-9]+\\.[0-9]+)'"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/data-machine.zip",
+        "changelog_target": "docs/CHANGELOG.md",
+        "id": "data-machine",
+        "local_path": "/Users/chubes/Developer/Data Machine Ecosystem/data-machine",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/data-machine",
+        "version_targets": [
+          {
+            "file": "data-machine.php"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/datamachine-events.zip",
+        "changelog_target": "docs/CHANGELOG.md",
+        "extract_command": "unzip -o {artifact} && rm {artifact}",
+        "id": "datamachine-events",
+        "local_path": "/Users/chubes/Developer/Data Machine Ecosystem/datamachine-events",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/datamachine-events",
+        "version_targets": [
+          {
+            "file": "datamachine-events.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          },
+          {
+            "file": "datamachine-events.php",
+            "pattern": "DATAMACHINE_EVENTS_VERSION',\\s*'(\\d+\\.\\d+\\.\\d+)'"
+          }
+        ]
+      },
+      {
+        "build_artifact": "dist/datamachine-recipes.zip",
+        "id": "datamachine-recipes",
+        "local_path": "/Users/chubes/Developer/Data Machine Ecosystem/datamachine-recipes",
+        "remote_path": "wp-content/plugins/datamachine-recipes",
+        "version_targets": [
+          {
+            "file": "datamachine-recipes.php",
+            "pattern": "Version:\\\\s*(\\\\d+\\\\.\\\\d+\\\\.\\\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-admin-tools.zip",
+        "id": "extra-chill-admin-tools",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-admin-tools",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-admin-tools",
+        "version_targets": [
+          {
+            "file": "extrachill-admin-tools.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-ai-client.zip",
+        "id": "extra-chill-ai-client",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-ai-client",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-ai-client",
+        "version_targets": [
+          {
+            "file": "extrachill-ai-client.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-analytics.zip",
+        "id": "extra-chill-analytics",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-analytics",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-analytics",
+        "version_targets": [
+          {
+            "file": "extrachill-analytics.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-api.zip",
+        "id": "extra-chill-api",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-api",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-api",
+        "version_targets": [
+          {
+            "file": "extrachill-api.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-artist-platform.zip",
+        "id": "extra-chill-artist-platform",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-artist-platform",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-artist-platform",
+        "version_targets": [
+          {
+            "file": "extrachill-artist-platform.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-blog.zip",
+        "id": "extra-chill-blog",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-blog",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-blog",
+        "version_targets": [
+          {
+            "file": "extrachill-blog.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-community.zip",
+        "id": "extra-chill-community",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-community",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-community",
+        "version_targets": [
+          {
+            "file": "extrachill-community.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-contact.zip",
+        "id": "extra-chill-contact",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-contact",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-contact",
+        "version_targets": [
+          {
+            "file": "extrachill-contact.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-docs.zip",
+        "id": "extra-chill-docs",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-docs",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-docs",
+        "version_targets": [
+          {
+            "file": "extrachill-docs.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-events.zip",
+        "id": "extra-chill-events",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-events",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-events",
+        "version_targets": [
+          {
+            "file": "extrachill-events.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-horoscopes.zip",
+        "id": "extra-chill-horoscopes",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-horoscopes",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-horoscopes",
+        "version_targets": [
+          {
+            "file": "extrachill-horoscopes.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-multisite.zip",
+        "id": "extra-chill-multisite",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-multisite",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-multisite",
+        "version_targets": [
+          {
+            "file": "extrachill-multisite.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-news-wire.zip",
+        "id": "extra-chill-news-wire",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-news-wire",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-news-wire",
+        "version_targets": [
+          {
+            "file": "extrachill-news-wire.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-newsletter.zip",
+        "id": "extra-chill-newsletter",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-newsletter",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-newsletter",
+        "version_targets": [
+          {
+            "file": "extrachill-newsletter.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-search.zip",
+        "id": "extra-chill-search",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-search",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-search",
+        "version_targets": [
+          {
+            "file": "extrachill-search.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-seo.zip",
+        "id": "extra-chill-seo",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-seo",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-seo",
+        "version_targets": [
+          {
+            "file": "extrachill-seo.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-shop.zip",
+        "id": "extra-chill-shop",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-shop",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-shop",
+        "version_targets": [
+          {
+            "file": "extrachill-shop.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-stream.zip",
+        "id": "extra-chill-stream",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-stream",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-stream",
+        "version_targets": [
+          {
+            "file": "extrachill-stream.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill.zip",
+        "id": "extra-chill-theme",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/themes/extrachill",
+        "version_targets": [
+          {
+            "file": "style.css",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/extrachill-users.zip",
+        "id": "extra-chill-users",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-users",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/extrachill-users",
+        "version_targets": [
+          {
+            "file": "extrachill-users.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_command": "cargo build --release",
+        "changelog_target": "docs/changelog.md",
+        "id": "homeboy",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/homeboy-ecosystem/homeboy",
+        "modules": {
+          "github": {
+            "settings": {}
+          },
+          "homebrew": {
+            "settings": {}
+          },
+          "rust": {
+            "settings": {}
+          }
+        },
+        "post_version_bump_commands": [
+          "cargo check"
+        ],
+        "release": {
+          "enabled": true,
+          "steps": [
+            {
+              "config": {
+                "mode": "validate"
+              },
+              "id": "version",
+              "type": "version"
+            },
+            {
+              "id": "package",
+              "needs": [
+                "version"
+              ],
+              "type": "package"
+            },
+            {
+              "id": "git.tag",
+              "needs": [
+                "package"
+              ],
+              "type": "git.tag"
+            },
+            {
+              "config": {
+                "tags": true
+              },
+              "id": "git.push",
+              "needs": [
+                "git.tag"
+              ],
+              "type": "git.push"
+            },
+            {
+              "id": "publish",
+              "needs": [
+                "git.push"
+              ],
+              "type": "publish"
+            }
+          ]
+        },
+        "remote_path": "",
+        "version_targets": [
+          {
+            "file": "Cargo.toml",
+            "pattern": "version = \"(\\d+\\.\\d+\\.\\d+)\""
+          }
+        ]
+      },
+      {
+        "build_artifact": "dist/Homeboy-macOS.dmg",
+        "build_command": "./build.sh",
+        "id": "homeboy-desktop",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/homeboy-ecosystem/homeboy-desktop",
+        "modules": {
+          "swift": {
+            "settings": {}
+          }
+        },
+        "remote_path": "",
+        "version_targets": [
+          {
+            "file": "project.yml",
+            "pattern": "MARKETING_VERSION:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "changelog_target": "CHANGELOG.md",
+        "id": "homeboy-modules",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/homeboy-ecosystem/homeboy-modules",
+        "remote_path": "",
+        "version_targets": [
+          {
+            "file": "VERSION",
+            "pattern": "^(\\d+\\.\\d+\\.\\d+)$"
+          },
+          {
+            "file": "VERSION",
+            "pattern": "(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/html-to-blocks-converter.zip",
+        "changelog_target": "docs/CHANGELOG.md",
+        "id": "html-to-blocks-converter",
+        "local_path": "/Users/chubes/Developer/WordPress Plugins/html-to-blocks-converter/html-to-blocks-converter",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/html-to-blocks-converter",
+        "version_targets": [
+          {
+            "file": "html-to-blocks-converter.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/mjpin.zip",
+        "build_command": "./build.sh",
+        "extract_command": "unzip -o {artifact} && cp -rf mjpin/* . && rm -rf mjpin {artifact}",
+        "id": "mjpin",
+        "local_path": "/Users/chubes/Developer/mjpin",
+        "remote_path": "public_html",
+        "version_targets": [
+          {
+            "file": "package.json",
+            "pattern": "\"version\":\\s*\"(\\d+\\.\\d+\\.\\d+)\""
+          }
+        ]
+      },
+      {
+        "build_artifact": "build/post-to-instagram.zip",
+        "changelog_target": "CHANGELOG.md",
+        "id": "post-to-instagram",
+        "local_path": "/Users/chubes/Developer/WordPress Plugins/post-to-instagram",
+        "remote_path": "wp-content/plugins/post-to-instagram",
+        "version_targets": [
+          {
+            "file": "post-to-instagram.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "dist/saraichinwag.zip",
+        "extract_command": "unzip -o {artifact} && rm {artifact}",
+        "id": "sarai-chinwag-theme",
+        "local_path": "/Users/chubes/Developer/Sarai Chinwag/saraichinwag",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/themes/saraichinwag",
+        "version_targets": [
+          {
+            "file": "style.css",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      },
+      {
+        "build_artifact": "dist/sell-my-images.zip",
+        "id": "sell-my-images",
+        "local_path": "/Users/chubes/Developer/Sarai Chinwag/sell-my-images",
+        "modules": {
+          "wordpress": {
+            "settings": {}
+          }
+        },
+        "remote_path": "wp-content/plugins/sell-my-images",
+        "version_targets": [
+          {
+            "file": "sell-my-images.php",
+            "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+          }
+        ]
+      }
+    ],
+    "success": false,
+    "updated_fields": []
+  }
+}
