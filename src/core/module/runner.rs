@@ -126,12 +126,10 @@ impl ModuleRunner {
             return Ok(("wordpress".to_string(), settings));
         }
 
-        // Otherwise use the first module with settings
-        for (module_name, module_config) in modules {
+        // Otherwise use the first available module
+        if let Some((module_name, module_config)) = modules.iter().next() {
             let settings = extract_module_settings(module_config);
-            if !settings.is_empty() {
-                return Ok((module_name.clone(), settings));
-            }
+            return Ok((module_name.clone(), settings));
         }
 
         Err(Error::validation_invalid_argument(

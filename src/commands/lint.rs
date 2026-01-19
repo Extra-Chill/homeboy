@@ -36,6 +36,18 @@ pub struct LintArgs {
     #[arg(long)]
     errors_only: bool,
 
+    /// Only check specific sniffs (comma-separated codes)
+    #[arg(long)]
+    sniffs: Option<String>,
+
+    /// Exclude sniffs from checking (comma-separated codes)
+    #[arg(long)]
+    exclude_sniffs: Option<String>,
+
+    /// Filter by category: security, i18n, yoda, whitespace
+    #[arg(long)]
+    category: Option<String>,
+
     /// Override settings as key=value pairs
     #[arg(long, value_parser = parse_key_val)]
     setting: Vec<(String, String)>,
@@ -102,6 +114,9 @@ pub fn run_json(args: LintArgs) -> CmdResult<LintOutput> {
         .env_opt("HOMEBOY_LINT_FILE", &args.file)
         .env_opt("HOMEBOY_LINT_GLOB", &effective_glob)
         .env_if(args.errors_only, "HOMEBOY_ERRORS_ONLY", "1")
+        .env_opt("HOMEBOY_SNIFFS", &args.sniffs)
+        .env_opt("HOMEBOY_EXCLUDE_SNIFFS", &args.exclude_sniffs)
+        .env_opt("HOMEBOY_CATEGORY", &args.category)
         .run()?;
 
     let status = if output.success { "passed" } else { "failed" };

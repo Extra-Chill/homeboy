@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.27.11] - 2026-01-19
+
+### Added
+- Added lint summary header showing error/warning counts at top of output
+- Added --sniffs, --exclude-sniffs, and --category flags for lint filtering
+
+### Changed
+- Enhanced --summary to show top violations by sniff type
+
+### Fixed
+- Fixed custom fixers ignoring --file and --glob targets
+
 ## [0.27.10] - 2026-01-19
 
 ### Added
