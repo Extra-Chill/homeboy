@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::path::PathBuf;
+use std::process::Command;
 
 use crate::component::{self, Component};
 use crate::config::{is_json_input, parse_bulk_ids};
@@ -228,6 +229,23 @@ fn execute_build(component_id: &str) -> Result<(BuildOutput, i32)> {
     let resolved = resolve_build_command(&comp)?;
     let build_cmd = resolved.command().to_string();
 
+    // Run pre-build script if module provides one
+    if let Some((exit_code, stderr)) = run_pre_build_scripts(&comp)? {
+        if exit_code != 0 {
+            return Ok((
+                BuildOutput {
+                    command: "build.run".to_string(),
+                    component_id: component_id.to_string(),
+                    build_command: build_cmd,
+                    stdout: String::new(),
+                    stderr,
+                    success: false,
+                },
+                exit_code,
+            ));
+        }
+    }
+
     // Fix local permissions before build to ensure zip has correct permissions
     permissions::fix_local_permissions(&comp.local_path);
 
@@ -244,6 +262,59 @@ fn execute_build(component_id: &str) -> Result<(BuildOutput, i32)> {
         },
         output.exit_code,
     ))
+}
+
+/// Run pre-build scripts from all configured modules.
+/// Returns Some((exit_code, stderr)) if any script fails, None if all pass or no scripts.
+fn run_pre_build_scripts(comp: &Component) -> Result<Option<(i32, String)>> {
+    let modules = match &comp.modules {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    for module_id in modules.keys() {
+        let module = match module::load_module(module_id) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let build_config = match &module.build {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let pre_build_script = match &build_config.pre_build_script {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let module_path = paths::module(module_id)?;
+        let script_path = module_path.join(pre_build_script);
+
+        if !script_path.exists() {
+            continue;
+        }
+
+        let output = Command::new(&script_path)
+            .env("HOMEBOY_MODULE_PATH", module_path.to_string_lossy().to_string())
+            .env("HOMEBOY_COMPONENT_PATH", &comp.local_path)
+            .env("HOMEBOY_PLUGIN_PATH", &comp.local_path)
+            .output()
+            .map_err(|e| Error::internal_io(
+                format!("Failed to execute pre-build script: {}", e),
+                Some(format!("Script: {}", script_path.display())),
+            ))?;
+
+        let exit_code = output.status.code().unwrap_or(1);
+        if exit_code != 0 {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let combined = if stderr.is_empty() { stdout } else { stderr };
+            return Ok(Some((exit_code, combined)));
+        }
+    }
+
+    Ok(None)
 }
 
 #[cfg(test)]

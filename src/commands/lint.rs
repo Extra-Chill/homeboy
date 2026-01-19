@@ -2,19 +2,20 @@ use clap::Args;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Command;
+
 use homeboy::component::ScopedModuleConfig;
 use homeboy::module;
 
 use super::CmdResult;
 
 #[derive(Args)]
-pub struct TestArgs {
-    /// Component name to test
+pub struct LintArgs {
+    /// Component name to lint
     component: String,
 
-    /// Skip linting before running tests
+    /// Auto-fix formatting issues before validating
     #[arg(long)]
-    skip_lint: bool,
+    fix: bool,
 
     /// Override settings as key=value pairs
     #[arg(long, value_parser = parse_key_val)]
@@ -22,12 +23,14 @@ pub struct TestArgs {
 }
 
 #[derive(Serialize)]
-pub struct TestOutput {
+pub struct LintOutput {
     status: String,
     component: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<String>,
     exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hints: Option<Vec<String>>,
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {
@@ -37,43 +40,39 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
-pub fn run_json(args: TestArgs) -> CmdResult<TestOutput> {
-    // Find component configuration
+pub fn run_json(args: LintArgs) -> CmdResult<LintOutput> {
     let component = find_component(&args.component)?;
-
-    // Determine which module to use for testing
-    let (module_name, module_settings) = determine_test_module(&component)?;
-
-    // Find module directory
+    let (module_name, module_settings) = determine_lint_module(&component)?;
     let module_path = find_module_path(&module_name)?;
 
-    // Validate module has test infrastructure
-    validate_testable_module(&module_path)?;
+    validate_lintable_module(&module_path)?;
 
-    // Load module manifest
     let manifest = load_module_manifest(&module_path)?;
-
-    // Merge settings: component module settings + user overrides
     let settings_json = merge_settings(&manifest, &module_settings, &args.setting)?;
-
-    // Get component's local path as project path
     let project_path = PathBuf::from(&component.local_path);
+    let env_vars = prepare_env_vars(&module_path, &project_path, &settings_json, &args.component, args.fix)?;
 
-    // Set environment variables
-    let env_vars = prepare_env_vars(&module_path, &project_path, &settings_json, &args.component, args.skip_lint)?;
-
-    // Execute test runner script
-    let output = execute_test_runner(&module_path, &env_vars)?;
+    let output = execute_lint_runner(&module_path, &env_vars)?;
 
     let status = if output.status.success() { "passed" } else { "failed" };
     let exit_code = output.status.code().unwrap_or(-1);
 
+    let hints = if !output.status.success() && !args.fix {
+        Some(vec![
+            format!("Run 'homeboy lint {} --fix' to auto-fix formatting issues", args.component),
+            "Some issues may require manual fixes".to_string(),
+        ])
+    } else {
+        None
+    };
+
     Ok((
-        TestOutput {
+        LintOutput {
             status: status.to_string(),
             component: args.component,
             output: Some(String::from_utf8_lossy(&output.stdout).to_string()),
             exit_code,
+            hints,
         },
         exit_code,
     ))
@@ -83,16 +82,17 @@ fn find_component(component_id: &str) -> homeboy::Result<homeboy::component::Com
     homeboy::component::load(component_id)
 }
 
-fn determine_test_module(component: &homeboy::component::Component) -> homeboy::Result<(String, Vec<(String, String)>)> {
-    // Check if component has modules
+fn determine_lint_module(
+    component: &homeboy::component::Component,
+) -> homeboy::Result<(String, Vec<(String, String)>)> {
     if let Some(modules) = &component.modules {
-        // For now, prefer wordpress module if available, otherwise use first available
         if modules.contains_key("wordpress") {
-            let settings = extract_module_settings(modules.get("wordpress").expect("wordpress module checked above"));
+            let settings = extract_module_settings(
+                modules.get("wordpress").expect("wordpress module checked above"),
+            );
             return Ok(("wordpress".to_string(), settings));
         }
 
-        // If no wordpress, use the first module that has settings
         for (module_name, module_config) in modules {
             let settings = extract_module_settings(module_config);
             if !settings.is_empty() {
@@ -101,10 +101,12 @@ fn determine_test_module(component: &homeboy::component::Component) -> homeboy::
         }
     }
 
-    // No testable modules found
     Err(homeboy::Error::validation_invalid_argument(
         "component",
-        format!("Component '{}' has no testable modules configured", component.id),
+        format!(
+            "Component '{}' has no lintable modules configured",
+            component.id
+        ),
         None,
         None,
     ))
@@ -121,7 +123,6 @@ fn extract_module_settings(module_config: &ScopedModuleConfig) -> Vec<(String, S
 }
 
 fn find_module_path(module_name: &str) -> homeboy::Result<PathBuf> {
-    // Use the public module API to get the module path
     let module_path = module::module_path(module_name);
 
     if module_path.exists() {
@@ -129,19 +130,25 @@ fn find_module_path(module_name: &str) -> homeboy::Result<PathBuf> {
     } else {
         Err(homeboy::Error::validation_invalid_argument(
             "module",
-            format!("Module '{}' not found in ~/.config/homeboy/modules/", module_name),
+            format!(
+                "Module '{}' not found in ~/.config/homeboy/modules/",
+                module_name
+            ),
             None,
             None,
         ))
     }
 }
 
-fn validate_testable_module(module_path: &PathBuf) -> homeboy::Result<()> {
-    let test_runner = module_path.join("scripts/test-runner.sh");
-    if !test_runner.exists() {
+fn validate_lintable_module(module_path: &PathBuf) -> homeboy::Result<()> {
+    let lint_runner = module_path.join("scripts/lint-runner.sh");
+    if !lint_runner.exists() {
         return Err(homeboy::Error::validation_invalid_argument(
             "module",
-            format!("Module at {} does not have test infrastructure (missing scripts/test-runner.sh)", module_path.display()),
+            format!(
+                "Module at {} does not have lint infrastructure (missing scripts/lint-runner.sh)",
+                module_path.display()
+            ),
             None,
             None,
         ));
@@ -150,7 +157,10 @@ fn validate_testable_module(module_path: &PathBuf) -> homeboy::Result<()> {
 }
 
 fn load_module_manifest(module_path: &PathBuf) -> homeboy::Result<serde_json::Value> {
-    let manifest_path = module_path.join(format!("{}.json", module_path.file_name().unwrap().to_string_lossy()));
+    let manifest_path = module_path.join(format!(
+        "{}.json",
+        module_path.file_name().unwrap().to_string_lossy()
+    ));
     if !manifest_path.exists() {
         return Err(homeboy::Error::internal_io(
             format!("Module manifest not found: {}", manifest_path.display()),
@@ -158,22 +168,32 @@ fn load_module_manifest(module_path: &PathBuf) -> homeboy::Result<serde_json::Va
         ));
     }
 
-    let content = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| homeboy::Error::internal_io(e.to_string(), Some(format!("read {}", manifest_path.display()))))?;
+    let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        homeboy::Error::internal_io(
+            e.to_string(),
+            Some(format!("read {}", manifest_path.display())),
+        )
+    })?;
     let manifest: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| homeboy::Error::validation_invalid_json(e, Some("parse manifest".to_string()), None))?;
     Ok(manifest)
 }
 
-fn merge_settings(manifest: &serde_json::Value, module_settings: &[(String, String)], user_overrides: &[(String, String)]) -> homeboy::Result<String> {
+fn merge_settings(
+    manifest: &serde_json::Value,
+    module_settings: &[(String, String)],
+    user_overrides: &[(String, String)],
+) -> homeboy::Result<String> {
     let mut settings = serde_json::json!({});
 
-    // Start with manifest defaults
     if let Some(manifest_settings) = manifest.get("settings") {
         if let Some(settings_array) = manifest_settings.as_array() {
             if let serde_json::Value::Object(ref mut obj) = settings {
                 for setting in settings_array {
-                    if let (Some(id), Some(default)) = (setting.get("id").and_then(|v| v.as_str()), setting.get("default").and_then(|v| v.as_str())) {
+                    if let (Some(id), Some(default)) = (
+                        setting.get("id").and_then(|v| v.as_str()),
+                        setting.get("default").and_then(|v| v.as_str()),
+                    ) {
                         obj.insert(id.to_string(), serde_json::Value::String(default.to_string()));
                     }
                 }
@@ -182,53 +202,70 @@ fn merge_settings(manifest: &serde_json::Value, module_settings: &[(String, Stri
     }
 
     if let serde_json::Value::Object(ref mut obj) = settings {
-        // Add module settings (from component config)
         for (key, value) in module_settings {
             obj.insert(key.clone(), serde_json::Value::String(value.clone()));
         }
 
-        // Add user overrides (these take precedence)
         for (key, value) in user_overrides {
             obj.insert(key.clone(), serde_json::Value::String(value.clone()));
         }
     }
 
-    serde_json::to_string(&settings).map_err(|e| homeboy::Error::internal_io(
-        format!("Failed to serialize settings JSON: {}", e),
-        None,
-    ))
+    serde_json::to_string(&settings).map_err(|e| {
+        homeboy::Error::internal_io(format!("Failed to serialize settings JSON: {}", e), None)
+    })
 }
 
-fn prepare_env_vars(module_path: &PathBuf, project_path: &PathBuf, settings_json: &str, component_id: &str, skip_lint: bool) -> homeboy::Result<Vec<(String, String)>> {
+fn prepare_env_vars(
+    module_path: &PathBuf,
+    project_path: &PathBuf,
+    settings_json: &str,
+    component_id: &str,
+    auto_fix: bool,
+) -> homeboy::Result<Vec<(String, String)>> {
     let module_name = module_path.file_name().unwrap().to_string_lossy();
 
     let mut env_vars = vec![
         ("HOMEBOY_EXEC_CONTEXT_VERSION".to_string(), "1".to_string()),
         ("HOMEBOY_MODULE_ID".to_string(), module_name.to_string()),
-        ("HOMEBOY_MODULE_PATH".to_string(), module_path.to_string_lossy().to_string()),
-        ("HOMEBOY_PROJECT_PATH".to_string(), project_path.to_string_lossy().to_string()),
+        (
+            "HOMEBOY_MODULE_PATH".to_string(),
+            module_path.to_string_lossy().to_string(),
+        ),
+        (
+            "HOMEBOY_PROJECT_PATH".to_string(),
+            project_path.to_string_lossy().to_string(),
+        ),
         ("HOMEBOY_COMPONENT_ID".to_string(), component_id.to_string()),
-        ("HOMEBOY_COMPONENT_PATH".to_string(), project_path.to_string_lossy().to_string()),
+        (
+            "HOMEBOY_COMPONENT_PATH".to_string(),
+            project_path.to_string_lossy().to_string(),
+        ),
         ("HOMEBOY_SETTINGS_JSON".to_string(), settings_json.to_string()),
     ];
 
-    if skip_lint {
-        env_vars.push(("HOMEBOY_SKIP_LINT".to_string(), "1".to_string()));
+    if auto_fix {
+        env_vars.push(("HOMEBOY_AUTO_FIX".to_string(), "1".to_string()));
     }
 
     Ok(env_vars)
 }
 
-fn execute_test_runner(module_path: &PathBuf, env_vars: &[(String, String)]) -> homeboy::Result<std::process::Output> {
-    let test_runner_path = module_path.join("scripts/test-runner.sh");
+fn execute_lint_runner(
+    module_path: &PathBuf,
+    env_vars: &[(String, String)],
+) -> homeboy::Result<std::process::Output> {
+    let lint_runner_path = module_path.join("scripts/lint-runner.sh");
 
-    let output = Command::new(&test_runner_path)
+    let output = Command::new(&lint_runner_path)
         .envs(env_vars.iter().cloned())
         .output()
-        .map_err(|e| homeboy::Error::internal_io(
-            format!("Failed to execute test runner: {}", e),
-            Some(format!("Command: {}", test_runner_path.display())),
-        ))?;
+        .map_err(|e| {
+            homeboy::Error::internal_io(
+                format!("Failed to execute lint runner: {}", e),
+                Some(format!("Command: {}", lint_runner_path.display())),
+            )
+        })?;
 
     Ok(output)
 }

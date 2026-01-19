@@ -171,6 +171,7 @@ pub mod docs;
 pub mod file;
 pub mod git;
 pub mod init;
+pub mod lint;
 pub mod logs;
 pub mod module;
 pub mod project;
@@ -211,6 +212,7 @@ pub(crate) fn run_json(
             crate::output::map_cmd_result_to_json(server::run(args, global))
         }
         crate::Commands::Test(args) => crate::output::map_cmd_result_to_json(test::run_json(args)),
+        crate::Commands::Lint(args) => crate::output::map_cmd_result_to_json(lint::run_json(args)),
         crate::Commands::Db(args) => crate::output::map_cmd_result_to_json(db::run(args, global)),
         crate::Commands::File(args) => {
             crate::output::map_cmd_result_to_json(file::run(args, global))

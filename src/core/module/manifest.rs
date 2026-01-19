@@ -215,6 +215,8 @@ pub struct BuildConfig {
     pub command_template: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_script: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_build_script: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

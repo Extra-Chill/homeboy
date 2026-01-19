@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.26.7] - 2026-01-18
+
+- Add `homeboy lint` command for standalone code linting via module scripts
+- Add `--skip-lint` flag to `homeboy test` to run tests without linting
+- Add `pre_build_script` hook to module BuildConfig for pre-build validation
+
 ## [0.26.6] - 2026-01-18
 
 ### Added

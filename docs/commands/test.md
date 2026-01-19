@@ -18,7 +18,7 @@ The `test` command executes test suites for specified Homeboy components. It aut
 
 ## Options
 
-- `--project-path <path>`: Path to the project directory containing tests (defaults to current directory)
+- `--skip-lint`: Skip linting before running tests
 - `--setting <key=value>`: Override component settings (can be used multiple times)
 
 ## Examples
@@ -30,8 +30,8 @@ homeboy test wordpress
 # Test wordpress with MySQL instead of SQLite
 homeboy test wordpress --setting database_type=mysql --setting mysql_host=localhost
 
-# Test a component in a specific project directory
-homeboy test wordpress --project-path /path/to/wordpress/project
+# Run tests only, skip linting
+homeboy test wordpress --skip-lint
 
 # Test with multiple setting overrides
 homeboy test wordpress --setting database_type=mysql --setting mysql_database=test_db
