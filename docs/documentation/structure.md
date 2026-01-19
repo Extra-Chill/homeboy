@@ -107,7 +107,7 @@ These belong elsewhere, not in `/docs`:
 
 ## Scaffold Command
 
-Use `homeboy docs scaffold` to analyze the codebase. The command:
+Use `homeboy docs scaffold <component>` to analyze a component's codebase. The command:
 1. Scans source directories
 2. Lists existing documentation files
 3. Identifies potentially undocumented areas

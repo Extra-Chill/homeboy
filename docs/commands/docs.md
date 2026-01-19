@@ -3,9 +3,10 @@
 ## Synopsis
 
 ```sh
-homeboy docs [TOPIC]...
+homeboy docs [TOPIC]
 homeboy docs list
-homeboy docs scaffold [--source <dir>] [--docs-dir <dir>]
+homeboy docs scaffold <component-id> [--docs-dir <dir>]
+homeboy docs audit <component-id>
 homeboy docs generate --json '<spec>'
 homeboy docs generate @spec.json
 homeboy docs generate -
@@ -19,7 +20,9 @@ This command renders documentation topics and provides tooling for documentation
 1. Embedded core docs in the CLI binary
 2. Installed module docs under `<config dir>/homeboy/modules/<module_id>/docs/`
 
-**Scaffold** analyzes a codebase and reports documentation status (read-only).
+**Scaffold** analyzes a component's codebase and reports documentation status (read-only).
+
+**Audit** validates documentation links and detects stale references.
 
 **Generate** creates documentation files in bulk from a JSON spec.
 
@@ -27,7 +30,7 @@ This command renders documentation topics and provides tooling for documentation
 
 ### `scaffold`
 
-Analyzes the codebase and reports:
+Analyzes a component's codebase and reports:
 - Source directories found
 - Existing documentation files
 - Potentially undocumented areas
@@ -35,12 +38,14 @@ Analyzes the codebase and reports:
 This is read-only - no files are created. Use the analysis to inform documentation planning.
 
 ```sh
-homeboy docs scaffold
-homeboy docs scaffold --source ./my-project --docs-dir documentation
+homeboy docs scaffold homeboy
+homeboy docs scaffold extrachill-api --docs-dir documentation
 ```
 
+**Arguments:**
+- `<component-id>`: Component to analyze (required)
+
 **Options:**
-- `--source <dir>`: Source directory to analyze (default: current directory)
 - `--docs-dir <dir>`: Documentation directory to scan (default: `docs`)
 
 **Output:**
@@ -50,12 +55,60 @@ homeboy docs scaffold --source ./my-project --docs-dir documentation
   "data": {
     "command": "docs.scaffold",
     "analysis": {
+      "component_id": "homeboy",
       "source_directories": ["src", "src/api", "src/models"],
       "existing_docs": ["overview.md", "core-system/engine.md"],
       "undocumented": ["src/api", "src/models"]
     },
     "instructions": "Run `homeboy docs documentation/generation` for writing guidelines",
     "hints": ["Found 3 source directories", "2 docs already exist"]
+  }
+}
+```
+
+### `audit`
+
+Validates documentation for a component by checking:
+- **Link validation**: Verifies markdown links resolve to existing docs
+- **Path validation**: Checks file path references exist in the component
+- **Staleness detection**: Identifies docs that may need review based on recent code changes
+
+```sh
+homeboy docs audit homeboy
+homeboy docs audit extrachill-api
+```
+
+**Arguments:**
+- `<component-id>`: Component to audit (required)
+
+**Output:**
+```json
+{
+  "success": true,
+  "data": {
+    "command": "docs.audit",
+    "component_id": "homeboy",
+    "summary": {
+      "docs_audited": 28,
+      "issues_found": 5,
+      "stale_docs": 2,
+      "broken_links": 3
+    },
+    "issues": [
+      {
+        "doc": "commands/deploy.md",
+        "issue_type": "broken_link",
+        "detail": "Link to 'nonexistent.md' does not resolve",
+        "line": 23
+      },
+      {
+        "doc": "core/engine.md",
+        "issue_type": "broken_path",
+        "detail": "Referenced file 'src/old/removed.rs' does not exist",
+        "line": 45
+      }
+    ],
+    "hints": ["2 docs may need review", "3 broken links should be fixed"]
   }
 }
 ```
@@ -129,16 +182,18 @@ Homeboy includes embedded documentation for AI agents:
 
 Typical documentation workflow using these commands:
 
-1. **Analyze**: `homeboy docs scaffold` - understand current state
+1. **Analyze**: `homeboy docs scaffold <component>` - understand current state
 2. **Learn**: `homeboy docs documentation/generation` - read guidelines
 3. **Plan**: AI determines structure based on analysis + guidelines
 4. **Generate**: `homeboy docs generate --json '<spec>'` - bulk create files
-5. **Maintain**: `homeboy docs documentation/alignment` - keep docs current
+5. **Validate**: `homeboy docs audit <component>` - check for broken links and stale docs
+6. **Maintain**: `homeboy docs documentation/alignment` - keep docs current
 
 ## Errors
 
-If a topic does not exist, the command fails with:
-- `config_missing_key("docs.<topic>")`
+If a topic does not exist, the command fails with an error indicating the topic was not found.
+
+If a component does not exist (for scaffold/audit), the command fails with a component not found error.
 
 ## Related
 

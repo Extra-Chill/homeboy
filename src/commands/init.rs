@@ -41,6 +41,8 @@ pub struct InitOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changelog: Option<ChangelogSnapshot>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agent_context_files: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
@@ -277,6 +279,7 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
     let git_snapshot = resolve_git_snapshot(context_output.git_root.as_ref());
     let (last_release, changelog_snapshot) = resolve_changelog_snapshots(&components);
     let warnings = validate_version_targets(&components);
+    let agent_context_files = resolve_agent_context_files(context_output.git_root.as_ref());
 
     Ok((
         InitOutput {
@@ -291,6 +294,7 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
             git: git_snapshot,
             last_release,
             changelog: changelog_snapshot,
+            agent_context_files,
             warnings,
         },
         0,
@@ -467,6 +471,16 @@ fn parse_version_label(label: &str) -> Option<String> {
 fn parse_date_label(label: &str) -> Option<String> {
     let re = regex::Regex::new(r"\d{4}-\d{2}-\d{2}").ok()?;
     re.find(label).map(|m| m.as_str().to_string())
+}
+
+fn resolve_agent_context_files(git_root: Option<&String>) -> Vec<String> {
+    let root = match git_root {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+
+    let path = PathBuf::from(root);
+    git::list_tracked_markdown_files(&path).unwrap_or_default()
 }
 
 fn validate_version_targets(components: &[Component]) -> Vec<String> {

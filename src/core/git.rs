@@ -63,6 +63,34 @@ pub fn is_workdir_clean(path: &Path) -> bool {
     }
 }
 
+/// List all git-tracked markdown files in a directory.
+/// Uses `git ls-files` to respect .gitignore and only include tracked/staged files.
+/// Returns relative paths from the repository root.
+pub fn list_tracked_markdown_files(path: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["ls-files", "--cached", "--others", "--exclude-standard", "*.md"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| Error::git_command_failed(format!("Failed to run git ls-files: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::git_command_failed(format!(
+            "git ls-files failed: {}",
+            stderr
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let files: Vec<String> = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    Ok(files)
+}
+
 /// Pull with fast-forward only, inheriting stdio for interactive output.
 pub fn pull_ff_only_interactive(path: &Path) -> Result<()> {
     use std::process::Stdio;

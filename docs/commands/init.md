@@ -87,7 +87,12 @@ Then read workspace docs (CLAUDE.md, README.md) for project context.
       "path": "docs/changelog.md",
       "label": "Unreleased",
       "items": ["Queued change"]
-    }
+    },
+    "agent_context_files": [
+      "CLAUDE.md",
+      "README.md",
+      "docs/index.md"
+    ]
   }
 }
 ```
@@ -109,6 +114,7 @@ Then read workspace docs (CLAUDE.md, README.md) for project context.
 | `git.version_baseline` | Tag or commit hash used as baseline for commit count |
 | `last_release` | Latest changelog release summary |
 | `changelog` | Unreleased preview from component changelog |
+| `agent_context_files` | Git-tracked markdown files for AI agent context (CLAUDE.md, README.md, etc.) |
 
 ## Decision Tree
 

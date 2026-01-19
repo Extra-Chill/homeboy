@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.29.0] - 2026-01-19
+
+- Add docs audit subcommand for link validation and staleness detection
+- Change docs scaffold to require component_id for consistency with other commands
+- Fix docs topic parsing to not consume flags as part of topic path
+- Add agent_context_files to init output showing git-tracked markdown files
+
 ## [0.28.1] - 2026-01-19
 
 - Add capability hints to lint and test commands for better discoverability

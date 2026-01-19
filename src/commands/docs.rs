@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::docs;
+use homeboy::component;
 
 use super::CmdResult;
 
@@ -13,21 +14,26 @@ pub struct DocsArgs {
     pub command: Option<DocsCommand>,
 
     /// Topic path (e.g., 'commands/deploy') or 'list' to show available topics
-    #[arg(trailing_var_arg = true)]
-    pub topic: Vec<String>,
+    #[arg(value_name = "TOPIC")]
+    pub topic: Option<String>,
 }
 
 #[derive(Subcommand)]
 pub enum DocsCommand {
     /// Analyze codebase and report documentation status (read-only)
     Scaffold {
-        /// Source directory to analyze (default: current directory)
-        #[arg(long)]
-        source: Option<String>,
+        /// Component to analyze
+        component_id: String,
 
         /// Docs directory to check for existing documentation (default: docs)
         #[arg(long, default_value = "docs")]
         docs_dir: String,
+    },
+
+    /// Audit documentation for broken links and stale references
+    Audit {
+        /// Component to audit
+        component_id: String,
     },
 
     /// Generate documentation files from JSON spec
@@ -47,9 +53,27 @@ pub enum DocsCommand {
 
 #[derive(Serialize)]
 pub struct ScaffoldAnalysis {
+    pub component_id: String,
     pub source_directories: Vec<String>,
     pub existing_docs: Vec<String>,
     pub undocumented: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct AuditSummary {
+    pub docs_audited: usize,
+    pub issues_found: usize,
+    pub stale_docs: usize,
+    pub broken_links: usize,
+}
+
+#[derive(Serialize)]
+pub struct AuditIssue {
+    pub doc: String,
+    pub issue_type: String,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -59,6 +83,14 @@ pub enum DocsOutput {
     Scaffold {
         analysis: ScaffoldAnalysis,
         instructions: String,
+        hints: Vec<String>,
+    },
+
+    #[serde(rename = "docs.audit")]
+    Audit {
+        component_id: String,
+        summary: AuditSummary,
+        issues: Vec<AuditIssue>,
         hints: Vec<String>,
     },
 
@@ -93,41 +125,49 @@ pub struct GenerateFileSpec {
 // Public API
 // ============================================================================
 
-/// Check if this invocation should return JSON (scaffold or generate subcommand)
+/// Check if this invocation should return JSON (scaffold, audit, or generate subcommand)
 pub fn is_json_mode(args: &DocsArgs) -> bool {
     matches!(
         args.command,
-        Some(DocsCommand::Scaffold { .. }) | Some(DocsCommand::Generate { .. })
+        Some(DocsCommand::Scaffold { .. })
+            | Some(DocsCommand::Audit { .. })
+            | Some(DocsCommand::Generate { .. })
     )
 }
 
 /// Markdown output mode (topic display, list)
 pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
-    if args.topic.len() == 1 && args.topic[0] == "list" {
+    let topic = args.topic.as_deref().unwrap_or("index");
+
+    if topic == "list" {
         let topics = docs::available_topics();
         return Ok((topics.join("\n"), 0));
     }
 
-    let resolved = docs::resolve(&args.topic)?;
+    let topic_vec = vec![topic.to_string()];
+    let resolved = docs::resolve(&topic_vec)?;
     Ok((resolved.content, 0))
 }
 
-/// JSON output mode (scaffold, generate subcommands)
+/// JSON output mode (scaffold, audit, generate subcommands)
 pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput> {
     match args.command {
-        Some(DocsCommand::Scaffold { source, docs_dir }) => {
-            run_scaffold(source.as_deref(), &docs_dir)
-        }
+        Some(DocsCommand::Scaffold {
+            component_id,
+            docs_dir,
+        }) => run_scaffold(&component_id, &docs_dir),
+        Some(DocsCommand::Audit { component_id }) => run_audit(&component_id),
         Some(DocsCommand::Generate { spec, json }) => {
             let json_spec = json.as_deref().or(spec.as_deref());
             run_generate(json_spec)
         }
         None => Err(homeboy::Error::validation_invalid_argument(
             "command",
-            "JSON output requires scaffold or generate subcommand. Use `homeboy docs <topic>` for topic display.",
+            "JSON output requires scaffold, audit, or generate subcommand. Use `homeboy docs <topic>` for topic display.",
             None,
             Some(vec![
-                "homeboy docs scaffold".to_string(),
+                "homeboy docs scaffold <component-id>".to_string(),
+                "homeboy docs audit <component-id>".to_string(),
                 "homeboy docs generate --json '<spec>'".to_string(),
                 "homeboy docs commands/deploy".to_string(),
             ]),
@@ -139,16 +179,16 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
 // Scaffold (Analysis Only)
 // ============================================================================
 
-fn run_scaffold(source_dir: Option<&str>, docs_dir: &str) -> CmdResult<DocsOutput> {
-    let source = source_dir.unwrap_or(".");
-    let source_path = Path::new(source);
-    let docs_path = Path::new(docs_dir);
+fn run_scaffold(component_id: &str, docs_dir: &str) -> CmdResult<DocsOutput> {
+    let comp = component::load(component_id)?;
+    let source_path = Path::new(&comp.local_path);
+    let docs_path = source_path.join(docs_dir);
 
     // Analyze source structure
     let source_directories = find_source_directories(source_path);
 
     // Find existing documentation
-    let existing_docs = find_existing_docs(docs_path);
+    let existing_docs = find_existing_docs(&docs_path);
 
     // Identify undocumented areas (source dirs without corresponding docs)
     let undocumented = identify_undocumented(&source_directories, &existing_docs);
@@ -172,6 +212,7 @@ fn run_scaffold(source_dir: Option<&str>, docs_dir: &str) -> CmdResult<DocsOutpu
     Ok((
         DocsOutput::Scaffold {
             analysis: ScaffoldAnalysis {
+                component_id: component_id.to_string(),
                 source_directories,
                 existing_docs,
                 undocumented,
@@ -183,6 +224,171 @@ fn run_scaffold(source_dir: Option<&str>, docs_dir: &str) -> CmdResult<DocsOutpu
         0,
     ))
 }
+
+// ============================================================================
+// Audit (Link Validation + Staleness Detection)
+// ============================================================================
+
+fn run_audit(component_id: &str) -> CmdResult<DocsOutput> {
+    let comp = component::load(component_id)?;
+    let source_path = Path::new(&comp.local_path);
+    let docs_path = source_path.join("docs");
+
+    // Find all documentation files
+    let doc_files = find_existing_docs(&docs_path);
+    let docs_audited = doc_files.len();
+
+    let mut issues = Vec::new();
+    let mut stale_docs = 0usize;
+    let mut broken_links = 0usize;
+
+    // Audit each doc file
+    for doc_file in &doc_files {
+        let doc_path = docs_path.join(doc_file);
+        let content = match fs::read_to_string(&doc_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Check for broken internal links
+        let doc_issues = audit_doc_links(&content, doc_file, &docs_path, source_path);
+        for issue in doc_issues {
+            if issue.issue_type == "broken_link" {
+                broken_links += 1;
+            } else if issue.issue_type == "stale" {
+                stale_docs += 1;
+            }
+            issues.push(issue);
+        }
+
+        // Check for path references that don't exist
+        let path_issues = audit_path_references(&content, doc_file, source_path);
+        for issue in path_issues {
+            if issue.issue_type == "broken_path" {
+                broken_links += 1;
+            }
+            issues.push(issue);
+        }
+    }
+
+    // Generate hints
+    let mut hints = Vec::new();
+    if stale_docs > 0 {
+        hints.push(format!("{} docs may need review", stale_docs));
+    }
+    if broken_links > 0 {
+        hints.push(format!("{} broken links should be fixed", broken_links));
+    }
+    if issues.is_empty() {
+        hints.push("All documentation links are valid".to_string());
+    }
+
+    Ok((
+        DocsOutput::Audit {
+            component_id: component_id.to_string(),
+            summary: AuditSummary {
+                docs_audited,
+                issues_found: issues.len(),
+                stale_docs,
+                broken_links,
+            },
+            issues,
+            hints,
+        },
+        0,
+    ))
+}
+
+fn audit_doc_links(content: &str, doc_file: &str, docs_path: &Path, _source_path: &Path) -> Vec<AuditIssue> {
+    let mut issues = Vec::new();
+
+    // Regex to find markdown links: [text](path)
+    let link_pattern = regex::Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap();
+
+    for (line_num, line) in content.lines().enumerate() {
+        for cap in link_pattern.captures_iter(line) {
+            let link_path = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+
+            // Skip external links, anchors, and mailto
+            if link_path.starts_with("http")
+                || link_path.starts_with('#')
+                || link_path.starts_with("mailto:")
+            {
+                continue;
+            }
+
+            // Resolve the link relative to the doc file's directory
+            let doc_dir = Path::new(doc_file).parent().unwrap_or(Path::new(""));
+            let resolved_path = if link_path.starts_with('/') {
+                docs_path.join(&link_path[1..])
+            } else {
+                docs_path.join(doc_dir).join(link_path)
+            };
+
+            // Normalize path (handle .. and .)
+            let normalized = normalize_path(&resolved_path);
+
+            // Check if file exists (with or without .md extension)
+            let exists = normalized.exists()
+                || normalized.with_extension("md").exists()
+                || normalized.join("index.md").exists();
+
+            if !exists {
+                issues.push(AuditIssue {
+                    doc: doc_file.to_string(),
+                    issue_type: "broken_link".to_string(),
+                    detail: format!("Link to '{}' does not resolve", link_path),
+                    line: Some(line_num + 1),
+                });
+            }
+        }
+    }
+
+    issues
+}
+
+fn audit_path_references(content: &str, doc_file: &str, source_path: &Path) -> Vec<AuditIssue> {
+    let mut issues = Vec::new();
+
+    // Look for code-style path references like `src/foo/bar.rs` or `inc/core/example.php`
+    let path_pattern = regex::Regex::new(r"`((?:src|inc|lib|app)/[a-zA-Z0-9_/.-]+\.[a-z]+)`").unwrap();
+
+    for (line_num, line) in content.lines().enumerate() {
+        for cap in path_pattern.captures_iter(line) {
+            let path_ref = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+            let full_path = source_path.join(path_ref);
+
+            if !full_path.exists() {
+                issues.push(AuditIssue {
+                    doc: doc_file.to_string(),
+                    issue_type: "broken_path".to_string(),
+                    detail: format!("Referenced file '{}' does not exist", path_ref),
+                    line: Some(line_num + 1),
+                });
+            }
+        }
+    }
+
+    issues
+}
+
+fn normalize_path(path: &Path) -> std::path::PathBuf {
+    let mut result = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                result.pop();
+            }
+            std::path::Component::CurDir => {}
+            _ => result.push(component),
+        }
+    }
+    result
+}
+
+// ============================================================================
+// Scaffold Helper Functions
+// ============================================================================
 
 fn find_source_directories(source_path: &Path) -> Vec<String> {
     let mut dirs = Vec::new();

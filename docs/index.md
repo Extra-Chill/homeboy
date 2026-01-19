@@ -17,7 +17,8 @@ Homeboy is a config-driven automation engine for development and deployment auto
 
 Homeboy provides tooling for AI-assisted documentation generation and maintenance:
 
-- `homeboy docs scaffold` - Analyze codebase and report documentation status
+- `homeboy docs scaffold <component>` - Analyze codebase and report documentation status
+- `homeboy docs audit <component>` - Validate documentation links and detect stale references
 - `homeboy docs generate --json` - Bulk create documentation files from JSON spec
 - `homeboy docs documentation/index` - Documentation philosophy and principles
 - `homeboy docs documentation/alignment` - Instructions for maintaining existing docs
