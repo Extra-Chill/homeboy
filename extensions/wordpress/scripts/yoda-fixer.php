@@ -173,20 +173,62 @@ function is_inline_whitespace($token) {
 /**
  * Try to fix a Yoda condition starting at index $i.
  *
+ * Handles patterns:
+ * - $var === 'literal'
+ * - $arr['key'] === 'literal'
+ * - $arr['key']['nested'] === 'literal'
+ *
  * @param array $tokens Token array.
  * @param int   $i      Current index (at variable token).
  * @param int   $count  Total token count.
  * @return array|null Result with 'replacement' and 'end_index', or null if not fixable.
  */
 function try_fix_yoda($tokens, $i, $count) {
-    $var_token = $tokens[$i];
-    $var_str = $var_token[1];
-    $j = $i + 1;
+    $j = $i;
 
-    // Skip whitespace after variable
-    $ws_after_var = '';
+    // Capture the left side expression (variable + optional array access)
+    $left_side = '';
+    $left_side .= $tokens[$j][1]; // The variable
+    $j++;
+
+    // Check for array access: $var['key'] or $var['key']['nested']
+    while ($j < $count) {
+        // Skip inline whitespace between variable and bracket
+        $ws_before_bracket = '';
+        while ($j < $count && is_inline_whitespace($tokens[$j])) {
+            $ws_before_bracket .= $tokens[$j][1];
+            $j++;
+        }
+
+        if ($j >= $count) {
+            break;
+        }
+
+        // Check for array access
+        if ($tokens[$j] === '[') {
+            $left_side .= $ws_before_bracket;
+            $bracket_content = capture_bracket_content($tokens, $j, $count);
+            if ($bracket_content === null) {
+                return null; // Malformed bracket
+            }
+            $left_side .= $bracket_content['content'];
+            $j = $bracket_content['end_index'] + 1;
+            continue;
+        }
+
+        // Check for object operator - skip these (too complex)
+        if (is_array($tokens[$j]) && in_array($tokens[$j][0], [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR], true)) {
+            return null;
+        }
+
+        // Not array access, restore position and break
+        break;
+    }
+
+    // Skip whitespace after left side
+    $ws_after_left = '';
     while ($j < $count && is_inline_whitespace($tokens[$j])) {
-        $ws_after_var .= $tokens[$j][1];
+        $ws_after_left .= $tokens[$j][1];
         $j++;
     }
 
@@ -198,8 +240,7 @@ function try_fix_yoda($tokens, $i, $count) {
     if (!is_comparison_op($tokens[$j])) {
         return null;
     }
-    $op_token = $tokens[$j];
-    $op_str = $op_token[1];
+    $op_str = $tokens[$j][1];
     $j++;
 
     // Skip whitespace after operator
@@ -217,8 +258,7 @@ function try_fix_yoda($tokens, $i, $count) {
     if (!is_simple_literal($tokens[$j])) {
         return null;
     }
-    $literal_token = $tokens[$j];
-    $literal_str = $literal_token[1];
+    $literal_str = $tokens[$j][1];
 
     // Check next token to ensure we're not in a complex expression
     $k = $j + 1;
@@ -238,12 +278,52 @@ function try_fix_yoda($tokens, $i, $count) {
         }
     }
 
-    // Build the swapped comparison: literal OPERATOR $var
-    $replacement = $literal_str . $ws_after_var . $op_str . $ws_after_op . $var_str;
+    // Build the swapped comparison: literal OPERATOR left_side
+    $replacement = $literal_str . $ws_after_left . $op_str . $ws_after_op . $left_side;
 
     return [
         'replacement' => $replacement,
         'end_index' => $j,
+    ];
+}
+
+/**
+ * Capture bracket content including nested brackets.
+ *
+ * @param array $tokens Token array.
+ * @param int   $start  Starting index (at '[').
+ * @param int   $count  Total token count.
+ * @return array|null Content string and end index, or null if malformed.
+ */
+function capture_bracket_content($tokens, $start, $count) {
+    if ($tokens[$start] !== '[') {
+        return null;
+    }
+
+    $content = '[';
+    $depth = 1;
+    $j = $start + 1;
+
+    while ($j < $count && $depth > 0) {
+        $token = $tokens[$j];
+
+        if ($token === '[') {
+            $depth++;
+        } elseif ($token === ']') {
+            $depth--;
+        }
+
+        $content .= token_to_string($token);
+        $j++;
+    }
+
+    if ($depth !== 0) {
+        return null; // Unbalanced brackets
+    }
+
+    return [
+        'content' => $content,
+        'end_index' => $j - 1,
     ];
 }
 

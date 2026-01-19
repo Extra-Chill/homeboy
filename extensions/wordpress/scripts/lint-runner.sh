@@ -37,6 +37,8 @@ fi
 PHPCS_BIN="${MODULE_PATH}/vendor/bin/phpcs"
 PHPCBF_BIN="${MODULE_PATH}/vendor/bin/phpcbf"
 YODA_FIXER="${MODULE_PATH}/scripts/yoda-fixer.php"
+IN_ARRAY_FIXER="${MODULE_PATH}/scripts/in-array-strict-fixer.php"
+SHORT_TERNARY_FIXER="${MODULE_PATH}/scripts/short-ternary-fixer.php"
 PHPCS_CONFIG="${MODULE_PATH}/phpcs.xml.dist"
 
 # Validate tools exist
@@ -63,11 +65,21 @@ if [ -n "$MAIN_PLUGIN_FILE" ]; then
     fi
 fi
 
-# Auto-fix mode: run Yoda fixer, then phpcbf, then phpcs
+# Auto-fix mode: run custom fixers, then phpcbf, then phpcs
 if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
-    # Run Yoda condition fixer first (handles cases phpcbf can't fix)
+    # Run Yoda condition fixer (handles cases phpcbf can't fix)
     if [ -f "$YODA_FIXER" ]; then
         php "$YODA_FIXER" "$PLUGIN_PATH"
+    fi
+
+    # Run in_array strict fixer (add true as third param)
+    if [ -f "$IN_ARRAY_FIXER" ]; then
+        php "$IN_ARRAY_FIXER" "$PLUGIN_PATH"
+    fi
+
+    # Run short ternary fixer (expand ?: to ? : for simple vars)
+    if [ -f "$SHORT_TERNARY_FIXER" ]; then
+        php "$SHORT_TERNARY_FIXER" "$PLUGIN_PATH"
     fi
 
     # Run phpcbf for remaining auto-fixable issues
