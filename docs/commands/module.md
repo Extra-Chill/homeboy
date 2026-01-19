@@ -123,8 +123,6 @@ Module settings validation currently happens during module execution (and may al
 
 ## Runtime Configuration
 
-Release steps can be backed by module actions named `release.<step_type>`.
-
 Executable modules define their runtime behavior in their module manifest (`modules/<module_id>/<module_id>.json`):
 
 ```json
@@ -145,6 +143,10 @@ Executable modules define their runtime behavior in their module manifest (`modu
 - `setup_command`: Optional shell command to set up the module (run during install/update).
 - `ready_check`: Optional shell command to check if module is ready (exit 0 = ready).
 - `env`: Optional environment variables to set when running.
+
+## Release Configuration
+
+Release steps can be backed by module actions named `release.<step_type>`.
 
 ## JSON output
 
