@@ -9,6 +9,7 @@ use crate::core::local_files::{self, FileSystem};
 use crate::core::version;
 use crate::error::{Error, Result};
 use crate::project;
+use crate::utils::parser;
 
 const DEFAULT_NEXT_SECTION_LABEL: &str = "Unreleased";
 
@@ -152,13 +153,7 @@ pub fn resolve_changelog_path(component: &Component) -> Result<PathBuf> {
 }
 
 fn resolve_target_path(local_path: &str, file: &str) -> Result<PathBuf> {
-    let path = if file.starts_with('/') {
-        PathBuf::from(file)
-    } else {
-        Path::new(local_path).join(file)
-    };
-
-    Ok(path)
+    Ok(parser::resolve_path(local_path, file))
 }
 
 pub fn add_next_section_item(

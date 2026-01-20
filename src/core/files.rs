@@ -10,6 +10,7 @@ use crate::context::require_project_base_path;
 use crate::error::{Error, Result};
 use crate::executor::execute_for_project;
 use crate::project;
+use crate::utils::parser;
 use crate::{base_path, shell, token};
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,42 +65,11 @@ pub struct RenameResult {
 
 /// Parse `ls -la` output into structured file entries.
 pub fn parse_ls_output(output: &str, base_path: &str) -> Vec<FileEntry> {
-    let mut entries = Vec::new();
-
-    for line in output.lines() {
-        if line.is_empty() || line.starts_with("total ") {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 9 {
-            continue;
-        }
-
-        let permissions = parts[0];
-        let name = parts[8..].join(" ");
-
-        if name == "." || name == ".." {
-            continue;
-        }
-
-        let is_directory = permissions.starts_with('d');
-        let size = parts[4].parse::<i64>().ok();
-
-        let full_path = if base_path.ends_with('/') {
-            format!("{}{}", base_path, name)
-        } else {
-            format!("{}/{}", base_path, name)
-        };
-
-        entries.push(FileEntry {
-            name,
-            path: full_path,
-            is_directory,
-            size,
-            permissions: permissions[1..].to_string(),
-        });
-    }
+    let mut entries: Vec<FileEntry> = parser::lines_filtered(output, |line| {
+        !line.starts_with("total ")
+    })
+    .filter_map(|line| parse_ls_line(line, base_path))
+    .collect();
 
     entries.sort_by(|a, b| {
         if a.is_directory != b.is_directory {
@@ -109,6 +79,25 @@ pub fn parse_ls_output(output: &str, base_path: &str) -> Vec<FileEntry> {
     });
 
     entries
+}
+
+fn parse_ls_line(line: &str, base_path: &str) -> Option<FileEntry> {
+    let parts = parser::split_whitespace(line, 9)?;
+
+    let permissions = parts[0];
+    let name = parts[8..].join(" ");
+
+    if name == "." || name == ".." {
+        return None;
+    }
+
+    Some(FileEntry {
+        name: name.clone(),
+        path: parser::resolve_path_string(base_path, &name),
+        is_directory: permissions.starts_with('d'),
+        size: parts[4].parse().ok(),
+        permissions: permissions[1..].to_string(),
+    })
 }
 
 /// Read content from stdin, stripping trailing newline.
@@ -295,11 +284,7 @@ pub struct LineChange {
 
 /// Parse find output into list of matching paths.
 fn parse_find_output(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| line.to_string())
-        .collect()
+    parser::lines(output).map(|s| s.to_string()).collect()
 }
 
 /// Parse grep output into structured matches.

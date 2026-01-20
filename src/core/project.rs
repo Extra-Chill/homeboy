@@ -3,6 +3,7 @@ use crate::error::{Error, Result};
 use crate::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::server;
 use crate::slugify;
+use crate::utils::parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -450,7 +451,6 @@ pub fn rename(id: &str, new_id: &str) -> Result<RenameResult> {
 
 pub fn set_components(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
     use crate::component;
-    use std::collections::HashSet;
 
     if component_ids.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -477,11 +477,7 @@ pub fn set_components(project_id: &str, component_ids: Vec<String>) -> Result<Ve
         ));
     }
 
-    let mut seen = HashSet::new();
-    let deduped: Vec<String> = component_ids
-        .into_iter()
-        .filter(|id| seen.insert(id.clone()))
-        .collect();
+    let deduped = parser::dedupe(component_ids);
 
     let mut project = load(project_id)?;
     project.component_ids = deduped.clone();
@@ -491,7 +487,6 @@ pub fn set_components(project_id: &str, component_ids: Vec<String>) -> Result<Ve
 
 pub fn add_components(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
     use crate::component;
-    use std::collections::HashSet;
 
     if component_ids.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -518,11 +513,7 @@ pub fn add_components(project_id: &str, component_ids: Vec<String>) -> Result<Ve
         ));
     }
 
-    let mut seen = HashSet::new();
-    let deduped: Vec<String> = component_ids
-        .into_iter()
-        .filter(|id| seen.insert(id.clone()))
-        .collect();
+    let deduped = parser::dedupe(component_ids);
 
     let mut project = load(project_id)?;
     for id in deduped {

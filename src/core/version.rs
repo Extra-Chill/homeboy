@@ -6,10 +6,11 @@ use crate::error::{Error, Result};
 use crate::local_files::{self, FileSystem};
 use crate::module::{load_all_modules, ModuleManifest};
 use crate::ssh::execute_local_command_in_dir;
+use crate::utils::parser;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -40,27 +41,13 @@ fn run_post_bump_commands(commands: &[String], working_dir: &str) -> Result<()> 
 /// Pattern must contain a capture group for the version string.
 /// Content is trimmed to handle trailing newlines in VERSION files.
 pub fn parse_version(content: &str, pattern: &str) -> Option<String> {
-    let re = Regex::new(pattern).ok()?;
-    let trimmed = content.trim();
-    re.captures(trimmed)
-        .and_then(|caps| caps.get(1))
-        .map(|m| m.as_str().to_string())
+    parser::extract_first(content, pattern)
 }
 
 /// Parse all versions from content using regex pattern.
 /// Content is trimmed to handle trailing newlines in VERSION files.
 pub fn parse_versions(content: &str, pattern: &str) -> Option<Vec<String>> {
-    let re = Regex::new(pattern).ok()?;
-    let trimmed = content.trim();
-    let mut versions = Vec::new();
-
-    for caps in re.captures_iter(trimmed) {
-        if let Some(m) = caps.get(1) {
-            versions.push(m.as_str().to_string());
-        }
-    }
-
-    Some(versions)
+    parser::extract_all(content, pattern)
 }
 
 pub fn replace_versions(
@@ -68,19 +55,7 @@ pub fn replace_versions(
     pattern: &str,
     new_version: &str,
 ) -> Option<(String, usize)> {
-    let re = Regex::new(pattern).ok()?;
-    let mut count = 0usize;
-
-    let replaced = re
-        .replace_all(content, |caps: &regex::Captures| {
-            count += 1;
-            let full_match = caps.get(0).map(|m| m.as_str()).unwrap_or("");
-            let captured = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            full_match.replacen(captured, new_version, 1)
-        })
-        .to_string();
-
-    Some((replaced, count))
+    parser::replace_all(content, pattern, new_version)
 }
 
 /// Get version pattern from module configuration.
@@ -230,11 +205,7 @@ pub fn read_local_version(local_path: &str, version_target: &VersionTarget) -> O
 
 /// Resolve version file path (absolute or relative to local_path)
 fn resolve_version_file_path(local_path: &str, file: &str) -> String {
-    if file.starts_with('/') {
-        file.to_string()
-    } else {
-        format!("{}/{}", local_path, file)
-    }
+    parser::resolve_path_string(local_path, file)
 }
 
 /// Information about a version target after reading
@@ -485,16 +456,7 @@ pub fn read_component_version(component: &Component) -> Result<ComponentVersionI
         ));
     }
 
-    let unique: BTreeSet<String> = versions.iter().cloned().collect();
-    if unique.len() != 1 {
-        return Err(Error::internal_unexpected(format!(
-            "Multiple different versions found in {}: {}",
-            primary.file,
-            unique.into_iter().collect::<Vec<_>>().join(", ")
-        )));
-    }
-
-    let version = versions[0].clone();
+    let version = parser::require_identical(&versions, &primary.file)?;
 
     // Build target info for primary
     let mut target_infos = vec![VersionTargetInfo {
@@ -601,16 +563,7 @@ pub fn set_component_version(component: &Component, new_version: &str) -> Result
         ));
     }
 
-    let unique_primary: BTreeSet<String> = primary_versions.iter().cloned().collect();
-    if unique_primary.len() != 1 {
-        return Err(Error::internal_unexpected(format!(
-            "Multiple different versions found in {}: {}",
-            primary.file,
-            unique_primary.into_iter().collect::<Vec<_>>().join(", ")
-        )));
-    }
-
-    let old_version = primary_versions[0].clone();
+    let old_version = parser::require_identical(&primary_versions, &primary.file)?;
 
     // Update all version targets (no changelog validation - `set` is version-only)
     let mut target_infos = Vec::new();
@@ -637,17 +590,8 @@ pub fn set_component_version(component: &Component, new_version: &str) -> Result
         }
 
         // Validate all versions match expected
-        let unique: BTreeSet<String> = versions.iter().cloned().collect();
-        if unique.len() != 1 {
-            return Err(Error::internal_unexpected(format!(
-                "Multiple different versions found in {}: {}",
-                target.file,
-                unique.into_iter().collect::<Vec<_>>().join(", ")
-            )));
-        }
-
-        let found = &versions[0];
-        if found != &old_version {
+        let found = parser::require_identical(&versions, &target.file)?;
+        if found != old_version {
             return Err(Error::internal_unexpected(format!(
                 "Version mismatch in {}: found {}, expected {}",
                 target.file, found, old_version
@@ -732,16 +676,7 @@ pub fn bump_component_version(component: &Component, bump_type: &str) -> Result<
         ));
     }
 
-    let unique_primary: BTreeSet<String> = primary_versions.iter().cloned().collect();
-    if unique_primary.len() != 1 {
-        return Err(Error::internal_unexpected(format!(
-            "Multiple different versions found in {}: {}",
-            primary.file,
-            unique_primary.into_iter().collect::<Vec<_>>().join(", ")
-        )));
-    }
-
-    let old_version = primary_versions[0].clone();
+    let old_version = parser::require_identical(&primary_versions, &primary.file)?;
     let new_version = increment_version(&old_version, bump_type).ok_or_else(|| {
         Error::validation_invalid_argument(
             "version",
@@ -779,17 +714,8 @@ pub fn bump_component_version(component: &Component, bump_type: &str) -> Result<
         }
 
         // Validate all versions match expected
-        let unique: BTreeSet<String> = versions.iter().cloned().collect();
-        if unique.len() != 1 {
-            return Err(Error::internal_unexpected(format!(
-                "Multiple different versions found in {}: {}",
-                target.file,
-                unique.into_iter().collect::<Vec<_>>().join(", ")
-            )));
-        }
-
-        let found = &versions[0];
-        if found != &old_version {
+        let found = parser::require_identical(&versions, &target.file)?;
+        if found != old_version {
             return Err(Error::internal_unexpected(format!(
                 "Version mismatch in {}: found {}, expected {}",
                 target.file, found, old_version
