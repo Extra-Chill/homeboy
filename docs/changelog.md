@@ -4,7 +4,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## Unreleased
+## [0.30.12] - 2026-01-20
 
 - Add pre_version_bump_commands for staging build artifacts before clean-tree check
 - Improve orphaned tag hint with one-liner fix command
