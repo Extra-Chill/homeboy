@@ -47,8 +47,56 @@ register_shutdown_function(function() use ($plugin_file) {
 define('ABSPATH', $abspath);
 define('WPINC', 'wp-includes');
 
-// Load WordPress test functions (provides add_action, add_filter, etc.)
+// Load WordPress test functions (provides tests_add_filter for test setup)
 require_once $wp_tests_dir . '/includes/functions.php';
+
+// Stub implementations for WordPress functions plugins call at load time
+// These allow the plugin to load without fatal errors while we verify autoloading
+if (!function_exists('add_action')) {
+    function add_action($hook, $callback, $priority = 10, $accepted_args = 1) {
+        return true;
+    }
+}
+if (!function_exists('add_filter')) {
+    function add_filter($hook, $callback, $priority = 10, $accepted_args = 1) {
+        return true;
+    }
+}
+if (!function_exists('register_activation_hook')) {
+    function register_activation_hook($file, $callback) {
+        return;
+    }
+}
+if (!function_exists('register_deactivation_hook')) {
+    function register_deactivation_hook($file, $callback) {
+        return;
+    }
+}
+if (!function_exists('plugin_dir_path')) {
+    function plugin_dir_path($file) {
+        return trailingslashit(dirname($file));
+    }
+}
+if (!function_exists('plugin_dir_url')) {
+    function plugin_dir_url($file) {
+        return '';
+    }
+}
+if (!function_exists('plugin_basename')) {
+    function plugin_basename($file) {
+        return basename(dirname($file)) . '/' . basename($file);
+    }
+}
+if (!function_exists('trailingslashit')) {
+    function trailingslashit($string) {
+        return rtrim($string, '/\\') . '/';
+    }
+}
+if (!function_exists('wp_die')) {
+    function wp_die($message = '', $title = '', $args = array()) {
+        exit(1);
+    }
+}
 
 // Attempt to load plugin
 require_once $plugin_file;
