@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use clap::Args;
 use serde::Serialize;
@@ -12,7 +12,7 @@ use homeboy::project::{self, Project};
 use homeboy::server::{self, Server};
 use homeboy::{changelog, git, version};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::CmdResult;
 
@@ -28,13 +28,56 @@ pub struct InitArgs {
 }
 
 #[derive(Debug, Serialize)]
+pub struct InitStatus {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ready_to_deploy: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub needs_version_bump: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub has_uncommitted: Vec<String>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub config_gaps: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+#[derive(Debug, Serialize)]
+pub struct InitSummary {
+    pub total_components: usize,
+    pub by_module: HashMap<String, usize>,
+    pub by_status: HashMap<String, usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ComponentSummary {
+    pub id: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub commits_since_version: u32,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+#[derive(Debug, Serialize)]
 pub struct InitOutput {
     pub command: &'static str,
+    pub status: InitStatus,
+    pub summary: InitSummary,
     pub context: ContextOutput,
     pub next_steps: Vec<String>,
+    pub components: Vec<ComponentSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub servers: Vec<Server>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<ProjectListItem>,
-    pub components: Vec<ComponentWithState>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub modules: Vec<ModuleEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<VersionSnapshot>,
@@ -129,7 +172,7 @@ pub struct ChangelogSnapshot {
     pub items: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ComponentReleaseState {
     pub commits_since_version: u32,
     pub has_uncommitted_changes: bool,
@@ -139,7 +182,7 @@ pub struct ComponentReleaseState {
     pub baseline_warning: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ComponentWithState {
     #[serde(flatten)]
     pub component: Component,
@@ -182,7 +225,7 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
 
     // Wrap components with release state and gaps
     let cwd = std::env::current_dir().ok();
-    let components: Vec<ComponentWithState> = filtered_components
+    let components_with_state: Vec<ComponentWithState> = filtered_components
         .into_iter()
         .map(|component| {
             let release_state = calculate_component_release_state(&component);
@@ -204,8 +247,14 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
         })
         .collect();
 
+    // Compute status buckets
+    let status = compute_status(&components_with_state);
+
+    // Compute summary
+    let summary = compute_summary(&components_with_state);
+
     // Get module IDs linked to matched components
-    let linked_module_ids: HashSet<String> = components
+    let linked_module_ids: HashSet<String> = components_with_state
         .iter()
         .filter_map(|c| c.component.modules.as_ref())
         .flat_map(|m| m.keys().cloned())
@@ -274,59 +323,18 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
             .collect()
     };
 
-    let mut next_steps = vec![
-        "Read CLAUDE.md and README.md for repo-specific guidance.".to_string(),
-        "Run `homeboy docs documentation/index` for Homeboy documentation. Documentation workflows are self-directed—explore before asking.".to_string(),
-        "Run `homeboy docs commands/commands-index` to browse available commands.".to_string(),
-    ];
-
-    if context_output.managed {
-        next_steps.push("Run `homeboy context` to inspect local config state.".to_string());
-        if !components.is_empty() {
-            next_steps
-                .push("Run `homeboy component show <id>` to inspect a component.".to_string());
-        }
-    } else if !context_output.contained_components.is_empty() {
-        next_steps.push("Run `homeboy component show <id>` for a contained component.".to_string());
-    } else {
-        next_steps.push(
-            "Create a project with `homeboy project create <name> <domain> --server <server_id> --module <module_id>`.".to_string(),
-        );
-        next_steps.push(
-            "Create a component with `homeboy component create <name> --local-path . --remote-path <path> --project <project_id>`.".to_string(),
-        );
-    }
-
-    // If agent context file exists, add documentation guidance
-    if std::path::Path::new("CLAUDE.md").exists() || std::path::Path::new("AGENTS.md").exists() {
-        next_steps.push(
-            "For documentation tasks: Run `homeboy changes <component-id>` first, then follow `homeboy docs documentation/alignment`. No clarification needed.".to_string(),
-        );
-    }
-
-    if let Some(suggestion) = context_output.suggestion.as_ref() {
-        next_steps.push(format!("Suggestion: {}", suggestion));
-    }
-
-    // Check for linked modules with CLI tools (e.g., WordPress module's `homeboy wp`)
-    let cli_modules: Vec<_> = all_modules
-        .iter()
-        .filter(|m| linked_module_ids.contains(&m.id))
-        .filter_map(|m| m.cli.as_ref().map(|c| (c.tool.clone(), c.display_name.clone())))
-        .collect();
-
-    if !cli_modules.is_empty() && !projects.is_empty() {
-        let project_id = &projects[0].id;
-        for (tool, display_name) in &cli_modules {
-            next_steps.push(format!(
-                "Run remote {} commands: `homeboy {} {} <command>`",
-                display_name, tool, project_id
-            ));
-        }
-    }
+    // Build actionable next_steps based on status
+    let next_steps = build_actionable_next_steps(
+        &status,
+        &context_output,
+        &components_with_state,
+        &projects,
+        &linked_module_ids,
+        &all_modules,
+    );
 
     let version_snapshot = if context_output.managed {
-        resolve_version_snapshot(&components)
+        resolve_version_snapshot(&components_with_state)
     } else {
         None
     };
@@ -334,9 +342,9 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
         context_output.git_root.as_ref(),
         version_snapshot.as_ref().map(|v| v.version.as_str()),
     );
-    let (last_release, changelog_snapshot) = resolve_changelog_snapshots(&components);
+    let (last_release, changelog_snapshot) = resolve_changelog_snapshots(&components_with_state);
 
-    let mut warnings = validate_version_targets(&components);
+    let mut warnings = validate_version_targets(&components_with_state);
     if let Some(alignment_warning) =
         validate_version_baseline_alignment(&version_snapshot, &git_snapshot)
     {
@@ -345,14 +353,19 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
 
     let agent_context_files = resolve_agent_context_files(context_output.git_root.as_ref());
 
+    // Convert components to compact summary format
+    let components = build_component_summaries(&components_with_state, cwd.as_ref());
+
     Ok((
         InitOutput {
             command: "init",
+            status,
+            summary,
             context: context_output,
             next_steps,
+            components,
             servers,
             projects,
-            components,
             modules,
             version: version_snapshot,
             git: git_snapshot,
@@ -363,6 +376,244 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
         },
         0,
     ))
+}
+
+fn compute_status(components: &[ComponentWithState]) -> InitStatus {
+    let mut ready_to_deploy = Vec::new();
+    let mut needs_version_bump = Vec::new();
+    let mut has_uncommitted = Vec::new();
+    let mut config_gaps = 0;
+
+    for comp in components {
+        let id = &comp.component.id;
+
+        // Count config gaps
+        config_gaps += comp.gaps.len();
+
+        if let Some(ref state) = comp.release_state {
+            if state.has_uncommitted_changes {
+                has_uncommitted.push(id.clone());
+            } else if state.commits_since_version > 0 {
+                needs_version_bump.push(id.clone());
+            } else {
+                ready_to_deploy.push(id.clone());
+            }
+        }
+    }
+
+    InitStatus {
+        ready_to_deploy,
+        needs_version_bump,
+        has_uncommitted,
+        config_gaps,
+    }
+}
+
+fn compute_summary(components: &[ComponentWithState]) -> InitSummary {
+    let mut by_module: HashMap<String, usize> = HashMap::new();
+    let mut by_status: HashMap<String, usize> = HashMap::new();
+
+    for comp in components {
+        // Count by module
+        if let Some(ref modules) = comp.component.modules {
+            for module_id in modules.keys() {
+                *by_module.entry(module_id.clone()).or_insert(0) += 1;
+            }
+        }
+
+        // Count by status
+        let status = determine_component_status(comp);
+        *by_status.entry(status).or_insert(0) += 1;
+    }
+
+    InitSummary {
+        total_components: components.len(),
+        by_module,
+        by_status,
+    }
+}
+
+fn determine_component_status(comp: &ComponentWithState) -> String {
+    match &comp.release_state {
+        Some(state) if state.has_uncommitted_changes => "uncommitted".to_string(),
+        Some(state) if state.commits_since_version > 0 => "needs_bump".to_string(),
+        Some(_) => "clean".to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
+fn shorten_path(path: &str, cwd: Option<&PathBuf>) -> String {
+    let path_buf = PathBuf::from(path);
+    if let Some(cwd_path) = cwd {
+        if let Ok(relative) = path_buf.strip_prefix(cwd_path) {
+            let rel_str = relative.to_string_lossy().to_string();
+            if !rel_str.is_empty() {
+                return rel_str;
+            }
+            return ".".to_string();
+        }
+    }
+    // Try to shorten to home-relative path
+    if let Ok(home_str) = std::env::var("HOME") {
+        let home = PathBuf::from(&home_str);
+        if let Ok(relative) = path_buf.strip_prefix(&home) {
+            return format!("~/{}", relative.to_string_lossy());
+        }
+    }
+    path.to_string()
+}
+
+fn build_component_summaries(
+    components: &[ComponentWithState],
+    cwd: Option<&PathBuf>,
+) -> Vec<ComponentSummary> {
+    components
+        .iter()
+        .map(|comp| {
+            let status = determine_component_status(comp);
+            let commits = comp
+                .release_state
+                .as_ref()
+                .map(|s| s.commits_since_version)
+                .unwrap_or(0);
+
+            // Get primary module
+            let module = comp
+                .component
+                .modules
+                .as_ref()
+                .and_then(|m| m.keys().next().cloned());
+
+            ComponentSummary {
+                id: comp.component.id.clone(),
+                path: shorten_path(&comp.component.local_path, cwd),
+                module,
+                status,
+                commits_since_version: commits,
+            }
+        })
+        .collect()
+}
+
+fn build_actionable_next_steps(
+    status: &InitStatus,
+    context_output: &ContextOutput,
+    components: &[ComponentWithState],
+    projects: &[ProjectListItem],
+    linked_module_ids: &HashSet<String>,
+    all_modules: &[homeboy::module::ModuleManifest],
+) -> Vec<String> {
+    let mut next_steps = Vec::new();
+
+    // Priority 1: Uncommitted changes
+    if !status.has_uncommitted.is_empty() {
+        let count = status.has_uncommitted.len();
+        if count == 1 {
+            next_steps.push(format!(
+                "1 component has uncommitted changes: `{}`",
+                status.has_uncommitted[0]
+            ));
+        } else {
+            next_steps.push(format!(
+                "{} components have uncommitted changes. Review with `homeboy changes <id>`.",
+                count
+            ));
+        }
+    }
+
+    // Priority 2: Needs version bump
+    if !status.needs_version_bump.is_empty() {
+        let count = status.needs_version_bump.len();
+        if count == 1 {
+            next_steps.push(format!(
+                "1 component has unreleased commits: `{}`. Bump with `homeboy version bump {}`.",
+                status.needs_version_bump[0], status.needs_version_bump[0]
+            ));
+        } else {
+            next_steps.push(format!(
+                "{} components have unreleased commits. Bump with `homeboy version bump <id>`.",
+                count
+            ));
+        }
+    }
+
+    // Priority 3: Ready to deploy
+    if !status.ready_to_deploy.is_empty() && status.has_uncommitted.is_empty() {
+        let count = status.ready_to_deploy.len();
+        if count == 1 {
+            next_steps.push(format!(
+                "1 component ready to deploy: `{}`. Deploy with `homeboy deploy {}`.",
+                status.ready_to_deploy[0], status.ready_to_deploy[0]
+            ));
+        } else {
+            next_steps.push(format!(
+                "{} components ready to deploy. Run `homeboy deploy <id>`.",
+                count
+            ));
+        }
+    }
+
+    // Config gaps (informational)
+    if status.config_gaps > 0 {
+        next_steps.push(format!(
+            "{} config gaps detected. Run `homeboy component show <id>` for details.",
+            status.config_gaps
+        ));
+    }
+
+    // Context-specific guidance
+    if context_output.managed && !components.is_empty() {
+        let comp_id = &components[0].component.id;
+        next_steps.push(format!(
+            "You're in {}. Common: `homeboy build`, `homeboy deploy`, `homeboy version bump`.",
+            comp_id
+        ));
+    }
+
+    // Documentation guidance
+    if Path::new("CLAUDE.md").exists() || Path::new("AGENTS.md").exists() {
+        next_steps.push(
+            "Read CLAUDE.md for repo-specific guidance. Run `homeboy docs commands/commands-index` for all commands.".to_string(),
+        );
+    }
+
+    // CLI tools from linked modules
+    let cli_modules: Vec<_> = all_modules
+        .iter()
+        .filter(|m| linked_module_ids.contains(&m.id))
+        .filter_map(|m| {
+            m.cli
+                .as_ref()
+                .map(|c| (c.tool.clone(), c.display_name.clone()))
+        })
+        .collect();
+
+    if !cli_modules.is_empty() && !projects.is_empty() {
+        let project_id = &projects[0].id;
+        for (tool, display_name) in &cli_modules {
+            next_steps.push(format!(
+                "Run remote {} commands: `homeboy {} {} <command>`.",
+                display_name, tool, project_id
+            ));
+        }
+    }
+
+    // Add context suggestion if present
+    if let Some(suggestion) = context_output.suggestion.as_ref() {
+        next_steps.push(format!("Suggestion: {}", suggestion));
+    }
+
+    // Fallback for empty repos
+    if components.is_empty() && !context_output.managed {
+        next_steps.push(
+            "Create a project: `homeboy project create <name> <domain> --server <id> --module <id>`.".to_string(),
+        );
+        next_steps.push(
+            "Create a component: `homeboy component create <name> --local-path . --remote-path <path> --project <id>`.".to_string(),
+        );
+    }
+
+    next_steps
 }
 
 fn calculate_component_release_state(component: &Component) -> Option<ComponentReleaseState> {

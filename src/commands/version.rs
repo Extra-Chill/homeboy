@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
-use homeboy::git::{commit, CommitOptions};
+use homeboy::git::{commit, get_uncommitted_changes, tag, CommitOptions};
 use homeboy::version::{
     bump_version, increment_version, read_version, set_version, validate_changelog_for_bump,
     VersionTargetInfo,
@@ -18,6 +18,10 @@ pub struct GitCommitInfo {
     pub stdout: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_created: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -50,6 +54,10 @@ enum VersionCommand {
         /// Skip automatic git commit after bump
         #[arg(long)]
         no_commit: bool,
+
+        /// Skip automatic git tag after bump
+        #[arg(long)]
+        no_tag: bool,
 
         /// Component ID
         component_id: Option<String>,
@@ -151,6 +159,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         VersionCommand::Bump {
             dry_run,
             no_commit,
+            no_tag,
             bump_type,
             level,
             component_id,
@@ -166,6 +175,36 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                     ]),
                 )
             })?;
+
+            // Require clean working tree before version bump
+            if let Some(ref id) = component_id {
+                if let Ok(component) = homeboy::component::load(id) {
+                    let uncommitted = get_uncommitted_changes(&component.local_path)?;
+                    if uncommitted.has_changes {
+                        let mut details = vec![];
+                        if !uncommitted.staged.is_empty() {
+                            details.push(format!("Staged: {}", uncommitted.staged.join(", ")));
+                        }
+                        if !uncommitted.unstaged.is_empty() {
+                            details.push(format!("Unstaged: {}", uncommitted.unstaged.join(", ")));
+                        }
+                        if !uncommitted.untracked.is_empty() {
+                            details.push(format!("Untracked: {}", uncommitted.untracked.join(", ")));
+                        }
+                        return Err(homeboy::error::Error::validation_invalid_argument(
+                            "workingTree",
+                            "Working tree has uncommitted changes",
+                            Some(details.join("\n")),
+                            Some(vec![
+                                "All changes must be committed before version bump.".to_string(),
+                                "1. Document changes: homeboy changelog add <component> -m \"...\" for each change".to_string(),
+                                "2. Commit everything: git add -A && git commit -m \"<description>\"".to_string(),
+                                "3. Run version bump: homeboy version bump <component> <level>".to_string(),
+                            ]),
+                        ));
+                    }
+                }
+            }
 
             if dry_run {
                 let info = read_version(component_id.as_deref())?;
@@ -242,6 +281,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                     &result.new_version,
                     &result.targets,
                     &result.changelog_path,
+                    !no_tag,
                 )
             };
 
@@ -274,6 +314,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 &result.new_version,
                 &result.targets,
                 &result.changelog_path,
+                true,
             );
 
             Ok((
@@ -294,12 +335,13 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
     }
 }
 
-/// Creates a git commit for version changes, returning commit info.
+/// Creates a git commit and optionally a tag for version changes.
 fn create_version_commit(
     component_id: Option<&str>,
     new_version: &str,
     targets: &[VersionTargetInfo],
     changelog_path: &str,
+    create_tag: bool,
 ) -> Option<GitCommitInfo> {
     let mut files_to_stage: Vec<String> = targets.iter().map(|t| t.full_path.clone()).collect();
 
@@ -328,12 +370,27 @@ fn create_version_commit(
             } else {
                 Some(output.stderr)
             };
+
+            // Create tag after successful commit
+            let (tag_created, tag_name) = if create_tag && output.success {
+                let tag_name = format!("v{}", new_version);
+                let tag_message = format!("Release {}", tag_name);
+                match tag(component_id, Some(&tag_name), Some(&tag_message)) {
+                    Ok(tag_output) => (Some(tag_output.success), Some(tag_name)),
+                    Err(_) => (Some(false), Some(tag_name)),
+                }
+            } else {
+                (None, None)
+            };
+
             Some(GitCommitInfo {
                 success: output.success,
                 message: commit_message,
                 files_staged: files_to_stage,
                 stdout,
                 stderr,
+                tag_created,
+                tag_name,
             })
         }
         Err(e) => Some(GitCommitInfo {
@@ -342,6 +399,8 @@ fn create_version_commit(
             files_staged: files_to_stage,
             stdout: None,
             stderr: Some(e.to_string()),
+            tag_created: None,
+            tag_name: None,
         }),
     }
 }
