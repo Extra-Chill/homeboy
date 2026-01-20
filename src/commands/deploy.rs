@@ -30,7 +30,7 @@ pub struct DeployArgs {
     pub dry_run: bool,
 
     /// Check component status without building or deploying
-    #[arg(long)]
+    #[arg(long, visible_alias = "status")]
     pub check: bool,
 }
 
