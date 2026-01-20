@@ -2,10 +2,13 @@
 
 Initialize a repo for use with Homeboy. Returns comprehensive context data in JSON format.
 
+**Alias:** `homeboy status`
+
 ## Usage
 
 ```bash
 homeboy init
+homeboy status  # equivalent
 ```
 
 ## Getting Started
@@ -155,5 +158,5 @@ homeboy component set <id> --build-command "./build.sh" --build-artifact "build/
 ## Verification
 
 ```bash
-homeboy context  # Confirm managed: true
+homeboy init  # Confirm managed: true
 ```

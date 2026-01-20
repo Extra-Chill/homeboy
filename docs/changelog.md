@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.30.1] - 2026-01-20
+
+### Added
+- Added: `status` alias for `init` command
+
+### Removed
+- Removed: `context` command (use `init` instead)
+
 ## [0.30.0] - 2026-01-19
 
 - Added component auto-detection in `homeboy changes` - auto-uses detected component when exactly one matched

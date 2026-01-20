@@ -164,7 +164,6 @@ pub mod changes;
 pub mod cli;
 pub mod component;
 pub mod config;
-pub mod context;
 pub mod db;
 pub mod deploy;
 pub mod docs;
@@ -230,7 +229,6 @@ pub(crate) fn run_json(
         crate::Commands::Deploy(args) => dispatch!(args, global, deploy),
         crate::Commands::Component(args) => dispatch!(args, global, component),
         crate::Commands::Config(args) => dispatch!(args, global, config),
-        crate::Commands::Context(args) => dispatch!(args, global, context),
         crate::Commands::Module(args) => dispatch!(args, global, module),
         crate::Commands::Docs(args) => dispatch!(args, global, docs),
         crate::Commands::Changelog(args) => dispatch!(args, global, changelog),

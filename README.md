@@ -56,7 +56,7 @@ Start with `homeboy init` to understand your environment and get context. Based 
 2. **Create project**: `homeboy project create <id> <domain> --server <server-id>`
 3. **Create component**: `homeboy component create <name> --local-path <path> --remote-path <path> --build-artifact <path>`
 4. **Link components**: `homeboy project components add <project> <component>`
-5. **Verify**: `homeboy context`
+5. **Verify**: `homeboy init`
 
 ### Getting Started
 
@@ -71,7 +71,7 @@ homeboy project list
 homeboy component list
 homeboy server list
 homeboy module list
-homeboy context                        # Show current working context
+homeboy status                         # Show current working context (alias for init)
 ```
 
 ### Component and Project Setup Workflow
