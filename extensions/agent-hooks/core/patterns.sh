@@ -123,6 +123,42 @@ EOF
     return 1
 }
 
+# Check if a bash command matches a release anti-pattern (manual git operations)
+# Arguments: $1 = command string
+# Returns: 0 if anti-pattern detected, 1 otherwise
+# Outputs: suggestion message if detected
+check_release_antipattern() {
+    local cmd="$1"
+
+    # Manual git commit with release message pattern
+    if [[ "$cmd" =~ git[[:space:]]+commit.*(-m|--message)[[:space:]]*[\"\']*release: ]]; then
+        cat <<'EOF'
+Release Anti-Pattern (manual git commit)
+
+Use the unified release pipeline:
+  homeboy release <component>
+
+Benefits: Pipeline validation, changelog checks, module-backed publishing
+EOF
+        return 0
+    fi
+
+    # Manual git tag with version pattern (v followed by digit)
+    if [[ "$cmd" =~ git[[:space:]]+tag[[:space:]]+v[0-9] ]]; then
+        cat <<'EOF'
+Release Anti-Pattern (manual git tag)
+
+Use the unified release pipeline:
+  homeboy release <component>
+
+Benefits: Tag created after validation, proper commit reference
+EOF
+        return 0
+    fi
+
+    return 1
+}
+
 # Check all bash anti-patterns
 # Arguments: $1 = command string
 # Returns: 0 if any anti-pattern detected, 1 otherwise
@@ -134,6 +170,7 @@ check_bash_antipatterns() {
     check_build_antipattern "$cmd" && return 0
     check_deploy_antipattern "$cmd" && return 0
     check_version_antipattern "$cmd" && return 0
+    check_release_antipattern "$cmd" && return 0
 
     return 1
 }
