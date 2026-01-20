@@ -126,6 +126,15 @@ run_lint() {
     fi
 }
 
+# Run autoload validation (blocking - must pass before tests)
+run_autoload_check() {
+    local check_script="${MODULE_PATH}/scripts/autoload-check.sh"
+    if [ -f "$check_script" ]; then
+        bash "$check_script" || exit 1
+        echo ""
+    fi
+}
+
 # Export paths for bootstrap
 if [ -n "${COMPONENT_ID:-}" ]; then
     export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
@@ -152,6 +161,9 @@ if [[ "${HOMEBOY_SKIP_LINT:-}" != "1" ]]; then
 else
     echo "Skipping linting (--skip-lint)"
 fi
+
+# Run autoload validation (catches class loading errors before PHPUnit)
+run_autoload_check
 
 # Validate test directory structure - warn about conflicting local infrastructure
 LOCAL_BOOTSTRAP="${TEST_DIR}/bootstrap.php"
