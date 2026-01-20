@@ -1067,7 +1067,7 @@ pub fn init(component_id: &str, path: Option<&str>, configure: bool) -> Result<I
 
     // Configure component if requested (do this regardless of file state)
     let configured = if configure {
-        component::set_changelog_target(component_id, relative_path)?;
+        component::set_changelog_target(component_id, &relative_path)?;
         true
     } else {
         false
