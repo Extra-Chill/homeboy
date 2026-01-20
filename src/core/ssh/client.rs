@@ -1,6 +1,6 @@
 use crate::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::server::Server;
-use crate::shell;
+use crate::utils::shell;
 use std::process::{Command, Stdio};
 
 pub struct SshClient {

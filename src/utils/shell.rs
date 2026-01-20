@@ -1,3 +1,5 @@
+//! Shell escaping and quoting utilities.
+
 /// Escape a value for use inside single quotes.
 /// Replaces `'` with `'\''` (end quote, escaped quote, start quote).
 pub fn escape_single_quote_content(value: &str) -> String {

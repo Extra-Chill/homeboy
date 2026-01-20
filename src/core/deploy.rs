@@ -14,9 +14,9 @@ use crate::git;
 use crate::module::{load_all_modules, DeployOverride, DeployVerification, ModuleManifest};
 use crate::permissions;
 use crate::project::{self, Project};
-use crate::shell;
 use crate::ssh::SshClient;
-use crate::template::{render_map, TemplateVars};
+use crate::utils::shell;
+use crate::utils::template::{render_map, TemplateVars};
 use crate::utils::parser;
 use crate::version;
 

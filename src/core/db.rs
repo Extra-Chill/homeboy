@@ -6,8 +6,8 @@ use crate::context::{require_project_base_path, resolve_project_ssh};
 use crate::executor::execute_for_project;
 use crate::module::{load_all_modules, DatabaseCliConfig};
 use crate::project::{self, Project};
-use crate::template::{render_map, TemplateVars};
-use crate::token;
+use crate::utils::template::{render_map, TemplateVars};
+use crate::utils::token;
 use crate::{Error, Result};
 
 const DEFAULT_DATABASE_HOST: &str = "127.0.0.1";

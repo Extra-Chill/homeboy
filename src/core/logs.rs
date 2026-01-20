@@ -8,7 +8,7 @@ use crate::context::require_project_base_path;
 use crate::error::{Error, Result};
 use crate::executor::{execute_for_project, execute_for_project_interactive};
 use crate::project;
-use crate::shell;
+use crate::utils::shell;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]

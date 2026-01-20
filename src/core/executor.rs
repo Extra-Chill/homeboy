@@ -39,7 +39,7 @@ use crate::context::resolve_project_ssh;
 use crate::error::{Error, Result};
 use crate::module::CliConfig;
 use crate::project::Project;
-use crate::shell;
+use crate::utils::shell;
 use crate::ssh::{execute_local_command, execute_local_command_interactive, CommandOutput};
 use std::process::Command;
 

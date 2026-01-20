@@ -1011,8 +1011,8 @@ pub fn init(component_id: &str, path: Option<&str>, configure: bool) -> Result<I
     let settings = resolve_effective_settings(Some(&component));
 
     // Determine changelog path (relative to component)
-    let relative_path = path.unwrap_or("CHANGELOG.md");
-    let changelog_path = resolve_target_path(&component.local_path, relative_path)?;
+    let mut relative_path = path.unwrap_or("CHANGELOG.md").to_string();
+    let mut changelog_path = resolve_target_path(&component.local_path, &relative_path)?;
 
     // Check for existing changelog_target configuration
     if let Some(ref configured_target) = component.changelog_target {
@@ -1045,6 +1045,12 @@ pub fn init(component_id: &str, path: Option<&str>, configure: bool) -> Result<I
         for candidate in &changelog_candidates {
             let candidate_path = local_path.join(candidate);
             if candidate_path.exists() {
+                if configure {
+                    // User wants to configure existing changelog - update the path and continue
+                    relative_path = candidate.to_string();
+                    changelog_path = candidate_path;
+                    break;
+                }
                 return Err(Error::validation_invalid_argument(
                     "changelog",
                     "Found existing changelog file",

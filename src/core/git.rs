@@ -8,6 +8,7 @@ use crate::config::read_json_spec_to_string;
 use crate::error::{Error, Result};
 use crate::output::{BulkResult, BulkSummary, ItemOutcome};
 use crate::project;
+use crate::utils::command;
 
 // ============================================================================
 // Low-level Git Primitives (path-based)
@@ -15,80 +16,38 @@ use crate::project;
 
 /// Clone a git repository to a target directory.
 pub fn clone_repo(url: &str, target_dir: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .args(["clone", url, &target_dir.to_string_lossy()])
-        .output()
-        .map_err(|e| Error::git_command_failed(format!("Failed to run git clone: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::git_command_failed(format!(
-            "git clone failed: {}",
-            stderr
-        )));
-    }
-
+    command::run("git", &["clone", url, &target_dir.to_string_lossy()], "git clone")
+        .map_err(|e| Error::git_command_failed(e.to_string()))?;
     Ok(())
 }
 
 /// Pull latest changes in a git repository.
 pub fn pull_repo(repo_dir: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .args(["pull"])
-        .current_dir(repo_dir)
-        .output()
-        .map_err(|e| Error::git_command_failed(format!("Failed to run git pull: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::git_command_failed(format!(
-            "git pull failed: {}",
-            stderr
-        )));
-    }
-
+    command::run_in(&repo_dir.to_string_lossy(), "git", &["pull"], "git pull")
+        .map_err(|e| Error::git_command_failed(e.to_string()))?;
     Ok(())
 }
 
 /// Check if a git working directory has no uncommitted changes.
 pub fn is_workdir_clean(path: &Path) -> bool {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(path)
-        .output();
-
-    match output {
-        Ok(output) => output.status.success() && output.stdout.is_empty(),
-        Err(_) => false,
-    }
+    command::run_in_optional(&path.to_string_lossy(), "git", &["status", "--porcelain"])
+        .map(|s| s.is_empty())
+        .unwrap_or(false)
 }
 
 /// List all git-tracked markdown files in a directory.
 /// Uses `git ls-files` to respect .gitignore and only include tracked/staged files.
 /// Returns relative paths from the repository root.
 pub fn list_tracked_markdown_files(path: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["ls-files", "--cached", "--others", "--exclude-standard", "*.md"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::git_command_failed(format!("Failed to run git ls-files: {}", e)))?;
+    let stdout = command::run_in(
+        &path.to_string_lossy(),
+        "git",
+        &["ls-files", "--cached", "--others", "--exclude-standard", "*.md"],
+        "git ls-files",
+    )
+    .map_err(|e| Error::git_command_failed(e.to_string()))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::git_command_failed(format!(
-            "git ls-files failed: {}",
-            stderr
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let files: Vec<String> = stdout
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-
-    Ok(files)
+    Ok(stdout.lines().filter(|l| !l.is_empty()).map(String::from).collect())
 }
 
 /// Pull with fast-forward only, inheriting stdio for interactive output.
@@ -177,27 +136,7 @@ fn extract_version_from_tag(tag: &str) -> Option<String> {
 /// Get the latest git tag in the repository.
 /// Returns None if no tags exist.
 pub fn get_latest_tag(path: &str) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args(["describe", "--tags", "--abbrev=0"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::other(format!("Failed to run git describe: {}", e)))?;
-
-    if !output.status.success() {
-        // No tags exist - this is fine, not an error
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("No names found") || stderr.contains("No tags can describe") {
-            return Ok(None);
-        }
-        return Err(Error::other(format!("git describe failed: {}", stderr)));
-    }
-
-    let tag = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if tag.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(tag))
-    }
+    Ok(command::run_in_optional(path, "git", &["describe", "--tags", "--abbrev=0"]))
 }
 
 const DEFAULT_COMMIT_LIMIT: usize = 10;
@@ -217,32 +156,15 @@ const NOISY_UNTRACKED_DIRS: [&str; 8] = [
 /// Matches strict patterns: v1.0.0, bump to X, release X, version X
 /// Returns the commit hash if found, None otherwise.
 pub fn find_version_commit(path: &str) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args(["log", "-200", "--format=%h|%s"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::other(format!("Failed to run git log: {}", e)))?;
+    let stdout = command::run_in(path, "git", &["log", "-200", "--format=%h|%s"], "git log")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::other(format!("git log failed: {}", stderr)));
-    }
-
-    // Strict patterns - require release keywords at START of message
     let version_pattern = Regex::new(
         r"(?i)(?:^v|^bump\s+(?:version\s+)?(?:to\s+)?v?|^(?:chore\([^)]*\):\s*)?release:?\s*v?)(\d+\.\d+(?:\.\d+)?)",
     )
     .expect("Invalid regex pattern");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(2, '|').collect();
-        if parts.len() == 2 {
-            let hash = parts[0];
-            let subject = parts[1];
+        if let Some((hash, subject)) = line.split_once('|') {
             if version_pattern.is_match(subject) {
                 return Ok(Some(hash.to_string()));
             }
@@ -256,45 +178,22 @@ pub fn find_version_commit(path: &str) -> Result<Option<String>> {
 /// Uses strict patterns to avoid false positives - only matches commits that
 /// clearly mark a release (e.g., "release: v0.2.0"), not mentions of releases.
 pub fn find_version_release_commit(path: &str, version: &str) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args(["log", "-200", "--format=%h|%s"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::other(format!("Failed to run git log: {}", e)))?;
-
-    if !output.status.success() {
+    let Some(stdout) = command::run_in_optional(path, "git", &["log", "-200", "--format=%h|%s"])
+    else {
         return Ok(None);
-    }
+    };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let escaped_version = regex::escape(version);
-
-    // STRICT patterns - require start of message and word boundaries
     let patterns = [
-        // Conventional commit: "release: v0.2.0" or "chore(release): v0.2.0"
-        format!(
-            r"(?i)^(?:chore\([^)]*\):\s*)?release:?\s*v?{}(?:\s|$)",
-            escaped_version
-        ),
-        // Version only: "v0.2.0" or "0.2.0" as the entire message
+        format!(r"(?i)^(?:chore\([^)]*\):\s*)?release:?\s*v?{}(?:\s|$)", escaped_version),
         format!(r"(?i)^v?{}\s*$", escaped_version),
-        // Bump at start: "bump to 0.2.0" or "bump version to 0.2.0"
-        format!(
-            r"(?i)^bump\s+(?:version\s+)?(?:to\s+)?v?{}(?:\s|$)",
-            escaped_version
-        ),
+        format!(r"(?i)^bump\s+(?:version\s+)?(?:to\s+)?v?{}(?:\s|$)", escaped_version),
     ];
 
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(2, '|').collect();
-        if parts.len() == 2 {
-            let hash = parts[0];
-            let subject = parts[1];
+        if let Some((hash, subject)) = line.split_once('|') {
             for pattern in &patterns {
-                if Regex::new(pattern)
-                    .map(|re| re.is_match(subject))
-                    .unwrap_or(false)
-                {
+                if Regex::new(pattern).map(|re| re.is_match(subject)).unwrap_or(false) {
                     return Ok(Some(hash.to_string()));
                 }
             }
@@ -305,35 +204,17 @@ pub fn find_version_release_commit(path: &str, version: &str) -> Result<Option<S
 
 /// Get the last N commits from the repository.
 pub fn get_last_n_commits(path: &str, n: usize) -> Result<Vec<CommitInfo>> {
-    let output = Command::new("git")
-        .args(["log", &format!("-{}", n), "--format=%h|%s"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::other(format!("Failed to run git log: {}", e)))?;
+    let stdout = command::run_in(path, "git", &["log", &format!("-{}", n), "--format=%h|%s"], "git log")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::other(format!("git log failed: {}", stderr)));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let commits = stdout
         .lines()
-        .filter(|line| !line.is_empty())
         .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(2, '|').collect();
-            if parts.len() == 2 {
-                let hash = parts[0].to_string();
-                let subject = parts[1].to_string();
-                let category = parse_conventional_commit(&subject);
-                Some(CommitInfo {
-                    hash,
-                    subject,
-                    category,
-                })
-            } else {
-                None
-            }
+            let (hash, subject) = line.split_once('|')?;
+            Some(CommitInfo {
+                hash: hash.to_string(),
+                subject: subject.to_string(),
+                category: parse_conventional_commit(subject),
+            })
         })
         .collect();
 
@@ -343,40 +224,18 @@ pub fn get_last_n_commits(path: &str, n: usize) -> Result<Vec<CommitInfo>> {
 /// Get commits since a given tag (or all commits if tag is None).
 /// Returns commits in reverse chronological order (newest first).
 pub fn get_commits_since_tag(path: &str, tag: Option<&str>) -> Result<Vec<CommitInfo>> {
-    let range = match tag {
-        Some(t) => format!("{}..HEAD", t),
-        None => "HEAD".to_string(),
-    };
+    let range = tag.map(|t| format!("{}..HEAD", t)).unwrap_or_else(|| "HEAD".to_string());
+    let stdout = command::run_in(path, "git", &["log", &range, "--format=%h|%s"], "git log")?;
 
-    let output = Command::new("git")
-        .args(["log", &range, "--format=%h|%s"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::other(format!("Failed to run git log: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::other(format!("git log failed: {}", stderr)));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let commits = stdout
         .lines()
-        .filter(|line| !line.is_empty())
         .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(2, '|').collect();
-            if parts.len() == 2 {
-                let hash = parts[0].to_string();
-                let subject = parts[1].to_string();
-                let category = parse_conventional_commit(&subject);
-                Some(CommitInfo {
-                    hash,
-                    subject,
-                    category,
-                })
-            } else {
-                None
-            }
+            let (hash, subject) = line.split_once('|')?;
+            Some(CommitInfo {
+                hash: hash.to_string(),
+                subject: subject.to_string(),
+                category: parse_conventional_commit(subject),
+            })
         })
         .collect();
 
@@ -667,41 +526,17 @@ pub fn get_repo_snapshot(path: &str) -> Result<RepoSnapshot> {
         return Err(Error::git_command_failed("Not a git repository"));
     }
 
-    let branch_output = execute_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .map_err(|e| Error::other(e.to_string()))?;
-    if !branch_output.status.success() {
-        let stderr = String::from_utf8_lossy(&branch_output.stderr);
-        return Err(Error::other(format!(
-            "git branch lookup failed: {}",
-            stderr
-        )));
-    }
-    let branch = String::from_utf8_lossy(&branch_output.stdout)
-        .trim()
-        .to_string();
+    let branch = command::run_in(path, "git", &["rev-parse", "--abbrev-ref", "HEAD"], "git branch")?;
+    let clean = command::run_in_optional(path, "git", &["status", "--porcelain=v1"])
+        .map(|s| s.is_empty())
+        .unwrap_or(false);
 
-    let status_output = execute_git(path, &["status", "--porcelain=v1"])
-        .map_err(|e| Error::other(e.to_string()))?;
-    let clean = status_output.status.success() && status_output.stdout.is_empty();
-
-    let upstream_output = execute_git(path, &["rev-parse", "--abbrev-ref", "@{upstream}"])
-        .map_err(|e| Error::other(e.to_string()))?;
-
-    let (ahead, behind) = if upstream_output.status.success() {
-        let counts_output = execute_git(
-            path,
-            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
-        )
-        .map_err(|e| Error::other(e.to_string()))?;
-        if counts_output.status.success() {
-            let counts = String::from_utf8_lossy(&counts_output.stdout);
-            parse_ahead_behind(&counts)
-        } else {
-            (None, None)
-        }
-    } else {
-        (None, None)
-    };
+    let (ahead, behind) = command::run_in_optional(path, "git", &["rev-parse", "--abbrev-ref", "@{upstream}"])
+        .and_then(|_| {
+            command::run_in_optional(path, "git", &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
+        })
+        .map(|counts| parse_ahead_behind(&counts))
+        .unwrap_or((None, None));
 
     Ok(RepoSnapshot {
         branch,
@@ -1404,70 +1239,35 @@ pub fn changes_project_filtered(
 }
 
 fn is_git_repo(path: &str) -> bool {
-    std::process::Command::new("git")
-        .args(["-C", path, "rev-parse", "--git-dir"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    command::succeeded_in(path, "git", &["rev-parse", "--git-dir"])
 }
 
 /// Check if a tag exists on the remote.
 pub fn tag_exists_on_remote(path: &str, tag_name: &str) -> Result<bool> {
-    let output = execute_git(
+    Ok(command::run_in_optional(
         path,
-        &[
-            "ls-remote",
-            "--tags",
-            "origin",
-            &format!("refs/tags/{}", tag_name),
-        ],
+        "git",
+        &["ls-remote", "--tags", "origin", &format!("refs/tags/{}", tag_name)],
     )
-    .map_err(|e| Error::other(e.to_string()))?;
-
-    if !output.status.success() {
-        return Ok(false);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(!stdout.trim().is_empty())
+    .map(|s| !s.is_empty())
+    .unwrap_or(false))
 }
 
 /// Check if a tag exists locally.
 pub fn tag_exists_locally(path: &str, tag_name: &str) -> Result<bool> {
-    let output =
-        execute_git(path, &["tag", "-l", tag_name]).map_err(|e| Error::other(e.to_string()))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(!stdout.trim().is_empty())
+    Ok(command::run_in_optional(path, "git", &["tag", "-l", tag_name])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false))
 }
 
 /// Get the commit SHA a tag points to.
 pub fn get_tag_commit(path: &str, tag_name: &str) -> Result<String> {
-    let output = execute_git(path, &["rev-list", "-n", "1", tag_name])
-        .map_err(|e| Error::other(e.to_string()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::other(format!(
-            "Failed to get commit for tag '{}': {}",
-            tag_name, stderr
-        )));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    command::run_in(path, "git", &["rev-list", "-n", "1", tag_name], &format!("get commit for tag '{}'", tag_name))
 }
 
 /// Get the current HEAD commit SHA.
 pub fn get_head_commit(path: &str) -> Result<String> {
-    let output =
-        execute_git(path, &["rev-parse", "HEAD"]).map_err(|e| Error::other(e.to_string()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::other(format!("Failed to get HEAD commit: {}", stderr)));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    command::run_in(path, "git", &["rev-parse", "HEAD"], "get HEAD commit")
 }
 
 #[cfg(test)]

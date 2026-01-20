@@ -1,3 +1,5 @@
+//! String template rendering utilities.
+
 use std::collections::HashMap;
 
 pub struct TemplateVars;

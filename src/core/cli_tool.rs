@@ -7,10 +7,10 @@ use crate::error::ErrorCode;
 use crate::executor;
 use crate::module::{find_module_by_tool, CliConfig};
 use crate::project::{self, Project};
-use crate::shell;
 use crate::ssh::{execute_local_command, CommandOutput};
-use crate::template::{render_map, TemplateVars};
-use crate::token;
+use crate::utils::shell;
+use crate::utils::template::{render_map, TemplateVars};
+use crate::utils::token;
 use crate::{Error, Result};
 
 #[derive(Serialize, Clone)]

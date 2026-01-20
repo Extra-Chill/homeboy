@@ -11,7 +11,8 @@ use crate::error::{Error, Result};
 use crate::executor::execute_for_project;
 use crate::project;
 use crate::utils::parser;
-use crate::{base_path, shell, token};
+use crate::base_path;
+use crate::utils::{shell, token};
 
 #[derive(Debug, Clone, Serialize)]
 

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::component::{self, Component, ScopedModuleConfig};
 use crate::error::{Error, Result};
-use crate::shell;
+use crate::utils::shell;
 use crate::ssh::{execute_local_command_in_dir, CommandOutput};
 
 use super::exec_context;

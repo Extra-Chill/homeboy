@@ -1,6 +1,13 @@
-//! Generic utility primitives.
+//! Generic utility primitives with zero domain knowledge.
 //!
-//! This module provides foundational utilities used across the codebase.
-//! Domain-specific logic should live in `core/`, not here.
+//! - `command` - Command execution with error handling
+//! - `parser` - Text extraction and manipulation
+//! - `shell` - Shell escaping and quoting
+//! - `template` - String template rendering
+//! - `token` - String comparison and normalization
 
+pub mod command;
 pub mod parser;
+pub mod shell;
+pub mod token;
+pub(crate) mod template;

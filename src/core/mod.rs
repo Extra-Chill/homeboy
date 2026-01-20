@@ -21,9 +21,7 @@ pub mod project;
 pub mod release;
 
 pub mod server;
-pub mod shell;
 pub mod ssh;
-pub mod token;
 pub mod upgrade;
 pub mod version;
 
@@ -35,7 +33,6 @@ pub(crate) mod local_files;
 pub(crate) mod paths;
 pub(crate) mod permissions;
 pub(crate) mod slugify;
-pub(crate) mod template;
 
 // Public modules for CLI access
 pub mod defaults;

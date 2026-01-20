@@ -1,3 +1,5 @@
+//! String comparison and normalization utilities.
+
 use std::cmp::Ordering;
 
 pub fn normalize_identifier(input: &str) -> String {

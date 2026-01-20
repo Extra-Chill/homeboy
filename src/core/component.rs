@@ -41,7 +41,7 @@ pub struct Component {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_targets: Option<Vec<VersionTarget>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "changelog_targets")]
     pub changelog_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changelog_next_section_label: Option<String>,
