@@ -1,35 +1,37 @@
 #!/usr/bin/env bash
 # Agent Hooks setup script
-# Installs Claude Code hooks and configures settings.json
+# Installs hooks for Claude Code and OpenCode
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLAUDE_DIR="$HOME/.claude"
-HOOKS_DIR="$CLAUDE_DIR/hooks/agent-hooks"
-SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 
-echo "Installing Agent Hooks for Claude Code..."
+# ============================================================================
+# Claude Code Installation
+# ============================================================================
+install_claude() {
+    local CLAUDE_DIR="$HOME/.claude"
+    local HOOKS_DIR="$CLAUDE_DIR/hooks/agent-hooks"
+    local SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 
-# Create Claude directories if they don't exist
-mkdir -p "$HOOKS_DIR"
+    echo "Installing Agent Hooks for Claude Code..."
 
-# Copy hook scripts
-echo "Copying hooks to $HOOKS_DIR..."
-cp -r "$SCRIPT_DIR/core" "$HOOKS_DIR/"
-cp -r "$SCRIPT_DIR/claude" "$HOOKS_DIR/"
+    # Create directories
+    mkdir -p "$HOOKS_DIR"
 
-# Make scripts executable
-chmod +x "$HOOKS_DIR/core/"*.sh
-chmod +x "$HOOKS_DIR/claude/"*.sh
+    # Copy hook scripts
+    cp -r "$SCRIPT_DIR/core" "$HOOKS_DIR/"
+    cp -r "$SCRIPT_DIR/claude" "$HOOKS_DIR/"
 
-echo "Hooks installed successfully."
+    # Make scripts executable
+    chmod +x "$HOOKS_DIR/core/"*.sh
+    chmod +x "$HOOKS_DIR/claude/"*.sh
 
-# Configure settings.json
-echo "Configuring Claude Code settings..."
+    echo "  Hooks copied to $HOOKS_DIR"
 
-# Hook configuration to merge
-HOOKS_CONFIG=$(cat <<'EOF'
+    # Hook configuration to merge
+    local HOOKS_CONFIG
+    HOOKS_CONFIG=$(cat <<'EOF'
 {
   "hooks": {
     "SessionStart": [
@@ -67,43 +69,62 @@ HOOKS_CONFIG=$(cat <<'EOF'
 EOF
 )
 
-# Check if settings.json exists
-if [[ -f "$SETTINGS_FILE" ]]; then
-    # Backup existing settings
-    cp "$SETTINGS_FILE" "$SETTINGS_FILE.backup"
-    echo "Backed up existing settings to $SETTINGS_FILE.backup"
+    # Merge or create settings.json
+    if [[ -f "$SETTINGS_FILE" ]]; then
+        cp "$SETTINGS_FILE" "$SETTINGS_FILE.backup"
+        echo "  Backed up existing settings to $SETTINGS_FILE.backup"
 
-    # Read existing settings
-    existing_settings=$(cat "$SETTINGS_FILE")
+        local merged
+        merged=$(cat "$SETTINGS_FILE" | jq --argjson new_hooks "$HOOKS_CONFIG" '
+            def merge_hook_arrays($existing; $new):
+                if $existing == null then $new
+                elif $new == null then $existing
+                else $existing + $new
+                end;
+            .hooks.SessionStart = merge_hook_arrays(.hooks.SessionStart; $new_hooks.hooks.SessionStart) |
+            .hooks.PreToolUse = merge_hook_arrays(.hooks.PreToolUse; $new_hooks.hooks.PreToolUse)
+        ')
+        echo "$merged" > "$SETTINGS_FILE"
+    else
+        mkdir -p "$CLAUDE_DIR"
+        echo "$HOOKS_CONFIG" > "$SETTINGS_FILE"
+    fi
 
-    # Merge hooks configuration using jq
-    # This adds our hooks to existing hooks arrays, or creates them if they don't exist
-    merged_settings=$(echo "$existing_settings" | jq --argjson new_hooks "$HOOKS_CONFIG" '
-        # Deep merge function for hooks
-        def merge_hook_arrays($existing; $new):
-            if $existing == null then $new
-            elif $new == null then $existing
-            else $existing + $new
-            end;
+    echo "  Settings configured"
+    echo "Claude Code hooks installed."
+}
 
-        # Merge SessionStart hooks
-        .hooks.SessionStart = merge_hook_arrays(.hooks.SessionStart; $new_hooks.hooks.SessionStart) |
+# ============================================================================
+# OpenCode Installation
+# ============================================================================
+install_opencode() {
+    local OPENCODE_PLUGINS_DIR="$HOME/.config/opencode/plugins"
 
-        # Merge PreToolUse hooks
-        .hooks.PreToolUse = merge_hook_arrays(.hooks.PreToolUse; $new_hooks.hooks.PreToolUse)
-    ')
+    echo "Installing Agent Hooks for OpenCode..."
 
-    echo "$merged_settings" > "$SETTINGS_FILE"
-else
-    # Create new settings file with just hooks
-    mkdir -p "$CLAUDE_DIR"
-    echo "$HOOKS_CONFIG" > "$SETTINGS_FILE"
-fi
+    # Create plugins directory
+    mkdir -p "$OPENCODE_PLUGINS_DIR"
 
-echo "Settings configured successfully."
+    # Copy plugin file
+    cp "$SCRIPT_DIR/opencode/homeboy-plugin.ts" "$OPENCODE_PLUGINS_DIR/"
+
+    echo "  Plugin copied to $OPENCODE_PLUGINS_DIR/homeboy-plugin.ts"
+    echo "OpenCode plugin installed."
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+install_claude
+echo ""
+install_opencode
+
 echo ""
 echo "Agent Hooks installation complete!"
-echo "Hooks are now active for Claude Code sessions."
 echo ""
-echo "To verify: cat ~/.claude/settings.json"
+echo "Installed for:"
+echo "  - Claude Code: ~/.claude/hooks/agent-hooks/"
+echo "  - OpenCode: ~/.config/opencode/plugins/homeboy-plugin.ts"
+echo ""
+echo "To verify Claude: cat ~/.claude/settings.json"
 echo "To uninstall: homeboy module run agent-hooks uninstall"

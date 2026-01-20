@@ -1,63 +1,90 @@
 #!/usr/bin/env bash
 # Agent Hooks uninstall script
-# Removes Claude Code hooks and cleans settings.json
+# Removes hooks for Claude Code and OpenCode
 
 set -euo pipefail
 
-CLAUDE_DIR="$HOME/.claude"
-HOOKS_DIR="$CLAUDE_DIR/hooks/agent-hooks"
-SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+# ============================================================================
+# Claude Code Uninstallation
+# ============================================================================
+uninstall_claude() {
+    local CLAUDE_DIR="$HOME/.claude"
+    local HOOKS_DIR="$CLAUDE_DIR/hooks/agent-hooks"
+    local SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 
-echo "Uninstalling Agent Hooks..."
+    echo "Uninstalling Claude Code hooks..."
 
-# Remove hooks directory
-if [[ -d "$HOOKS_DIR" ]]; then
-    rm -rf "$HOOKS_DIR"
-    echo "Removed hooks directory: $HOOKS_DIR"
-else
-    echo "Hooks directory not found (already removed?)"
-fi
+    # Remove hooks directory
+    if [[ -d "$HOOKS_DIR" ]]; then
+        rm -rf "$HOOKS_DIR"
+        echo "  Removed: $HOOKS_DIR"
+    else
+        echo "  Hooks directory not found (already removed?)"
+    fi
 
-# Clean up settings.json
-if [[ -f "$SETTINGS_FILE" ]]; then
-    echo "Cleaning up Claude Code settings..."
+    # Clean up settings.json
+    if [[ -f "$SETTINGS_FILE" ]]; then
+        local cleaned
+        cleaned=$(cat "$SETTINGS_FILE" | jq '
+            # Remove SessionStart hooks that reference agent-hooks
+            .hooks.SessionStart = (
+                .hooks.SessionStart // [] |
+                map(select(
+                    .hooks == null or
+                    (.hooks | map(select(.command | contains("agent-hooks"))) | length == 0)
+                ))
+            ) |
 
-    # Remove agent-hooks entries from settings
-    cleaned_settings=$(cat "$SETTINGS_FILE" | jq '
-        # Remove SessionStart hooks that reference agent-hooks
-        .hooks.SessionStart = (
-            .hooks.SessionStart // [] |
-            map(select(
-                .hooks == null or
-                (.hooks | map(select(.command | contains("agent-hooks"))) | length == 0)
-            ))
-        ) |
+            # Remove PreToolUse hooks that reference agent-hooks
+            .hooks.PreToolUse = (
+                .hooks.PreToolUse // [] |
+                map(select(
+                    .hooks == null or
+                    (.hooks | map(select(.command | contains("agent-hooks"))) | length == 0)
+                ))
+            ) |
 
-        # Remove PreToolUse hooks that reference agent-hooks
-        .hooks.PreToolUse = (
-            .hooks.PreToolUse // [] |
-            map(select(
-                .hooks == null or
-                (.hooks | map(select(.command | contains("agent-hooks"))) | length == 0)
-            ))
-        ) |
+            # Clean up empty arrays
+            if .hooks.SessionStart == [] then del(.hooks.SessionStart) else . end |
+            if .hooks.PreToolUse == [] then del(.hooks.PreToolUse) else . end |
+            if .hooks == {} then del(.hooks) else . end
+        ')
+        echo "$cleaned" > "$SETTINGS_FILE"
+        echo "  Cleaned: settings.json"
+    else
+        echo "  Settings file not found (nothing to clean)"
+    fi
 
-        # Clean up empty arrays
-        if .hooks.SessionStart == [] then del(.hooks.SessionStart) else . end |
-        if .hooks.PreToolUse == [] then del(.hooks.PreToolUse) else . end |
-        if .hooks == {} then del(.hooks) else . end
-    ')
+    # Remove empty hooks directory
+    [[ -d "$CLAUDE_DIR/hooks" ]] && rmdir "$CLAUDE_DIR/hooks" 2>/dev/null || true
 
-    echo "$cleaned_settings" > "$SETTINGS_FILE"
-    echo "Settings cleaned."
-else
-    echo "Settings file not found (nothing to clean)"
-fi
+    echo "Claude Code hooks uninstalled."
+}
 
-# Remove empty hooks directory if parent exists
-if [[ -d "$CLAUDE_DIR/hooks" ]]; then
-    rmdir "$CLAUDE_DIR/hooks" 2>/dev/null || true
-fi
+# ============================================================================
+# OpenCode Uninstallation
+# ============================================================================
+uninstall_opencode() {
+    local PLUGIN_FILE="$HOME/.config/opencode/plugins/homeboy-plugin.ts"
+
+    echo "Uninstalling OpenCode plugin..."
+
+    if [[ -f "$PLUGIN_FILE" ]]; then
+        rm "$PLUGIN_FILE"
+        echo "  Removed: $PLUGIN_FILE"
+    else
+        echo "  Plugin file not found (already removed?)"
+    fi
+
+    echo "OpenCode plugin uninstalled."
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+uninstall_claude
+echo ""
+uninstall_opencode
 
 echo ""
 echo "Agent Hooks uninstalled successfully."

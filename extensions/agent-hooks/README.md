@@ -1,6 +1,6 @@
 # Agent Hooks
 
-Claude Code hooks that enforce Homeboy usage patterns across all projects.
+Unified hooks for Claude Code and OpenCode that enforce Homeboy usage patterns across all projects.
 
 ## Installation
 
@@ -8,15 +8,23 @@ Claude Code hooks that enforce Homeboy usage patterns across all projects.
 homeboy module install agent-hooks
 ```
 
-The setup script automatically:
-1. Copies hooks to `~/.claude/hooks/agent-hooks/`
-2. Merges configuration into `~/.claude/settings.json`
+The setup script automatically installs hooks for both AI coding assistants:
+- **Claude Code**: Hooks in `~/.claude/hooks/agent-hooks/`, configuration in `~/.claude/settings.json`
+- **OpenCode**: Plugin at `~/.config/opencode/plugins/homeboy-plugin.ts`
+
+## Supported Agents
+
+| Feature | Claude Code | OpenCode |
+|---------|-------------|----------|
+| Session start message | SessionStart hook | Plugin init |
+| Bash anti-pattern detection | PreToolUse (Bash) | tool.execute.before |
+| File protection | PreToolUse (Edit) | tool.execute.before |
 
 ## Hooks
 
-### SessionStart: Init Reminder
+### Session Start: Init Reminder
 
-When starting any Claude Code session, displays a reminder:
+When starting any session, displays a reminder:
 
 ```
 Homeboy Active
@@ -28,7 +36,7 @@ Use Homeboy for: builds, deploys, version management
 Docs: homeboy docs commands/commands-index
 ```
 
-### PreToolUse (Bash): Anti-Pattern Detector
+### Bash Anti-Pattern Detector
 
 Blocks bash commands that bypass Homeboy:
 
@@ -41,12 +49,12 @@ Blocks bash commands that bypass Homeboy:
 | `npm version` | `homeboy version bump/set` |
 | `cargo set-version` | `homeboy version bump/set` |
 
-### PreToolUse (Edit): Dynamic File Protection
+### Dynamic File Protection
 
 Uses `homeboy init --json` to dynamically detect protected files:
 
-- **Version targets**: Files listed in `version.targets[].full_path` (Cargo.toml, package.json, Info.plist, VERSION, etc.)
-- **Changelog**: File at `changelog.path` (typically CHANGELOG.md or docs/changelog.md)
+- **Version targets**: Files listed in `version.targets[].full_path`
+- **Changelog**: File at `changelog.path`
 
 This approach:
 - Works for ANY project type (Rust, Node, WordPress, Swift, PHP)
@@ -55,38 +63,40 @@ This approach:
 
 ## Behavior
 
-Hooks apply globally to all Claude Code sessions. In non-Homeboy repositories, the edit hook gracefully passes through (homeboy init returns empty data).
+Hooks apply globally to all sessions. In non-Homeboy repositories, hooks gracefully pass through (homeboy init returns empty data).
 
 ## Uninstall
 
 ```bash
-bash ~/.claude/hooks/agent-hooks/../uninstall.sh
+homeboy module run agent-hooks uninstall
 ```
 
 Or manually:
-1. Remove `~/.claude/hooks/agent-hooks/`
-2. Remove agent-hooks entries from `~/.claude/settings.json`
+1. Claude Code: Remove `~/.claude/hooks/agent-hooks/` and clean `~/.claude/settings.json`
+2. OpenCode: Remove `~/.config/opencode/plugins/homeboy-plugin.ts`
 
 ## Structure
 
 ```
 agent-hooks/
 ├── agent-hooks.json      # Module manifest
-├── setup.sh              # Installation script
-├── uninstall.sh          # Removal script
-├── core/                 # Shared logic (hub)
+├── setup.sh              # Unified installer (both agents)
+├── uninstall.sh          # Unified uninstaller (both agents)
+├── README.md
+├── core/                 # Shared logic (bash)
 │   └── patterns.sh       # Bash anti-pattern detection
-├── claude/               # Claude Code hooks (spoke)
+├── claude/               # Claude Code hooks (bash)
 │   ├── session-start.sh
 │   ├── pre-tool-bash.sh
 │   └── pre-tool-edit.sh
-└── README.md
+└── opencode/             # OpenCode plugin (TypeScript)
+    └── homeboy-plugin.ts
 ```
 
-## Future Expansion
+## Architecture Notes
 
-This module is designed for future agent support:
-- `cursor/` - Cursor AI rules
-- `copilot/` - GitHub Copilot instructions
+**Claude Code** uses separate bash scripts for each hook type, configured via `~/.claude/settings.json`.
 
-The `core/` hub contains shared detection logic reusable across agents.
+**OpenCode** uses a single TypeScript plugin that exports multiple hook handlers, installed to `~/.config/opencode/plugins/`.
+
+Both implementations provide identical functionality and error messages for seamless switching between agents.

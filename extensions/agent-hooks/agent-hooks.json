@@ -1,11 +1,11 @@
 {
   "name": "Agent Hooks",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "icon": "terminal.fill",
-  "description": "Claude Code hooks to enforce Homeboy usage patterns",
+  "description": "Hooks for Claude Code and OpenCode to enforce Homeboy usage patterns",
   "author": "Extra Chill",
   "runtime": {
     "setup_command": "bash {{module_path}}/setup.sh",
-    "run_command": "echo 'Hooks installed. Check ~/.claude/settings.json'"
+    "run_command": "echo 'Hooks installed for Claude Code and OpenCode'"
   }
 }
