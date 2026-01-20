@@ -126,6 +126,9 @@ if [[ "${HOMEBOY_ERRORS_ONLY:-}" == "1" ]]; then
     eslint_base_args+=(--quiet)
 fi
 
+# Run from plugin directory to ensure jsconfig.json is found by import resolver
+cd "$PLUGIN_PATH"
+
 # Auto-fix mode
 if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
     echo "Running ESLint auto-fix..."
