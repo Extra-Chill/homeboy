@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+### Added
+- Added: Comprehensive schema, architecture, and developer guide documentation
+
 ## [0.30.8] - 2026-01-20
 
 - Make release git.tag step idempotent to work with version bump tags
