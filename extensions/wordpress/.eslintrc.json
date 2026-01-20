@@ -18,6 +18,14 @@
     "*.min.js",
     "tests/"
   ],
+  "settings": {
+    "import/resolver": {
+      "typescript": {
+        "alwaysTryTypes": true,
+        "project": ["**/jsconfig.json", "**/tsconfig.json"]
+      }
+    }
+  },
   "rules": {
     "prettier/prettier": "off",
     "@wordpress/dependency-group": "error",
