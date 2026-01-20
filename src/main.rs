@@ -45,6 +45,7 @@ enum Commands {
     /// SSH into a project server or configured server
     Ssh(ssh::SshArgs),
     /// Manage SSH server configurations
+    #[command(visible_alias = "servers")]
     Server(server::ServerArgs),
     /// Run tests for a component
     Test(test::TestArgs),
@@ -59,10 +60,12 @@ enum Commands {
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
     /// Manage standalone component configurations
+    #[command(visible_alias = "components")]
     Component(component::ComponentArgs),
     /// Manage global Homeboy configuration
     Config(config::ConfigArgs),
     /// Execute CLI-compatible modules
+    #[command(visible_alias = "modules")]
     Module(module::ModuleArgs),
     /// Initialize a repo for use with Homeboy
     #[command(visible_alias = "status")]
