@@ -1270,6 +1270,14 @@ pub fn get_head_commit(path: &str) -> Result<String> {
     command::run_in(path, "git", &["rev-parse", "HEAD"], "get HEAD commit")
 }
 
+/// Stage specific files in a git repository.
+pub fn stage_files(path: &str, files: &[&str]) -> Result<()> {
+    let mut args = vec!["add", "--"];
+    args.extend(files);
+    command::run_in(path, "git", &args, "stage files")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

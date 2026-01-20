@@ -10,9 +10,8 @@ use crate::context::require_project_base_path;
 use crate::error::{Error, Result};
 use crate::executor::execute_for_project;
 use crate::project;
-use crate::utils::parser;
+use crate::utils::{command, parser, shell, token};
 use crate::base_path;
-use crate::utils::{shell, token};
 
 #[derive(Debug, Clone, Serialize)]
 
@@ -122,10 +121,7 @@ pub fn list(project_id: &str, path: &str) -> Result<ListResult> {
     let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
     let command = format!("ls -la {}", shell::quote_path(&full_path));
     let output = execute_for_project(&project, &command)?;
-
-    if !output.success {
-        return Err(Error::other(format!("LIST_FAILED: {}", output.stderr)));
-    }
+    command::require_success(output.success, &output.stderr, "LIST")?;
 
     let entries = parse_ls_output(&output.stdout, &full_path);
 
@@ -143,10 +139,7 @@ pub fn read(project_id: &str, path: &str) -> Result<ReadResult> {
     let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
     let command = format!("cat {}", shell::quote_path(&full_path));
     let output = execute_for_project(&project, &command)?;
-
-    if !output.success {
-        return Err(Error::other(format!("READ_FAILED: {}", output.stderr)));
-    }
+    command::require_success(output.success, &output.stderr, "READ")?;
 
     Ok(ReadResult {
         base_path: Some(project_base_path),
@@ -180,10 +173,7 @@ pub fn write(project_id: &str, path: &str, content: &str) -> Result<WriteResult>
         delimiter
     );
     let output = execute_for_project(&project, &command)?;
-
-    if !output.success {
-        return Err(Error::other(format!("WRITE_FAILED: {}", output.stderr)));
-    }
+    command::require_success(output.success, &output.stderr, "WRITE")?;
 
     Ok(WriteResult {
         base_path: Some(project_base_path),
@@ -200,10 +190,7 @@ pub fn delete(project_id: &str, path: &str, recursive: bool) -> Result<DeleteRes
     let flags = if recursive { "-rf" } else { "-f" };
     let command = format!("rm {} {}", flags, shell::quote_path(&full_path));
     let output = execute_for_project(&project, &command)?;
-
-    if !output.success {
-        return Err(Error::other(format!("DELETE_FAILED: {}", output.stderr)));
-    }
+    command::require_success(output.success, &output.stderr, "DELETE")?;
 
     Ok(DeleteResult {
         base_path: Some(project_base_path),
@@ -224,10 +211,7 @@ pub fn rename(project_id: &str, old_path: &str, new_path: &str) -> Result<Rename
         shell::quote_path(&full_new)
     );
     let output = execute_for_project(&project, &command)?;
-
-    if !output.success {
-        return Err(Error::other(format!("RENAME_FAILED: {}", output.stderr)));
-    }
+    command::require_success(output.success, &output.stderr, "RENAME")?;
 
     Ok(RenameResult {
         base_path: Some(project_base_path),
@@ -456,7 +440,7 @@ pub fn edit_replace_line(
     let original_lines: Vec<String> = read_result
         .content
         .lines()
-        .map(|s| s.to_string())
+        .map(String::from)
         .collect();
 
     if line_num == 0 || line_num > original_lines.len() {
@@ -508,7 +492,7 @@ pub fn edit_insert_after_line(
     let original_lines: Vec<String> = read_result
         .content
         .lines()
-        .map(|s| s.to_string())
+        .map(String::from)
         .collect();
 
     if line_num == 0 || line_num > original_lines.len() {
@@ -558,7 +542,7 @@ pub fn edit_insert_before_line(
     let original_lines: Vec<String> = read_result
         .content
         .lines()
-        .map(|s| s.to_string())
+        .map(String::from)
         .collect();
 
     if line_num == 0 || line_num > original_lines.len() {
@@ -603,7 +587,7 @@ pub fn edit_delete_line(project_id: &str, path: &str, line_num: usize) -> Result
     let original_lines: Vec<String> = read_result
         .content
         .lines()
-        .map(|s| s.to_string())
+        .map(String::from)
         .collect();
 
     if line_num == 0 || line_num > original_lines.len() {
@@ -653,7 +637,7 @@ pub fn edit_delete_lines(
     let original_lines: Vec<String> = read_result
         .content
         .lines()
-        .map(|s| s.to_string())
+        .map(String::from)
         .collect();
 
     if start_line == 0 || start_line > original_lines.len() || end_line == 0
@@ -712,7 +696,7 @@ pub fn edit_replace_pattern(
     let original_lines: Vec<String> = read_result
         .content
         .lines()
-        .map(|s| s.to_string())
+        .map(String::from)
         .collect();
 
     let modified_content = if all {
@@ -725,7 +709,7 @@ pub fn edit_replace_pattern(
 
     let modified_lines: Vec<String> = modified_content
         .lines()
-        .map(|s: &str| s.to_string())
+        .map(String::from)
         .collect();
 
     let changes: Vec<LineChange> = original_lines
@@ -766,7 +750,7 @@ pub fn edit_delete_pattern(project_id: &str, path: &str, pattern: &str) -> Resul
     let original_lines: Vec<String> = read_result
         .content
         .lines()
-        .map(|s| s.to_string())
+        .map(String::from)
         .collect();
 
     let modified_lines: Vec<String> = original_lines
@@ -810,7 +794,7 @@ pub fn edit_append(project_id: &str, path: &str, content: &str) -> Result<EditRe
     let original_lines: Vec<String> = read_result
         .content
         .lines()
-        .map(|s| s.to_string())
+        .map(String::from)
         .collect();
 
     let command = format!(
@@ -820,10 +804,7 @@ pub fn edit_append(project_id: &str, path: &str, content: &str) -> Result<EditRe
     );
 
     let output = execute_for_project(&project, &command)?;
-
-    if !output.success {
-        return Err(Error::other(format!("EDIT_FAILED: {}", output.stderr)));
-    }
+    command::require_success(output.success, &output.stderr, "EDIT")?;
 
     let mut modified_lines = original_lines.clone();
     modified_lines.push(content.to_string());
@@ -855,7 +836,7 @@ pub fn edit_prepend(project_id: &str, path: &str, content: &str) -> Result<EditR
     let original_lines: Vec<String> = read_result
         .content
         .lines()
-        .map(|s| s.to_string())
+        .map(String::from)
         .collect();
 
     let command = format!(
@@ -866,10 +847,7 @@ pub fn edit_prepend(project_id: &str, path: &str, content: &str) -> Result<EditR
     );
 
     let output = execute_for_project(&project, &command)?;
-
-    if !output.success {
-        return Err(Error::other(format!("EDIT_FAILED: {}", output.stderr)));
-    }
+    command::require_success(output.success, &output.stderr, "EDIT")?;
 
     let mut modified_lines = original_lines.clone();
     modified_lines.insert(0, content.to_string());

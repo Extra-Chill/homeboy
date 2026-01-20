@@ -94,6 +94,18 @@ pub fn succeeded_in(dir: &str, program: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+/// Require a command operation to have succeeded.
+///
+/// Generic helper that takes success flag and error text.
+/// Useful for checking results from various command execution patterns.
+pub fn require_success(success: bool, stderr: &str, operation: &str) -> Result<()> {
+    if success {
+        Ok(())
+    } else {
+        Err(Error::other(format!("{}_FAILED: {}", operation, stderr)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +157,17 @@ mod tests {
             stderr: b"".to_vec(),
         };
         assert_eq!(error_text(&output), "stdout content");
+    }
+
+    #[test]
+    fn require_success_passes_when_successful() {
+        let result = require_success(true, "", "TEST");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn require_success_fails_with_error_message() {
+        let result = require_success(false, "Something went wrong", "LIST");
+        assert!(result.is_err());
     }
 }

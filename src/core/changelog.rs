@@ -9,7 +9,7 @@ use crate::core::local_files::{self, FileSystem};
 use crate::core::version;
 use crate::error::{Error, Result};
 use crate::project;
-use crate::utils::parser;
+use crate::utils::{parser, validation};
 
 const DEFAULT_NEXT_SECTION_LABEL: &str = "Unreleased";
 
@@ -29,17 +29,24 @@ const VALID_ENTRY_TYPES: &[&str] = &[
     "removed",
     "fixed",
     "security",
+    "refactored",
 ];
 
 fn validate_entry_type(entry_type: &str) -> Result<String> {
     let normalized = entry_type.to_lowercase();
+    // Accept "refactor" as alias for "refactored"
+    let normalized = if normalized == "refactor" {
+        "refactored".to_string()
+    } else {
+        normalized
+    };
     if VALID_ENTRY_TYPES.contains(&normalized.as_str()) {
         Ok(normalized)
     } else {
         Err(Error::validation_invalid_argument(
             "type",
             format!(
-                "Invalid changelog entry type '{}'. Valid types: Added, Changed, Deprecated, Removed, Fixed, Security",
+                "Invalid changelog entry type '{}'. Valid types: Added, Changed, Deprecated, Removed, Fixed, Security, Refactored",
                 entry_type
             ),
             None,
@@ -47,6 +54,7 @@ fn validate_entry_type(entry_type: &str) -> Result<String> {
                 "Use --type added for new features".to_string(),
                 "Use --type fixed for bug fixes".to_string(),
                 "Use --type changed for modifications".to_string(),
+                "Use --type refactored for code restructuring".to_string(),
             ]),
         ))
     }
@@ -131,23 +139,21 @@ pub fn resolve_effective_settings(component: Option<&Component>) -> EffectiveCha
 
 pub fn resolve_changelog_path(component: &Component) -> Result<PathBuf> {
     // Require explicit configuration - no auto-detection
-    let target = component.changelog_target.as_ref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "component.changelog_target",
-            "No changelog target configured for component",
-            None,
-            Some(vec![
-                format!(
-                    "Configure: homeboy component set {} --changelog-target \"CHANGELOG.md\"",
-                    component.id
-                ),
-                format!(
-                    "Create and configure: homeboy changelog init {} --configure",
-                    component.id
-                ),
-            ]),
-        )
-    })?;
+    let target = validation::require_with_hints(
+        component.changelog_target.as_ref(),
+        "component.changelog_target",
+        "No changelog target configured for component",
+        vec![
+            format!(
+                "Configure: homeboy component set {} --changelog-target \"CHANGELOG.md\"",
+                component.id
+            ),
+            format!(
+                "Create and configure: homeboy changelog init {} --configure",
+                component.id
+            ),
+        ],
+    )?;
 
     resolve_target_path(&component.local_path, target)
 }
@@ -385,16 +391,15 @@ pub fn finalize_next_section(
     }
 
     let lines: Vec<&str> = changelog_content.lines().collect();
-    let start = find_next_section_start(&lines, next_section_aliases).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "changelog",
-            "No changelog items found (cannot finalize)",
-            None,
-            None,
-        )
-        .with_hint("Add changelog items with: `homeboy changelog add <componentId> -m \"...\"`")
-        .with_hint("Ensure changelog contains all changes since the last version update.")
-    })?;
+    let start = validation::require_with_hints(
+        find_next_section_start(&lines, next_section_aliases),
+        "changelog",
+        "No changelog items found (cannot finalize)",
+        vec![
+            "Add changelog items with: `homeboy changelog add <componentId> -m \"...\"`".to_string(),
+            "Ensure changelog contains all changes since the last version update.".to_string(),
+        ],
+    )?;
 
     let end = find_section_end(&lines, start);
     let body_lines = &lines[start + 1..end];
@@ -910,18 +915,16 @@ pub fn add_items(
         }
     }
 
-    let id = component_id.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "componentId",
-            "Missing componentId",
-            None,
-            Some(vec![
-                "Provide a component ID: homeboy changelog add <component-id> -m \"message\""
-                    .to_string(),
-                "List available components: homeboy component list".to_string(),
-            ]),
-        )
-    })?;
+    let id = validation::require_with_hints(
+        component_id,
+        "componentId",
+        "Missing componentId",
+        vec![
+            "Provide a component ID: homeboy changelog add <component-id> -m \"message\""
+                .to_string(),
+            "List available components: homeboy component list".to_string(),
+        ],
+    )?;
 
     if messages.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -1338,6 +1341,12 @@ mod tests {
         assert!(validate_entry_type("deprecated").is_ok());
         assert!(validate_entry_type("removed").is_ok());
         assert!(validate_entry_type("security").is_ok());
+        assert!(validate_entry_type("refactored").is_ok());
+        assert!(validate_entry_type("Refactored").is_ok());
+        // "refactor" is accepted as an alias for "refactored"
+        assert!(validate_entry_type("refactor").is_ok());
+        assert!(validate_entry_type("Refactor").is_ok());
+        assert_eq!(validate_entry_type("refactor").unwrap(), "refactored");
     }
 
     #[test]

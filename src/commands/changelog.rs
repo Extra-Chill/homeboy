@@ -40,8 +40,8 @@ pub enum ChangelogCommand {
         #[arg(short = 'm', long = "message", action = clap::ArgAction::Append)]
         messages: Vec<String>,
 
-        /// Changelog subsection type (Added, Changed, Deprecated, Removed, Fixed, Security)
-        #[arg(short = 't', long = "type")]
+        /// Changelog subsection type
+        #[arg(short = 't', long = "type", value_parser = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security", "Refactored", "Refactor"])]
         entry_type: Option<String>,
     },
 

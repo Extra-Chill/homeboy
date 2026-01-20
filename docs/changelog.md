@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+### Added
+- Add Refactored changelog entry type with Refactor alias
+- Add stage_files function for targeted git staging operations
+- Auto-stage changelog changes before version bump clean-tree check
+- Add lines_to_vec helper for common string-to-vec-lines pattern
+
+### Changed
+- Replace manual error checking with validation helper utilities across codebase
+- Use String::from instead of .to_string() for owned string conversions
+
+### Fixed
+- Improve orphaned tag auto-fix messaging in release pipeline
+
 ## [0.30.14] - 2026-01-20
 
 ### Changed

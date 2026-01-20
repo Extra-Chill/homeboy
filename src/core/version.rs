@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::local_files::{self, FileSystem};
 use crate::module::{load_all_modules, ModuleManifest};
 use crate::ssh::execute_local_command_in_dir;
-use crate::utils::parser;
+use crate::utils::{parser, validation};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
@@ -655,9 +655,7 @@ pub fn set_component_version(component: &Component, new_version: &str) -> Result
 
 /// Set version by component ID.
 pub fn set_version(component_id: Option<&str>, new_version: &str) -> Result<SetResult> {
-    let id = component_id.ok_or_else(|| {
-        Error::validation_invalid_argument("componentId", "Missing componentId", None, None)
-    })?;
+    let id = validation::require(component_id, "componentId", "Missing componentId")?;
     let component = component::load(id)?;
     set_component_version(&component, new_version)
 }
@@ -781,18 +779,15 @@ pub fn bump_component_version(component: &Component, bump_type: &str) -> Result<
 
 /// Bump version by component ID.
 pub fn bump_version(component_id: Option<&str>, bump_type: &str) -> Result<BumpResult> {
-    let id = component_id.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "componentId",
-            "Missing componentId",
-            None,
-            Some(vec![
-                "Provide a component ID: homeboy version bump <component-id> <bump-type>"
-                    .to_string(),
-                "List available components: homeboy component list".to_string(),
-            ]),
-        )
-    })?;
+    let id = validation::require_with_hints(
+        component_id,
+        "componentId",
+        "Missing componentId",
+        vec![
+            "Provide a component ID: homeboy version bump <component-id> <bump-type>".to_string(),
+            "List available components: homeboy component list".to_string(),
+        ],
+    )?;
     let component = component::load(id)?;
     bump_component_version(&component, bump_type)
 }

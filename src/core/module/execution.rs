@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::http::ApiClient;
 use crate::project::{self, Project};
 use crate::ssh::{execute_local_command_in_dir, execute_local_command_interactive};
-use crate::utils::template;
+use crate::utils::{template, validation};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -66,10 +66,11 @@ pub fn run_setup(module_id: &str) -> Result<ModuleSetupResult> {
         }
     };
 
-    let module_path = module
-        .module_path
-        .as_ref()
-        .ok_or_else(|| Error::other("module_path not set".to_string()))?;
+    let module_path = validation::require(
+        module.module_path.as_ref(),
+        "module",
+        "module_path not set",
+    )?;
 
     let entrypoint = runtime.entrypoint.clone().unwrap_or_default();
     let vars: Vec<(&str, &str)> = vec![
@@ -162,8 +163,11 @@ pub(crate) fn execute_action(
 
     match action.action_type {
         ActionType::Api => {
-            let pid =
-                project_id.ok_or_else(|| Error::other("--project is required for API actions"))?;
+            let pid = validation::require(
+                project_id,
+                "project",
+                "--project is required for API actions",
+            )?;
 
             let project = project::load(pid)?;
             let client = ApiClient::new(pid, &project.api)?;
@@ -174,10 +178,11 @@ pub(crate) fn execute_action(
                 ));
             }
 
-            let endpoint = action
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| Error::other("API action missing 'endpoint'"))?;
+            let endpoint = validation::require(
+                action.endpoint.as_ref(),
+                "endpoint",
+                "API action missing 'endpoint'",
+            )?;
 
             let method = action.method.as_ref().unwrap_or(&HttpMethod::Post);
             let project = project::load(pid)?;
@@ -193,10 +198,11 @@ pub(crate) fn execute_action(
             }
         }
         ActionType::Command => {
-            let command_template = action
-                .command
-                .as_ref()
-                .ok_or_else(|| Error::other("Command action missing 'command'"))?;
+            let command_template = validation::require(
+                action.command.as_ref(),
+                "command",
+                "Command action missing 'command'",
+            )?;
             let project = project_id.and_then(|pid| project::load(pid).ok());
             let component = None;
             let settings = ModuleScope::effective_settings(module_id, project.as_ref(), component)?;
@@ -464,10 +470,11 @@ fn execute_module_runtime(
         ))
     })?;
 
-    let module_path = module
-        .module_path
-        .as_ref()
-        .ok_or_else(|| Error::other("module_path not set".to_string()))?;
+    let module_path = validation::require(
+        module.module_path.as_ref(),
+        "module",
+        "module_path not set",
+    )?;
 
     let args_str = build_args_string(&module, inputs, args);
     let context =

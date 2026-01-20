@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
-use homeboy::git::{commit, get_uncommitted_changes, tag, CommitOptions};
+use homeboy::git::{commit, get_uncommitted_changes, stage_files, tag, CommitOptions};
 use homeboy::version::{
     bump_version, increment_version, read_version, run_pre_bump_commands, set_version,
     validate_changelog_for_bump, VersionTargetInfo,
@@ -184,6 +184,37 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                             &component.pre_version_bump_commands,
                             &component.local_path,
                         )?;
+                    }
+                }
+            }
+
+            // Auto-stage uncommitted changelog changes before clean-tree check
+            if let Some(ref id) = component_id {
+                if let Ok(component) = homeboy::component::load(id) {
+                    if let Some(ref changelog_target) = component.changelog_target {
+                        let uncommitted = get_uncommitted_changes(&component.local_path)?;
+                        if uncommitted.has_changes {
+                            // Check if ONLY the changelog file has uncommitted changes (ignore untracked)
+                            let all_uncommitted: Vec<&str> = uncommitted
+                                .staged
+                                .iter()
+                                .chain(uncommitted.unstaged.iter())
+                                .map(|s| s.as_str())
+                                .collect();
+
+                            let only_changelog = !all_uncommitted.is_empty()
+                                && all_uncommitted.iter().all(|f| {
+                                    *f == changelog_target || f.ends_with(changelog_target)
+                                });
+
+                            if only_changelog {
+                                eprintln!(
+                                    "[version] Auto-staging changelog changes: {}",
+                                    changelog_target
+                                );
+                                stage_files(&component.local_path, &[changelog_target.as_str()])?;
+                            }
+                        }
                     }
                 }
             }

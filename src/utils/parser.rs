@@ -102,6 +102,16 @@ pub fn lines(output: &str) -> impl Iterator<Item = &str> {
     output.lines().filter(|line| !line.is_empty())
 }
 
+/// Convert content into a Vec of owned line strings.
+///
+/// Replaces the common pattern:
+/// ```ignore
+/// content.lines().map(|s| s.to_string()).collect()
+/// ```
+pub fn lines_to_vec(content: &str) -> Vec<String> {
+    content.lines().map(|s| s.to_string()).collect()
+}
+
 /// Parse output into lines with custom filter.
 pub fn lines_filtered<'a, F>(output: &'a str, filter: F) -> impl Iterator<Item = &'a str>
 where
@@ -231,5 +241,19 @@ mod tests {
         let items = vec!["a", "b", "a", "c", "b"];
         let result = dedupe(items);
         assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn lines_to_vec_splits_correctly() {
+        let content = "line1\nline2\nline3";
+        let result = lines_to_vec(content);
+        assert_eq!(result, vec!["line1", "line2", "line3"]);
+    }
+
+    #[test]
+    fn lines_to_vec_preserves_empty_lines() {
+        let content = "line1\n\nline3";
+        let result = lines_to_vec(content);
+        assert_eq!(result, vec!["line1", "", "line3"]);
     }
 }

@@ -94,35 +94,27 @@ use crate::pipeline::{
     self, PipelineCapabilityResolver, PipelinePlanStep, PipelineRunResult, PipelineRunStatus,
     PipelineStep, PipelineStepExecutor, PipelineStepResult,
 };
+use crate::utils::validation;
 use crate::{changelog, version};
 
 fn parse_module_inputs(values: &[serde_json::Value]) -> Result<Vec<(String, String)>> {
     let mut inputs = Vec::new();
     for value in values {
-        let entry = value.as_object().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "release.steps",
-                "module.run inputs must be objects with 'id' and 'value'",
-                None,
-                None,
-            )
-        })?;
-        let id = entry.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "release.steps",
-                "module.run inputs require 'id'",
-                None,
-                None,
-            )
-        })?;
-        let value = entry.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "release.steps",
-                "module.run inputs require 'value'",
-                None,
-                None,
-            )
-        })?;
+        let entry = validation::require(
+            value.as_object(),
+            "release.steps",
+            "module.run inputs must be objects with 'id' and 'value'",
+        )?;
+        let id = validation::require(
+            entry.get("id").and_then(|v| v.as_str()),
+            "release.steps",
+            "module.run inputs require 'id'",
+        )?;
+        let value = validation::require(
+            entry.get("value").and_then(|v| v.as_str()),
+            "release.steps",
+            "module.run inputs require 'value'",
+        )?;
         inputs.push((id.to_string(), value.to_string()));
     }
 
@@ -132,14 +124,11 @@ fn parse_module_inputs(values: &[serde_json::Value]) -> Result<Vec<(String, Stri
 fn parse_module_args(values: &[serde_json::Value]) -> Result<Vec<String>> {
     let mut args = Vec::new();
     for value in values {
-        let arg = value.as_str().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "release.steps",
-                "module.run args must be strings",
-                None,
-                None,
-            )
-        })?;
+        let arg = validation::require(
+            value.as_str(),
+            "release.steps",
+            "module.run args must be strings",
+        )?;
         args.push(arg.to_string());
     }
     Ok(args)
@@ -476,7 +465,7 @@ impl ReleaseStepExecutor {
 
             // Tag exists but points to different commit - auto-fix by deleting and recreating
             eprintln!(
-                "[release] Tag '{}' exists but points to wrong commit ({}), recreating at HEAD ({})...",
+                "[release] Auto-fixing: Tag '{}' points to {} but HEAD is {}. Recreating tag at HEAD...",
                 tag_name,
                 &tag_commit[..8.min(tag_commit.len())],
                 &head_commit[..8.min(head_commit.len())]
@@ -502,6 +491,8 @@ impl ReleaseStepExecutor {
                     Vec::new(),
                 ));
             }
+
+            eprintln!("[release] Tag '{}' will be recreated at HEAD", tag_name);
 
             // Fall through to create the tag (existing code below handles this)
         }
@@ -747,14 +738,11 @@ impl ReleaseStepExecutor {
         let component = component::load(&self.component_id)?;
         let changelog_path = changelog::resolve_changelog_path(&component)?;
         let changelog_content = crate::core::local_files::local().read(&changelog_path)?;
-        let notes = extract_latest_notes(&changelog_content).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "changelog",
-                "No finalized changelog entries found for release notes",
-                None,
-                None,
-            )
-        })?;
+        let notes = validation::require(
+            extract_latest_notes(&changelog_content),
+            "changelog",
+            "No finalized changelog entries found for release notes",
+        )?;
         Ok(notes)
     }
 
@@ -824,18 +812,11 @@ impl ReleaseStepExecutor {
     }
 
     fn run_module_runtime(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
-        let module_id = step
-            .config
-            .get("module")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "release.steps",
-                    "module.run requires config.module",
-                    None,
-                    None,
-                )
-            })?;
+        let module_id = validation::require(
+            step.config.get("module").and_then(|v| v.as_str()),
+            "release.steps",
+            "module.run requires config.module",
+        )?;
 
         let inputs = step
             .config
@@ -1002,18 +983,12 @@ fn parse_release_artifacts(value: &serde_json::Value) -> Result<Vec<ReleaseArtif
                 platform: None,
             },
             serde_json::Value::Object(map) => {
-                let path = map
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        Error::validation_invalid_argument(
-                            "release.artifacts",
-                            "Artifact is missing 'path'",
-                            None,
-                            None,
-                        )
-                    })?
-                    .to_string();
+                let path = validation::require(
+                    map.get("path").and_then(|v| v.as_str()),
+                    "release.artifacts",
+                    "Artifact is missing 'path'",
+                )?
+                .to_string();
                 let artifact_type = map
                     .get("type")
                     .and_then(|v| v.as_str())
