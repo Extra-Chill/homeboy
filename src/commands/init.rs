@@ -30,7 +30,7 @@ pub struct InitOutput {
     pub next_steps: Vec<String>,
     pub servers: Vec<Server>,
     pub projects: Vec<ProjectListItem>,
-    pub components: Vec<Component>,
+    pub components: Vec<ComponentWithState>,
     pub modules: Vec<ModuleEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<VersionSnapshot>,
@@ -123,6 +123,22 @@ pub struct ChangelogSnapshot {
     pub items: Option<Vec<String>>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ComponentReleaseState {
+    pub commits_since_version: u32,
+    pub has_uncommitted_changes: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_ref: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ComponentWithState {
+    #[serde(flatten)]
+    pub component: Component,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_state: Option<ComponentReleaseState>,
+}
+
 pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
     // Get context for current directory
     let (context_output, _) = context::run(None)?;
@@ -144,8 +160,8 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
     // Determine if we should show focused output
     let show_all = args.all || relevant_ids.is_empty();
 
-    // Filter components
-    let components: Vec<Component> = if show_all {
+    // Filter components and calculate release state
+    let filtered_components: Vec<Component> = if show_all {
         all_components
     } else {
         all_components
@@ -154,10 +170,22 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
             .collect()
     };
 
+    // Wrap components with release state
+    let components: Vec<ComponentWithState> = filtered_components
+        .into_iter()
+        .map(|component| {
+            let release_state = calculate_component_release_state(&component);
+            ComponentWithState {
+                component,
+                release_state,
+            }
+        })
+        .collect();
+
     // Get module IDs linked to matched components
     let linked_module_ids: HashSet<String> = components
         .iter()
-        .filter_map(|c| c.modules.as_ref())
+        .filter_map(|c| c.component.modules.as_ref())
         .flat_map(|m| m.keys().cloned())
         .collect();
 
@@ -301,8 +329,31 @@ pub fn run_json(args: InitArgs) -> CmdResult<InitOutput> {
     ))
 }
 
-fn resolve_version_snapshot(components: &[Component]) -> Option<VersionSnapshot> {
-    let component = components.first()?;
+fn calculate_component_release_state(component: &Component) -> Option<ComponentReleaseState> {
+    let path = &component.local_path;
+
+    let baseline = git::detect_baseline_for_path(path).ok()?;
+
+    let commits = git::get_commits_since_tag(path, baseline.reference.as_deref())
+        .ok()
+        .map(|c| c.len() as u32)
+        .unwrap_or(0);
+
+    let uncommitted = git::get_uncommitted_changes(path)
+        .ok()
+        .map(|u| u.has_changes)
+        .unwrap_or(false);
+
+    Some(ComponentReleaseState {
+        commits_since_version: commits,
+        has_uncommitted_changes: uncommitted,
+        baseline_ref: baseline.reference,
+    })
+}
+
+fn resolve_version_snapshot(components: &[ComponentWithState]) -> Option<VersionSnapshot> {
+    let wrapper = components.first()?;
+    let component = &wrapper.component;
     let info = version::read_component_version(component).ok()?;
     Some(VersionSnapshot {
         component_id: component.id.clone(),
@@ -334,12 +385,13 @@ fn resolve_git_snapshot(git_root: Option<&String>) -> Option<GitSnapshot> {
 }
 
 fn resolve_changelog_snapshots(
-    components: &[Component],
+    components: &[ComponentWithState],
 ) -> (Option<ReleaseSnapshot>, Option<ChangelogSnapshot>) {
-    let component = match components.first() {
+    let wrapper = match components.first() {
         Some(c) => c,
         None => return (None, None),
     };
+    let component = &wrapper.component;
 
     let changelog_path = match changelog::resolve_changelog_path(component) {
         Ok(path) => path,
@@ -483,9 +535,10 @@ fn resolve_agent_context_files(git_root: Option<&String>) -> Vec<String> {
     git::list_tracked_markdown_files(&path).unwrap_or_default()
 }
 
-fn validate_version_targets(components: &[Component]) -> Vec<String> {
+fn validate_version_targets(components: &[ComponentWithState]) -> Vec<String> {
     let mut warnings = Vec::new();
-    for comp in components {
+    for wrapper in components {
+        let comp = &wrapper.component;
         if let Some(targets) = &comp.version_targets {
             for target in targets {
                 if target.pattern.is_none()

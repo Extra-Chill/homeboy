@@ -219,7 +219,7 @@ pub fn find_version_commit(path: &str) -> Result<Option<String>> {
     }
 
     let version_pattern =
-        Regex::new(r"(?i)(?:^v|bump\s+(?:to\s+)?|release\s+v?|version\s+)(\d+\.\d+(?:\.\d+)?)")
+        Regex::new(r"(?i)(?:^v|(?:^|\s)bump\s+(?:version\s+)?(?:to\s+)?|(?:^|\s)release\s+v?|(?:^|\s)version\s+)(\d+\.\d+(?:\.\d+)?)")
             .expect("Invalid regex pattern");
 
     let stdout = String::from_utf8_lossy(&output.stdout);

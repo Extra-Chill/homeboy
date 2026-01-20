@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.29.2] - 2026-01-19
+
+- Add per-component release_state to init output (commits_since_version, has_uncommitted_changes, baseline_ref)
+
 ## [0.29.1] - 2026-01-19
 
 - Add --status as visible alias for deploy --check
