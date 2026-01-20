@@ -4,7 +4,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## Unreleased
+## [0.30.15] - 2026-01-20
 
 ### Added
 - Add Refactored changelog entry type with Refactor alias
