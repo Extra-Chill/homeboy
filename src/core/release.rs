@@ -474,29 +474,36 @@ impl ReleaseStepExecutor {
                 ));
             }
 
-            // Tag exists but points to different commit - fail with clear error
-            return Ok(self.step_result(
-                step,
-                PipelineRunStatus::Failed,
-                None,
-                Some(format!(
-                    "Tag '{}' exists but points to {} (HEAD is {})",
-                    tag_name,
-                    &tag_commit[..8.min(tag_commit.len())],
-                    &head_commit[..8.min(head_commit.len())]
-                )),
-                vec![
-                    crate::error::Hint {
-                        message: format!(
-                            "Delete and retry: git tag -d {} && homeboy release run {}",
-                            tag_name, self.component_id
-                        ),
-                    },
-                    crate::error::Hint {
-                        message: format!("Or just delete the tag: git tag -d {}", tag_name),
-                    },
-                ],
-            ));
+            // Tag exists but points to different commit - auto-fix by deleting and recreating
+            eprintln!(
+                "[release] Tag '{}' exists but points to wrong commit ({}), recreating at HEAD ({})...",
+                tag_name,
+                &tag_commit[..8.min(tag_commit.len())],
+                &head_commit[..8.min(head_commit.len())]
+            );
+
+            // Delete the old tag
+            let delete_output = crate::git::execute_git_for_release(
+                &component.local_path,
+                &["tag", "-d", &tag_name],
+            )
+            .map_err(|e| Error::other(e.to_string()))?;
+
+            if !delete_output.status.success() {
+                return Ok(self.step_result(
+                    step,
+                    PipelineRunStatus::Failed,
+                    None,
+                    Some(format!(
+                        "Failed to delete orphaned tag '{}': {}",
+                        tag_name,
+                        String::from_utf8_lossy(&delete_output.stderr)
+                    )),
+                    Vec::new(),
+                ));
+            }
+
+            // Fall through to create the tag (existing code below handles this)
         }
 
         // Tag doesn't exist - create it
