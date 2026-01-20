@@ -53,7 +53,19 @@ if [ -n "${HOMEBOY_LINT_FILE:-}" ]; then
         echo "Error: File not found: ${LINT_FILES[0]}"
         exit 1
     fi
-    echo "Linting single file: ${HOMEBOY_LINT_FILE}"
+
+    # Skip non-JS files
+    case "${HOMEBOY_LINT_FILE}" in
+        *.js|*.jsx|*.ts|*.tsx)
+            echo "Linting single file: ${HOMEBOY_LINT_FILE}"
+            ;;
+        *)
+            if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+                echo "DEBUG: Skipping non-JS file: ${HOMEBOY_LINT_FILE}"
+            fi
+            exit 0
+            ;;
+    esac
 elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
     cd "$PLUGIN_PATH"
 

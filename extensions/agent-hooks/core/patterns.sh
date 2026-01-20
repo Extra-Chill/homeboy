@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Anti-pattern definitions for Homeboy-managed repositories
+# Sourced by hook scripts to check for patterns that should use Homeboy commands
+
+# Check if a bash command matches a git status anti-pattern
+# Arguments: $1 = command string
+# Returns: 0 if anti-pattern detected, 1 otherwise
+# Outputs: suggestion message if detected
+check_git_antipattern() {
+    local cmd="$1"
+
+    # git status → homeboy changes
+    # Only matches literal "git status", not homeboy commands
+    if [[ "$cmd" =~ ^git[[:space:]]+status ]]; then
+        cat <<'EOF'
+Git Status Anti-Pattern
+
+Use Homeboy for change detection:
+  homeboy changes
+
+Benefits: Shows version context, changelog status, component-aware diffs
+EOF
+        return 0
+    fi
+
+    return 1
+}
+
+# Check if a bash command matches a build anti-pattern
+# Arguments: $1 = command string
+# Returns: 0 if anti-pattern detected, 1 otherwise
+# Outputs: suggestion message if detected
+check_build_antipattern() {
+    local cmd="$1"
+
+    # Direct build.sh execution
+    if [[ "$cmd" =~ (\./build\.sh|bash[[:space:]]+build\.sh|sh[[:space:]]+build\.sh) ]]; then
+        cat <<'EOF'
+Build Script Anti-Pattern
+
+Use Homeboy for builds:
+  homeboy build <component>
+
+Benefits: Consistent build process, artifact management, validation
+EOF
+        return 0
+    fi
+
+    return 1
+}
+
+# Check if a bash command matches a deploy anti-pattern
+# Arguments: $1 = command string
+# Returns: 0 if anti-pattern detected, 1 otherwise
+# Outputs: suggestion message if detected
+check_deploy_antipattern() {
+    local cmd="$1"
+
+    # rsync to remote servers (basic pattern - excludes local rsync)
+    if [[ "$cmd" =~ rsync.*@ ]]; then
+        cat <<'EOF'
+Deploy Anti-Pattern (rsync)
+
+Use Homeboy for deployments:
+  homeboy deploy
+
+Benefits: Server configuration, artifact handling, post-deploy verification
+EOF
+        return 0
+    fi
+
+    # scp to remote servers
+    if [[ "$cmd" =~ scp.*@ ]]; then
+        cat <<'EOF'
+Deploy Anti-Pattern (scp)
+
+Use Homeboy for deployments:
+  homeboy deploy
+
+Benefits: Server configuration, artifact handling, post-deploy verification
+EOF
+        return 0
+    fi
+
+    return 1
+}
+
+# Check if a bash command matches a version anti-pattern
+# Arguments: $1 = command string
+# Returns: 0 if anti-pattern detected, 1 otherwise
+# Outputs: suggestion message if detected
+check_version_antipattern() {
+    local cmd="$1"
+
+    # npm version commands
+    if [[ "$cmd" =~ npm[[:space:]]+version ]]; then
+        cat <<'EOF'
+Version Anti-Pattern (npm)
+
+Use Homeboy for version changes:
+  homeboy version bump <component> patch|minor|major
+  homeboy version set <component> X.Y.Z
+
+Benefits: Automatic changelog, consistent targets, git commit
+EOF
+        return 0
+    fi
+
+    # cargo set-version commands
+    if [[ "$cmd" =~ cargo[[:space:]]+set-version ]]; then
+        cat <<'EOF'
+Version Anti-Pattern (cargo)
+
+Use Homeboy for version changes:
+  homeboy version bump <component> patch|minor|major
+  homeboy version set <component> X.Y.Z
+
+Benefits: Automatic changelog, consistent targets, git commit
+EOF
+        return 0
+    fi
+
+    return 1
+}
+
+# Check all bash anti-patterns
+# Arguments: $1 = command string
+# Returns: 0 if any anti-pattern detected, 1 otherwise
+# Outputs: suggestion message if detected
+check_bash_antipatterns() {
+    local cmd="$1"
+
+    check_git_antipattern "$cmd" && return 0
+    check_build_antipattern "$cmd" && return 0
+    check_deploy_antipattern "$cmd" && return 0
+    check_version_antipattern "$cmd" && return 0
+
+    return 1
+}

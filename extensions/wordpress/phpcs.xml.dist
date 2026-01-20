@@ -12,6 +12,12 @@
         <exclude name="WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase"/>
         <exclude name="WordPress.NamingConventions.ValidVariableName.PropertyNotSnakeCase"/>
         <exclude name="WordPress.NamingConventions.ValidVariableName.InterpolatedVariableNotSnakeCase"/>
+
+        <!-- Exclude PEAR/Squiz function spacing rules that conflict with WordPress formatting -->
+        <!-- These rules fight with WordPress spacing rules, causing PHPCBF infinite loops -->
+        <exclude name="PEAR.Functions.FunctionCallSignature"/>
+        <exclude name="Squiz.Functions.FunctionDeclarationArgumentSpacing"/>
+        <exclude name="Squiz.Functions.MultiLineFunctionDeclaration"/>
     </rule>
 
     <!-- PHP 7.4+ compatibility -->

@@ -191,16 +191,31 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
 
         # phpcbf exit codes: 0=no changes, 1=changes made, 2=some errors unfixable
         set +e
-        "$PHPCBF_BIN" "${phpcbf_args[@]}"
+        phpcbf_output=$("$PHPCBF_BIN" "${phpcbf_args[@]}" 2>&1)
         PHPCBF_EXIT=$?
         set -e
 
+        # Show phpcbf output
+        echo "$phpcbf_output"
+
+        # Extract fix count from phpcbf output (e.g., "146 ERRORS WERE FIXED")
+        fixed_count=$(echo "$phpcbf_output" | grep -oE '[0-9]+ ERRORS? WERE FIXED' | grep -oE '[0-9]+' || echo "0")
+
+        echo ""
+        if [ "$fixed_count" != "0" ]; then
+            echo "PHPCBF fixed $fixed_count errors"
+        fi
+
         if [ "$PHPCBF_EXIT" -eq 2 ]; then
-            echo ""
             echo "WARNING: Some errors could not be auto-fixed."
-            echo "Common unfixable issues:"
-            echo "  - Complex Yoda conditions (method calls, expressions)"
-            echo "  - Translator comments requiring context"
+        fi
+
+        # Detect infinite loop (PHPCBF hit 50-pass limit)
+        if echo "$phpcbf_output" | grep -q "made 50 passes"; then
+            echo ""
+            echo "ERROR: PHPCBF hit 50-pass limit (infinite loop detected)"
+            echo "This usually means conflicting rules are fighting each other."
+            echo "Check phpcs.xml.dist for rule conflicts."
         fi
         echo ""
     else
