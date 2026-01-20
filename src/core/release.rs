@@ -450,6 +450,49 @@ impl ReleaseStepExecutor {
             None => self.default_tag()?,
         };
 
+        let component = component::load(&self.component_id)?;
+
+        // Check if tag already exists locally (idempotent behavior for version bump workflow)
+        if crate::git::tag_exists_locally(&component.local_path, &tag_name).unwrap_or(false) {
+            let tag_commit = crate::git::get_tag_commit(&component.local_path, &tag_name)?;
+            let head_commit = crate::git::get_head_commit(&component.local_path)?;
+
+            if tag_commit == head_commit {
+                // Tag exists and points to HEAD - success (idempotent)
+                self.store_tag_context(&tag_name)?;
+                return Ok(self.step_result(
+                    step,
+                    PipelineRunStatus::Success,
+                    Some(serde_json::json!({
+                        "action": "tag",
+                        "component_id": self.component_id,
+                        "tag": tag_name,
+                        "skipped": true,
+                        "reason": "tag already exists and points to HEAD"
+                    })),
+                    None,
+                    Vec::new(),
+                ));
+            }
+
+            // Tag exists but points to different commit - fail with clear error
+            return Ok(self.step_result(
+                step,
+                PipelineRunStatus::Failed,
+                None,
+                Some(format!(
+                    "Tag '{}' exists but points to {} (HEAD is {})",
+                    tag_name,
+                    &tag_commit[..8.min(tag_commit.len())],
+                    &head_commit[..8.min(head_commit.len())]
+                )),
+                vec![crate::error::Hint {
+                    message: format!("Delete the tag and retry: git tag -d {}", tag_name),
+                }],
+            ));
+        }
+
+        // Tag doesn't exist - create it
         let message = step
             .config
             .get("message")
@@ -465,7 +508,6 @@ impl ReleaseStepExecutor {
             let mut hints = Vec::new();
 
             if output.stderr.contains("already exists") {
-                let component = component::load(&self.component_id)?;
                 let local_exists = crate::git::tag_exists_locally(&component.local_path, &tag_name)
                     .unwrap_or(false);
                 let remote_exists =

@@ -376,7 +376,15 @@ fn create_version_commit(
                 let tag_name = format!("v{}", new_version);
                 let tag_message = format!("Release {}", tag_name);
                 match tag(component_id, Some(&tag_name), Some(&tag_message)) {
-                    Ok(tag_output) => (Some(tag_output.success), Some(tag_name)),
+                    Ok(tag_output) => {
+                        if tag_output.success {
+                            eprintln!(
+                                "[version] Tagged {}. For automated packaging/publishing, configure a release pipeline: homeboy docs release",
+                                tag_name
+                            );
+                        }
+                        (Some(tag_output.success), Some(tag_name))
+                    }
                     Err(_) => (Some(false), Some(tag_name)),
                 }
             } else {

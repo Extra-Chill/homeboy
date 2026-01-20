@@ -1437,6 +1437,35 @@ pub fn tag_exists_locally(path: &str, tag_name: &str) -> Result<bool> {
     Ok(!stdout.trim().is_empty())
 }
 
+/// Get the commit SHA a tag points to.
+pub fn get_tag_commit(path: &str, tag_name: &str) -> Result<String> {
+    let output = execute_git(path, &["rev-list", "-n", "1", tag_name])
+        .map_err(|e| Error::other(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::other(format!(
+            "Failed to get commit for tag '{}': {}",
+            tag_name, stderr
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Get the current HEAD commit SHA.
+pub fn get_head_commit(path: &str) -> Result<String> {
+    let output =
+        execute_git(path, &["rev-parse", "HEAD"]).map_err(|e| Error::other(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::other(format!("Failed to get HEAD commit: {}", stderr)));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
