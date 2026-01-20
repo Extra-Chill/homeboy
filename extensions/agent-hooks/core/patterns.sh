@@ -2,23 +2,79 @@
 # Anti-pattern definitions for Homeboy-managed repositories
 # Sourced by hook scripts to check for patterns that should use Homeboy commands
 
-# Check if a bash command matches a git status anti-pattern
+# Get homeboy context for navigation guidance
+# Returns JSON data or empty string for non-homeboy directories
+get_homeboy_context() {
+    homeboy init --json 2>/dev/null || echo ""
+}
+
+# Format component paths for display
+# Arguments: $1 = homeboy init JSON output
+format_component_paths() {
+    local json="$1"
+    echo "$json" | jq -r '
+        .data.components // [] |
+        map("  \(.id) → \(.path // "unknown")") |
+        join("\n")
+    ' 2>/dev/null
+}
+
+# Check if we're in monorepo root (contains components but no git_root)
+# Arguments: $1 = homeboy init JSON output
+is_monorepo_root() {
+    local json="$1"
+    local git_root contained
+    git_root=$(echo "$json" | jq -r '.data.context.git_root // empty' 2>/dev/null)
+    contained=$(echo "$json" | jq -r '.data.context.contained_components | length' 2>/dev/null)
+
+    [[ -z "$git_root" && "$contained" -gt 0 ]]
+}
+
+# Check git commands and provide navigation help
 # Arguments: $1 = command string
 # Returns: 0 if anti-pattern detected, 1 otherwise
 # Outputs: suggestion message if detected
 check_git_antipattern() {
     local cmd="$1"
 
-    # git status → homeboy changes
-    # Only matches literal "git status", not homeboy commands
-    if [[ "$cmd" =~ ^git[[:space:]]+status ]]; then
-        cat <<'EOF'
-Git Status Anti-Pattern
+    # Only check commands starting with "git "
+    [[ ! "$cmd" =~ ^git[[:space:]] ]] && return 1
 
+    local json paths
+    json=$(get_homeboy_context)
+
+    # Non-homeboy directory: pass through
+    [[ -z "$json" ]] && return 1
+
+    # Check if in monorepo root (no git_root but has contained components)
+    if is_monorepo_root "$json"; then
+        paths=$(format_component_paths "$json")
+        cat <<EOF
+Git Repository Not Found
+
+You're in a project directory, not a git repository.
+Component repositories available:
+$paths
+
+Options:
+  cd <component-path> && git <command>
+  homeboy git <command> <component>
+  homeboy changes <component>
+EOF
+        return 0
+    fi
+
+    # In a git repo: check for anti-patterns (git status only)
+    if [[ "$cmd" =~ ^git[[:space:]]+status ]]; then
+        paths=$(format_component_paths "$json")
+        cat <<EOF
 Use Homeboy for change detection:
   homeboy changes
 
-Benefits: Shows version context, changelog status, component-aware diffs
+${paths:+Components:
+$paths
+
+}Benefits: Version context, changelog status, component-aware diffs
 EOF
         return 0
     fi

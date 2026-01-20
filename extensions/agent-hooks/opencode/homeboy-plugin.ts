@@ -33,20 +33,66 @@ async function getHomeboyData(): Promise<Record<string, unknown> | null> {
 }
 
 /**
+ * Check if directory is monorepo root (contains components but no git_root)
+ */
+function isMonorepoRoot(data: Record<string, unknown>): boolean {
+  const context = data?.context as Record<string, unknown> | undefined
+  const gitRoot = context?.git_root
+  const contained = (context?.contained_components as unknown[]) || []
+  return !gitRoot && contained.length > 0
+}
+
+/**
+ * Format component paths for display
+ */
+function formatComponentPaths(data: Record<string, unknown>): string {
+  const components = (data?.components as Array<Record<string, unknown>>) || []
+  if (components.length === 0) return ""
+  return components
+    .map((c) => `  ${c.id} → ${c.path || "unknown"}`)
+    .join("\n")
+}
+
+/**
  * Check for bash anti-patterns that should use Homeboy commands
  * Returns error message if anti-pattern detected, null otherwise
  *
  * Mirrors: claude/pre-tool-bash.sh + core/patterns.sh
  */
-function checkBashAntipatterns(command: string): string | null {
-  // Git status → homeboy changes
-  if (/^git\s+status/.test(command)) {
-    return `Git Status Anti-Pattern
+async function checkBashAntipatterns(command: string): Promise<string | null> {
+  // Git commands: check for monorepo root or suggest homeboy
+  if (/^git\s/.test(command)) {
+    const data = await getHomeboyData()
 
-Use Homeboy for change detection:
+    // Non-homeboy directory: pass through
+    if (!data) return null
+
+    // Check if in monorepo root (no git_root but has contained components)
+    if (isMonorepoRoot(data)) {
+      const paths = formatComponentPaths(data)
+      return `Git Repository Not Found
+
+You're in a project directory, not a git repository.
+Component repositories available:
+${paths}
+
+Options:
+  cd <component-path> && git <command>
+  homeboy git <command> <component>
+  homeboy changes <component>`
+    }
+
+    // In a git repo: check for git status anti-pattern
+    if (/^git\s+status/.test(command)) {
+      const paths = formatComponentPaths(data)
+      const componentsSection = paths ? `Components:\n${paths}\n\n` : ""
+      return `Use Homeboy for change detection:
   homeboy changes
 
-Benefits: Shows version context, changelog status, component-aware diffs`
+${componentsSection}Benefits: Version context, changelog status, component-aware diffs`
+    }
+
+    return null
   }
 
   // Build script → homeboy build
@@ -158,7 +204,7 @@ export const HomeboyPlugin: Plugin = async () => {
       if (input.tool === "bash") {
         const command = output.args?.command as string
         if (command) {
-          const violation = checkBashAntipatterns(command)
+          const violation = await checkBashAntipatterns(command)
           if (violation) {
             throw new Error(violation)
           }
