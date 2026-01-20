@@ -196,7 +196,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                             "Working tree has uncommitted changes",
                             Some(details.join("\n")),
                             Some(vec![
-                                "All changes must be committed before version bump.".to_string(),
+                                "Version bump only commits version targets and changelog - your code changes will be left behind.".to_string(),
                                 "1. Document changes: homeboy changelog add <component> -m \"...\" for each change".to_string(),
                                 "2. Commit everything: git add -A && git commit -m \"<description>\"".to_string(),
                                 "3. Run version bump: homeboy version bump <component> <level>".to_string(),
