@@ -23,6 +23,11 @@ enum ModuleCommand {
         #[arg(short, long)]
         project: Option<String>,
     },
+    /// Show detailed information about a module
+    Show {
+        /// Module ID
+        module_id: String,
+    },
     /// Execute a module
     Run {
         /// Module ID
@@ -106,6 +111,7 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
 pub fn run(args: ModuleArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ModuleOutput> {
     match args.command {
         ModuleCommand::List { project } => list(project),
+        ModuleCommand::Show { module_id } => show_module(&module_id),
         ModuleCommand::Run {
             module_id,
             project,
@@ -142,6 +148,8 @@ pub enum ModuleOutput {
         project_id: Option<String>,
         modules: Vec<ModuleEntry>,
     },
+    #[serde(rename = "module.show")]
+    Show { module: ModuleDetail },
     #[serde(rename = "module.run")]
     Run {
         module_id: String,
@@ -223,6 +231,74 @@ pub struct ModuleEntry {
     pub has_ready_check: Option<bool>,
 }
 
+#[derive(Serialize)]
+pub struct ModuleDetail {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    pub runtime: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_setup: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_ready_check: Option<bool>,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_detail: Option<String>,
+    pub linked: bool,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli: Option<CliDetail>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionDetail>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<homeboy::module::InputConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<homeboy::module::SettingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires: Option<RequiresDetail>,
+}
+
+#[derive(Serialize)]
+pub struct CliDetail {
+    pub tool: String,
+    pub display_name: String,
+    pub command_template: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_cli_path: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ActionDetail {
+    pub id: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub action_type: homeboy::module::ActionType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<homeboy::module::HttpMethod>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RequiresDetail {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<String>,
+}
+
 fn list(project: Option<String>) -> CmdResult<ModuleOutput> {
     let modules = load_all_modules().unwrap_or_default();
 
@@ -300,6 +376,77 @@ fn list(project: Option<String>) -> CmdResult<ModuleOutput> {
         },
         0,
     ))
+}
+
+fn show_module(module_id: &str) -> CmdResult<ModuleOutput> {
+    let module = load_module(module_id)?;
+    let ready_status = module_ready_status(&module);
+    let linked = is_module_linked(&module.id);
+
+    let has_setup = module
+        .runtime
+        .as_ref()
+        .and_then(|r| r.setup_command.as_ref())
+        .map(|_| true);
+    let has_ready_check = module
+        .runtime
+        .as_ref()
+        .and_then(|r| r.ready_check.as_ref())
+        .map(|_| true);
+
+    let cli = module.cli.as_ref().map(|c| CliDetail {
+        tool: c.tool.clone(),
+        display_name: c.display_name.clone(),
+        command_template: c.command_template.clone(),
+        default_cli_path: c.default_cli_path.clone(),
+    });
+
+    let actions: Vec<ActionDetail> = module
+        .actions
+        .iter()
+        .map(|a| ActionDetail {
+            id: a.id.clone(),
+            label: a.label.clone(),
+            action_type: a.action_type.clone(),
+            endpoint: a.endpoint.clone(),
+            method: a.method.clone(),
+            command: a.command.clone(),
+        })
+        .collect();
+
+    let requires = module.requires.as_ref().map(|r| RequiresDetail {
+        modules: r.modules.clone(),
+        components: r.components.clone(),
+    });
+
+    let detail = ModuleDetail {
+        id: module.id.clone(),
+        name: module.name.clone(),
+        version: module.version.clone(),
+        description: module.description.clone(),
+        author: module.author.clone(),
+        homepage: module.homepage.clone(),
+        source_url: module.source_url.clone(),
+        runtime: if module.runtime.is_some() {
+            "executable".to_string()
+        } else {
+            "platform".to_string()
+        },
+        has_setup,
+        has_ready_check,
+        ready: ready_status.ready,
+        ready_reason: ready_status.reason,
+        ready_detail: ready_status.detail,
+        linked,
+        path: module.module_path.clone().unwrap_or_default(),
+        cli,
+        actions,
+        inputs: module.inputs.clone(),
+        settings: module.settings.clone(),
+        requires,
+    };
+
+    Ok((ModuleOutput::Show { module: detail }, 0))
 }
 
 fn run_module(

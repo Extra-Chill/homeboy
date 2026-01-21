@@ -4,7 +4,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## Unreleased
+## [0.32.4] - 2026-01-20
 
 - Add build-time local_path validation with clear error messages
 - Add tilde expansion (~/) support for component local_path
