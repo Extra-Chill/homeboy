@@ -97,6 +97,11 @@ if (!function_exists('wp_die')) {
         exit(1);
     }
 }
+if (!function_exists('is_admin')) {
+    function is_admin() {
+        return false;
+    }
+}
 
 // Handle based on component type
 if ($component['type'] === 'theme') {
@@ -124,6 +129,11 @@ if ($component['type'] === 'theme') {
     if (!function_exists('get_stylesheet_uri')) {
         function get_stylesheet_uri() {
             return '';
+        }
+    }
+    if (!function_exists('add_theme_support')) {
+        function add_theme_support($feature, $args = array()) {
+            return;
         }
     }
 
