@@ -29,10 +29,20 @@ pub fn pull_repo(repo_dir: &Path) -> Result<()> {
 }
 
 /// Check if a git working directory has no uncommitted changes.
+///
+/// Uses direct Command execution to properly handle empty output (clean repo).
+/// `run_in_optional` returns None for empty stdout, which would incorrectly
+/// indicate a dirty repo when used with `.unwrap_or(false)`.
 pub fn is_workdir_clean(path: &Path) -> bool {
-    command::run_in_optional(&path.to_string_lossy(), "git", &["status", "--porcelain"])
-        .map(|s| s.is_empty())
-        .unwrap_or(false)
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => o.stdout.is_empty(),
+        _ => false, // Command failed = assume not clean (conservative)
+    }
 }
 
 /// Get the root directory of a git repository containing the given path.
@@ -535,8 +545,15 @@ pub fn get_repo_snapshot(path: &str) -> Result<RepoSnapshot> {
     }
 
     let branch = command::run_in(path, "git", &["rev-parse", "--abbrev-ref", "HEAD"], "git branch")?;
-    let clean = command::run_in_optional(path, "git", &["status", "--porcelain=v1"])
-        .map(|s| s.is_empty())
+
+    // Use direct Command to properly handle empty output (clean repo).
+    // run_in_optional returns None for empty stdout, which would incorrectly
+    // indicate a dirty repo when used with .unwrap_or(false).
+    let clean = Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(path)
+        .output()
+        .map(|o| o.status.success() && o.stdout.is_empty())
         .unwrap_or(false);
 
     let (ahead, behind) = command::run_in_optional(path, "git", &["rev-parse", "--abbrev-ref", "@{upstream}"])
@@ -1343,6 +1360,89 @@ mod tests {
         assert_eq!(
             strip_conventional_prefix("Regular commit"),
             "Regular commit"
+        );
+    }
+
+    #[test]
+    fn is_workdir_clean_returns_true_for_clean_repo() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let path = temp_dir.path();
+
+        // Initialize a git repo
+        Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to init git repo");
+
+        // Configure git user for commits
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to configure git email");
+
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to configure git name");
+
+        // Create a file and commit it
+        fs::write(path.join("test.txt"), "content").expect("Failed to write file");
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()
+            .expect("Failed to git add");
+
+        Command::new("git")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to commit");
+
+        // Now the repo should be clean
+        assert!(
+            is_workdir_clean(path),
+            "Expected clean repo to return true"
+        );
+    }
+
+    #[test]
+    fn is_workdir_clean_returns_false_for_dirty_repo() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let path = temp_dir.path();
+
+        // Initialize a git repo
+        Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to init git repo");
+
+        // Create an untracked file
+        fs::write(path.join("untracked.txt"), "content").expect("Failed to write file");
+
+        // Repo should be dirty (untracked file)
+        assert!(
+            !is_workdir_clean(path),
+            "Expected dirty repo to return false"
+        );
+    }
+
+    #[test]
+    fn is_workdir_clean_returns_false_for_invalid_path() {
+        let path = Path::new("/nonexistent/path/that/does/not/exist");
+        assert!(
+            !is_workdir_clean(path),
+            "Expected invalid path to return false"
         );
     }
 }
