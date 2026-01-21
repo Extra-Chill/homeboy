@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+- Add --deploy flag to release command for automatic deployment to all projects using the component
+- Add --force flag to deploy command to allow deployment with uncommitted changes
+- Fix version commit detection to recognize 'Version X.Y.Z' and 'Version bump to X.Y.Z' commit formats
+
 ## [0.32.5] - 2026-01-20
 
 - Add 'homeboy module show' command for detailed module inspection

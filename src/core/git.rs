@@ -165,7 +165,7 @@ pub fn find_version_commit(path: &str) -> Result<Option<String>> {
     let stdout = command::run_in(path, "git", &["log", "-200", "--format=%h|%s"], "git log")?;
 
     let version_pattern = Regex::new(
-        r"(?i)(?:^v|^bump\s+(?:version\s+)?(?:to\s+)?v?|^(?:chore\([^)]*\):\s*)?release:?\s*v?)(\d+\.\d+(?:\.\d+)?)",
+        r"(?i)(?:^v|^version\s+(?:bump\s+(?:to\s+)?)?v?|^bump\s+(?:version\s+)?(?:to\s+)?v?|^(?:chore\([^)]*\):\s*)?release:?\s*v?)(\d+\.\d+(?:\.\d+)?)",
     )
     .expect("Invalid regex pattern");
 
@@ -194,6 +194,8 @@ pub fn find_version_release_commit(path: &str, version: &str) -> Result<Option<S
         format!(r"(?i)^(?:chore\([^)]*\):\s*)?release:?\s*v?{}(?:\s|$)", escaped_version),
         format!(r"(?i)^v?{}\s*$", escaped_version),
         format!(r"(?i)^bump\s+(?:version\s+)?(?:to\s+)?v?{}(?:\s|$)", escaped_version),
+        // Match "Version X.Y.Z" or "Version bump to X.Y.Z"
+        format!(r"(?i)^version\s+(?:bump\s+(?:to\s+)?)?v?{}(?:\s|:|-|$)", escaped_version),
     ];
 
     for line in stdout.lines() {

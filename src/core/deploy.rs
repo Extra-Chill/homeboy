@@ -295,6 +295,9 @@ pub struct DeployConfig {
     pub outdated: bool,
     pub dry_run: bool,
     pub check: bool,
+    pub force: bool,
+    /// Skip build if artifact already exists (used by release --deploy)
+    pub skip_build: bool,
 }
 
 /// Reason why a component was selected for deployment.
@@ -561,6 +564,24 @@ pub fn deploy_components(
         });
     }
 
+    // Check for uncommitted changes before deployment
+    if !config.force {
+        let components_with_changes: Vec<&Component> = components_to_deploy
+            .iter()
+            .filter(|c| !git::is_workdir_clean(Path::new(&c.local_path)))
+            .collect();
+
+        if !components_with_changes.is_empty() {
+            let ids: Vec<&str> = components_with_changes.iter().map(|c| c.id.as_str()).collect();
+            return Err(Error::other(format!(
+                "Components have uncommitted changes: {}",
+                ids.join(", ")
+            ))
+            .with_hint("Commit your changes before deploying to ensure deployed code is tracked")
+            .with_hint("Use --force to deploy anyway"));
+        }
+    }
+
     // Execute deployments
     let mut results: Vec<ComponentDeployResult> = vec![];
     let mut succeeded: u32 = 0;
@@ -570,8 +591,24 @@ pub fn deploy_components(
         let local_version = local_versions.get(&component.id).cloned();
         let remote_version = remote_versions.get(&component.id).cloned();
 
-        // Build is mandatory before deploy
-        let (build_exit_code, build_error) = build::build_component(component);
+        // Build is mandatory before deploy UNLESS skip_build is set
+        let artifact_path = component.build_artifact.as_ref().unwrap();
+        let (build_exit_code, build_error) = if config.skip_build {
+            // Verify artifact exists (release should have built it)
+            if !Path::new(artifact_path).exists() {
+                (
+                    Some(1),
+                    Some(format!(
+                        "Artifact not found: {}. Release build may have failed.",
+                        artifact_path
+                    )),
+                )
+            } else {
+                (Some(0), None)
+            }
+        } else {
+            build::build_component(component)
+        };
 
         if let Some(ref error) = build_error {
             results.push(
@@ -585,10 +622,8 @@ pub fn deploy_components(
             continue;
         }
 
-        // Check artifact exists after build
-        // build_artifact is guaranteed to be Some at this point (filtered in load_project_components)
-        let artifact_path = component.build_artifact.as_ref().unwrap();
-        if !Path::new(artifact_path).exists() {
+        // Check artifact exists after build (only needed when not skipping build)
+        if !config.skip_build && !Path::new(artifact_path).exists() {
             results.push(
                 ComponentDeployResult::new(component, base_path)
                     .with_status("failed")

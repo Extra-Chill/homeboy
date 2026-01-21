@@ -36,6 +36,10 @@ pub struct DeployArgs {
     /// Check component status without building or deploying
     #[arg(long, visible_alias = "status")]
     pub check: bool,
+
+    /// Deploy even with uncommitted changes
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Serialize)]
@@ -47,6 +51,7 @@ pub struct DeployOutput {
     pub outdated: bool,
     pub dry_run: bool,
     pub check: bool,
+    pub force: bool,
     pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
 }
@@ -198,6 +203,8 @@ pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdRe
         outdated: args.outdated,
         dry_run: args.dry_run,
         check: args.check,
+        force: args.force,
+        skip_build: false,
     };
 
     let result = deploy::run(&project_id, &config).map_err(|e| {
@@ -222,6 +229,7 @@ pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdRe
             outdated: args.outdated,
             dry_run: args.dry_run,
             check: args.check,
+            force: args.force,
             results: result.results,
             summary: result.summary,
         },
