@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+### Added
+- Add `version bump` command as alias for release (e.g., `homeboy version bump homeboy minor`)
+- Add `--no-commit` flag to release command to skip auto-committing uncommitted changes
+- Add `--commit-message` flag to release command for custom pre-release commit messages
+- Add version show shorthand: `homeboy version <component>` now works as `homeboy version show <component>`
+
+### Changed
+- Release command now auto-commits uncommitted changes by default (use `--no-commit` to opt-out)
+- Improve build verification before release
+
 ## [0.31.1] - 2026-01-20
 
 - Consolidate I/O primitives and option chains for cleaner code
