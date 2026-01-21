@@ -3,12 +3,24 @@
 ## Synopsis
 
 ```sh
-homeboy release <COMMAND>
+homeboy release <COMPONENT> <BUMP_TYPE> [OPTIONS]
 ```
+
+Where `<BUMP_TYPE>` is `patch`, `minor`, or `major`.
+
+Also available as: `homeboy version bump <COMPONENT> <BUMP_TYPE> [OPTIONS]`
+
+## Options
+
+- `--dry-run`: Preview the release plan without executing
+- `--no-tag`: Skip creating git tag
+- `--no-push`: Skip pushing to remote
+- `--no-commit`: Fail if uncommitted changes exist (strict mode)
+- `--commit-message <MESSAGE>`: Custom message for pre-release commit
 
 ## Description
 
-`homeboy release` plans and runs component-scoped release pipelines using the `release` configuration. It replaces GitHub Actions by coordinating versioning, committing, tagging, packaging, and module-backed publishing steps locally.
+`homeboy release` executes a component release: bumps version, finalizes changelog, commits, tags, and optionally pushes. Use `--dry-run` to preview the release plan without making changes.
 
 ## Recommended Workflow
 
@@ -16,48 +28,16 @@ homeboy release <COMMAND>
 # 1. Review changes since last release
 homeboy changes <component_id>
 
-# 2. Plan the release (validates configuration, shows auto-inserted steps)
-homeboy release plan <component_id>
+# 2. Preview the release (validates configuration, shows plan)
+homeboy release <component_id> patch --dry-run
 
-# 3. Execute the release pipeline
-homeboy release run <component_id>
+# 3. Execute the release
+homeboy release <component_id> patch
 ```
 
-## Subcommands
+## Release Pipeline
 
-### `plan`
-
-```sh
-homeboy release plan <component_id>
-```
-
-Generates an ordered release plan without executing any steps.
-
-Notes:
-
-- Release config is read from the component (`components/<id>.json`).
-- If no release config exists for the component, the command errors and suggests adding one via `homeboy component set`.
-- Module actions are resolved from `component.modules`.
-- **Prerequisites validation**: The plan command validates release prerequisites and surfaces warnings:
-  - Empty changelog: "No unreleased changelog entries. Run `homeboy changelog add` first."
-  - Subsection headers only: "Changelog has subsection headers but no items. Add entries with `homeboy changelog add`."
-  - No changelog configured: "No changelog configured for this component."
-
-### `run`
-
-```sh
-homeboy release run <component_id>
-```
-
-Executes the release pipeline steps defined in the component `release` block.
-
-Notes:
-
-- Steps run in parallel when dependencies allow it.
-- Any step depending on a failed/missing step is skipped.
-- Release actions use module definitions configured in `component.modules`.
-- Release payload includes version, tag, notes, artifacts, component_id, and local_path.
-- `module.run` steps execute module runtime commands as part of the pipeline.
+The release command coordinates versioning, committing, tagging, and pushing.
 
 ## Pipeline steps
 
@@ -109,7 +89,7 @@ Use `--no-commit` to preserve the previous strict behavior that fails on uncommi
 
 ### Pre-flight validation
 
-Before executing the pipeline, `release run` validates:
+Before executing the pipeline, `release` validates:
 
 1. **Working tree status**: If `--no-commit` is specified and uncommitted changes exist, the command fails early with actionable guidance.
 
@@ -166,36 +146,42 @@ When a step provides additional config, it is included as `payload.config` along
 
 > Note: all command output is wrapped in the global JSON envelope described in the [JSON output contract](../architecture/output-system.md). The object below is the `data` payload.
 
+With `--dry-run`:
+
 ```json
 {
-  "command": "release.plan",
-  "plan": {
+  "command": "release",
+  "result": {
     "component_id": "<component_id>",
-    "enabled": true,
-    "steps": [
-      {
-        "id": "build",
-        "type": "build",
-        "label": "Build",
-        "needs": [],
-        "config": {},
-        "status": "ready",
-        "missing": []
-      }
-    ],
-    "warnings": [],
-    "hints": []
+    "bump_type": "patch",
+    "dry_run": true,
+    "no_tag": false,
+    "no_push": false,
+    "no_commit": false,
+    "plan": {
+      "component_id": "<component_id>",
+      "enabled": true,
+      "steps": [...],
+      "warnings": [],
+      "hints": []
+    }
   }
 }
 ```
 
+Without `--dry-run`:
+
 ```json
 {
-  "command": "release.run",
-  "run": {
+  "command": "release",
+  "result": {
     "component_id": "<component_id>",
-    "enabled": true,
-    "result": {
+    "bump_type": "patch",
+    "dry_run": false,
+    "no_tag": false,
+    "no_push": false,
+    "no_commit": false,
+    "run": {
       "status": "success",
       "warnings": [],
       "summary": {
@@ -206,36 +192,7 @@ When a step provides additional config, it is included as `payload.config` along
         "missing": 0,
         "next_actions": []
       },
-      "steps": [
-        {
-          "id": "build",
-          "type": "build",
-          "status": "success",
-          "missing": [],
-          "warnings": [],
-          "hints": [],
-          "data": {}
-        },
-        {
-          "id": "publish",
-          "type": "publish",
-          "status": "success",
-          "missing": [],
-          "warnings": [],
-          "hints": [],
-          "data": {
-            "release": {
-              "version": "1.2.3",
-              "tag": "v1.2.3",
-              "notes": "- Added feature",
-              "artifacts": [
-                { "path": "dist/homeboy-macos.zip", "type": "binary", "platform": "macos" }
-              ],
-              "component_id": "homeboy"
-            }
-          }
-        }
-      ]
+      "steps": [...]
     }
   }
 }
