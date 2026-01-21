@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+FAILED_STEP=""
+FAILURE_OUTPUT=""
+
+print_failure_summary() {
+    if [ -n "$FAILED_STEP" ]; then
+        echo ""
+        echo "============================================"
+        echo "BUILD FAILED: $FAILED_STEP"
+        echo "============================================"
+        if [ -n "$FAILURE_OUTPUT" ]; then
+            echo ""
+            echo "Error details:"
+            echo "$FAILURE_OUTPUT"
+        fi
+    fi
+}
+trap print_failure_summary EXIT
+
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Environment variables:"
@@ -119,7 +137,17 @@ run_lint() {
 run_autoload_check() {
     local check_script="${MODULE_PATH}/scripts/autoload-check.sh"
     if [ -f "$check_script" ]; then
-        bash "$check_script" || exit 1
+        local output
+        set +e
+        output=$(bash "$check_script" 2>&1)
+        local exit_code=$?
+        set -e
+        echo "$output"
+        if [ $exit_code -ne 0 ]; then
+            FAILED_STEP="Autoload validation"
+            FAILURE_OUTPUT="$output"
+            exit 1
+        fi
         echo ""
     fi
 }
@@ -205,9 +233,20 @@ fi
 
 # Run PHPUnit with module bootstrap
 echo "Running PHPUnit tests..."
-"${MODULE_PATH}/vendor/bin/phpunit" \
+set +e
+phpunit_output=$("${MODULE_PATH}/vendor/bin/phpunit" \
   --bootstrap="${MODULE_PATH}/tests/bootstrap.php" \
   --configuration="${MODULE_PATH}/phpunit.xml.dist" \
   --testdox \
   "${TEST_DIR}" \
-  "$@"
+  "$@" 2>&1)
+phpunit_exit=$?
+set -e
+
+echo "$phpunit_output"
+
+if [ $phpunit_exit -ne 0 ]; then
+    FAILED_STEP="PHPUnit tests"
+    FAILURE_OUTPUT=$(echo "$phpunit_output" | tail -30)
+    exit $phpunit_exit
+fi
