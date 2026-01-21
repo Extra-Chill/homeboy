@@ -2,7 +2,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::module::{
-    self, is_module_compatible, is_module_linked, load_all_modules, module_ready_status, run_setup,
+    self, is_module_compatible, is_module_linked, load_all_modules, load_module,
+    module_ready_status, run_setup,
 };
 use homeboy::project::{self, Project};
 

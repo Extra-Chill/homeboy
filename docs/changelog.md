@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+- Add build-time local_path validation with clear error messages
+- Add tilde expansion (~/) support for component local_path
+- Add gap_details to init output for inline config gap explanations
+- Add project auto-detection for deploy when only component ID provided
+- Add normalize_args() to handle both quoted and unquoted CLI tool arguments
+
 ## [0.32.3] - 2026-01-20
 
 - Consolidate release runner, fix step ordering
