@@ -4,7 +4,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## Unreleased
+## [0.33.5] - 2026-01-21
 
 - Create engine/ directory with pipeline and executor modules
 - Move base_path.rs and slugify.rs to utils/
