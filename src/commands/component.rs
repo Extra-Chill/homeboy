@@ -88,6 +88,15 @@ enum ComponentCommand {
         /// Component ID
         id: String,
     },
+    /// Add a version target to a component
+    AddVersionTarget {
+        /// Component ID
+        id: String,
+        /// Target file path relative to component root
+        file: String,
+        /// Regex pattern with capture group for version
+        pattern: String,
+    },
 }
 
 #[derive(Default, Serialize)]
@@ -212,6 +221,9 @@ pub fn run(
         ComponentCommand::Rename { id, new_id } => rename(&id, &new_id),
         ComponentCommand::List => list(),
         ComponentCommand::Projects { id } => projects(&id),
+        ComponentCommand::AddVersionTarget { id, file, pattern } => {
+            add_version_target(&id, &file, &pattern)
+        }
     }
 }
 
@@ -273,6 +285,39 @@ fn set(args: DynamicSetArgs) -> CmdResult<ComponentOutput> {
                 exit_code,
             ))
         }
+    }
+}
+
+fn add_version_target(id: &str, file: &str, pattern: &str) -> CmdResult<ComponentOutput> {
+    let version_target = serde_json::json!({
+        "version_targets": [{
+            "file": file,
+            "pattern": pattern
+        }]
+    });
+
+    let json_string = serde_json::to_string(&version_target).map_err(|e| {
+        homeboy::Error::internal_unexpected(format!("Failed to serialize: {}", e))
+    })?;
+
+    match component::merge(Some(id), &json_string, &[])? {
+        homeboy::MergeOutput::Single(result) => {
+            let comp = component::load(&result.id)?;
+            Ok((
+                ComponentOutput {
+                    command: "component.add-version-target".to_string(),
+                    success: true,
+                    component_id: Some(result.id),
+                    updated_fields: result.updated_fields,
+                    component: Some(comp),
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
+        homeboy::MergeOutput::Bulk(_) => Err(homeboy::Error::internal_unexpected(
+            "Unexpected bulk result for single component".to_string(),
+        )),
     }
 }
 
