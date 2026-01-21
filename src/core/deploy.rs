@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
-use crate::base_path;
+use crate::utils::base_path;
 use crate::build;
 use crate::component::{self, Component};
 use crate::config;

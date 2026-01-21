@@ -1,7 +1,7 @@
 use crate::component::Component;
 use crate::error::{Error, Result};
 use crate::module::{self, ModuleManifest};
-use crate::pipeline::PipelineCapabilityResolver;
+use crate::engine::pipeline::PipelineCapabilityResolver;
 
 use super::types::ReleaseStepType;
 

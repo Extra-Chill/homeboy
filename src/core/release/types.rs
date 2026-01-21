@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::pipeline::{self, PipelinePlanStep, PipelineRunResult};
+use crate::engine::pipeline::{self, PipelinePlanStep, PipelineRunResult};
 
 /// Internal step types for the release pipeline.
 /// These are used internally - the core flow is non-configurable.

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use crate::component::{self, Component};
 use crate::context::resolve_project_ssh;
 use crate::error::ErrorCode;
-use crate::executor;
+use crate::engine::executor;
 use crate::module::{find_module_by_tool, CliConfig};
 use crate::project::{self, Project};
 use crate::ssh::{execute_local_command, CommandOutput};

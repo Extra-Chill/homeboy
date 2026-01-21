@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::module;
 use crate::output::{CreateOutput, MergeOutput, MergeResult, RemoveResult};
 use crate::project::{self, NullableUpdate};
-use crate::slugify;
+use crate::utils::slugify;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;

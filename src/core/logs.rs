@@ -3,10 +3,10 @@
 //! Provides viewing, following, and clearing of log files.
 //! Routes to local or SSH execution based on project configuration.
 
-use crate::base_path;
+use crate::utils::base_path;
 use crate::context::require_project_base_path;
 use crate::error::{Error, Result};
-use crate::executor::{execute_for_project, execute_for_project_interactive};
+use crate::engine::executor::{execute_for_project, execute_for_project_interactive};
 use crate::project;
 use crate::utils::shell;
 use serde::Serialize;

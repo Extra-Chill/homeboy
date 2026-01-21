@@ -2,7 +2,7 @@ use crate::component;
 use crate::core::local_files::FileSystem;
 use crate::error::{Error, Result};
 use crate::module::{self, ModuleManifest};
-use crate::pipeline::{PipelineRunStatus, PipelineStep, PipelineStepExecutor, PipelineStepResult};
+use crate::engine::pipeline::{PipelineRunStatus, PipelineStep, PipelineStepExecutor, PipelineStepResult};
 use crate::utils::validation;
 use crate::{changelog, version};
 

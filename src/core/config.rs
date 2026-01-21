@@ -4,7 +4,7 @@ use crate::output::{
     BatchResult, CreateOutput, CreateResult, MergeOutput, MergeResult, RemoveResult,
 };
 use crate::paths;
-use crate::slugify;
+use crate::utils::slugify;
 use crate::Result;
 use heck::ToSnakeCase;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};

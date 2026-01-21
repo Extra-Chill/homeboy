@@ -1,3 +1,5 @@
+//! Path joining utilities for remote paths.
+
 use crate::error::{Error, Result};
 
 pub fn resolve_optional_base_path(base_path: Option<&str>) -> Option<&str> {

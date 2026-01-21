@@ -3,7 +3,7 @@ use crate::component::{self, Component};
 use crate::core::local_files::FileSystem;
 use crate::error::{Error, Result};
 use crate::module::ModuleManifest;
-use crate::pipeline::{self, PipelineStep};
+use crate::engine::pipeline::{self, PipelineStep};
 use crate::version;
 
 use super::executor::ReleaseStepExecutor;

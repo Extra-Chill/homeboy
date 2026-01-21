@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::git;
 use crate::local_files::{self, FileSystem};
 use crate::paths;
-use crate::slugify;
+use crate::utils::slugify;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
 use crate::context::{require_project_base_path, resolve_project_ssh};
-use crate::executor::execute_for_project;
+use crate::engine::executor::execute_for_project;
 use crate::module::{load_all_modules, DatabaseCliConfig};
 use crate::project::{self, Project};
 use crate::utils::template::{render_map, TemplateVars};

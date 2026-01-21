@@ -3,7 +3,7 @@ use crate::config::{self, ConfigEntity};
 use crate::error::{Error, Result};
 use crate::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::server;
-use crate::slugify;
+use crate::utils::slugify;
 use crate::utils::parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

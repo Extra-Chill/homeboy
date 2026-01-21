@@ -39,8 +39,8 @@ use crate::context::resolve_project_ssh;
 use crate::error::{Error, Result};
 use crate::module::CliConfig;
 use crate::project::Project;
-use crate::utils::shell;
 use crate::ssh::{execute_local_command, execute_local_command_interactive, CommandOutput};
+use crate::utils::shell;
 use std::process::Command;
 
 /// Execute a command for a project - routes to local or SSH based on server_id config.
@@ -100,7 +100,14 @@ pub fn execute_for_project_direct(
     let normalized_args = shell::normalize_args(args);
 
     // Try direct execution first
-    if let Ok(output) = try_execute_direct(base_path.clone(), cli_config, project, module_id, &normalized_args, target_domain) {
+    if let Ok(output) = try_execute_direct(
+        base_path.clone(),
+        cli_config,
+        project,
+        module_id,
+        &normalized_args,
+        target_domain,
+    ) {
         return Ok(output);
     }
 
@@ -125,7 +132,14 @@ fn try_execute_direct(
     }
 
     // Parse the template
-    let parsed = parse_direct_template(base_path, cli_config, project, module_id, args, target_domain)?;
+    let parsed = parse_direct_template(
+        base_path,
+        cli_config,
+        project,
+        module_id,
+        args,
+        target_domain,
+    )?;
 
     // Execute directly (no shell)
     let mut cmd = Command::new(&parsed.program);

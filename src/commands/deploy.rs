@@ -17,6 +17,10 @@ pub struct DeployArgs {
     #[arg(long, short = 'p')]
     pub project: Option<String>,
 
+    /// Explicit component IDs (takes precedence over positional)
+    #[arg(long, short = 'c')]
+    pub component: Option<Vec<String>>,
+
     /// JSON input spec for bulk operations
     #[arg(long)]
     pub json: Option<String>,
@@ -177,14 +181,42 @@ fn infer_project_for_components(component_ids: &[String]) -> Option<String> {
 }
 
 pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DeployOutput> {
-    // If --project flag provided, use it directly (first positional becomes component)
-    let (project_id, component_ids) = if let Some(ref explicit_project) = args.project {
-        let mut comps = vec![args.project_id.clone()];
-        comps.extend(args.component_ids.clone());
-        (explicit_project.clone(), comps)
-    } else {
-        // Resolve argument order (supports both project-first and component-first)
-        resolve_argument_order(&args.project_id, &args.component_ids)?
+    // Resolve project and component IDs based on flag/positional combinations
+    let (project_id, component_ids) = match (&args.project, &args.component) {
+        // Both flags provided - use them directly
+        (Some(ref proj), Some(ref comps)) => (proj.clone(), comps.clone()),
+
+        // Only --project flag - positionals are components
+        (Some(ref proj), None) => {
+            let mut comps = vec![args.project_id.clone()];
+            comps.extend(args.component_ids.clone());
+            (proj.clone(), comps)
+        }
+
+        // Only --component flag - resolve project from positional or inference
+        (None, Some(ref comps)) => {
+            let projects = homeboy::project::list_ids().unwrap_or_default();
+            if projects.contains(&args.project_id) {
+                (args.project_id.clone(), comps.clone())
+            } else {
+                // Try to infer project from components
+                match infer_project_for_components(comps) {
+                    Some(proj) => (proj, comps.clone()),
+                    None => {
+                        return Err(homeboy::Error::validation_invalid_argument(
+                            "project_id",
+                            "Could not infer project. Use --project flag or provide project as first argument.",
+                            None,
+                            None,
+                        )
+                        .into())
+                    }
+                }
+            }
+        }
+
+        // No flags - use existing positional detection
+        (None, None) => resolve_argument_order(&args.project_id, &args.component_ids)?,
     };
 
     // Update args with resolved values

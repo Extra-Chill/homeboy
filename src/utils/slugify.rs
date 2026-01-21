@@ -1,7 +1,15 @@
+//! String slug generation utilities.
+
 use crate::error::Error;
 use crate::Result;
 
-pub(crate) fn slugify_id(value: &str, field_name: &str) -> Result<String> {
+/// Convert a string to a URL-friendly slug.
+///
+/// - Converts to lowercase
+/// - Replaces whitespace, underscores, and dashes with single dashes
+/// - Removes special characters
+/// - Trims leading/trailing dashes
+pub fn slugify_id(value: &str, field_name: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -64,7 +72,8 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-pub(crate) fn validate_component_id(id: &str) -> Result<()> {
+/// Validate a component ID for use in configuration.
+pub fn validate_component_id(id: &str) -> Result<()> {
     if id.is_empty() {
         return Err(Error::validation_invalid_argument(
             "component_id",
