@@ -94,19 +94,6 @@ impl ReleaseStepExecutor {
     }
 
     fn run_version(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
-        let mode = step
-            .config
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("bump");
-
-        match mode {
-            "validate" => self.run_version_validate(step),
-            _ => self.run_version_bump(step),
-        }
-    }
-
-    fn run_version_bump(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
         let bump_type = step
             .config
             .get("bump")
@@ -116,20 +103,6 @@ impl ReleaseStepExecutor {
         let data = serde_json::to_value(&result)
             .map_err(|e| Error::internal_json(e.to_string(), Some("version output".to_string())))?;
         self.store_version_context(&result.new_version)?;
-        Ok(self.step_result(
-            step,
-            PipelineRunStatus::Success,
-            Some(data),
-            None,
-            Vec::new(),
-        ))
-    }
-
-    fn run_version_validate(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
-        let info = version::read_version(Some(&self.component_id))?;
-        let data = serde_json::to_value(&info)
-            .map_err(|e| Error::internal_json(e.to_string(), Some("version output".to_string())))?;
-        self.store_version_context(&info.version)?;
         Ok(self.step_result(
             step,
             PipelineRunStatus::Success,

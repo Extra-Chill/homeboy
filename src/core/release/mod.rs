@@ -4,7 +4,7 @@ mod resolver;
 mod types;
 mod utils;
 
-pub use pipeline::{plan, plan_unified, resolve_component_release, run};
+pub use pipeline::{plan, resolve_component_release, run};
 pub use types::{
     ReleaseArtifact, ReleaseConfig, ReleaseOptions, ReleasePlan, ReleasePlanStatus,
     ReleasePlanStep, ReleaseRun, ReleaseStep, ReleaseStepType,

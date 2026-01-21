@@ -121,7 +121,7 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
     };
 
     if args.dry_run {
-        let plan = release::plan_unified(&args.component_id, &options)?;
+        let plan = release::plan(&args.component_id, &options)?;
 
         let deployment = if args.deploy {
             Some(plan_deployment(&args.component_id))

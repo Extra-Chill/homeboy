@@ -192,7 +192,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             };
 
             if dry_run {
-                let plan = release::plan_unified(&component_id, &options)?;
+                let plan = release::plan(&component_id, &options)?;
                 Ok((
                     VersionOutput::Bump(VersionBumpOutput {
                         command: "version.bump".to_string(),
