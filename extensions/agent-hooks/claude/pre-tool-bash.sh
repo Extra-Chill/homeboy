@@ -25,7 +25,7 @@ fi
 # Check for anti-patterns
 if message=$(check_bash_antipatterns "$command"); then
     # Anti-pattern detected, block with message
-    echo "$message"
+    echo "$message" >&2
     exit 2
 fi
 

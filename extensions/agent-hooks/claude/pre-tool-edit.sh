@@ -20,7 +20,7 @@ init_data=$(homeboy init --json 2>/dev/null | jq '.data' 2>/dev/null || echo "{}
 # Check changelog protection
 changelog_path=$(echo "$init_data" | jq -r '.changelog.path // empty' 2>/dev/null || true)
 if [[ -n "$changelog_path" && "$file_path" == "$changelog_path" ]]; then
-    cat <<'EOF'
+    cat <<'EOF' >&2
 Changelog Protection
 
 Use Homeboy for changelog entries:
@@ -35,7 +35,7 @@ fi
 version_files=$(echo "$init_data" | jq -r '.version.targets[].full_path // empty' 2>/dev/null || true)
 for version_file in $version_files; do
     if [[ "$file_path" == "$version_file" ]]; then
-        cat <<'EOF'
+        cat <<'EOF' >&2
 Version File Protection
 
 Use Homeboy for version changes:
