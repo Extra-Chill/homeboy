@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+- Add 'homeboy module show' command for detailed module inspection
+
 ## [0.32.4] - 2026-01-20
 
 - Add build-time local_path validation with clear error messages
