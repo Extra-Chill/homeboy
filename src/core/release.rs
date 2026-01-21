@@ -1281,3 +1281,480 @@ fn build_plan_hints(
 
     hints
 }
+
+// ============================================================================
+// Unified Release Command (cargo-release pattern)
+// ============================================================================
+
+/// Options for the unified release command.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReleaseOptions {
+    pub bump_type: String,
+    pub dry_run: bool,
+    pub local: bool,
+    pub publish: bool,
+    pub no_tag: bool,
+    pub no_push: bool,
+}
+
+/// Determine if the component has publish targets configured.
+fn has_publish_targets(component: &Component) -> bool {
+    if let Some(release) = &component.release {
+        release.steps.iter().any(|step| {
+            matches!(
+                step.step_type,
+                ReleaseStepType::GitPush | ReleaseStepType::ModuleAction(_) | ReleaseStepType::ModuleRun
+            )
+        })
+    } else {
+        false
+    }
+}
+
+/// Plan a unified release (version bump + git operations + optional publish).
+pub fn plan_unified(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan> {
+    let component = component::load(component_id)?;
+
+    // Validate changelog has content to release
+    let changelog_path = changelog::resolve_changelog_path(&component)?;
+    let changelog_content = crate::core::local_files::local().read(&changelog_path)?;
+    let settings = changelog::resolve_effective_settings(Some(&component));
+
+    if let Some(status) =
+        changelog::check_next_section_content(&changelog_content, &settings.next_section_aliases)?
+    {
+        match status.as_str() {
+            "empty" => {
+                return Err(Error::validation_invalid_argument(
+                    "changelog",
+                    "Changelog has no unreleased entries",
+                    None,
+                    Some(vec![
+                        "Add changelog entries: homeboy changelog add <component> -m \"...\"".to_string(),
+                    ]),
+                ));
+            }
+            "subsection_headers_only" => {
+                return Err(Error::validation_invalid_argument(
+                    "changelog",
+                    "Changelog has subsection headers but no items",
+                    None,
+                    Some(vec![
+                        "Add changelog entries: homeboy changelog add <component> -m \"...\"".to_string(),
+                    ]),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    // Preview version bump
+    let version_info = version::read_version(Some(component_id))?;
+    let new_version = version::increment_version(&version_info.version, &options.bump_type)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "version",
+                format!("Invalid version format: {}", version_info.version),
+                None,
+                None,
+            )
+        })?;
+
+    // Validate changelog for bump (dry-run validation)
+    version::validate_changelog_for_bump(&component, &version_info.version, &new_version)?;
+
+    // Determine effective behavior based on flags and config
+    let has_publish = has_publish_targets(&component);
+    let will_push = !options.local && !options.no_push && (options.publish || has_publish);
+    let will_publish = !options.local && options.publish;
+
+    // Build plan steps
+    let mut steps = Vec::new();
+    let warnings = Vec::new();
+    let mut hints = Vec::new();
+
+    // Step 1: Version bump (implicit, always first)
+    steps.push(ReleasePlanStep {
+        id: "version".to_string(),
+        step_type: "version".to_string(),
+        label: Some(format!(
+            "Bump version {} → {} ({})",
+            version_info.version, new_version, options.bump_type
+        )),
+        needs: vec![],
+        config: {
+            let mut config = std::collections::HashMap::new();
+            config.insert(
+                "bump".to_string(),
+                serde_json::Value::String(options.bump_type.clone()),
+            );
+            config.insert(
+                "from".to_string(),
+                serde_json::Value::String(version_info.version.clone()),
+            );
+            config.insert(
+                "to".to_string(),
+                serde_json::Value::String(new_version.clone()),
+            );
+            config
+        },
+        status: ReleasePlanStatus::Ready,
+        missing: vec![],
+    });
+
+    // Step 2: Git commit (always after version bump)
+    steps.push(ReleasePlanStep {
+        id: "git.commit".to_string(),
+        step_type: "git.commit".to_string(),
+        label: Some(format!("Commit release: v{}", new_version)),
+        needs: vec!["version".to_string()],
+        config: std::collections::HashMap::new(),
+        status: ReleasePlanStatus::Ready,
+        missing: vec![],
+    });
+
+    // Step 3: Git tag (unless --no-tag)
+    if !options.no_tag {
+        steps.push(ReleasePlanStep {
+            id: "git.tag".to_string(),
+            step_type: "git.tag".to_string(),
+            label: Some(format!("Tag v{}", new_version)),
+            needs: vec!["git.commit".to_string()],
+            config: {
+                let mut config = std::collections::HashMap::new();
+                config.insert(
+                    "name".to_string(),
+                    serde_json::Value::String(format!("v{}", new_version)),
+                );
+                config
+            },
+            status: ReleasePlanStatus::Ready,
+            missing: vec![],
+        });
+    }
+
+    // Step 4: Git push (unless --local or --no-push)
+    if will_push {
+        let needs = if options.no_tag {
+            vec!["git.commit".to_string()]
+        } else {
+            vec!["git.tag".to_string()]
+        };
+        steps.push(ReleasePlanStep {
+            id: "git.push".to_string(),
+            step_type: "git.push".to_string(),
+            label: Some("Push to remote".to_string()),
+            needs,
+            config: {
+                let mut config = std::collections::HashMap::new();
+                config.insert("tags".to_string(), serde_json::Value::Bool(!options.no_tag));
+                config
+            },
+            status: ReleasePlanStatus::Ready,
+            missing: vec![],
+        });
+    }
+
+    // Step 5+: Publish steps from component config (if --publish or has publish targets and not --local)
+    if will_publish {
+        if let Some(release) = &component.release {
+            for step in &release.steps {
+                if matches!(
+                    step.step_type,
+                    ReleaseStepType::ModuleAction(_) | ReleaseStepType::ModuleRun
+                ) {
+                    let needs = if will_push {
+                        vec!["git.push".to_string()]
+                    } else if !options.no_tag {
+                        vec!["git.tag".to_string()]
+                    } else {
+                        vec!["git.commit".to_string()]
+                    };
+                    steps.push(ReleasePlanStep {
+                        id: step.id.clone(),
+                        step_type: step.step_type.as_str().to_string(),
+                        label: step.label.clone(),
+                        needs,
+                        config: step.config.clone(),
+                        status: ReleasePlanStatus::Ready,
+                        missing: vec![],
+                    });
+                }
+            }
+        }
+    }
+
+    // Add hints based on configuration
+    if options.local {
+        hints.push("Local-only release: skipping push and publish steps".to_string());
+    } else if options.no_push {
+        hints.push("Skipping push (--no-push)".to_string());
+    }
+
+    if options.no_tag {
+        hints.push("Skipping tag creation (--no-tag)".to_string());
+    }
+
+    if !will_publish && has_publish {
+        hints.push(format!(
+            "Component has publish targets. Use --publish to run: homeboy release {} {} --publish",
+            component_id, options.bump_type
+        ));
+    }
+
+    if options.dry_run {
+        hints.push("Dry run: no changes will be made".to_string());
+    }
+
+    Ok(ReleasePlan {
+        component_id: component_id.to_string(),
+        enabled: true,
+        steps,
+        warnings,
+        hints,
+    })
+}
+
+/// Run a unified release (version bump + git operations + optional publish).
+pub fn run_unified(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
+    let component = component::load(component_id)?;
+
+    // Execute pre-bump commands
+    if !component.pre_version_bump_commands.is_empty() {
+        version::run_pre_bump_commands(&component.pre_version_bump_commands, &component.local_path)?;
+    }
+
+    // Auto-stage changelog changes before clean-tree check
+    if let Some(ref changelog_target) = component.changelog_target {
+        let uncommitted = crate::git::get_uncommitted_changes(&component.local_path)?;
+        if uncommitted.has_changes {
+            let all_uncommitted: Vec<&str> = uncommitted
+                .staged
+                .iter()
+                .chain(uncommitted.unstaged.iter())
+                .map(|s| s.as_str())
+                .collect();
+
+            let only_changelog = !all_uncommitted.is_empty()
+                && all_uncommitted
+                    .iter()
+                    .all(|f| *f == changelog_target || f.ends_with(changelog_target));
+
+            if only_changelog {
+                eprintln!(
+                    "[release] Auto-staging changelog changes: {}",
+                    changelog_target
+                );
+                crate::git::stage_files(&component.local_path, &[changelog_target.as_str()])?;
+            }
+        }
+    }
+
+    // Require clean working tree
+    let uncommitted = crate::git::get_uncommitted_changes(&component.local_path)?;
+    if uncommitted.has_changes {
+        let mut details = vec![];
+        if !uncommitted.staged.is_empty() {
+            details.push(format!("Staged: {}", uncommitted.staged.join(", ")));
+        }
+        if !uncommitted.unstaged.is_empty() {
+            details.push(format!("Unstaged: {}", uncommitted.unstaged.join(", ")));
+        }
+        if !uncommitted.untracked.is_empty() {
+            details.push(format!("Untracked: {}", uncommitted.untracked.join(", ")));
+        }
+        return Err(Error::validation_invalid_argument(
+            "workingTree",
+            "Working tree has uncommitted changes",
+            Some(details.join("\n")),
+            Some(vec![
+                "Release only commits version targets and changelog.".to_string(),
+                "1. Document changes: homeboy changelog add <component> -m \"...\"".to_string(),
+                "2. Commit everything: git add -A && git commit -m \"<description>\"".to_string(),
+                "3. Run release: homeboy release <component> <level>".to_string(),
+            ]),
+        ));
+    }
+
+    // Step 1: Version bump with changelog finalization
+    eprintln!("[release] Bumping version ({})...", options.bump_type);
+    let bump_result = version::bump_version(Some(component_id), &options.bump_type)?;
+    let new_version = bump_result.new_version.clone();
+
+    // Collect files to commit
+    let mut files_to_stage: Vec<String> = bump_result
+        .targets
+        .iter()
+        .map(|t| t.full_path.clone())
+        .collect();
+    if !bump_result.changelog_path.is_empty() {
+        files_to_stage.push(bump_result.changelog_path.clone());
+    }
+
+    // Step 2: Git commit
+    eprintln!("[release] Committing release: v{}...", new_version);
+    let commit_message = format!("release: v{}", new_version);
+    let commit_options = crate::git::CommitOptions {
+        staged_only: false,
+        files: Some(files_to_stage),
+        exclude: None,
+        amend: false,
+    };
+    let commit_output = crate::git::commit(Some(component_id), Some(&commit_message), commit_options)?;
+    if !commit_output.success {
+        return Err(Error::other(format!(
+            "Git commit failed: {}",
+            commit_output.stderr
+        )));
+    }
+
+    // Step 3: Git tag (unless --no-tag)
+    if !options.no_tag {
+        let tag_name = format!("v{}", new_version);
+        let tag_message = format!("Release {}", tag_name);
+        eprintln!("[release] Tagging {}...", tag_name);
+        let tag_output = crate::git::tag(Some(component_id), Some(&tag_name), Some(&tag_message))?;
+        if !tag_output.success {
+            return Err(Error::other(format!(
+                "Git tag failed: {}",
+                tag_output.stderr
+            )));
+        }
+    }
+
+    // Determine effective behavior
+    let has_publish = has_publish_targets(&component);
+    let will_push = !options.local && !options.no_push && (options.publish || has_publish);
+    let will_publish = !options.local && options.publish;
+
+    // Step 4: Git push (unless --local or --no-push)
+    if will_push {
+        eprintln!("[release] Pushing to remote...");
+        let push_output = crate::git::push(Some(component_id), !options.no_tag)?;
+        if !push_output.success {
+            return Err(Error::other(format!(
+                "Git push failed: {}",
+                push_output.stderr
+            )));
+        }
+    }
+
+    // Step 5+: Run publish steps from component config (if --publish)
+    let mut publish_results = Vec::new();
+    if will_publish {
+        let modules = resolve_modules(&component, None)?;
+        if let Some(release) = &component.release {
+            for step in &release.steps {
+                if matches!(
+                    step.step_type,
+                    ReleaseStepType::ModuleAction(_) | ReleaseStepType::ModuleRun
+                ) {
+                    eprintln!("[release] Running publish step: {}...", step.id);
+                    let executor =
+                        ReleaseStepExecutor::new(component_id.to_string(), modules.clone());
+
+                    // Store version context for module execution
+                    {
+                        let mut context = executor.context.lock().map_err(|_| {
+                            Error::internal_unexpected("Failed to lock release context".to_string())
+                        })?;
+                        context.version = Some(new_version.clone());
+                        context.tag = Some(format!("v{}", new_version));
+                    }
+
+                    let pipeline_step = PipelineStep::from(step.clone());
+                    let result = executor.execute_step(&pipeline_step)?;
+                    publish_results.push(result);
+                }
+            }
+        }
+    }
+
+    // Build result
+    let mut run_steps = vec![
+        PipelineStepResult {
+            id: "version".to_string(),
+            step_type: "version".to_string(),
+            status: PipelineRunStatus::Success,
+            missing: vec![],
+            warnings: vec![],
+            hints: vec![],
+            data: Some(serde_json::json!({
+                "old_version": bump_result.old_version,
+                "new_version": bump_result.new_version,
+                "changelog_finalized": bump_result.changelog_finalized,
+            })),
+            error: None,
+        },
+        PipelineStepResult {
+            id: "git.commit".to_string(),
+            step_type: "git.commit".to_string(),
+            status: PipelineRunStatus::Success,
+            missing: vec![],
+            warnings: vec![],
+            hints: vec![],
+            data: Some(serde_json::json!({
+                "message": commit_message,
+            })),
+            error: None,
+        },
+    ];
+
+    if !options.no_tag {
+        run_steps.push(PipelineStepResult {
+            id: "git.tag".to_string(),
+            step_type: "git.tag".to_string(),
+            status: PipelineRunStatus::Success,
+            missing: vec![],
+            warnings: vec![],
+            hints: vec![],
+            data: Some(serde_json::json!({
+                "tag": format!("v{}", new_version),
+            })),
+            error: None,
+        });
+    }
+
+    if will_push {
+        run_steps.push(PipelineStepResult {
+            id: "git.push".to_string(),
+            step_type: "git.push".to_string(),
+            status: PipelineRunStatus::Success,
+            missing: vec![],
+            warnings: vec![],
+            hints: vec![],
+            data: None,
+            error: None,
+        });
+    }
+
+    run_steps.extend(publish_results);
+
+    let overall_status = if run_steps.iter().all(|s| s.status == PipelineRunStatus::Success) {
+        PipelineRunStatus::Success
+    } else {
+        PipelineRunStatus::Failed
+    };
+
+    // Log completion message
+    if overall_status == PipelineRunStatus::Success {
+        eprintln!("[release] Released v{}", new_version);
+        if !will_push {
+            eprintln!(
+                "[release] Push with: git push origin v{} && git push",
+                new_version
+            );
+        }
+    }
+
+    Ok(ReleaseRun {
+        component_id: component_id.to_string(),
+        enabled: true,
+        result: PipelineRunResult {
+            status: overall_status,
+            steps: run_steps,
+            warnings: Vec::new(),
+            summary: None,
+        },
+    })
+}

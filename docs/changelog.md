@@ -7,6 +7,18 @@ All notable changes to Homeboy CLI are documented in this file.
 ## Unreleased
 
 ### Added
+- Add release command flags: --dry-run (preview), --local (skip push/publish), --publish (force full pipeline), --no-tag, --no-push
+
+### Changed
+- Unify release command: 'homeboy release <component> <patch|minor|major>' now handles version bump, commit, tag, and optional push/publish in one flow
+
+### Removed
+- Remove 'version bump' command - use 'homeboy release <component> patch|minor|major' instead
+- Remove 'release run' and 'release plan' subcommands - use 'homeboy release <component> patch|minor|major [--dry-run]' instead
+
+## [0.30.16] - 2026-01-20
+
+### Added
 - Add --project/-p flag to deploy command for explicit project specification
 
 ### Refactored
