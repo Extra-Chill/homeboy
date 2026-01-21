@@ -3,43 +3,6 @@ use crate::utils::validation;
 
 use super::types::ReleaseArtifact;
 
-pub(crate) fn parse_module_inputs(values: &[serde_json::Value]) -> Result<Vec<(String, String)>> {
-    let mut inputs = Vec::new();
-    for value in values {
-        let entry = validation::require(
-            value.as_object(),
-            "release.steps",
-            "module.run inputs must be objects with 'id' and 'value'",
-        )?;
-        let id = validation::require(
-            entry.get("id").and_then(|v| v.as_str()),
-            "release.steps",
-            "module.run inputs require 'id'",
-        )?;
-        let value = validation::require(
-            entry.get("value").and_then(|v| v.as_str()),
-            "release.steps",
-            "module.run inputs require 'value'",
-        )?;
-        inputs.push((id.to_string(), value.to_string()));
-    }
-
-    Ok(inputs)
-}
-
-pub(crate) fn parse_module_args(values: &[serde_json::Value]) -> Result<Vec<String>> {
-    let mut args = Vec::new();
-    for value in values {
-        let arg = validation::require(
-            value.as_str(),
-            "release.steps",
-            "module.run args must be strings",
-        )?;
-        args.push(arg.to_string());
-    }
-    Ok(args)
-}
-
 pub fn extract_latest_notes(content: &str) -> Option<String> {
     let mut in_section = false;
     let mut buffer = Vec::new();

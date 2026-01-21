@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+- Refactor release system: built-in core steps (commit, tag, push) with config-driven publish targets
+
+## [0.32.7] - 2026-01-21
+
+- Fix release config-first: component release.steps now respected instead of overwritten with generated defaults
+- Remove --no-tag, --no-push, --no-commit flags from release command (use git primitives for partial workflows)
+
 ## [0.32.6] - 2026-01-21
 
 - Add --deploy flag to release command for automatic deployment to all projects using the component

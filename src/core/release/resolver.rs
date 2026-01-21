@@ -14,28 +14,41 @@ impl ReleaseCapabilityResolver {
         Self { modules }
     }
 
-    fn supports_module_action(&self, step_type: &str) -> bool {
-        let action_id = format!("release.{}", step_type);
+    fn supports_publish_target(&self, target: &str) -> bool {
         self.modules
             .iter()
-            .any(|module| module.actions.iter().any(|action| action.id == action_id))
+            .any(|module| module.id == target && module.actions.iter().any(|a| a.id == "release.publish"))
     }
 }
 
 impl PipelineCapabilityResolver for ReleaseCapabilityResolver {
     fn is_supported(&self, step_type: &str) -> bool {
-        let st = ReleaseStepType::from(step_type);
-        st == ReleaseStepType::ModuleRun
-            || st.is_core_step()
-            || self.supports_module_action(step_type)
+        let st = ReleaseStepType::from_str(step_type);
+        match st {
+            ReleaseStepType::Version
+            | ReleaseStepType::GitCommit
+            | ReleaseStepType::GitTag
+            | ReleaseStepType::GitPush => true,
+            ReleaseStepType::Publish(ref target) => {
+                // Extract target from "publish.<target>" format
+                let target_name = target.strip_prefix("publish.").unwrap_or(target);
+                self.supports_publish_target(target_name)
+            }
+        }
     }
 
     fn missing(&self, step_type: &str) -> Vec<String> {
-        if ReleaseStepType::from(step_type) == ReleaseStepType::ModuleRun {
-            return Vec::new();
+        let st = ReleaseStepType::from_str(step_type);
+        match st {
+            ReleaseStepType::Publish(ref target) => {
+                let target_name = target.strip_prefix("publish.").unwrap_or(target);
+                vec![format!(
+                    "Missing module '{}' with action 'release.publish'",
+                    target_name
+                )]
+            }
+            _ => Vec::new(),
         }
-        let action_id = format!("release.{}", step_type);
-        vec![format!("Missing action '{}'", action_id)]
     }
 }
 
@@ -66,26 +79,4 @@ pub(crate) fn resolve_modules(
     }
 
     Ok(modules)
-}
-
-pub(crate) fn resolve_module_actions(
-    modules: &[ModuleManifest],
-    action_id: &str,
-) -> Result<Vec<ModuleManifest>> {
-    let matches: Vec<ModuleManifest> = modules
-        .iter()
-        .filter(|module| module.actions.iter().any(|action| action.id == action_id))
-        .cloned()
-        .collect();
-
-    if matches.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "release.steps",
-            format!("No module provides action '{}'", action_id),
-            None,
-            None,
-        ));
-    }
-
-    Ok(matches)
 }
