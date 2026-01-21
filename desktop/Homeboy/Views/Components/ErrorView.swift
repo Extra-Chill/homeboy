@@ -5,8 +5,6 @@ struct ErrorView: View {
     let error: any DisplayableError
     let onRetry: (() -> Void)?
 
-    @State private var showCopied = false
-
     /// Initialize with error message and source context (creates AppError)
     init(_ message: String, source: String, path: String? = nil, onRetry: (() -> Void)? = nil) {
         self.error = AppError(message, source: source, path: path)
@@ -47,13 +45,7 @@ struct ErrorView: View {
             }
 
             HStack(spacing: 12) {
-                Button(action: performCopy) {
-                    HStack(spacing: 4) {
-                        Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
-                        Text(showCopied ? "Copied!" : "Copy Error")
-                    }
-                }
-                .foregroundColor(showCopied ? .green : nil)
+                CopyButton(content: error, style: .labeledError)
 
                 if let onRetry = onRetry, error.isRetryable != false {
                     Button("Retry", action: onRetry)
@@ -61,14 +53,5 @@ struct ErrorView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func performCopy() {
-        error.copyToClipboard()
-        showCopied = true
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            showCopied = false
-        }
     }
 }

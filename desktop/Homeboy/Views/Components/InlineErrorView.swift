@@ -5,8 +5,6 @@ struct InlineErrorView: View {
     let error: any DisplayableError
     let onDismiss: (() -> Void)?
 
-    @State private var showCopied = false
-
     /// Initialize with error message and source context (creates AppError)
     init(_ message: String, source: String, path: String? = nil, onDismiss: (() -> Void)? = nil) {
         self.error = AppError(message, source: source, path: path)
@@ -48,12 +46,7 @@ struct InlineErrorView: View {
                     .cornerRadius(4)
             }
 
-            Button(action: performCopy) {
-                Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
-                    .foregroundColor(showCopied ? .green : .secondary)
-            }
-            .buttonStyle(.borderless)
-            .help(showCopied ? "Copied!" : "Copy error details")
+            CopyButton(content: error, style: .icon)
 
             if let onDismiss = onDismiss {
                 Button(action: onDismiss) {
@@ -66,14 +59,5 @@ struct InlineErrorView: View {
         .padding(8)
         .background(Color.red.opacity(0.1))
         .cornerRadius(6)
-    }
-
-    private func performCopy() {
-        error.copyToClipboard()
-        showCopied = true
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            showCopied = false
-        }
     }
 }
