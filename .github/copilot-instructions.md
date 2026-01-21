@@ -10,7 +10,7 @@
 ## Project-specific patterns to follow
 - JSON output is mandatory for most commands; wrap results with the stable envelope in src/output/response.rs and return exit codes via map_cmd_result_to_json.
 - Some commands are raw/interactive: ssh/logs passthrough require a TTY (see src/main.rs and src/tty.rs), docs/changelog/list return Markdown.
-- CLI “set/merge/remove” flows accept JSON specs from a string, @file, or stdin (-); avoid inventing new parsing conventions—reuse merge_json_sources in src/commands/mod.rs or config::read_json_spec_to_string in src/core/config.rs.
+- CLI “set/merge/remove” flows accept JSON specs from a string, `@file`, or stdin (`-`); avoid inventing new parsing conventions—reuse `merge_json_sources` (CLI layer, `src/commands/mod.rs`) and the centralized reader `read_json_spec_to_string` at `src/core/config.rs`.
 - Config records are stored as JSON files (projects/, servers/, components/) under the OS config dir; avoid adding repo-local config files.
 
 ## Key integration points
