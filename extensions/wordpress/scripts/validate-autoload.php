@@ -1,6 +1,6 @@
 <?php
 /**
- * Pre-flight plugin load validation
+ * Pre-flight component load validation (plugins and themes)
  * Catches autoload errors, missing classes, and fatal errors during initialization
  */
 
@@ -18,16 +18,16 @@ if (!is_dir($wp_tests_dir)) {
     exit(1);
 }
 
-// Find plugin main file (same logic as bootstrap.php)
-$plugin_file = find_plugin_main_file($plugin_path);
-if (!$plugin_file) {
-    echo "Could not find plugin main file in $plugin_path\n";
-    echo "Looked for files with 'Plugin Name:' header\n";
+// Find component main file (plugin or theme)
+$component = find_component_main_file($plugin_path);
+if (!$component) {
+    echo "Could not find component main file in $plugin_path\n";
+    echo "Looked for: style.css with 'Theme Name:' or *.php with 'Plugin Name:'\n";
     exit(1);
 }
 
 // Register shutdown handler for fatal errors
-register_shutdown_function(function() use ($plugin_file) {
+register_shutdown_function(function() use ($component) {
     $error = error_get_last();
     if ($error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
         echo "\n";
@@ -98,28 +98,78 @@ if (!function_exists('wp_die')) {
     }
 }
 
-// Attempt to load plugin
-require_once $plugin_file;
+// Handle based on component type
+if ($component['type'] === 'theme') {
+    // Add theme-specific stubs
+    if (!function_exists('get_template_directory')) {
+        function get_template_directory() {
+            return getenv('HOMEBOY_PLUGIN_PATH');
+        }
+    }
+    if (!function_exists('get_stylesheet_directory')) {
+        function get_stylesheet_directory() {
+            return getenv('HOMEBOY_PLUGIN_PATH');
+        }
+    }
+    if (!function_exists('get_template_directory_uri')) {
+        function get_template_directory_uri() {
+            return '';
+        }
+    }
+    if (!function_exists('get_stylesheet_directory_uri')) {
+        function get_stylesheet_directory_uri() {
+            return '';
+        }
+    }
+    if (!function_exists('get_stylesheet_uri')) {
+        function get_stylesheet_uri() {
+            return '';
+        }
+    }
 
-echo "Plugin loaded successfully.\n";
+    if ($component['file']) {
+        require_once $component['file'];
+        echo "Theme loaded successfully.\n";
+    } else {
+        echo "Theme has no functions.php (CSS-only theme).\n";
+    }
+} else {
+    // Plugin loading
+    require_once $component['file'];
+    echo "Plugin loaded successfully.\n";
+}
+
 exit(0);
 
 /**
- * Find plugin main file by scanning for Plugin Name header
+ * Find component main file - plugin or theme
+ * Returns array: ['type' => 'plugin'|'theme', 'file' => '/path/to/file'] or null
  */
-function find_plugin_main_file($path) {
-    // Check common names first
+function find_component_main_file($path) {
+    // Check for theme first (style.css with Theme Name:)
+    $style_css = $path . '/style.css';
+    if (file_exists($style_css) && strpos(file_get_contents($style_css), 'Theme Name:') !== false) {
+        // For themes, return functions.php as the main file to load
+        $functions_php = $path . '/functions.php';
+        if (file_exists($functions_php)) {
+            return ['type' => 'theme', 'file' => $functions_php];
+        }
+        // Theme without functions.php is valid (just CSS)
+        return ['type' => 'theme', 'file' => null];
+    }
+
+    // Check for plugin (check common names first)
     $candidates = [basename($path) . '.php', 'plugin.php'];
     foreach ($candidates as $name) {
         $file = $path . '/' . $name;
         if (file_exists($file) && strpos(file_get_contents($file), 'Plugin Name:') !== false) {
-            return $file;
+            return ['type' => 'plugin', 'file' => $file];
         }
     }
     // Scan root PHP files
     foreach (glob($path . '/*.php') as $file) {
         if (strpos(file_get_contents($file), 'Plugin Name:') !== false) {
-            return $file;
+            return ['type' => 'plugin', 'file' => $file];
         }
     }
     return null;

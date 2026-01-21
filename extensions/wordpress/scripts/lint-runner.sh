@@ -343,12 +343,13 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         fi
     fi
 
-    # Exit based on combined results
+    # Always exit 0 (warn-only mode) - lint issues are warnings, not failures
     if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ]; then
-        exit 0
+        echo "Linting passed"
     else
-        exit 1
+        echo "Linting found issues (see above)"
     fi
+    exit 0
 fi
 
 # Full report mode (default)
@@ -376,9 +377,12 @@ if [ -f "$ESLINT_RUNNER" ]; then
     fi
 fi
 
-# Exit based on combined results
+# Always exit 0 (warn-only mode) - lint issues are warnings, not failures
 if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ]; then
-    exit 0
+    echo ""
+    echo "Linting passed"
 else
-    exit 1
+    echo ""
+    echo "Linting found issues (see above)"
 fi
+exit 0

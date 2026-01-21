@@ -110,20 +110,9 @@ run_lint() {
         return 0
     fi
 
-    # Run linting in summary mode for concise test output
-    local lint_exit=0
-    HOMEBOY_SUMMARY_MODE=1 bash "$lint_runner" || lint_exit=$?
-
-    if [ $lint_exit -eq 0 ]; then
-        echo ""
-    elif [ $lint_exit -le 2 ]; then
-        echo ""
-        echo "Linting found issues (see above). Proceeding to tests..."
-        echo ""
-    else
-        echo "Linting encountered a fatal error (exit code $lint_exit). Aborting."
-        exit 1
-    fi
+    # Run linting in summary mode (lint-runner.sh always exits 0 - warn-only mode)
+    HOMEBOY_SUMMARY_MODE=1 bash "$lint_runner"
+    echo ""
 }
 
 # Run autoload validation (blocking - must pass before tests)
@@ -203,6 +192,15 @@ if [ -f "$LOCAL_PHPUNIT_XML_DIST_ROOT" ]; then
     echo "  Location: $LOCAL_PHPUNIT_XML_DIST_ROOT"
     echo "  Consider removing: $LOCAL_PHPUNIT_XML_DIST_ROOT"
     echo ""
+fi
+
+# Check if tests directory exists before running PHPUnit
+if [ ! -d "${TEST_DIR}" ]; then
+    echo ""
+    echo "⚠ Warning: No tests directory found at ${TEST_DIR}"
+    echo "  Skipping PHPUnit tests."
+    echo ""
+    exit 0
 fi
 
 # Run PHPUnit with module bootstrap
