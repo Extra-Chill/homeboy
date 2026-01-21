@@ -140,23 +140,7 @@ impl ReleaseStepExecutor {
     }
 
     fn run_git_tag(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
-        let tag = step
-            .config
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string())
-            .or_else(|| {
-                step.config
-                    .get("versionTag")
-                    .and_then(|v| v.as_str())
-                    .map(|v| v.to_string())
-            });
-
-        let tag_name = match tag {
-            Some(name) => name,
-            None => self.default_tag()?,
-        };
-
+        let tag_name = self.get_release_tag(step)?;
         let component = component::load(&self.component_id)?;
 
         if crate::git::tag_exists_locally(&component.local_path, &tag_name).unwrap_or(false) {
@@ -180,34 +164,22 @@ impl ReleaseStepExecutor {
                 ));
             }
 
-            eprintln!(
-                "[release] Auto-fixing: Tag '{}' points to {} but HEAD is {}. Recreating tag at HEAD...",
-                tag_name,
-                &tag_commit[..8.min(tag_commit.len())],
-                &head_commit[..8.min(head_commit.len())]
-            );
-
-            let delete_output = crate::git::execute_git_for_release(
-                &component.local_path,
-                &["tag", "-d", &tag_name],
-            )
-            .map_err(|e| Error::other(e.to_string()))?;
-
-            if !delete_output.status.success() {
-                return Ok(self.step_result(
-                    step,
-                    PipelineRunStatus::Failed,
-                    None,
-                    Some(format!(
-                        "Failed to delete orphaned tag '{}': {}",
-                        tag_name,
-                        String::from_utf8_lossy(&delete_output.stderr)
-                    )),
-                    Vec::new(),
-                ));
-            }
-
-            eprintln!("[release] Tag '{}' will be recreated at HEAD", tag_name);
+            return Err(Error::validation_invalid_argument(
+                "tag",
+                format!(
+                    "Tag '{}' exists but points to different commit",
+                    tag_name
+                ),
+                Some(format!(
+                    "Tag points to {}, HEAD is {}",
+                    &tag_commit[..8.min(tag_commit.len())],
+                    &head_commit[..8.min(head_commit.len())]
+                )),
+                Some(vec![
+                    format!("Delete stale tag: git tag -d {}", tag_name),
+                    format!("Then retry: homeboy release {} <bump>", self.component_id),
+                ]),
+            ));
         }
 
         let message = step
@@ -384,7 +356,18 @@ impl ReleaseStepExecutor {
         let context = self.context.lock().map_err(|_| {
             Error::internal_unexpected("Failed to lock release context".to_string())
         })?;
-        let version = context.version.clone().unwrap_or_default();
+
+        let version = context.version.clone().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "version",
+                "Version context not set for release step",
+                Some(format!("Step '{}' requires version context", step.id)),
+                Some(vec![
+                    "Ensure version step runs before this step".to_string(),
+                ]),
+            )
+        })?;
+
         let tag = context
             .tag
             .clone()
@@ -432,18 +415,34 @@ impl ReleaseStepExecutor {
         Ok(())
     }
 
-    fn default_tag(&self) -> Result<String> {
+    fn get_release_tag(&self, step: &PipelineStep) -> Result<String> {
+        if let Some(name) = step.config.get("name").and_then(|v| v.as_str()) {
+            return Ok(name.to_string());
+        }
+        if let Some(name) = step.config.get("versionTag").and_then(|v| v.as_str()) {
+            return Ok(name.to_string());
+        }
+
         let context = self.context.lock().map_err(|_| {
             Error::internal_unexpected("Failed to lock release context".to_string())
         })?;
+
         if let Some(tag) = context.tag.as_ref() {
             return Ok(tag.clone());
         }
         if let Some(version) = context.version.as_ref() {
             return Ok(format!("v{}", version));
         }
-        let info = version::read_version(Some(&self.component_id))?;
-        Ok(format!("v{}", info.version))
+
+        Err(Error::validation_invalid_argument(
+            "tag",
+            "Cannot determine release tag - version context not set",
+            None,
+            Some(vec![
+                "Ensure version step runs before git.tag step".to_string(),
+                "Or specify tag explicitly in step config: { \"name\": \"v1.2.3\" }".to_string(),
+            ]),
+        ))
     }
 
     fn load_release_notes(&self) -> Result<String> {

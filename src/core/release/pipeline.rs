@@ -59,6 +59,53 @@ fn validate_plan_prerequisites(component: &Component) -> Vec<String> {
     warnings
 }
 
+fn validate_step_dependencies(steps: &[ReleaseStep]) -> Result<()> {
+    let has_version = steps
+        .iter()
+        .any(|s| s.step_type == ReleaseStepType::Version);
+    let has_tag = steps.iter().any(|s| s.step_type == ReleaseStepType::GitTag);
+
+    if has_tag && !has_version {
+        return Err(Error::validation_invalid_argument(
+            "release.steps",
+            "git.tag step requires version step to set release context",
+            None,
+            Some(vec![
+                "Add version step before git.tag in release config".to_string(),
+                "Or specify tag explicitly in git.tag config: { \"name\": \"v1.2.3\" }".to_string(),
+            ]),
+        ));
+    }
+
+    if has_tag && has_version {
+        let version_idx = steps
+            .iter()
+            .position(|s| s.step_type == ReleaseStepType::Version);
+        let tag_idx = steps
+            .iter()
+            .position(|s| s.step_type == ReleaseStepType::GitTag);
+
+        if let (Some(v_idx), Some(t_idx)) = (version_idx, tag_idx) {
+            if v_idx > t_idx {
+                return Err(Error::validation_invalid_argument(
+                    "release.steps",
+                    "version step must come before git.tag step",
+                    Some(format!(
+                        "version is at position {}, git.tag is at position {}",
+                        v_idx + 1,
+                        t_idx + 1
+                    )),
+                    Some(vec![
+                        "Reorder steps so version runs before git.tag".to_string(),
+                    ]),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn plan(component_id: &str, module_id: Option<&str>) -> Result<ReleasePlan> {
     let component = component::load(component_id)?;
     let modules = resolve_modules(&component, module_id)?;
@@ -78,6 +125,8 @@ pub fn plan(component_id: &str, module_id: Option<&str>) -> Result<ReleasePlan> 
     })?;
 
     let enabled = release.enabled.unwrap_or(true);
+
+    validate_step_dependencies(&release.steps)?;
 
     let (release_steps, commit_auto_inserted) = auto_insert_commit_step(release.steps);
     let pipeline_steps: Vec<PipelineStep> = release_steps
@@ -218,6 +267,8 @@ pub fn run(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
     })?;
 
     let enabled = release.enabled.unwrap_or(true);
+
+    validate_step_dependencies(&release.steps)?;
 
     // 5. Build steps with auto-inserted commit
     let (release_steps, _commit_auto_inserted) = auto_insert_commit_step(release.steps);
