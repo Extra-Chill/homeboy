@@ -7,6 +7,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ============================================================================
+# Shared Config Installation
+# ============================================================================
+install_shared() {
+    local CONFIG_DIR="$HOME/.config/homeboy"
+    local MESSAGE_FILE="$CONFIG_DIR/agent-message.txt"
+
+    echo "Installing shared agent configuration..."
+
+    # Create config directory
+    mkdir -p "$CONFIG_DIR"
+
+    # Copy centralized session message
+    cp "$SCRIPT_DIR/core/session-message.txt" "$MESSAGE_FILE"
+
+    echo "  Message installed to $MESSAGE_FILE"
+}
+
+# ============================================================================
 # Claude Code Installation
 # ============================================================================
 install_claude() {
@@ -115,6 +133,8 @@ install_opencode() {
 # ============================================================================
 # Main
 # ============================================================================
+install_shared
+echo ""
 install_claude
 echo ""
 install_opencode
@@ -123,6 +143,7 @@ echo ""
 echo "Agent Hooks installation complete!"
 echo ""
 echo "Installed for:"
+echo "  - Shared config: ~/.config/homeboy/agent-message.txt"
 echo "  - Claude Code: ~/.claude/hooks/agent-hooks/"
 echo "  - OpenCode: ~/.config/opencode/plugins/homeboy-plugin.ts"
 echo ""

@@ -1,11 +1,28 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { exec } from "child_process"
 import { promisify } from "util"
+import { readFile } from "fs/promises"
+import { homedir } from "os"
+import { join } from "path"
 
 // SYNC NOTE: Bash equivalent at ../core/patterns.sh
 // When modifying patterns, update both files.
 
 const execAsync = promisify(exec)
+
+/**
+ * Read session message from centralized config
+ * Returns message content or null if file not found
+ */
+async function getSessionMessage(): Promise<string | null> {
+  try {
+    const messagePath = join(homedir(), ".config", "homeboy", "agent-message.txt")
+    const content = await readFile(messagePath, "utf-8")
+    return content.trim()
+  } catch {
+    return null
+  }
+}
 
 /**
  * Execute homeboy command and return stdout
@@ -196,9 +213,17 @@ Benefits: Automatic changelog, consistent targets, git commit`
  * Homeboy Plugin for OpenCode
  * Enforces Homeboy usage patterns with full Claude Code parity
  */
-export const HomeboyPlugin: Plugin = async () => {
-  // Note: client.app.log() causes blank screen - OpenCode bug?
-  // Session start message handled via tool hooks instead
+export const HomeboyPlugin: Plugin = async (client) => {
+  // Display session message on plugin initialization
+  // Uses centralized message from ~/.config/homeboy/agent-message.txt
+  const sessionMessage = await getSessionMessage()
+  if (sessionMessage && client?.app?.log) {
+    try {
+      client.app.log(sessionMessage)
+    } catch {
+      // Fallback: client.app.log() may cause issues in some OpenCode versions
+    }
+  }
 
   return {
     // Before tool execution (mirrors PreToolUse hooks)

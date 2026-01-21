@@ -1,0 +1,8 @@
+Homeboy Active
+
+Start with: homeboy init
+This gathers context (components, servers, versions) before operations.
+
+Use Homeboy for: builds, deploys, version management, documentation
+Commands: homeboy docs commands/commands-index
+Documentation: homeboy docs documentation/index

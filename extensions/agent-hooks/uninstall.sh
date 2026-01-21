@@ -80,11 +80,29 @@ uninstall_opencode() {
 }
 
 # ============================================================================
+# Shared Config Uninstallation
+# ============================================================================
+uninstall_shared() {
+    local MESSAGE_FILE="$HOME/.config/homeboy/agent-message.txt"
+
+    echo "Removing shared agent configuration..."
+
+    if [[ -f "$MESSAGE_FILE" ]]; then
+        rm "$MESSAGE_FILE"
+        echo "  Removed: $MESSAGE_FILE"
+    else
+        echo "  Message file not found (already removed?)"
+    fi
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 uninstall_claude
 echo ""
 uninstall_opencode
+echo ""
+uninstall_shared
 
 echo ""
 echo "Agent Hooks uninstalled successfully."

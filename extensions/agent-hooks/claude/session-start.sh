@@ -4,18 +4,12 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Read session data from stdin (JSON)
 cat >/dev/null
 
-# Output reminder message
-cat <<'EOF'
-Homeboy Active
-
-Start with: homeboy init
-This gathers context (components, servers, versions) before operations.
-
-Use Homeboy for: builds, deploys, changelogs, version management
-Docs: homeboy docs commands/commands-index
-EOF
+# Output reminder message from centralized source
+cat "$SCRIPT_DIR/../core/session-message.txt"
 
 exit 0

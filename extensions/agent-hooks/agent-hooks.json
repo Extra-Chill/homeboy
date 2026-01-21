@@ -6,6 +6,6 @@
   "author": "Extra Chill",
   "runtime": {
     "setup_command": "bash {{module_path}}/setup.sh",
-    "run_command": "echo 'Hooks installed for Claude Code and OpenCode'"
+    "run_command": "bash {{module_path}}/setup.sh"
   }
 }

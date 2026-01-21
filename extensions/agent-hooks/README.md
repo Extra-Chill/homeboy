@@ -9,6 +9,7 @@ homeboy module install agent-hooks
 ```
 
 The setup script automatically installs hooks for both AI coding assistants:
+- **Shared config**: `~/.config/homeboy/agent-message.txt` (centralized session message)
 - **Claude Code**: Hooks in `~/.claude/hooks/agent-hooks/`, configuration in `~/.claude/settings.json`
 - **OpenCode**: Plugin at `~/.config/opencode/plugins/homeboy-plugin.ts`
 
@@ -32,9 +33,12 @@ Homeboy Active
 Start with: homeboy init
 This gathers context (components, servers, versions) before operations.
 
-Use Homeboy for: builds, deploys, version management
-Docs: homeboy docs commands/commands-index
+Use Homeboy for: builds, deploys, version management, documentation
+Commands: homeboy docs commands/commands-index
+Documentation: homeboy docs documentation/index
 ```
+
+The message is centralized in `core/session-message.txt` and installed to `~/.config/homeboy/agent-message.txt` during setup.
 
 ### Bash Anti-Pattern Detector
 
@@ -74,6 +78,7 @@ homeboy module run agent-hooks uninstall
 Or manually:
 1. Claude Code: Remove `~/.claude/hooks/agent-hooks/` and clean `~/.claude/settings.json`
 2. OpenCode: Remove `~/.config/opencode/plugins/homeboy-plugin.ts`
+3. Shared: Remove `~/.config/homeboy/agent-message.txt`
 
 ## Structure
 
@@ -83,20 +88,25 @@ agent-hooks/
 ├── setup.sh              # Unified installer (both agents)
 ├── uninstall.sh          # Unified uninstaller (both agents)
 ├── README.md
-├── core/                 # Shared logic (bash)
-│   └── patterns.sh       # Bash anti-pattern detection
+├── core/                 # Shared logic and configuration
+│   ├── patterns.sh       # Bash anti-pattern detection
+│   └── session-message.txt  # Centralized session start message
 ├── claude/               # Claude Code hooks (bash)
-│   ├── session-start.sh
+│   ├── session-start.sh  # Reads from core/session-message.txt
 │   ├── pre-tool-bash.sh
 │   └── pre-tool-edit.sh
 └── opencode/             # OpenCode plugin (TypeScript)
-    └── homeboy-plugin.ts
+    └── homeboy-plugin.ts # Reads from ~/.config/homeboy/agent-message.txt
 ```
 
 ## Architecture Notes
 
-**Claude Code** uses separate bash scripts for each hook type, configured via `~/.claude/settings.json`.
+**Centralized Session Message**: The session start message is defined once in `core/session-message.txt`. This is the single source of truth that both agents read from:
+- **Claude Code**: Reads directly from `~/.claude/hooks/agent-hooks/core/session-message.txt` (installed alongside hooks)
+- **OpenCode**: Reads from `~/.config/homeboy/agent-message.txt` (copied during setup since plugin is installed separately)
 
-**OpenCode** uses a single TypeScript plugin that exports multiple hook handlers, installed to `~/.config/opencode/plugins/`.
+**Claude Code** uses separate bash scripts for each hook type, configured via `~/.claude/settings.json`. Hooks are installed to `~/.claude/hooks/agent-hooks/` with access to the `core/` directory.
+
+**OpenCode** uses a single TypeScript plugin that exports multiple hook handlers, installed to `~/.config/opencode/plugins/`. Since the plugin is installed separately from the source, shared configuration is accessed from `~/.config/homeboy/`.
 
 Both implementations provide identical functionality and error messages for seamless switching between agents.
