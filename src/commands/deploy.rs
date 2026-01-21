@@ -13,6 +13,10 @@ pub struct DeployArgs {
     /// Component IDs to deploy (or project ID if first arg is a component)
     pub component_ids: Vec<String>,
 
+    /// Explicit project ID (takes precedence over positional detection)
+    #[arg(long, short = 'p')]
+    pub project: Option<String>,
+
     /// JSON input spec for bulk operations
     #[arg(long)]
     pub json: Option<String>,
@@ -97,9 +101,15 @@ fn resolve_argument_order(
 }
 
 pub fn run(mut args: DeployArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DeployOutput> {
-    // Resolve argument order (supports both project-first and component-first)
-    let (project_id, component_ids) =
-        resolve_argument_order(&args.project_id, &args.component_ids)?;
+    // If --project flag provided, use it directly (first positional becomes component)
+    let (project_id, component_ids) = if let Some(ref explicit_project) = args.project {
+        let mut comps = vec![args.project_id.clone()];
+        comps.extend(args.component_ids.clone());
+        (explicit_project.clone(), comps)
+    } else {
+        // Resolve argument order (supports both project-first and component-first)
+        resolve_argument_order(&args.project_id, &args.component_ids)?
+    };
 
     // Update args with resolved values
     args.project_id = project_id.clone();

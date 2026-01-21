@@ -1,6 +1,5 @@
 use chrono::Local;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::component::{self, Component};
@@ -9,7 +8,7 @@ use crate::core::local_files::{self, FileSystem};
 use crate::core::version;
 use crate::error::{Error, Result};
 use crate::project;
-use crate::utils::{parser, validation};
+use crate::utils::{io, parser, validation};
 
 const DEFAULT_NEXT_SECTION_LABEL: &str = "Unreleased";
 
@@ -231,15 +230,13 @@ pub fn read_and_add_next_section_item(
     message: &str,
 ) -> Result<(PathBuf, bool)> {
     let path = resolve_changelog_path(component)?;
-    let content = fs::read_to_string(&path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some("read changelog".to_string())))?;
+    let content = io::read_file(&path, "read changelog")?;
 
     let (new_content, changed) =
         add_next_section_item(&content, &settings.next_section_aliases, message)?;
 
     if changed {
-        fs::write(&path, new_content)
-            .map_err(|e| Error::internal_io(e.to_string(), Some("write changelog".to_string())))?;
+        io::write_file(&path, &new_content, "write changelog")?;
     }
 
     Ok((path, changed))
@@ -251,15 +248,13 @@ pub fn read_and_add_next_section_items(
     messages: &[String],
 ) -> Result<(PathBuf, bool, usize)> {
     let path = resolve_changelog_path(component)?;
-    let content = fs::read_to_string(&path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some("read changelog".to_string())))?;
+    let content = io::read_file(&path, "read changelog")?;
 
     let (new_content, changed, items_added) =
         add_next_section_items(&content, &settings.next_section_aliases, messages)?;
 
     if changed {
-        fs::write(&path, new_content)
-            .map_err(|e| Error::internal_io(e.to_string(), Some("write changelog".to_string())))?;
+        io::write_file(&path, &new_content, "write changelog")?;
     }
 
     Ok((path, changed, items_added))
@@ -272,8 +267,7 @@ pub fn read_and_add_next_section_items_typed(
     entry_type: &str,
 ) -> Result<(PathBuf, bool, usize)> {
     let path = resolve_changelog_path(component)?;
-    let content = fs::read_to_string(&path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some("read changelog".to_string())))?;
+    let content = io::read_file(&path, "read changelog")?;
 
     let (with_section, _) = ensure_next_section(&content, &settings.next_section_aliases)?;
     let mut current_content = with_section;
@@ -305,8 +299,7 @@ pub fn read_and_add_next_section_items_typed(
     }
 
     if changed {
-        fs::write(&path, &current_content)
-            .map_err(|e| Error::internal_io(e.to_string(), Some("write changelog".to_string())))?;
+        io::write_file(&path, &current_content, "write changelog")?;
     }
 
     Ok((path, changed, items_added))
@@ -971,12 +964,10 @@ pub fn show(component_id: &str) -> Result<ShowOutput> {
     let component = component::load(component_id)?;
     let changelog_path = resolve_changelog_path(&component)?;
 
-    let content = fs::read_to_string(&changelog_path).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("read changelog at {}", changelog_path.display())),
-        )
-    })?;
+    let content = io::read_file(
+        &changelog_path,
+        &format!("read changelog at {}", changelog_path.display()),
+    )?;
 
     Ok(ShowOutput {
         component_id: component_id.to_string(),
@@ -1078,8 +1069,7 @@ pub fn init(component_id: &str, path: Option<&str>, configure: bool) -> Result<I
 
     // Handle existing file: ensure Unreleased section exists
     if changelog_path.exists() {
-        let content = fs::read_to_string(&changelog_path)
-            .map_err(|e| Error::internal_io(e.to_string(), Some("read changelog".to_string())))?;
+        let content = io::read_file(&changelog_path, "read changelog")?;
 
         let (new_content, changed) = ensure_next_section(&content, &settings.next_section_aliases)?;
 

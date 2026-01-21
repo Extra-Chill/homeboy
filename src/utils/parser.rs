@@ -158,6 +158,25 @@ where
         .collect()
 }
 
+/// Extract a string value from a nested JSON path.
+///
+/// Traverses the JSON object using the provided path segments and returns
+/// the final value as a string if it exists.
+///
+/// # Example
+/// ```ignore
+/// let json = serde_json::json!({"release": {"local_path": "/path/to/file"}});
+/// let path = json_path_str(&json, &["release", "local_path"]);
+/// assert_eq!(path, Some("/path/to/file"));
+/// ```
+pub fn json_path_str<'a>(json: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = json;
+    for part in path {
+        current = current.get(part)?;
+    }
+    current.as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +274,38 @@ mod tests {
         let content = "line1\n\nline3";
         let result = lines_to_vec(content);
         assert_eq!(result, vec!["line1", "", "line3"]);
+    }
+
+    #[test]
+    fn json_path_str_extracts_nested_value() {
+        let json = serde_json::json!({"release": {"local_path": "/path/to/file"}});
+        assert_eq!(
+            json_path_str(&json, &["release", "local_path"]),
+            Some("/path/to/file")
+        );
+    }
+
+    #[test]
+    fn json_path_str_returns_none_for_missing_path() {
+        let json = serde_json::json!({"release": {"version": "1.0.0"}});
+        assert_eq!(json_path_str(&json, &["release", "local_path"]), None);
+    }
+
+    #[test]
+    fn json_path_str_returns_none_for_non_string() {
+        let json = serde_json::json!({"count": 42});
+        assert_eq!(json_path_str(&json, &["count"]), None);
+    }
+
+    #[test]
+    fn json_path_str_handles_single_level() {
+        let json = serde_json::json!({"name": "test"});
+        assert_eq!(json_path_str(&json, &["name"]), Some("test"));
+    }
+
+    #[test]
+    fn json_path_str_handles_deep_nesting() {
+        let json = serde_json::json!({"a": {"b": {"c": {"d": "value"}}}});
+        assert_eq!(json_path_str(&json, &["a", "b", "c", "d"]), Some("value"));
     }
 }

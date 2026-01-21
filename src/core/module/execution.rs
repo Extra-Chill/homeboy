@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::http::ApiClient;
 use crate::project::{self, Project};
 use crate::ssh::{execute_local_command_in_dir, execute_local_command_interactive};
-use crate::utils::{template, validation};
+use crate::utils::{parser, template, validation};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -210,20 +210,11 @@ pub(crate) fn execute_action(
             let module_path = module.module_path.as_deref().unwrap_or(".");
             let vars = vec![("module_path", module_path)];
 
-            let project_base_path = if let Some(pid) = project_id {
-                if let Ok(proj) = project::load(pid) {
-                    proj.base_path.as_deref().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let project_base_path = project_id
+                .and_then(|pid| project::load(pid).ok())
+                .and_then(|proj| proj.base_path.clone());
 
-            let working_dir = payload
-                .get("release")
-                .and_then(|r| r.get("local_path"))
-                .and_then(|p| p.as_str())
+            let working_dir = parser::json_path_str(&payload, &["release", "local_path"])
                 .unwrap_or(module_path);
 
             let execution = execute_module_command(

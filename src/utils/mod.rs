@@ -1,6 +1,7 @@
 //! Generic utility primitives with zero domain knowledge.
 //!
 //! - `command` - Command execution with error handling
+//! - `io` - File I/O with consistent error handling
 //! - `parser` - Text extraction and manipulation
 //! - `shell` - Shell escaping and quoting
 //! - `template` - String template rendering
@@ -8,6 +9,7 @@
 //! - `validation` - Input validation helpers
 
 pub mod command;
+pub mod io;
 pub mod parser;
 pub mod shell;
 pub mod token;
