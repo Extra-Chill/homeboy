@@ -353,67 +353,6 @@ struct SubTarget: Codable, Identifiable, Equatable {
     }
 }
 
-// MARK: - Component Configuration
-
-/// Legacy component configuration embedded in project JSON.
-/// Used for migration to standalone ComponentConfiguration files.
-struct ComponentConfig: Codable, Identifiable {
-    var id: String
-    var name: String
-    var localPath: String
-
-    // Deployment paths - explicit
-    var remotePath: String              // Relative to basePath (e.g., "plugins/my-plugin")
-    var buildArtifact: String           // Relative to localPath (e.g., "build/my-plugin.zip")
-
-    // Version detection - optional
-    var versionFile: String?            // Relative to localPath (e.g., "my-plugin.php")
-    var versionPattern: String?         // Regex with capture group
-
-    // Build integration - optional
-    var buildCommand: String?           // Command to run in localPath (e.g., "./build.sh")
-
-    // Legacy WordPress compat
-    var isNetwork: Bool?
-
-    init(
-        id: String,
-        name: String,
-        localPath: String,
-        remotePath: String,
-        buildArtifact: String,
-        versionFile: String? = nil,
-        versionPattern: String? = nil,
-        buildCommand: String? = nil,
-        isNetwork: Bool? = nil
-    ) {
-        self.id = id
-        self.name = name
-        self.localPath = localPath
-        self.remotePath = remotePath
-        self.buildArtifact = buildArtifact
-        self.versionFile = versionFile
-        self.versionPattern = versionPattern
-        self.buildCommand = buildCommand
-        self.isNetwork = isNetwork
-    }
-
-    /// Convert to standalone ComponentConfiguration
-    func toComponentConfiguration() -> ComponentConfiguration {
-        ComponentConfiguration(
-            id: id,
-            name: name,
-            localPath: localPath,
-            remotePath: remotePath,
-            buildArtifact: buildArtifact,
-            versionFile: versionFile,
-            versionPattern: versionPattern,
-            buildCommand: buildCommand,
-            isNetwork: isNetwork
-        )
-    }
-}
-
 // MARK: - Tools Configuration
 
 struct ToolsConfig: Codable {

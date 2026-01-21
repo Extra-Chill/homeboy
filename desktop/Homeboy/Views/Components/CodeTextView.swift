@@ -6,7 +6,7 @@ struct CodeTextView: NSViewRepresentable {
     @Binding var text: String
 
     func makeNSView(context: Context) -> NSScrollView {
-        let textView = NSTextView()
+        let textView = FindableNSTextView()
         
         // Text styling
         textView.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)

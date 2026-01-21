@@ -8,7 +8,7 @@ enum DeployStatus: Equatable {
     case unknown
     case deploying
     case failed(String)
-    
+
     var icon: String {
         switch self {
         case .current: return "checkmark.circle.fill"
@@ -20,7 +20,7 @@ enum DeployStatus: Equatable {
         case .failed: return "exclamationmark.triangle.fill"
         }
     }
-    
+
     var color: String {
         switch self {
         case .current: return "green"
@@ -39,14 +39,14 @@ struct DeployableComponent: Identifiable, Hashable {
     let name: String
     let localPath: String
     let remotePath: String
-    let buildArtifact: String
+    let buildArtifact: String?
     let versionFile: String?
     let versionPattern: String?
     let buildCommand: String?
-    let isNetwork: Bool
 
-    var buildArtifactPath: String {
-        "\(localPath)/\(buildArtifact)"
+    var buildArtifactPath: String? {
+        guard let artifact = buildArtifact else { return nil }
+        return "\(localPath)/\(artifact)"
     }
 
     var versionFilePath: String? {
@@ -55,46 +55,28 @@ struct DeployableComponent: Identifiable, Hashable {
     }
 
     var artifactExtension: String {
-        (buildArtifact as NSString).pathExtension.lowercased()
+        guard let artifact = buildArtifact else { return "" }
+        return (artifact as NSString).pathExtension.lowercased()
     }
 
     var hasBuildArtifact: Bool {
-        FileManager.default.fileExists(atPath: buildArtifactPath)
+        guard let path = buildArtifactPath else { return false }
+        return FileManager.default.fileExists(atPath: path)
     }
 
     var hasBuildCommand: Bool {
         buildCommand != nil && !buildCommand!.isEmpty
     }
 
-    /// Whether this is a network-activated plugin (from config)
-    var isNetworkPlugin: Bool {
-        isNetwork
-    }
-
-    /// Initialize from standalone ComponentConfiguration (new format)
     init(from config: ComponentConfiguration) {
         self.id = config.id
-        self.name = config.name
+        self.name = config.displayName
         self.localPath = config.localPath
         self.remotePath = config.remotePath
         self.buildArtifact = config.buildArtifact
         self.versionFile = config.versionFile
         self.versionPattern = config.versionPattern
         self.buildCommand = config.buildCommand
-        self.isNetwork = config.isNetwork ?? false
-    }
-
-    /// Initialize from legacy embedded ComponentConfig (migration support)
-    init(from config: ComponentConfig) {
-        self.id = config.id
-        self.name = config.name
-        self.localPath = config.localPath
-        self.remotePath = config.remotePath
-        self.buildArtifact = config.buildArtifact
-        self.versionFile = config.versionFile
-        self.versionPattern = config.versionPattern
-        self.buildCommand = config.buildCommand
-        self.isNetwork = config.isNetwork ?? false
     }
 
     func hash(into hasher: inout Hasher) {
@@ -135,4 +117,3 @@ enum VersionInfo: Equatable {
         return nil
     }
 }
-

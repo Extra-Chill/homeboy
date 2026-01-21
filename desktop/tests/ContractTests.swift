@@ -72,6 +72,36 @@ struct WPTable: Decodable {
     let Engine: String?
 }
 
+// MARK: - Component Configuration Types (mirror ComponentConfiguration.swift)
+
+struct VersionTargetTest: Decodable {
+    let file: String
+    let pattern: String?
+}
+
+struct ComponentConfigurationTest: Decodable {
+    let id: String
+    let localPath: String
+    let remotePath: String
+    let buildArtifact: String?
+    let versionTargets: [VersionTargetTest]?
+    let buildCommand: String?
+
+    var displayName: String {
+        id.split(separator: "-")
+            .map { $0.capitalized }
+            .joined(separator: " ")
+    }
+
+    var versionFile: String? {
+        versionTargets?.first?.file
+    }
+
+    var versionPattern: String? {
+        versionTargets?.first?.pattern
+    }
+}
+
 // MARK: - Test Runner
 
 func runTests(testDir: String) throws {
@@ -92,6 +122,18 @@ func runTests(testDir: String) throws {
 
     // Test 3: db-describe.json parsing
     try testDbDescribe(fixturesDir: fixturesDir, decoder: decoder)
+
+    // Test 4: component.json parsing (ComponentConfiguration)
+    try testComponentConfigurationFullDecode(fixturesDir: fixturesDir, decoder: decoder)
+
+    // Test 5: minimal component (required fields only)
+    try testComponentConfigurationMinimal(decoder: decoder)
+
+    // Test 6: displayName computation
+    try testDisplayNameComputation()
+
+    // Test 7: versionTargets parsing
+    try testVersionTargetsParsing(fixturesDir: fixturesDir, decoder: decoder)
 
     print("")
     print("All contract tests passed")
@@ -273,6 +315,195 @@ func testDbDescribe(fixturesDir: String, decoder: JSONDecoder) throws {
     for table in tables {
         print("    - \(table.Name) (\(table.Rows ?? "?") rows)")
     }
+    print("")
+}
+
+func testComponentConfigurationFullDecode(fixturesDir: String, decoder: JSONDecoder) throws {
+    print("Test: component.json (full decode)")
+    print("----------------------------------")
+
+    let fixture = URL(fileURLWithPath: "\(fixturesDir)/component.json")
+
+    guard FileManager.default.fileExists(atPath: fixture.path) else {
+        throw NSError(domain: "ContractTest", code: 30,
+            userInfo: [NSLocalizedDescriptionKey: "Fixture not found: component.json"])
+    }
+
+    let data = try Data(contentsOf: fixture)
+    let component = try decoder.decode(ComponentConfigurationTest.self, from: data)
+
+    print("[PASS] Decoded ComponentConfiguration")
+
+    // Validate required fields
+    guard !component.id.isEmpty else {
+        throw NSError(domain: "ContractTest", code: 31,
+            userInfo: [NSLocalizedDescriptionKey: "component.json: id is empty"])
+    }
+    print("[PASS] id: \(component.id)")
+
+    guard !component.localPath.isEmpty else {
+        throw NSError(domain: "ContractTest", code: 32,
+            userInfo: [NSLocalizedDescriptionKey: "component.json: localPath is empty"])
+    }
+    print("[PASS] localPath: \(component.localPath)")
+
+    guard !component.remotePath.isEmpty else {
+        throw NSError(domain: "ContractTest", code: 33,
+            userInfo: [NSLocalizedDescriptionKey: "component.json: remotePath is empty"])
+    }
+    print("[PASS] remotePath: \(component.remotePath)")
+
+    // Validate optional fields
+    guard component.buildArtifact != nil else {
+        throw NSError(domain: "ContractTest", code: 34,
+            userInfo: [NSLocalizedDescriptionKey: "component.json: buildArtifact should be present"])
+    }
+    print("[PASS] buildArtifact: \(component.buildArtifact!)")
+
+    guard component.buildCommand != nil else {
+        throw NSError(domain: "ContractTest", code: 35,
+            userInfo: [NSLocalizedDescriptionKey: "component.json: buildCommand should be present"])
+    }
+    print("[PASS] buildCommand: \(component.buildCommand!)")
+
+    guard let versionTargets = component.versionTargets, !versionTargets.isEmpty else {
+        throw NSError(domain: "ContractTest", code: 36,
+            userInfo: [NSLocalizedDescriptionKey: "component.json: versionTargets should be present and non-empty"])
+    }
+    print("[PASS] versionTargets: \(versionTargets.count) targets")
+    print("")
+}
+
+func testComponentConfigurationMinimal(decoder: JSONDecoder) throws {
+    print("Test: component minimal (required fields only)")
+    print("----------------------------------------------")
+
+    // Minimal JSON with only required fields
+    let minimalJson = """
+    {
+        "id": "my-plugin",
+        "local_path": "/path/to/plugin",
+        "remote_path": "wp-content/plugins/my-plugin"
+    }
+    """
+
+    let data = minimalJson.data(using: .utf8)!
+    let component = try decoder.decode(ComponentConfigurationTest.self, from: data)
+
+    print("[PASS] Decoded minimal ComponentConfiguration")
+
+    guard component.id == "my-plugin" else {
+        throw NSError(domain: "ContractTest", code: 40,
+            userInfo: [NSLocalizedDescriptionKey: "Minimal: id mismatch"])
+    }
+    print("[PASS] id matches")
+
+    guard component.buildArtifact == nil else {
+        throw NSError(domain: "ContractTest", code: 41,
+            userInfo: [NSLocalizedDescriptionKey: "Minimal: buildArtifact should be nil"])
+    }
+    print("[PASS] buildArtifact is nil")
+
+    guard component.versionTargets == nil else {
+        throw NSError(domain: "ContractTest", code: 42,
+            userInfo: [NSLocalizedDescriptionKey: "Minimal: versionTargets should be nil"])
+    }
+    print("[PASS] versionTargets is nil")
+
+    guard component.buildCommand == nil else {
+        throw NSError(domain: "ContractTest", code: 43,
+            userInfo: [NSLocalizedDescriptionKey: "Minimal: buildCommand should be nil"])
+    }
+    print("[PASS] buildCommand is nil")
+    print("")
+}
+
+func testDisplayNameComputation() throws {
+    print("Test: displayName computation")
+    print("-----------------------------")
+
+    // Test cases for displayName computation
+    let testCases: [(id: String, expected: String)] = [
+        ("my-plugin", "My Plugin"),
+        ("extra-chill-theme", "Extra Chill Theme"),
+        ("simple", "Simple"),
+        ("a-b-c-d", "A B C D"),
+    ]
+
+    for testCase in testCases {
+        let computed = testCase.id.split(separator: "-")
+            .map { $0.capitalized }
+            .joined(separator: " ")
+
+        guard computed == testCase.expected else {
+            throw NSError(domain: "ContractTest", code: 50,
+                userInfo: [NSLocalizedDescriptionKey: "displayName: '\(testCase.id)' -> '\(computed)' (expected '\(testCase.expected)')"])
+        }
+        print("[PASS] '\(testCase.id)' -> '\(computed)'")
+    }
+    print("")
+}
+
+func testVersionTargetsParsing(fixturesDir: String, decoder: JSONDecoder) throws {
+    print("Test: versionTargets parsing")
+    print("----------------------------")
+
+    let fixture = URL(fileURLWithPath: "\(fixturesDir)/component.json")
+    let data = try Data(contentsOf: fixture)
+    let component = try decoder.decode(ComponentConfigurationTest.self, from: data)
+
+    guard let targets = component.versionTargets else {
+        throw NSError(domain: "ContractTest", code: 60,
+            userInfo: [NSLocalizedDescriptionKey: "versionTargets is nil"])
+    }
+    print("[PASS] versionTargets array decoded")
+
+    guard targets.count == 2 else {
+        throw NSError(domain: "ContractTest", code: 61,
+            userInfo: [NSLocalizedDescriptionKey: "Expected 2 version targets, got \(targets.count)"])
+    }
+    print("[PASS] versionTargets has 2 entries")
+
+    // First target should have both file and pattern
+    let first = targets[0]
+    guard first.file == "style.css" else {
+        throw NSError(domain: "ContractTest", code: 62,
+            userInfo: [NSLocalizedDescriptionKey: "First target file mismatch: \(first.file)"])
+    }
+    print("[PASS] First target file: \(first.file)")
+
+    guard first.pattern != nil else {
+        throw NSError(domain: "ContractTest", code: 63,
+            userInfo: [NSLocalizedDescriptionKey: "First target pattern should not be nil"])
+    }
+    print("[PASS] First target has pattern")
+
+    // Second target should have file only (pattern is optional)
+    let second = targets[1]
+    guard second.file == "functions.php" else {
+        throw NSError(domain: "ContractTest", code: 64,
+            userInfo: [NSLocalizedDescriptionKey: "Second target file mismatch: \(second.file)"])
+    }
+    print("[PASS] Second target file: \(second.file)")
+
+    guard second.pattern == nil else {
+        throw NSError(domain: "ContractTest", code: 65,
+            userInfo: [NSLocalizedDescriptionKey: "Second target pattern should be nil"])
+    }
+    print("[PASS] Second target pattern is nil (optional field)")
+
+    // Test computed properties
+    guard component.versionFile == "style.css" else {
+        throw NSError(domain: "ContractTest", code: 66,
+            userInfo: [NSLocalizedDescriptionKey: "versionFile computed property mismatch"])
+    }
+    print("[PASS] versionFile computed property: \(component.versionFile!)")
+
+    guard component.versionPattern != nil else {
+        throw NSError(domain: "ContractTest", code: 67,
+            userInfo: [NSLocalizedDescriptionKey: "versionPattern computed property should not be nil"])
+    }
+    print("[PASS] versionPattern computed property: present")
     print("")
 }
 

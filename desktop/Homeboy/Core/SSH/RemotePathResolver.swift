@@ -70,9 +70,10 @@ struct RemotePathResolver {
     }
 
     /// Artifact upload destination
-    func artifactUploadPath(for component: DeployableComponent) -> String {
+    func artifactUploadPath(for component: DeployableComponent) -> String? {
+        guard let artifact = component.buildArtifact else { return nil }
         let parent = componentParent(for: component)
-        let artifactName = Self.filename(of: component.buildArtifact)
+        let artifactName = Self.filename(of: artifact)
         return Self.join(parent, artifactName)
     }
 

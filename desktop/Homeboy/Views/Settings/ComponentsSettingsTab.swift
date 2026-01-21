@@ -37,7 +37,7 @@ struct ComponentsSettingsTab: View {
             }
 
             Section("Components") {
-                ForEach(projectComponents.sorted { $0.name < $1.name }) { component in
+                ForEach(projectComponents.sorted { $0.displayName < $1.displayName }) { component in
                     ComponentRow(
                         component: component,
                         onEdit: { editingComponent = component },
@@ -67,7 +67,7 @@ struct ComponentsSettingsTab: View {
                 componentToDelete = nil
             }
         } message: {
-            Text("Remove \(componentToDelete?.name ?? "") from deployment list? This does not delete the actual files.")
+            Text("Remove \(componentToDelete?.displayName ?? "") from deployment list? This does not delete the actual files.")
         }
     }
 
@@ -90,7 +90,7 @@ struct ComponentRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(component.name)
+                Text(component.displayName)
                     .font(.body)
                 Text(truncatedPath(component.localPath))
                     .font(.caption)
@@ -133,7 +133,6 @@ struct AddEditComponentSheet: View {
     // Basic info
     @State private var localPath: String = ""
     @State private var id: String = ""
-    @State private var name: String = ""
 
     // Deployment paths
     @State private var remotePath: String = ""
@@ -143,7 +142,6 @@ struct AddEditComponentSheet: View {
     @State private var versionFile: String = ""
     @State private var versionPattern: String = "Version:\\s*([\\d.]+)"
 
-    @State private var isNetwork: Bool = false
     @State private var validationError: String? = nil
 
     @Environment(\.dismiss) private var dismiss
@@ -153,7 +151,7 @@ struct AddEditComponentSheet: View {
     }
 
     private var canSave: Bool {
-        !localPath.isEmpty && !id.isEmpty && !name.isEmpty && !remotePath.isEmpty && !buildArtifact.isEmpty
+        !localPath.isEmpty && !id.isEmpty && !remotePath.isEmpty
     }
 
     var body: some View {
@@ -176,12 +174,6 @@ struct AddEditComponentSheet: View {
                     Section("Component Details") {
                         TextField("ID (slug)", text: $id)
                             .textFieldStyle(.roundedBorder)
-                        TextField("Display Name", text: $name)
-                            .textFieldStyle(.roundedBorder)
-
-                        if config.safeActiveProject.isWordPress {
-                            Toggle("Network Plugin", isOn: $isNetwork)
-                        }
                     }
 
                     Section("Deployment") {
@@ -227,17 +219,15 @@ struct AddEditComponentSheet: View {
             }
         }
         .padding()
-        .frame(width: 550, height: 500)
+        .frame(width: 550, height: 450)
         .onAppear {
             if let existing = existing {
                 localPath = existing.localPath
                 id = existing.id
-                name = existing.name
                 remotePath = existing.remotePath
-                buildArtifact = existing.buildArtifact
+                buildArtifact = existing.buildArtifact ?? ""
                 versionFile = existing.versionFile ?? ""
                 versionPattern = existing.versionPattern ?? "Version:\\s*([\\d.]+)"
-                isNetwork = existing.isNetwork ?? false
             }
         }
         .onChange(of: localPath) { _, newValue in
@@ -272,43 +262,20 @@ struct AddEditComponentSheet: View {
         // Detect type and set defaults
         if FileManager.default.fileExists(atPath: styleCSS) {
             // Theme
-            name = VersionParser.parseVersion(from: (try? String(contentsOfFile: styleCSS, encoding: .utf8)) ?? "") != nil
-                ? (parseThemeName(from: styleCSS) ?? slug.capitalized)
-                : slug.capitalized
             remotePath = "themes/\(slug)"
             buildArtifact = "build/\(slug).zip"
             versionFile = "style.css"
         } else if FileManager.default.fileExists(atPath: mainPHP) {
             // Plugin
-            name = parsePluginName(from: mainPHP) ?? slug.capitalized
             remotePath = "plugins/\(slug)"
             buildArtifact = "build/\(slug).zip"
             versionFile = "\(slug).php"
         } else {
             // Generic
-            name = slug.capitalized
             remotePath = slug
             buildArtifact = "build/\(slug).zip"
             versionFile = ""
         }
-    }
-
-    private func parseThemeName(from filePath: String) -> String? {
-        guard let content = try? String(contentsOfFile: filePath, encoding: .utf8) else { return nil }
-        let pattern = "Theme Name:\\s*(.+)"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
-              let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
-              let range = Range(match.range(at: 1), in: content) else { return nil }
-        return String(content[range]).trimmingCharacters(in: .whitespaces)
-    }
-
-    private func parsePluginName(from filePath: String) -> String? {
-        guard let content = try? String(contentsOfFile: filePath, encoding: .utf8) else { return nil }
-        let pattern = "Plugin Name:\\s*(.+)"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
-              let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
-              let range = Range(match.range(at: 1), in: content) else { return nil }
-        return String(content[range]).trimmingCharacters(in: .whitespaces)
     }
 
     private func validate() -> Bool {
@@ -322,25 +289,25 @@ struct AddEditComponentSheet: View {
             return false
         }
 
-        guard !buildArtifact.isEmpty else {
-            validationError = "Build artifact path is required"
-            return false
-        }
-
         validationError = nil
         return true
     }
 
     private func save() {
+        // Build version_targets array if versionFile is provided
+        var versionTargets: [VersionTarget]? = nil
+        if !versionFile.isEmpty {
+            let pattern = versionPattern.isEmpty ? nil : versionPattern
+            versionTargets = [VersionTarget(file: versionFile, pattern: pattern)]
+        }
+
         let component = ComponentConfiguration(
             id: id,
-            name: name,
             localPath: localPath,
             remotePath: remotePath,
-            buildArtifact: buildArtifact,
-            versionFile: versionFile.isEmpty ? nil : versionFile,
-            versionPattern: versionPattern.isEmpty ? nil : versionPattern,
-            isNetwork: isNetwork ? true : nil
+            buildArtifact: buildArtifact.isEmpty ? nil : buildArtifact,
+            versionTargets: versionTargets,
+            buildCommand: nil
         )
 
         Task {

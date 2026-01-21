@@ -60,6 +60,7 @@
 		80D12DD221BE19316CB0BDCA /* RemoteLogViewerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E867876A7DCD50A851E6F8D7 /* RemoteLogViewerViewModel.swift */; };
 		8327EB6B86BD82A5A8F0E466 /* ServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */; };
 		8416680F81D345B2751765CC /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A80F92FC849ACD9591EDEFE /* LoginView.swift */; };
+		85A8C46096DE6DFF3BD11E63 /* FindableTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 385944CD36C9E1B61CE23EDE /* FindableTextView.swift */; };
 		85F4F94606B3D49BEFDC227F /* DeploymentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */; };
 		86C712A03FB9FC626DC46371 /* ArtifactVersionParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60913533AA72054F3D79625C /* ArtifactVersionParser.swift */; };
 		8ACB39F91168D33D93F5B338 /* ModuleResultsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0354F3771ED337E0EDCAC7B5 /* ModuleResultsView.swift */; };
@@ -118,6 +119,7 @@
 		2DA1C2F245C5FCEF82A5D2D3 /* ModuleInstallSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleInstallSheet.swift; sourceTree = "<group>"; };
 		2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileBrowser.swift; sourceTree = "<group>"; };
 		2EC7ED01925DBCB9195A8A4D /* TableDataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableDataView.swift; sourceTree = "<group>"; };
+		385944CD36C9E1B61CE23EDE /* FindableTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindableTextView.swift; sourceTree = "<group>"; };
 		3A6FE3DEAD139D529B6724D8 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
 		3A80F92FC849ACD9591EDEFE /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchemaResolver.swift; sourceTree = "<group>"; };
@@ -403,6 +405,7 @@
 				91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */,
 				7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */,
 				AD70F8136E9691D7528CB581 /* FileBrowserSidebarView.swift */,
+				385944CD36C9E1B61CE23EDE /* FindableTextView.swift */,
 				943FB329E82EA8D3985C41BE /* InlineErrorView.swift */,
 				0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */,
 				514BD1BE8868C181AD9401CF /* LogContentView.swift */,
@@ -657,6 +660,7 @@
 				AB378FCB8518F6BED6EEFB6F /* DisplayableError.swift in Sources */,
 				5CA76C92A6AF0C42784FD35D /* ErrorView.swift in Sources */,
 				5B3425AA6A8A9C4C9EF5E29F /* FileBrowserSidebarView.swift in Sources */,
+				85A8C46096DE6DFF3BD11E63 /* FindableTextView.swift in Sources */,
 				02AD314100925D82AE384CE8 /* GeneralSettingsTab.swift in Sources */,
 				57C3AE0D20A591DEE69B0FF0 /* HomeboyApp.swift in Sources */,
 				278021F9D228BBDA95267231 /* HomeboyCLI.swift in Sources */,

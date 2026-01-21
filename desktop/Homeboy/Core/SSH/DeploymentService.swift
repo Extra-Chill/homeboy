@@ -32,9 +32,14 @@ class DeploymentService {
         onOutput: ((String) -> Void)?,
         onComplete: @escaping (Result<Void, Error>) -> Void
     ) {
-        let localArtifact = component.buildArtifactPath
+        guard let buildArtifact = component.buildArtifact,
+              let localArtifact = component.buildArtifactPath else {
+            onComplete(.failure(DeploymentError.artifactNotFound("No build artifact configured for \(component.name)")))
+            return
+        }
+
         let remoteParent = pathResolver.componentParent(for: component)
-        let artifactName = RemotePathResolver.filename(of: component.buildArtifact)
+        let artifactName = RemotePathResolver.filename(of: buildArtifact)
         let stagingPath = pathResolver.stagingUploadPath(for: component)
         let tempDir = pathResolver.tempDeployPath(for: component)
 

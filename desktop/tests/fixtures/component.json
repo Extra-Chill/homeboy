@@ -1,0 +1,16 @@
+{
+  "id": "extra-chill-theme",
+  "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill",
+  "remote_path": "wp-content/themes/extrachill",
+  "build_artifact": "build/extrachill.zip",
+  "build_command": "./build.sh",
+  "version_targets": [
+    {
+      "file": "style.css",
+      "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+    },
+    {
+      "file": "functions.php"
+    }
+  ]
+}
