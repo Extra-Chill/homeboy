@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+- Add context-aware component suggestions for version bump command
+
 ## [0.33.8] - 2026-01-21
 
 - feat: Add project:subtarget colon syntax for CLI tools (both 'extra-chill:events' and 'extra-chill events' now work)

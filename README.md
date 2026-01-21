@@ -23,13 +23,7 @@ Homeboy provides these core capabilities:
 
 ## Agent usage (recommended)
 
-Add this to your agent instructions (AGENTS.md, CLAUDE.md, .cursorrules, etc.):
-
-- Use Homeboy for deployments, server/db ops, version/build management, and documentation.
-- Run `homeboy init` first to understand context, then `homeboy docs <topic>` for commands.
-- For documentation tasks, see `homeboy docs documentation/index`.
-
-This keeps agent actions consistent and prevents assumptions about project structure.
+Use the [Agent Hooks module](https://github.com/Extra-Chill/homeboy-modules/tree/main/agent-hooks) to guide your coding agent to use Homeboy effectively. Our module provides hooks for Claude Code and OpenCode. 
 
 ## `homeboy init`
 
@@ -388,6 +382,6 @@ Actions are also used in release pipelines as custom steps:
 
 ## License
 
-See `../LICENSE` for the repository license.
-
-Note: `homeboy` (CLI) is distributed under the same license as the rest of this repository unless explicitly stated otherwise in build/distribution tooling.
+MIT License
+Created by Chris Huber
+https://chubes.net

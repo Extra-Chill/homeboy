@@ -786,14 +786,26 @@ pub fn bump_component_version(component: &Component, bump_type: &str) -> Result<
 
 /// Bump version by component ID.
 pub fn bump_version(component_id: Option<&str>, bump_type: &str) -> Result<BumpResult> {
+    let mut hints = Vec::new();
+
+    // Check if we can detect component from current directory
+    if component_id.is_none() {
+        if let Some(detected_id) = component::detect_from_cwd() {
+            hints.push(format!(
+                "Did you mean: homeboy version bump {} {}",
+                detected_id, bump_type
+            ));
+        }
+    }
+
+    hints.push("Provide a component ID: homeboy version bump <component-id> <bump-type>".to_string());
+    hints.push("List available components: homeboy component list".to_string());
+
     let id = validation::require_with_hints(
         component_id,
         "componentId",
         "Missing componentId",
-        vec![
-            "Provide a component ID: homeboy version bump <component-id> <bump-type>".to_string(),
-            "List available components: homeboy component list".to_string(),
-        ],
+        hints,
     )?;
     let component = component::load(id)?;
     bump_component_version(&component, bump_type)

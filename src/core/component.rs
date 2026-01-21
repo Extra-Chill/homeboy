@@ -6,7 +6,7 @@ use crate::project::{self, NullableUpdate};
 use crate::utils::slugify;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
@@ -440,4 +440,21 @@ pub fn validate_local_path(component: &Component) -> Result<PathBuf> {
     }
 
     Ok(path)
+}
+
+/// Detect component ID from current working directory.
+/// Returns Some(component_id) if cwd matches or is within a component's local_path.
+pub fn detect_from_cwd() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let components = list().ok()?;
+
+    for component in components {
+        let expanded = shellexpand::tilde(&component.local_path);
+        let local_path = Path::new(expanded.as_ref());
+
+        if cwd.starts_with(local_path) {
+            return Some(component.id);
+        }
+    }
+    None
 }
