@@ -128,11 +128,24 @@ if [ ! -f "$PHPCS_CONFIG" ]; then
     exit 1
 fi
 
-# Auto-detect text domain from plugin header
+# Auto-detect text domain from plugin header (required for i18n validation)
 TEXT_DOMAIN=""
 MAIN_PLUGIN_FILE=$(find "$PLUGIN_PATH" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
 if [ -n "$MAIN_PLUGIN_FILE" ]; then
-    TEXT_DOMAIN=$(grep -m1 "Text Domain:" "$MAIN_PLUGIN_FILE" 2>/dev/null | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
+    # Check if Text Domain header exists before extracting
+    if ! grep -q "Text Domain:" "$MAIN_PLUGIN_FILE" 2>/dev/null; then
+        echo "" >&2
+        echo "============================================" >&2
+        echo "ERROR: Missing Text Domain header" >&2
+        echo "============================================" >&2
+        echo "File: $MAIN_PLUGIN_FILE" >&2
+        echo "" >&2
+        echo "Add this line to your plugin header:" >&2
+        echo "  * Text Domain: your-plugin-slug" >&2
+        echo "" >&2
+        exit 1
+    fi
+    TEXT_DOMAIN=$(grep -m1 "Text Domain:" "$MAIN_PLUGIN_FILE" | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
     if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
         echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
     fi
@@ -249,9 +262,11 @@ json_exit=$?
 set -e
 
 # Parse JSON and print summary header (only if issues exist)
+# NOTE: JSON is piped via stdin to avoid ARG_MAX limits (~1MB on macOS)
+# Large codebases can generate multi-MB JSON output that exceeds shell limits
 if [ -n "$json_output" ] && command -v php &> /dev/null; then
-    summary=$(php -r '
-        $json = json_decode($GLOBALS["argv"][1], true);
+    summary=$(echo "$json_output" | php -r '
+        $json = json_decode(file_get_contents("php://stdin"), true);
         if (!$json || !isset($json["totals"])) exit;
         $totals = $json["totals"];
         $errors = $totals["errors"] ?? 0;
@@ -270,7 +285,7 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
             echo "Fixable: " . $fixable . " | Files with issues: " . $filesWithIssues . " of " . $files . "\n";
             echo "============================================\n";
         }
-    ' "$json_output" 2>/dev/null)
+    ' 2>/dev/null)
 
     if [ -n "$summary" ]; then
         echo ""
@@ -281,8 +296,8 @@ fi
 # Summary mode: show summary header + top violations, skip full report
 if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     if [ -n "$json_output" ] && command -v php &> /dev/null; then
-        top_violations=$(php -r '
-            $json = json_decode($GLOBALS["argv"][1], true);
+        top_violations=$(echo "$json_output" | php -r '
+            $json = json_decode(file_get_contents("php://stdin"), true);
             if (!$json || !isset($json["totals"])) exit(1);
 
             // Count violations by source
@@ -310,7 +325,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                 $count++;
                 if ($count >= 10) break;
             }
-        ' "$json_output" 2>/dev/null)
+        ' 2>/dev/null)
 
         if [ -n "$top_violations" ]; then
             echo "$top_violations"
