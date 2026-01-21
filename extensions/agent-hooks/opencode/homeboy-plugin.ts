@@ -2,6 +2,9 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { exec } from "child_process"
 import { promisify } from "util"
 
+// SYNC NOTE: Bash equivalent at ../core/patterns.sh
+// When modifying patterns, update both files.
+
 const execAsync = promisify(exec)
 
 /**

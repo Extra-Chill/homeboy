@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Anti-pattern definitions for Homeboy-managed repositories
 # Sourced by hook scripts to check for patterns that should use Homeboy commands
+#
+# SYNC NOTE: TypeScript equivalent at ../opencode/homeboy-plugin.ts
+# When modifying patterns, update both files.
 
 # Get homeboy context for navigation guidance
 # Returns JSON data or empty string for non-homeboy directories
