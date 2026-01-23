@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- feat: add CLI help configuration to WordPress module
+
 ## [0.1.2] - 2026-01-21
 
 ### Fixed

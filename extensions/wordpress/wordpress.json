@@ -20,6 +20,15 @@
     "default_cli_path": "wp",
     "settings_flags": {
       "user": "--user={{value}}"
+    },
+    "help": {
+      "project_id_help": "Project ID (use 'homeboy project list'). For multisite: project:subtarget",
+      "args_help": "WP-CLI command and arguments (space-separated, not quoted)",
+      "examples": [
+        "homeboy wp my-site plugin list",
+        "homeboy wp my-site option get blogname",
+        "homeboy wp extra-chill:events datamachine pipelines list"
+      ]
     }
   },
 
