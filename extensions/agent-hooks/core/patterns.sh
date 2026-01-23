@@ -93,7 +93,7 @@ check_build_antipattern() {
     local cmd="$1"
 
     # Direct build.sh execution
-    if [[ "$cmd" =~ (\./build\.sh|bash[[:space:]]+build\.sh|sh[[:space:]]+build\.sh) ]]; then
+    if [[ "$cmd" =~ ^(\./build\.sh|bash[[:space:]]+build\.sh|sh[[:space:]]+build\.sh) ]]; then
         cat <<'EOF'
 Build Script Anti-Pattern
 
@@ -116,7 +116,7 @@ check_deploy_antipattern() {
     local cmd="$1"
 
     # rsync to remote servers (basic pattern - excludes local rsync)
-    if [[ "$cmd" =~ rsync.*@ ]]; then
+    if [[ "$cmd" =~ ^rsync.*@ ]]; then
         cat <<'EOF'
 Deploy Anti-Pattern (rsync)
 
@@ -129,7 +129,7 @@ EOF
     fi
 
     # scp to remote servers
-    if [[ "$cmd" =~ scp.*@ ]]; then
+    if [[ "$cmd" =~ ^scp.*@ ]]; then
         cat <<'EOF'
 Deploy Anti-Pattern (scp)
 
@@ -152,7 +152,7 @@ check_version_antipattern() {
     local cmd="$1"
 
     # npm version commands
-    if [[ "$cmd" =~ npm[[:space:]]+version ]]; then
+    if [[ "$cmd" =~ ^npm[[:space:]]+version ]]; then
         cat <<'EOF'
 Version Anti-Pattern (npm)
 
@@ -166,7 +166,7 @@ EOF
     fi
 
     # cargo set-version commands
-    if [[ "$cmd" =~ cargo[[:space:]]+set-version ]]; then
+    if [[ "$cmd" =~ ^cargo[[:space:]]+set-version ]]; then
         cat <<'EOF'
 Version Anti-Pattern (cargo)
 
@@ -190,7 +190,7 @@ check_release_antipattern() {
     local cmd="$1"
 
     # Manual git commit with release message pattern
-    if [[ "$cmd" =~ git[[:space:]]+commit.*(-m|--message)[[:space:]]*[\"\']*release: ]]; then
+    if [[ "$cmd" =~ ^git[[:space:]]+commit.*(-m|--message)[[:space:]]*[\"\']*release: ]]; then
         cat <<'EOF'
 Release Anti-Pattern (manual git commit)
 
@@ -203,7 +203,7 @@ EOF
     fi
 
     # Manual git tag with version pattern (v followed by digit)
-    if [[ "$cmd" =~ git[[:space:]]+tag[[:space:]]+v[0-9] ]]; then
+    if [[ "$cmd" =~ ^git[[:space:]]+tag[[:space:]]+v[0-9] ]]; then
         cat <<'EOF'
 Release Anti-Pattern (manual git tag)
 

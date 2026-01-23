@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- fix: anchor all anti-pattern regexes to command start for consistency
+
 ## [0.1.3] - 2026-01-22
 
 - feat: add CLI help configuration to WordPress module

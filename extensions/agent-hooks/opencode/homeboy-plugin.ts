@@ -116,7 +116,7 @@ ${componentsSection}Benefits: Version context, changelog status, component-aware
   }
 
   // Build script → homeboy build
-  if (/(\.\/(build\.sh)|bash\s+build\.sh|sh\s+build\.sh)/.test(command)) {
+  if (/^(\.\/(build\.sh)|bash\s+build\.sh|sh\s+build\.sh)/.test(command)) {
     return `Build Script Anti-Pattern
 
 Use Homeboy for builds:
@@ -126,7 +126,7 @@ Benefits: Consistent build process, artifact management, validation`
   }
 
   // rsync to remote → homeboy deploy
-  if (/rsync.*@/.test(command)) {
+  if (/^rsync.*@/.test(command)) {
     return `Deploy Anti-Pattern (rsync)
 
 Use Homeboy for deployments:
@@ -136,7 +136,7 @@ Benefits: Server configuration, artifact handling, post-deploy verification`
   }
 
   // scp to remote → homeboy deploy
-  if (/scp.*@/.test(command)) {
+  if (/^scp.*@/.test(command)) {
     return `Deploy Anti-Pattern (scp)
 
 Use Homeboy for deployments:
@@ -146,7 +146,7 @@ Benefits: Server configuration, artifact handling, post-deploy verification`
   }
 
   // npm version → homeboy version
-  if (/npm\s+version/.test(command)) {
+  if (/^npm\s+version/.test(command)) {
     return `Version Anti-Pattern (npm)
 
 Use Homeboy for version changes:
@@ -157,7 +157,7 @@ Benefits: Automatic changelog, consistent targets, git commit`
   }
 
   // cargo set-version → homeboy version
-  if (/cargo\s+set-version/.test(command)) {
+  if (/^cargo\s+set-version/.test(command)) {
     return `Version Anti-Pattern (cargo)
 
 Use Homeboy for version changes:
