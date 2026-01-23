@@ -86,9 +86,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
             "Uncommitted changes detected",
             Some("Release requires a clean working tree".to_string()),
             Some(vec![
-                "Commit your changes: git add -A && git commit -m \"...\"".to_string(),
-                "Or stash them: git stash".to_string(),
-            ]),
+                "Commit your changes: git add -A && git commit -m \"...\"".to_string(),]),
         ));
     }
 
