@@ -1,7 +1,6 @@
 Homeboy Active
 
-Start with: homeboy init
-This gathers context (components, servers, versions) before operations.
+Run 'homeboy init' to gain context on your environment and available automations
 
 Use Homeboy for: builds, deploys, version management, documentation
 Commands: homeboy docs commands/commands-index
