@@ -129,6 +129,9 @@ struct ModuleCliInfo {
     tool: String,
     display_name: String,
     module_name: String,
+    project_id_help: Option<String>,
+    args_help: Option<String>,
+    examples: Vec<String>,
 }
 
 fn collect_module_cli_info() -> Vec<ModuleCliInfo> {
@@ -136,10 +139,16 @@ fn collect_module_cli_info() -> Vec<ModuleCliInfo> {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|m| {
-            m.cli.map(|cli| ModuleCliInfo {
-                tool: cli.tool,
-                display_name: cli.display_name,
-                module_name: m.name,
+            m.cli.map(|cli| {
+                let help = cli.help.unwrap_or_default();
+                ModuleCliInfo {
+                    tool: cli.tool,
+                    display_name: cli.display_name,
+                    module_name: m.name,
+                    project_id_help: help.project_id_help,
+                    args_help: help.args_help,
+                    examples: help.examples,
+                }
             })
         })
         .collect()
@@ -150,27 +159,46 @@ fn build_augmented_command(module_info: &[ModuleCliInfo]) -> Command {
 
     for info in module_info {
         let tool_name: &'static str = Box::leak(info.tool.clone().into_boxed_str());
-        cmd = cmd.subcommand(
-            Command::new(tool_name)
-                .about(format!(
-                    "Run {} commands via {}",
-                    info.display_name, info.module_name
-                ))
-                .arg(
-                    clap::Arg::new("project_id")
-                        .help("Project ID")
-                        .required(true)
-                        .index(1),
-                )
-                .arg(
-                    clap::Arg::new("args")
-                        .help("Command arguments")
-                        .index(2)
-                        .num_args(0..)
-                        .allow_hyphen_values(true),
-                )
-                .trailing_var_arg(true),
-        );
+
+        let project_id_help = info
+            .project_id_help
+            .clone()
+            .unwrap_or_else(|| "Project ID".to_string());
+        let project_id_help: &'static str = Box::leak(project_id_help.into_boxed_str());
+
+        let args_help = info
+            .args_help
+            .clone()
+            .unwrap_or_else(|| "Command arguments".to_string());
+        let args_help: &'static str = Box::leak(args_help.into_boxed_str());
+
+        let mut subcommand = Command::new(tool_name)
+            .about(format!(
+                "Run {} commands via {}",
+                info.display_name, info.module_name
+            ))
+            .arg(
+                clap::Arg::new("project_id")
+                    .help(project_id_help)
+                    .required(true)
+                    .index(1),
+            )
+            .arg(
+                clap::Arg::new("args")
+                    .help(args_help)
+                    .index(2)
+                    .num_args(0..)
+                    .allow_hyphen_values(true),
+            )
+            .trailing_var_arg(true);
+
+        if !info.examples.is_empty() {
+            let examples_text = format!("Examples:\n  {}", info.examples.join("\n  "));
+            let examples_text: &'static str = Box::leak(examples_text.into_boxed_str());
+            subcommand = subcommand.after_help(examples_text);
+        }
+
+        cmd = cmd.subcommand(subcommand);
     }
 
     cmd

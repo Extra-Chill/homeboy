@@ -158,6 +158,18 @@ pub struct DatabaseCliConfig {
     pub query_command: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CliHelpConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id_help: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args_help: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 pub struct CliConfig {
@@ -170,6 +182,8 @@ pub struct CliConfig {
     pub working_dir_template: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub settings_flags: std::collections::HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help: Option<CliHelpConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
