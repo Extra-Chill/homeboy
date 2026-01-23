@@ -119,5 +119,4 @@ pub enum ReleasePlanStatus {
 pub struct ReleaseOptions {
     pub bump_type: String,
     pub dry_run: bool,
-    pub commit_message: Option<String>,
 }

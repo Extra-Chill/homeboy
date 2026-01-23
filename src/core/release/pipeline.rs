@@ -49,12 +49,13 @@ pub fn run(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
 
 /// Plan a release with built-in core steps and module-derived publish targets.
 ///
+/// Requires a clean working tree (uncommitted changes will cause an error).
+///
 /// Core steps (always generated, non-configurable):
-/// 1. Pre-commit uncommitted changes (if any)
-/// 2. Version bump + changelog finalization
-/// 3. Git commit
-/// 4. Git tag
-/// 5. Git push (commits AND tags)
+/// 1. Version bump + changelog finalization
+/// 2. Git commit
+/// 3. Git tag
+/// 4. Git push (commits AND tags)
 ///
 /// Publish steps (derived from modules):
 /// - From component's modules that have `release.publish` action
@@ -79,6 +80,18 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     version::validate_changelog_for_bump(&component, &version_info.version, &new_version)?;
 
     let uncommitted = crate::git::get_uncommitted_changes(&component.local_path)?;
+    if uncommitted.has_changes {
+        return Err(Error::validation_invalid_argument(
+            "working_tree",
+            "Uncommitted changes detected",
+            Some("Release requires a clean working tree".to_string()),
+            Some(vec![
+                "Commit your changes: git add -A && git commit -m \"...\"".to_string(),
+                "Or stash them: git stash".to_string(),
+            ]),
+        ));
+    }
+
     let mut warnings = Vec::new();
     let mut hints = Vec::new();
 
@@ -88,7 +101,6 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         &version_info.version,
         &new_version,
         options,
-        uncommitted.has_changes,
         &mut warnings,
         &mut hints,
     )?;
@@ -166,9 +178,8 @@ fn build_release_steps(
     current_version: &str,
     new_version: &str,
     options: &ReleaseOptions,
-    has_uncommitted: bool,
     warnings: &mut Vec<String>,
-    hints: &mut Vec<String>,
+    _hints: &mut Vec<String>,
 ) -> Result<Vec<ReleasePlanStep>> {
     let mut steps = Vec::new();
     let publish_targets = get_publish_targets(modules);
@@ -184,40 +195,7 @@ fn build_release_steps(
 
     // === CORE STEPS (non-configurable, always present) ===
 
-    // 1. Pre-release commit for uncommitted changes (if any)
-    if has_uncommitted {
-        let pre_commit_message = options
-            .commit_message
-            .clone()
-            .unwrap_or_else(|| "pre-release changes".to_string());
-        steps.push(ReleasePlanStep {
-            id: "pre-release.commit".to_string(),
-            step_type: "git.commit".to_string(),
-            label: Some(format!(
-                "Commit pre-release changes: {}",
-                pre_commit_message
-            )),
-            needs: vec![],
-            config: {
-                let mut config = std::collections::HashMap::new();
-                config.insert(
-                    "message".to_string(),
-                    serde_json::Value::String(pre_commit_message),
-                );
-                config
-            },
-            status: ReleasePlanStatus::Ready,
-            missing: vec![],
-        });
-        hints.push("Will auto-commit uncommitted changes before release".to_string());
-    }
-
-    // 2. Version bump
-    let version_needs = if has_uncommitted {
-        vec!["pre-release.commit".to_string()]
-    } else {
-        vec![]
-    };
+    // 1. Version bump
     steps.push(ReleasePlanStep {
         id: "version".to_string(),
         step_type: "version".to_string(),
@@ -225,7 +203,7 @@ fn build_release_steps(
             "Bump version {} → {} ({})",
             current_version, new_version, options.bump_type
         )),
-        needs: version_needs,
+        needs: vec![],
         config: {
             let mut config = std::collections::HashMap::new();
             config.insert(
@@ -246,7 +224,7 @@ fn build_release_steps(
         missing: vec![],
     });
 
-    // 3. Git commit
+    // 2. Git commit
     steps.push(ReleasePlanStep {
         id: "git.commit".to_string(),
         step_type: "git.commit".to_string(),
@@ -257,7 +235,7 @@ fn build_release_steps(
         missing: vec![],
     });
 
-    // 4. Git tag
+    // 3. Git tag
     steps.push(ReleasePlanStep {
         id: "git.tag".to_string(),
         step_type: "git.tag".to_string(),
@@ -275,7 +253,7 @@ fn build_release_steps(
         missing: vec![],
     });
 
-    // 5. Git push (commits AND tags)
+    // 4. Git push (commits AND tags)
     steps.push(ReleasePlanStep {
         id: "git.push".to_string(),
         step_type: "git.push".to_string(),
@@ -293,7 +271,7 @@ fn build_release_steps(
     // === PUBLISH STEPS (module-derived, only if publish targets exist) ===
 
     if !publish_targets.is_empty() {
-        // 6. Package (produces artifacts for publish steps)
+        // 5. Package (produces artifacts for publish steps)
         steps.push(ReleasePlanStep {
             id: "package".to_string(),
             step_type: "package".to_string(),
@@ -304,7 +282,7 @@ fn build_release_steps(
             missing: vec![],
         });
 
-        // 7. Publish steps (all run independently after package)
+        // 6. Publish steps (all run independently after package)
         let mut publish_step_ids: Vec<String> = Vec::new();
         for target in &publish_targets {
             let step_id = format!("publish.{}", target);
@@ -322,7 +300,7 @@ fn build_release_steps(
             });
         }
 
-        // 8. Cleanup step (runs after all publish steps)
+        // 7. Cleanup step (runs after all publish steps)
         steps.push(ReleasePlanStep {
             id: "cleanup".to_string(),
             step_type: "cleanup".to_string(),

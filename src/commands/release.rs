@@ -38,10 +38,6 @@ pub struct ReleaseArgs {
     #[arg(long)]
     dry_run: bool,
 
-    /// Custom message for pre-release commit
-    #[arg(long, value_name = "MESSAGE")]
-    commit_message: Option<String>,
-
     /// Accept --json for compatibility (output is JSON by default)
     #[arg(long, hide = true)]
     json: bool,
@@ -86,8 +82,6 @@ pub struct ReleaseResult {
     pub bump_type: String,
     pub dry_run: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit_message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<ReleasePlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<ReleaseRun>,
@@ -99,7 +93,6 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
     let options = release::ReleaseOptions {
         bump_type: args.bump_type.as_str().to_string(),
         dry_run: args.dry_run,
-        commit_message: args.commit_message.clone(),
     };
 
     if args.dry_run {
@@ -117,7 +110,6 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                     component_id: args.component_id,
                     bump_type: options.bump_type,
                     dry_run: true,
-                    commit_message: args.commit_message,
                     plan: Some(plan),
                     run: None,
                     deployment,
@@ -140,7 +132,6 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                     component_id: args.component_id,
                     bump_type: options.bump_type,
                     dry_run: false,
-                    commit_message: args.commit_message,
                     plan: None,
                     run: Some(run_result),
                     deployment,
