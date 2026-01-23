@@ -26,6 +26,7 @@ use commands::{
 };
 use homeboy::module::load_all_modules;
 use homeboy::utils::args;
+use homeboy::utils::entity_suggest::{find_entity_match, generate_entity_hints};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -233,7 +234,17 @@ fn main() -> std::process::ExitCode {
 
     let args: Vec<String> = std::env::args().collect();
     let normalized = args::normalize(args);
-    let matches = cmd.get_matches_from(normalized);
+
+    let matches = match cmd.try_get_matches_from(normalized) {
+        Ok(m) => m,
+        Err(e) => {
+            if let Some(output) = try_augment_clap_error(&e) {
+                eprintln!("{}", output);
+                return std::process::ExitCode::from(2);
+            }
+            e.exit();
+        }
+    };
 
     let global = GlobalArgs {};
 
@@ -252,9 +263,7 @@ fn main() -> std::process::ExitCode {
 
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
-        Err(e) => {
-            e.exit();
-        }
+        Err(e) => e.exit(),
     };
 
     let mode = response_mode(&cli.command);
@@ -354,4 +363,96 @@ fn exit_code_to_u8(code: i32) -> u8 {
     } else {
         code as u8
     }
+}
+
+/// Attempt to augment a clap error with entity suggestions.
+/// Returns Some(augmented_message) if the unrecognized string matches a known entity.
+fn try_augment_clap_error(e: &clap::Error) -> Option<String> {
+    use clap::error::ErrorKind;
+
+    // Only handle InvalidSubcommand errors
+    if e.kind() != ErrorKind::InvalidSubcommand {
+        return None;
+    }
+
+    // Extract unrecognized subcommand and parent command from error
+    let unrecognized = extract_unrecognized_from_error(e)?;
+    let parent_command = extract_parent_command_from_error(e)?;
+
+    // Check if it matches a known entity
+    let entity_match = find_entity_match(&unrecognized)?;
+
+    // Generate hints
+    let hints = generate_entity_hints(&entity_match, &parent_command, &unrecognized);
+
+    // Build augmented output
+    let mut output = format!("error: unrecognized subcommand '{}'\n\n", unrecognized);
+    for hint in hints {
+        output.push_str(&format!("hint: {}\n", hint));
+    }
+    output.push_str(&format!(
+        "\nFor more information, try 'homeboy {} --help'",
+        parent_command
+    ));
+
+    Some(output)
+}
+
+/// Extract the unrecognized subcommand string from a clap error.
+fn extract_unrecognized_from_error(e: &clap::Error) -> Option<String> {
+    use clap::error::ContextKind;
+
+    // clap 4.x provides context via e.context()
+    for (kind, value) in e.context() {
+        if matches!(kind, ContextKind::InvalidSubcommand) {
+            return Some(value.to_string());
+        }
+    }
+
+    // Fallback: parse from error message
+    // Format: "error: unrecognized subcommand 'xyz'"
+    let msg = e.to_string();
+    if let Some(start) = msg.find("unrecognized subcommand '") {
+        let rest = &msg[start + 25..];
+        if let Some(end) = rest.find('\'') {
+            return Some(rest[..end].to_string());
+        }
+    }
+
+    None
+}
+
+/// Extract the parent command from a clap error's usage string.
+fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
+    use clap::error::ContextKind;
+
+    // clap 4.x: look for Usage context which contains "homeboy <command> ..."
+    for (kind, value) in e.context() {
+        if matches!(kind, ContextKind::Usage) {
+            let usage = value.to_string();
+            // Format: "Usage: homeboy <command> [OPTIONS] ..."
+            if let Some(rest) = usage.strip_prefix("Usage: homeboy ") {
+                // Get first word after "homeboy "
+                if let Some(cmd) = rest.split_whitespace().next() {
+                    // Skip if it's a placeholder like "[OPTIONS]" or "<COMMAND>"
+                    if !cmd.starts_with('[') && !cmd.starts_with('<') {
+                        return Some(cmd.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: parse from error message which includes usage
+    let msg = e.to_string();
+    if let Some(start) = msg.find("Usage: homeboy ") {
+        let rest = &msg[start + 15..];
+        if let Some(cmd) = rest.split_whitespace().next() {
+            if !cmd.starts_with('[') && !cmd.starts_with('<') {
+                return Some(cmd.to_string());
+            }
+        }
+    }
+
+    None
 }
