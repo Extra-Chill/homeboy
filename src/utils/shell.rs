@@ -186,4 +186,20 @@ mod tests {
         let args: Vec<String> = vec![];
         assert_eq!(normalize_args(&args), args);
     }
+
+    #[test]
+    fn normalize_args_quoted_and_unquoted_equivalent() {
+        // Simulate what clap gives us for each syntax:
+        // `homeboy wp proj post list`     → ["post", "list"]
+        // `homeboy wp proj "post list"`   → ["post list"]
+
+        let unquoted = vec!["post".to_string(), "list".to_string()];
+        let quoted = vec!["post list".to_string()];
+
+        let normalized_unquoted = normalize_args(&unquoted);
+        let normalized_quoted = normalize_args(&quoted);
+
+        assert_eq!(normalized_unquoted, normalized_quoted);
+        assert_eq!(normalized_quoted, vec!["post", "list"]);
+    }
 }

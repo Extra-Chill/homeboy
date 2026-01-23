@@ -95,9 +95,7 @@ pub fn execute_for_project_direct(
         .filter(|p| !p.is_empty())
         .ok_or_else(|| Error::config("Base path not configured".to_string()))?;
 
-    // Normalize args: if single arg contains spaces, split it
-    // This handles both: "arg1 arg2 --flag" and ["arg1", "arg2", "--flag"]
-    let normalized_args = shell::normalize_args(args);
+    // Args are normalized at the cli_tool::run() entry point
 
     // Try direct execution first
     if let Ok(output) = try_execute_direct(
@@ -105,14 +103,14 @@ pub fn execute_for_project_direct(
         cli_config,
         project,
         module_id,
-        &normalized_args,
+        args,
         target_domain,
     ) {
         return Ok(output);
     }
 
     // Fallback to shell execution
-    let command = build_shell_command(&base_path, cli_config, &normalized_args, target_domain)?;
+    let command = build_shell_command(&base_path, cli_config, args, target_domain)?;
     execute_for_project(project, &command)
 }
 

@@ -27,6 +27,12 @@ pub struct CliToolResult {
 }
 
 pub fn run(tool: &str, identifier: &str, args: &[String]) -> Result<CliToolResult> {
+    // Normalize args: split quoted strings containing spaces.
+    // This ensures both syntaxes work identically:
+    //   homeboy wp extra-chill:events datamachine pipelines list
+    //   homeboy wp extra-chill:events "datamachine pipelines list"
+    let args = shell::normalize_args(args);
+
     // Parse project:subtarget syntax
     let (project_id, embedded_subtarget) = crate::utils::parser::split_identifier(identifier);
 
@@ -39,7 +45,7 @@ pub fn run(tool: &str, identifier: &str, args: &[String]) -> Result<CliToolResul
     };
 
     // Try component first (uses original identifier for component lookup)
-    if let Some(result) = try_run_for_component(tool, identifier, args) {
+    if let Some(result) = try_run_for_component(tool, identifier, &args) {
         return result;
     }
 
@@ -258,8 +264,12 @@ fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<
             format!(
                 "This project has subtargets configured. You must specify which subtarget to use.\n\n\
                  Available subtargets for project '{}':\n{}\n\n\
-                 Syntax: homeboy <tool> {}:<subtarget> \"<command>\" OR homeboy <tool> {} <subtarget> \"<command>\"",
-                project.id, subtarget_list, project.id, project.id
+                 Syntax: homeboy <tool> {}:<subtarget> <command>...\n\
+                     OR  homeboy <tool> {} <subtarget> <command>...\n\n\
+                 Commands can be quoted or unquoted:\n  \
+                   homeboy wp {}:events post list\n  \
+                   homeboy wp {}:events \"post list\"",
+                project.id, subtarget_list, project.id, project.id, project.id, project.id
             ),
             Some(project.id.clone()),
             None,
@@ -286,8 +296,12 @@ fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<
         "subtarget",
         format!(
             "Subtarget '{}' not found. Available subtargets for project '{}':\n{}\n\n\
-             Syntax: homeboy <tool> {}:<subtarget> \"<command>\" OR homeboy <tool> {} <subtarget> \"<command>\"",
-            sub_id, project.id, subtarget_list, project.id, project.id
+             Syntax: homeboy <tool> {}:<subtarget> <command>...\n\
+                 OR  homeboy <tool> {} <subtarget> <command>...\n\n\
+             Commands can be quoted or unquoted:\n  \
+               homeboy wp {}:events post list\n  \
+               homeboy wp {}:events \"post list\"",
+            sub_id, project.id, subtarget_list, project.id, project.id, project.id, project.id
         ),
         Some(project.id.clone()),
         None,
