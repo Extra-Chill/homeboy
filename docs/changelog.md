@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+- Add clean working tree hint to changelog validation errors
+
 ## [0.35.0] - 2026-01-23
 
 - feat: entity suggestion for unrecognized subcommands
