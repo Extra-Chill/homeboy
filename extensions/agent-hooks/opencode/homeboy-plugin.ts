@@ -2,26 +2,13 @@ import type { Plugin } from "@opencode-ai/plugin"
 import type { $ as Shell } from "bun"
 
 // SYNC NOTE: Anti-pattern detection mirrors ../core/patterns.sh
-// Topic detection and error suggestions are NOT synced - Claude Code uses
-// UserPromptSubmit/PostToolUse hooks that inject into additionalContext.
-// OpenCode lacks equivalent context injection, so those features are
-// Claude Code-only. This plugin only implements blocking behavior.
+// Context injection uses experimental.chat.system.transform hook.
+// Topic detection and error suggestions are Claude Code-only (different hook APIs).
 
 // Shell reference set during plugin initialization
 let $: typeof Shell
-
-/**
- * Read session message from centralized config
- * Returns message content or null if file not found
- */
-async function getSessionMessage(): Promise<string | null> {
-  try {
-    const result = await $`cat ~/.config/homeboy/agent-message.txt`.text()
-    return result.trim()
-  } catch {
-    return null
-  }
-}
+// Cached init output for system prompt injection
+let cachedInitOutput: string | null = null
 
 /**
  * Execute homeboy command and return stdout
@@ -220,27 +207,20 @@ export const HomeboyPlugin: Plugin = async (context) => {
   // Store shell reference for module functions
   $ = context.$
 
-  // Run homeboy init and display results for agent context
-  const initOutput = await homeboy("init")
-  if (initOutput && context.client?.app?.log) {
-    try {
-      context.client.app.log(`Homeboy Active (auto-init)\n\n${initOutput}`)
-    } catch {
-      // Fallback: client.app.log() may cause issues in some OpenCode versions
-    }
-  } else {
-    // Fallback to static message if homeboy not available
-    const fallbackMessage = await getSessionMessage()
-    if (fallbackMessage && context.client?.app?.log) {
-      try {
-        context.client.app.log(fallbackMessage)
-      } catch {
-        // Fallback: client.app.log() may cause issues in some OpenCode versions
-      }
-    }
-  }
+  // Run homeboy init and cache output for system prompt injection
+  cachedInitOutput = await homeboy("init")
 
   return {
+    // Inject homeboy context into system prompt
+    "experimental.chat.system.transform": async (
+      _input: { system: string },
+      output: { system: string[] }
+    ) => {
+      if (cachedInitOutput) {
+        output.system.push(`Homeboy Active (auto-init)\n\n${cachedInitOutput}`)
+      }
+    },
+
     // Before tool execution (mirrors PreToolUse hooks)
     "tool.execute.before": async (input, output) => {
       // Bash command validation (mirrors pre-tool-bash.sh)
