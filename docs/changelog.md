@@ -4,7 +4,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## Unreleased
+## [0.36.3] - 2026-01-23
 
 - Add success_summary to pipeline output for human-readable release summaries
 
