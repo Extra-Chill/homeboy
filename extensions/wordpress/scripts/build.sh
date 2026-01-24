@@ -310,7 +310,6 @@ AGENTS.md
 .DS_Store
 ._*
 node_modules
-/src
 *.log
 *.tmp
 *.temp
@@ -508,6 +507,16 @@ build_project() {
         print_error "Build validation failed"
         restore_dev_deps
         exit 1
+    fi
+
+    # Validate PSR-4 autoload paths
+    if [ -f "${MODULE_PATH}/scripts/validate-psr4.sh" ]; then
+        if ! bash "${MODULE_PATH}/scripts/validate-psr4.sh" "build/$PROJECT_NAME"; then
+            print_error "PSR-4 autoload validation failed"
+            rm -rf "build/$PROJECT_NAME"
+            restore_dev_deps
+            exit 1
+        fi
     fi
 
     create_production_zip
