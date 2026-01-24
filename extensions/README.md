@@ -38,9 +38,6 @@ homeboy pm2 my-app restart
 # Rust
 homeboy cargo my-crate build
 
-# GitHub
-homeboy gh my-component issue list
-homeboy gh my-component pr status
 ```
 
 ## Creating Modules

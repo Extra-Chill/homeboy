@@ -2,16 +2,9 @@
   "name": "GitHub",
   "version": "1.0.0",
   "icon": "arrow.triangle.branch",
-  "description": "GitHub CLI integration for component repositories",
+  "description": "GitHub release publishing for the Homeboy workflow system",
   "author": "Extra Chill",
 
-  "cli": {
-    "tool": "gh",
-    "display_name": "GitHub CLI",
-    "command_template": "{{cliPath}} {{args}}",
-    "working_dir_template": "{{sitePath}}",
-    "default_cli_path": "gh"
-  },
   "actions": [
     {
       "id": "release.publish",
@@ -23,8 +16,5 @@
         "config": "{{payload.config}}"
       }
     }
-  ],
-  "runtime": {
-    "run_command": "{{modulePath}}/scripts/publish-github.sh"
-  }
+  ]
 }
