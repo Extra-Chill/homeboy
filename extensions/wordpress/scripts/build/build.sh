@@ -510,8 +510,8 @@ build_project() {
     fi
 
     # Validate PSR-4 autoload paths
-    if [ -f "${MODULE_PATH}/scripts/validate-psr4.sh" ]; then
-        if ! bash "${MODULE_PATH}/scripts/validate-psr4.sh" "build/$PROJECT_NAME"; then
+    if [ -f "${MODULE_PATH}/scripts/build/validate-psr4.sh" ]; then
+        if ! bash "${MODULE_PATH}/scripts/build/validate-psr4.sh" "build/$PROJECT_NAME"; then
             print_error "PSR-4 autoload validation failed"
             rm -rf "build/$PROJECT_NAME"
             restore_dev_deps

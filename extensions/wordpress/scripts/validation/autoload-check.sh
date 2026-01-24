@@ -22,4 +22,4 @@ export HOMEBOY_PLUGIN_PATH="$PLUGIN_PATH"
 echo "Checking component can load..."
 
 # Run PHP validation script
-php "${MODULE_PATH}/scripts/validate-autoload.php" || exit 1
+php "${MODULE_PATH}/scripts/validation/validate-autoload.php" || exit 1

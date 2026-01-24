@@ -101,7 +101,7 @@ ABSPATH="${MODULE_PATH}/vendor/wp-phpunit/wp-phpunit/wordpress"
 
 # Generate configuration based on database type
 if [ "$DATABASE_TYPE" = "sqlite" ]; then
-    bash "${MODULE_PATH}/scripts/generate-config.sh" "sqlite" "$ABSPATH"
+    bash "${MODULE_PATH}/scripts/test/generate-config.sh" "sqlite" "$ABSPATH"
 elif [ "$DATABASE_TYPE" = "mysql" ]; then
     if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then
         # Use Homeboy settings
@@ -116,13 +116,13 @@ elif [ "$DATABASE_TYPE" = "mysql" ]; then
         MYSQL_USER="root"
         MYSQL_PASSWORD=""
     fi
-    bash "${MODULE_PATH}/scripts/generate-config.sh" "mysql" "$ABSPATH" \
+    bash "${MODULE_PATH}/scripts/test/generate-config.sh" "mysql" "$ABSPATH" \
         "$MYSQL_HOST" "$MYSQL_DATABASE" "$MYSQL_USER" "$MYSQL_PASSWORD"
 fi
 
 # Run linting using external lint-runner.sh with summary mode
 run_lint() {
-    local lint_runner="${MODULE_PATH}/scripts/lint-runner.sh"
+    local lint_runner="${MODULE_PATH}/scripts/lint/lint-runner.sh"
     if [ ! -f "$lint_runner" ]; then
         echo "Warning: lint-runner.sh not found, skipping linting"
         return 0
@@ -135,7 +135,7 @@ run_lint() {
 
 # Run autoload validation (blocking - must pass before tests)
 run_autoload_check() {
-    local check_script="${MODULE_PATH}/scripts/autoload-check.sh"
+    local check_script="${MODULE_PATH}/scripts/validation/autoload-check.sh"
     if [ -f "$check_script" ]; then
         local output
         set +e

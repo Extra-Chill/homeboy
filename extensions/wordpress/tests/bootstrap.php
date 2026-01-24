@@ -64,37 +64,43 @@ if (false !== $_phpunit_polyfills_path) {
 // Load WordPress test functions
 require_once "{$_tests_dir}/includes/functions.php";
 
-// Find plugin main file
-$plugin_file = null;
+// Detect component type and find appropriate file to load
+$component_type = null;
+$component_file = null;
 
-// First, try common plugin filenames
-$common_names = ['my-plugin.php', basename($_plugin_path) . '.php'];
-foreach ($common_names as $name) {
-    $candidate = $_plugin_path . '/' . $name;
-    if (file_exists($candidate)) {
-        $content = file_get_contents($candidate);
-        if (strpos($content, 'Plugin Name:') !== false) {
-            $plugin_file = $candidate;
-            break;
-        }
+// Check if this is a theme first
+$style_css = $_plugin_path . '/style.css';
+if (file_exists($style_css) && strpos(file_get_contents($style_css), 'Theme Name:') !== false) {
+    $component_type = 'theme';
+    $functions_php = $_plugin_path . '/functions.php';
+    if (file_exists($functions_php)) {
+        $component_file = $functions_php;
     }
-}
-
-// If not found, scan all PHP files for plugin header
-if (!$plugin_file) {
+} else {
+    // Check if it's a plugin
     $files = glob($_plugin_path . '/*.php');
     foreach ($files as $file) {
         $content = file_get_contents($file);
         if (strpos($content, 'Plugin Name:') !== false) {
-            $plugin_file = $file;
+            $component_type = 'plugin';
+            $component_file = $file;
             break;
         }
     }
 }
 
-if (!$plugin_file) {
-    echo "Could not find plugin main file in $_plugin_path\n";
-    echo "Looked for files with 'Plugin Name:' header\n";
+if (!$component_type || !$component_file) {
+    if (!$component_type) {
+        echo "Could not detect component type in $_plugin_path\n";
+        echo "Expected either a plugin (with 'Plugin Name:' header) or theme (with 'Theme Name:' in style.css)\n";
+    } else {
+        echo "Could not find main file for $component_type in $_plugin_path\n";
+        if ($component_type === 'theme') {
+            echo "Looked for functions.php in theme directory\n";
+        } else {
+            echo "Looked for files with 'Plugin Name:' header\n";
+        }
+    }
     exit(1);
 }
 
@@ -103,49 +109,33 @@ if (!$_core_dir) {
     exit(1);
 }
 
-// Find plugin main file
-$plugin_file = null;
-
-// First, try common plugin filenames
-$common_names = [basename($_plugin_path) . '.php', 'my-plugin.php'];
-foreach ($common_names as $name) {
-    $candidate = $_plugin_path . '/' . $name;
-    if (file_exists($candidate)) {
-        $content = file_get_contents($candidate);
-        if (strpos($content, 'Plugin Name:') !== false) {
-            $plugin_file = $candidate;
-            break;
-        }
-    }
-}
-
-// If not found, scan all PHP files for plugin header
-if (!$plugin_file) {
-    $files = glob($_plugin_path . '/*.php');
-    foreach ($files as $file) {
-        $content = file_get_contents($file);
-        if (strpos($content, 'Plugin Name:') !== false) {
-            $plugin_file = $file;
-            break;
-        }
-    }
-}
-
-if (!$plugin_file) {
-    echo "Could not find plugin main file in $_plugin_path\n";
-    echo "Looked for files with 'Plugin Name:' header\n";
-    exit(1);
-}
-
 // Only print debug info when HOMEBOY_DEBUG is set
 if (getenv('HOMEBOY_DEBUG') === '1') {
-    echo "Found plugin file: $plugin_file\n";
+    echo "Detected $component_type with file: $component_file\n";
 }
 
-// Load plugin before WordPress loads
-tests_add_filter('muplugins_loaded', function() use ($plugin_file) {
-    require_once $plugin_file;
-});
+// Load component at the appropriate WordPress hook
+if ($component_type === 'theme') {
+    // Load themes on after_setup_theme hook
+    tests_add_filter('after_setup_theme', function() use ($component_file, $_plugin_path) {
+        if ($component_file) {
+            require_once $component_file;
+        }
+        
+        // Set theme constants for tests
+        if (!defined('TEMPLATEPATH')) {
+            define('TEMPLATEPATH', $_plugin_path);
+        }
+        if (!defined('STYLESHEETPATH')) {
+            define('STYLESHEETPATH', $_plugin_path);
+        }
+    });
+} else {
+    // Load plugins on plugins_loaded hook
+    tests_add_filter('plugins_loaded', function() use ($component_file) {
+        require_once $component_file;
+    });
+}
 
 // Start up the WP testing environment
 require_once $_tests_dir . '/includes/bootstrap.php';

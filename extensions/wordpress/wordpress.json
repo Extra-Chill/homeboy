@@ -119,14 +119,14 @@
     "script_names": ["build.sh"],
     "command_template": "bash {{script}}",
     "module_script": "scripts/build.sh",
-    "pre_build_script": "scripts/validate-build.sh",
+    "pre_build_script": "scripts/build/validate-build.sh",
     "artifact_pattern": "build/{component_id}.zip"
   },
 
   "runtime": {
-    "setup_command": "bash {{module_path}}/scripts/setup.sh",
+    "setup_command": "bash {{module_path}}/scripts/build/setup.sh",
     "ready_check": "test -f {{module_path}}/vendor/wp-phpunit/wp-phpunit/includes/bootstrap.php",
-    "run_command": "bash {{module_path}}/scripts/test-runner.sh"
+    "run_command": "bash {{module_path}}/scripts/test/test-runner.sh"
   },
 
   "testing": {

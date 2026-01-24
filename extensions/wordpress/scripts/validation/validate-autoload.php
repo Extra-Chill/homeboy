@@ -350,6 +350,38 @@ if (!function_exists('sanitize_text_field')) {
     }
 }
 
+// Shortcode API stubs
+if (!function_exists('add_shortcode')) {
+    function add_shortcode($tag, $callback) {
+        return true;
+    }
+}
+if (!function_exists('remove_shortcode')) {
+    function remove_shortcode($tag) {
+        return true;
+    }
+}
+if (!function_exists('shortcode_exists')) {
+    function shortcode_exists($tag) {
+        return false;
+    }
+}
+if (!function_exists('do_shortcode')) {
+    function do_shortcode($content) {
+        return $content;
+    }
+}
+if (!function_exists('shortcode_atts')) {
+    function shortcode_atts($pairs, $atts, $shortcode = '') {
+        $atts = (array)$atts;
+        $out = [];
+        foreach ($pairs as $name => $default) {
+            $out[$name] = array_key_exists($name, $atts) ? $atts[$name] : $default;
+        }
+        return $out;
+    }
+}
+
 // Utility stubs
 if (!function_exists('absint')) {
     function absint($maybeint) {

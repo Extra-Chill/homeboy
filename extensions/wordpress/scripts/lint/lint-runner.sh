@@ -108,13 +108,13 @@ fi
 
 PHPCS_BIN="${MODULE_PATH}/vendor/bin/phpcs"
 PHPCBF_BIN="${MODULE_PATH}/vendor/bin/phpcbf"
-YODA_FIXER="${MODULE_PATH}/scripts/yoda-fixer.php"
-IN_ARRAY_FIXER="${MODULE_PATH}/scripts/in-array-strict-fixer.php"
-SHORT_TERNARY_FIXER="${MODULE_PATH}/scripts/short-ternary-fixer.php"
-ESCAPE_I18N_FIXER="${MODULE_PATH}/scripts/escape-i18n-fixer.php"
-ECHO_TRANSLATE_FIXER="${MODULE_PATH}/scripts/echo-translate-fixer.php"
-SAFE_REDIRECT_FIXER="${MODULE_PATH}/scripts/safe-redirect-fixer.php"
-WP_DIE_TRANSLATE_FIXER="${MODULE_PATH}/scripts/wp-die-translate-fixer.php"
+YODA_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/yoda-fixer.php"
+IN_ARRAY_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/in-array-strict-fixer.php"
+SHORT_TERNARY_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/short-ternary-fixer.php"
+ESCAPE_I18N_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/escape-i18n-fixer.php"
+ECHO_TRANSLATE_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/echo-translate-fixer.php"
+SAFE_REDIRECT_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/safe-redirect-fixer.php"
+WP_DIE_TRANSLATE_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/wp-die-translate-fixer.php"
 PHPCS_CONFIG="${MODULE_PATH}/phpcs.xml.dist"
 
 # Validate tools exist
