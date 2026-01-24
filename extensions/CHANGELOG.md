@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.2.0] - 2026-01-23
 
 ### Added
 - Auto-init context injection for agent hooks
