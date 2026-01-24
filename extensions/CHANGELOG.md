@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Auto-init context injection for agent hooks
+
+### Refactored
+- GitHub module: Remove CLI wrapper, focus on release publishing
+
+### Fixed
+- Add missing WordPress function stubs to validate-autoload.php
+- Add ^ anchors to prevent false positive pattern matches
+
 ## [0.1.4] - 2026-01-22
 
 - fix: anchor all anti-pattern regexes to command start for consistency
