@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
 
+use crate::changelog;
 use crate::component;
 use crate::config::read_json_spec_to_string;
 use crate::error::{Error, Result};
@@ -443,6 +444,15 @@ pub struct UncommittedChanges {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ChangelogInfo {
+    pub unreleased_entries: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 
 pub struct ChangesOutput {
     pub component_id: String,
@@ -463,6 +473,8 @@ pub struct ChangesOutput {
     pub warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changelog: Option<ChangelogInfo>,
 }
 
 pub struct BaselineInfo {
@@ -728,6 +740,32 @@ fn resolve_target(component_id: Option<&str>) -> Result<(String, String)> {
         )
     })?;
     Ok((id.to_string(), get_component_path(id)?))
+}
+
+fn resolve_changelog_info(
+    component: &crate::component::Component,
+    commits: &[CommitInfo],
+) -> Option<ChangelogInfo> {
+    let changelog_path = changelog::resolve_changelog_path(component).ok()?;
+    let content = std::fs::read_to_string(&changelog_path).ok()?;
+    let settings = changelog::resolve_effective_settings(Some(component));
+    let unreleased_entries =
+        changelog::count_unreleased_entries(&content, &settings.next_section_aliases);
+
+    let hint = if unreleased_entries == 0 && !commits.is_empty() {
+        Some(format!(
+            "Run `homeboy changelog add {}` before bumping version",
+            component.id
+        ))
+    } else {
+        None
+    };
+
+    Some(ChangelogInfo {
+        unreleased_entries,
+        path: Some(changelog_path.to_string_lossy().to_string()),
+        hint,
+    })
 }
 
 /// Get git status for a component.
@@ -1200,6 +1238,9 @@ pub fn changes(
     })?;
     let path = get_component_path(id)?;
 
+    // Load component for version checking and changelog info
+    let component = crate::component::load(id).ok();
+
     // Determine baseline with version alignment awareness
     let baseline = match since_tag {
         Some(t) => {
@@ -1212,10 +1253,10 @@ pub fn changes(
             }
         }
         None => {
-            // Load component version for alignment checking
-            let current_version = crate::component::load(id)
-                .ok()
-                .and_then(|c| crate::version::get_component_version(&c));
+            // Use component version for alignment checking
+            let current_version = component
+                .as_ref()
+                .and_then(|c| crate::version::get_component_version(c));
             detect_baseline_with_version(&path, current_version.as_deref())?
         }
     };
@@ -1224,6 +1265,11 @@ pub fn changes(
         Some(BaselineSource::LastNCommits) => get_last_n_commits(&path, DEFAULT_COMMIT_LIMIT)?,
         _ => get_commits_since_tag(&path, baseline.reference.as_deref())?,
     };
+
+    // Resolve changelog info if component has changelog configured
+    let changelog_info = component
+        .as_ref()
+        .and_then(|c| resolve_changelog_info(c, &commits));
 
     let uncommitted = get_uncommitted_changes(&path)?;
     let uncommitted_diff = if uncommitted.has_changes {
@@ -1254,6 +1300,7 @@ pub fn changes(
         diff,
         warning: baseline.warning,
         error: None,
+        changelog: changelog_info,
     })
 }
 

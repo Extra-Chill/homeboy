@@ -510,6 +510,26 @@ fn find_section_end(lines: &[&str], start: usize) -> usize {
     index
 }
 
+/// Count bullet items in the unreleased section.
+/// Returns 0 if no unreleased section exists or section is empty.
+pub fn count_unreleased_entries(content: &str, aliases: &[String]) -> usize {
+    let lines: Vec<&str> = content.lines().collect();
+    let start = match find_next_section_start(&lines, aliases) {
+        Some(idx) => idx,
+        None => return 0,
+    };
+
+    let end = find_section_end(&lines, start);
+
+    lines[start + 1..end]
+        .iter()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("- ") || trimmed.starts_with("* ")
+        })
+        .count()
+}
+
 fn ensure_next_section(content: &str, aliases: &[String]) -> Result<(String, bool)> {
     let lines: Vec<&str> = content.lines().collect();
     if find_next_section_start(&lines, aliases).is_some() {
@@ -1425,5 +1445,56 @@ mod tests {
 
         assert!(!changed);
         assert_eq!(out.matches("- Bug fix").count(), 1);
+    }
+
+    // === count_unreleased_entries Tests ===
+
+    #[test]
+    fn count_unreleased_entries_with_direct_bullets() {
+        let content = "# Changelog\n\n## Unreleased\n\n- Item one\n- Item two\n- Item three\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        assert_eq!(count_unreleased_entries(content, &aliases), 3);
+    }
+
+    #[test]
+    fn count_unreleased_entries_with_subsection_bullets() {
+        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature one\n- Feature two\n\n### Fixed\n\n- Bug fix\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        assert_eq!(count_unreleased_entries(content, &aliases), 3);
+    }
+
+    #[test]
+    fn count_unreleased_entries_empty_section() {
+        let content = "# Changelog\n\n## Unreleased\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        assert_eq!(count_unreleased_entries(content, &aliases), 0);
+    }
+
+    #[test]
+    fn count_unreleased_entries_no_section() {
+        let content = "# Changelog\n\n## 0.1.0\n- Initial release\n";
+        let aliases = vec!["Unreleased".to_string()];
+        assert_eq!(count_unreleased_entries(content, &aliases), 0);
+    }
+
+    #[test]
+    fn count_unreleased_entries_subsections_only_no_bullets() {
+        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n### Changed\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        assert_eq!(count_unreleased_entries(content, &aliases), 0);
+    }
+
+    #[test]
+    fn count_unreleased_entries_with_asterisk_bullets() {
+        let content = "# Changelog\n\n## Unreleased\n\n* Item one\n* Item two\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        assert_eq!(count_unreleased_entries(content, &aliases), 2);
+    }
+
+    #[test]
+    fn count_unreleased_entries_mixed_bullets() {
+        let content = "# Changelog\n\n## Unreleased\n\n- Dash item\n* Asterisk item\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        assert_eq!(count_unreleased_entries(content, &aliases), 2);
     }
 }
