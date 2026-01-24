@@ -1,11 +1,11 @@
 {
   "name": "Agent Hooks",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "icon": "terminal.fill",
   "description": "Hooks for Claude Code and OpenCode to enforce Homeboy usage patterns",
   "author": "Extra Chill",
   "runtime": {
     "setup_command": "bash {{module_path}}/setup.sh",
-    "run_command": "bash {{module_path}}/setup.sh"
+    "run_command": "bash {{module_path}}/run.sh {{args}}"
   }
 }
