@@ -8,6 +8,9 @@ For current behavior, prefer the code and other documentation (for example `docs
 
 ## Unreleased
 
+### Refactored
+- Dead code cleanup
+
 ## 0.10.0
 
 - Add snake_case JSON decoding strategy for CLI output compatibility
