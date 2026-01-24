@@ -1,7 +1,6 @@
-Homeboy Active
+Homeboy not detected in PATH
 
-Run 'homeboy init' to gain context on your environment and available automations
+If Homeboy should be available, check installation:
+  brew install chubes4/tap/homeboy
 
-Use Homeboy for: builds, deploys, version management, documentation
-Commands: homeboy docs commands/commands-index
-Documentation: homeboy docs documentation/index
+Otherwise, this message can be ignored.

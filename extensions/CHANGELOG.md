@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.1.4] - 2026-01-22
 
 - fix: anchor all anti-pattern regexes to command start for consistency
 

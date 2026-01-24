@@ -1,14 +1,14 @@
 import type { Plugin } from "@opencode-ai/plugin"
-import { exec } from "child_process"
-import { promisify } from "util"
-import { readFile } from "fs/promises"
-import { homedir } from "os"
-import { join } from "path"
+import type { $ as Shell } from "bun"
 
-// SYNC NOTE: Bash equivalent at ../core/patterns.sh
-// When modifying patterns, update both files.
+// SYNC NOTE: Anti-pattern detection mirrors ../core/patterns.sh
+// Topic detection and error suggestions are NOT synced - Claude Code uses
+// UserPromptSubmit/PostToolUse hooks that inject into additionalContext.
+// OpenCode lacks equivalent context injection, so those features are
+// Claude Code-only. This plugin only implements blocking behavior.
 
-const execAsync = promisify(exec)
+// Shell reference set during plugin initialization
+let $: typeof Shell
 
 /**
  * Read session message from centralized config
@@ -16,9 +16,8 @@ const execAsync = promisify(exec)
  */
 async function getSessionMessage(): Promise<string | null> {
   try {
-    const messagePath = join(homedir(), ".config", "homeboy", "agent-message.txt")
-    const content = await readFile(messagePath, "utf-8")
-    return content.trim()
+    const result = await $`cat ~/.config/homeboy/agent-message.txt`.text()
+    return result.trim()
   } catch {
     return null
   }
@@ -30,8 +29,8 @@ async function getSessionMessage(): Promise<string | null> {
  */
 async function homeboy(args: string): Promise<string> {
   try {
-    const { stdout } = await execAsync(`homeboy ${args}`)
-    return stdout.trim()
+    const result = await $`homeboy ${args}`.text()
+    return result.trim()
   } catch {
     return ""
   }
@@ -72,6 +71,10 @@ function formatComponentPaths(data: Record<string, unknown>): string {
     .map((c) => `  ${c.id} → ${c.path || "unknown"}`)
     .join("\n")
 }
+
+// ============================================================================
+// Anti-Pattern Detection (mirrors core/patterns.sh)
+// ============================================================================
 
 /**
  * Check for bash anti-patterns that should use Homeboy commands
@@ -211,17 +214,29 @@ Benefits: Automatic changelog, consistent targets, git commit`
 
 /**
  * Homeboy Plugin for OpenCode
- * Enforces Homeboy usage patterns with full Claude Code parity
+ * Enforces Homeboy usage patterns (anti-pattern blocking, file protection)
  */
-export const HomeboyPlugin: Plugin = async (client) => {
-  // Display session message on plugin initialization
-  // Uses centralized message from ~/.config/homeboy/agent-message.txt
-  const sessionMessage = await getSessionMessage()
-  if (sessionMessage && client?.app?.log) {
+export const HomeboyPlugin: Plugin = async (context) => {
+  // Store shell reference for module functions
+  $ = context.$
+
+  // Run homeboy init and display results for agent context
+  const initOutput = await homeboy("init")
+  if (initOutput && context.client?.app?.log) {
     try {
-      client.app.log(sessionMessage)
+      context.client.app.log(`Homeboy Active (auto-init)\n\n${initOutput}`)
     } catch {
       // Fallback: client.app.log() may cause issues in some OpenCode versions
+    }
+  } else {
+    // Fallback to static message if homeboy not available
+    const fallbackMessage = await getSessionMessage()
+    if (fallbackMessage && context.client?.app?.log) {
+      try {
+        context.client.app.log(fallbackMessage)
+      } catch {
+        // Fallback: client.app.log() may cause issues in some OpenCode versions
+      }
     }
   }
 
@@ -248,19 +263,6 @@ export const HomeboyPlugin: Plugin = async (client) => {
             throw new Error(violation)
           }
         }
-      }
-    },
-
-    // After tool execution (PostToolUse equivalent - for future use)
-    "tool.execute.after": async (_input, _output) => {
-      // Reserved for future logging/metrics
-    },
-
-    // Event handler for session events
-    event: async ({ event }) => {
-      // Session idle notification (Stop equivalent)
-      if (event.type === "session.idle") {
-        // Could trigger homeboy notifications here
       }
     },
   }

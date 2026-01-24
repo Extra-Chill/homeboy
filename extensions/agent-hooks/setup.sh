@@ -47,7 +47,7 @@ install_claude() {
 
     echo "  Hooks copied to $HOOKS_DIR"
 
-    # Hook configuration to merge
+    # Hook configuration to add
     local HOOKS_CONFIG
     HOOKS_CONFIG=$(cat <<'EOF'
 {
@@ -58,6 +58,16 @@ install_claude() {
           {
             "type": "command",
             "command": "~/.claude/hooks/agent-hooks/claude/session-start.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/agent-hooks/claude/user-prompt-submit.sh"
           }
         ]
       }
@@ -81,26 +91,51 @@ install_claude() {
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/agent-hooks/claude/post-tool-bash.sh"
+          }
+        ]
+      }
     ]
   }
 }
 EOF
 )
 
-    # Merge or create settings.json
+    # Merge or create settings.json using replace strategy
+    # First remove any existing agent-hooks entries, then add fresh config
     if [[ -f "$SETTINGS_FILE" ]]; then
         cp "$SETTINGS_FILE" "$SETTINGS_FILE.backup"
         echo "  Backed up existing settings to $SETTINGS_FILE.backup"
 
         local merged
         merged=$(cat "$SETTINGS_FILE" | jq --argjson new_hooks "$HOOKS_CONFIG" '
-            def merge_hook_arrays($existing; $new):
+            # Helper to filter out agent-hooks entries from an array
+            def remove_agent_hooks:
+                if . == null then null
+                else map(select(
+                    (.hooks // []) | all(.command | (. == null) or (contains("agent-hooks") | not))
+                ))
+                end;
+
+            # Helper to merge arrays (existing cleaned + new)
+            def merge_arrays($existing; $new):
                 if $existing == null then $new
                 elif $new == null then $existing
-                else $existing + $new
+                else ($existing | remove_agent_hooks) + $new
                 end;
-            .hooks.SessionStart = merge_hook_arrays(.hooks.SessionStart; $new_hooks.hooks.SessionStart) |
-            .hooks.PreToolUse = merge_hook_arrays(.hooks.PreToolUse; $new_hooks.hooks.PreToolUse)
+
+            # Apply to all hook types
+            .hooks.SessionStart = merge_arrays(.hooks.SessionStart; $new_hooks.hooks.SessionStart) |
+            .hooks.UserPromptSubmit = merge_arrays(.hooks.UserPromptSubmit; $new_hooks.hooks.UserPromptSubmit) |
+            .hooks.PreToolUse = merge_arrays(.hooks.PreToolUse; $new_hooks.hooks.PreToolUse) |
+            .hooks.PostToolUse = merge_arrays(.hooks.PostToolUse; $new_hooks.hooks.PostToolUse)
         ')
         echo "$merged" > "$SETTINGS_FILE"
     else
