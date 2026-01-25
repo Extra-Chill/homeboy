@@ -122,7 +122,7 @@ fi
 
 # Run linting using external lint-runner.sh with summary mode
 run_lint() {
-    local lint_runner="${MODULE_PATH}/scripts/lint/lint-runner.sh"
+    local lint_runner="${MODULE_PATH}/scripts/lint-runner.sh"
     if [ ! -f "$lint_runner" ]; then
         echo "Warning: lint-runner.sh not found, skipping linting"
         return 0

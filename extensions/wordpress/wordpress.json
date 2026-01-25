@@ -118,7 +118,7 @@
     "artifact_extensions": [".zip"],
     "script_names": ["build.sh"],
     "command_template": "bash {{script}}",
-    "module_script": "scripts/build.sh",
+    "module_script": "scripts/build/build.sh",
     "pre_build_script": "scripts/build/validate-build.sh",
     "artifact_pattern": "build/{component_id}.zip"
   },
