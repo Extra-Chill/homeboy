@@ -36,19 +36,67 @@ pub fn quote_args(args: &[String]) -> String {
         .join(" ")
 }
 
-/// Normalize argument list - if single arg contains spaces, split it.
+/// Normalize argument list - if single arg contains spaces, split it while respecting quotes.
 /// Handles both input styles for CLI tool commands:
 /// - Multiple args: ["arg1", "arg2", "--flag"] -> unchanged
 /// - Single quoted arg: ["arg1 arg2 --flag"] -> split to ["arg1", "arg2", "--flag"]
+/// - Quoted content preserved: ["eval 'echo foo;'"] -> ["eval", "echo foo;"]
 ///
 /// This provides a consistent experience for users who may quote arguments
 /// in their shell vs. provide them as separate args.
 pub fn normalize_args(args: &[String]) -> Vec<String> {
-    if args.len() == 1 && args[0].contains(' ') {
-        args[0].split_whitespace().map(|s| s.to_string()).collect()
-    } else {
-        args.to_vec()
+    if args.len() != 1 || !args[0].contains(' ') {
+        return args.to_vec();
     }
+    split_respecting_quotes(&args[0])
+}
+
+/// Split a string on whitespace while respecting single and double quotes.
+/// Quotes are consumed (not included in output).
+fn split_respecting_quotes(input: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+                // Quote character consumed, not included in output
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+                // Quote character consumed, not included in output
+            }
+            ' ' | '\t' if !in_single_quote && !in_double_quote => {
+                if !current.is_empty() {
+                    result.push(std::mem::take(&mut current));
+                }
+            }
+            '\\' if in_double_quote => {
+                // Handle escape sequences in double quotes (bash semantics)
+                if let Some(&next) = chars.peek() {
+                    if matches!(next, '"' | '\\' | '$' | '`') {
+                        chars.next();
+                        current.push(next);
+                    } else {
+                        current.push(c);
+                    }
+                } else {
+                    current.push(c);
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+
+    if !current.is_empty() {
+        result.push(current);
+    }
+
+    result
 }
 
 /// Escape an entire command string for sh -c execution.
@@ -201,5 +249,61 @@ mod tests {
 
         assert_eq!(normalized_unquoted, normalized_quoted);
         assert_eq!(normalized_quoted, vec!["post", "list"]);
+    }
+
+    #[test]
+    fn normalize_args_respects_single_quotes() {
+        // `homeboy wp proj "eval 'echo foo;'"` → ["eval 'echo foo;'"]
+        let args = vec!["eval 'echo foo;'".to_string()];
+        assert_eq!(normalize_args(&args), vec!["eval", "echo foo;"]);
+    }
+
+    #[test]
+    fn normalize_args_respects_double_quotes() {
+        let args = vec!["eval \"echo foo;\"".to_string()];
+        assert_eq!(normalize_args(&args), vec!["eval", "echo foo;"]);
+    }
+
+    #[test]
+    fn normalize_args_preserves_backslashes_in_single_quotes() {
+        // Single quotes preserve everything literally (no escape processing)
+        let args = vec!["eval 'print_r(\\Namespace\\Class::method());'".to_string()];
+        assert_eq!(
+            normalize_args(&args),
+            vec!["eval", "print_r(\\Namespace\\Class::method());"]
+        );
+    }
+
+    #[test]
+    fn normalize_args_mixed_content() {
+        let args = vec!["cmd 'arg with spaces' --flag value".to_string()];
+        assert_eq!(
+            normalize_args(&args),
+            vec!["cmd", "arg with spaces", "--flag", "value"]
+        );
+    }
+
+    #[test]
+    fn normalize_args_wp_eval_php_code() {
+        // Real-world use case: WP-CLI eval with PHP code
+        let args = vec!["eval 'echo json_encode(get_option(\"blogname\"));'".to_string()];
+        assert_eq!(
+            normalize_args(&args),
+            vec!["eval", "echo json_encode(get_option(\"blogname\"));"]
+        );
+    }
+
+    #[test]
+    fn normalize_args_nested_quotes() {
+        // Double quotes inside single quotes are literal
+        let args = vec!["cmd 'say \"hello\"'".to_string()];
+        assert_eq!(normalize_args(&args), vec!["cmd", "say \"hello\""]);
+    }
+
+    #[test]
+    fn normalize_args_double_quote_escapes() {
+        // Within double quotes, backslash-escaped chars are processed
+        let args = vec!["cmd \"path\\\\to\\\\file\"".to_string()];
+        assert_eq!(normalize_args(&args), vec!["cmd", "path\\to\\file"]);
     }
 }

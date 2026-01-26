@@ -1,3 +1,4 @@
+use base64::Engine;
 use clap::Args;
 use serde_json::{json, Map, Value};
 
@@ -37,6 +38,10 @@ pub struct DynamicSetArgs {
     #[arg(long, value_name = "JSON")]
     pub json: Option<String>,
 
+    /// Base64-encoded JSON spec (bypasses shell escaping issues)
+    #[arg(long, value_name = "BASE64")]
+    pub base64: Option<String>,
+
     /// Replace these fields instead of merging arrays
     #[arg(long, value_name = "FIELD")]
     pub replace: Vec<String>,
@@ -49,9 +54,32 @@ pub struct DynamicSetArgs {
 }
 
 impl DynamicSetArgs {
-    /// Get the JSON spec from either --json or positional argument
-    pub fn json_spec(&self) -> Option<&str> {
-        self.json.as_deref().or(self.spec.as_deref())
+    /// Get the JSON spec from --base64, --json, or positional argument.
+    /// Priority: --base64 > --json > positional spec
+    pub fn json_spec(&self) -> Result<Option<String>, homeboy::Error> {
+        // Base64 takes priority - decode and return
+        if let Some(b64) = &self.base64 {
+            let decoded_bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(
+                |e| {
+                    homeboy::Error::validation_invalid_argument(
+                        "base64",
+                        format!("Invalid base64 encoding: {}", e),
+                        None,
+                        Some(vec!["Encode with: echo '{...}' | base64".to_string()]),
+                    )
+                },
+            )?;
+            let decoded_str = String::from_utf8(decoded_bytes).map_err(|e| {
+                homeboy::Error::validation_invalid_argument(
+                    "base64",
+                    format!("Decoded base64 is not valid UTF-8: {}", e),
+                    None,
+                    None,
+                )
+            })?;
+            return Ok(Some(decoded_str));
+        }
+        Ok(self.json.clone().or_else(|| self.spec.clone()))
     }
 }
 
@@ -112,10 +140,24 @@ pub fn merge_json_sources(spec: Option<&str>, extra: &[String]) -> homeboy::Resu
     let mut base = if let Some(spec) = spec {
         let raw = homeboy::config::read_json_spec_to_string(spec)?;
         serde_json::from_str(&raw).map_err(|e| {
+            let hint = if raw.contains('\\') {
+                Some(
+                    "For patterns with backslashes, use --base64 to bypass shell escaping:\n  \
+                     echo '{...}' | base64\n  \
+                     homeboy <command> set ID --base64 \"<encoded>\""
+                        .to_string(),
+                )
+            } else {
+                None
+            };
             homeboy::Error::validation_invalid_json(
                 e,
                 Some("parse JSON spec".to_string()),
-                Some(raw.chars().take(200).collect::<String>()),
+                Some(format!(
+                    "{}{}",
+                    raw.chars().take(200).collect::<String>(),
+                    hint.map(|h| format!("\n\nTip: {}", h)).unwrap_or_default()
+                )),
             )
         })?
     } else {

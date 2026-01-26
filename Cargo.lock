@@ -694,6 +694,7 @@ version = "0.37.4"
 dependencies = [
  "anyhow",
  "arboard",
+ "base64",
  "chrono",
  "clap",
  "heck",

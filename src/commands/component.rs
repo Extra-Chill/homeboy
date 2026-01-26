@@ -242,18 +242,19 @@ fn show(id: &str) -> CmdResult<ComponentOutput> {
 }
 
 fn set(args: DynamicSetArgs) -> CmdResult<ComponentOutput> {
-    // Merge JSON sources: positional/--json spec + dynamic flags
-    let has_input = args.json_spec().is_some() || !args.extra.is_empty();
+    // Merge JSON sources: positional/--json/--base64 spec + dynamic flags
+    let spec = args.json_spec()?;
+    let has_input = spec.is_some() || !args.extra.is_empty();
     if !has_input {
         return Err(homeboy::Error::validation_invalid_argument(
             "spec",
-            "Provide JSON spec, --json flag, or --key value flags",
+            "Provide JSON spec, --json flag, --base64 flag, or --key value flags",
             None,
             None,
         ));
     }
 
-    let merged = super::merge_json_sources(args.json_spec(), &args.extra)?;
+    let merged = super::merge_json_sources(spec.as_deref(), &args.extra)?;
     let json_string = serde_json::to_string(&merged).map_err(|e| {
         homeboy::Error::internal_unexpected(format!("Failed to serialize merged JSON: {}", e))
     })?;
