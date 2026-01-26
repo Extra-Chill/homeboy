@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.38.1] - 2026-01-26
+
+- Add flag-style aliases for version and changelog commands (#13, #32)
+
 ## [0.38.0] - 2026-01-26
 
 ### Added
