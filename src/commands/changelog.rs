@@ -31,6 +31,7 @@ pub enum ChangelogCommand {
         json: Option<String>,
 
         /// Component ID (non-JSON mode)
+        #[arg(long = "component")]
         component_id: Option<String>,
 
         /// Changelog item content (positional, for backward compatibility)
