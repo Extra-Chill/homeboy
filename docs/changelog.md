@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.37.2] - 2026-01-26
+
+### Fixed
+- Case-insensitive enum arguments for --type and BUMP_TYPE (closes #29)
+
 ## [0.37.1] - 2026-01-26
 
 ### Fixed
