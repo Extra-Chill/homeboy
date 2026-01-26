@@ -31,7 +31,7 @@ pub struct ReleaseArgs {
     component_id: String,
 
     /// Version bump type (patch, minor, major)
-    #[arg(value_name = "BUMP_TYPE")]
+    #[arg(value_name = "BUMP_TYPE", ignore_case = true)]
     bump_type: BumpType,
 
     /// Preview what will happen without making changes
