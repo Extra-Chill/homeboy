@@ -415,7 +415,7 @@ run_tests() {
         else
             # Run tests with module infrastructure (default)
             print_status "Running tests with module infrastructure..."
-            if ! bash "${MODULE_PATH}/scripts/test-runner.sh"; then
+            if ! bash "${MODULE_PATH}/scripts/test/test-runner.sh"; then
                 print_error "Test pipeline failed. See error details above."
                 return 1
             fi
