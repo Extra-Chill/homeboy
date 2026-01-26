@@ -4,7 +4,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## Unreleased
+## [0.37.0] - 2026-01-25
 
 - Add configurable lint and test script paths via module manifest (lint.module_script, test.module_script)
 
