@@ -14,8 +14,31 @@ file_path=$(echo "$tool_input" | jq -r '.tool_input.file_path // empty' 2>/dev/n
 
 [[ -z "$file_path" ]] && exit 0
 
-# Get protected files from Homeboy (suppress errors for non-Homeboy repos)
-init_data=$(homeboy init --json 2>/dev/null | jq '.data' 2>/dev/null || echo "{}")
+# Find the project root for this file by walking up the directory tree
+find_project_root() {
+    local path="$1"
+    local dir
+
+    # Start from parent directory (handles both existing files and new files)
+    dir=$(dirname "$path")
+
+    # Walk up looking for git root
+    while [[ "$dir" != "/" && "$dir" != "." ]]; do
+        if [[ -d "$dir/.git" ]]; then
+            echo "$dir"
+            return 0
+        fi
+        dir=$(dirname "$dir")
+    done
+
+    return 1
+}
+
+project_root=$(find_project_root "$file_path" 2>/dev/null || true)
+[[ -z "$project_root" ]] && exit 0
+
+# Get protected files from Homeboy (run from project root, suppress errors for non-Homeboy repos)
+init_data=$(cd "$project_root" && homeboy init --json 2>/dev/null | jq '.data' 2>/dev/null || echo "{}")
 
 # Check changelog protection
 changelog_path=$(echo "$init_data" | jq -r '.changelog.path // empty' 2>/dev/null || true)

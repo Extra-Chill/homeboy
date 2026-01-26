@@ -1,6 +1,6 @@
 {
   "name": "Agent Hooks",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "icon": "terminal.fill",
   "description": "Hooks for Claude Code and OpenCode to enforce Homeboy usage patterns",
   "author": "Extra Chill",

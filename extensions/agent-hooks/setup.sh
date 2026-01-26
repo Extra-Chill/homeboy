@@ -90,6 +90,15 @@ install_claude() {
             "command": "~/.claude/hooks/agent-hooks/claude/pre-tool-edit.sh"
           }
         ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/agent-hooks/claude/pre-tool-write.sh"
+          }
+        ]
       }
     ],
     "PostToolUse": [
