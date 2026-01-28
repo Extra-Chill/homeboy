@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.38.2] - 2026-01-27
+
+- Fix version bump race condition where changelog was finalized before all version targets were validated, causing 'No changelog items found' on retry after validation failure
+
 ## [0.38.1] - 2026-01-26
 
 - Add flag-style aliases for version and changelog commands (#13, #32)
