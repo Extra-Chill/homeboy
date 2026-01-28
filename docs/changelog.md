@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.38.5] - 2026-01-28
+
+- Fixing my fuck-up with version bumping
+
 ## [0.38.4] - 2026-01-28
 
 - Make documentation guidance audit-driven with concrete commands
