@@ -8,12 +8,17 @@ class ComposerStaticInit440dd1e8e1b91fb36d88b32020e78c1b
 {
     public static $files = array (
         '6124b4c8570aa390c21fafd04a26c69f' => __DIR__ . '/..' . '/myclabs/deep-copy/src/DeepCopy/deep_copy.php',
+        '9b38cf48e83f5d8f60375221cd213eee' => __DIR__ . '/..' . '/phpstan/phpstan/bootstrap.php',
         'ec07570ca5a812141189b1fa81503674' => __DIR__ . '/..' . '/phpunit/phpunit/src/Framework/Assert/Functions.php',
         '38fbb71d514eee25044aa9d94851ee76' => __DIR__ . '/..' . '/wp-phpunit/wp-phpunit/__loaded.php',
         '7d3b315c4f303f2fc14aca642a738e50' => __DIR__ . '/..' . '/yoast/phpunit-polyfills/phpunitpolyfills-autoload.php',
     );
 
     public static $prefixLengthsPsr4 = array (
+        'S' =>
+        array (
+            'SzepeViktor\\PHPStan\\WordPress\\' => 30,
+        ),
         'P' =>
         array (
             'PhpParser\\' => 10,
@@ -27,6 +32,10 @@ class ComposerStaticInit440dd1e8e1b91fb36d88b32020e78c1b
     );
 
     public static $prefixDirsPsr4 = array (
+        'SzepeViktor\\PHPStan\\WordPress\\' =>
+        array (
+            0 => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src',
+        ),
         'PhpParser\\' =>
         array (
             0 => __DIR__ . '/..' . '/nikic/php-parser/lib/PhpParser',

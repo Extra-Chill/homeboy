@@ -1,0 +1,18 @@
+includes:
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+
+parameters:
+    level: 5
+
+    paths:
+        - %currentWorkingDirectory%
+
+    excludePaths:
+        - vendor/
+        - node_modules/
+        - build/
+        - dist/
+        - tests/
+
+    parallel:
+        maximumNumberOfProcesses: 4

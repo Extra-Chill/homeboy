@@ -358,8 +358,24 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         fi
     fi
 
+    # Run PHPStan in summary mode
+    PHPSTAN_RUNNER="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
+    PHPSTAN_PASSED=1
+
+    if [ -f "$PHPSTAN_RUNNER" ] && [[ "${HOMEBOY_SKIP_PHPSTAN:-}" != "1" ]]; then
+        echo ""
+        set +e
+        bash "$PHPSTAN_RUNNER"
+        PHPSTAN_EXIT=$?
+        set -e
+
+        if [ "$PHPSTAN_EXIT" -ne 0 ]; then
+            PHPSTAN_PASSED=0
+        fi
+    fi
+
     # Always exit 0 (warn-only mode) - lint issues are warnings, not failures
-    if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ]; then
+    if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ] && [ "$PHPSTAN_PASSED" -eq 1 ]; then
         echo "Linting passed"
     else
         echo "Linting found issues (see above)"
@@ -392,8 +408,24 @@ if [ -f "$ESLINT_RUNNER" ]; then
     fi
 fi
 
+# Run PHPStan static analysis
+PHPSTAN_RUNNER="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
+PHPSTAN_PASSED=1
+
+if [ -f "$PHPSTAN_RUNNER" ] && [[ "${HOMEBOY_SKIP_PHPSTAN:-}" != "1" ]]; then
+    echo ""
+    set +e
+    bash "$PHPSTAN_RUNNER"
+    PHPSTAN_EXIT=$?
+    set -e
+
+    if [ "$PHPSTAN_EXIT" -ne 0 ]; then
+        PHPSTAN_PASSED=0
+    fi
+fi
+
 # Always exit 0 (warn-only mode) - lint issues are warnings, not failures
-if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ]; then
+if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ] && [ "$PHPSTAN_PASSED" -eq 1 ]; then
     echo ""
     echo "Linting passed"
 else
