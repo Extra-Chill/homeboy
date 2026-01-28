@@ -74,6 +74,10 @@ pub struct ModuleManifest {
     pub test: Option<TestConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<String>,
+    /// Glob patterns for paths to ignore during docs audit.
+    /// Uses `*` for single segment and `**` for multiple segments (e.g., `/wp-json/**`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audit_ignore_claim_patterns: Vec<String>,
 
     // Executable tools (from former modules)
     #[serde(skip_serializing_if = "Option::is_none")]

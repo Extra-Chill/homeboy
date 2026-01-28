@@ -16,7 +16,7 @@ pub use claims::{Claim, ClaimType};
 pub use tasks::{AuditTask, AuditTaskStatus};
 pub use verify::VerifyResult;
 
-use crate::{component, git, Result};
+use crate::{component, git, module, Result};
 
 /// Summary of an audit operation.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -52,8 +52,14 @@ pub fn audit_component(component_id: &str) -> Result<AuditResult> {
     let source_path = Path::new(&comp.local_path);
     let docs_path = source_path.join("docs");
 
-    // Find all documentation files
-    let doc_files = find_doc_files(&docs_path);
+    // Get changelog target to exclude from audit (historical references are expected)
+    let changelog_exclude = comp.changelog_target.as_deref();
+
+    // Collect ignore patterns from all linked modules
+    let ignore_patterns = collect_module_ignore_patterns(&comp);
+
+    // Find all documentation files (excluding changelog)
+    let doc_files = find_doc_files(&docs_path, changelog_exclude);
     let docs_scanned = doc_files.len();
 
     // Extract claims from all docs
@@ -61,7 +67,7 @@ pub fn audit_component(component_id: &str) -> Result<AuditResult> {
     for doc_file in &doc_files {
         let doc_path = docs_path.join(doc_file);
         if let Ok(content) = fs::read_to_string(&doc_path) {
-            let claims = claims::extract_claims(&content, doc_file);
+            let claims = claims::extract_claims(&content, doc_file, &ignore_patterns);
             all_claims.extend(claims);
         }
     }
@@ -105,14 +111,28 @@ pub fn audit_component(component_id: &str) -> Result<AuditResult> {
 }
 
 /// Find all markdown files in the docs directory.
-fn find_doc_files(docs_path: &Path) -> Vec<String> {
+///
+/// Excludes the changelog file if configured, since changelogs contain
+/// historical references to file paths that may no longer exist.
+fn find_doc_files(docs_path: &Path, exclude_changelog: Option<&str>) -> Vec<String> {
     let mut docs = Vec::new();
 
     if !docs_path.exists() {
         return docs;
     }
 
-    fn scan_docs(dir: &Path, prefix: &str, docs: &mut Vec<String>) {
+    // Extract changelog filename for comparison
+    let changelog_filename = exclude_changelog
+        .and_then(|p| Path::new(p).file_name())
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_lowercase());
+
+    fn scan_docs(
+        dir: &Path,
+        prefix: &str,
+        docs: &mut Vec<String>,
+        changelog_filename: &Option<String>,
+    ) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -123,6 +143,13 @@ fn find_doc_files(docs_path: &Path) -> Vec<String> {
                 }
 
                 if path.is_file() && name.ends_with(".md") {
+                    // Skip changelog file if configured
+                    if let Some(changelog) = changelog_filename {
+                        if name.to_lowercase() == *changelog {
+                            continue;
+                        }
+                    }
+
                     let relative = if prefix.is_empty() {
                         name
                     } else {
@@ -135,13 +162,13 @@ fn find_doc_files(docs_path: &Path) -> Vec<String> {
                     } else {
                         format!("{}/{}", prefix, name)
                     };
-                    scan_docs(&path, &new_prefix, docs);
+                    scan_docs(&path, &new_prefix, docs, changelog_filename);
                 }
             }
         }
     }
 
-    scan_docs(docs_path, "", &mut docs);
+    scan_docs(docs_path, "", &mut docs, &changelog_filename);
     docs.sort();
     docs
 }
@@ -190,4 +217,17 @@ fn build_changes_context(component_id: &str, tasks: &[AuditTask]) -> Option<Chan
         changed_files,
         priority_docs,
     })
+}
+
+/// Collect audit ignore patterns from all linked modules.
+fn collect_module_ignore_patterns(comp: &component::Component) -> Vec<String> {
+    let mut patterns = Vec::new();
+    if let Some(ref modules) = comp.modules {
+        for module_id in modules.keys() {
+            if let Ok(manifest) = module::load_module(module_id) {
+                patterns.extend(manifest.audit_ignore_claim_patterns.clone());
+            }
+        }
+    }
+    patterns
 }

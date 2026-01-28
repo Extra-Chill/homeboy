@@ -5,6 +5,7 @@
 //! - Directory paths in backticks
 //! - Code examples in fenced blocks
 
+use glob_match::glob_match;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -55,8 +56,28 @@ const DOMAIN_EXTENSIONS: &[&str] = &[
     ".com", ".org", ".io", ".net", ".dev", ".co", ".app", ".ai", ".xyz",
 ];
 
+/// Check if a path looks like a MIME type (platform-agnostic, IANA standard).
+fn is_mime_type(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.starts_with("application/")
+        || lower.starts_with("text/")
+        || lower.starts_with("image/")
+        || lower.starts_with("audio/")
+        || lower.starts_with("video/")
+        || lower.starts_with("font/")
+        || lower.starts_with("multipart/")
+}
+
+/// Check if a value matches any of the component's ignore patterns.
+fn matches_ignore_pattern(value: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| glob_match(pattern, value))
+}
+
 /// Extract all claims from a markdown document.
-pub fn extract_claims(content: &str, doc_file: &str) -> Vec<Claim> {
+///
+/// The `ignore_patterns` parameter allows components to filter out platform-specific
+/// patterns (e.g., `/wp-json/*` for WordPress) without hardcoding them in core.
+pub fn extract_claims(content: &str, doc_file: &str, ignore_patterns: &[String]) -> Vec<Claim> {
     let mut claims = Vec::new();
 
     // Track which positions we've already claimed to avoid duplicates
@@ -89,6 +110,16 @@ pub fn extract_claims(content: &str, doc_file: &str) -> Vec<Claim> {
                     continue;
                 }
 
+                // Skip MIME types (application/*, text/*, etc.)
+                if is_mime_type(path) {
+                    continue;
+                }
+
+                // Skip component-configured ignore patterns
+                if matches_ignore_pattern(path, ignore_patterns) {
+                    continue;
+                }
+
                 // Skip very short paths that might be false positives
                 if path.len() < 5 {
                     continue;
@@ -115,6 +146,11 @@ pub fn extract_claims(content: &str, doc_file: &str) -> Vec<Claim> {
 
                 // Skip common false positives
                 if path == "./" || path == "../" || path.len() < 4 {
+                    continue;
+                }
+
+                // Skip component-configured ignore patterns
+                if matches_ignore_pattern(path, ignore_patterns) {
                     continue;
                 }
 
@@ -176,7 +212,7 @@ mod tests {
     #[test]
     fn test_extract_file_paths() {
         let content = "Check the file at `/inc/Engine/AI/Tools/BaseTool.php` for details.";
-        let claims = extract_claims(content, "test.md");
+        let claims = extract_claims(content, "test.md", &[]);
 
         assert!(claims
             .iter()
@@ -188,7 +224,7 @@ mod tests {
     fn test_extract_file_paths_requires_separator() {
         // Files without path separator should NOT be extracted
         let content = "The `main.py` file is the entry point.";
-        let claims = extract_claims(content, "test.md");
+        let claims = extract_claims(content, "test.md", &[]);
 
         assert!(!claims.iter().any(|c| c.value == "main.py"));
     }
@@ -196,7 +232,7 @@ mod tests {
     #[test]
     fn test_extract_directory_paths() {
         let content = "The tools are in `src/core/docs_audit/` directory.";
-        let claims = extract_claims(content, "test.md");
+        let claims = extract_claims(content, "test.md", &[]);
 
         assert!(claims
             .iter()
@@ -207,7 +243,7 @@ mod tests {
     #[test]
     fn test_skip_domain_patterns() {
         let content = "Visit `mysite.com/path/to/page.html` for documentation.";
-        let claims = extract_claims(content, "test.md");
+        let claims = extract_claims(content, "test.md", &[]);
 
         // Should skip domain-like paths
         assert!(!claims.iter().any(|c| c.value.contains("mysite.com")));
@@ -223,7 +259,7 @@ function test() {
 }
 ```
 "#;
-        let claims = extract_claims(content, "test.md");
+        let claims = extract_claims(content, "test.md", &[]);
 
         assert!(claims
             .iter()
@@ -233,7 +269,7 @@ function test() {
     #[test]
     fn test_skip_urls() {
         let content = "See https://example.com/path/to/file.html for details.";
-        let claims = extract_claims(content, "test.md");
+        let claims = extract_claims(content, "test.md", &[]);
 
         assert!(claims.is_empty() || !claims.iter().any(|c| c.value.contains("https://")));
     }
@@ -245,9 +281,67 @@ function test() {
 The `BaseTool` class provides base functionality.
 Call `register_tool(name, handler)` to register a tool.
 "#;
-        let claims = extract_claims(content, "test.md");
+        let claims = extract_claims(content, "test.md", &[]);
 
         // Should have no claims (no file paths or directories in this content)
         assert!(claims.is_empty());
+    }
+
+    #[test]
+    fn test_skip_mime_types() {
+        let content = "The file type is `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`.";
+        let claims = extract_claims(content, "test.md", &[]);
+
+        assert!(!claims.iter().any(|c| c.value.starts_with("application/")));
+    }
+
+    #[test]
+    fn test_skip_various_mime_types() {
+        let content = r#"
+Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
+"#;
+        let claims = extract_claims(content, "test.md", &[]);
+
+        assert!(claims.is_empty());
+    }
+
+    #[test]
+    fn test_ignore_patterns_filter_rest_api() {
+        let content = "The endpoint is at `/wp-json/datamachine/v1/events`.";
+        // Use ** to match multiple path segments
+        let patterns = vec!["/wp-json/**".to_string()];
+        let claims = extract_claims(content, "test.md", &patterns);
+
+        assert!(!claims.iter().any(|c| c.value.contains("wp-json")));
+    }
+
+    #[test]
+    fn test_ignore_patterns_filter_api_versioned() {
+        let content = "Call `/api/v1/users/list.json` for the user list.";
+        // Use ** to match path segments before and after /v1/
+        let patterns = vec!["**/v1/**".to_string()];
+        let claims = extract_claims(content, "test.md", &patterns);
+
+        assert!(!claims.iter().any(|c| c.value.contains("/v1/")));
+    }
+
+    #[test]
+    fn test_ignore_patterns_filter_oauth_callback() {
+        let content = "OAuth redirects to `/datamachine-auth/twitter/` callback.";
+        // Use ** to match any path starting with segment ending in -auth
+        let patterns = vec!["/*-auth/**".to_string()];
+        let claims = extract_claims(content, "test.md", &patterns);
+
+        assert!(!claims.iter().any(|c| c.value.contains("-auth/")));
+    }
+
+    #[test]
+    fn test_no_ignore_patterns_extracts_api_paths() {
+        // Without ignore patterns, API-like paths ARE extracted
+        let content = "The endpoint is at `/wp-json/datamachine/v1/events.json`.";
+        let claims = extract_claims(content, "test.md", &[]);
+
+        // With no patterns, this should be extracted as a file path
+        assert!(claims.iter().any(|c| c.value.contains("wp-json")));
     }
 }
