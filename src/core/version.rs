@@ -280,6 +280,57 @@ fn resolve_target_pattern(target: &VersionTarget) -> Result<String> {
         })
 }
 
+/// Pre-validate all version targets match the expected version.
+/// This is a read-only operation that ensures all targets are in sync
+/// BEFORE any file modifications (like changelog finalization) occur.
+fn pre_validate_version_targets(
+    targets: &[VersionTarget],
+    local_path: &str,
+    expected_version: &str,
+) -> Result<Vec<VersionTargetInfo>> {
+    let mut target_infos = Vec::new();
+
+    for target in targets {
+        let version_pattern = resolve_target_pattern(target)?;
+        let full_path = resolve_version_file_path(local_path, &target.file);
+        let content = local_files::local().read(Path::new(&full_path))?;
+
+        let versions = parse_versions(&content, &version_pattern).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "versionPattern",
+                format!("Invalid version regex pattern '{}'", version_pattern),
+                None,
+                Some(vec![version_pattern.clone()]),
+            )
+        })?;
+
+        if versions.is_empty() {
+            return Err(Error::internal_unexpected(format!(
+                "Could not find version in {}",
+                target.file
+            )));
+        }
+
+        // Validate all versions in this file match expected
+        let found = parser::require_identical(&versions, &target.file)?;
+        if found != expected_version {
+            return Err(Error::internal_unexpected(format!(
+                "Version mismatch in {}: found {}, expected {}",
+                target.file, found, expected_version
+            )));
+        }
+
+        target_infos.push(VersionTargetInfo {
+            file: target.file.clone(),
+            pattern: version_pattern,
+            full_path,
+            match_count: versions.len(),
+        });
+    }
+
+    Ok(target_infos)
+}
+
 /// Result of validating and finalizing changelog for a version operation.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangelogValidationResult {
@@ -725,60 +776,25 @@ pub fn bump_component_version(component: &Component, bump_type: &str) -> Result<
         )
     })?;
 
+    // Pre-validate ALL version targets BEFORE any file modifications.
+    // This prevents changelog finalization when version files are out of sync.
+    let target_infos = pre_validate_version_targets(targets, &component.local_path, &old_version)?;
+
+    // Now safe to finalize changelog - all targets validated
     let changelog_validation =
         validate_and_finalize_changelog(component, &old_version, &new_version)?;
 
-    // Update all version targets
-    let mut target_infos = Vec::new();
-
-    for target in targets {
-        let version_pattern = resolve_target_pattern(target)?;
-        let full_path = resolve_version_file_path(&component.local_path, &target.file);
-        let content = local_files::local().read(Path::new(&full_path))?;
-
-        let versions = parse_versions(&content, &version_pattern).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "versionPattern",
-                format!("Invalid version regex pattern '{}'", version_pattern),
-                None,
-                Some(vec![version_pattern.clone()]),
-            )
-        })?;
-
-        if versions.is_empty() {
-            return Err(Error::internal_unexpected(format!(
-                "Could not find version in {}",
-                target.file
-            )));
-        }
-
-        // Validate all versions match expected
-        let found = parser::require_identical(&versions, &target.file)?;
-        if found != old_version {
-            return Err(Error::internal_unexpected(format!(
-                "Version mismatch in {}: found {}, expected {}",
-                target.file, found, old_version
-            )));
-        }
-
-        let match_count = versions.len();
-
+    // Update all version files (validation already done, just write new versions)
+    for info in &target_infos {
         let replaced_count =
-            update_version_in_file(&full_path, &version_pattern, &old_version, &new_version)?;
+            update_version_in_file(&info.full_path, &info.pattern, &old_version, &new_version)?;
 
-        if replaced_count != match_count {
+        if replaced_count != info.match_count {
             return Err(Error::internal_unexpected(format!(
                 "Unexpected replacement count in {}",
-                target.file
+                info.file
             )));
         }
-
-        target_infos.push(VersionTargetInfo {
-            file: target.file.clone(),
-            pattern: version_pattern,
-            full_path,
-            match_count,
-        });
     }
 
     run_post_bump_commands(&component.post_version_bump_commands, &component.local_path)?;
