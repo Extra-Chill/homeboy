@@ -5,7 +5,6 @@ use homeboy::component::{self, Component};
 use homeboy::error::Error;
 use homeboy::git;
 use homeboy::module::{self, ModuleRunner};
-use homeboy::utils::command::CapturedOutput;
 
 use super::CmdResult;
 
@@ -63,8 +62,6 @@ pub struct LintArgs {
 pub struct LintOutput {
     status: String,
     component: String,
-    #[serde(flatten)]
-    output: CapturedOutput,
     exit_code: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     hints: Option<Vec<String>>,
@@ -133,14 +130,11 @@ pub fn run_json(args: LintArgs) -> CmdResult<LintOutput> {
         changed_files.extend(uncommitted.untracked);
 
         if changed_files.is_empty() {
+            println!("No files in working tree changes");
             return Ok((
                 LintOutput {
                     status: "passed".to_string(),
                     component: args.component,
-                    output: CapturedOutput::new(
-                        "No files in working tree changes".to_string(),
-                        String::new(),
-                    ),
                     exit_code: 0,
                     hints: None,
                 },
@@ -199,7 +193,6 @@ pub fn run_json(args: LintArgs) -> CmdResult<LintOutput> {
         LintOutput {
             status: status.to_string(),
             component: args.component,
-            output: output.output,
             exit_code: output.exit_code,
             hints,
         },

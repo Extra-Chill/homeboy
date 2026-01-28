@@ -230,3 +230,52 @@ pub fn execute_local_command_interactive(
         Err(_) => -1,
     }
 }
+
+/// Execute local command with stdout/stderr passed through to terminal.
+/// Returns only exit status, not captured output.
+pub fn execute_local_command_passthrough(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+) -> CommandOutput {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    };
+
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    };
+
+    if let Some(dir) = current_dir {
+        cmd.current_dir(dir);
+    }
+
+    if let Some(env_pairs) = env {
+        cmd.envs(env_pairs.iter().copied());
+    }
+
+    // Passthrough to terminal instead of capturing
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
+
+    match cmd.status() {
+        Ok(status) => CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            success: status.success(),
+            exit_code: status.code().unwrap_or(-1),
+        },
+        Err(e) => CommandOutput {
+            stdout: String::new(),
+            stderr: format!("Command error: {}", e),
+            success: false,
+            exit_code: -1,
+        },
+    }
+}
