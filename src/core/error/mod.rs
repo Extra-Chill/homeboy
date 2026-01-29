@@ -19,6 +19,7 @@ pub enum ErrorCode {
     ValidationMissingArgument,
     ValidationInvalidArgument,
     ValidationInvalidJson,
+    ValidationMultipleErrors,
 
     ProjectNotFound,
     ProjectNoActive,
@@ -56,6 +57,7 @@ impl ErrorCode {
             ErrorCode::ValidationMissingArgument => "validation.missing_argument",
             ErrorCode::ValidationInvalidArgument => "validation.invalid_argument",
             ErrorCode::ValidationInvalidJson => "validation.invalid_json",
+            ErrorCode::ValidationMultipleErrors => "validation.multiple_errors",
 
             ErrorCode::ProjectNotFound => "project.not_found",
             ErrorCode::ProjectNoActive => "project.no_active",
@@ -171,6 +173,19 @@ pub struct InvalidArgumentDetails {
     pub tried: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidationErrorItem {
+    pub field: String,
+    pub problem: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MultipleValidationErrorsDetails {
+    pub errors: Vec<ValidationErrorItem>,
+}
+
 #[derive(Debug, Serialize)]
 
 pub struct InternalIoErrorDetails {
@@ -279,6 +294,22 @@ impl Error {
         }
 
         Self::new(ErrorCode::ValidationInvalidJson, "Invalid JSON", details)
+    }
+
+    pub fn validation_multiple_errors(errors: Vec<ValidationErrorItem>) -> Self {
+        let count = errors.len();
+        let details = serde_json::to_value(MultipleValidationErrorsDetails { errors })
+            .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+
+        Self::new(
+            ErrorCode::ValidationMultipleErrors,
+            format!(
+                "Found {} validation issue{}",
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
+            details,
+        )
     }
 
     pub fn project_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {

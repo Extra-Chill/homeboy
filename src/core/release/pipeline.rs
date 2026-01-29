@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::git::{self, UncommittedChanges};
 use crate::module::ModuleManifest;
 use crate::engine::pipeline::{self, PipelineStep};
+use crate::utils::validation::ValidationCollector;
 use crate::version;
 
 use super::executor::ReleaseStepExecutor;
@@ -65,48 +66,71 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     let component = component::load(component_id)?;
     let modules = resolve_modules(&component, None)?;
 
-    // Check commits vs changelog entries (before changelog content validation)
-    validate_commits_vs_changelog(&component)?;
+    let mut v = ValidationCollector::new();
 
-    // Validate changelog has unreleased entries
-    validate_changelog(&component)?;
+    // === Stage 1: Independent validations ===
+    v.capture(validate_commits_vs_changelog(&component), "commits");
+    v.capture(validate_changelog(&component), "changelog");
+    let version_info = v.capture(version::read_version(Some(component_id)), "version");
 
-    let version_info = version::read_version(Some(component_id))?;
-    let new_version = version::increment_version(&version_info.version, &options.bump_type)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "version",
-                format!("Invalid version format: {}", version_info.version),
-                None,
-                None,
-            )
-        })?;
+    // === Stage 2: Version-dependent validations ===
+    let new_version = if let Some(ref info) = version_info {
+        match version::increment_version(&info.version, &options.bump_type) {
+            Some(ver) => Some(ver),
+            None => {
+                v.push(
+                    "version",
+                    &format!("Invalid version format: {}", info.version),
+                    None,
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
-    version::validate_changelog_for_bump(&component, &version_info.version, &new_version)?;
+    if let (Some(ref info), Some(ref new_ver)) = (&version_info, &new_version) {
+        v.capture(
+            version::validate_changelog_for_bump(&component, &info.version, new_ver),
+            "changelog_sync",
+        );
+    }
 
-    let uncommitted = crate::git::get_uncommitted_changes(&component.local_path)?;
-    if uncommitted.has_changes {
-        // Allow changelog and version targets - they're modified during release anyway
-        let changelog_path = changelog::resolve_changelog_path(&component)?;
-        let version_targets: Vec<String> = version_info.targets.iter()
-            .map(|t| t.full_path.clone())
-            .collect();
+    // === Stage 3: Working tree check ===
+    if let Some(ref info) = version_info {
+        let uncommitted = crate::git::get_uncommitted_changes(&component.local_path)?;
+        if uncommitted.has_changes {
+            let changelog_path = changelog::resolve_changelog_path(&component)?;
+            let version_targets: Vec<String> =
+                info.targets.iter().map(|t| t.full_path.clone()).collect();
 
-        let allowed_files = get_release_allowed_files(&changelog_path, &version_targets, std::path::Path::new(&component.local_path));
-        let unexpected_files = get_unexpected_uncommitted_files(&uncommitted, &allowed_files);
+            let allowed = get_release_allowed_files(
+                &changelog_path,
+                &version_targets,
+                std::path::Path::new(&component.local_path),
+            );
+            let unexpected = get_unexpected_uncommitted_files(&uncommitted, &allowed);
 
-        if !unexpected_files.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "working_tree",
-                "Uncommitted changes detected",
-                Some("Release requires a clean working tree (changelog and version files are allowed)".to_string()),
-                Some(vec![
-                    format!("Unexpected files: {}", unexpected_files.join(", ")),
-                    "Commit your changes: git add -A && git commit -m \"...\"".to_string(),
-                ]),
-            ));
+            if !unexpected.is_empty() {
+                v.push(
+                    "working_tree",
+                    "Uncommitted changes detected",
+                    Some(serde_json::json!({
+                        "files": unexpected,
+                        "hint": "Commit changes or stash before release"
+                    })),
+                );
+            }
         }
     }
+
+    // === Return aggregated errors or proceed ===
+    v.finish()?;
+
+    // All validations passed - unwrap safely
+    let version_info = version_info.unwrap();
+    let new_version = new_version.unwrap();
 
     let mut warnings = Vec::new();
     let mut hints = Vec::new();
