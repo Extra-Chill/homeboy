@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.39.0] - 2026-01-28
+
+- add ValidationCollector for aggregated error reporting in version bump
+
 ## [0.38.6] - 2026-01-28
 
 ### Added
