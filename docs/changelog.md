@@ -4,7 +4,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## Unreleased
+## [0.39.1] - 2026-01-28
 
 ### Added
 - Display human-readable success summary after version bump/release
