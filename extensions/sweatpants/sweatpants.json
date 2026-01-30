@@ -1,0 +1,34 @@
+{
+  "name": "Sweatpants",
+  "version": "0.1.0",
+  "icon": "server.rack",
+  "description": "Bridge to Sweatpants automation engine",
+  "author": "Extra Chill",
+  "homepage": "https://github.com/Extra-Chill/sweatpants",
+
+  "cli": {
+    "tool": "sweatpants",
+    "display_name": "Sweatpants",
+    "command_template": "bash {{module_path}}/scripts/sweatpants-bridge.sh {{args}}",
+    "help": {
+      "project_id_help": "Endpoint ID (local, vps, etc.) or omit to use default",
+      "args_help": "Sweatpants command",
+      "examples": [
+        "homeboy sweatpants status",
+        "homeboy sweatpants local status",
+        "homeboy sweatpants run my-module -i key=value",
+        "homeboy sweatpants vps run my-scraper -i query=test",
+        "homeboy sweatpants logs <job-id> --follow"
+      ]
+    }
+  },
+
+  "settings": [
+    {
+      "id": "default_endpoint",
+      "label": "Default Endpoint",
+      "type": "string",
+      "default": "local"
+    }
+  ]
+}
