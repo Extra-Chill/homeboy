@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
+use crate::utils::artifact;
 use crate::utils::base_path;
 use crate::build;
 use crate::component::{self, Component};
@@ -602,20 +603,9 @@ pub fn deploy_components(
         let remote_version = remote_versions.get(&component.id).cloned();
 
         // Build is mandatory before deploy UNLESS skip_build is set
-        let artifact_path = component.build_artifact.as_ref().unwrap();
+        let artifact_pattern = component.build_artifact.as_ref().unwrap();
         let (build_exit_code, build_error) = if config.skip_build {
-            // Verify artifact exists (release should have built it)
-            if !Path::new(artifact_path).exists() {
-                (
-                    Some(1),
-                    Some(format!(
-                        "Artifact not found: {}. Release build may have failed.",
-                        artifact_path
-                    )),
-                )
-            } else {
-                (Some(0), None)
-            }
+            (Some(0), None)
         } else {
             build::build_component(component)
         };
@@ -632,21 +622,26 @@ pub fn deploy_components(
             continue;
         }
 
-        // Check artifact exists after build (only needed when not skipping build)
-        if !config.skip_build && !Path::new(artifact_path).exists() {
-            results.push(
-                ComponentDeployResult::new(component, base_path)
-                    .with_status("failed")
-                    .with_versions(local_version, remote_version)
-                    .with_error(format!(
-                        "Artifact not found: {}. Run build first: homeboy build {}",
-                        artifact_path, component.id
-                    ))
-                    .with_build_exit_code(build_exit_code),
-            );
-            failed += 1;
-            continue;
-        }
+        // Resolve artifact path (supports glob patterns like dist/app-*.zip)
+        let artifact_path = match artifact::resolve_artifact_path(artifact_pattern) {
+            Ok(path) => path,
+            Err(e) => {
+                let error_msg = if config.skip_build {
+                    format!("{}. Release build may have failed.", e)
+                } else {
+                    format!("{}. Run build first: homeboy build {}", e, component.id)
+                };
+                results.push(
+                    ComponentDeployResult::new(component, base_path)
+                        .with_status("failed")
+                        .with_versions(local_version, remote_version)
+                        .with_error(error_msg)
+                        .with_build_exit_code(build_exit_code),
+                );
+                failed += 1;
+                continue;
+            }
+        };
 
         // Calculate install directory
         let install_dir = match base_path::join_remote_path(Some(base_path), &component.remote_path)
@@ -673,7 +668,7 @@ pub fn deploy_components(
             if let Some((override_config, module)) = find_deploy_override(&install_dir) {
                 deploy_with_override(
                     &ctx.client,
-                    Path::new(artifact_path),
+                    &artifact_path,
                     &install_dir,
                     &override_config,
                     &module,
@@ -685,7 +680,7 @@ pub fn deploy_components(
                 // Standard deploy
                 deploy_artifact(
                     &ctx.client,
-                    Path::new(artifact_path),
+                    &artifact_path,
                     &install_dir,
                     component.extract_command.as_deref(),
                     verification.as_ref(),

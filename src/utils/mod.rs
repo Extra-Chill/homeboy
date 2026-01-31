@@ -14,6 +14,7 @@
 //! - `validation` - Input validation helpers
 
 pub mod args;
+pub mod artifact;
 pub mod base_path;
 pub mod command;
 pub mod entity_suggest;
