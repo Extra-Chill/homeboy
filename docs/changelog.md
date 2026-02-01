@@ -4,7 +4,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## Unreleased
+## [0.39.4] - 2026-01-31
 
 ### Added
 - auto-inject --allow-root for root SSH users
