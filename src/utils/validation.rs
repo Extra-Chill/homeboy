@@ -89,9 +89,17 @@ impl ValidationCollector {
         match result {
             Ok(value) => Some(value),
             Err(err) => {
+                // Extract specific problem from details if available, otherwise use generic message
+                let problem = err
+                    .details
+                    .get("problem")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| err.message.clone());
+
                 self.errors.push(crate::error::ValidationErrorItem {
                     field: field.to_string(),
-                    problem: err.message.clone(),
+                    problem,
                     context: if err.details.is_object()
                         && !err.details.as_object().unwrap().is_empty()
                     {
@@ -242,5 +250,34 @@ mod tests {
         let result: Option<i32> = v.capture(Ok(42), "test");
         assert_eq!(result, Some(42));
         assert!(!v.has_errors());
+    }
+
+    #[test]
+    fn collector_capture_extracts_problem_from_details() {
+        let mut v = ValidationCollector::new();
+
+        // Create an error with a specific problem in details (like changelog validation does)
+        let err = Error::validation_invalid_argument(
+            "changelog",
+            "Changelog has no finalized versions",
+            None,
+            Some(vec![
+                "Add at least one finalized version section like '## [0.1.0] - YYYY-MM-DD'"
+                    .to_string(),
+            ]),
+        );
+
+        let result: Option<i32> = v.capture(Err(err), "changelog_sync");
+        assert!(result.is_none());
+        assert!(v.has_errors());
+
+        // Finish and verify the error contains the specific problem, not the generic message
+        let final_err = v.finish().unwrap_err();
+        assert!(final_err
+            .details
+            .get("problem")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .contains("Changelog has no finalized versions"));
     }
 }
