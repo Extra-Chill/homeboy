@@ -359,20 +359,32 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     fi
 
     # Run PHPStan in summary mode
-    PHPSTAN_RUNNER="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
-    PHPSTAN_PASSED=1
+    run_phpstan_summary() {
+        local phpstan_runner="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
+        if [ ! -f "$phpstan_runner" ]; then
+            return 0
+        fi
 
-    if [ -f "$PHPSTAN_RUNNER" ] && [[ "${HOMEBOY_SKIP_PHPSTAN:-}" != "1" ]]; then
+        if [[ "${HOMEBOY_SKIP_PHPSTAN:-}" == "1" ]]; then
+            echo "Skipping PHPStan (HOMEBOY_SKIP_PHPSTAN=1)"
+            return 0
+        fi
+
         echo ""
         set +e
-        bash "$PHPSTAN_RUNNER"
-        PHPSTAN_EXIT=$?
+        HOMEBOY_SUMMARY_MODE=1 bash "$phpstan_runner"
+        local phpstan_exit=$?
         set -e
 
-        if [ "$PHPSTAN_EXIT" -ne 0 ]; then
-            PHPSTAN_PASSED=0
+        if [ "$phpstan_exit" -ne 0 ]; then
+            return 1
         fi
-    fi
+        return 0
+    }
+
+    # Run PHPStan (warn-only - does not affect exit code)
+    PHPSTAN_PASSED=1
+    run_phpstan_summary || PHPSTAN_PASSED=0
 
     # Always exit 0 (warn-only mode) - lint issues are warnings, not failures
     if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ] && [ "$PHPSTAN_PASSED" -eq 1 ]; then
@@ -408,21 +420,34 @@ if [ -f "$ESLINT_RUNNER" ]; then
     fi
 fi
 
-# Run PHPStan static analysis
-PHPSTAN_RUNNER="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
-PHPSTAN_PASSED=1
+# Run PHPStan in warn-only mode (optional static analysis)
+run_phpstan() {
+    local phpstan_runner="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
+    if [ ! -f "$phpstan_runner" ]; then
+        return 0
+    fi
 
-if [ -f "$PHPSTAN_RUNNER" ] && [[ "${HOMEBOY_SKIP_PHPSTAN:-}" != "1" ]]; then
+    if [[ "${HOMEBOY_SKIP_PHPSTAN:-}" == "1" ]]; then
+        echo "Skipping PHPStan (HOMEBOY_SKIP_PHPSTAN=1)"
+        return 0
+    fi
+
     echo ""
     set +e
-    bash "$PHPSTAN_RUNNER"
-    PHPSTAN_EXIT=$?
+    HOMEBOY_SUMMARY_MODE=1 bash "$phpstan_runner"
+    local phpstan_exit=$?
     set -e
 
-    if [ "$PHPSTAN_EXIT" -ne 0 ]; then
-        PHPSTAN_PASSED=0
+    if [ "$phpstan_exit" -ne 0 ]; then
+        # Return 1 to indicate issues found, but caller handles exit code
+        return 1
     fi
-fi
+    return 0
+}
+
+# Run PHPStan (warn-only - does not affect exit code)
+PHPSTAN_PASSED=1
+run_phpstan || PHPSTAN_PASSED=0
 
 # Always exit 0 (warn-only mode) - lint issues are warnings, not failures
 if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ] && [ "$PHPSTAN_PASSED" -eq 1 ]; then

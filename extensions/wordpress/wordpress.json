@@ -1,17 +1,15 @@
 {
   "name": "WordPress",
-  "version": "1.2.0",
+  "version": "1.3.1",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
   "config_schema": "wordpress",
-
   "discovery": {
     "find_command": "find /home /var/www /srv -maxdepth 6 -name 'wp-config.php' -type f 2>/dev/null | head -20",
     "base_path_transform": "dirname",
     "display_name_command": "cd {{basePath}} && wp option get blogname --skip-themes --skip-plugins 2>/dev/null || basename {{basePath}}"
   },
-
   "cli": {
     "tool": "wp",
     "display_name": "WP-CLI",
@@ -31,39 +29,77 @@
       ]
     }
   },
-
-  "default_pinned_files": ["wp-config.php", ".htaccess", "robots.txt"],
-  "default_pinned_logs": ["wp-content/debug.log"],
-
+  "default_pinned_files": [
+    "wp-config.php",
+    ".htaccess",
+    "robots.txt"
+  ],
+  "default_pinned_logs": [
+    "wp-content/debug.log"
+  ],
   "database": {
     "cli": {
       "tables_command": "cd {{sitePath}} && {{cliPath}} db query \"SHOW TABLE STATUS\" --format={{format}} --url={{domain}}",
       "describe_command": "cd {{sitePath}} && {{cliPath}} db query \"DESCRIBE {{table}}\" --format={{format}} --url={{domain}}",
       "query_command": "cd {{sitePath}} && {{cliPath}} db query \"{{query}}\" --format={{format}} --url={{domain}}"
     },
-
     "default_table_prefix": "wp_",
-    "prefix_detection_suffixes": ["options", "posts", "users"],
-
+    "prefix_detection_suffixes": [
+      "options",
+      "posts",
+      "users"
+    ],
     "table_suffixes": {
-      "core": ["commentmeta", "comments", "links", "options", "postmeta",
-               "posts", "termmeta", "terms", "term_relationships", "term_taxonomy"],
-      "users": ["users", "usermeta"],
-      "network": ["blogs", "blogmeta", "site", "sitemeta", "registration_log", "signups"]
+      "core": [
+        "commentmeta",
+        "comments",
+        "links",
+        "options",
+        "postmeta",
+        "posts",
+        "termmeta",
+        "terms",
+        "term_relationships",
+        "term_taxonomy"
+      ],
+      "users": [
+        "users",
+        "usermeta"
+      ],
+      "network": [
+        "blogs",
+        "blogmeta",
+        "site",
+        "sitemeta",
+        "registration_log",
+        "signups"
+      ]
     },
-
-    "protected_suffixes": ["options", "posts", "postmeta", "users", "usermeta",
-                          "comments", "commentmeta", "terms", "termmeta",
-                          "term_relationships", "term_taxonomy", "links",
-                          "blogs", "blogmeta", "site", "sitemeta",
-                          "registration_log", "signups"],
-
+    "protected_suffixes": [
+      "options",
+      "posts",
+      "postmeta",
+      "users",
+      "usermeta",
+      "comments",
+      "commentmeta",
+      "terms",
+      "termmeta",
+      "term_relationships",
+      "term_taxonomy",
+      "links",
+      "blogs",
+      "blogmeta",
+      "site",
+      "sitemeta",
+      "registration_log",
+      "signups"
+    ],
     "default_grouping": {
       "id": "wordpress-tables",
       "name": "WordPress Tables",
       "pattern_template": "{{prefix}}*"
     },
-
     "multisite_grouping": {
       "network": {
         "id": "wordpress-network",
@@ -76,7 +112,6 @@
       }
     }
   },
-
   "deploy": [
     {
       "path_pattern": "/wp-content/plugins/",
@@ -89,59 +124,58 @@
       "verify_error_message": "No WordPress theme header found in {{targetDir}}/style.css"
     }
   ],
-
   "deploy_override": [
     {
       "path_pattern": "/wp-content/plugins/",
       "staging_path": "/tmp/homeboy-staging",
-      "install_command": "cd {{siteRoot}} && plugin_slug=$(basename {{targetDir}}) && ([ -d {{targetDir}} ] && echo 'WARNING: Removing existing plugin directory' && rm -rf {{targetDir}} || true) && {{cliPath}} plugin install {{stagingArtifact}} --force --url={{domain}}",
+      "install_command": "cd {{siteRoot}} && plugin_slug=$(basename {{targetDir}}) && ([ -d {{targetDir}} ] && echo 'WARNING: Removing existing plugin directory' && rm -rf {{targetDir}} || true) && {{cliPath}} plugin install {{stagingArtifact}} --force --url={{domain}} {{allowRootFlag}}",
       "cleanup_command": "rm -f {{stagingArtifact}}",
       "skip_permissions_fix": true
     },
     {
       "path_pattern": "/wp-content/themes/",
       "staging_path": "/tmp/homeboy-staging",
-      "install_command": "cd {{siteRoot}} && theme_slug=$(basename {{targetDir}}) && ([ -d {{targetDir}} ] && echo 'WARNING: Removing existing theme directory' && rm -rf {{targetDir}} || true) && {{cliPath}} theme install {{stagingArtifact}} --force --url={{domain}}",
+      "install_command": "cd {{siteRoot}} && theme_slug=$(basename {{targetDir}}) && ([ -d {{targetDir}} ] && echo 'WARNING: Removing existing theme directory' && rm -rf {{targetDir}} || true) && {{cliPath}} theme install {{stagingArtifact}} --force --url={{domain}} {{allowRootFlag}}",
       "cleanup_command": "rm -f {{stagingArtifact}}",
       "skip_permissions_fix": true
     }
   ],
-
   "version_patterns": [
     {
       "extension": ".php",
       "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
     }
   ],
-
   "build": {
-    "artifact_extensions": [".zip"],
-    "script_names": ["build.sh"],
+    "artifact_extensions": [
+      ".zip"
+    ],
+    "script_names": [
+      "build.sh"
+    ],
     "command_template": "bash {{script}}",
     "module_script": "scripts/build/build.sh",
     "pre_build_script": "scripts/build/validate-build.sh",
     "artifact_pattern": "build/{component_id}.zip"
   },
-
   "lint": {
     "module_script": "scripts/lint/lint-runner.sh"
   },
-
   "test": {
     "module_script": "scripts/test/test-runner.sh"
   },
-
   "runtime": {
     "setup_command": "bash {{module_path}}/scripts/build/setup.sh",
     "ready_check": "test -f {{module_path}}/vendor/wp-phpunit/wp-phpunit/includes/bootstrap.php",
     "run_command": "bash {{module_path}}/scripts/test/test-runner.sh"
   },
-
   "testing": {
-    "supported_databases": ["sqlite", "mysql"],
+    "supported_databases": [
+      "sqlite",
+      "mysql"
+    ],
     "default_database": "sqlite"
   },
-
   "settings": [
     {
       "id": "user",
@@ -186,6 +220,14 @@
       "description": "MySQL password (when using mysql database type)"
     }
   ],
-
-  "commands": ["wp", "wp-test"]
+  "commands": [
+    "wp",
+    "wp-test"
+  ],
+  "audit_ignore_claim_patterns": [
+    "/wp-json/**",
+    "/*-auth/**",
+    "**/v1/**",
+    "**/v2/**"
+  ]
 }

@@ -1,6 +1,6 @@
 {
   "name": "Sweatpants",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "icon": "server.rack",
   "description": "Bridge to Sweatpants automation engine",
   "author": "Extra Chill",
@@ -36,7 +36,7 @@
     {
       "path_pattern": "/home/sweatpants/services/sweatpants",
       "staging_path": "/tmp/homeboy-staging",
-      "install_command": "cd /home/sweatpants/services && rm -rf sweatpants.old && mv sweatpants sweatpants.old 2>/dev/null || true && tar -xzf {{stagingArtifact}} && mv sweatpants-* sweatpants && cd sweatpants && /home/sweatpants/services/sweatpants/.venv/bin/pip install -e . --quiet && systemctl restart sweatpants",
+      "install_command": "cd /home/sweatpants/services && rm -rf sweatpants.old && mv sweatpants sweatpants.old 2>/dev/null || true && tar -xzf {{stagingArtifact}} && mv sweatpants-* sweatpants && cd sweatpants && (mv ../sweatpants.old/.venv .venv 2>/dev/null || python3 -m venv .venv) && .venv/bin/pip install -e . --quiet && systemctl restart sweatpants",
       "cleanup_command": "rm -f {{stagingArtifact}} && rm -rf /home/sweatpants/services/sweatpants.old",
       "skip_permissions_fix": true
     }

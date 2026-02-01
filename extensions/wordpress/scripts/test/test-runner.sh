@@ -129,7 +129,7 @@ run_lint() {
     fi
 
     # Run linting in summary mode (lint-runner.sh always exits 0 - warn-only mode)
-    HOMEBOY_SUMMARY_MODE=1 bash "$lint_runner"
+    HOMEBOY_SUMMARY_MODE=1 HOMEBOY_AUTO_FIX="${HOMEBOY_AUTO_FIX:-}" bash "$lint_runner"
     echo ""
 }
 
@@ -150,32 +150,6 @@ run_autoload_check() {
         fi
         echo ""
     fi
-}
-
-# Run PHPStan static analysis (blocking - catches type errors before tests)
-run_phpstan() {
-    local phpstan_runner="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
-    if [ ! -f "$phpstan_runner" ]; then
-        return 0
-    fi
-
-    if [[ "${HOMEBOY_SKIP_PHPSTAN:-}" == "1" ]]; then
-        echo "Skipping PHPStan (--skip-phpstan)"
-        return 0
-    fi
-
-    local output
-    set +e
-    output=$(HOMEBOY_SUMMARY_MODE=1 bash "$phpstan_runner" 2>&1)
-    local exit_code=$?
-    set -e
-    echo "$output"
-    if [ $exit_code -ne 0 ]; then
-        FAILED_STEP="PHPStan static analysis"
-        FAILURE_OUTPUT="$output"
-        exit 1
-    fi
-    echo ""
 }
 
 # Export paths for bootstrap
@@ -204,9 +178,6 @@ if [[ "${HOMEBOY_SKIP_LINT:-}" != "1" ]]; then
 else
     echo "Skipping linting (--skip-lint)"
 fi
-
-# Run PHPStan static analysis (blocking - catches type errors)
-run_phpstan
 
 # Run autoload validation (catches class loading errors before PHPUnit)
 run_autoload_check

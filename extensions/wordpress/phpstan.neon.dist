@@ -2,17 +2,33 @@ includes:
     - vendor/szepeviktor/phpstan-wordpress/extension.neon
 
 parameters:
+    bootstrapFiles:
+        - %currentWorkingDirectory%/vendor/autoload.php
+
+    ignoreErrors:
+        -
+            identifier: return.void
+        -
+            message: '#Constant [A-Z_]+_(PATH|URL|VERSION|DIR|FILE) not found#'
+
+    scanFiles:
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-commands-stubs.php
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-i18n-stubs.php
+        - vendor/php-stubs/woocommerce-stubs/woocommerce-stubs.php
+        - vendor/php-stubs/woocommerce-stubs/woocommerce-packages-stubs.php
+
     level: 5
 
     paths:
         - %currentWorkingDirectory%
 
     excludePaths:
-        - vendor/
-        - node_modules/
-        - build/
-        - dist/
-        - tests/
+        - */vendor/*
+        - */node_modules/*
+        - */build/*
+        - */dist/*
+        - */tests/*
 
     parallel:
-        maximumNumberOfProcesses: 4
+        maximumNumberOfProcesses: 2

@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- WordPress deploy override now injects `--allow-root` for root SSH users
+
 ## [0.2.0] - 2026-01-23
 
 ### Added
