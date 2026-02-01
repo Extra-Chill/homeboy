@@ -7,6 +7,7 @@ use crate::error::ErrorCode;
 use crate::engine::executor;
 use crate::module::{find_module_by_tool, CliConfig};
 use crate::project::{self, Project};
+use crate::server;
 use crate::ssh::{execute_local_command, CommandOutput};
 use crate::utils::shell;
 use crate::utils::template::{render_map, TemplateVars};
@@ -62,7 +63,7 @@ fn try_run_for_component(
             let module = find_module_by_tool(tool)?;
             let cli_config = module.cli.as_ref()?;
 
-            let command = build_component_command(&component, cli_config, args);
+            let command = build_component_command(&component, cli_config, &module, args);
             let output = execute_local_command(&command);
 
             Some(Ok(CliToolResult {
@@ -84,6 +85,7 @@ fn try_run_for_component(
 fn build_component_command(
     component: &Component,
     cli_config: &CliConfig,
+    module: &crate::module::ModuleManifest,
     args: &[String],
 ) -> String {
     let mut variables = HashMap::new();
@@ -99,6 +101,10 @@ fn build_component_command(
             .unwrap_or_else(|| cli_config.tool.clone()),
     );
     variables.insert(TemplateVars::ARGS.to_string(), shell::quote_args(args));
+
+    if let Some(ref path) = module.module_path {
+        variables.insert(TemplateVars::MODULE_PATH.to_string(), path.clone());
+    }
 
     render_map(&cli_config.command_template, &variables)
 }
@@ -227,6 +233,17 @@ fn build_project_command(
             {
                 rendered.push(' ');
                 rendered.push_str(&flag);
+            }
+        }
+    }
+
+    // Auto-inject --allow-root when SSH user is root
+    if let Some(ref server_id) = project.server_id {
+        if !server_id.is_empty() {
+            if let Ok(svr) = server::load(server_id) {
+                if svr.user == "root" {
+                    rendered.push_str(" --allow-root");
+                }
             }
         }
     }
