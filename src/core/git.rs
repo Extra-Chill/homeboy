@@ -104,6 +104,7 @@ pub enum CommitCategory {
     Fix,
     Docs,
     Chore,
+    Merge,
     Other,
 }
 
@@ -115,12 +116,13 @@ impl CommitCategory {
             CommitCategory::Fix => Some("fix"),
             CommitCategory::Docs => Some("docs"),
             CommitCategory::Chore => Some("chore"),
+            CommitCategory::Merge => None,
             CommitCategory::Other => None,
         }
     }
 
     /// Map commit category to changelog entry type.
-    /// Returns None for categories that should be skipped (docs, chore).
+    /// Returns None for categories that should be skipped (docs, chore, merge).
     pub fn to_changelog_entry_type(&self) -> Option<&'static str> {
         match self {
             CommitCategory::Feature => Some("added"),
@@ -128,6 +130,7 @@ impl CommitCategory {
             CommitCategory::Breaking => Some("changed"),
             CommitCategory::Docs => None,
             CommitCategory::Chore => None,
+            CommitCategory::Merge => None,
             CommitCategory::Other => Some("changed"),
         }
     }
@@ -137,6 +140,14 @@ impl CommitCategory {
 /// Falls back to Other if no pattern matches - this is fine, commits still get included.
 pub fn parse_conventional_commit(subject: &str) -> CommitCategory {
     let lower = subject.to_lowercase();
+
+    // Detect merge commits first - they should be filtered out
+    if lower.starts_with("merge pull request")
+        || lower.starts_with("merge branch")
+        || lower.starts_with("merge remote-tracking")
+    {
+        return CommitCategory::Merge;
+    }
 
     if lower.contains("breaking change") || subject.contains("!:") {
         CommitCategory::Breaking
@@ -1634,5 +1645,29 @@ mod tests {
             parse_conventional_commit("docs(api): Add endpoint docs"),
             CommitCategory::Docs
         );
+    }
+
+    #[test]
+    fn parse_conventional_commit_merge() {
+        assert_eq!(
+            parse_conventional_commit("Merge pull request #45 from feature-branch"),
+            CommitCategory::Merge
+        );
+        assert_eq!(
+            parse_conventional_commit("Merge branch 'main' into feature"),
+            CommitCategory::Merge
+        );
+        assert_eq!(
+            parse_conventional_commit("Merge remote-tracking branch 'origin/main'"),
+            CommitCategory::Merge
+        );
+    }
+
+    #[test]
+    fn merge_category_skipped_in_changelog() {
+        assert!(CommitCategory::Merge.to_changelog_entry_type().is_none());
+        assert!(CommitCategory::Docs.to_changelog_entry_type().is_none());
+        assert!(CommitCategory::Chore.to_changelog_entry_type().is_none());
+        assert!(CommitCategory::Feature.to_changelog_entry_type().is_some());
     }
 }

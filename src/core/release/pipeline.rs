@@ -246,7 +246,7 @@ fn validate_commits_vs_changelog(component: &Component) -> Result<()> {
 fn auto_generate_changelog_entries(component: &Component, commits: &[git::CommitInfo]) -> Result<()> {
     let settings = changelog::resolve_effective_settings(Some(component));
 
-    // Group commits by changelog entry type
+    // Group commits by changelog entry type (skips docs, chore, merge)
     let mut entries_by_type: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
 
     for commit in commits {
@@ -257,6 +257,26 @@ fn auto_generate_changelog_entries(component: &Component, commits: &[git::Commit
                 .or_default()
                 .push(message.to_string());
         }
+    }
+
+    // If no entries generated (all docs/chore/merge), use first non-skip commit or fallback
+    if entries_by_type.is_empty() {
+        let fallback = commits
+            .iter()
+            .find(|c| !matches!(
+                c.category,
+                git::CommitCategory::Docs | git::CommitCategory::Chore | git::CommitCategory::Merge
+            ))
+            .map(|c| git::strip_conventional_prefix(&c.subject).to_string())
+            .unwrap_or_else(|| "Internal improvements".to_string());
+
+        changelog::read_and_add_next_section_items_typed(
+            component,
+            &settings,
+            &[fallback],
+            "changed",
+        )?;
+        return Ok(());
     }
 
     // Add entries to changelog grouped by type
