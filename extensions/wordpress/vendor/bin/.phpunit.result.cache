@@ -1,0 +1,1 @@
+{"version":1,"defects":{"SimpleTest::test_config_class_exists":3},"times":{"SimpleTest::test_true_is_true":0.002,"SimpleTest::test_addition":0,"SimpleTest::test_config_class_exists":0,"MinimalTest::test_minimal":0.001}}
