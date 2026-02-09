@@ -196,14 +196,17 @@ fn run_scaffold(
         dirs
     } else if detect_by_extension {
         // Extension-based detection
-        let extensions = source_extensions.unwrap_or_else(default_source_extensions);
+        let extensions = source_extensions.clone().unwrap_or_else(default_source_extensions);
+        find_source_directories_by_extension(source_path, &extensions)
+    } else if let Some(extensions) = source_extensions {
+        // Custom extensions provided - use extension-based detection automatically
         find_source_directories_by_extension(source_path, &extensions)
     } else {
         // Try conventional directories first
         let conventional = find_source_directories(source_path);
         if conventional.is_empty() {
-            // Fallback to extension-based detection
-            let extensions = source_extensions.unwrap_or_else(default_source_extensions);
+            // Fallback to extension-based detection with defaults
+            let extensions = default_source_extensions();
             find_source_directories_by_extension(source_path, &extensions)
         } else {
             conventional
