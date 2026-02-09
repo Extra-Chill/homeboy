@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.40.2] - 2026-02-09
+
+### Added
+- agnostic source directory detection for scaffold (#57)
+
 ## [0.40.1] - 2026-02-03
 
 ### Added
