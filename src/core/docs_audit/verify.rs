@@ -84,6 +84,13 @@ fn verify_file_path(
         }
     }
 
+    if Path::new(path).is_absolute() {
+        return VerifyResult::NeedsVerification {
+            hint: "Absolute path outside repository; verify path exists on target system."
+                .to_string(),
+        };
+    }
+
     VerifyResult::Broken {
         suggestion: Some(format!(
             "File '{}' not found. Search codebase for actual location or remove if deleted.",
@@ -119,6 +126,13 @@ fn verify_directory_path(
         if candidate.is_dir() {
             return VerifyResult::Verified;
         }
+    }
+
+    if Path::new(path).is_absolute() {
+        return VerifyResult::NeedsVerification {
+            hint: "Absolute directory path outside repository; verify path exists on target system."
+                .to_string(),
+        };
     }
 
     VerifyResult::Broken {
@@ -179,6 +193,22 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_absolute_path_needs_verification() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let claim = Claim {
+            claim_type: ClaimType::FilePath,
+            value: "/var/lib/sweatpants/modules.yaml".to_string(),
+            doc_file: "docs/test.md".to_string(),
+            line: 1,
+            context: None,
+        };
+
+        let result = verify_file_path(&claim, temp_dir.path(), temp_dir.path(), None);
+        assert!(matches!(result, VerifyResult::NeedsVerification { .. }));
+    }
+
+    #[test]
     fn test_verify_existing_directory() {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().join("src/core");
@@ -194,6 +224,22 @@ mod tests {
 
         let result = verify_directory_path(&claim, temp_dir.path(), temp_dir.path(), None);
         assert!(matches!(result, VerifyResult::Verified));
+    }
+
+    #[test]
+    fn test_verify_absolute_directory_needs_verification() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let claim = Claim {
+            claim_type: ClaimType::DirectoryPath,
+            value: "/var/lib/sweatpants/".to_string(),
+            doc_file: "docs/test.md".to_string(),
+            line: 1,
+            context: None,
+        };
+
+        let result = verify_directory_path(&claim, temp_dir.path(), temp_dir.path(), None);
+        assert!(matches!(result, VerifyResult::NeedsVerification { .. }));
     }
 
     #[test]
