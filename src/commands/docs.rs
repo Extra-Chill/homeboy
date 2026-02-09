@@ -29,6 +29,18 @@ pub enum DocsCommand {
         /// Docs directory to check for existing documentation (default: docs)
         #[arg(long, default_value = "docs")]
         docs_dir: String,
+
+        /// Source directories to analyze (comma-separated, or repeat flag). Overrides auto-detection.
+        #[arg(long, value_delimiter = ',')]
+        source_dirs: Option<Vec<String>>,
+
+        /// File extensions to detect as source code (default: php,rs,js,ts,py,go,java,rb,swift,kt)
+        #[arg(long, value_delimiter = ',')]
+        source_extensions: Option<Vec<String>>,
+
+        /// Include all directories containing source files (extension-based detection)
+        #[arg(long)]
+        detect_by_extension: bool,
     },
 
     /// Audit documentation for broken links and stale references
@@ -134,7 +146,16 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
         Some(DocsCommand::Scaffold {
             component_id,
             docs_dir,
-        }) => run_scaffold(&component_id, &docs_dir),
+            source_dirs,
+            source_extensions,
+            detect_by_extension,
+        }) => run_scaffold(
+            &component_id,
+            &docs_dir,
+            source_dirs,
+            source_extensions,
+            detect_by_extension,
+        ),
         Some(DocsCommand::Audit { component_id }) => run_audit(&component_id),
         Some(DocsCommand::Generate { spec, json }) => {
             let json_spec = json.as_deref().or(spec.as_deref());
@@ -158,13 +179,36 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
 // Scaffold (Analysis Only)
 // ============================================================================
 
-fn run_scaffold(component_id: &str, docs_dir: &str) -> CmdResult<DocsOutput> {
+fn run_scaffold(
+    component_id: &str,
+    docs_dir: &str,
+    explicit_source_dirs: Option<Vec<String>>,
+    source_extensions: Option<Vec<String>>,
+    detect_by_extension: bool,
+) -> CmdResult<DocsOutput> {
     let comp = component::load(component_id)?;
     let source_path = Path::new(&comp.local_path);
     let docs_path = source_path.join(docs_dir);
 
     // Analyze source structure
-    let source_directories = find_source_directories(source_path);
+    let source_directories = if let Some(dirs) = explicit_source_dirs {
+        // User provided explicit directories
+        dirs
+    } else if detect_by_extension {
+        // Extension-based detection
+        let extensions = source_extensions.unwrap_or_else(default_source_extensions);
+        find_source_directories_by_extension(source_path, &extensions)
+    } else {
+        // Try conventional directories first
+        let conventional = find_source_directories(source_path);
+        if conventional.is_empty() {
+            // Fallback to extension-based detection
+            let extensions = source_extensions.unwrap_or_else(default_source_extensions);
+            find_source_directories_by_extension(source_path, &extensions)
+        } else {
+            conventional
+        }
+    };
 
     // Find existing documentation
     let existing_docs = find_existing_docs(&docs_path);
@@ -217,6 +261,23 @@ fn run_audit(component_id: &str) -> CmdResult<DocsOutput> {
 // Scaffold Helper Functions
 // ============================================================================
 
+fn default_source_extensions() -> Vec<String> {
+    vec![
+        "php".to_string(),
+        "rs".to_string(),
+        "js".to_string(),
+        "ts".to_string(),
+        "jsx".to_string(),
+        "tsx".to_string(),
+        "py".to_string(),
+        "go".to_string(),
+        "java".to_string(),
+        "rb".to_string(),
+        "swift".to_string(),
+        "kt".to_string(),
+    ]
+}
+
 fn find_source_directories(source_path: &Path) -> Vec<String> {
     let mut dirs = Vec::new();
     let source_dir_names = [
@@ -249,6 +310,81 @@ fn find_source_directories(source_path: &Path) -> Vec<String> {
 
     dirs.sort();
     dirs
+}
+
+/// Find source directories by scanning for files with matching extensions.
+/// Returns directories that contain at least one source file (non-recursive for root,
+/// recursive one level for subdirectories).
+fn find_source_directories_by_extension(source_path: &Path, extensions: &[String]) -> Vec<String> {
+    let mut dirs = Vec::new();
+
+    // Check if root contains source files
+    if directory_contains_source_files(source_path, extensions) {
+        dirs.push(".".to_string());
+    }
+
+    // Scan immediate subdirectories
+    if let Ok(entries) = fs::read_dir(source_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            // Skip hidden directories, common non-source directories
+            if name.starts_with('.')
+                || name == "node_modules"
+                || name == "vendor"
+                || name == "docs"
+                || name == "tests"
+                || name == "test"
+                || name == "__pycache__"
+                || name == "target"
+                || name == "build"
+                || name == "dist"
+            {
+                continue;
+            }
+
+            if path.is_dir() && directory_contains_source_files(&path, extensions) {
+                dirs.push(name.clone());
+
+                // Also collect immediate subdirectories of this directory
+                if let Ok(sub_entries) = fs::read_dir(&path) {
+                    for sub_entry in sub_entries.flatten() {
+                        let sub_path = sub_entry.path();
+                        let sub_name = sub_entry.file_name().to_string_lossy().to_string();
+
+                        if !sub_name.starts_with('.')
+                            && sub_path.is_dir()
+                            && directory_contains_source_files(&sub_path, extensions)
+                        {
+                            dirs.push(format!("{}/{}", name, sub_name));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    dirs.sort();
+    dirs
+}
+
+/// Check if a directory contains any files with the given extensions.
+fn directory_contains_source_files(dir: &Path, extensions: &[String]) -> bool {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    let ext_str = ext.to_string_lossy().to_lowercase();
+                    if extensions.iter().any(|e| e.to_lowercase() == ext_str) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 fn find_existing_docs(docs_path: &Path) -> Vec<String> {
