@@ -2,6 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::component;
+use homeboy::deploy::{self, DeployConfig};
 use homeboy::fleet::{self, Fleet};
 use homeboy::project::{self, Project};
 use homeboy::version;
@@ -75,10 +76,19 @@ enum FleetCommand {
         /// Fleet ID
         id: String,
     },
-    /// Show component versions across a fleet
+    /// Show component versions across a fleet (local only)
     Status {
         /// Fleet ID
         id: String,
+    },
+    /// Check component drift across a fleet (compares local vs remote)
+    Check {
+        /// Fleet ID
+        id: String,
+
+        /// Only show components that need updates
+        #[arg(long)]
+        outdated: bool,
     },
 }
 
@@ -97,8 +107,43 @@ pub struct FleetOutput {
     pub components: Option<std::collections::HashMap<String, Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<Vec<FleetProjectStatus>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<Vec<FleetProjectCheck>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<FleetCheckSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub updated_fields: Vec<String>,
+}
+
+#[derive(Default, Serialize)]
+pub struct FleetProjectCheck {
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub components: Vec<FleetComponentCheck>,
+}
+
+#[derive(Default, Serialize)]
+pub struct FleetComponentCheck {
+    pub component_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_version: Option<String>,
+    pub status: String,
+}
+
+#[derive(Default, Serialize)]
+pub struct FleetCheckSummary {
+    pub total_projects: u32,
+    pub projects_checked: u32,
+    pub projects_failed: u32,
+    pub components_up_to_date: u32,
+    pub components_needs_update: u32,
+    pub components_unknown: u32,
 }
 
 #[derive(Default, Serialize)]
@@ -135,6 +180,7 @@ pub fn run(
         FleetCommand::Projects { id } => projects(&id),
         FleetCommand::Components { id } => components(&id),
         FleetCommand::Status { id } => status(&id),
+        FleetCommand::Check { id, outdated } => check(&id, outdated),
     }
 }
 
@@ -346,5 +392,105 @@ fn status(id: &str) -> CmdResult<FleetOutput> {
             ..Default::default()
         },
         0,
+    ))
+}
+
+fn check(id: &str, only_outdated: bool) -> CmdResult<FleetOutput> {
+    let fl = fleet::load(id)?;
+    let mut project_checks = Vec::new();
+    let mut summary = FleetCheckSummary {
+        total_projects: fl.project_ids.len() as u32,
+        ..Default::default()
+    };
+
+    for project_id in &fl.project_ids {
+        eprintln!("[fleet] Checking project '{}'...", project_id);
+
+        // Use existing deploy check infrastructure
+        let config = DeployConfig {
+            component_ids: vec![],
+            all: true,
+            outdated: false,
+            dry_run: false,
+            check: true,
+            force: false,
+            skip_build: true,
+        };
+
+        match deploy::run(project_id, &config) {
+            Ok(result) => {
+                summary.projects_checked += 1;
+
+                let proj = project::load(project_id).ok();
+                let mut component_checks = Vec::new();
+
+                for comp_result in &result.results {
+                    let status_str = match &comp_result.component_status {
+                        Some(deploy::ComponentStatus::UpToDate) => "up_to_date",
+                        Some(deploy::ComponentStatus::NeedsUpdate) => "needs_update",
+                        Some(deploy::ComponentStatus::BehindRemote) => "behind_remote",
+                        Some(deploy::ComponentStatus::Unknown) | None => "unknown",
+                    };
+
+                    // Count for summary
+                    match status_str {
+                        "up_to_date" => summary.components_up_to_date += 1,
+                        "needs_update" | "behind_remote" => summary.components_needs_update += 1,
+                        _ => summary.components_unknown += 1,
+                    }
+
+                    // Skip up-to-date if only_outdated
+                    if only_outdated && status_str == "up_to_date" {
+                        continue;
+                    }
+
+                    component_checks.push(FleetComponentCheck {
+                        component_id: comp_result.id.clone(),
+                        local_version: comp_result.local_version.clone(),
+                        remote_version: comp_result.remote_version.clone(),
+                        status: status_str.to_string(),
+                    });
+                }
+
+                // Skip project entirely if only_outdated and nothing to show
+                if only_outdated && component_checks.is_empty() {
+                    continue;
+                }
+
+                project_checks.push(FleetProjectCheck {
+                    project_id: project_id.clone(),
+                    server_id: proj.and_then(|p| p.server_id),
+                    status: "checked".to_string(),
+                    error: None,
+                    components: component_checks,
+                });
+            }
+            Err(e) => {
+                summary.projects_failed += 1;
+
+                if !only_outdated {
+                    project_checks.push(FleetProjectCheck {
+                        project_id: project_id.clone(),
+                        server_id: None,
+                        status: "failed".to_string(),
+                        error: Some(e.to_string()),
+                        components: vec![],
+                    });
+                }
+            }
+        }
+    }
+
+    let exit_code = if summary.projects_failed > 0 { 1 } else { 0 };
+
+    Ok((
+        FleetOutput {
+            command: "fleet.check".to_string(),
+            fleet_id: Some(id.to_string()),
+            check: Some(project_checks),
+            summary: Some(summary),
+            ..Default::default()
+        },
+        exit_code,
     ))
 }
