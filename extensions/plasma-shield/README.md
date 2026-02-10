@@ -1,6 +1,12 @@
 # Plasma Shield Module
 
-Network security control for AI agent fleets via Homeboy CLI.
+Network security control for AI agent fleets.
+
+## Two Interfaces
+
+**Desktop App** — Visual dashboard in Homeboy Desktop sidebar. Select views, see results in tables.
+
+**CLI** — Command-line via `homeboy plasma <command>`. Full control from terminal.
 
 ## Overview
 
