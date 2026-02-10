@@ -25,6 +25,7 @@ pub enum ErrorCode {
     ProjectNoActive,
     ServerNotFound,
     ComponentNotFound,
+    FleetNotFound,
     ModuleNotFound,
 
     SshServerInvalid,
@@ -63,6 +64,7 @@ impl ErrorCode {
             ErrorCode::ProjectNoActive => "project.no_active",
             ErrorCode::ServerNotFound => "server.not_found",
             ErrorCode::ComponentNotFound => "component.not_found",
+            ErrorCode::FleetNotFound => "fleet.not_found",
             ErrorCode::ModuleNotFound => "module.not_found",
 
             ErrorCode::SshServerInvalid => "ssh.server_invalid",
@@ -342,6 +344,14 @@ impl Error {
             err = err.with_hint(format_suggestions(&suggestions));
         }
         err.with_hint("Run 'homeboy module list' to see available modules")
+    }
+
+    pub fn fleet_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
+        let mut err = Self::not_found(ErrorCode::FleetNotFound, "Fleet not found", id);
+        if !suggestions.is_empty() {
+            err = err.with_hint(format_suggestions(&suggestions));
+        }
+        err.with_hint("Run 'homeboy fleet list' to see available fleets")
     }
 
     pub fn docs_topic_not_found(topic: impl Into<String>) -> Self {

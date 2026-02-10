@@ -126,6 +126,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         ErrorCode::ProjectNotFound
         | ErrorCode::ServerNotFound
         | ErrorCode::ComponentNotFound
+        | ErrorCode::FleetNotFound
         | ErrorCode::ModuleNotFound
         | ErrorCode::ProjectNoActive => 4,
 

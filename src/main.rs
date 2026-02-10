@@ -21,7 +21,7 @@ mod output;
 mod tty;
 
 use commands::{
-    api, auth, build, changelog, changes, cli, component, config, db, deploy, file, git, init,
+    api, auth, build, changelog, changes, cli, component, config, db, deploy, file, fleet, git, init,
     lint, logs, module, project, release, server, ssh, test, upgrade, version,
 };
 use homeboy::module::load_all_modules;
@@ -57,6 +57,9 @@ enum Commands {
     Db(db::DbArgs),
     /// Remote file operations
     File(file::FileArgs),
+    /// Manage fleets (groups of projects)
+    #[command(visible_alias = "fleets")]
+    Fleet(fleet::FleetArgs),
     /// Remote log viewing
     Logs(logs::LogsArgs),
     /// Deploy components to remote server

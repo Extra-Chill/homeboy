@@ -188,6 +188,7 @@ pub mod db;
 pub mod deploy;
 pub mod docs;
 pub mod file;
+pub mod fleet;
 pub mod git;
 pub mod init;
 pub mod lint;
@@ -245,6 +246,7 @@ pub(crate) fn run_json(
         crate::Commands::Server(args) => dispatch!(args, global, server),
         crate::Commands::Db(args) => dispatch!(args, global, db),
         crate::Commands::File(args) => dispatch!(args, global, file),
+        crate::Commands::Fleet(args) => dispatch!(args, global, fleet),
         crate::Commands::Logs(args) => dispatch!(args, global, logs),
         crate::Commands::Deploy(args) => dispatch!(args, global, deploy),
         crate::Commands::Component(args) => dispatch!(args, global, component),
