@@ -88,6 +88,11 @@ enum ComponentCommand {
         /// Component ID
         id: String,
     },
+    /// Show which components are shared across projects
+    Shared {
+        /// Specific component ID to check (optional, shows all if omitted)
+        id: Option<String>,
+    },
     /// Add a version target to a component
     AddVersionTarget {
         /// Component ID
@@ -116,6 +121,8 @@ pub struct ComponentOutput {
     pub project_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub projects: Option<Vec<Project>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared: Option<std::collections::HashMap<String, Vec<String>>>,
 }
 
 pub fn run(
@@ -221,6 +228,7 @@ pub fn run(
         ComponentCommand::Rename { id, new_id } => rename(&id, &new_id),
         ComponentCommand::List => list(),
         ComponentCommand::Projects { id } => projects(&id),
+        ComponentCommand::Shared { id } => shared(id.as_deref()),
         ComponentCommand::AddVersionTarget { id, file, pattern } => {
             add_version_target(&id, &file, &pattern)
         }
@@ -391,4 +399,35 @@ fn projects(id: &str) -> CmdResult<ComponentOutput> {
         },
         0,
     ))
+}
+
+fn shared(id: Option<&str>) -> CmdResult<ComponentOutput> {
+    if let Some(component_id) = id {
+        // Show projects for a specific component
+        let project_ids = component::projects_using(component_id)?;
+        let mut shared_map = std::collections::HashMap::new();
+        shared_map.insert(component_id.to_string(), project_ids);
+
+        Ok((
+            ComponentOutput {
+                command: "component.shared".to_string(),
+                component_id: Some(component_id.to_string()),
+                shared: Some(shared_map),
+                ..Default::default()
+            },
+            0,
+        ))
+    } else {
+        // Show all components and their projects
+        let shared_map = component::shared_components()?;
+
+        Ok((
+            ComponentOutput {
+                command: "component.shared".to_string(),
+                shared: Some(shared_map),
+                ..Default::default()
+            },
+            0,
+        ))
+    }
 }

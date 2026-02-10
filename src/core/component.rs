@@ -360,6 +360,24 @@ pub fn projects_using(component_id: &str) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Returns a map of component_id -> Vec<project_id> for all components used by projects.
+/// Only includes components that are used by at least one project.
+pub fn shared_components() -> Result<std::collections::HashMap<String, Vec<String>>> {
+    let projects = project::list().unwrap_or_default();
+    let mut sharing: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+
+    for project in projects {
+        for component_id in &project.component_ids {
+            sharing
+                .entry(component_id.clone())
+                .or_default()
+                .push(project.id.clone());
+        }
+    }
+
+    Ok(sharing)
+}
+
 pub fn delete_safe(id: &str) -> Result<()> {
     if !exists(id) {
         let suggestions = config::find_similar_ids::<Component>(id);
