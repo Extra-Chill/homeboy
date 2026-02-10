@@ -141,10 +141,10 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
 
     /// Loads manifest from CLI-reported path and creates LoadedModule
     private func loadManifest(from entry: CLIModuleEntry) -> LoadedModule? {
-        let manifestPath = URL(fileURLWithPath: entry.path).appendingPathComponent("homeboy.json")
+        let manifestPath = URL(fileURLWithPath: entry.path).appendingPathComponent("\(entry.id).json")
 
         guard fileManager.fileExists(atPath: manifestPath.path) else {
-            print("[ModuleManager] No homeboy.json at \(entry.path)")
+            print("[ModuleManager] No \(entry.id).json at \(entry.path)")
             return nil
         }
 
@@ -289,9 +289,9 @@ enum ModuleError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingManifest:
-            return "No homeboy.json found in the selected directory"
+            return "No module manifest ({id}.json) found in the selected directory"
         case .invalidManifest:
-            return "Invalid homeboy.json format"
+            return "Invalid module manifest format"
         case .moduleNotFound:
             return "Module not found"
         case .installFailed:

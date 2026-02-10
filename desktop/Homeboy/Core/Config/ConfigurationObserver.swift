@@ -183,7 +183,7 @@ final class ConfigurationObserver: ObservableObject {
             return result
         }
         for moduleId in moduleIds {
-            let manifestPath = modulesDir.appendingPathComponent(moduleId).appendingPathComponent("homeboy.json")
+            let manifestPath = modulesDir.appendingPathComponent(moduleId).appendingPathComponent("\(moduleId).json")
             if let data = try? Data(contentsOf: manifestPath) {
                 result[moduleId] = data
             }
