@@ -6,6 +6,11 @@ The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for 
 
 For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
+## Unreleased
+
+- Fix module manifest path to use {id}.json convention (modules now load in Desktop)
+- Add sidebar empty state and section descriptions for modules
+
 ## [0.11.1] - 2026-01-23
 
 ### Refactored
