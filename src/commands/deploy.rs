@@ -49,6 +49,10 @@ pub struct DeployArgs {
     /// Deploy to multiple projects (comma-separated or repeated)
     #[arg(long, value_delimiter = ',')]
     pub projects: Option<Vec<String>>,
+
+    /// Deploy to all projects in a fleet
+    #[arg(long, short = 'f')]
+    pub fleet: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -104,6 +108,12 @@ pub fn run(
     mut args: DeployArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<DeployCommandOutput> {
+    // Resolve fleet to project IDs if specified
+    if let Some(ref fleet_id) = args.fleet {
+        let fl = homeboy::fleet::load(fleet_id)?;
+        return run_multi_project(&args, &fl.project_ids);
+    }
+
     // Handle multi-project case first
     if let Some(ref project_ids) = args.projects {
         return run_multi_project(&args, project_ids);

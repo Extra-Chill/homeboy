@@ -1,8 +1,10 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::component;
 use homeboy::fleet::{self, Fleet};
-use homeboy::project::Project;
+use homeboy::project::{self, Project};
+use homeboy::version;
 
 use super::{CmdResult, DynamicSetArgs};
 
@@ -73,6 +75,11 @@ enum FleetCommand {
         /// Fleet ID
         id: String,
     },
+    /// Show component versions across a fleet
+    Status {
+        /// Fleet ID
+        id: String,
+    },
 }
 
 #[derive(Default, Serialize)]
@@ -88,8 +95,25 @@ pub struct FleetOutput {
     pub projects: Option<Vec<Project>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components: Option<std::collections::HashMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<Vec<FleetProjectStatus>>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub updated_fields: Vec<String>,
+}
+
+#[derive(Default, Serialize)]
+pub struct FleetProjectStatus {
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    pub components: Vec<FleetComponentStatus>,
+}
+
+#[derive(Default, Serialize)]
+pub struct FleetComponentStatus {
+    pub component_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 pub fn run(
@@ -110,6 +134,7 @@ pub fn run(
         FleetCommand::Remove { id, project } => remove(&id, &project),
         FleetCommand::Projects { id } => projects(&id),
         FleetCommand::Components { id } => components(&id),
+        FleetCommand::Status { id } => status(&id),
     }
 }
 
@@ -277,6 +302,47 @@ fn components(id: &str) -> CmdResult<FleetOutput> {
             command: "fleet.components".to_string(),
             fleet_id: Some(id.to_string()),
             components: Some(components),
+            ..Default::default()
+        },
+        0,
+    ))
+}
+
+fn status(id: &str) -> CmdResult<FleetOutput> {
+    let fl = fleet::load(id)?;
+    let mut project_statuses = Vec::new();
+
+    for project_id in &fl.project_ids {
+        let proj = match project::load(project_id) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let mut component_statuses = Vec::new();
+        for component_id in &proj.component_ids {
+            let comp_version = match component::load(component_id) {
+                Ok(comp) => version::get_component_version(&comp),
+                Err(_) => None,
+            };
+
+            component_statuses.push(FleetComponentStatus {
+                component_id: component_id.clone(),
+                version: comp_version,
+            });
+        }
+
+        project_statuses.push(FleetProjectStatus {
+            project_id: project_id.clone(),
+            server_id: proj.server_id.clone(),
+            components: component_statuses,
+        });
+    }
+
+    Ok((
+        FleetOutput {
+            command: "fleet.status".to_string(),
+            fleet_id: Some(id.to_string()),
+            status: Some(project_statuses),
             ..Default::default()
         },
         0,
