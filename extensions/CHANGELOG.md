@@ -1,6 +1,15 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0] - 2026-02-10
+
+### Added
+- plasma-shield module with desktop visual UI
+
+### Fixed
+- WordPress module: download WordPress on demand instead of bundling
+- plasma-shield: rename manifest to {id}.json pattern
+
+## [0.3.0] - 2026-02-10
 
 ### Fixed
 - WordPress deploy override now injects `--allow-root` for root SSH users
