@@ -1,0 +1,37 @@
+{
+  "name": "Plasma Shield",
+  "version": "1.0.0",
+  "icon": "shield.lefthalf.filled",
+  "description": "Network security control for AI agent fleets",
+  "author": "Extra Chill",
+  "homepage": "https://github.com/Extra-Chill/plasma-shield",
+
+  "cli": {
+    "tool": "plasma",
+    "display_name": "Plasma Shield",
+    "command_template": "bash {{module_path}}/scripts/plasma-shield-bridge.sh {{args}}",
+    "help": {
+      "project_id_help": "Shield router ID or omit to use default",
+      "args_help": "Plasma Shield command",
+      "examples": [
+        "homeboy plasma status",
+        "homeboy plasma agents",
+        "homeboy plasma logs --limit 50",
+        "homeboy plasma mode enforce",
+        "homeboy plasma agent sarai lockdown",
+        "homeboy plasma rules list",
+        "homeboy plasma prod mode audit"
+      ]
+    }
+  },
+
+  "settings": [
+    {
+      "id": "default_router",
+      "label": "Default Router",
+      "type": "string",
+      "default": "local",
+      "description": "Default shield router ID"
+    }
+  ]
+}
