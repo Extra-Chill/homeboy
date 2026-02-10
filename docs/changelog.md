@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.41.0] - 2026-02-10
+
+### Added
+- Fleet management: create, list, show, delete, add, remove projects from fleets
+- fleet status: check versions across all projects in a fleet
+- fleet check: drift detection across fleet using deploy --check
+- deploy --fleet: deploy component to all projects in a fleet
+- deploy --shared: deploy to all projects using a component (auto-detect)
+- component shared: show which projects use a component
+
 ## [0.40.4] - 2026-02-10
 
 ### Added
