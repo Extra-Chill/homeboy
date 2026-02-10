@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+### Added
+- OpenClaw skill for AI agent usage (skills/homeboy/)
+
 ## [0.41.0] - 2026-02-10
 
 ### Added

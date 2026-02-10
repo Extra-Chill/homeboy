@@ -27,9 +27,11 @@ Homeboy provides these core capabilities:
 - **Documentation**: Embedded docs, codebase analysis, and bulk documentation generation
 - **Module System**: Extensible runtime tools, platform behaviors, and custom release steps
 
-## Agent usage (recommended)
+## AI Agent Usage
 
-Use the [Agent Hooks module](https://github.com/Extra-Chill/homeboy-modules/tree/main/agent-hooks) to guide your coding agent to use Homeboy effectively. Our module provides hooks for Claude Code and OpenCode. 
+**OpenClaw Skill:** Install the bundled skill at `skills/homeboy/` for AI agents using OpenClaw. The skill provides workflow guidance for version management, deployment, and fleet operations.
+
+**Agent Hooks Module:** Use the [Agent Hooks module](https://github.com/Extra-Chill/homeboy-modules/tree/main/agent-hooks) to guide your coding agent to use Homeboy effectively. Provides hooks for Claude Code and OpenCode. 
 
 ## `homeboy init`
 
