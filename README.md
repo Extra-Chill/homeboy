@@ -1,8 +1,13 @@
 # Homeboy CLI
 
-Homeboy is a development and deployment automation CLI designed for agentic coding sessions and rapid iteration across multiple projects.
+Homeboy is a development and deployment automation CLI designed for agentic coding sessions and rapid iteration across multiple projects—whether local development or cloud network administration.
 
-It standardizes configuration-driven workflows for projects, servers, and components while providing extensible automation through modules. Most commands return stable JSON output for machine parsing alongside human-readable output.
+It standardizes configuration-driven workflows for projects, servers, components, and fleets while providing extensible automation through modules. Most commands return stable JSON output for machine parsing alongside human-readable output.
+
+**Use cases:**
+- **Local development**: Version management, builds, deployments for single projects
+- **Multi-project workflows**: Shared components deployed across multiple sites
+- **Network administration**: Fleet management, coordinated deployments, version sync across servers
 
 **Note:** This is still early in development. Breaking changes may occur between releases.
 
@@ -10,8 +15,9 @@ It standardizes configuration-driven workflows for projects, servers, and compon
 
 Homeboy provides these core capabilities:
 
-- **Configuration & Context**: Manage projects, components, servers, and modules with `homeboy init` for environment discovery
+- **Configuration & Context**: Manage projects, components, servers, fleets, and modules with `homeboy init` for environment discovery
 - **Deployment**: Version-aware deployment with pre-flight checks, dry-run mode, and version comparison
+- **Fleet Management**: Group projects into fleets, detect shared components, deploy updates across multiple sites
 - **Release Pipelines**: Local orchestration replacing CI/CD with configurable steps and module-backed actions
 - **SSH & Remote Operations**: Managed SSH connections, remote file operations, log management, and database access
 - **Git Integration**: Status, commit (with granular file control), push/pull, and automatic tagging
@@ -100,6 +106,38 @@ homeboy deploy <project> component-a component-b
 homeboy deploy <project> --all
 homeboy deploy <project> --outdated
 ```
+
+### Fleet Management
+
+Fleets are named groups of projects for coordinated operations. Use them to manage shared components across multiple sites.
+
+```bash
+# See which projects share components
+homeboy component shared
+# → my-plugin: [site-a, site-b, site-c]
+
+# Create a fleet from projects
+homeboy fleet create production --projects site-a,site-b,site-c
+homeboy fleet add production --project site-d
+
+# View fleet status
+homeboy fleet list
+homeboy fleet show production
+homeboy fleet status production          # Component versions across fleet
+homeboy fleet components production      # Component usage in fleet
+
+# Deploy to a fleet
+homeboy deploy my-plugin --fleet production
+
+# Deploy to ALL projects using a component (auto-detected)
+homeboy deploy my-plugin --shared
+```
+
+**Fleet use cases:**
+- Keep plugins in sync across a network of WordPress sites
+- Deploy theme updates to all sites using that theme
+- Update CLI tools (like homeboy itself) across all servers
+- Coordinate deployments between staging/production environments
 
 ### Release Workflow
 
