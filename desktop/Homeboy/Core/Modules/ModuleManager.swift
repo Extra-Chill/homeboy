@@ -289,7 +289,7 @@ enum ModuleError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingManifest:
-            return "No module manifest ({id}.json) found in the selected directory"
+            return "No module manifest found in the selected directory"
         case .invalidManifest:
             return "Invalid module manifest format"
         case .moduleNotFound:

@@ -17,23 +17,43 @@ struct SidebarView: View {
             
             List(selection: $selectedItem) {
                 // Core Tools Section
-                Section("Tools") {
+                Section {
                     ForEach(coreTools, id: \.self) { tool in
                         Label(tool.rawValue, systemImage: tool.icon)
                             .tag(NavigationItem.coreTool(tool))
                     }
+                } header: {
+                    Text("Tools")
+                } footer: {
+                    Text("Built-in server and deployment tools")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
-                
+
                 // Dynamic Modules Section
-                if !moduleManager.modules.isEmpty {
-                    Section("Modules") {
+                Section {
+                    if moduleManager.modules.isEmpty {
+                        if moduleManager.isLoading {
+                            Label("Loading modules...", systemImage: "arrow.trianglehead.2.clockwise")
+                                .foregroundColor(.secondary)
+                                .font(.callout)
+                        } else {
+                            Label("No modules installed", systemImage: "puzzlepiece.extension")
+                                .foregroundColor(.secondary)
+                                .font(.callout)
+                                .onTapGesture {
+                                    selectedItem = .coreTool(.settings)
+                                }
+                                .help("Manage modules in Settings")
+                        }
+                    } else {
                         ForEach(moduleManager.modules) { module in
                             HStack {
                                 Label(module.name, systemImage: module.icon)
                                     .foregroundColor(module.isDisabled ? .secondary : .primary)
-                                
+
                                 Spacer()
-                                
+
                                 // Status indicator
                                 if module.isDisabled {
                                     Image(systemName: "exclamationmark.triangle.fill")
@@ -62,9 +82,15 @@ struct SidebarView: View {
                                 }
                             }
                             .tag(NavigationItem.module(module.id))
-                            .help(module.isDisabled ? "Requires: \(module.missingComponents.joined(separator: ", "))" : "")
+                            .help(module.isDisabled ? "Requires: \(module.missingComponents.joined(separator: ", "))" : module.name)
                         }
                     }
+                } header: {
+                    Text("Modules")
+                } footer: {
+                    Text("Installable extensions \u{2014} manage in Settings")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
                 
                 // Settings (separate section at bottom)
