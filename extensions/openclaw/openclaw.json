@@ -1,0 +1,99 @@
+{
+  "name": "OpenClaw",
+  "version": "0.1.0",
+  "icon": "antenna.radiowaves.left.and.right",
+  "description": "AI agent platform — view config, workspace, memory, and agent status",
+  "author": "Extra Chill",
+  "config_schema": "openclaw",
+
+  "discovery": {
+    "find_command": "find /root/.openclaw /home -maxdepth 3 -name 'openclaw.json' -path '*/.openclaw/*' -type f 2>/dev/null | head -10",
+    "base_path_transform": "dirname",
+    "display_name_command": "cd {{basePath}} && (head -1 workspace/SOUL.md 2>/dev/null | sed 's/^# //' || basename {{basePath}})"
+  },
+
+  "cli": {
+    "tool": "openclaw",
+    "display_name": "OpenClaw",
+    "command_template": "{{cliPath}} {{args}}",
+    "default_cli_path": "openclaw",
+    "help": {
+      "project_id_help": "OpenClaw agent profile (default, or named profile)",
+      "args_help": "OpenClaw CLI command and arguments",
+      "examples": [
+        "homeboy openclaw my-agent gateway status",
+        "homeboy openclaw my-agent config get",
+        "homeboy openclaw my-agent cron list"
+      ]
+    }
+  },
+
+  "default_pinned_files": [
+    "openclaw.json",
+    "workspace/SOUL.md",
+    "workspace/USER.md",
+    "workspace/AGENTS.md",
+    "workspace/TOOLS.md",
+    "workspace/MEMORY.md",
+    "workspace/HEARTBEAT.md",
+    "workspace/IDENTITY.md"
+  ],
+
+  "default_pinned_logs": [
+    "logs/gateway.log",
+    "logs/agent.log"
+  ],
+
+  "settings": [
+    {
+      "id": "profile",
+      "type": "string",
+      "label": "Profile",
+      "placeholder": "default",
+      "default": ""
+    },
+    {
+      "id": "gateway_port",
+      "type": "string",
+      "label": "Gateway Port",
+      "default": "19000"
+    }
+  ],
+
+  "actions": [
+    {
+      "id": "gateway-status",
+      "label": "Gateway Status",
+      "type": "command",
+      "command": "openclaw gateway status"
+    },
+    {
+      "id": "gateway-restart",
+      "label": "Restart Gateway",
+      "type": "command",
+      "command": "openclaw gateway restart"
+    },
+    {
+      "id": "config-get",
+      "label": "View Config",
+      "type": "command",
+      "command": "openclaw config get"
+    },
+    {
+      "id": "cron-list",
+      "label": "List Cron Jobs",
+      "type": "command",
+      "command": "openclaw cron list"
+    },
+    {
+      "id": "agents-list",
+      "label": "List Agents",
+      "type": "command",
+      "command": "openclaw agents list"
+    }
+  ],
+
+  "commands": [
+    "openclaw"
+  ]
+}
