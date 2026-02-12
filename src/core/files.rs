@@ -6,12 +6,16 @@
 use serde::Serialize;
 use std::io::{self, Read};
 
-use crate::context::require_project_base_path;
+use crate::context::{require_project_base_path, resolve_project_ssh_with_base_path};
+use crate::defaults;
 use crate::error::{Error, Result};
 use crate::engine::executor::execute_for_project;
 use crate::project;
 use crate::utils::{command, parser, shell, token};
 use crate::utils::base_path;
+
+use std::path::Path;
+use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
 
@@ -868,4 +872,96 @@ pub fn edit_prepend(project_id: &str, path: &str, content: &str) -> Result<EditR
         success: true,
         error: None,
     })
+}
+
+pub struct DownloadResult {
+    pub remote_path: String,
+    pub local_path: String,
+    pub recursive: bool,
+    pub success: bool,
+    pub exit_code: i32,
+    pub error: Option<String>,
+}
+
+/// Download a file or directory from remote server via SCP.
+pub fn download(
+    project_id: &str,
+    remote_path: &str,
+    local_path: &str,
+    recursive: bool,
+) -> Result<DownloadResult> {
+    let (ctx, project_base_path) = resolve_project_ssh_with_base_path(project_id)?;
+    let full_remote_path = base_path::join_remote_path(Some(&project_base_path), remote_path)?;
+
+    // Create local parent directories if needed
+    let local = Path::new(local_path);
+    if let Some(parent) = local.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::other(format!("Failed to create local directory: {}", e))
+            })?;
+        }
+    }
+
+    let deploy_defaults = defaults::load_defaults().deploy;
+    let mut scp_args: Vec<String> = deploy_defaults.scp_flags.clone();
+
+    if recursive {
+        scp_args.push("-r".to_string());
+    }
+
+    if let Some(identity_file) = &ctx.client.identity_file {
+        scp_args.extend(["-i".to_string(), identity_file.clone()]);
+    }
+
+    if ctx.client.port != deploy_defaults.default_ssh_port {
+        scp_args.extend(["-P".to_string(), ctx.client.port.to_string()]);
+    }
+
+    // Remote source (reverse of upload)
+    scp_args.push(format!(
+        "{}@{}:{}",
+        ctx.client.user,
+        ctx.client.host,
+        shell::quote_path(&full_remote_path)
+    ));
+    scp_args.push(local_path.to_string());
+
+    let label = if recursive { "directory" } else { "file" };
+    eprintln!(
+        "[download] Downloading {}: {}@{}:{} -> {}",
+        label, ctx.client.user, ctx.client.host, full_remote_path, local_path
+    );
+
+    let output = Command::new("scp").args(&scp_args).output();
+    match output {
+        Ok(output) if output.status.success() => Ok(DownloadResult {
+            remote_path: full_remote_path,
+            local_path: local_path.to_string(),
+            recursive,
+            success: true,
+            exit_code: 0,
+            error: None,
+        }),
+        Ok(output) => {
+            let exit_code = output.status.code().unwrap_or(1);
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            Ok(DownloadResult {
+                remote_path: full_remote_path,
+                local_path: local_path.to_string(),
+                recursive,
+                success: false,
+                exit_code,
+                error: Some(stderr),
+            })
+        }
+        Err(err) => Ok(DownloadResult {
+            remote_path: full_remote_path,
+            local_path: local_path.to_string(),
+            recursive,
+            success: false,
+            exit_code: 1,
+            error: Some(err.to_string()),
+        }),
+    }
 }

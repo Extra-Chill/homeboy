@@ -88,6 +88,19 @@ enum FileCommand {
         #[arg(short = 'i', long)]
         ignore_case: bool,
     },
+    /// Download a file or directory from remote server
+    Download {
+        /// Project ID
+        project_id: String,
+        /// Remote file path
+        path: String,
+        /// Local destination path (defaults to current directory)
+        #[arg(default_value = ".")]
+        local_path: String,
+        /// Download directories recursively
+        #[arg(short, long)]
+        recursive: bool,
+    },
     /// Edit file with line-based or pattern-based operations
     Edit(EditArgs),
 }
@@ -211,12 +224,25 @@ pub struct FileEditOutput {
 }
 
 #[derive(Serialize)]
+pub struct FileDownloadOutput {
+    command: String,
+    project_id: String,
+    remote_path: String,
+    local_path: String,
+    recursive: bool,
+    success: bool,
+    exit_code: i32,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum FileCommandOutput {
     Standard(FileOutput),
     Find(FileFindOutput),
     Grep(FileGrepOutput),
     Edit(FileEditOutput),
+    Download(FileDownloadOutput),
     Raw(String),
 }
 
@@ -295,6 +321,26 @@ pub fn run(
                 ignore_case,
             )?;
             Ok((FileCommandOutput::Grep(out), code))
+        }
+        FileCommand::Download {
+            project_id,
+            path,
+            local_path,
+            recursive,
+        } => {
+            let result = files::download(&project_id, &path, &local_path, recursive)?;
+            let code = result.exit_code;
+            let out = FileDownloadOutput {
+                command: "file.download".to_string(),
+                project_id,
+                remote_path: result.remote_path,
+                local_path: result.local_path,
+                recursive: result.recursive,
+                success: result.success,
+                exit_code: result.exit_code,
+                error: result.error,
+            };
+            Ok((FileCommandOutput::Download(out), code))
         }
         FileCommand::Edit(args) => {
             let (out, code) = edit(args)?;
