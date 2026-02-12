@@ -1,16 +1,16 @@
 # Homeboy
 
-Development and deployment automation CLI — manage projects, servers, and fleets from the terminal.
+Development and deployment automation CLI built in Rust — manage projects, servers, and fleets from the terminal.
 
 ## What It Does
 
-Homeboy replaces scattered scripts, FTP clients, and manual SSH sessions with one CLI:
+Homeboy replaces scattered scripts, FTP clients, and manual SSH sessions with one tool:
 
 - **Deploy anything** — Push plugins, themes, CLIs, and modules to remote servers
 - **Fleet management** — Group projects, detect shared components, deploy everywhere at once
 - **Release pipelines** — Version bump, changelog, build, tag, publish — one command
 - **Remote operations** — SSH, file management, database queries, log tailing
-- **AI-native** — JSON output for machine parsing, embedded docs for agent context
+- **Structured output** — JSON for scripting and AI agents, human-readable for terminals
 
 ## How It Works
 
@@ -133,12 +133,13 @@ No repo-local config files. Everything is centralized.
 ## Installation
 
 ```bash
-# Homebrew
+# Homebrew (macOS/Linux)
 brew tap Extra-Chill/homebrew-tap
 brew install homeboy
 
-# From source
-cargo install --path .
+# From source (requires Rust toolchain)
+git clone https://github.com/Extra-Chill/homeboy.git
+cd homeboy && cargo install --path .
 ```
 
 ## Documentation
