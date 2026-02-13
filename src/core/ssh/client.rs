@@ -89,6 +89,48 @@ impl SshClient {
     }
 
     fn execute_with_stdin(&self, command: &str, stdin_file: Option<&str>) -> CommandOutput {
+        self.execute_with_retry(command, stdin_file, 3)
+    }
+
+    fn execute_with_retry(
+        &self,
+        command: &str,
+        stdin_file: Option<&str>,
+        max_attempts: u32,
+    ) -> CommandOutput {
+        let backoff_secs = [0, 2, 5]; // delays before retry 1, 2, 3
+
+        for attempt in 0..max_attempts {
+            let result = self.execute_once(command, stdin_file);
+
+            // Only retry on transient connection errors, not command failures
+            if result.success || attempt + 1 >= max_attempts || !is_transient_ssh_error(&result) {
+                return result;
+            }
+
+            let delay = backoff_secs
+                .get(attempt as usize + 1)
+                .copied()
+                .unwrap_or(5);
+            eprintln!(
+                "[ssh] Connection failed (attempt {}/{}), retrying in {}s...",
+                attempt + 1,
+                max_attempts,
+                delay
+            );
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+        }
+
+        // Unreachable, but satisfy the compiler
+        CommandOutput {
+            stdout: String::new(),
+            stderr: "SSH retry exhausted".to_string(),
+            success: false,
+            exit_code: -1,
+        }
+    }
+
+    fn execute_once(&self, command: &str, stdin_file: Option<&str>) -> CommandOutput {
         let args = self.build_ssh_args(Some(command));
 
         let mut cmd = Command::new("ssh");
@@ -278,4 +320,26 @@ pub fn execute_local_command_passthrough(
             exit_code: -1,
         },
     }
+}
+
+/// Check if an SSH failure is a transient connection error worth retrying.
+fn is_transient_ssh_error(output: &CommandOutput) -> bool {
+    let stderr = output.stderr.to_lowercase();
+    // SSH exit code 255 = connection error (not a remote command failure)
+    let is_connection_exit = output.exit_code == 255;
+
+    let transient_patterns = [
+        "connection refused",
+        "connection reset",
+        "connection timed out",
+        "no route to host",
+        "network is unreachable",
+        "temporary failure in name resolution",
+        "could not resolve hostname",
+        "broken pipe",
+        "ssh_exchange_identification",
+        "connection closed by remote host",
+    ];
+
+    is_connection_exit || transient_patterns.iter().any(|p| stderr.contains(p))
 }
