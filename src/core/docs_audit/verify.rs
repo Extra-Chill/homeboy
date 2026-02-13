@@ -321,7 +321,7 @@ mod tests {
 
         let claim = Claim {
             claim_type: ClaimType::DirectoryPath,
-            value: "/var/lib/sweatpants/".to_string(),
+            value: "/opt/nonexistent-test-path-xyz/".to_string(),
             doc_file: "docs/test.md".to_string(),
             line: 1,
             context: None,
