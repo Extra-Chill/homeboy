@@ -30,9 +30,9 @@ pub struct ReleaseArgs {
     #[arg(value_name = "COMPONENT")]
     component_id: String,
 
-    /// Version bump type (patch, minor, major)
-    #[arg(value_name = "BUMP_TYPE", ignore_case = true)]
-    bump_type: BumpType,
+    /// Version bump type (patch, minor, major) — not needed with --recover
+    #[arg(value_name = "BUMP_TYPE", ignore_case = true, required_unless_present = "recover")]
+    bump_type: Option<BumpType>,
 
     /// Preview what will happen without making changes
     #[arg(long)]
@@ -45,6 +45,10 @@ pub struct ReleaseArgs {
     /// Deploy to all projects using this component after release
     #[arg(long)]
     deploy: bool,
+
+    /// Recover from an interrupted release (tag + push current version)
+    #[arg(long, conflicts_with = "bump_type")]
+    recover: bool,
 }
 
 #[derive(Serialize)]
@@ -90,8 +94,13 @@ pub struct ReleaseResult {
 }
 
 pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ReleaseOutput> {
+    if args.recover {
+        return run_recover(&args.component_id);
+    }
+
+    let bump_type = args.bump_type.expect("bump_type required when not recovering");
     let options = release::ReleaseOptions {
-        bump_type: args.bump_type.as_str().to_string(),
+        bump_type: bump_type.as_str().to_string(),
         dry_run: args.dry_run,
     };
 
@@ -284,4 +293,95 @@ fn execute_deployment(component_id: &str) -> (Option<DeploymentResult>, i32) {
         }),
         exit_code,
     )
+}
+
+/// Recover from an interrupted release.
+/// Detects state: version files bumped but tag/push missing, and completes the release.
+fn run_recover(component_id: &str) -> CmdResult<ReleaseOutput> {
+    let component = component::load(component_id)?;
+    let version_info = homeboy::version::read_version(Some(component_id))?;
+    let current_version = &version_info.version;
+    let tag_name = format!("v{}", current_version);
+
+    // Check what state we're in
+    let tag_exists_local = homeboy::git::tag_exists_locally(&component.local_path, &tag_name)
+        .unwrap_or(false);
+    let tag_exists_remote = homeboy::git::tag_exists_on_remote(&component.local_path, &tag_name)
+        .unwrap_or(false);
+    let uncommitted = homeboy::git::get_uncommitted_changes(&component.local_path)?;
+
+    let mut actions = Vec::new();
+
+    // Step 1: Commit uncommitted version files if needed
+    if uncommitted.has_changes {
+        eprintln!("[recover] Committing uncommitted changes...");
+        let msg = format!("release: v{}", current_version);
+        let commit_result = homeboy::git::commit(
+            Some(component_id),
+            Some(msg.as_str()),
+            homeboy::git::CommitOptions {
+                staged_only: false,
+                files: None,
+                exclude: None,
+                amend: false,
+            },
+        )?;
+        if !commit_result.success {
+            return Err(homeboy::Error::other(format!(
+                "Failed to commit: {}",
+                commit_result.stderr
+            )));
+        }
+        actions.push("committed version files".to_string());
+    }
+
+    // Step 2: Create tag if missing locally
+    if !tag_exists_local {
+        eprintln!("[recover] Creating tag {}...", tag_name);
+        let tag_result = homeboy::git::tag(
+            Some(component_id),
+            Some(&tag_name),
+            Some(&format!("Release {}", tag_name)),
+        )?;
+        if !tag_result.success {
+            return Err(homeboy::Error::other(format!(
+                "Failed to create tag: {}",
+                tag_result.stderr
+            )));
+        }
+        actions.push(format!("created tag {}", tag_name));
+    }
+
+    // Step 3: Push commits and tags if not on remote
+    if !tag_exists_remote {
+        eprintln!("[recover] Pushing to remote...");
+        let push_result = homeboy::git::push(Some(component_id), true)?;
+        if !push_result.success {
+            return Err(homeboy::Error::other(format!(
+                "Failed to push: {}",
+                push_result.stderr
+            )));
+        }
+        actions.push("pushed commits and tags".to_string());
+    }
+
+    if actions.is_empty() {
+        eprintln!("[recover] Release v{} appears complete — nothing to recover.", current_version);
+    } else {
+        eprintln!("[recover] Recovery complete for v{}: {}", current_version, actions.join(", "));
+    }
+
+    Ok((
+        ReleaseOutput {
+            result: ReleaseResult {
+                component_id: component_id.to_string(),
+                bump_type: "recover".to_string(),
+                dry_run: false,
+                plan: None,
+                run: None,
+                deployment: None,
+            },
+        },
+        0,
+    ))
 }
