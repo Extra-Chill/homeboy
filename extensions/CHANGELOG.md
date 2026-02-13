@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.5.0] - 2026-02-13
+
+- feat: add openclaw module for AI agent management
+
 ## [0.4.0] - 2026-02-10
 
 ### Added
