@@ -124,6 +124,20 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
                         "hint": "Commit changes or stash before release"
                     })),
                 );
+            } else if uncommitted.has_changes {
+                // Only changelog/version files are uncommitted — auto-stage them
+                // so the release commit includes them (e.g., after `homeboy changelog add`)
+                eprintln!("[release] Auto-staging changelog/version files for release commit");
+                let all_files: Vec<&String> = uncommitted.staged.iter()
+                    .chain(uncommitted.unstaged.iter())
+                    .collect();
+                for file in all_files {
+                    let full_path = std::path::Path::new(&component.local_path).join(file);
+                    let _ = std::process::Command::new("git")
+                        .args(["add", &full_path.to_string_lossy()])
+                        .current_dir(&component.local_path)
+                        .output();
+                }
             }
         }
     }

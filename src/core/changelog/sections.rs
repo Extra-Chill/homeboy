@@ -87,10 +87,13 @@ pub fn finalize_next_section(
     let start = validation::require_with_hints(
         find_next_section_start(&lines, next_section_aliases),
         "changelog",
-        "No changelog items found (cannot finalize)",
+        &format!(
+            "No unreleased changelog section found (looked for: {})",
+            next_section_aliases.iter().map(|a| format!("\"## {}\"", a)).collect::<Vec<_>>().join(", ")
+        ),
         vec![
-            "Commit all changes before running version bump (changelog auto-generates from commits).".to_string(),
-            "Or add entries manually: `homeboy changelog add <componentId> -m \"...\"`".to_string(),
+            "Add entries: `homeboy changelog add <componentId> -m \"...\"`".to_string(),
+            "Or create section manually: add a `## Unreleased` heading to your changelog".to_string(),
         ],
     )?;
 
