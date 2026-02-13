@@ -1,6 +1,4 @@
-use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::process::Command;
 
 use crate::changelog;
@@ -9,183 +7,15 @@ use crate::config::read_json_spec_to_string;
 use crate::error::{Error, Result};
 use crate::output::{BulkResult, BulkSummary, ItemOutcome};
 use crate::project;
-use crate::utils::command;
 
-// ============================================================================
-// Low-level Git Primitives (path-based)
-// ============================================================================
-
-/// Clone a git repository to a target directory.
-pub fn clone_repo(url: &str, target_dir: &Path) -> Result<()> {
-    command::run("git", &["clone", url, &target_dir.to_string_lossy()], "git clone")
-        .map_err(|e| Error::git_command_failed(e.to_string()))?;
-    Ok(())
-}
-
-/// Pull latest changes in a git repository.
-pub fn pull_repo(repo_dir: &Path) -> Result<()> {
-    command::run_in(&repo_dir.to_string_lossy(), "git", &["pull"], "git pull")
-        .map_err(|e| Error::git_command_failed(e.to_string()))?;
-    Ok(())
-}
-
-/// Check if a git working directory has no uncommitted changes.
-///
-/// Uses direct Command execution to properly handle empty output (clean repo).
-/// `run_in_optional` returns None for empty stdout, which would incorrectly
-/// indicate a dirty repo when used with `.unwrap_or(false)`.
-pub fn is_workdir_clean(path: &Path) -> bool {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(path)
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => o.stdout.is_empty(),
-        _ => false, // Command failed = assume not clean (conservative)
-    }
-}
-
-/// Get the root directory of a git repository containing the given path.
-/// Returns None if the path is not within a git repository.
-pub fn get_git_root(path: &str) -> Option<String> {
-    command::run_in_optional(path, "git", &["rev-parse", "--show-toplevel"])
-}
-
-/// List all git-tracked markdown files in a directory.
-/// Uses `git ls-files` to respect .gitignore and only include tracked/staged files.
-/// Returns relative paths from the repository root.
-pub fn list_tracked_markdown_files(path: &Path) -> Result<Vec<String>> {
-    let stdout = command::run_in(
-        &path.to_string_lossy(),
-        "git",
-        &["ls-files", "--cached", "--others", "--exclude-standard", "*.md"],
-        "git ls-files",
-    )
-    .map_err(|e| Error::git_command_failed(e.to_string()))?;
-
-    Ok(stdout.lines().filter(|l| !l.is_empty()).map(String::from).collect())
-}
-
-/// Pull with fast-forward only, inheriting stdio for interactive output.
-pub fn pull_ff_only_interactive(path: &Path) -> Result<()> {
-    use std::process::Stdio;
-
-    let status = Command::new("git")
-        .args(["pull", "--ff-only"])
-        .current_dir(path)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|e| Error::git_command_failed(format!("Failed to run git pull: {}", e)))?;
-
-    if !status.success() {
-        return Err(Error::git_command_failed(
-            "git pull --ff-only failed".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, Clone, Serialize)]
-
-pub struct CommitInfo {
-    pub hash: String,
-    pub subject: String,
-    pub category: CommitCategory,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub enum CommitCategory {
-    Breaking,
-    Feature,
-    Fix,
-    Docs,
-    Chore,
-    Merge,
-    Other,
-}
-
-impl CommitCategory {
-    pub fn prefix(&self) -> Option<&'static str> {
-        match self {
-            CommitCategory::Breaking => Some("BREAKING"),
-            CommitCategory::Feature => Some("feat"),
-            CommitCategory::Fix => Some("fix"),
-            CommitCategory::Docs => Some("docs"),
-            CommitCategory::Chore => Some("chore"),
-            CommitCategory::Merge => None,
-            CommitCategory::Other => None,
-        }
-    }
-
-    /// Map commit category to changelog entry type.
-    /// Returns None for categories that should be skipped (docs, chore, merge).
-    pub fn to_changelog_entry_type(&self) -> Option<&'static str> {
-        match self {
-            CommitCategory::Feature => Some("added"),
-            CommitCategory::Fix => Some("fixed"),
-            CommitCategory::Breaking => Some("changed"),
-            CommitCategory::Docs => None,
-            CommitCategory::Chore => None,
-            CommitCategory::Merge => None,
-            CommitCategory::Other => Some("changed"),
-        }
-    }
-}
-
-/// Parse a commit subject into a category based on conventional commit format.
-/// Falls back to Other if no pattern matches - this is fine, commits still get included.
-pub fn parse_conventional_commit(subject: &str) -> CommitCategory {
-    let lower = subject.to_lowercase();
-
-    // Detect merge commits first - they should be filtered out
-    if lower.starts_with("merge pull request")
-        || lower.starts_with("merge branch")
-        || lower.starts_with("merge remote-tracking")
-    {
-        return CommitCategory::Merge;
-    }
-
-    if lower.contains("breaking change") || subject.contains("!:") {
-        CommitCategory::Breaking
-    } else if lower.starts_with("feat") {
-        CommitCategory::Feature
-    } else if lower.starts_with("fix") {
-        CommitCategory::Fix
-    } else if lower.starts_with("docs") {
-        CommitCategory::Docs
-    } else if lower.starts_with("chore") {
-        CommitCategory::Chore
-    } else {
-        CommitCategory::Other
-    }
-}
-
-/// Extract version number from a git tag.
-/// Handles formats: v1.0.0, 1.0.0, component-v1.0.0
-fn extract_version_from_tag(tag: &str) -> Option<String> {
-    let version_pattern = Regex::new(r"v?(\d+\.\d+(?:\.\d+)?)").ok()?;
-    version_pattern
-        .captures(tag)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
-}
-
-/// Get the latest git tag in the repository.
-/// Returns None if no tags exist.
-pub fn get_latest_tag(path: &str) -> Result<Option<String>> {
-    Ok(command::run_in_optional(path, "git", &["describe", "--tags", "--abbrev=0"]))
-}
+use super::commits::*;
+use super::changes::*;
+use super::primitives::is_git_repo;
+use super::{execute_git, resolve_target};
 
 const DEFAULT_COMMIT_LIMIT: usize = 10;
 const VERBOSE_UNTRACKED_THRESHOLD: usize = 200;
 
-// Docs file patterns for categorizing commits
-const DOCS_FILE_EXTENSIONS: [&str; 1] = [".md"];
-const DOCS_DIRECTORIES: [&str; 1] = ["docs/"];
 const NOISY_UNTRACKED_DIRS: [&str; 8] = [
     "node_modules",
     "dist",
@@ -196,219 +26,6 @@ const NOISY_UNTRACKED_DIRS: [&str; 8] = [
     "target",
     ".cache",
 ];
-
-/// Find the most recent commit containing a version number in its message.
-/// Matches strict patterns: v1.0.0, bump to X, release X, version X
-/// Returns the commit hash if found, None otherwise.
-pub fn find_version_commit(path: &str) -> Result<Option<String>> {
-    let stdout = command::run_in(path, "git", &["log", "-200", "--format=%h|%s"], "git log")?;
-
-    let version_pattern = Regex::new(
-        r"(?i)(?:^v|^version\s+(?:bump\s+(?:to\s+)?)?v?|^bump\s+(?:version\s+)?(?:to\s+)?v?|^(?:chore\([^)]*\):\s*)?release:?\s*v?)(\d+\.\d+(?:\.\d+)?)",
-    )
-    .expect("Invalid regex pattern");
-
-    for line in stdout.lines() {
-        if let Some((hash, subject)) = line.split_once('|') {
-            if version_pattern.is_match(subject) {
-                return Ok(Some(hash.to_string()));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-/// Find the commit that released a specific version.
-/// Uses strict patterns to avoid false positives - only matches commits that
-/// clearly mark a release (e.g., "release: v0.2.0"), not mentions of releases.
-pub fn find_version_release_commit(path: &str, version: &str) -> Result<Option<String>> {
-    let Some(stdout) = command::run_in_optional(path, "git", &["log", "-200", "--format=%h|%s"])
-    else {
-        return Ok(None);
-    };
-
-    let escaped_version = regex::escape(version);
-    let patterns = [
-        format!(r"(?i)^(?:chore\([^)]*\):\s*)?release:?\s*v?{}(?:\s|$)", escaped_version),
-        format!(r"(?i)^v?{}\s*$", escaped_version),
-        format!(r"(?i)^bump\s+(?:version\s+)?(?:to\s+)?v?{}(?:\s|$)", escaped_version),
-        // Match "Version X.Y.Z" or "Version bump to X.Y.Z"
-        format!(r"(?i)^version\s+(?:bump\s+(?:to\s+)?)?v?{}(?:\s|:|-|$)", escaped_version),
-    ];
-
-    for line in stdout.lines() {
-        if let Some((hash, subject)) = line.split_once('|') {
-            for pattern in &patterns {
-                if Regex::new(pattern).map(|re| re.is_match(subject)).unwrap_or(false) {
-                    return Ok(Some(hash.to_string()));
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Get the last N commits from the repository.
-pub fn get_last_n_commits(path: &str, n: usize) -> Result<Vec<CommitInfo>> {
-    let stdout = command::run_in(path, "git", &["log", &format!("-{}", n), "--format=%h|%s"], "git log")?;
-
-    let commits = stdout
-        .lines()
-        .filter_map(|line| {
-            let (hash, subject) = line.split_once('|')?;
-            Some(CommitInfo {
-                hash: hash.to_string(),
-                subject: subject.to_string(),
-                category: parse_conventional_commit(subject),
-            })
-        })
-        .collect();
-
-    Ok(commits)
-}
-
-/// Get commits since a given tag (or all commits if tag is None).
-/// Returns commits in reverse chronological order (newest first).
-pub fn get_commits_since_tag(path: &str, tag: Option<&str>) -> Result<Vec<CommitInfo>> {
-    let range = tag.map(|t| format!("{}..HEAD", t)).unwrap_or_else(|| "HEAD".to_string());
-    let stdout = command::run_in(path, "git", &["log", &range, "--format=%h|%s"], "git log")?;
-
-    let commits = stdout
-        .lines()
-        .filter_map(|line| {
-            let (hash, subject) = line.split_once('|')?;
-            Some(CommitInfo {
-                hash: hash.to_string(),
-                subject: subject.to_string(),
-                category: parse_conventional_commit(subject),
-            })
-        })
-        .collect();
-
-    Ok(commits)
-}
-
-// ============================================================================
-// Docs-Only Commit Detection
-// ============================================================================
-
-/// Counts of commits categorized by type.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct CommitCounts {
-    pub total: u32,
-    pub code: u32,
-    pub docs_only: u32,
-}
-
-/// Get the list of files changed by a specific commit.
-pub fn get_commit_files(path: &str, commit_hash: &str) -> Result<Vec<String>> {
-    let stdout = command::run_in(
-        path,
-        "git",
-        &["diff-tree", "--no-commit-id", "--name-only", "-r", commit_hash],
-        "git diff-tree",
-    )?;
-
-    Ok(stdout.lines().filter(|l| !l.is_empty()).map(String::from).collect())
-}
-
-/// Check if a file path is considered a docs file.
-/// Returns true for *.md files and files in docs/ directories.
-fn is_docs_file(file_path: &str) -> bool {
-    // Check file extension
-    for ext in DOCS_FILE_EXTENSIONS {
-        if file_path.ends_with(ext) {
-            return true;
-        }
-    }
-
-    // Check if in docs/ directory (at any depth)
-    for dir in DOCS_DIRECTORIES {
-        if file_path.starts_with(dir) || file_path.contains(&format!("/{}", dir)) {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Check if a commit only touches documentation files.
-/// Uses belt-and-suspenders approach:
-/// 1. Fast path: commits with `docs:` prefix (CommitCategory::Docs) are docs-only
-/// 2. Fallback: check all changed files match docs patterns
-pub fn is_docs_only_commit(path: &str, commit: &CommitInfo) -> bool {
-    // Fast path: conventional commit prefix
-    if commit.category == CommitCategory::Docs {
-        return true;
-    }
-
-    // Fallback: check actual file changes
-    let files = match get_commit_files(path, &commit.hash) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-
-    // Empty file list shouldn't count as docs-only
-    if files.is_empty() {
-        return false;
-    }
-
-    // All files must be docs files
-    files.iter().all(|f| is_docs_file(f))
-}
-
-/// Categorize commits into code vs docs-only.
-pub fn categorize_commits(path: &str, commits: &[CommitInfo]) -> CommitCounts {
-    let mut counts = CommitCounts {
-        total: commits.len() as u32,
-        code: 0,
-        docs_only: 0,
-    };
-
-    for commit in commits {
-        if is_docs_only_commit(path, commit) {
-            counts.docs_only += 1;
-        } else {
-            counts.code += 1;
-        }
-    }
-
-    counts
-}
-
-/// Convert commits to changelog entries.
-/// Strips conventional commit prefixes for cleaner changelog.
-pub fn commits_to_changelog_entries(commits: &[CommitInfo]) -> Vec<String> {
-    commits
-        .iter()
-        .map(|c| {
-            // Strip conventional commit prefix if present
-            let subject = strip_conventional_prefix(&c.subject);
-            subject.to_string()
-        })
-        .collect()
-}
-
-/// Strip conventional commit prefix from a subject line.
-/// "feat: Add new feature" -> "Add new feature"
-/// "fix(scope): Fix bug" -> "Fix bug"
-pub fn strip_conventional_prefix(subject: &str) -> &str {
-    // Pattern: type(scope)?: message or type!: message
-    if let Some(pos) = subject.find(": ") {
-        let prefix = &subject[..pos];
-        // Check if it looks like a conventional commit prefix
-        if prefix
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '(' || c == ')' || c == '!')
-        {
-            return &subject[pos + 2..];
-        }
-    }
-    subject
-}
-
-// === Component Git Operations ===
 
 #[derive(Debug, Clone, Serialize)]
 
@@ -454,17 +71,6 @@ pub enum BaselineSource {
     Tag,
     VersionCommit,
     LastNCommits,
-}
-
-#[derive(Debug, Clone, Serialize)]
-
-pub struct UncommittedChanges {
-    pub has_changes: bool,
-    pub staged: Vec<String>,
-    pub unstaged: Vec<String>,
-    pub untracked: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -659,13 +265,6 @@ fn get_component_path(component_id: &str) -> Result<String> {
     Ok(comp.local_path)
 }
 
-fn execute_git(path: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-}
-
 pub fn execute_git_for_release(path: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
     execute_git(path, args)
 }
@@ -675,7 +274,7 @@ pub fn get_repo_snapshot(path: &str) -> Result<RepoSnapshot> {
         return Err(Error::git_command_failed("Not a git repository"));
     }
 
-    let branch = command::run_in(path, "git", &["rev-parse", "--abbrev-ref", "HEAD"], "git branch")?;
+    let branch = crate::utils::command::run_in(path, "git", &["rev-parse", "--abbrev-ref", "HEAD"], "git branch")?;
 
     // Use direct Command to properly handle empty output (clean repo).
     // run_in_optional returns None for empty stdout, which would incorrectly
@@ -687,9 +286,9 @@ pub fn get_repo_snapshot(path: &str) -> Result<RepoSnapshot> {
         .map(|o| o.status.success() && o.stdout.is_empty())
         .unwrap_or(false);
 
-    let (ahead, behind) = command::run_in_optional(path, "git", &["rev-parse", "--abbrev-ref", "@{upstream}"])
+    let (ahead, behind) = crate::utils::command::run_in_optional(path, "git", &["rev-parse", "--abbrev-ref", "@{upstream}"])
         .and_then(|_| {
-            command::run_in_optional(path, "git", &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
+            crate::utils::command::run_in_optional(path, "git", &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
         })
         .map(|counts| parse_ahead_behind(&counts))
         .unwrap_or((None, None));
@@ -710,7 +309,7 @@ fn parse_ahead_behind(counts: &str) -> (Option<u32>, Option<u32>) {
     (ahead, behind)
 }
 
-fn build_untracked_hint(path: &str, untracked_count: usize) -> Option<String> {
+pub(crate) fn build_untracked_hint(path: &str, untracked_count: usize) -> Option<String> {
     if untracked_count < VERBOSE_UNTRACKED_THRESHOLD {
         return None;
     }
@@ -752,21 +351,6 @@ fn build_untracked_hint(path: &str, untracked_count: usize) -> Option<String> {
         untracked_count,
         noisy_ignored.join(", ")
     ))
-}
-
-fn resolve_target(component_id: Option<&str>) -> Result<(String, String)> {
-    let id = component_id.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "componentId",
-            "Missing componentId",
-            None,
-            Some(vec![
-                "Provide a component ID: homeboy git <command> <component-id>".to_string(),
-                "List available components: homeboy component list".to_string(),
-            ]),
-        )
-    })?;
-    Ok((id.to_string(), get_component_path(id)?))
 }
 
 fn resolve_changelog_info(
@@ -1156,94 +740,68 @@ pub fn tag(
     Ok(GitOutput::from_output(id, path, "tag", output))
 }
 
-// === Changes Operations ===
-
-/// Parse git status output into structured uncommitted changes.
-pub fn get_uncommitted_changes(path: &str) -> Result<UncommittedChanges> {
-    let output = execute_git(
+/// Check if a tag exists on the remote.
+pub fn tag_exists_on_remote(path: &str, tag_name: &str) -> Result<bool> {
+    Ok(crate::utils::command::run_in_optional(
         path,
-        &["status", "--porcelain=v1", "--untracked-files=normal"],
+        "git",
+        &["ls-remote", "--tags", "origin", &format!("refs/tags/{}", tag_name)],
     )
-    .map_err(|e| Error::other(e.to_string()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::other(format!("git status failed: {}", stderr)));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut staged = Vec::new();
-    let mut unstaged = Vec::new();
-    let mut untracked = Vec::new();
-
-    for line in stdout.lines() {
-        if line.len() < 3 {
-            continue;
-        }
-        let index_status = line.chars().next().unwrap_or(' ');
-        let worktree_status = line.chars().nth(1).unwrap_or(' ');
-        let file_path = line[3..].to_string();
-
-        match (index_status, worktree_status) {
-            ('?', '?') => untracked.push(file_path),
-            (idx, wt) => {
-                if idx != ' ' && idx != '?' {
-                    staged.push(file_path.clone());
-                }
-                if wt != ' ' && wt != '?' {
-                    unstaged.push(file_path);
-                }
-            }
-        }
-    }
-
-    let has_changes = !staged.is_empty() || !unstaged.is_empty() || !untracked.is_empty();
-    let hint = build_untracked_hint(path, untracked.len());
-
-    Ok(UncommittedChanges {
-        has_changes,
-        staged,
-        unstaged,
-        untracked,
-        hint,
-    })
+    .map(|s| !s.is_empty())
+    .unwrap_or(false))
 }
 
-/// Get diff of uncommitted changes.
-pub fn get_diff(path: &str) -> Result<String> {
-    // Get both staged and unstaged diff
-    let staged =
-        execute_git(path, &["diff", "--cached"]).map_err(|e| Error::other(e.to_string()))?;
-    let unstaged = execute_git(path, &["diff"]).map_err(|e| Error::other(e.to_string()))?;
-
-    let staged_diff = String::from_utf8_lossy(&staged.stdout);
-    let unstaged_diff = String::from_utf8_lossy(&unstaged.stdout);
-
-    let mut result = String::new();
-    if !staged_diff.is_empty() {
-        result.push_str("=== Staged Changes ===\n");
-        result.push_str(&staged_diff);
-    }
-    if !unstaged_diff.is_empty() {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        result.push_str("=== Unstaged Changes ===\n");
-        result.push_str(&unstaged_diff);
-    }
-
-    Ok(result)
+/// Check if a tag exists locally.
+pub fn tag_exists_locally(path: &str, tag_name: &str) -> Result<bool> {
+    Ok(crate::utils::command::run_in_optional(path, "git", &["tag", "-l", tag_name])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false))
 }
 
-/// Get diff between baseline ref and HEAD (commit range diff).
-pub fn get_range_diff(path: &str, baseline_ref: &str) -> Result<String> {
-    let output = execute_git(
-        path,
-        &["diff", &format!("{}..HEAD", baseline_ref), "--", "."],
-    )
-    .map_err(|e| Error::other(e.to_string()))?;
+/// Get the commit SHA a tag points to.
+pub fn get_tag_commit(path: &str, tag_name: &str) -> Result<String> {
+    crate::utils::command::run_in(path, "git", &["rev-list", "-n", "1", tag_name], &format!("get commit for tag '{}'", tag_name))
+}
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+/// Get the current HEAD commit SHA.
+pub fn get_head_commit(path: &str) -> Result<String> {
+    crate::utils::command::run_in(path, "git", &["rev-parse", "HEAD"], "get HEAD commit")
+}
+
+/// Stage specific files in a git repository.
+pub fn stage_files(path: &str, files: &[&str]) -> Result<()> {
+    let mut args = vec!["add", "--"];
+    args.extend(files);
+    crate::utils::command::run_in(path, "git", &args, "stage files")?;
+    Ok(())
+}
+
+/// Fetch from remote and return count of commits behind upstream.
+/// Returns Ok(Some(n)) if behind by n commits, Ok(None) if not behind or no upstream.
+pub fn fetch_and_get_behind_count(path: &str) -> Result<Option<u32>> {
+    // Run git fetch (update tracking refs)
+    crate::utils::command::run_in(path, "git", &["fetch"], "git fetch")?;
+
+    // Check if upstream exists
+    let upstream = crate::utils::command::run_in_optional(path, "git", &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    if upstream.is_none() {
+        return Ok(None); // No upstream configured
+    }
+
+    // Get ahead/behind counts
+    let counts = crate::utils::command::run_in_optional(
+        path,
+        "git",
+        &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+    );
+
+    match counts {
+        Some(output) => {
+            let (_, behind) = parse_ahead_behind(&output);
+            Ok(behind.filter(|&n| n > 0))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Get all changes for a component.
@@ -1429,133 +987,9 @@ pub fn changes_project_filtered(
     Ok(build_bulk_changes_output(&filtered, include_diff))
 }
 
-fn is_git_repo(path: &str) -> bool {
-    command::succeeded_in(path, "git", &["rev-parse", "--git-dir"])
-}
-
-/// Check if a tag exists on the remote.
-pub fn tag_exists_on_remote(path: &str, tag_name: &str) -> Result<bool> {
-    Ok(command::run_in_optional(
-        path,
-        "git",
-        &["ls-remote", "--tags", "origin", &format!("refs/tags/{}", tag_name)],
-    )
-    .map(|s| !s.is_empty())
-    .unwrap_or(false))
-}
-
-/// Check if a tag exists locally.
-pub fn tag_exists_locally(path: &str, tag_name: &str) -> Result<bool> {
-    Ok(command::run_in_optional(path, "git", &["tag", "-l", tag_name])
-        .map(|s| !s.is_empty())
-        .unwrap_or(false))
-}
-
-/// Get the commit SHA a tag points to.
-pub fn get_tag_commit(path: &str, tag_name: &str) -> Result<String> {
-    command::run_in(path, "git", &["rev-list", "-n", "1", tag_name], &format!("get commit for tag '{}'", tag_name))
-}
-
-/// Get the current HEAD commit SHA.
-pub fn get_head_commit(path: &str) -> Result<String> {
-    command::run_in(path, "git", &["rev-parse", "HEAD"], "get HEAD commit")
-}
-
-/// Stage specific files in a git repository.
-pub fn stage_files(path: &str, files: &[&str]) -> Result<()> {
-    let mut args = vec!["add", "--"];
-    args.extend(files);
-    command::run_in(path, "git", &args, "stage files")?;
-    Ok(())
-}
-
-/// Fetch from remote and return count of commits behind upstream.
-/// Returns Ok(Some(n)) if behind by n commits, Ok(None) if not behind or no upstream.
-pub fn fetch_and_get_behind_count(path: &str) -> Result<Option<u32>> {
-    // Run git fetch (update tracking refs)
-    command::run_in(path, "git", &["fetch"], "git fetch")?;
-
-    // Check if upstream exists
-    let upstream = command::run_in_optional(path, "git", &["rev-parse", "--abbrev-ref", "@{upstream}"]);
-    if upstream.is_none() {
-        return Ok(None); // No upstream configured
-    }
-
-    // Get ahead/behind counts
-    let counts = command::run_in_optional(
-        path,
-        "git",
-        &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
-    );
-
-    match counts {
-        Some(output) => {
-            let (_, behind) = parse_ahead_behind(&output);
-            Ok(behind.filter(|&n| n > 0))
-        }
-        None => Ok(None),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_conventional_commit_feat() {
-        assert_eq!(
-            parse_conventional_commit("feat: Add new feature"),
-            CommitCategory::Feature
-        );
-        assert_eq!(
-            parse_conventional_commit("feat(scope): Add scoped feature"),
-            CommitCategory::Feature
-        );
-    }
-
-    #[test]
-    fn parse_conventional_commit_fix() {
-        assert_eq!(
-            parse_conventional_commit("fix: Fix a bug"),
-            CommitCategory::Fix
-        );
-    }
-
-    #[test]
-    fn parse_conventional_commit_breaking() {
-        assert_eq!(
-            parse_conventional_commit("feat!: Breaking change"),
-            CommitCategory::Breaking
-        );
-        assert_eq!(
-            parse_conventional_commit("BREAKING CHANGE: Something big"),
-            CommitCategory::Breaking
-        );
-    }
-
-    #[test]
-    fn parse_conventional_commit_other() {
-        assert_eq!(
-            parse_conventional_commit("Random commit message"),
-            CommitCategory::Other
-        );
-    }
-
-    #[test]
-    fn strip_conventional_prefix_works() {
-        assert_eq!(
-            strip_conventional_prefix("feat: Add feature"),
-            "Add feature"
-        );
-        assert_eq!(
-            strip_conventional_prefix("fix(shell): Fix escaping"),
-            "Fix escaping"
-        );
-        assert_eq!(
-            strip_conventional_prefix("Regular commit"),
-            "Regular commit"
-        );
-    }
 
     #[test]
     fn is_workdir_clean_returns_true_for_clean_repo() {
@@ -1601,7 +1035,7 @@ mod tests {
 
         // Now the repo should be clean
         assert!(
-            is_workdir_clean(path),
+            super::super::is_workdir_clean(path),
             "Expected clean repo to return true"
         );
     }
@@ -1626,79 +1060,17 @@ mod tests {
 
         // Repo should be dirty (untracked file)
         assert!(
-            !is_workdir_clean(path),
+            !super::super::is_workdir_clean(path),
             "Expected dirty repo to return false"
         );
     }
 
     #[test]
     fn is_workdir_clean_returns_false_for_invalid_path() {
-        let path = Path::new("/nonexistent/path/that/does/not/exist");
+        let path = std::path::Path::new("/nonexistent/path/that/does/not/exist");
         assert!(
-            !is_workdir_clean(path),
+            !super::super::is_workdir_clean(path),
             "Expected invalid path to return false"
         );
-    }
-
-    #[test]
-    fn is_docs_file_recognizes_markdown() {
-        assert!(is_docs_file("README.md"));
-        assert!(is_docs_file("CLAUDE.md"));
-        assert!(is_docs_file("changelog.md"));
-        assert!(is_docs_file("path/to/file.md"));
-    }
-
-    #[test]
-    fn is_docs_file_recognizes_docs_directory() {
-        assert!(is_docs_file("docs/guide.md"));
-        assert!(is_docs_file("docs/api/reference.md"));
-        assert!(is_docs_file("docs/commands/init.md"));
-        assert!(is_docs_file("src/docs/readme.txt"));
-        assert!(is_docs_file("path/to/docs/file.txt"));
-    }
-
-    #[test]
-    fn is_docs_file_rejects_code() {
-        assert!(!is_docs_file("src/main.rs"));
-        assert!(!is_docs_file("lib/module.js"));
-        assert!(!is_docs_file("Cargo.toml"));
-        assert!(!is_docs_file("package.json"));
-        assert!(!is_docs_file("src/component.tsx"));
-    }
-
-    #[test]
-    fn parse_conventional_commit_docs() {
-        assert_eq!(
-            parse_conventional_commit("docs: Update README"),
-            CommitCategory::Docs
-        );
-        assert_eq!(
-            parse_conventional_commit("docs(api): Add endpoint docs"),
-            CommitCategory::Docs
-        );
-    }
-
-    #[test]
-    fn parse_conventional_commit_merge() {
-        assert_eq!(
-            parse_conventional_commit("Merge pull request #45 from feature-branch"),
-            CommitCategory::Merge
-        );
-        assert_eq!(
-            parse_conventional_commit("Merge branch 'main' into feature"),
-            CommitCategory::Merge
-        );
-        assert_eq!(
-            parse_conventional_commit("Merge remote-tracking branch 'origin/main'"),
-            CommitCategory::Merge
-        );
-    }
-
-    #[test]
-    fn merge_category_skipped_in_changelog() {
-        assert!(CommitCategory::Merge.to_changelog_entry_type().is_none());
-        assert!(CommitCategory::Docs.to_changelog_entry_type().is_none());
-        assert!(CommitCategory::Chore.to_changelog_entry_type().is_none());
-        assert!(CommitCategory::Feature.to_changelog_entry_type().is_some());
     }
 }
