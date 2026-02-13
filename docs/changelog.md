@@ -8,6 +8,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ### Added
 - Support aliases for components, projects, and servers (#34)
+- Detect and warn about outdated modules in homeboy init (#26)
+- Automatic retry with backoff for transient SSH failures (#51)
+- Release --recover for interrupted releases (#38)
+- Git-based deployment strategy (#52)
 
 ### Fixed
 - Clarify local file permissions message with path and chmod modes (#9)
