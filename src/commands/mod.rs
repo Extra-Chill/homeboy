@@ -198,6 +198,7 @@ pub mod project;
 pub mod release;
 pub mod server;
 pub mod ssh;
+pub mod transfer;
 pub mod test;
 pub mod upgrade;
 pub mod version;
@@ -248,6 +249,7 @@ pub(crate) fn run_json(
         crate::Commands::File(args) => dispatch!(args, global, file),
         crate::Commands::Fleet(args) => dispatch!(args, global, fleet),
         crate::Commands::Logs(args) => dispatch!(args, global, logs),
+        crate::Commands::Transfer(args) => dispatch!(args, global, transfer),
         crate::Commands::Deploy(args) => dispatch!(args, global, deploy),
         crate::Commands::Component(args) => dispatch!(args, global, component),
         crate::Commands::Config(args) => dispatch!(args, global, config),

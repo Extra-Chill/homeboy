@@ -22,7 +22,7 @@ mod tty;
 
 use commands::{
     api, auth, build, changelog, changes, cli, component, config, db, deploy, file, fleet, git, init,
-    lint, logs, module, project, release, server, ssh, test, upgrade, version,
+    lint, logs, module, project, release, server, ssh, test, transfer, upgrade, version,
 };
 use homeboy::module::load_all_modules;
 use homeboy::utils::args;
@@ -62,6 +62,8 @@ enum Commands {
     Fleet(fleet::FleetArgs),
     /// Remote log viewing
     Logs(logs::LogsArgs),
+    /// Transfer files between servers
+    Transfer(transfer::TransferArgs),
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
     /// Manage standalone component configurations
