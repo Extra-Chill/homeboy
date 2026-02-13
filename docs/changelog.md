@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+### Added
+- Support aliases for components, projects, and servers (#34)
+
+### Fixed
+- Clarify local file permissions message with path and chmod modes (#9)
+- Expand {{module_path}} in project CLI command templates (#44)
+- Fix environment-dependent docs audit test
+
 ## [0.42.0] - 2026-02-13
 
 ### Added
