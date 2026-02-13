@@ -33,7 +33,7 @@ struct LoadedModule: Identifiable {
     }
 
     var entrypointPath: String {
-        guard let entrypoint = manifest.runtime.entrypoint else { return "" }
+        guard let entrypoint = manifest.runtime?.entrypoint else { return "" }
         return "\(modulePath)/\(entrypoint)"
     }
 
@@ -118,12 +118,14 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
                 return
             }
 
-            // Filter to executable modules only (platform modules don't have UI)
-            let executableEntries = data.modules.filter { $0.runtime == "executable" }
+            // Include executable modules and platform modules that have actions
+            let visibleEntries = data.modules.filter {
+                $0.runtime == "executable" || !($0.actions ?? []).isEmpty
+            }
 
             // Load manifests from CLI-reported paths
             var loadedModules: [LoadedModule] = []
-            for entry in executableEntries {
+            for entry in visibleEntries {
                 if let module = loadManifest(from: entry) {
                     loadedModules.append(module)
                 }

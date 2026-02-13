@@ -44,7 +44,7 @@ struct ModuleSetupView: View {
                         .frame(maxWidth: 400)
                     
                     // Dependencies list
-                    if let dependencies = module.manifest.runtime.dependencies, !dependencies.isEmpty {
+                    if let dependencies = module.manifest.runtime?.dependencies, !dependencies.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Dependencies:")
                                 .font(.caption)
@@ -58,7 +58,7 @@ struct ModuleSetupView: View {
                         .cornerRadius(8)
                     }
                     
-                    if let browsers = module.manifest.runtime.playwrightBrowsers, !browsers.isEmpty {
+                    if let browsers = module.manifest.runtime?.playwrightBrowsers, !browsers.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Playwright Browsers:")
                                 .font(.caption)

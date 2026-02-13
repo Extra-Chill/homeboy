@@ -31,7 +31,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
     
     /// Whether this module is a CLI module with subtarget support
     var isCLIModule: Bool {
-        module?.manifest.runtime.type == .cli
+        module?.manifest.runtime?.type == .cli
     }
     
     /// Whether the current project has subtargets (for showing site selector)
@@ -72,12 +72,12 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
     /// Initialize input values from module manifest
     func initializeInputValues(from module: LoadedModule) {
         // Set default network site for CLI modules
-        if module.manifest.runtime.type == .cli {
-            selectedNetworkSite = module.manifest.runtime.defaultSite ?? "main"
+        if module.manifest.runtime?.type == .cli {
+            selectedNetworkSite = module.manifest.runtime?.defaultSite ?? "main"
         }
         
         // Set default input values
-        for input in module.manifest.inputs {
+        for input in module.manifest.inputs ?? [] {
             if let defaultValue = input.default {
                 inputValues[input.id] = defaultValue.stringValue
             } else {
@@ -148,7 +148,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
             if output.success {
                 results = output.results ?? []
                 // Auto-select all rows if selectable
-                if module.manifest.output.selectable {
+                if module.manifest.output?.selectable == true {
                     selectedRows = Set(results.indices)
                 }
                 if let errors = output.errors, !errors.isEmpty {
@@ -263,7 +263,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
     private func exportToCsv(module: LoadedModule) {
         guard !results.isEmpty else { return }
         
-        let columns = module.manifest.output.schema.items?.keys.sorted() ?? []
+        let columns = module.manifest.output?.schema.items?.keys.sorted() ?? []
         guard !columns.isEmpty else { return }
         
         var csv = columns.joined(separator: ",") + "\n"

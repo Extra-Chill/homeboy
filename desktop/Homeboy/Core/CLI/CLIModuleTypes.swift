@@ -13,6 +13,13 @@ struct CLIModuleEntry: Decodable, Identifiable {
     let configured: Bool
     let linked: Bool
     let path: String  // Module directory path for manifest reading
+    let actions: [CLIModuleAction]?  // Present when module defines actions
+}
+
+struct CLIModuleAction: Decodable {
+    let id: String
+    let label: String
+    let type: String
 }
 
 /// Response wrapper for `homeboy module list --json`

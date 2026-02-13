@@ -10,11 +10,11 @@ struct ModuleManifest: Codable, Identifiable {
     let author: String
     let homepage: String?
     
-    let runtime: RuntimeConfig
-    let inputs: [InputConfig]
-    let output: OutputConfig
-    let actions: [ActionConfig]
-    let settings: [SettingConfig]
+    let runtime: RuntimeConfig?
+    let inputs: [InputConfig]?
+    let output: OutputConfig?
+    let actions: [ActionConfig]?
+    let settings: [SettingConfig]?
     let requires: RequirementsConfig?
     
     /// Path to the module directory (set after loading, not from JSON)
@@ -167,6 +167,9 @@ struct ActionConfig: Codable, Identifiable {
     let builtin: BuiltinAction?
     let column: String?
     
+    // Command action properties
+    let command: String?
+    
     // API action properties
     let endpoint: String?
     let method: String?
@@ -176,6 +179,7 @@ struct ActionConfig: Codable, Identifiable {
     enum ActionType: String, Codable {
         case builtin
         case api
+        case command
     }
     
     enum BuiltinAction: String, Codable {
@@ -224,6 +228,7 @@ struct SettingConfig: Codable, Identifiable {
     
     enum SettingType: String, Codable {
         case text
+        case string
         case toggle
         case stepper
     }

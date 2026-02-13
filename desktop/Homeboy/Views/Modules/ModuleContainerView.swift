@@ -83,8 +83,100 @@ struct ModuleContainerView: View {
                 }
                 
             case .ready:
-                ModuleReadyView(module: module, viewModel: viewModel)
+                if let _ = module.manifest.runtime {
+                    ModuleReadyView(module: module, viewModel: viewModel)
+                } else {
+                    PlatformModuleView(module: module)
+                }
             }
+        }
+    }
+}
+
+// MARK: - Platform Module View (modules without runtime, e.g. OpenClaw)
+
+struct PlatformModuleView: View {
+    let module: LoadedModule
+    @State private var actionOutput: String = ""
+    @State private var isRunning = false
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Actions grid
+            if let actions = module.manifest.actions, !actions.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Actions")
+                        .font(.headline)
+                    
+                    LazyVGrid(columns: [
+                        GridItem(.adaptive(minimum: 160))
+                    ], spacing: 8) {
+                        ForEach(actions) { action in
+                            Button {
+                                Task { await runAction(action) }
+                            } label: {
+                                HStack {
+                                    Text(action.label)
+                                    Spacer()
+                                    if isRunning {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.accentColor.opacity(0.1))
+                                .cornerRadius(8)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isRunning)
+                        }
+                    }
+                }
+                .padding()
+            }
+            
+            Divider()
+            
+            // Output console
+            if !actionOutput.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Output")
+                            .font(.headline)
+                        Spacer()
+                        Button("Clear") {
+                            actionOutput = ""
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.secondary)
+                    }
+                    
+                    ScrollView {
+                        Text(actionOutput)
+                            .font(.system(.body, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding()
+            } else {
+                Spacer()
+            }
+        }
+    }
+    
+    private func runAction(_ action: ActionConfig) async {
+        guard let command = action.command else { return }
+        isRunning = true
+        defer { isRunning = false }
+        
+        do {
+            let args = ["module", "action", module.id, action.id]
+            let response = try await CLIBridge.shared.execute(args)
+            actionOutput += "$ \(command)\n\(response.output)\n\n"
+        } catch {
+            actionOutput += "Error: \(error.localizedDescription)\n\n"
         }
     }
 }
@@ -163,7 +255,7 @@ struct ModuleReadyView: View {
             .frame(minWidth: 300)
             
             // Right side: Results (if table display)
-            if module.manifest.output.display == .table && !viewModel.results.isEmpty {
+            if module.manifest.output?.display == .table && !viewModel.results.isEmpty {
                 VStack(spacing: 0) {
                     ModuleResultsView(module: module, viewModel: viewModel)
                     

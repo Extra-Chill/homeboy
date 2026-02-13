@@ -20,7 +20,7 @@ struct ModuleInputsView: View {
                 }
             }
             
-            ForEach(module.manifest.inputs) { input in
+            ForEach(module.manifest.inputs ?? []) { input in
                 inputField(for: input)
             }
             
