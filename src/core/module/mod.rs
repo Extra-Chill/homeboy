@@ -30,8 +30,8 @@ pub use scope::ModuleScope;
 
 // Re-export lifecycle types and functions
 pub use lifecycle::{
-    derive_id_from_url, install, is_git_url, slugify_id, uninstall, update,
-    InstallResult, UpdateResult,
+    check_update_available, derive_id_from_url, install, is_git_url, slugify_id, uninstall, update,
+    InstallResult, UpdateAvailable, UpdateResult,
 };
 
 // Module loader functions

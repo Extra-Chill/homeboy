@@ -657,6 +657,26 @@ fn build_actionable_next_steps(
         next_steps.push(format!("Suggestion: {}", suggestion));
     }
 
+    // Check for outdated modules (git-cloned only, skips linked)
+    let mut outdated_modules = Vec::new();
+    for module in all_modules {
+        if let Some(update) = homeboy::module::check_update_available(&module.id) {
+            outdated_modules.push(update);
+        }
+    }
+    if !outdated_modules.is_empty() {
+        for update in &outdated_modules {
+            next_steps.push(format!(
+                "Module '{}' is outdated (v{}, {} commit{} behind). Run: `homeboy module update {}`",
+                update.module_id,
+                update.installed_version,
+                update.behind_count,
+                if update.behind_count == 1 { "" } else { "s" },
+                update.module_id,
+            ));
+        }
+    }
+
     // Fallback for empty repos
     if components.is_empty() && !context_output.managed {
         next_steps.push(

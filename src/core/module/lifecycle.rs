@@ -286,3 +286,60 @@ pub fn uninstall(module_id: &str) -> Result<PathBuf> {
 
     Ok(module_dir)
 }
+
+/// Check if a git-cloned module has updates available.
+/// Runs `git fetch` then checks if HEAD is behind the remote tracking branch.
+/// Returns None for linked modules or if check fails.
+pub fn check_update_available(module_id: &str) -> Option<UpdateAvailable> {
+    let module_dir = paths::module(module_id).ok()?;
+    if !module_dir.exists() || is_module_linked(module_id) {
+        return None;
+    }
+
+    // Check it's a git repo
+    if !module_dir.join(".git").exists() {
+        return None;
+    }
+
+    // Fetch latest (best-effort, short timeout)
+    Command::new("git")
+        .args(["fetch", "--quiet"])
+        .current_dir(&module_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+
+    // Check how many commits we're behind
+    let output = Command::new("git")
+        .args(["rev-list", "HEAD..@{u}", "--count"])
+        .current_dir(&module_dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    let count_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let behind_count: usize = count_str.parse().ok()?;
+
+    if behind_count == 0 {
+        return None;
+    }
+
+    // Get installed version
+    let module = load_module(module_id).ok()?;
+    let installed_version = module.version.clone();
+
+    Some(UpdateAvailable {
+        module_id: module_id.to_string(),
+        installed_version,
+        behind_count,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateAvailable {
+    pub module_id: String,
+    pub installed_version: String,
+    pub behind_count: usize,
+}
