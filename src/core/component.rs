@@ -93,7 +93,35 @@ pub struct Component {
     pub build_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_command: Option<String>,
+
+    /// Deployment strategy: "rsync" (default) or "git"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_strategy: Option<String>,
+    /// Git deploy configuration (used when deploy_strategy = "git")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_deploy: Option<GitDeployConfig>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GitDeployConfig {
+    /// Git remote to pull from (default: "origin")
+    #[serde(default = "default_git_remote", skip_serializing_if = "is_default_remote")]
+    pub remote: String,
+    /// Branch to pull (default: "main")
+    #[serde(default = "default_git_branch", skip_serializing_if = "is_default_branch")]
+    pub branch: String,
+    /// Commands to run after git pull (e.g., "composer install", "npm run build")
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_pull: Vec<String>,
+    /// Pull a specific tag instead of branch HEAD (e.g., "v{{version}}")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_pattern: Option<String>,
+}
+
+fn default_git_remote() -> String { "origin".to_string() }
+fn default_git_branch() -> String { "main".to_string() }
+fn is_default_remote(s: &str) -> bool { s == "origin" }
+fn is_default_branch(s: &str) -> bool { s == "main" }
 
 impl Component {
     pub fn new(
@@ -118,6 +146,8 @@ impl Component {
             post_release_commands: Vec::new(),
             build_command: None,
             extract_command: None,
+            deploy_strategy: None,
+            git_deploy: None,
         }
     }
 }

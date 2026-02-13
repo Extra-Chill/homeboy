@@ -51,6 +51,82 @@ impl DeployResult {
     }
 }
 
+/// Deploy a component via git pull on the remote server.
+pub fn deploy_via_git(
+    ssh_client: &SshClient,
+    remote_path: &str,
+    git_config: &component::GitDeployConfig,
+    component_version: Option<&str>,
+) -> Result<DeployResult> {
+    // Determine what to checkout
+    let checkout_target = if let Some(ref pattern) = git_config.tag_pattern {
+        if let Some(ver) = component_version {
+            pattern.replace("{{version}}", ver)
+        } else {
+            git_config.branch.clone()
+        }
+    } else {
+        git_config.branch.clone()
+    };
+
+    // Step 1: Fetch latest
+    eprintln!("[deploy:git] Fetching from {} in {}", git_config.remote, remote_path);
+    let fetch_cmd = format!(
+        "cd {} && git fetch {} --tags",
+        shell::quote_path(remote_path),
+        shell::quote_arg(&git_config.remote),
+    );
+    let fetch_output = ssh_client.execute(&fetch_cmd);
+    if !fetch_output.success {
+        return Ok(DeployResult::failure(
+            fetch_output.exit_code,
+            format!("git fetch failed: {}", fetch_output.stderr),
+        ));
+    }
+
+    // Step 2: Checkout target (tag or branch)
+    let is_tag = git_config.tag_pattern.is_some() && component_version.is_some();
+    let checkout_cmd = if is_tag {
+        format!(
+            "cd {} && git checkout {}",
+            shell::quote_path(remote_path),
+            shell::quote_arg(&checkout_target),
+        )
+    } else {
+        format!(
+            "cd {} && git checkout {} && git pull {} {}",
+            shell::quote_path(remote_path),
+            shell::quote_arg(&checkout_target),
+            shell::quote_arg(&git_config.remote),
+            shell::quote_arg(&checkout_target),
+        )
+    };
+    eprintln!("[deploy:git] Checking out {}", checkout_target);
+    let checkout_output = ssh_client.execute(&checkout_cmd);
+    if !checkout_output.success {
+        return Ok(DeployResult::failure(
+            checkout_output.exit_code,
+            format!("git checkout/pull failed: {}", checkout_output.stderr),
+        ));
+    }
+
+    // Step 3: Run post-pull commands
+    for cmd in &git_config.post_pull {
+        eprintln!("[deploy:git] Running: {}", cmd);
+        let full_cmd = format!("cd {} && {}", shell::quote_path(remote_path), cmd);
+        let output = ssh_client.execute(&full_cmd);
+        if !output.success {
+            return Ok(DeployResult::failure(
+                output.exit_code,
+                format!("post-pull command failed ({}): {}", cmd, output.stderr),
+            ));
+        }
+    }
+
+    eprintln!("[deploy:git] Deploy complete for {}", remote_path);
+    Ok(DeployResult::success(0))
+}
+
 /// Main entry point - uploads artifact and runs extract command if configured
 pub fn deploy_artifact(
     ssh_client: &SshClient,
@@ -662,6 +738,53 @@ pub fn deploy_components(
                 continue;
             }
         };
+
+        // Check deploy strategy
+        let strategy = component.deploy_strategy.as_deref().unwrap_or("rsync");
+
+        if strategy == "git" {
+            let git_config = component.git_deploy.clone().unwrap_or_default();
+            let deploy_result = deploy_via_git(
+                &ctx.client,
+                &install_dir,
+                &git_config,
+                local_version.as_deref(),
+            );
+            match deploy_result {
+                Ok(DeployResult { success: true, exit_code, .. }) => {
+                    results.push(
+                        ComponentDeployResult::new(component, base_path)
+                            .with_status("deployed")
+                            .with_versions(local_version.clone(), local_version)
+                            .with_remote_path(install_dir)
+                            .with_deploy_exit_code(Some(exit_code)),
+                    );
+                    succeeded += 1;
+                }
+                Ok(DeployResult { error, exit_code, .. }) => {
+                    results.push(
+                        ComponentDeployResult::new(component, base_path)
+                            .with_status("failed")
+                            .with_versions(local_version, remote_version)
+                            .with_remote_path(install_dir)
+                            .with_error(error.unwrap_or_default())
+                            .with_deploy_exit_code(Some(exit_code)),
+                    );
+                    failed += 1;
+                }
+                Err(err) => {
+                    results.push(
+                        ComponentDeployResult::new(component, base_path)
+                            .with_status("failed")
+                            .with_versions(local_version, remote_version)
+                            .with_remote_path(install_dir)
+                            .with_error(err.to_string()),
+                    );
+                    failed += 1;
+                }
+            }
+            continue;
+        }
 
         // Look up verification from modules
         let verification = find_deploy_verification(&install_dir);
