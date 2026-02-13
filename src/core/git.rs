@@ -1,7 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::changelog;
 use crate::component;
@@ -660,7 +660,11 @@ fn get_component_path(component_id: &str) -> Result<String> {
 }
 
 fn execute_git(path: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
-    Command::new("git").args(args).current_dir(path).output()
+    Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .stdin(Stdio::null())
+        .output()
 }
 
 pub fn execute_git_for_release(path: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
