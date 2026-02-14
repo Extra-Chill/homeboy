@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+### Added
+- Fleet sync command (homeboy fleet sync) — sync OpenClaw agent configs, skills, and tools across fleet servers with manifest-driven categories, JSON merging, auto-detection of OpenClaw home paths, ownership fixing, and dry-run support
+
 ## [0.43.1] - 2026-02-13
 
 ### Fixed

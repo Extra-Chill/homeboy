@@ -441,6 +441,18 @@ fn sync_project(
         }
     }
 
+    // Fix ownership if openclaw runs as non-root user
+    if !dry_run && !openclaw_home.starts_with("/root/") {
+        let user_home = std::path::Path::new(&openclaw_home)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if let Some(user) = user_home.strip_prefix("/home/") {
+            eprintln!("[fleet sync]   Fixing ownership for user: {}", user);
+            ssh_client.execute(&format!("chown -R {}:{} {} {}", user, user, user_home, openclaw_home));
+        }
+    }
+
     Ok(FleetProjectSyncResult {
         project_id: target_project_id.to_string(),
         server_id: Some(server_id.clone()),
@@ -452,7 +464,7 @@ fn sync_project(
 
 fn detect_openclaw_home(ssh_client: &SshClient) -> Result<String> {
     let output = ssh_client
-        .execute("find $HOME -maxdepth 2 -type f -name 'openclaw.json' 2>/dev/null | head -1");
+        .execute("find /root/.openclaw /home/*/.openclaw -maxdepth 1 -type f -name 'openclaw.json' 2>/dev/null | head -1");
 
     if !output.success || output.stdout.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -531,7 +543,7 @@ fn sync_openclaw_config(
     }
 
     // Read local openclaw.json
-    let local_openclaw_path = shellexpand::tilde("~/.config/openclaw/openclaw.json").to_string();
+    let local_openclaw_path = shellexpand::tilde("~/.openclaw/openclaw.json").to_string();
     let local_content = std::fs::read_to_string(&local_openclaw_path).map_err(|e| {
         Error::internal_io(e.to_string(), Some("read local openclaw.json".to_string()))
     })?;
@@ -665,6 +677,13 @@ fn sync_opencode_config(
         )
     })?;
 
+    // Derive remote user home from openclaw_home (e.g. /home/openclaw/.openclaw -> /home/openclaw)
+    let remote_user_home = std::path::Path::new(openclaw_home)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/root".to_string());
+    let local_home = shellexpand::tilde("~").to_string();
+
     if dry_run {
         return Ok(FleetSyncCategoryResult {
             category: "opencode-config".to_string(),
@@ -677,15 +696,24 @@ fn sync_opencode_config(
     let mut synced_files = Vec::new();
 
     for file_path in files {
-        let expanded = shellexpand::tilde(file_path).to_string();
-        let remote_path = format!("{}/{}", openclaw_home, file_path.trim_start_matches("~/"));
+        let local_path = format!("{}/{}", local_home, file_path);
+        let remote_path = format!("{}/{}", remote_user_home, file_path);
 
-        if expanded.ends_with('/') {
+        // Ensure remote parent dir exists
+        let remote_dir = std::path::Path::new(&remote_path)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
+        if !remote_dir.is_empty() {
+            ssh_client.execute(&format!("mkdir -p {}", remote_dir));
+        }
+
+        if file_path.ends_with('/') {
             // Directory - use tar
-            sync_directory_via_tar(ssh_client, &expanded, &remote_path)?;
+            sync_directory_via_tar(ssh_client, local_path.trim_end_matches('/'), &remote_path)?;
         } else {
             // Single file
-            sync_file(ssh_client, &expanded, &remote_path)?;
+            sync_file(ssh_client, &local_path, &remote_path)?;
         }
 
         synced_files.push(remote_path);
@@ -723,11 +751,17 @@ fn sync_opencode_auth(
         });
     }
 
+    let remote_user_home = std::path::Path::new(openclaw_home)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/root".to_string());
+    let local_home = shellexpand::tilde("~").to_string();
+
     let mut synced_files = Vec::new();
 
     for file_path in files {
-        let expanded = shellexpand::tilde(file_path).to_string();
-        let remote_path = format!("{}/{}", openclaw_home, file_path.trim_start_matches("~/"));
+        let local_path = format!("{}/{}", local_home, file_path);
+        let remote_path = format!("{}/{}", remote_user_home, file_path);
 
         // Ensure remote parent dir exists
         let remote_dir = std::path::Path::new(&remote_path)
@@ -739,7 +773,7 @@ fn sync_opencode_auth(
             ssh_client.execute(&format!("mkdir -p {}", remote_dir));
         }
 
-        sync_file(ssh_client, &expanded, &remote_path)?;
+        sync_file(ssh_client, &local_path, &remote_path)?;
         synced_files.push(remote_path);
     }
 
@@ -777,19 +811,23 @@ fn sync_skills(
 
     let mut synced_files = Vec::new();
 
+    let local_workspace = shellexpand::tilde("~/.openclaw/workspace").to_string();
+    let remote_workspace = format!("{}/workspace", openclaw_home);
+
     for item_path in items {
-        let expanded = shellexpand::tilde(item_path).to_string();
-        let skill_name = std::path::Path::new(item_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("skill");
+        let local_path = format!("{}/{}", local_workspace, item_path.trim_end_matches('/'));
+        let remote_path = format!("{}/{}", remote_workspace, item_path.trim_end_matches('/'));
 
-        let remote_path = format!("{}/skills/{}", openclaw_home, skill_name);
+        // Ensure remote parent dir exists
+        let remote_parent = std::path::Path::new(&remote_path)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
+        if !remote_parent.is_empty() {
+            ssh_client.execute(&format!("mkdir -p {}", remote_parent));
+        }
 
-        // Ensure remote skills dir exists
-        ssh_client.execute(&format!("mkdir -p {}/skills", openclaw_home));
-
-        sync_directory_via_tar(ssh_client, &expanded.trim_end_matches('/'), &remote_path)?;
+        sync_directory_via_tar(ssh_client, &local_path, &remote_path)?;
         synced_files.push(remote_path);
     }
 
@@ -827,16 +865,14 @@ fn sync_workspace_files(
 
     let mut synced_files = Vec::new();
 
+    let local_workspace = shellexpand::tilde("~/.openclaw/workspace").to_string();
+    let remote_workspace = format!("{}/workspace", openclaw_home);
+
     for item_path in items {
-        let expanded = shellexpand::tilde(item_path).to_string();
-        let file_name = std::path::Path::new(item_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file");
+        let local_path = format!("{}/{}", local_workspace, item_path);
+        let remote_path = format!("{}/{}", remote_workspace, item_path);
 
-        let remote_path = format!("{}/{}", openclaw_home, file_name);
-
-        sync_file(ssh_client, &expanded, &remote_path)?;
+        sync_file(ssh_client, &local_path, &remote_path)?;
         synced_files.push(remote_path);
     }
 
