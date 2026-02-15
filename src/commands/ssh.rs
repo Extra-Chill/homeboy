@@ -119,7 +119,9 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
                         resolved_type: result.resolved_type,
                         project_id: result.project_id,
                         server_id: result.server_id,
-                        command: Some(args.command.join(" ")),
+                        // Prefer the quoted/normalized command string for JSON output so
+                        // multi-arg invocations remain unambiguous (e.g. args containing spaces).
+                        command: command_string.clone(),
                         stdout: Some(output.stdout),
                         stderr: Some(output.stderr),
                         success: output.success,

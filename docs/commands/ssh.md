@@ -27,6 +27,7 @@ homeboy ssh list
 - `--server <SERVER>`: force server resolution
 - `[COMMAND...]` (optional): command to execute (omit for interactive shell).
   - Recommended form: `homeboy ssh <id> -- <command...>` (supports multiple args cleanly)
+  - Put all Homeboy flags/options **before** `--` (everything after `--` is treated as part of the remote command)
   - If you need shell operators (`&&`, `|`, redirects), pass a single quoted string: `homeboy ssh <id> "cd /var/www && ls | head"`
 
 
