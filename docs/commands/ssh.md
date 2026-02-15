@@ -6,8 +6,8 @@
 # Non-interactive discovery (JSON output):
 homeboy ssh list
 
-# Connect (interactive when COMMAND is omitted):
-homeboy ssh [OPTIONS] [ID] [COMMAND]
+# Connect (interactive when no COMMAND is provided):
+homeboy ssh [OPTIONS] [ID] [-- <COMMAND...>]
 ```
 
 ## Subcommands
@@ -25,7 +25,9 @@ homeboy ssh list
 - `[ID]`: project ID or server ID (project wins when both exist). Optional when using `--project` or `--server`.
 - `--project <PROJECT>`: force project resolution
 - `--server <SERVER>`: force server resolution
-- `[COMMAND]` (optional): command to execute (omit for interactive shell). Note: currently parsed as a single argument; multiple words may require shell quoting.
+- `[COMMAND...]` (optional): command to execute (omit for interactive shell).
+  - Recommended form: `homeboy ssh <id> -- <command...>` (supports multiple args cleanly)
+  - If you need shell operators (`&&`, `|`, redirects), pass a single quoted string: `homeboy ssh <id> "cd /var/www && ls | head"`
 
 
 ## JSON output
@@ -52,11 +54,11 @@ homeboy ssh list
 
 Note: `action` is produced by the tagged enum output (`SshOutput`).
 
-### Connect (`homeboy ssh [OPTIONS] [ID] [COMMAND]`)
+### Connect (`homeboy ssh [OPTIONS] [ID] [-- <COMMAND...>]`)
 
 The connect action uses an interactive SSH session and does not print the JSON envelope (it is treated as passthrough output).
 
-When `command` is provided, it is passed to the remote shell via the interactive session.
+When a command is provided, it is executed non-interactively and Homeboy captures stdout/stderr into the JSON response.
 
 Note: the CLI still computes a JSON `data` object internally for this action, but it is not printed in interactive passthrough mode.
 

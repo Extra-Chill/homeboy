@@ -11,8 +11,16 @@ pub struct SshArgs {
     /// Target ID (project or server; project wins when ambiguous)
     pub target: Option<String>,
 
-    /// Command to execute (omit for interactive shell)
-    pub command: Option<String>,
+    /// Command to execute (omit for interactive shell).
+    ///
+    /// Examples:
+    ///   homeboy ssh my-project -- ls -la
+    ///   homeboy ssh my-project -- wp plugin list
+    ///
+    /// If you need shell operators (&&, |, redirects), pass a single quoted string:
+    ///   homeboy ssh my-project "cd /var/www && ls | head"
+    #[arg(num_args = 0.., trailing_var_arg = true)]
+    pub command: Vec<String>,
 
     /// Force interpretation as server ID
     #[arg(long)]
@@ -77,8 +85,19 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
             };
             let result = resolve_context(&resolve_args)?;
 
+            let command_string: Option<String> = if args.command.is_empty() {
+                None
+            } else if args.command.len() == 1 {
+                // Preserve legacy behavior: a single string is treated as a raw shell command.
+                Some(args.command[0].clone())
+            } else {
+                // Multi-arg form (typically from `-- <cmd...>`): quote args safely.
+                // Note: this intentionally does NOT support shell operators; pass a single string for that.
+                Some(shell::quote_args(&args.command))
+            };
+
             // When project is resolved with base_path, auto-cd to project root
-            let effective_command = match (&result.project_id, &result.base_path, &args.command) {
+            let effective_command = match (&result.project_id, &result.base_path, &command_string) {
                 // Project with base_path and command: cd to base_path then run command
                 (Some(_), Some(bp), Some(cmd)) => {
                     Some(format!("cd {} && {}", shell::quote_path(bp), cmd))
@@ -86,12 +105,12 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
                 // Project with base_path, no command: interactive shell starts in base_path
                 (Some(_), Some(bp), None) => Some(format!("cd {}", shell::quote_path(bp))),
                 // No project context or no base_path: use command as-is
-                _ => args.command.clone(),
+                _ => command_string.clone(),
             };
 
             let client = SshClient::from_server(&result.server, &result.server_id)?;
 
-            if args.command.is_some() {
+            if !args.command.is_empty() {
                 // Non-interactive: capture output for JSON response
                 let output = client.execute(effective_command.as_deref().unwrap());
 
@@ -100,7 +119,7 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
                         resolved_type: result.resolved_type,
                         project_id: result.project_id,
                         server_id: result.server_id,
-                        command: args.command,
+                        command: Some(args.command.join(" ")),
                         stdout: Some(output.stdout),
                         stderr: Some(output.stderr),
                         success: output.success,
