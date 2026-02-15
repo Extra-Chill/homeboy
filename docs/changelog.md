@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.44.1] - 2026-02-15
+
+### Fixed
+- Update Cargo.lock after 0.44.0 release
+
 ## [0.44.0] - 2026-02-14
 
 ### Added
