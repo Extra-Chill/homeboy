@@ -178,9 +178,23 @@ pub fn deploy_artifact(
         let artifact_filename = format!("{}{}", artifact_prefix, artifact_filename);
 
         let upload_path = if extract_command.is_some() {
+            // Archives are uploaded into the target directory (often with a prefix) then extracted.
             format!("{}/{}", remote_path, artifact_filename)
         } else {
-            remote_path.to_string()
+            // Non-archives (or archives with no extract) should upload directly to a file path.
+            // Using an explicit file path allows atomic replacement via a temp upload + mv.
+            let local_filename = local_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "buildArtifact",
+                        "Build artifact path must include a file name",
+                        Some(local_path.display().to_string()),
+                        None,
+                    )
+                })?;
+            format!("{}/{}", remote_path, local_filename)
         };
 
         // Create target directory
@@ -294,7 +308,9 @@ fn upload_file(
     local_path: &Path,
     remote_path: &str,
 ) -> Result<DeployResult> {
-    scp_file(ssh_client, local_path, remote_path)
+    // Upload to a temporary file in the same directory and atomically replace the destination.
+    // This avoids failures like: `scp: ...: Text file busy` when updating an in-use binary.
+    scp_file_atomic(ssh_client, local_path, remote_path)
 }
 
 /// Core SCP transfer function.
@@ -350,6 +366,60 @@ fn scp_transfer(
 
 fn scp_file(ssh_client: &SshClient, local_path: &Path, remote_path: &str) -> Result<DeployResult> {
     scp_transfer(ssh_client, local_path, remote_path, false)
+}
+
+fn scp_file_atomic(
+    ssh_client: &SshClient,
+    local_path: &Path,
+    remote_path: &str,
+) -> Result<DeployResult> {
+    let remote = Path::new(remote_path);
+    let remote_dir = remote.parent().and_then(|p| p.to_str()).unwrap_or(".");
+    let remote_filename = remote
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "remotePath",
+                "Remote path must include a file name",
+                Some(remote_path.to_string()),
+                None,
+            )
+        })?;
+
+    let tmp_path = format!(
+        "{}/.homeboy-upload-{}.tmp.{}",
+        remote_dir,
+        remote_filename,
+        std::process::id()
+    );
+
+    let upload_result = scp_transfer(ssh_client, local_path, &tmp_path, false)?;
+    if !upload_result.success {
+        return Ok(upload_result);
+    }
+
+    // Atomic replace: mv temp -> destination (same directory)
+    let mv_cmd = format!(
+        "mv -f {} {}",
+        shell::quote_path(&tmp_path),
+        shell::quote_path(remote_path)
+    );
+    let mv_output = ssh_client.execute(&mv_cmd);
+
+    if !mv_output.success {
+        let error_detail = if mv_output.stderr.is_empty() {
+            mv_output.stdout
+        } else {
+            mv_output.stderr
+        };
+        return Ok(DeployResult::failure(
+            mv_output.exit_code,
+            format!("Failed to move uploaded file into place: {}", error_detail),
+        ));
+    }
+
+    Ok(DeployResult::success(0))
 }
 
 fn scp_recursive(
