@@ -53,6 +53,9 @@ pub struct InstallMethodsConfig {
 
     #[serde(default = "default_source_config")]
     pub source: InstallMethodConfig,
+
+    #[serde(default = "default_binary_config")]
+    pub binary: InstallMethodConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +111,7 @@ fn default_install_methods() -> InstallMethodsConfig {
         homebrew: default_homebrew_config(),
         cargo: default_cargo_config(),
         source: default_source_config(),
+        binary: default_binary_config(),
     }
 }
 
@@ -131,6 +135,87 @@ fn default_source_config() -> InstallMethodConfig {
     InstallMethodConfig {
         path_patterns: vec!["/target/release/".to_string(), "/target/debug/".to_string()],
         upgrade_command: "git pull && . \"$HOME/.cargo/env\" && cargo build --release".to_string(),
+        list_command: None,
+    }
+}
+
+fn default_binary_config() -> InstallMethodConfig {
+    // A downloaded release binary (e.g. ~/bin/homeboy, /usr/local/bin/homeboy).
+    //
+    // This default upgrade command is intentionally shell-based so it works without
+    // introducing new Rust deps (tar/xz/sha256). It can be overridden via homeboy.json.
+    InstallMethodConfig {
+        // Matches typical install locations. We intentionally key off "/bin/homeboy" so both
+        // /usr/local/bin/homeboy and ~/bin/homeboy are detected.
+        path_patterns: vec!["/bin/homeboy".to_string(), "homeboy.exe".to_string()],
+        upgrade_command: r#"set -e
+
+BIN_PATH="$(command -v homeboy)"
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+
+case "${OS}-${ARCH}" in
+  linux-x86_64)  ASSET="homeboy-x86_64-unknown-linux-gnu.tar.xz" ;;
+  linux-aarch64|linux-arm64) ASSET="homeboy-aarch64-unknown-linux-gnu.tar.xz" ;;
+  darwin-x86_64) ASSET="homeboy-x86_64-apple-darwin.tar.xz" ;;
+  darwin-aarch64|darwin-arm64) ASSET="homeboy-aarch64-apple-darwin.tar.xz" ;;
+  *) echo "Unsupported platform for binary upgrade: ${OS}-${ARCH}" >&2; exit 1 ;;
+esac
+
+BASE_URL="https://github.com/Extra-Chill/homeboy/releases/latest/download"
+TMP_DIR="$(mktemp -d)"
+
+cleanup() { rm -rf "$TMP_DIR"; }
+trap cleanup EXIT
+
+curl -fsSL "${BASE_URL}/${ASSET}" -o "${TMP_DIR}/${ASSET}"
+curl -fsSL "${BASE_URL}/${ASSET}.sha256" -o "${TMP_DIR}/${ASSET}.sha256"
+
+cd "$TMP_DIR"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum -c "${ASSET}.sha256"
+elif command -v shasum >/dev/null 2>&1; then
+  # macOS
+  SHASUM_EXPECTED="$(cut -d" " -f1 "${ASSET}.sha256")"
+  SHASUM_ACTUAL="$(shasum -a 256 "${ASSET}" | cut -d" " -f1)"
+  [ "$SHASUM_EXPECTED" = "$SHASUM_ACTUAL" ]
+else
+  echo "No sha256 tool found (sha256sum or shasum)." >&2
+  exit 1
+fi
+
+# Extract and install
+if tar -xJf "${ASSET}" 2>/dev/null; then
+  true
+else
+  tar -xf "${ASSET}"
+fi
+
+if [ ! -f "homeboy" ]; then
+  echo "Expected extracted binary named 'homeboy'" >&2
+  ls -la
+  exit 1
+fi
+
+# Install with permission-aware behavior
+if [ -w "$BIN_PATH" ] || [ -w "$(dirname "$BIN_PATH")" ]; then
+  install -m 0755 homeboy "$BIN_PATH"
+else
+  if command -v sudo >/dev/null 2>&1; then
+    if sudo -n true >/dev/null 2>&1; then
+      sudo install -m 0755 homeboy "$BIN_PATH"
+    else
+      echo "Insufficient permissions to write to $BIN_PATH. Re-run with sudo:" >&2
+      echo "  sudo homeboy upgrade --method binary" >&2
+      exit 1
+    fi
+  else
+    echo "Insufficient permissions to write to $BIN_PATH (and sudo not found)." >&2
+    exit 1
+  fi
+fi
+"#.to_string(),
         list_command: None,
     }
 }

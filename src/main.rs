@@ -106,7 +106,7 @@ enum Commands {
 
 fn response_mode(command: &Commands) -> ResponseMode {
     match command {
-        Commands::Ssh(args) if args.subcommand.is_none() && args.command.is_none() => {
+        Commands::Ssh(args) if args.subcommand.is_none() && args.command.is_empty() => {
             ResponseMode::Raw(RawOutputMode::InteractivePassthrough)
         }
         Commands::Logs(args) if logs::is_interactive(args) => {
@@ -279,7 +279,7 @@ fn main() -> std::process::ExitCode {
             if !tty::require_tty_for_interactive() {
                 let err = homeboy::Error::validation_invalid_argument(
                     "tty",
-                    "This command requires an interactive TTY",
+                    "This command requires an interactive TTY. For non-interactive usage, run: homeboy ssh <target> -- <command...>",
                     None,
                     None,
                 );

@@ -98,6 +98,58 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
     // Generate context-aware suggestion
     let suggestion = if managed {
         None
+    } else if let Some(ref git_root_str) = git_root {
+        // If we're in a git repo that *looks like* a configured component, suggest relinking.
+        let git_root_path = PathBuf::from(git_root_str);
+        let repo_name = git_root_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string());
+
+        let relink_match = repo_name.as_ref().and_then(|name| {
+            components.iter().find(|c| c.id == *name || c.aliases.iter().any(|a| a == name))
+        });
+
+        if let Some(component_match) = relink_match {
+            // Only suggest relink if paths differ (canonicalize best-effort)
+            let git_canon = git_root_path.canonicalize().ok();
+            let comp_canon = PathBuf::from(&component_match.local_path).canonicalize().ok();
+
+            if git_canon.is_some() && comp_canon.is_some() && git_canon != comp_canon {
+                // JSON-escape just enough for typical paths (quotes + backslashes).
+                let json_path = git_root_str.replace('\\', "\\\\").replace('"', "\\\"");
+                Some(format!(
+                    "This looks like component '{}' but local_path is set to '{}'. To relink: homeboy component set {} --json '{{\"local_path\":\"{}\"}}' (edit JSON if your path contains unusual characters)",
+                    component_match.id,
+                    component_match.local_path,
+                    component_match.id,
+                    json_path
+                ))
+            } else {
+                Some(format!(
+                    "This directory is a git repo ('{}') but is not managed by Homeboy. Run `homeboy init --all` to see all components.",
+                    git_root_str
+                ))
+            }
+        } else if !contained_ids.is_empty() {
+            if let Some(ref proj) = project_ctx {
+                Some(format!(
+                    "Monorepo root for project {} with {} components. Use `homeboy project show {}` for full details.",
+                    proj.id,
+                    contained_ids.len(),
+                    proj.id
+                ))
+            } else {
+                Some(format!(
+                    "Directory contains {} configured components. Use `homeboy component show <id>` to see a specific component's configuration.",
+                    contained_ids.len()
+                ))
+            }
+        } else {
+            Some(format!(
+                "This directory is a git repo ('{}') but is not managed by Homeboy. Run `homeboy init --all` to see all components.",
+                git_root_str
+            ))
+        }
     } else if !contained_ids.is_empty() {
         if let Some(ref proj) = project_ctx {
             Some(format!(
@@ -114,7 +166,7 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
         }
     } else {
         Some(
-            "This directory is not managed by Homeboy. Run 'homeboy init' to see project context and available components."
+            "This directory is not managed by Homeboy. Run `homeboy init --all` to see all components."
                 .to_string(),
         )
     };
