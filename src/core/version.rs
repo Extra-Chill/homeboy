@@ -14,8 +14,13 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-/// Execute pre-bump commands before the clean working tree check.
-/// These commands are expected to stage build artifacts like Cargo.lock.
+/// Execute pre-bump commands as part of the version bump pipeline.
+///
+/// These commands are expected to update and/or stage generated artifacts that may change
+/// due to the version bump (e.g., `cargo build` updating Cargo.lock).
+///
+/// Important: this runs *after* the version/changelog files are updated so generated artifacts
+/// can reflect the new version, but *before* the release commit is created.
 pub fn run_pre_bump_commands(commands: &[String], working_dir: &str) -> Result<()> {
     if commands.is_empty() {
         return Ok(());
@@ -796,6 +801,10 @@ pub fn bump_component_version(component: &Component, bump_type: &str) -> Result<
             )));
         }
     }
+
+    // Run commands that may update/stage generated artifacts impacted by the bump (e.g. Cargo.lock).
+    // This must happen AFTER version targets are updated so artifacts match the new version.
+    run_pre_bump_commands(&component.pre_version_bump_commands, &component.local_path)?;
 
     run_post_bump_commands(&component.post_version_bump_commands, &component.local_path)?;
 
