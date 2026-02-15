@@ -14,6 +14,8 @@ pub enum InstallMethod {
     Homebrew,
     Cargo,
     Source,
+    /// Downloaded release binary (e.g. ~/bin/homeboy, /usr/local/bin/homeboy)
+    Binary,
     Unknown,
 }
 
@@ -23,6 +25,7 @@ impl InstallMethod {
             InstallMethod::Homebrew => "homebrew",
             InstallMethod::Cargo => "cargo",
             InstallMethod::Source => "source",
+            InstallMethod::Binary => "binary",
             InstallMethod::Unknown => "unknown",
         }
     }
@@ -33,7 +36,8 @@ impl InstallMethod {
             InstallMethod::Homebrew => defaults.install_methods.homebrew.upgrade_command.clone(),
             InstallMethod::Cargo => defaults.install_methods.cargo.upgrade_command.clone(),
             InstallMethod::Source => defaults.install_methods.source.upgrade_command.clone(),
-            InstallMethod::Unknown => "Please reinstall using Homebrew or Cargo".to_string(),
+            InstallMethod::Binary => defaults.install_methods.binary.upgrade_command.clone(),
+            InstallMethod::Unknown => "Please reinstall using Homebrew, Cargo, or a release binary".to_string(),
         }
     }
 }
@@ -122,9 +126,10 @@ fn fetch_latest_github_version() -> Result<String> {
 pub fn fetch_latest_version(method: InstallMethod) -> Result<String> {
     match method {
         InstallMethod::Cargo => fetch_latest_crates_io_version(),
-        InstallMethod::Homebrew | InstallMethod::Source | InstallMethod::Unknown => {
-            fetch_latest_github_version()
-        }
+        InstallMethod::Homebrew
+        | InstallMethod::Source
+        | InstallMethod::Binary
+        | InstallMethod::Unknown => fetch_latest_github_version(),
     }
 }
 
@@ -172,6 +177,13 @@ pub fn detect_install_method() -> InstallMethod {
         }
     }
 
+    // Check for downloaded release binary via path patterns
+    for pattern in &defaults.install_methods.binary.path_patterns {
+        if exe_path.contains(pattern) {
+            return InstallMethod::Binary;
+        }
+    }
+
     InstallMethod::Unknown
 }
 
@@ -215,7 +227,14 @@ fn version_is_newer(latest: &str, current: &str) -> bool {
 }
 
 pub fn run_upgrade(force: bool) -> Result<UpgradeResult> {
-    let install_method = detect_install_method();
+    run_upgrade_with_method(force, None)
+}
+
+pub fn run_upgrade_with_method(
+    force: bool,
+    method_override: Option<InstallMethod>,
+) -> Result<UpgradeResult> {
+    let install_method = method_override.unwrap_or_else(detect_install_method);
     let previous_version = current_version().to_string();
 
     if install_method == InstallMethod::Unknown {
@@ -225,7 +244,8 @@ pub fn run_upgrade(force: bool) -> Result<UpgradeResult> {
             None,
             None,
         )
-        .with_hint("Reinstall using: brew install homeboy")
+        .with_hint("Try: homeboy upgrade --method binary")
+        .with_hint("Or reinstall using: brew install homeboy")
         .with_hint("Or: cargo install homeboy"));
     }
 
@@ -318,6 +338,14 @@ fn execute_upgrade(method: InstallMethod) -> Result<(bool, Option<String>)> {
 
             (cmd.clone(), status.success())
         }
+        InstallMethod::Binary => {
+            let cmd = &defaults.install_methods.binary.upgrade_command;
+            let status = Command::new("sh")
+                .args(["-c", cmd])
+                .status()
+                .map_err(|e| Error::other(format!("Failed to run upgrade: {}", e)))?;
+            (cmd.clone(), status.success())
+        }
         InstallMethod::Unknown => {
             return Err(Error::validation_invalid_argument(
                 "install_method",
@@ -384,6 +412,7 @@ mod tests {
         assert_eq!(InstallMethod::Homebrew.as_str(), "homebrew");
         assert_eq!(InstallMethod::Cargo.as_str(), "cargo");
         assert_eq!(InstallMethod::Source.as_str(), "source");
+        assert_eq!(InstallMethod::Binary.as_str(), "binary");
         assert_eq!(InstallMethod::Unknown.as_str(), "unknown");
     }
 }

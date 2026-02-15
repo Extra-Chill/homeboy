@@ -9,7 +9,7 @@ homeboy update [OPTIONS]  # alias
 
 ## Description
 
-Upgrades Homeboy to the latest version. The command auto-detects the installation method (Homebrew, Cargo, or source build) and runs the appropriate upgrade process.
+Upgrades Homeboy to the latest version. The command auto-detects the installation method (Homebrew, Cargo, source build, or downloaded release binary) and runs the appropriate upgrade process.
 
 By default, after a successful upgrade, Homeboy restarts itself to use the new version.
 
@@ -18,6 +18,7 @@ By default, after a successful upgrade, Homeboy restarts itself to use the new v
 - `--check`: Check for updates without installing. Returns version information without making changes.
 - `--force`: Force upgrade even if already at the latest version.
 - `--no-restart`: Skip automatic restart after upgrade. Useful for scripted environments.
+- `--method`: Override install method detection (homebrew|cargo|source|binary).
 
 ## Installation Method Detection
 
@@ -28,8 +29,13 @@ Homeboy detects how it was installed and uses the appropriate upgrade method:
 | Homebrew | Binary path contains `/Cellar/` or `/homebrew/`, or `brew list homeboy` succeeds | `brew update && brew upgrade homeboy` |
 | Cargo | Binary path contains `/.cargo/bin/` | `cargo install homeboy` |
 | Source | Binary path contains `/target/release/` or `/target/debug/` | `git pull && cargo build --release` |
+| Binary | Binary path contains `/bin/homeboy` (covers `~/bin/homeboy` and `/usr/local/bin/homeboy`) | Downloads latest release asset and replaces the current binary |
 
-If the installation method cannot be detected, an error is returned with manual upgrade instructions.
+If the installation method cannot be detected, an error is returned with manual upgrade instructions. You can also override detection:
+
+```sh
+homeboy upgrade --method binary
+```
 
 ## Examples
 
