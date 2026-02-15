@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.44.2] - 2026-02-15
+
+### Fixed
+- ssh: allow multi-arg non-interactive commands; improve non-TTY guidance
+
 ## [0.44.1] - 2026-02-15
 
 ### Fixed
