@@ -90,7 +90,7 @@ enum FleetCommand {
         #[arg(long)]
         outdated: bool,
     },
-    /// Sync OpenClaw agent configurations across fleet servers
+    /// [DEPRECATED] Use 'homeboy deploy' instead. See issue #101.
     Sync {
         /// Fleet ID
         id: String,
@@ -130,8 +130,7 @@ pub struct FleetOutput {
     pub summary: Option<FleetCheckSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub updated_fields: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sync: Option<fleet::FleetSyncResult>,
+    // sync field removed — fleet sync deprecated (see #101)
 }
 
 #[derive(Default, Serialize)]
@@ -517,26 +516,18 @@ fn check(id: &str, only_outdated: bool) -> CmdResult<FleetOutput> {
 }
 
 fn sync(
-    id: &str,
-    categories: Option<Vec<String>>,
-    dry_run: bool,
-    leader_override: Option<String>,
+    _id: &str,
+    _categories: Option<Vec<String>>,
+    _dry_run: bool,
+    _leader_override: Option<String>,
 ) -> CmdResult<FleetOutput> {
-    let result = fleet::sync(id, categories, dry_run, leader_override)?;
-
-    let exit_code = if result.summary.projects_failed > 0 {
-        1
-    } else {
-        0
-    };
-
-    Ok((
-        FleetOutput {
-            command: "fleet.sync".to_string(),
-            fleet_id: Some(id.to_string()),
-            sync: Some(result),
-            ..Default::default()
-        },
-        exit_code,
-    ))
+    Err(homeboy::Error::validation_invalid_argument(
+        "fleet sync",
+        "fleet sync has been deprecated. Use 'homeboy deploy' to sync files across servers. \
+         Register your agent workspace as a component and deploy it like any other component.",
+        None,
+        None,
+    )
+    .with_hint("homeboy deploy <component> --fleet <fleet>".to_string())
+    .with_hint("See: https://github.com/Extra-Chill/homeboy/issues/101".to_string()))
 }
