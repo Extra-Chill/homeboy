@@ -1,6 +1,6 @@
 {
   "name": "OpenClaw",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "icon": "antenna.radiowaves.left.and.right",
   "description": "AI agent platform — view config, workspace, memory, and agent status",
   "author": "Extra Chill",
@@ -90,6 +90,18 @@
       "label": "List Agents",
       "type": "command",
       "command": "openclaw agents list"
+    },
+    {
+      "id": "update",
+      "label": "Update OpenClaw",
+      "type": "command",
+      "command": "openclaw update --yes"
+    },
+    {
+      "id": "version",
+      "label": "Show Version",
+      "type": "command",
+      "command": "openclaw --version"
     }
   ],
 
