@@ -57,7 +57,7 @@ impl SshClient {
         })
     }
 
-    fn build_ssh_args(&self, command: Option<&str>) -> Vec<String> {
+    fn build_ssh_args(&self, command: Option<&str>, interactive: bool) -> Vec<String> {
         let mut args = Vec::new();
 
         if let Some(identity_file) = &self.identity_file {
@@ -68,6 +68,17 @@ impl SshClient {
         if self.port != 22 {
             args.push("-p".to_string());
             args.push(self.port.to_string());
+        }
+
+        // For non-interactive commands, add timeout and keepalive options
+        // to prevent hangs on stalled connections or unexpected prompts.
+        if !interactive {
+            args.extend([
+                "-o".to_string(), "BatchMode=yes".to_string(),
+                "-o".to_string(), "ConnectTimeout=10".to_string(),
+                "-o".to_string(), "ServerAliveInterval=15".to_string(),
+                "-o".to_string(), "ServerAliveCountMax=3".to_string(),
+            ]);
         }
 
         args.push(format!("{}@{}", self.user, self.host));
@@ -131,7 +142,7 @@ impl SshClient {
     }
 
     fn execute_once(&self, command: &str, stdin_file: Option<&str>) -> CommandOutput {
-        let args = self.build_ssh_args(Some(command));
+        let args = self.build_ssh_args(Some(command), false);
 
         let mut cmd = Command::new("ssh");
         cmd.args(&args);
@@ -171,7 +182,7 @@ impl SshClient {
     }
 
     pub fn execute_interactive(&self, command: Option<&str>) -> i32 {
-        let args = self.build_ssh_args(command);
+        let args = self.build_ssh_args(command, true);
 
         let status = Command::new("ssh")
             .args(&args)
