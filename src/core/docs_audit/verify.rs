@@ -69,7 +69,18 @@ fn verify_file_path(
     // Strip component prefix if present (e.g., "homeboy/docs/index.md" -> "docs/index.md")
     let stripped_path = strip_component_prefix(path, component_id);
 
-    // Try multiple path interpretations
+    // Absolute paths can't be verified against the source tree — they reference
+    // system paths that may or may not exist on the current machine. Return early
+    // to avoid Path::join replacing the base with the absolute path and accidentally
+    // checking the real filesystem.
+    if Path::new(path).is_absolute() {
+        return VerifyResult::NeedsVerification {
+            hint: "Absolute path outside repository; verify path exists on target system."
+                .to_string(),
+        };
+    }
+
+    // Try multiple path interpretations for relative paths
     let candidates = vec![
         source_path.join(stripped_path.trim_start_matches('/')),
         source_path.join(stripped_path),
@@ -84,13 +95,6 @@ fn verify_file_path(
         if candidate.exists() {
             return VerifyResult::Verified;
         }
-    }
-
-    if Path::new(path).is_absolute() {
-        return VerifyResult::NeedsVerification {
-            hint: "Absolute path outside repository; verify path exists on target system."
-                .to_string(),
-        };
     }
 
     VerifyResult::Broken {
@@ -113,7 +117,16 @@ fn verify_directory_path(
     // Strip component prefix if present
     let stripped_path = strip_component_prefix(path, component_id);
 
-    // Try multiple path interpretations
+    // Absolute paths can't be verified against the source tree — return early
+    // to avoid Path::join replacing the base with the absolute path.
+    if Path::new(path).is_absolute() {
+        return VerifyResult::NeedsVerification {
+            hint: "Absolute directory path outside repository; verify path exists on target system."
+                .to_string(),
+        };
+    }
+
+    // Try multiple path interpretations for relative paths
     let candidates = vec![
         source_path.join(stripped_path.trim_start_matches('/')),
         source_path.join(stripped_path),
@@ -128,13 +141,6 @@ fn verify_directory_path(
         if candidate.is_dir() {
             return VerifyResult::Verified;
         }
-    }
-
-    if Path::new(path).is_absolute() {
-        return VerifyResult::NeedsVerification {
-            hint: "Absolute directory path outside repository; verify path exists on target system."
-                .to_string(),
-        };
     }
 
     VerifyResult::Broken {

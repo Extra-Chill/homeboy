@@ -37,7 +37,7 @@ Homeboy replaces scattered scripts, FTP clients, and manual SSH sessions with on
 | Deploy a plugin | `homeboy deploy my-site my-plugin` |
 | Deploy to all sites | `homeboy deploy my-plugin --shared` |
 | Fleet rollout | `homeboy deploy my-plugin --fleet production` |
-| Sync agent configs | `homeboy fleet sync fleet-servers` |
+| Deploy across fleet | `homeboy deploy my-plugin --fleet fleet-servers` |
 | Release a new version | `homeboy release run my-plugin` |
 | Check what's outdated | `homeboy deploy my-site --check --outdated` |
 | Tail remote logs | `homeboy logs show my-site error.log --follow` |

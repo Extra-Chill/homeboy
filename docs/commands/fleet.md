@@ -131,81 +131,14 @@ Returns per-project status with:
 
 Summary includes counts for quick overview.
 
-### `sync`
+### `sync` (deprecated)
+
+> **Deprecated.** Use `homeboy deploy` to sync files across servers instead. Register shared configs as components and deploy them like any other component. See [#101](https://github.com/Extra-Chill/homeboy/issues/101).
 
 ```sh
-homeboy fleet sync <id> [--category <name>] [--dry-run] [--leader <project_id>]
-```
-
-Sync OpenClaw agent configurations across all servers in a fleet. Reads a `fleet-sync.json` manifest from `~/.config/homeboy/` that defines what to sync and where from.
-
-Options:
-- `--category <name>`: Only sync specific categories (repeatable, comma-separated)
-- `--dry-run`: Preview what would be synced without applying changes
-- `--leader <project_id>`: Override the leader server (source of truth)
-
-#### Sync Categories
-
-| Category | What it syncs | Method |
-|----------|--------------|--------|
-| `openclaw-config` | Specific JSON paths in `openclaw.json` (e.g., model fallbacks) | JSON merge |
-| `opencode-config` | OpenCode config files and prompts | File copy |
-| `opencode-auth` | GitHub Copilot auth tokens | File copy |
-| `skills` | Workspace skill directories | Directory tar stream |
-| `workspace-files` | Shared workspace files (CODING-STANDARDS.md, etc.) | File copy |
-
-#### Manifest Format (`~/.config/homeboy/fleet-sync.json`)
-
-```json
-{
-  "leader": "command-server",
-  "categories": {
-    "openclaw-config": {
-      "enabled": true,
-      "merge_paths": ["agents.defaults.model.fallbacks"]
-    },
-    "opencode-config": {
-      "enabled": true,
-      "files": [".config/opencode/opencode.json", ".config/opencode/prompts/"]
-    },
-    "opencode-auth": {
-      "enabled": true,
-      "files": [".local/share/opencode/auth.json"]
-    },
-    "skills": {
-      "enabled": true,
-      "items": ["skills/opencode/"]
-    },
-    "workspace-files": {
-      "enabled": false,
-      "items": ["CODING-STANDARDS.md", "TOOLS.md"]
-    }
-  }
-}
-```
-
-#### Key Behaviors
-
-- **Auto-detects OpenClaw home** on each server (handles `/root/.openclaw/` and `/home/openclaw/.openclaw/`)
-- **JSON merge** for `openclaw-config` — merges specific paths without overwriting the full config
-- **Skips the leader** — doesn't sync the source of truth to itself
-- **Fixes ownership** — automatically `chown`s files for non-root OpenClaw users
-- **Category filtering** — sync only what you need with `--category`
-
-#### Example
-
-```sh
-# Preview sync across the fleet
-homeboy fleet sync fleet-servers --dry-run
-
-# Sync everything
-homeboy fleet sync fleet-servers
-
-# Sync only model config
-homeboy fleet sync fleet-servers --category openclaw-config
-
-# Sync skills and opencode config
-homeboy fleet sync fleet-servers --category skills,opencode-config
+# Instead of: homeboy fleet sync fleet-servers
+# Use:
+homeboy deploy my-config --fleet fleet-servers
 ```
 
 ## Fleet Deployment
