@@ -272,7 +272,13 @@ if [ -f "$LOCAL_BOOTSTRAP" ]; then
     echo "⚠ Warning: Local bootstrap.php found and will be IGNORED"
     echo "  Location: $LOCAL_BOOTSTRAP"
     echo "  Homeboy WordPress module provides complete test infrastructure."
-    echo "  Consider removing: $LOCAL_BOOTSTRAP"
+    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+        echo "  → Auto-fix: Removing $LOCAL_BOOTSTRAP"
+        rm -f "$LOCAL_BOOTSTRAP"
+        echo "  ✓ Removed"
+    else
+        echo "  Consider removing: $LOCAL_BOOTSTRAP"
+    fi
     echo ""
 fi
 
@@ -281,7 +287,13 @@ if [ -f "$LOCAL_PHPUNIT_XML" ]; then
     echo "⚠ Warning: Local phpunit.xml found in tests/ and will be IGNORED"
     echo "  Location: $LOCAL_PHPUNIT_XML"
     echo "  Homeboy WordPress module provides PHPUnit configuration."
-    echo "  Consider removing: $LOCAL_PHPUNIT_XML"
+    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+        echo "  → Auto-fix: Removing $LOCAL_PHPUNIT_XML"
+        rm -f "$LOCAL_PHPUNIT_XML"
+        echo "  ✓ Removed"
+    else
+        echo "  Consider removing: $LOCAL_PHPUNIT_XML"
+    fi
     echo ""
 fi
 
@@ -289,7 +301,13 @@ if [ -f "$LOCAL_PHPUNIT_XML_ROOT" ]; then
     echo ""
     echo "⚠ Warning: Local phpunit.xml found in root and will be IGNORED"
     echo "  Location: $LOCAL_PHPUNIT_XML_ROOT"
-    echo "  Consider removing: $LOCAL_PHPUNIT_XML_ROOT"
+    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+        echo "  → Auto-fix: Removing $LOCAL_PHPUNIT_XML_ROOT"
+        rm -f "$LOCAL_PHPUNIT_XML_ROOT"
+        echo "  ✓ Removed"
+    else
+        echo "  Consider removing: $LOCAL_PHPUNIT_XML_ROOT"
+    fi
     echo ""
 fi
 
@@ -297,8 +315,51 @@ if [ -f "$LOCAL_PHPUNIT_XML_DIST_ROOT" ]; then
     echo ""
     echo "⚠ Warning: Local phpunit.xml.dist found in root and will be IGNORED"
     echo "  Location: $LOCAL_PHPUNIT_XML_DIST_ROOT"
-    echo "  Consider removing: $LOCAL_PHPUNIT_XML_DIST_ROOT"
+    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+        echo "  → Auto-fix: Removing $LOCAL_PHPUNIT_XML_DIST_ROOT"
+        rm -f "$LOCAL_PHPUNIT_XML_DIST_ROOT"
+        echo "  ✓ Removed"
+    else
+        echo "  Consider removing: $LOCAL_PHPUNIT_XML_DIST_ROOT"
+    fi
     echo ""
+fi
+
+# Detect conflicting local PHPUnit binary
+LOCAL_PHPUNIT_BIN="${PLUGIN_PATH}/vendor/bin/phpunit"
+if [ -f "$LOCAL_PHPUNIT_BIN" ]; then
+    echo ""
+    echo "⚠ Warning: Local vendor/bin/phpunit found — may conflict with Homeboy's PHPUnit"
+    echo "  Location: $LOCAL_PHPUNIT_BIN"
+    echo "  Homeboy WordPress module provides PHPUnit through its own vendor directory."
+    echo "  Having two PHPUnit versions can cause version mismatches and confusing failures."
+    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+        echo "  → Auto-fix: Removing local phpunit from require-dev and vendor..."
+        (cd "$PLUGIN_PATH" && composer remove --dev phpunit/phpunit 2>/dev/null || true)
+        echo "  ✓ Removed"
+    else
+        echo "  Fix: composer remove --dev phpunit/phpunit (in $PLUGIN_PATH)"
+        echo "  Or run: homeboy test ${COMPONENT_ID:-} --fix"
+    fi
+    echo ""
+fi
+
+# Detect phpunit in composer.json require-dev (even if not installed yet)
+if [ ! -f "$LOCAL_PHPUNIT_BIN" ] && [ -f "${PLUGIN_PATH}/composer.json" ]; then
+    if grep -q '"phpunit/phpunit"' "${PLUGIN_PATH}/composer.json" 2>/dev/null; then
+        echo ""
+        echo "⚠ Warning: phpunit/phpunit found in composer.json require-dev"
+        echo "  Homeboy WordPress module provides PHPUnit — the local dependency is redundant."
+        if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+            echo "  → Auto-fix: Removing phpunit from require-dev..."
+            (cd "$PLUGIN_PATH" && composer remove --dev phpunit/phpunit 2>/dev/null || true)
+            echo "  ✓ Removed"
+        else
+            echo "  Fix: composer remove --dev phpunit/phpunit (in $PLUGIN_PATH)"
+            echo "  Or run: homeboy test ${COMPONENT_ID:-} --fix"
+        fi
+        echo ""
+    fi
 fi
 
 # Check if tests directory exists before running PHPUnit
