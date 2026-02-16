@@ -68,6 +68,11 @@ enum ComponentCommand {
     Set {
         #[command(flatten)]
         args: DynamicSetArgs,
+
+        /// Version targets in the form "file" or "file::pattern" (repeatable).
+        /// Same format as `component create --version-target`.
+        #[arg(long = "version-target", value_name = "TARGET")]
+        version_targets: Vec<String>,
     },
     /// Delete a component configuration
     Delete {
@@ -223,7 +228,10 @@ pub fn run(
             }
         }
         ComponentCommand::Show { id } => show(&id),
-        ComponentCommand::Set { args } => set(args),
+        ComponentCommand::Set {
+            args,
+            version_targets,
+        } => set(args, version_targets),
         ComponentCommand::Delete { id } => delete(&id),
         ComponentCommand::Rename { id, new_id } => rename(&id, &new_id),
         ComponentCommand::List => list(),
@@ -249,7 +257,7 @@ fn show(id: &str) -> CmdResult<ComponentOutput> {
     ))
 }
 
-fn set(args: DynamicSetArgs) -> CmdResult<ComponentOutput> {
+fn set(args: DynamicSetArgs, version_targets: Vec<String>) -> CmdResult<ComponentOutput> {
     // Merge JSON sources: positional/--json/--base64 spec + dynamic flags
     let spec = args.json_spec()?;
     let has_input = spec.is_some() || !args.extra.is_empty();
@@ -262,7 +270,24 @@ fn set(args: DynamicSetArgs) -> CmdResult<ComponentOutput> {
         ));
     }
 
-    let merged = super::merge_json_sources(spec.as_deref(), &args.extra)?;
+    let mut merged = super::merge_json_sources(spec.as_deref(), &args.extra)?;
+
+    // Support --version-target flag like `component create`.
+    // If provided, it replaces any existing version_targets value in the merged spec.
+    if !version_targets.is_empty() {
+        let parsed = component::parse_version_targets(&version_targets)?;
+        if let serde_json::Value::Object(ref mut obj) = merged {
+            obj.insert("version_targets".to_string(), serde_json::json!(parsed));
+        } else {
+            return Err(homeboy::Error::validation_invalid_argument(
+                "spec",
+                "Merged spec must be a JSON object",
+                None,
+                None,
+            ));
+        }
+    }
+
     let json_string = serde_json::to_string(&merged).map_err(|e| {
         homeboy::Error::internal_unexpected(format!("Failed to serialize merged JSON: {}", e))
     })?;
