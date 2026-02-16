@@ -49,27 +49,56 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
-fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> {
-    let modules = component.modules.as_ref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "component",
-            format!("Component '{}' has no modules configured", component.id),
-            None,
-            None,
-        )
-    })?;
+/// Attempt to auto-detect the module for a component based on contextual clues.
+fn auto_detect_module(component: &Component) -> Option<String> {
+    // Check build_command for module references (e.g., "modules/wordpress/scripts/build")
+    if let Some(ref cmd) = component.build_command {
+        if cmd.contains("modules/wordpress") {
+            return Some("wordpress".to_string());
+        }
+    }
 
-    let module_id = if modules.contains_key("wordpress") {
-        "wordpress"
+    // Check for composer.json in local_path (indicates WordPress/PHP component)
+    let expanded = shellexpand::tilde(&component.local_path);
+    let composer_path = std::path::Path::new(expanded.as_ref()).join("composer.json");
+    if composer_path.exists() {
+        return Some("wordpress".to_string());
+    }
+
+    None
+}
+
+fn no_modules_error(component: &Component) -> Error {
+    Error::validation_invalid_argument(
+        "component",
+        format!("Component '{}' has no modules configured and none could be auto-detected", component.id),
+        None,
+        None,
+    )
+    .with_hint(format!(
+        "Add a module: homeboy component set {} --module wordpress",
+        component.id
+    ))
+}
+
+fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> {
+    let module_id_owned: String;
+    let module_id: &str = if let Some(ref modules) = component.modules {
+        if modules.contains_key("wordpress") {
+            "wordpress"
+        } else if let Some(key) = modules.keys().next() {
+            key.as_str()
+        } else if let Some(detected) = auto_detect_module(component) {
+            module_id_owned = detected;
+            &module_id_owned
+        } else {
+            return Err(no_modules_error(component));
+        }
+    } else if let Some(detected) = auto_detect_module(component) {
+        module_id_owned = detected;
+        &module_id_owned
     } else {
-        modules.keys().next().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "component",
-                format!("Component '{}' has no modules configured", component.id),
-                None,
-                None,
-            )
-        })?
+        return Err(no_modules_error(component));
     };
 
     let manifest = module::load_module(module_id)?;
