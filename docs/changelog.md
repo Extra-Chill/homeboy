@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.44.4] - 2026-02-16
+
+### Fixed
+- SSH non-interactive commands now use BatchMode, ConnectTimeout, and ServerAliveInterval to prevent hangs (#88)
+- Version target patterns are validated at create time — rejects template syntax and missing capture groups (#90)
+- component set now supports --version-target flag like component create (#91)
+
 ## [0.44.3] - 2026-02-15
 
 ### Fixed
