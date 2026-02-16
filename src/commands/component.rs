@@ -298,6 +298,9 @@ fn set(args: DynamicSetArgs) -> CmdResult<ComponentOutput> {
 }
 
 fn add_version_target(id: &str, file: &str, pattern: &str) -> CmdResult<ComponentOutput> {
+    // Validate pattern is a valid regex with capture group
+    component::validate_version_pattern(pattern)?;
+
     // Load component to check existing targets
     let comp = component::load(id).map_err(|e| e.with_contextual_hint())?;
 

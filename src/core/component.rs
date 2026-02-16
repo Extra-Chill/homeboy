@@ -4,6 +4,7 @@ use crate::module;
 use crate::output::{CreateOutput, MergeOutput, MergeResult, RemoveResult};
 use crate::project::{self, NullableUpdate};
 use crate::utils::slugify;
+use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -260,6 +261,50 @@ pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Compo
     config::create::<Component>(json_spec, skip_existing)
 }
 
+/// Validate that a version target pattern is a valid regex with at least one capture group.
+/// Rejects common mistakes like `{version}` template syntax.
+pub fn validate_version_pattern(pattern: &str) -> Result<()> {
+    // Check for template syntax (common mistake)
+    if pattern.contains("{version}") {
+        return Err(Error::validation_invalid_argument(
+            "version_target.pattern",
+            format!(
+                "Pattern '{}' uses template syntax ({{version}}), but a regex with a capture group is required. \
+                 Example: 'Version: (\\d+\\.\\d+\\.\\d+)'",
+                pattern
+            ),
+            Some(pattern.to_string()),
+            None,
+        ));
+    }
+
+    // Must be valid regex
+    let re = Regex::new(pattern).map_err(|e| {
+        Error::validation_invalid_argument(
+            "version_target.pattern",
+            format!("Invalid regex pattern '{}': {}", pattern, e),
+            Some(pattern.to_string()),
+            None,
+        )
+    })?;
+
+    // Must have at least one capture group
+    if re.captures_len() < 2 {
+        return Err(Error::validation_invalid_argument(
+            "version_target.pattern",
+            format!(
+                "Pattern '{}' has no capture group. Wrap the version portion in parentheses. \
+                 Example: 'Version: (\\d+\\.\\d+\\.\\d+)'",
+                pattern
+            ),
+            Some(pattern.to_string()),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn parse_version_targets(targets: &[String]) -> Result<Vec<VersionTarget>> {
     let mut parsed = Vec::new();
     for target in targets {
@@ -277,6 +322,9 @@ pub fn parse_version_targets(targets: &[String]) -> Result<Vec<VersionTarget>> {
                 )
             })?;
         let pattern = parts.next().map(str::trim).filter(|s| !s.is_empty());
+        if let Some(p) = pattern {
+            validate_version_pattern(p)?;
+        }
         parsed.push(VersionTarget {
             file: file.to_string(),
             pattern: pattern.map(|p| p.to_string()),
@@ -602,5 +650,39 @@ mod tests {
 
         let result = validate_version_target_conflict(&existing, "plugin.php", "Version: (.*)", "test-comp");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_version_pattern_rejects_template_syntax() {
+        let result = validate_version_pattern("Version: {version}");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.details.to_string().contains("template syntax"));
+    }
+
+    #[test]
+    fn validate_version_pattern_rejects_no_capture_group() {
+        let result = validate_version_pattern(r"Version: \d+\.\d+\.\d+");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.details.to_string().contains("no capture group"));
+    }
+
+    #[test]
+    fn validate_version_pattern_rejects_invalid_regex() {
+        let result = validate_version_pattern(r"Version: (\d+\.\d+");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_version_pattern_accepts_valid_pattern() {
+        assert!(validate_version_pattern(r"Version:\s*(\d+\.\d+\.\d+)").is_ok());
+    }
+
+    #[test]
+    fn parse_version_targets_rejects_template_syntax() {
+        let targets = vec!["style.css::Version: {version}".to_string()];
+        let result = parse_version_targets(&targets);
+        assert!(result.is_err());
     }
 }
