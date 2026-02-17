@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+### Added
+- Undocumented feature detection in docs audit via module audit_feature_patterns (#104)
+
 ## [0.45.0] - 2026-02-16
 
 ### Added
