@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -229,5 +229,15 @@
     "/*-auth/**",
     "**/v1/**",
     "**/v2/**"
+  ],
+  "audit_feature_patterns": [
+    "register_post_type\\(\\s*['\"]([\\w-]+)['\"]",
+    "register_taxonomy\\(\\s*['\"]([\\w-]+)['\"]",
+    "register_block_type\\(\\s*['\"]([\\w-]+/[\\w-]+)['\"]",
+    "register_setting\\(\\s*['\"]([\\w-]+)['\"]",
+    "register_rest_route\\(\\s*['\"]([\\w-]+/v\\d+)['\"]",
+    "add_shortcode\\(\\s*['\"]([\\w-]+)['\"]",
+    "wp_register_script\\(\\s*['\"]([\\w-]+)['\"]",
+    "wp_register_style\\(\\s*['\"]([\\w-]+)['\"]"
   ]
 }
