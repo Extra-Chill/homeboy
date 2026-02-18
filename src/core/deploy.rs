@@ -134,6 +134,7 @@ pub fn deploy_artifact(
     remote_path: &str,
     extract_command: Option<&str>,
     verification: Option<&DeployVerification>,
+    remote_owner: Option<&str>,
 ) -> Result<DeployResult> {
     // Step 1: Upload (directory or file)
     if local_path.is_dir() {
@@ -242,7 +243,7 @@ pub fn deploy_artifact(
 
             // Fix file permissions after extraction
             eprintln!("[deploy] Fixing file permissions");
-            permissions::fix_deployed_permissions(ssh_client, remote_path)?;
+            permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)?;
         }
     }
 
@@ -881,6 +882,7 @@ pub fn deploy_components(
                     verification.as_ref(),
                     Some(base_path),
                     project.domain.as_deref(),
+                    component.remote_owner.as_deref(),
                 )
             } else {
                 // Standard deploy
@@ -890,6 +892,7 @@ pub fn deploy_components(
                     &install_dir,
                     component.extract_command.as_deref(),
                     verification.as_ref(),
+                    component.remote_owner.as_deref(),
                 )
             };
 
@@ -1347,6 +1350,7 @@ fn deploy_with_override(
     verification: Option<&DeployVerification>,
     site_root: Option<&str>,
     domain: Option<&str>,
+    remote_owner: Option<&str>,
 ) -> Result<DeployResult> {
     let artifact_filename = local_path
         .file_name()
@@ -1442,7 +1446,7 @@ fn deploy_with_override(
     // Step 5: Fix permissions unless skipped
     if !override_config.skip_permissions_fix {
         eprintln!("[deploy] Fixing file permissions");
-        permissions::fix_deployed_permissions(ssh_client, remote_path)?;
+        permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)?;
     }
 
     // Step 6: Run verification if configured
