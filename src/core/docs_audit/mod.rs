@@ -76,14 +76,22 @@ pub struct AuditResult {
 /// Audit a component's documentation and return an alignment report.
 ///
 /// If `docs_dir_override` is provided, it's used instead of the component's
-/// configured `docs_dir` (which defaults to "docs").
+/// configured `docs_dir`/`docs_dirs` (which defaults to "docs").
 pub fn audit_component(component_id: &str, docs_dir_override: Option<&str>) -> Result<AuditResult> {
     let comp = component::load(component_id)?;
     let source_path = Path::new(&comp.local_path);
-    let docs_dir = docs_dir_override
-        .or(comp.docs_dir.as_deref())
-        .unwrap_or("docs");
-    let docs_path = source_path.join(docs_dir);
+
+    // Resolve docs directories: CLI override > docs_dirs > docs_dir > default "docs"
+    let docs_dirs: Vec<String> = if let Some(override_dir) = docs_dir_override {
+        vec![override_dir.to_string()]
+    } else if !comp.docs_dirs.is_empty() {
+        comp.docs_dirs.clone()
+    } else {
+        vec![comp.docs_dir.as_deref().unwrap_or("docs").to_string()]
+    };
+
+    // Primary docs path (first dir) for claim verification and priority docs
+    let docs_path = source_path.join(&docs_dirs[0]);
 
     // Get changelog target to exclude from audit (historical references are expected)
     let changelog_exclude = comp.changelog_target.as_deref();
@@ -127,7 +135,7 @@ pub fn audit_component(component_id: &str, docs_dir_override: Option<&str>) -> R
     let undocumented_features = detect_undocumented_features(
         &feature_patterns,
         source_path,
-        &docs_path,
+        &docs_dirs,
         changelog_exclude,
     );
 
@@ -384,10 +392,14 @@ fn collect_module_feature_patterns(comp: &component::Component) -> Vec<String> {
 /// Scans the entire source tree (excluding vendor/node_modules/test dirs) for
 /// feature registrations matching the configured patterns. Any feature name not
 /// found in documentation content is reported as undocumented.
+///
+/// Documentation is gathered from:
+/// 1. All configured docs directories
+/// 2. README.md and README.txt in the project root (auto-included)
 fn detect_undocumented_features(
     feature_patterns: &[String],
     source_path: &Path,
-    docs_path: &Path,
+    docs_dirs: &[String],
     changelog_exclude: Option<&str>,
 ) -> Vec<UndocumentedFeature> {
     if feature_patterns.is_empty() {
@@ -404,13 +416,30 @@ fn detect_undocumented_features(
         return Vec::new();
     }
 
-    // Collect all doc content for searching
-    let doc_files = find_doc_files(docs_path, changelog_exclude);
-    let all_doc_content: String = doc_files
-        .iter()
-        .filter_map(|f| fs::read_to_string(docs_path.join(f)).ok())
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Collect all doc content from all configured directories
+    let mut all_doc_parts: Vec<String> = Vec::new();
+
+    for docs_dir in docs_dirs {
+        let docs_path = source_path.join(docs_dir);
+        let doc_files = find_doc_files(&docs_path, changelog_exclude);
+        for f in &doc_files {
+            if let Ok(content) = fs::read_to_string(docs_path.join(f)) {
+                all_doc_parts.push(content);
+            }
+        }
+    }
+
+    // Auto-include README files from project root
+    for readme in &["README.md", "readme.md", "README.txt", "readme.txt"] {
+        let readme_path = source_path.join(readme);
+        if readme_path.exists() {
+            if let Ok(content) = fs::read_to_string(&readme_path) {
+                all_doc_parts.push(content);
+            }
+        }
+    }
+
+    let all_doc_content = all_doc_parts.join("\n");
 
     // Find all source files in the project (excluding common non-source dirs)
     let source_files = find_source_files(source_path);
@@ -747,7 +776,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
+        let result = detect_undocumented_features(&patterns, source_path, &["docs".to_string()], None);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "coolStep");
@@ -758,7 +787,7 @@ index 111222..333444 100644
     #[test]
     fn test_detect_undocumented_features_empty_when_no_patterns() {
         let dir = tempfile::tempdir().unwrap();
-        let result = detect_undocumented_features(&[], dir.path(), &dir.path().join("docs"), None);
+        let result = detect_undocumented_features(&[], dir.path(), &["docs".to_string()], None);
         assert!(result.is_empty());
     }
 
@@ -773,7 +802,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
+        let result = detect_undocumented_features(&patterns, source_path, &["docs".to_string()], None);
         assert!(result.is_empty());
     }
 
@@ -789,7 +818,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
+        let result = detect_undocumented_features(&patterns, source_path, &["docs".to_string()], None);
         assert!(result.is_empty());
     }
 
@@ -811,7 +840,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"register_rest_route\(\s*['"](\w[\w-]*/v\d+)['"]"#.to_string()];
 
-        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
+        let result = detect_undocumented_features(&patterns, source_path, &["docs".to_string()], None);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "myplugin/v1");
@@ -836,7 +865,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"register_rest_route\(\s*['"](\w[\w-]*/v\d+)['"]"#.to_string()];
 
-        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
+        let result = detect_undocumented_features(&patterns, source_path, &["docs".to_string()], None);
         assert!(result.is_empty());
     }
 
@@ -861,8 +890,64 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
+        let result = detect_undocumented_features(&patterns, source_path, &["docs".to_string()], None);
         assert_eq!(result.len(), 1); // Deduplicated
+    }
+
+    #[test]
+    fn test_detect_undocumented_features_reads_readme() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path();
+        let docs_path = source_path.join("docs");
+        fs::create_dir_all(&docs_path).unwrap();
+
+        // Feature in source
+        fs::write(
+            source_path.join("plugin.js"),
+            "registerStepType('readmeStep', handler);\nregisterStepType('hiddenStep', handler);\n",
+        )
+        .unwrap();
+
+        // README.md documents one of them (no docs/ file does)
+        fs::write(source_path.join("README.md"), "This plugin provides readmeStep for automation.\n").unwrap();
+
+        let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
+        let result = detect_undocumented_features(&patterns, source_path, &["docs".to_string()], None);
+
+        // readmeStep is documented via README, hiddenStep is not
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "hiddenStep");
+    }
+
+    #[test]
+    fn test_detect_undocumented_features_multiple_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path();
+        let docs_path = source_path.join("docs");
+        let wiki_path = source_path.join("wiki");
+        fs::create_dir_all(&docs_path).unwrap();
+        fs::create_dir_all(&wiki_path).unwrap();
+
+        // Feature in source
+        fs::write(
+            source_path.join("plugin.js"),
+            "registerStepType('wikiStep', handler);\nregisterStepType('orphanStep', handler);\n",
+        )
+        .unwrap();
+
+        // Documented in wiki, not in docs
+        fs::write(wiki_path.join("features.md"), "The wikiStep handles wiki operations.\n").unwrap();
+
+        let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
+
+        // Only scanning docs/ — both undocumented
+        let result = detect_undocumented_features(&patterns, source_path, &["docs".to_string()], None);
+        assert_eq!(result.len(), 2);
+
+        // Scanning both dirs — wikiStep found in wiki/
+        let result = detect_undocumented_features(&patterns, source_path, &["docs".to_string(), "wiki".to_string()], None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "orphanStep");
     }
 
     #[test]

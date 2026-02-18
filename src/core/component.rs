@@ -112,8 +112,15 @@ pub struct Component {
 
     /// Documentation directory relative to local_path (default: "docs").
     /// Used by `docs audit` and `docs scaffold` to locate documentation files.
+    /// Can be a single path or use `docs_dirs` for multiple paths.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docs_dir: Option<String>,
+
+    /// Multiple documentation directories relative to local_path.
+    /// When set, all directories are scanned for documentation.
+    /// Takes precedence over `docs_dir`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub docs_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -165,6 +172,7 @@ impl Component {
             git_deploy: None,
             auto_cleanup: false,
             docs_dir: None,
+            docs_dirs: Vec::new(),
         }
     }
 }
