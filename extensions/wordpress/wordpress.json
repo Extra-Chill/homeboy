@@ -235,9 +235,13 @@
     "register_taxonomy\\(\\s*['\"]([\\w-]+)['\"]",
     "register_block_type\\(\\s*['\"]([\\w-]+/[\\w-]+)['\"]",
     "register_setting\\(\\s*['\"]([\\w-]+)['\"]",
-    "register_rest_route\\(\\s*['\"]([\\w-]+/v\\d+)['\"]",
+    "register_rest_route\\([^)]*?,\\s*['\"](/[^'\"]+)['\"]",
     "add_shortcode\\(\\s*['\"]([\\w-]+)['\"]",
     "wp_register_script\\(\\s*['\"]([\\w-]+)['\"]",
-    "wp_register_style\\(\\s*['\"]([\\w-]+)['\"]"
+    "wp_register_style\\(\\s*['\"]([\\w-]+)['\"]",
+    "wp_register_ability\\(\\s*['\"]([^'\"]+)['\"]",
+    "wp_register_ability_category\\(\\s*['\"]([^'\"]+)['\"]",
+    "WP_CLI::add_command\\(\\s*['\"]([^'\"]+)['\"]",
+    "\\$this->registerTool\\(\\s*['\"][^'\"]+['\"]\\s*,\\s*['\"]([^'\"]+)['\"]"
   ]
 }
