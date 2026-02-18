@@ -117,10 +117,9 @@ pub fn audit_component(component_id: &str) -> Result<AuditResult> {
     let priority_docs = build_priority_docs(&tasks, &changed_files);
     let broken_references = extract_broken_references(&tasks);
 
-    // Detect undocumented features in changed source files
+    // Detect undocumented features across all source files (not just changed ones)
     let undocumented_features = detect_undocumented_features(
         &feature_patterns,
-        &changed_files,
         source_path,
         &docs_path,
         changelog_exclude,
@@ -374,10 +373,13 @@ fn collect_module_feature_patterns(comp: &component::Component) -> Vec<String> {
     patterns
 }
 
-/// Detect features in changed source files that have no mentions in documentation.
+/// Detect features across all source files that have no mentions in documentation.
+///
+/// Scans the entire source tree (excluding vendor/node_modules/test dirs) for
+/// feature registrations matching the configured patterns. Any feature name not
+/// found in documentation content is reported as undocumented.
 fn detect_undocumented_features(
     feature_patterns: &[String],
-    changed_files: &[String],
     source_path: &Path,
     docs_path: &Path,
     changelog_exclude: Option<&str>,
@@ -404,33 +406,45 @@ fn detect_undocumented_features(
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Find all source files in the project (excluding common non-source dirs)
+    let source_files = find_source_files(source_path);
+
     let mut undocumented = Vec::new();
+    let mut seen_names: HashSet<String> = HashSet::new();
 
-    for file in changed_files {
-        // Skip markdown files
-        if file.ends_with(".md") {
-            continue;
-        }
-
+    for file in &source_files {
         let file_path = source_path.join(file);
         let content = match fs::read_to_string(&file_path) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
+        // Build line offset table for mapping byte positions to line numbers
+        let line_offsets: Vec<usize> = std::iter::once(0)
+            .chain(content.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+
         for (regex, pattern) in &compiled {
-            for (line_idx, line) in content.lines().enumerate() {
-                for caps in regex.captures_iter(line) {
-                    if let Some(name_match) = caps.get(1) {
-                        let name = name_match.as_str().to_string();
-                        if !all_doc_content.contains(&name) {
-                            undocumented.push(UndocumentedFeature {
-                                name,
-                                source_file: file.clone(),
-                                line: line_idx + 1,
-                                pattern: pattern.clone(),
-                            });
-                        }
+            // Search the full file content (not line-by-line) to handle
+            // multi-line registrations like:
+            //   register_rest_route(
+            //       'namespace/v1',
+            for caps in regex.captures_iter(&content) {
+                if let Some(name_match) = caps.get(1) {
+                    let name = name_match.as_str().to_string();
+                    // Deduplicate: only report first occurrence of each feature name
+                    if !seen_names.contains(&name) && !all_doc_content.contains(&name) {
+                        // Map byte offset to line number
+                        let byte_pos = name_match.start();
+                        let line_num = line_offsets
+                            .partition_point(|&offset| offset <= byte_pos);
+                        seen_names.insert(name.clone());
+                        undocumented.push(UndocumentedFeature {
+                            name,
+                            source_file: file.clone(),
+                            line: line_num,
+                            pattern: pattern.clone(),
+                        });
                     }
                 }
             }
@@ -438,6 +452,53 @@ fn detect_undocumented_features(
     }
 
     undocumented
+}
+
+/// Directories to skip when scanning for source files.
+const SKIP_DIRS: &[&str] = &[
+    "vendor",
+    "node_modules",
+    ".git",
+    "target",
+    "build",
+    "dist",
+    "__pycache__",
+    ".svn",
+];
+
+/// Recursively find all non-markdown source files, excluding common dependency dirs.
+fn find_source_files(source_path: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    collect_source_files(source_path, source_path, &mut files);
+    files.sort();
+    files
+}
+
+fn collect_source_files(base: &Path, dir: &Path, files: &mut Vec<String>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if name.starts_with('.') {
+            continue;
+        }
+
+        if path.is_dir() {
+            if SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            collect_source_files(base, &path, files);
+        } else if path.is_file() && !name.ends_with(".md") {
+            if let Ok(relative) = path.strip_prefix(base) {
+                files.push(relative.to_string_lossy().to_string());
+            }
+        }
+    }
 }
 
 /// Collect audit ignore patterns from all linked modules.
@@ -679,9 +740,8 @@ index 111222..333444 100644
         fs::write(docs_path.join("guide.md"), "Use the docStep to do things.\n").unwrap();
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
-        let changed_files = vec!["plugin.js".to_string()];
 
-        let result = detect_undocumented_features(&patterns, &changed_files, source_path, &docs_path, None);
+        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "coolStep");
@@ -692,7 +752,7 @@ index 111222..333444 100644
     #[test]
     fn test_detect_undocumented_features_empty_when_no_patterns() {
         let dir = tempfile::tempdir().unwrap();
-        let result = detect_undocumented_features(&[], &["file.rs".to_string()], dir.path(), &dir.path().join("docs"), None);
+        let result = detect_undocumented_features(&[], dir.path(), &dir.path().join("docs"), None);
         assert!(result.is_empty());
     }
 
@@ -706,9 +766,8 @@ index 111222..333444 100644
         fs::write(source_path.join("notes.md"), "registerStepType('hidden', h);\n").unwrap();
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
-        let changed_files = vec!["notes.md".to_string()];
 
-        let result = detect_undocumented_features(&patterns, &changed_files, source_path, &docs_path, None);
+        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
         assert!(result.is_empty());
     }
 
@@ -723,10 +782,81 @@ index 111222..333444 100644
         fs::write(docs_path.join("guide.md"), "The myStep feature does things.\n").unwrap();
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
-        let changed_files = vec!["plugin.js".to_string()];
 
-        let result = detect_undocumented_features(&patterns, &changed_files, source_path, &docs_path, None);
+        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_detect_undocumented_features_scans_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path();
+        let docs_path = source_path.join("docs");
+        let inc_path = source_path.join("inc").join("Api");
+        fs::create_dir_all(&docs_path).unwrap();
+        fs::create_dir_all(&inc_path).unwrap();
+
+        // Feature in a nested subdirectory (not in changed files)
+        fs::write(
+            inc_path.join("Routes.php"),
+            "register_rest_route('myplugin/v1', '/items', []);\n",
+        )
+        .unwrap();
+
+        let patterns = vec![r#"register_rest_route\(\s*['"](\w[\w-]*/v\d+)['"]"#.to_string()];
+
+        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "myplugin/v1");
+        assert!(result[0].source_file.contains("Routes.php"));
+    }
+
+    #[test]
+    fn test_detect_undocumented_features_skips_vendor() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path();
+        let docs_path = source_path.join("docs");
+        let vendor_path = source_path.join("vendor").join("lib");
+        fs::create_dir_all(&docs_path).unwrap();
+        fs::create_dir_all(&vendor_path).unwrap();
+
+        // Feature in vendor should be ignored
+        fs::write(
+            vendor_path.join("plugin.php"),
+            "register_rest_route('vendor/v1', '/stuff', []);\n",
+        )
+        .unwrap();
+
+        let patterns = vec![r#"register_rest_route\(\s*['"](\w[\w-]*/v\d+)['"]"#.to_string()];
+
+        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_detect_undocumented_features_deduplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path();
+        let docs_path = source_path.join("docs");
+        fs::create_dir_all(&docs_path).unwrap();
+
+        // Same feature name registered in two files
+        fs::write(
+            source_path.join("a.js"),
+            "registerStepType('myStep', handler);\n",
+        )
+        .unwrap();
+        fs::write(
+            source_path.join("b.js"),
+            "registerStepType('myStep', handler);\n",
+        )
+        .unwrap();
+
+        let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
+
+        let result = detect_undocumented_features(&patterns, source_path, &docs_path, None);
+        assert_eq!(result.len(), 1); // Deduplicated
     }
 
     #[test]
