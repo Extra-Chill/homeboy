@@ -293,6 +293,7 @@ homeboy config path                        # show config file path
   "remote_path": "/usr/local/bin",
   "build_command": "cargo build --release",
   "build_artifact": "target/release/myapp",
+  "remote_owner": "www-data:www-data",
   "version_targets": [
     { "file": "Cargo.toml", "pattern": "^version = \"(\\d+\\.\\d+\\.\\d+)\"" }
   ],

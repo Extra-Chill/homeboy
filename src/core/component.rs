@@ -95,6 +95,11 @@ pub struct Component {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_command: Option<String>,
 
+    /// Owner:group for deployed files (e.g., "www-data:www-data").
+    /// If not set, auto-detected from remote_path ownership.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_owner: Option<String>,
+
     /// Deployment strategy: "rsync" (default) or "git"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_strategy: Option<String>,
@@ -150,6 +155,7 @@ impl Component {
             post_release_commands: Vec::new(),
             build_command: None,
             extract_command: None,
+            remote_owner: None,
             deploy_strategy: None,
             git_deploy: None,
             auto_cleanup: false,
