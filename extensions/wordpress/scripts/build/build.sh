@@ -397,7 +397,9 @@ validate_build() {
 run_tests() {
     if [ -f "composer.json" ] && grep -q '"test"' composer.json; then
         # Check for test override settings
-        SKIP_TESTS="${HOMEBOY_SKIP_TESTS:-}"
+        # Default: skip tests during builds. Use HOMEBOY_SKIP_TESTS=0 to force tests.
+        # Tests should run via `homeboy test`, not during builds/deploys.
+        SKIP_TESTS="${HOMEBOY_SKIP_TESTS:-1}"
         USE_LOCAL_TESTS="${HOMEBOY_USE_LOCAL_TESTS:-}"
 
         if [ "$SKIP_TESTS" = "true" ] || [ "$SKIP_TESTS" = "1" ]; then
