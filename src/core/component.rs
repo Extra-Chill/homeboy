@@ -109,6 +109,11 @@ pub struct Component {
     /// Enable post-deploy cleanup of build dependencies (default: false)
     #[serde(default)]
     pub auto_cleanup: bool,
+
+    /// Documentation directory relative to local_path (default: "docs").
+    /// Used by `docs audit` and `docs scaffold` to locate documentation files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docs_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -159,6 +164,7 @@ impl Component {
             deploy_strategy: None,
             git_deploy: None,
             auto_cleanup: false,
+            docs_dir: None,
         }
     }
 }

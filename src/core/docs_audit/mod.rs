@@ -74,10 +74,16 @@ pub struct AuditResult {
 }
 
 /// Audit a component's documentation and return an alignment report.
-pub fn audit_component(component_id: &str) -> Result<AuditResult> {
+///
+/// If `docs_dir_override` is provided, it's used instead of the component's
+/// configured `docs_dir` (which defaults to "docs").
+pub fn audit_component(component_id: &str, docs_dir_override: Option<&str>) -> Result<AuditResult> {
     let comp = component::load(component_id)?;
     let source_path = Path::new(&comp.local_path);
-    let docs_path = source_path.join("docs");
+    let docs_dir = docs_dir_override
+        .or(comp.docs_dir.as_deref())
+        .unwrap_or("docs");
+    let docs_path = source_path.join(docs_dir);
 
     // Get changelog target to exclude from audit (historical references are expected)
     let changelog_exclude = comp.changelog_target.as_deref();

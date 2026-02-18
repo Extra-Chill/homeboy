@@ -47,6 +47,10 @@ pub enum DocsCommand {
     Audit {
         /// Component to audit
         component_id: String,
+
+        /// Docs directory relative to component root (overrides component config, default: docs)
+        #[arg(long)]
+        docs_dir: Option<String>,
     },
 
     /// Generate documentation files from JSON spec
@@ -156,7 +160,7 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
             source_extensions,
             detect_by_extension,
         ),
-        Some(DocsCommand::Audit { component_id }) => run_audit(&component_id),
+        Some(DocsCommand::Audit { component_id, docs_dir }) => run_audit(&component_id, docs_dir.as_deref()),
         Some(DocsCommand::Generate { spec, json }) => {
             let json_spec = json.as_deref().or(spec.as_deref());
             run_generate(json_spec)
@@ -255,8 +259,8 @@ fn run_scaffold(
 // Audit (Claim-Based Documentation Verification)
 // ============================================================================
 
-fn run_audit(component_id: &str) -> CmdResult<DocsOutput> {
-    let result = docs_audit::audit_component(component_id)?;
+fn run_audit(component_id: &str, docs_dir: Option<&str>) -> CmdResult<DocsOutput> {
+    let result = docs_audit::audit_component(component_id, docs_dir)?;
     Ok((DocsOutput::Audit(result), 0))
 }
 
