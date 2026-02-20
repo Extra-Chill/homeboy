@@ -1,166 +1,90 @@
 # Homeboy
 
-Native macOS SwiftUI application for development and deployment automation. Supports WordPress, Node.js, and custom project types via extensible JSON definitions. Configure multiple sites and extend functionality with installable modules.
+A visual dashboard for all your web projects. See everything in one place—what's deployed, what needs updating, and what's happening across your sites.
 
-**Note:** The desktop app may lag behind the Homeboy CLI. The CLI is the source of truth for behavior and output contracts.
+Homeboy Desktop connects to your servers and shows you a unified view of all your projects, components, and deployments. No more switching between SSH terminals, FTP clients, and scattered scripts.
 
-## Features
+**Perfect for:** Site owners, project managers, and developers who prefer a visual interface over the command line.
 
-### Core Tools
+**Powered by:** The [Homeboy CLI](../homeboy/) under the hood (required, installed separately).
 
-**Deployer**
-One-click deployment of components (plugins, themes, packages) to any SSH-accessible server.
-- SSH key authentication
-- Deploys prebuilt artifacts (build happens via the CLI `homeboy build`, not as a deploy flag)
-- Version comparison (local vs remote)
-- Per-site component registry
+## What You Get
 
-**Database Browser**
-Browse and query remote databases via the `homeboy db` CLI (executed over SSH where applicable).
-- Table listing with multisite support (WordPress projects)
-- Table grouping system for organization
-- Query editor with native table results display
-- Row selection and clipboard operations
+### One Dashboard for Everything
 
-**Remote File Editor**
-Edit remote files over SSH with backup support.
-- Pinnable file tabs for frequently accessed files
-- Syntax highlighting
+- **See all your sites** — Know what's deployed, what's outdated, and what needs attention at a glance
+- **One-click deployments** — Push updates without touching the terminal
+- **Project overview** — Visual status across all your projects and components
 
-**Remote Log Viewer**
-View and search remote log files over SSH.
-- Real-time log viewing with filtering
-- Pinnable log tabs for frequently accessed logs
+### Built-in Tools
 
-### Module System
+**Deployer** — Push code to any server with a click
+- One-click deployment of plugins, themes, and packages
+- Version comparison (see what's outdated before you deploy)
+- Automatic backups before changes
 
-Extend functionality with installable modules. Modules are self-contained plugins with:
-- JSON manifest defining inputs, outputs, and actions
-- Isolated Python virtual environments
-- Dynamic UI generation from manifest
-- API action support for WordPress REST endpoints
+**Database Browser** — Explore your databases visually
+- Browse tables without writing SQL
+- Run queries and see results in a clean table view
+- Copy data to clipboard instantly
 
-See docs/MODULE-SPEC.md for the complete module specification.
+**Remote File Editor** — Edit files on your server directly
+- Pinnable tabs for frequently accessed files
+- Syntax highlighting for code files
+- Automatic backups before saves
 
-### Command Line Tool
+**Remote Log Viewer** — Monitor logs in real-time
+- Live log streaming with filtering
+- Search across log files
+- Pinnable tabs for important logs
 
-Homeboy Desktop shells out to the standalone `homeboy` CLI binary for most core operations.
+## Quick Start
 
-This README avoids duplicating CLI reference docs.
+1. **Install Homeboy CLI** first (the Desktop app needs it):
+   ```bash
+   brew tap Extra-Chill/homebrew-tap
+   brew install homeboy
+   ```
 
-- Canonical CLI reference: `homeboy docs`
-- Desktop/CLI integration notes: [docs/CLI.md](docs/CLI.md)
-- Embedded CLI markdown sources: [`../homeboy/docs/`](../homeboy/docs/index.md)
+2. **Download Homeboy Desktop** from the [releases page](https://github.com/Extra-Chill/homeboy-desktop/releases)
 
-Compatibility note: the CLI is the source of truth for command behavior and output. The desktop app may lag behind and not support newer commands/options until it is updated.
+3. **Set up your first server**:
+   - Open Settings → Servers → Add Server
+   - Enter your server details (host, username)
+   - Generate an SSH key and add it to your server
 
-## Requirements
+4. **Add a project**:
+   - Settings → Projects → Add Project
+   - Link it to your server
+   - Configure the path where your site lives on the server
 
-- macOS 14.4+ (Sonoma)
-- Xcode 15.0+
-- Python 3.12+ (Homebrew) - for modules with Python scripts
+5. **Start managing**:
+   - View your dashboard
+   - Deploy components with one click
+   - Browse databases and logs visually
 
-## CLI dependency
+## System Requirements
 
-Homeboy Desktop relies on a system-installed `homeboy` CLI binary. The app discovers it at:
-- `/opt/homebrew/bin/homeboy` (Apple Silicon Homebrew)
-- `/usr/local/bin/homeboy` (Intel Homebrew / manual)
-- `~/.cargo/bin/homeboy` (Cargo)
+- **macOS 14.4+** (Sonoma or later)
+- **Homeboy CLI** must be installed ([see CLI installation](../homeboy/#installation))
+- Optional: Python 3.12+ (only needed for certain modules)
 
-(See `Homeboy/Core/CLI/CLIVersionChecker.swift` for the canonical search order.)
+> **Note:** The Desktop app may lag behind CLI features. The CLI is the source of truth for behavior.
 
-The desktop app uses a 30s default timeout for CLI commands (see `Homeboy/Core/CLI/CLIBridge.swift`).
-The app checks for updates via GitHub releases: `Extra-Chill/homeboy-cli`.
+## What Homeboy Desktop Is NOT
 
-Note: update checking requires network access (GitHub API).
+- **Not a hosting platform** — You bring your own servers (VPS, shared hosting, etc.)
+- **Not a code editor** — Use it alongside your IDE, not instead of it
+- **Not cross-platform** — macOS only; for Windows/Linux use the [CLI](../homeboy/)
 
-For desktop  CLI integration details (including config paths and timeouts), see:
-- [docs/CLI.md](docs/CLI.md)
+## Documentation
 
-For monorepo setup details, see:
-- [Root README](../README.md)
-
-### Project Types
-
-Project type support is primarily defined by installed modules and the CLI; the desktop app UI may not expose all project/module settings.
-
-## Installing Modules
-
-Homeboy Desktop installs/links modules by shelling out to the `homeboy` CLI.
-
-1. Go to **Settings > Modules**
-2. Click **Install Module from Folder...**
-3. Select a local folder containing a `homeboy.json` manifest
-4. Homeboy runs `homeboy module install <path>` under the hood
-
-Installed modules live under CLI's config directory:
-
-```
-~/.config/homeboy/modules/
-```
-
-Note: the desktop app does NOT manage its own config storage. All configuration is stored by the CLI at `~/.config/homeboy/`. Desktop app reads/writes configuration via CLI commands through CLIBridge.
-## Server Configuration (SSH)
-
-Remote features (deployments, remote file browsing, remote database access) require an SSH server.
-
-1. Go to **Settings > Servers**
-2. Click **Add Server**
-3. Fill in:
-   - **Server ID**: unique identifier (e.g. `production-1`)
-   - **Display Name**: any friendly name
-   - **Host**: SSH host/IP
-   - **Username**: SSH user
-   - **Port**: usually `22`
-4. Under **SSH Key**, click **Generate SSH Key**
-5. Click **Show** to copy the public key and add it to the server’s `~/.ssh/authorized_keys`
-6. Click **Test SSH Connection** to verify (requires selecting a project linked to this server)
-
-For WordPress projects, set the **wp-content path** in project settings (you can use **Browse** to discover installations on the server).
-
-## Documentation map
-
-This README stays desktop-focused and intentionally avoids duplicating CLI reference docs.
-
-- Desktop 1 CLI integration + config tree: [`docs/CLI.md`](docs/CLI.md)
-- Embedded CLI markdown sources (canonical command docs): [`../homeboy/docs/index.md`](../homeboy/docs/index.md)
-- Module manifest spec (`homeboy.json`): [`docs/MODULE-SPEC.md`](docs/MODULE-SPEC.md)
-
-## API Authentication
-
-The app supports JWT authentication with REST APIs:
-- Access and refresh tokens stored in macOS Keychain (per-site)
-- Auto-refresh before token expiry
-- Requires valid credentials for the configured `/auth/login` endpoint
-
-Configure the API base URL in **Settings > API** for each project. API authentication enables module actions that interact with your REST API.
-
-## Creating Modules
-
-Modules follow a JSON manifest contract. See docs/MODULE-SPEC.md for:
-- Manifest schema
-- Input types (text, stepper, toggle, select)
-- Output display options
-- Builtin and API actions
-- Script output contract
-
-Example module structure:
-```
-my-module/
-├── homeboy.json       # Manifest (required)
-├── script.py          # Optional script entrypoint
-└── README.md          # Documentation
-```
-
-## Development
-
-Regenerate the desktop app Xcode project after adding/removing files:
-```bash
-xcodegen generate --spec homeboy-desktop/project.yml
-```
+- [CLI documentation](../homeboy/docs/) — Complete command reference
+- [Desktop/CLI integration](docs/CLI.md) — How they work together
+- [Module specification](docs/MODULE-SPEC.md) — Extend with custom modules
 
 ## License
 
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version.
+GNU General Public License v2.0 or later. See [LICENSE](LICENSE).
 
-See [LICENSE](LICENSE) for the full license text.
+Created by Chris Huber · https://chubes.net
