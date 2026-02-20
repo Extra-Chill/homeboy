@@ -8,7 +8,7 @@ struct ModuleActionsBar: View {
     
     var body: some View {
         HStack {
-            ForEach(module.manifest.actions) { action in
+            ForEach(module.manifest.actions ?? []) { action in
                 actionButton(for: action)
             }
             
@@ -54,7 +54,7 @@ struct ModuleActionsBar: View {
         }
         
         // Check row selection for selectable outputs
-        if module.manifest.output.selectable && viewModel.selectedRows.isEmpty {
+        if module.manifest.output?.selectable == true && viewModel.selectedRows.isEmpty {
             return (false, "Select rows first")
         }
         
