@@ -2,6 +2,8 @@
 
 Development and deployment automation CLI built in Rust — manage projects, servers, and fleets from the terminal.
 
+> **New to Homeboy?** If you prefer a visual dashboard, check out [Homeboy Desktop](../homeboy-desktop/) — a native macOS app that provides the same capabilities with a point-and-click interface. (Desktop requires macOS 14.4+; CLI works on macOS, Linux, and Windows.)
+
 ## What It Does
 
 Homeboy replaces scattered scripts, FTP clients, and manual SSH sessions with one tool:
@@ -11,6 +13,17 @@ Homeboy replaces scattered scripts, FTP clients, and manual SSH sessions with on
 - **Release pipelines** — Version bump, changelog, build, tag, publish — one command
 - **Remote operations** — SSH, file management, database queries, log tailing
 - **Structured output** — JSON for scripting and AI agents, human-readable for terminals
+
+## CLI vs Desktop
+
+| What you need | Use |
+|---------------|-----|
+| Visual dashboard, one-click deployments | [**Homeboy Desktop**](../homeboy-desktop/) (macOS only) |
+| Terminal automation, CI/CD pipelines | **Homeboy CLI** (this tool) |
+| Scripting and custom workflows | **Homeboy CLI** |
+| Browse databases and logs in a UI | [**Homeboy Desktop**](../homeboy-desktop/) |
+
+**New to Homeboy?** Start with [Homeboy Desktop](../homeboy-desktop/) for a visual overview, or use the CLI if you're comfortable with the terminal.
 
 ## How It Works
 
