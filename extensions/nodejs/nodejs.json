@@ -1,6 +1,6 @@
 {
   "name": "Node.js",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "icon": "server.rack",
   "description": "Node.js project type with PM2 integration",
   "author": "Extra Chill",
@@ -20,6 +20,12 @@
 
   "default_pinned_files": ["package.json", "ecosystem.config.js", ".env.example"],
   "default_pinned_logs": ["logs/combined.log", "logs/err.log", "logs/out.log"],
+
+  "build": {
+    "cleanup_paths": [
+      "node_modules"
+    ]
+  },
 
     "database": {
       "cli": {

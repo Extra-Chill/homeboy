@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -156,7 +156,12 @@
     "command_template": "bash {{script}}",
     "module_script": "scripts/build/build.sh",
     "pre_build_script": "scripts/build/validate-build.sh",
-    "artifact_pattern": "build/{component_id}.zip"
+    "artifact_pattern": "build/{component_id}.zip",
+    "cleanup_paths": [
+      "node_modules",
+      "vendor",
+      "build"
+    ]
   },
   "lint": {
     "module_script": "scripts/lint/lint-runner.sh"
