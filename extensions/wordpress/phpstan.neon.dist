@@ -2,9 +2,6 @@ includes:
     - vendor/szepeviktor/phpstan-wordpress/extension.neon
 
 parameters:
-    bootstrapFiles:
-        - %currentWorkingDirectory%/vendor/autoload.php
-
     ignoreErrors:
         -
             identifier: return.void
