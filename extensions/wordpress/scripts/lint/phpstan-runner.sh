@@ -83,8 +83,8 @@ phpstan_args+=(--configuration="$PHPSTAN_CONFIG")
 PHPSTAN_LEVEL="${HOMEBOY_PHPSTAN_LEVEL:-5}"
 phpstan_args+=(--level="$PHPSTAN_LEVEL")
 
-# Memory limit (default: 1G)
-phpstan_args+=(--memory-limit=1G)
+# Memory limit (default: 2G)
+phpstan_args+=(--memory-limit=2G)
 
 # Include component baseline if it exists
 if [ -f "$COMPONENT_BASELINE" ]; then
