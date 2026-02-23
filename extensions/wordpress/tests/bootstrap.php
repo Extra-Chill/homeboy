@@ -139,3 +139,10 @@ if ($component_type === 'theme') {
 
 // Start up the WP testing environment
 require_once $_tests_dir . '/includes/bootstrap.php';
+
+// Flush WordPress output buffers so PHPUnit's result printer works.
+// The WP bootstrap starts ob_start() during initialization which captures
+// all subsequent stdout, including PHPUnit's test output.
+while ( ob_get_level() > 0 ) {
+	ob_end_flush();
+}

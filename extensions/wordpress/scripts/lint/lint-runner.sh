@@ -343,7 +343,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     fi
 
     # Run ESLint in summary mode
-    ESLINT_RUNNER="${MODULE_PATH}/scripts/eslint-runner.sh"
+    ESLINT_RUNNER="${MODULE_PATH}/scripts/lint/eslint-runner.sh"
     ESLINT_PASSED=1
 
     if [ -f "$ESLINT_RUNNER" ]; then
@@ -405,7 +405,7 @@ else
 fi
 
 # Run ESLint for JavaScript files
-ESLINT_RUNNER="${MODULE_PATH}/scripts/eslint-runner.sh"
+ESLINT_RUNNER="${MODULE_PATH}/scripts/lint/eslint-runner.sh"
 ESLINT_PASSED=1
 
 if [ -f "$ESLINT_RUNNER" ]; then

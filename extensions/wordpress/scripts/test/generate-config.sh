@@ -37,10 +37,10 @@ if (!defined('ABSPATH')) {
 require_once ABSPATH . 'wp-content/db.php';
 PHP
 else
-    MYSQL_HOST="$3"
-    MYSQL_DATABASE="$4"
-    MYSQL_USER="$5"
-    MYSQL_PASSWORD="$6"
+    MYSQL_HOST="$4"
+    MYSQL_DATABASE="$5"
+    MYSQL_USER="$6"
+    MYSQL_PASSWORD="$7"
 
     cat > "$ABSPATH/wp-config.php" <<PHP
 <?php
