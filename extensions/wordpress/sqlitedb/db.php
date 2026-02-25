@@ -2,6 +2,11 @@
 // Lightweight SQLite database driver for WordPress testing
 // Minimal implementation to allow WP tests to run using PDO-backed SQLite in module environment
 
+if ( ! extension_loaded( 'pdo_sqlite' ) ) {
+    echo "Fatal: pdo_sqlite extension is not loaded. Install php-sqlite3 and restart PHP.\n";
+    exit( 1 );
+}
+
 // Fast hack: provide a fake mysqli subclass so procedural mysqli_* calls accept the object
 class FakeMySQL extends mysqli {
     // Override constructor to avoid attempting a real connection

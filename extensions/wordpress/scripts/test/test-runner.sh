@@ -180,6 +180,18 @@ export WP_PHPUNIT__TESTS_CONFIG="$WP_TESTS_CONFIG_PATH"
 
 # Generate configuration based on database type
 if [ "$DATABASE_TYPE" = "sqlite" ]; then
+    # Pre-flight: verify pdo_sqlite extension is available
+    if ! php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);' 2>/dev/null; then
+        echo "Error: PHP pdo_sqlite extension is required for SQLite-backed tests."
+        echo ""
+        echo "Install it with:"
+        echo "  Ubuntu/Debian: sudo apt install php-sqlite3"
+        echo "  macOS (Homebrew): brew install php (includes pdo_sqlite)"
+        echo "  RHEL/CentOS: sudo yum install php-pdo"
+        echo ""
+        echo "Or switch to MySQL: homeboy test <component> --setting database_type=mysql"
+        exit 1
+    fi
     bash "${MODULE_PATH}/scripts/test/generate-config.sh" "sqlite" "$ABSPATH" "$MODULE_PATH"
 elif [ "$DATABASE_TYPE" = "mysql" ]; then
     if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then

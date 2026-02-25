@@ -7,9 +7,9 @@ MODULE_PATH="${3:-$(pwd)}"
 
 echo "Generating wp-config.php for $DB_TYPE..."
 
-# Copy SQLite driver to wp-content location
+# Copy SQLite driver to wp-content location (only needed for SQLite mode)
 mkdir -p "$ABSPATH/wp-content"
-if [ -f "${MODULE_PATH}/sqlitedb/db.php" ]; then
+if [ "$DB_TYPE" = "sqlite" ] && [ -f "${MODULE_PATH}/sqlitedb/db.php" ]; then
     cp "${MODULE_PATH}/sqlitedb/db.php" "$ABSPATH/wp-content/"
 fi
 
