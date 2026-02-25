@@ -106,12 +106,40 @@ fi
 # No progress bar for cleaner output
 phpstan_args+=(--no-progress)
 
+# Thread control: HOMEBOY_PHPSTAN_THREADS overrides, otherwise auto-detect.
+# On low-core machines (<=2 CPUs), force single-threaded to avoid parallel worker crashes.
+if [ -n "${HOMEBOY_PHPSTAN_THREADS:-}" ]; then
+    phpstan_args+=("--threads=${HOMEBOY_PHPSTAN_THREADS}")
+elif [ "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)" -le 2 ]; then
+    phpstan_args+=(--threads=1)
+fi
+
 # Add the path to analyze
 phpstan_args+=("$PLUGIN_PATH")
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: PHPStan command: $PHPSTAN_BIN ${phpstan_args[*]}"
 fi
+
+# Helper: detect parallel worker failure in PHPStan JSON output.
+# Returns 0 (true) if the only errors are parallel worker crashes.
+is_parallel_worker_failure() {
+    local output="$1"
+    [ -z "$output" ] && return 1
+    echo "$output" | php -r '
+        $json = json_decode(file_get_contents("php://stdin"), true);
+        if (!$json) exit(1);
+        $totals = $json["totals"] ?? [];
+        $fileErrors = $totals["file_errors"] ?? 0;
+        $globalErrors = $totals["errors"] ?? 0;
+        if ($fileErrors === 0 && $globalErrors > 0) {
+            foreach ($json["errors"] ?? [] as $err) {
+                if (stripos($err, "parallel worker") !== false) exit(0);
+            }
+        }
+        exit(1);
+    ' 2>/dev/null
+}
 
 # Summary mode: get JSON output and parse it
 if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
@@ -122,6 +150,16 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     json_exit=$?
     stderr_output=$(cat "$stderr_file")
     rm -f "$stderr_file"
+
+    # Retry with single thread if parallel workers failed
+    if [ "$json_exit" -ne 0 ] && is_parallel_worker_failure "$json_output"; then
+        echo "Parallel worker failure detected, retrying with --threads=1..."
+        stderr_file=$(mktemp)
+        json_output=$("$PHPSTAN_BIN" "${phpstan_args[@]}" --threads=1 --error-format=json 2>"$stderr_file")
+        json_exit=$?
+        stderr_output=$(cat "$stderr_file")
+        rm -f "$stderr_file"
+    fi
     set -e
 
     # Parse JSON and print full summary with error details
@@ -214,10 +252,29 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
 fi
 
 # Full report mode (default)
-if "$PHPSTAN_BIN" "${phpstan_args[@]}"; then
+set +e
+stderr_file=$(mktemp)
+"$PHPSTAN_BIN" "${phpstan_args[@]}" 2>"$stderr_file"
+full_exit=$?
+stderr_output=$(cat "$stderr_file")
+rm -f "$stderr_file"
+set -e
+
+# Retry with single thread if parallel workers failed
+if [ "$full_exit" -ne 0 ] && echo "$stderr_output" | grep -qi "parallel worker"; then
+    echo "Parallel worker failure detected, retrying with --threads=1..."
+    "$PHPSTAN_BIN" "${phpstan_args[@]}" --threads=1
+    full_exit=$?
+fi
+
+if [ "$full_exit" -eq 0 ]; then
     echo "PHPStan analysis passed"
     exit 0
 else
+    # Show stderr if it wasn't already displayed
+    if [ -n "$stderr_output" ]; then
+        echo "$stderr_output" >&2
+    fi
     echo "PHPStan analysis failed"
     exit 1
 fi
