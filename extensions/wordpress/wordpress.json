@@ -99,6 +99,12 @@
       "wp-test"
     ]
   },
+  "hooks": {
+    "post:deploy": [
+      "wp plugin is-installed {{component_id}} --path={{base_path}} --allow-root 2>/dev/null && wp plugin activate {{component_id}} --path={{base_path}} --allow-root 2>/dev/null || true",
+      "wp cache flush --path={{base_path}} --allow-root 2>/dev/null || true"
+    ]
+  },
   "deploy": {
     "verifications": [
       {
