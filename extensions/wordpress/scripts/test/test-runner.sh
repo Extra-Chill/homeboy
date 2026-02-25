@@ -4,6 +4,20 @@ set -euo pipefail
 FAILED_STEP=""
 FAILURE_OUTPUT=""
 
+# Step filtering: HOMEBOY_STEP=phpunit,lint runs only those steps.
+# HOMEBOY_SKIP=lint,phpstan skips those steps.
+# Step names: lint, phpcs, eslint, phpstan, autoload-check, phpunit
+should_run_step() {
+    local step_name="$1"
+    if [ -n "${HOMEBOY_STEP:-}" ]; then
+        echo ",${HOMEBOY_STEP}," | grep -q ",${step_name}," && return 0 || return 1
+    fi
+    if [ -n "${HOMEBOY_SKIP:-}" ]; then
+        echo ",${HOMEBOY_SKIP}," | grep -q ",${step_name}," && return 1 || return 0
+    fi
+    return 0
+}
+
 print_failure_summary() {
     if [ -n "$FAILED_STEP" ]; then
         echo ""
@@ -264,14 +278,18 @@ export WP_TESTS_DIR="$WP_TESTS_DIR"
 export ABSPATH="$ABSPATH"
 
 # Run linting before tests (unless skipped)
-if [[ "${HOMEBOY_SKIP_LINT:-}" != "1" ]]; then
+if should_run_step "lint" && [[ "${HOMEBOY_SKIP_LINT:-}" != "1" ]]; then
     run_lint
+elif ! should_run_step "lint"; then
+    echo "Skipping linting (--step filter)"
 else
     echo "Skipping linting (--skip-lint)"
 fi
 
 # Run autoload validation (catches class loading errors before PHPUnit)
-run_autoload_check
+if should_run_step "autoload-check"; then
+    run_autoload_check
+fi
 
 # Validate test directory structure - warn about conflicting local infrastructure
 LOCAL_BOOTSTRAP="${TEST_DIR}/bootstrap.php"
@@ -372,6 +390,12 @@ if [ ! -f "$LOCAL_PHPUNIT_BIN" ] && [ -f "${PLUGIN_PATH}/composer.json" ]; then
         fi
         echo ""
     fi
+fi
+
+# Check if PHPUnit step should run
+if ! should_run_step "phpunit"; then
+    echo "Skipping PHPUnit tests (--step filter)"
+    exit 0
 fi
 
 # Check if tests directory exists before running PHPUnit

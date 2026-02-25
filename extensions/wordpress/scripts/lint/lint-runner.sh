@@ -24,6 +24,19 @@ fi
 # Standalone PHP linting script using PHPCS/PHPCBF
 # Supports auto-fix mode via HOMEBOY_AUTO_FIX=1
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
+# Supports step filtering via HOMEBOY_STEP/HOMEBOY_SKIP (steps: phpcs, eslint, phpstan)
+
+# Step filtering helper (matches test-runner.sh pattern)
+should_run_step() {
+    local step_name="$1"
+    if [ -n "${HOMEBOY_STEP:-}" ]; then
+        echo ",${HOMEBOY_STEP}," | grep -q ",${step_name}," && return 0 || return 1
+    fi
+    if [ -n "${HOMEBOY_SKIP:-}" ]; then
+        echo ",${HOMEBOY_SKIP}," | grep -q ",${step_name}," && return 1 || return 0
+    fi
+    return 0
+}
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -256,10 +269,16 @@ if [ -n "${HOMEBOY_EXCLUDE_SNIFFS:-}" ]; then
 fi
 
 # First run: Get JSON report for summary header
-set +e
-json_output=$("$PHPCS_BIN" "${phpcs_base_args[@]}" --report=json "${LINT_FILES[@]}" 2>/dev/null)
-json_exit=$?
-set -e
+if ! should_run_step "phpcs"; then
+    json_output=""
+    json_exit=0
+    echo "Skipping PHPCS (step filter)"
+else
+    set +e
+    json_output=$("$PHPCS_BIN" "${phpcs_base_args[@]}" --report=json "${LINT_FILES[@]}" 2>/dev/null)
+    json_exit=$?
+    set -e
+fi
 
 # Parse JSON and print summary header (only if issues exist)
 # NOTE: JSON is piped via stdin to avoid ARG_MAX limits (~1MB on macOS)
@@ -346,7 +365,10 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     ESLINT_RUNNER="${MODULE_PATH}/scripts/lint/eslint-runner.sh"
     ESLINT_PASSED=1
 
-    if [ -f "$ESLINT_RUNNER" ]; then
+    if ! should_run_step "eslint"; then
+        echo ""
+        echo "Skipping ESLint (step filter)"
+    elif [ -f "$ESLINT_RUNNER" ]; then
         echo ""
         set +e
         bash "$ESLINT_RUNNER"
@@ -362,6 +384,12 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     run_phpstan_summary() {
         local phpstan_runner="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
         if [ ! -f "$phpstan_runner" ]; then
+            return 0
+        fi
+
+        if ! should_run_step "phpstan"; then
+            echo ""
+            echo "Skipping PHPStan (step filter)"
             return 0
         fi
 
@@ -397,7 +425,10 @@ fi
 
 # Full report mode (default)
 PHPCS_PASSED=0
-if "$PHPCS_BIN" "${phpcs_base_args[@]}" "${LINT_FILES[@]}"; then
+if ! should_run_step "phpcs"; then
+    echo "Skipping PHPCS (step filter)"
+    PHPCS_PASSED=1
+elif "$PHPCS_BIN" "${phpcs_base_args[@]}" "${LINT_FILES[@]}"; then
     echo "PHPCS linting passed"
     PHPCS_PASSED=1
 else
@@ -408,7 +439,10 @@ fi
 ESLINT_RUNNER="${MODULE_PATH}/scripts/lint/eslint-runner.sh"
 ESLINT_PASSED=1
 
-if [ -f "$ESLINT_RUNNER" ]; then
+if ! should_run_step "eslint"; then
+    echo ""
+    echo "Skipping ESLint (step filter)"
+elif [ -f "$ESLINT_RUNNER" ]; then
     echo ""
     set +e
     bash "$ESLINT_RUNNER"
@@ -424,6 +458,12 @@ fi
 run_phpstan() {
     local phpstan_runner="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
     if [ ! -f "$phpstan_runner" ]; then
+        return 0
+    fi
+
+    if ! should_run_step "phpstan"; then
+        echo ""
+        echo "Skipping PHPStan (step filter)"
         return 0
     fi
 
