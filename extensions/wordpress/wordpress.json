@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "1.4.6",
+  "version": "1.5.0",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -146,6 +146,9 @@
       "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
     }
   ],
+  "since_tag": {
+    "extensions": [".php"]
+  },
   "build": {
     "artifact_extensions": [
       ".zip"
