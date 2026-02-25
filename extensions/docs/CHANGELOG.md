@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.1.0] - 2026-02-25
+
+### Added
+- WordPress post:deploy hooks for plugin activation and cache flush
+
+### Fixed
+- WordPress build script permission errors on stale artifacts
+- PHPUnit test output swallowed instead of streamed to stdout
+
 ## [0.5.0] - 2026-02-13
 
 - feat: add openclaw module for AI agent management
