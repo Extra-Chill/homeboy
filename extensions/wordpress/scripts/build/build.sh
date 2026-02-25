@@ -145,20 +145,53 @@ extract_metadata() {
 }
 
 # Clean previous builds
+#
+# Handles stale build directories that may be owned by a different user
+# (e.g., from a previous deployment or migration). Tries progressively
+# stronger cleanup strategies before failing with an actionable message.
 clean_previous_builds() {
     print_status "Cleaning previous build artifacts..."
 
-    if [ -d "build" ]; then
-        rm -rf build
-    fi
+    remove_stale_dir "build"
 
     # Also clean old dist directories if they exist
     if [ -d "dist" ]; then
         print_warning "Removing legacy dist directory"
-        rm -rf dist
+        remove_stale_dir "dist"
     fi
 
     print_success "Previous builds cleaned"
+}
+
+# Remove a directory that may be owned by a different user.
+# Strategy: rm -rf → chmod + rm -rf → actionable error.
+remove_stale_dir() {
+    local dir="$1"
+    [ -d "$dir" ] || return 0
+
+    # Fast path: normal removal
+    if rm -rf "$dir" 2>/dev/null; then
+        return 0
+    fi
+
+    # Stale ownership detected. Try fixing permissions first.
+    print_warning "Cannot remove $dir/ (permission denied). Attempting permission fix..."
+    chmod -R u+rwX "$dir" 2>/dev/null || true
+    if rm -rf "$dir" 2>/dev/null; then
+        print_success "Removed $dir/ after permission fix"
+        return 0
+    fi
+
+    # Last resort: if running as root or sudo is available, use it
+    if [ "$(id -u)" = "0" ]; then
+        # Already root but rm failed — shouldn't happen, but try force
+        rm -rf "$dir"
+        return $?
+    fi
+
+    print_error "Cannot remove stale $dir/ directory (owned by a different user)."
+    print_error "Fix manually: sudo rm -rf $(pwd)/$dir"
+    exit 1
 }
 
 # Install production dependencies
