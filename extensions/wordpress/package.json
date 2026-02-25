@@ -6,8 +6,11 @@
     "lint:js": "eslint --ext .js,.jsx,.ts,.tsx"
   },
   "devDependencies": {
-    "eslint": "^8.57.0",
-    "@wordpress/eslint-plugin": "^24.2.0"
+    "@wordpress/eslint-plugin": "^24.2.0",
+    "eslint": "^8.57.0"
+  },
+  "overrides": {
+    "minimatch@>=9.0.0 <9.0.6": "^10.0.1"
   },
   "engines": {
     "node": ">=18.12.0"
