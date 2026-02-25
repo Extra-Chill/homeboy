@@ -1,32 +1,60 @@
 # Homeboy Modules
 
-Installable modules for [Homeboy](https://github.com/Extra-Chill/homeboy) that extend CLI tool support.
+Official module directory for [Homeboy](https://github.com/Extra-Chill/homeboy). Modules extend the CLI with project-type support — WordPress, Node.js, Rust, and more.
+
+This is a **monorepo** — each subdirectory is a standalone module. Install individual modules, not the whole repo.
 
 ## Available Modules
 
-| Module | Tool | Description |
-|--------|------|-------------|
-| `wordpress` | `wp` | WP-CLI integration with database discovery |
-| `nodejs` | `pm2` | PM2 process management |
-| `rust` | `cargo` | Cargo CLI integration |
-| `github` | `gh` | GitHub CLI for issues, PRs, and repos |
-| `homebrew` | `brew` | Homebrew tap publishing |
+| Module | Install command | Description |
+|--------|----------------|-------------|
+| `wordpress` | `homeboy module install … --id wordpress` | WP-CLI integration, build, test, lint |
+| `nodejs` | `homeboy module install … --id nodejs` | PM2 process management |
+| `rust` | `homeboy module install … --id rust` | Cargo CLI integration |
+| `github` | `homeboy module install … --id github` | GitHub CLI for issues, PRs, and repos |
+| `homebrew` | `homeboy module install … --id homebrew` | Homebrew tap publishing |
+| `agent-hooks` | `homeboy module install … --id agent-hooks` | AI agent guardrails (Claude Code, OpenCode) |
+| `openclaw` | `homeboy module install … --id openclaw` | OpenClaw AI agent integration |
+| `sweatpants` | `homeboy module install … --id sweatpants` | Sweatpants automation engine bridge |
 
 ## Installation
 
-Clone or symlink modules to your Homeboy config directory:
+Install modules using the Homeboy CLI:
 
 ```bash
-# Clone the repo
-git clone https://github.com/Extra-Chill/homeboy-modules.git
+# Install a single module from this monorepo
+homeboy module install https://github.com/Extra-Chill/homeboy-modules --id wordpress
 
-# Symlink a module
-ln -s /path/to/homeboy-modules/github ~/.config/homeboy/modules/github
+# Install multiple modules
+homeboy module install https://github.com/Extra-Chill/homeboy-modules --id github
+homeboy module install https://github.com/Extra-Chill/homeboy-modules --id rust
+```
+
+Homeboy clones the repo, detects the monorepo layout, and extracts just the module you asked for into `~/.config/homeboy/modules/<id>/`.
+
+### Verify installation
+
+```bash
+# List all installed modules
+homeboy module list
+
+# Inspect a specific module
+homeboy module show wordpress
+```
+
+### Install from a local clone
+
+If you prefer to clone the repo first:
+
+```bash
+git clone https://github.com/Extra-Chill/homeboy-modules.git
+homeboy module install ./homeboy-modules/wordpress
+homeboy module install ./homeboy-modules/github
 ```
 
 ## Usage
 
-Once installed, use the module's tool against any component:
+Once installed, use the module's tool against any project or component:
 
 ```bash
 # WordPress
@@ -38,10 +66,12 @@ homeboy pm2 my-app restart
 # Rust
 homeboy cargo my-crate build
 
+# GitHub
+homeboy gh my-repo pr list
 ```
 
 ## Creating Modules
 
-Each module is a directory containing a `homeboy.json` manifest. See existing modules for examples.
+Each module is a directory containing a `<module-id>.json` manifest. The manifest defines capabilities, commands, and settings. See existing modules for examples.
 
-Note: not every module includes embedded markdown docs; module docs are optional.
+Module docs are optional — not every module includes embedded markdown docs.
