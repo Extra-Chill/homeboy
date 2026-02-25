@@ -385,13 +385,16 @@ fi
 
 # Run PHPUnit with module bootstrap
 echo "Running PHPUnit tests..."
+
+phpunit_args=(
+    --bootstrap="${MODULE_PATH}/tests/bootstrap.php"
+    --configuration="${MODULE_PATH}/phpunit.xml.dist"
+    --testdox
+    "${TEST_DIR}"
+)
+
 set +e
-phpunit_output=$("${MODULE_PATH}/vendor/bin/phpunit" \
-  --bootstrap="${MODULE_PATH}/tests/bootstrap.php" \
-  --configuration="${MODULE_PATH}/phpunit.xml.dist" \
-  --testdox \
-  "${TEST_DIR}" \
-  "$@" 2>&1)
+phpunit_output=$("${MODULE_PATH}/vendor/bin/phpunit" "${phpunit_args[@]}" "$@" 2>&1)
 phpunit_exit=$?
 set -e
 

@@ -140,9 +140,12 @@ if ($component_type === 'theme') {
 // Start up the WP testing environment
 require_once $_tests_dir . '/includes/bootstrap.php';
 
-// Flush WordPress output buffers so PHPUnit's result printer works.
+// Clean WordPress output buffers so PHPUnit's result printer works.
 // The WP bootstrap starts ob_start() during initialization which captures
 // all subsequent stdout, including PHPUnit's test output.
+// We use ob_end_clean() (not ob_end_flush) to discard the buffered bootstrap
+// noise ("Installing...", "Running as single site...") silently — flushing it
+// triggers "Cannot modify header information" warnings that corrupt output.
 while ( ob_get_level() > 0 ) {
-	ob_end_flush();
+	ob_end_clean();
 }
