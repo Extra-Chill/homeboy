@@ -1,69 +1,66 @@
 {
-  "id": "plasma-shield",
   "name": "Plasma Shield",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "icon": "shield.lefthalf.filled",
   "description": "Network security control for AI agent fleets",
   "author": "Extra Chill",
   "homepage": "https://github.com/Extra-Chill/plasma-shield",
-
-  "runtime": {
-    "type": "shell",
-    "entrypoint": "scripts/run.sh"
-  },
-
-  "inputs": [
-    {
-      "id": "view",
-      "type": "select",
-      "label": "View",
-      "default": "status",
-      "options": [
-        {"value": "status", "label": "Shield Status"},
-        {"value": "agents", "label": "Agent Modes"},
-        {"value": "logs", "label": "Traffic Logs"},
-        {"value": "rules", "label": "Blocking Rules"}
-      ],
-      "arg": "--view"
+  "executable": {
+    "runtime": {
+      "type": "shell",
+      "entrypoint": "scripts/run.sh"
     },
-    {
-      "id": "agent",
-      "type": "text",
-      "label": "Agent Filter",
-      "placeholder": "Filter by agent ID (optional)",
-      "arg": "--agent"
-    },
-    {
-      "id": "limit",
-      "type": "stepper",
-      "label": "Result Limit",
-      "default": 50,
-      "min": 10,
-      "max": 500,
-      "arg": "--limit"
-    }
-  ],
-
-  "output": {
-    "schema": {
-      "type": "array",
-      "items": {
-        "timestamp": "string",
-        "agent": "string", 
-        "domain": "string",
-        "action": "string",
-        "mode": "string",
-        "reason": "string"
+    "inputs": [
+      {
+        "id": "view",
+        "type": "select",
+        "label": "View",
+        "default": "status",
+        "options": [
+          {"value": "status", "label": "Shield Status"},
+          {"value": "agents", "label": "Agent Modes"},
+          {"value": "logs", "label": "Traffic Logs"},
+          {"value": "rules", "label": "Blocking Rules"}
+        ],
+        "arg": "--view"
+      },
+      {
+        "id": "agent",
+        "type": "text",
+        "label": "Agent Filter",
+        "placeholder": "Filter by agent ID (optional)",
+        "arg": "--agent"
+      },
+      {
+        "id": "limit",
+        "type": "stepper",
+        "label": "Result Limit",
+        "default": 50,
+        "min": 10,
+        "max": 500,
+        "arg": "--limit"
       }
-    },
-    "display": "table",
-    "selectable": true
+    ],
+    "output": {
+      "schema": {
+        "type": "array",
+        "items": {
+          "timestamp": "string",
+          "agent": "string",
+          "domain": "string",
+          "action": "string",
+          "mode": "string",
+          "reason": "string"
+        }
+      },
+      "display": "table",
+      "selectable": true
+    }
   },
-
   "actions": [
     {
       "id": "lockdown",
-      "label": "🔒 Lockdown Selected",
+      "label": "Lockdown Selected",
       "type": "builtin",
       "builtin": "copy-column",
       "column": "agent"
@@ -81,7 +78,6 @@
       "builtin": "copy-json"
     }
   ],
-
   "settings": [
     {
       "id": "router_url",
@@ -92,12 +88,10 @@
     },
     {
       "id": "api_key",
-      "type": "text", 
+      "type": "text",
       "label": "API Key",
       "placeholder": "Optional API key",
       "default": ""
     }
-  ],
-
-  "requires": {}
+  ]
 }

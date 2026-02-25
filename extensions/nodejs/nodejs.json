@@ -1,32 +1,17 @@
 {
   "name": "Node.js",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "icon": "server.rack",
   "description": "Node.js project type with PM2 integration",
   "author": "Extra Chill",
-
-  "discovery": {
-    "find_command": "find /home -name 'package.json' -type f 2>/dev/null | xargs grep -l '\"main\"' 2>/dev/null",
-    "base_path_transform": "dirname",
-    "display_name_command": "cd {{basePath}} && node -e \"console.log(require('./package.json').name)\" 2>/dev/null || basename {{basePath}}"
-  },
-
-  "cli": {
-    "tool": "pm2",
-    "display_name": "PM2",
-    "command_template": "{{cliPath}} {{args}} {{projectId}}",
-    "default_cli_path": "pm2"
-  },
-
-  "default_pinned_files": ["package.json", "ecosystem.config.js", ".env.example"],
-  "default_pinned_logs": ["logs/combined.log", "logs/err.log", "logs/out.log"],
-
-  "build": {
-    "cleanup_paths": [
-      "node_modules"
-    ]
-  },
-
+  "platform": {
+    "discovery": {
+      "find_command": "find /home -name 'package.json' -type f 2>/dev/null | xargs grep -l '\"main\"' 2>/dev/null",
+      "base_path_transform": "dirname",
+      "display_name_command": "cd {{basePath}} && node -e \"console.log(require('./package.json').name)\" 2>/dev/null || basename {{basePath}}"
+    },
+    "default_pinned_files": ["package.json", "ecosystem.config.js", ".env.example"],
+    "default_pinned_logs": ["logs/combined.log", "logs/err.log", "logs/out.log"],
     "database": {
       "cli": {
         "tables_command": "MYSQL_PWD='{{db_password}}' mysql -u{{db_user}} -h{{db_host}} {{db_name}} -e 'SHOW TABLE STATUS'",
@@ -34,5 +19,16 @@
         "query_command": "MYSQL_PWD='{{db_password}}' mysql -u{{db_user}} -h{{db_host}} {{db_name}} -e '{{query}}'"
       }
     }
-
+  },
+  "cli": {
+    "tool": "pm2",
+    "display_name": "PM2",
+    "command_template": "{{cliPath}} {{args}} {{projectId}}",
+    "default_cli_path": "pm2"
+  },
+  "build": {
+    "cleanup_paths": [
+      "node_modules"
+    ]
+  }
 }

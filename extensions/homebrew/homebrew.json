@@ -1,6 +1,6 @@
 {
   "name": "Homebrew",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "icon": "mug.fill",
   "description": "Homebrew tap publishing",
   "author": "Extra Chill",
@@ -16,7 +16,9 @@
       }
     }
   ],
-  "runtime": {
-    "run_command": "{{modulePath}}/scripts/publish-homebrew.sh"
+  "executable": {
+    "runtime": {
+      "run_command": "{{module_path}}/scripts/publish-homebrew.sh"
+    }
   }
 }
