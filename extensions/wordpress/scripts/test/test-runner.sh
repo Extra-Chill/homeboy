@@ -417,15 +417,17 @@ phpunit_args=(
     "${TEST_DIR}"
 )
 
-set +e
-phpunit_output=$("${MODULE_PATH}/vendor/bin/phpunit" "${phpunit_args[@]}" "$@" 2>&1)
-phpunit_exit=$?
-set -e
+PHPUNIT_TMPFILE=$(mktemp)
 
-echo "$phpunit_output"
+set +e
+"${MODULE_PATH}/vendor/bin/phpunit" "${phpunit_args[@]}" "$@" 2>&1 | tee "$PHPUNIT_TMPFILE"
+phpunit_exit=${PIPESTATUS[0]}
+set -e
 
 if [ $phpunit_exit -ne 0 ]; then
     FAILED_STEP="PHPUnit tests"
-    FAILURE_OUTPUT=$(echo "$phpunit_output" | tail -30)
+    FAILURE_OUTPUT=$(tail -30 "$PHPUNIT_TMPFILE")
+    rm -f "$PHPUNIT_TMPFILE"
     exit $phpunit_exit
 fi
+rm -f "$PHPUNIT_TMPFILE"
