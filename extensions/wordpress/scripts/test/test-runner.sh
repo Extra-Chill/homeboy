@@ -70,9 +70,9 @@ if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then
 
     # Parse settings from JSON using jq
     if [ -n "$SETTINGS_JSON" ] && [ "$SETTINGS_JSON" != "{}" ]; then
-        DATABASE_TYPE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.database_type // "sqlite"')
+        DATABASE_TYPE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.database_type // "auto"')
     else
-        DATABASE_TYPE="sqlite"
+        DATABASE_TYPE="auto"
     fi
 else
     # Called directly (e.g., from composer test in component directory)
@@ -84,7 +84,7 @@ else
     COMPONENT_PATH="$(pwd)"
     PLUGIN_PATH="$COMPONENT_PATH"
     COMPONENT_ID="$(basename "$COMPONENT_PATH")"  # Derive component ID from directory name
-    DATABASE_TYPE="sqlite"  # Default to SQLite
+    DATABASE_TYPE="auto"  # Auto-detect MySQL, fall back to SQLite
 
     # Set component environment variables for bootstrap
     export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
@@ -192,6 +192,35 @@ fi
 WP_TESTS_CONFIG_PATH="$(dirname "$ABSPATH")/wp-tests-config.php"
 export WP_PHPUNIT__TESTS_CONFIG="$WP_TESTS_CONFIG_PATH"
 
+# Resolve "auto" database type: try MySQL first, fall back to SQLite
+MYSQL_AUTO_CREATED=""
+if [ "$DATABASE_TYPE" = "auto" ]; then
+    if command -v mysql &>/dev/null && mysql -u root -e "SELECT 1" &>/dev/null; then
+        DATABASE_TYPE="mysql"
+        MYSQL_HOST="localhost"
+        MYSQL_DATABASE="homeboy_wptests"
+        MYSQL_USER="root"
+        MYSQL_PASSWORD=""
+        # Auto-create the test database
+        mysql -u root -e "CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null
+        MYSQL_AUTO_CREATED="1"
+        if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+            echo "DEBUG: Auto-detected MySQL (root@localhost)"
+        fi
+    elif php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);' 2>/dev/null; then
+        DATABASE_TYPE="sqlite"
+        echo "Note: MySQL not available, using SQLite (experimental)"
+    else
+        echo "Error: No database backend available."
+        echo ""
+        echo "Either:"
+        echo "  - Install MySQL/MariaDB (recommended)"
+        echo "  - Install PHP pdo_sqlite extension"
+        echo ""
+        exit 1
+    fi
+fi
+
 # Generate configuration based on database type
 if [ "$DATABASE_TYPE" = "sqlite" ]; then
     # Pre-flight: verify pdo_sqlite extension is available
@@ -208,18 +237,21 @@ if [ "$DATABASE_TYPE" = "sqlite" ]; then
     fi
     bash "${MODULE_PATH}/scripts/test/generate-config.sh" "sqlite" "$ABSPATH" "$MODULE_PATH"
 elif [ "$DATABASE_TYPE" = "mysql" ]; then
-    if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then
-        # Use Homeboy settings
-        MYSQL_HOST=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_host // "localhost"')
-        MYSQL_DATABASE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_database // "wordpress_test"')
-        MYSQL_USER=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_user // "root"')
-        MYSQL_PASSWORD=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_password // ""')
-    else
-        # Use defaults when called directly
-        MYSQL_HOST="localhost"
-        MYSQL_DATABASE="wordpress_test"
-        MYSQL_USER="root"
-        MYSQL_PASSWORD=""
+    if [ -z "${MYSQL_HOST:-}" ]; then
+        # Credentials not set yet (explicit mysql mode, not auto-detected)
+        if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then
+            # Use Homeboy settings
+            MYSQL_HOST=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_host // "localhost"')
+            MYSQL_DATABASE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_database // "wordpress_test"')
+            MYSQL_USER=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_user // "root"')
+            MYSQL_PASSWORD=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_password // ""')
+        else
+            # Use defaults when called directly
+            MYSQL_HOST="localhost"
+            MYSQL_DATABASE="wordpress_test"
+            MYSQL_USER="root"
+            MYSQL_PASSWORD=""
+        fi
     fi
     bash "${MODULE_PATH}/scripts/test/generate-config.sh" "mysql" "$ABSPATH" "$MODULE_PATH" \
         "$MYSQL_HOST" "$MYSQL_DATABASE" "$MYSQL_USER" "$MYSQL_PASSWORD"
@@ -428,6 +460,15 @@ if [ $phpunit_exit -ne 0 ]; then
     FAILED_STEP="PHPUnit tests"
     FAILURE_OUTPUT=$(tail -30 "$PHPUNIT_TMPFILE")
     rm -f "$PHPUNIT_TMPFILE"
+    # Clean up auto-created test database
+    if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
+        mysql -u root -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
+    fi
     exit $phpunit_exit
 fi
 rm -f "$PHPUNIT_TMPFILE"
+
+# Clean up auto-created test database
+if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
+    mysql -u root -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
+fi

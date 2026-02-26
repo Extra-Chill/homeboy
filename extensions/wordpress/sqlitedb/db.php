@@ -238,11 +238,12 @@ class SQLite_DB extends wpdb {
     }
 }
 
-// Read database configuration from environment (set by wp-config.php)
-$dbuser = getenv('DB_USER') ?: 'root';
-$dbpassword = getenv('DB_PASSWORD') ?: '';
-$dbname = getenv('DB_NAME') ?: ':memory:';
-$dbhost = getenv('DB_HOST') ?: 'localhost';
+// Read database configuration from PHP constants (defined by wp-config.php / wp-tests-config.php).
+// Constants are always available by the time this drop-in is loaded via require_wp_db().
+$dbuser     = defined( 'DB_USER' ) ? DB_USER : '';
+$dbpassword = defined( 'DB_PASSWORD' ) ? DB_PASSWORD : '';
+$dbname     = defined( 'DB_NAME' ) ? DB_NAME : ':memory:';
+$dbhost     = defined( 'DB_HOST' ) ? DB_HOST : '';
 
 // Instantiate and expose global wpdb instance to WordPress
-$GLOBALS['wpdb'] = new SQLite_DB($dbuser, $dbpassword, $dbname, $dbhost);
+$GLOBALS['wpdb'] = new SQLite_DB( $dbuser, $dbpassword, $dbname, $dbhost );
