@@ -444,7 +444,8 @@ echo "Running PHPUnit tests..."
 
 phpunit_args=(
     --bootstrap="${MODULE_PATH}/tests/bootstrap.php"
-    --configuration="${MODULE_PATH}/phpunit.xml.dist"
+    --no-configuration
+    --colors=auto
     --testdox
     "${TEST_DIR}"
 )
