@@ -131,6 +131,13 @@ extract_metadata() {
         PROJECT_VERSION=$(grep -i "Version:" "$PROJECT_MAIN_FILE" | head -1 | sed 's/.*Version:[ ]*\([0-9\.]*\).*/\1/')
     fi
 
+    # When invoked by homeboy, use the component ID for artifact naming so the
+    # zip matches the deploy system's artifact_pattern (build/{component_id}.zip).
+    # Falls back to the auto-detected PROJECT_NAME for standalone usage.
+    if [ -n "$HOMEBOY_COMPONENT_ID" ]; then
+        PROJECT_NAME="$HOMEBOY_COMPONENT_ID"
+    fi
+
     if [ -z "$PROJECT_NAME" ]; then
         print_error "Could not extract project name"
         exit 1
