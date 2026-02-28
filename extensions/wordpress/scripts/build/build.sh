@@ -42,8 +42,8 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# Module path from Homeboy environment (required)
-MODULE_PATH="${HOMEBOY_MODULE_PATH}"
+# Extension path from Homeboy environment (required)
+EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
 
 # Output functions
 print_status() {
@@ -457,7 +457,7 @@ run_tests() {
         else
             # Run tests with module infrastructure (default)
             print_status "Running tests with module infrastructure..."
-            if ! bash "${MODULE_PATH}/scripts/test/test-runner.sh"; then
+            if ! bash "${EXTENSION_PATH}/scripts/test/test-runner.sh"; then
                 print_error "Test pipeline failed. See error details above."
                 return 1
             fi
@@ -552,8 +552,8 @@ build_project() {
     fi
 
     # Validate PSR-4 autoload paths
-    if [ -f "${MODULE_PATH}/scripts/build/validate-psr4.sh" ]; then
-        if ! bash "${MODULE_PATH}/scripts/build/validate-psr4.sh" "build/$PROJECT_NAME"; then
+    if [ -f "${EXTENSION_PATH}/scripts/build/validate-psr4.sh" ]; then
+        if ! bash "${EXTENSION_PATH}/scripts/build/validate-psr4.sh" "build/$PROJECT_NAME"; then
             print_error "PSR-4 autoload validation failed"
             rm -rf "build/$PROJECT_NAME"
             restore_dev_deps

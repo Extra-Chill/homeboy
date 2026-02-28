@@ -1,13 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-# Derive module path from current working directory
-MODULE_PATH="$(pwd)"
+# Derive extension path from current working directory
+EXTENSION_PATH="$(pwd)"
 
 echo "Setting up WordPress test infrastructure..."
 
 # Install PHP dependencies
-cd "$MODULE_PATH"
+cd "$EXTENSION_PATH"
 composer install --quiet --no-interaction
 
 # Install npm dependencies for ESLint
@@ -19,5 +19,5 @@ if [ -f "package.json" ]; then
 fi
 
 echo "WordPress test infrastructure installed successfully"
-echo "WP_TESTS_DIR: $MODULE_PATH/vendor/wp-phpunit/wp-phpunit/tests/phpunit"
-echo "ABSPATH: $MODULE_PATH/vendor/wp-phpunit/wp-phpunit/wordpress"
+echo "WP_TESTS_DIR: $EXTENSION_PATH/vendor/wp-phpunit/wp-phpunit/tests/phpunit"
+echo "ABSPATH: $EXTENSION_PATH/vendor/wp-phpunit/wp-phpunit/wordpress"
