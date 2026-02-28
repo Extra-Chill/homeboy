@@ -6,8 +6,8 @@
   "author": "Extra Chill",
   "executable": {
     "runtime": {
-      "setup_command": "bash {{module_path}}/setup.sh",
-      "run_command": "bash {{module_path}}/run.sh {{args}}"
+      "setup_command": "bash {{extension_path}}/setup.sh",
+      "run_command": "bash {{extension_path}}/run.sh {{args}}"
     }
   }
 }

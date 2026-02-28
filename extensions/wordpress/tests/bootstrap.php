@@ -1,6 +1,6 @@
 <?php
 /**
- * Homeboy WordPress Module Bootstrap
+ * Homeboy WordPress Extension Bootstrap
  *
  * Provides complete WordPress testing infrastructure.
  * Components only need test files - no WordPress setup required.
@@ -54,7 +54,7 @@ $_phpunit_polyfills_path = getenv('WP_TESTS_PHPUNIT_POLYFILLS_PATH');
 if (false !== $_phpunit_polyfills_path) {
     define('WP_TESTS_PHPUNIT_POLYFILLS_PATH', $_phpunit_polyfills_path);
 } elseif (file_exists(__DIR__ . '/../vendor/yoast/phpunit-polyfills/phpunitpolyfills-autoload.php')) {
-    // Use polyfills from WordPress module
+    // Use polyfills from WordPress extension
     define('WP_TESTS_PHPUNIT_POLYFILLS_PATH', __DIR__ . '/../vendor/yoast/phpunit-polyfills');
 } elseif (file_exists($_plugin_path . '/vendor/yoast/phpunit-polyfills/phpunitpolyfills-autoload.php')) {
     // Fallback to component's polyfills

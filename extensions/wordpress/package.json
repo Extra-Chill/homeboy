@@ -1,5 +1,5 @@
 {
-  "name": "homeboy-module-wordpress",
+  "name": "homeboy-extension-wordpress",
   "version": "1.0.0",
   "private": true,
   "scripts": {

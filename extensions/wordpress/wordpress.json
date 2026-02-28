@@ -168,9 +168,9 @@
   },
   "executable": {
     "runtime": {
-      "setup_command": "bash {{module_path}}/scripts/build/setup.sh",
-      "ready_check": "test -f {{module_path}}/vendor/wp-phpunit/wp-phpunit/includes/bootstrap.php",
-      "run_command": "bash {{module_path}}/scripts/test/test-runner.sh"
+      "setup_command": "bash {{extension_path}}/scripts/build/setup.sh",
+      "ready_check": "test -f {{extension_path}}/vendor/wp-phpunit/wp-phpunit/includes/bootstrap.php",
+      "run_command": "bash {{extension_path}}/scripts/test/test-runner.sh"
     }
   },
   "cli": {
@@ -200,20 +200,20 @@
       "build.sh"
     ],
     "command_template": "bash {{script}}",
-    "module_script": "scripts/build/build.sh",
+    "extension_script": "scripts/build/build.sh",
     "pre_build_script": "scripts/build/validate-build.sh",
     "artifact_pattern": "build/{component_id}.zip",
     "cleanup_paths": [
-      "node_modules",
+      "node_extensions",
       "vendor",
       "build"
     ]
   },
   "lint": {
-    "module_script": "scripts/lint/lint-runner.sh"
+    "extension_script": "scripts/lint/lint-runner.sh"
   },
   "test": {
-    "module_script": "scripts/test/test-runner.sh"
+    "extension_script": "scripts/test/test-runner.sh"
   },
   "testing": {
     "supported_databases": [

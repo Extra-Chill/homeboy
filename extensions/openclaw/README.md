@@ -1,6 +1,6 @@
-# OpenClaw Module for Homeboy
+# OpenClaw Extension for Homeboy
 
-Homeboy module for managing [OpenClaw](https://github.com/openclaw/openclaw) AI agent installations.
+Homeboy extension for managing [OpenClaw](https://github.com/openclaw/openclaw) AI agent installations.
 
 ## What It Does
 
@@ -13,13 +13,13 @@ Homeboy module for managing [OpenClaw](https://github.com/openclaw/openclaw) AI 
 ## Install
 
 ```bash
-homeboy module install https://github.com/Extra-Chill/homeboy-module-openclaw
+homeboy extension install https://github.com/Extra-Chill/homeboy-extension-openclaw
 ```
 
 Or from a local path:
 
 ```bash
-homeboy module install /path/to/openclaw-module
+homeboy extension install /path/to/openclaw-extension
 ```
 
 ## Usage
@@ -40,15 +40,15 @@ homeboy openclaw my-agent cron list
 ### Actions (Desktop App)
 
 ```bash
-# Run a module action
-homeboy module action openclaw gateway-status -p my-agent
-homeboy module action openclaw config-get -p my-agent
-homeboy module action openclaw cron-list -p my-agent
+# Run a extension action
+homeboy extension action openclaw gateway-status -p my-agent
+homeboy extension action openclaw config-get -p my-agent
+homeboy extension action openclaw cron-list -p my-agent
 ```
 
 ### Pinned Files
 
-The module automatically pins these workspace files for viewing in the desktop app:
+The extension automatically pins these workspace files for viewing in the desktop app:
 
 | File | Purpose |
 |------|---------|
@@ -74,7 +74,7 @@ Works with Homeboy's fleet system. Add OpenClaw agents as projects, group them i
 
 ```bash
 # Register an agent as a project
-homeboy project add star-fleet-command --module openclaw --server my-vps
+homeboy project add star-fleet-command --extension openclaw --server my-vps
 
 # Fleet operations
 homeboy fleet create ai-agents --projects star-fleet-command,sarai-chinwag

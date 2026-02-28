@@ -8,7 +8,7 @@ set -euo pipefail
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: ESLint Environment variables:"
-    echo "HOMEBOY_MODULE_PATH=${HOMEBOY_MODULE_PATH:-NOT_SET}"
+    echo "HOMEBOY_EXTENSION_PATH=${HOMEBOY_EXTENSION_PATH:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_ID=${HOMEBOY_COMPONENT_ID:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
     echo "HOMEBOY_AUTO_FIX=${HOMEBOY_AUTO_FIX:-NOT_SET}"
@@ -17,20 +17,20 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
 fi
 
 # Determine execution context
-if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then
-    MODULE_PATH="${HOMEBOY_MODULE_PATH}"
+if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
+    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
     COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-.}"
     PLUGIN_PATH="$COMPONENT_PATH"
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    MODULE_PATH="$(dirname "$SCRIPT_DIR")"
+    EXTENSION_PATH="$(dirname "$SCRIPT_DIR")"
     COMPONENT_PATH="$(pwd)"
     PLUGIN_PATH="$COMPONENT_PATH"
 fi
 
 # Check if component has JavaScript files
 js_file_count=$(find "$PLUGIN_PATH" -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \) \
-    -not -path "*/node_modules/*" \
+    -not -path "*/node_extensions/*" \
     -not -path "*/vendor/*" \
     -not -path "*/build/*" \
     -not -path "*/dist/*" \
@@ -85,14 +85,14 @@ else
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-    echo "Module path: $MODULE_PATH"
+    echo "Extension path: $EXTENSION_PATH"
     echo "Plugin path: $PLUGIN_PATH"
     echo "Lint files: ${LINT_FILES[*]}"
     echo "Auto-fix: ${HOMEBOY_AUTO_FIX:-0}"
 fi
 
-ESLINT_BIN="${MODULE_PATH}/node_modules/.bin/eslint"
-ESLINT_CONFIG="${MODULE_PATH}/.eslintrc.json"
+ESLINT_BIN="${EXTENSION_PATH}/node_extensions/.bin/eslint"
+ESLINT_CONFIG="${EXTENSION_PATH}/.eslintrc.json"
 
 # Validate tools exist
 if [ ! -f "$ESLINT_BIN" ]; then

@@ -204,7 +204,7 @@ Benefits: Automatic changelog, consistent targets, git commit`
  * Enforces Homeboy usage patterns (anti-pattern blocking, file protection)
  */
 export const HomeboyPlugin: Plugin = async (context) => {
-  // Store shell reference for module functions
+  // Store shell reference for extension functions
   $ = context.$
 
   // Run homeboy init and cache output for system prompt injection

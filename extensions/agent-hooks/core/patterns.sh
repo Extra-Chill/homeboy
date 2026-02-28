@@ -197,7 +197,7 @@ Release Anti-Pattern (manual git commit)
 Use the unified release pipeline:
   homeboy release <component>
 
-Benefits: Pipeline validation, changelog checks, module-backed publishing
+Benefits: Pipeline validation, changelog checks, extension-backed publishing
 EOF
         return 0
     fi

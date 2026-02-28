@@ -1,14 +1,14 @@
-# Homebrew Module
+# Homebrew Extension
 
 Publishes Homebrew formulas to your tap repository.
 
-## What This Module Does
+## What This Extension Does
 
 - Clones your tap repository
 - Copies formula files (`.rb`) to `Formula/`
 - Commits and pushes changes
 
-## What This Module Does NOT Do
+## What This Extension Does NOT Do
 
 - Build binaries (requires platform access)
 - Generate formula files (use cargo-dist or manually)
@@ -22,14 +22,14 @@ Publishes Homebrew formulas to your tap repository.
 
 ## Usage with cargo-dist
 
-cargo-dist generates a complete formula as a release asset. Download it and pass to this module:
+cargo-dist generates a complete formula as a release asset. Download it and pass to this extension:
 
 ```bash
 # Download formula from release
 gh release download v1.0.0 --pattern "*.rb" --dir /tmp
 
 # Publish to tap
-homeboy module run homebrew --settings '{"artifacts": ["/tmp/myapp.rb"]}'
+homeboy extension run homebrew --settings '{"artifacts": ["/tmp/myapp.rb"]}'
 ```
 
 ## Platform Limitations

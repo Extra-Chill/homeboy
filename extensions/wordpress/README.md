@@ -1,4 +1,4 @@
-# Homeboy WordPress Module
+# Homeboy WordPress Extension
 
 Universal test and lint infrastructure for WordPress plugins and themes. Zero configuration required.
 
@@ -30,7 +30,7 @@ homeboy build extrachill-shop
 
 ### Test Discovery
 
-The module automatically discovers tests when a `tests/` directory exists with PHP files:
+The extension automatically discovers tests when a `tests/` directory exists with PHP files:
 
 ```
 your-plugin/
@@ -42,7 +42,7 @@ your-plugin/
     └── test-feature-two.php    ← Discovered automatically
 ```
 
-No `bootstrap.php` or `phpunit.xml` needed in your plugin - the module provides everything.
+No `bootstrap.php` or `phpunit.xml` needed in your plugin - the extension provides everything.
 
 ### Linting
 
@@ -127,7 +127,7 @@ The WordPress test framework provides factories for creating test data:
 
 ### Database Options
 
-The module supports SQLite (default) or MySQL for tests:
+The extension supports SQLite (default) or MySQL for tests:
 
 ```bash
 # SQLite (default, no setup required)
@@ -139,21 +139,21 @@ homeboy test my-plugin --database mysql
 
 ## Migration from Local Infrastructure
 
-If your plugin has local test infrastructure, the module will warn and ignore it:
+If your plugin has local test infrastructure, the extension will warn and ignore it:
 
 ```
 ⚠ Warning: Local bootstrap.php found and will be IGNORED
   Location: /path/to/plugin/tests/bootstrap.php
-  Homeboy WordPress module provides complete test infrastructure.
+  Homeboy WordPress extension provides complete test infrastructure.
   Consider removing: /path/to/plugin/tests/bootstrap.php
 ```
 
 Files that can be safely removed after migration:
 - `tests/bootstrap.php`
 - `phpunit.xml` or `phpunit.xml.dist`
-- Local PHPCS/ESLint configs (if using module standards)
+- Local PHPCS/ESLint configs (if using extension standards)
 
-## Module Structure
+## Extension Structure
 
 ```
 wordpress/

@@ -4,7 +4,7 @@
  */
 
 /**
- * Process PHP files in a path, excluding vendor/node_modules/build directories.
+ * Process PHP files in a path, excluding vendor/node_extensions/build directories.
  *
  * @param string   $path     File or directory path.
  * @param callable $callback Function to process each file, receives filepath, returns fix count.
@@ -14,7 +14,7 @@ function fixer_process_path($path, callable $callback) {
     $total_fixes = 0;
     $files_fixed = 0;
 
-    $excluded_dirs = ['vendor', 'node_modules', 'build'];
+    $excluded_dirs = ['vendor', 'node_extensions', 'build'];
 
     if (is_dir($path)) {
         $iterator = new RecursiveIteratorIterator(

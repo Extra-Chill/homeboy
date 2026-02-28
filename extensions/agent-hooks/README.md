@@ -5,7 +5,7 @@ Unified hooks for Claude Code and OpenCode that enforce Homeboy usage patterns a
 ## Installation
 
 ```bash
-homeboy module install agent-hooks
+homeboy extension install agent-hooks
 ```
 
 The setup script automatically installs hooks for both AI coding assistants:
@@ -72,7 +72,7 @@ Hooks apply globally to all sessions. In non-Homeboy repositories, hooks gracefu
 ## Uninstall
 
 ```bash
-homeboy module run agent-hooks uninstall
+homeboy extension run agent-hooks uninstall
 ```
 
 Or manually:
@@ -84,7 +84,7 @@ Or manually:
 
 ```
 agent-hooks/
-├── agent-hooks.json      # Module manifest
+├── agent-hooks.json      # Extension manifest
 ├── setup.sh              # Unified installer (both agents)
 ├── uninstall.sh          # Unified uninstaller (both agents)
 ├── README.md

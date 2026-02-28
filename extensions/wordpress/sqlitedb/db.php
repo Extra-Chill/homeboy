@@ -1,6 +1,6 @@
 <?php
 // Lightweight SQLite database driver for WordPress testing
-// Minimal implementation to allow WP tests to run using PDO-backed SQLite in module environment
+// Minimal implementation to allow WP tests to run using PDO-backed SQLite in extension environment
 
 if ( ! extension_loaded( 'pdo_sqlite' ) ) {
     echo "Fatal: pdo_sqlite extension is not loaded. Install php-sqlite3 and restart PHP.\n";

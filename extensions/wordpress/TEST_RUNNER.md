@@ -1,8 +1,8 @@
-# WordPress Module Test Runner
+# WordPress Extension Test Runner
 
 ## Overview
 
-The WordPress module provides a test runner script for testing WordPress plugins and components using PHPUnit. The test runner can be invoked via Homeboy's `test` command or the module runtime system.
+The WordPress extension provides a test runner script for testing WordPress plugins and components using PHPUnit. The test runner can be invoked via Homeboy's `test` command or the extension runtime system.
 
 ## Running Tests
 
@@ -19,17 +19,17 @@ Example:
 homeboy test data-machine
 ```
 
-### Via Module Runtime
+### Via Extension Runtime
 
-Run the WordPress module directly with component context:
+Run the WordPress extension directly with component context:
 
 ```bash
-homeboy module run wordpress --component <component-id> -- --setting database_type=sqlite
+homeboy extension run wordpress --component <component-id> -- --setting database_type=sqlite
 ```
 
 Example:
 ```bash
-homeboy module run wordpress --component data-machine -- --setting database_type=sqlite
+homeboy extension run wordpress --component data-machine -- --setting database_type=sqlite
 ```
 
 ### Direct Execution
@@ -37,11 +37,11 @@ homeboy module run wordpress --component data-machine -- --setting database_type
 Run the test runner script directly with environment variables set:
 
 ```bash
-export HOMEBOY_MODULE_PATH="$HOME/.config/homeboy/modules/wordpress"
+export HOMEBOY_EXTENSION_PATH="$HOME/.config/homeboy/extensions/wordpress"
 export HOMEBOY_COMPONENT_ID="data-machine"
 export HOMEBOY_COMPONENT_PATH="/path/to/component"
 export HOMEBOY_SETTINGS_JSON='{"database_type":"sqlite"}'
-bash "$HOMEBOY_MODULE_PATH/scripts/test-runner.sh"
+bash "$HOMEBOY_EXTENSION_PATH/scripts/test-runner.sh"
 ```
 
 ## PHPCS Linting
@@ -51,7 +51,7 @@ The test runner uses PHP_CodeSniffer (PHPCS) with WordPress coding standards for
 ### Running Lint Manually
 
 ```bash
-# From module directory
+# From extension directory
 composer lint
 
 # Or directly with phpcs
@@ -63,7 +63,7 @@ composer lint
 The `phpcs.xml.dist` file configures PHPCS with:
 - **WordPress-Extra** standard (includes WordPress-Core + WordPress-Docs)
 - PHP 7.4+ compatibility
-- Excluded directories: `vendor/`, `node_modules/`, `build/`, `dist/`, `tests/`
+- Excluded directories: `vendor/`, `node_extensions/`, `build/`, `dist/`, `tests/`
 
 ### Text Domain Auto-Detection
 
@@ -90,7 +90,7 @@ HOMEBOY_DEBUG=1 homeboy test my-component
 
 ### Centralized Infrastructure
 
-**Important:** Components should NOT have local `phpcs.xml.dist` files. The WordPress module provides centralized PHPCS infrastructure to ensure consistent standards across all components.
+**Important:** Components should NOT have local `phpcs.xml.dist` files. The WordPress extension provides centralized PHPCS infrastructure to ensure consistent standards across all components.
 
 ### Rules Configuration
 
@@ -120,16 +120,16 @@ The test runner uses ESLint with WordPress JavaScript coding standards for linti
 
 ### Automatic Detection
 
-ESLint only runs when JavaScript files exist in the component. The test runner automatically detects JS/JSX/TS/TSX files (excluding node_modules, vendor, build, dist, and minified files).
+ESLint only runs when JavaScript files exist in the component. The test runner automatically detects JS/JSX/TS/TSX files (excluding node_extensions, vendor, build, dist, and minified files).
 
 ### Running Lint Manually
 
 ```bash
-# From module directory
+# From extension directory
 npm run lint:js /path/to/component
 
 # Or directly with eslint
-./node_modules/.bin/eslint --config .eslintrc.json --ext .js,.jsx,.ts,.tsx /path/to/component
+./node_extensions/.bin/eslint --config .eslintrc.json --ext .js,.jsx,.ts,.tsx /path/to/component
 ```
 
 ### Configuration
@@ -138,7 +138,7 @@ The `.eslintrc.json` file configures ESLint with:
 - **@wordpress/eslint-plugin/recommended** standard
 - Browser and ES2021 environment
 - WordPress globals (`wp`, `jQuery`, `ajaxurl`)
-- Excluded directories: `node_modules/`, `vendor/`, `build/`, `dist/`, `tests/`, `*.min.js`
+- Excluded directories: `node_extensions/`, `vendor/`, `build/`, `dist/`, `tests/`, `*.min.js`
 
 ### Text Domain Auto-Detection
 
@@ -152,7 +152,7 @@ HOMEBOY_DEBUG=1 homeboy test my-component
 
 ### Centralized Infrastructure
 
-**Important:** Components should NOT have local `.eslintrc` or `.eslintrc.json` files. The WordPress module provides centralized ESLint infrastructure to ensure consistent standards across all components.
+**Important:** Components should NOT have local `.eslintrc` or `.eslintrc.json` files. The WordPress extension provides centralized ESLint infrastructure to ensure consistent standards across all components.
 
 ### Rules Configuration
 
@@ -182,7 +182,7 @@ HOMEBOY_DEBUG=1 homeboy test data-machine
 When `HOMEBOY_DEBUG=1`, the test runner will display:
 - Environment variables being passed
 - Execution context (component vs project)
-- Module and component paths
+- Extension and component paths
 - Database configuration
 
 Without `HOMEBOY_DEBUG=1`, the test runner runs silently except for PHPUnit output.
@@ -199,7 +199,7 @@ Without `HOMEBOY_DEBUG=1`, the test runner runs silently except for PHPUnit outp
 - `tests/bootstrap.php`
 - `phpunit.xml`
 
-The WordPress module provides complete testing infrastructure including WordPress environment setup, database configuration, PHPUnit configuration, and test discovery. Local test infrastructure files will cause the test runner to fail with a clear error message.
+The WordPress extension provides complete testing infrastructure including WordPress environment setup, database configuration, PHPUnit configuration, and test discovery. Local test infrastructure files will cause the test runner to fail with a clear error message.
 
 ### Removing Local Infrastructure
 
@@ -240,13 +240,13 @@ The test runner supports both SQLite and MySQL databases:
 ```bash
 homeboy test data-machine
 # or
-homeboy module run wordpress --component data-machine -- --setting database_type=sqlite
+homeboy extension run wordpress --component data-machine -- --setting database_type=sqlite
 ```
 
 ### MySQL
 
 ```bash
-homeboy module run wordpress --component data-machine \
+homeboy extension run wordpress --component data-machine \
   -- --setting database_type=mysql \
      --setting mysql_host=localhost \
      --setting mysql_database=wordpress_test \
@@ -256,11 +256,11 @@ homeboy module run wordpress --component data-machine \
 
 ## Component Configuration
 
-Components must have WordPress module configured in their component config:
+Components must have WordPress extension configured in their component config:
 
 ```json
 {
-  "modules": {
+  "extensions": {
     "wordpress": {
       "settings": {
         "database_type": "sqlite"

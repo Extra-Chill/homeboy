@@ -4,17 +4,17 @@
  * Catches autoload errors, missing classes, and fatal errors during initialization
  */
 
-$module_path = getenv('HOMEBOY_MODULE_PATH') ?: dirname(__DIR__);
+$extension_path = getenv('HOMEBOY_EXTENSION_PATH') ?: dirname(__DIR__);
 $plugin_path = getenv('HOMEBOY_PLUGIN_PATH') ?: getenv('HOMEBOY_COMPONENT_PATH') ?: getcwd();
 
 // WordPress paths from wp-phpunit
-$wp_tests_dir = $module_path . '/vendor/wp-phpunit/wp-phpunit';
+$wp_tests_dir = $extension_path . '/vendor/wp-phpunit/wp-phpunit';
 $abspath = $wp_tests_dir . '/wordpress/';
 
 // Verify wp-phpunit exists
 if (!is_dir($wp_tests_dir)) {
     echo "Error: WordPress test library not found at $wp_tests_dir\n";
-    echo "Run 'composer install' in the WordPress module directory.\n";
+    echo "Run 'composer install' in the WordPress extension directory.\n";
     exit(1);
 }
 

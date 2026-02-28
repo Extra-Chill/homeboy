@@ -11,7 +11,7 @@
     "ajaxurl": "readonly"
   },
   "ignorePatterns": [
-    "node_modules/",
+    "node_extensions/",
     "vendor/",
     "build/",
     "dist/",

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Plasma Shield Bridge - Homeboy module for Plasma Shield network security
+# Plasma Shield Bridge - Homeboy extension for Plasma Shield network security
 # Manages shield routers, agents, rules, and traffic logs
 
 set -e

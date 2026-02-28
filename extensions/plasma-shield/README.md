@@ -1,4 +1,4 @@
-# Plasma Shield Module
+# Plasma Shield Extension
 
 Network security control for AI agent fleets.
 
@@ -10,14 +10,14 @@ Network security control for AI agent fleets.
 
 ## Overview
 
-This module provides CLI integration with [Plasma Shield](https://github.com/Extra-Chill/plasma-shield) routers, enabling fleet-wide security management from the command line.
+This extension provides CLI integration with [Plasma Shield](https://github.com/Extra-Chill/plasma-shield) routers, enabling fleet-wide security management from the command line.
 
 ## Installation
 
 ```bash
 # Clone and symlink
-git clone https://github.com/Extra-Chill/homeboy-modules.git
-ln -s /path/to/homeboy-modules/plasma-shield ~/.config/homeboy/modules/plasma-shield
+git clone https://github.com/Extra-Chill/homeboy-extensions.git
+ln -s /path/to/homeboy-extensions/plasma-shield ~/.config/homeboy/extensions/plasma-shield
 ```
 
 ## Configuration

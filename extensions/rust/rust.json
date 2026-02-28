@@ -21,7 +21,7 @@
       "id": "release.package",
       "label": "Package release artifacts",
       "type": "command",
-      "command": "bash \"{{module_path}}/scripts/package.sh\"",
+      "command": "bash \"{{extension_path}}/scripts/package.sh\"",
       "payload": {
         "release": "{{payload.release}}",
         "config": "{{payload.config}}"
@@ -31,7 +31,7 @@
       "id": "release.publish",
       "label": "Publish to crates.io",
       "type": "command",
-      "command": "bash \"{{module_path}}/scripts/publish-crates.sh\"",
+      "command": "bash \"{{extension_path}}/scripts/publish-crates.sh\"",
       "payload": {
         "release": "{{payload.release}}",
         "config": "{{payload.config}}"

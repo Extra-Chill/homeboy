@@ -155,26 +155,26 @@ cmd_status() {
     echo "$response" | jq .
 }
 
-# List available modules
-cmd_module_list() {
+# List available extensions
+cmd_extension_list() {
     local endpoint_url="$1"
     local auth="$2"
 
     local response
-    response=$(api_request GET "$endpoint_url" "/api/modules" "" "$auth")
+    response=$(api_request GET "$endpoint_url" "/api/extensions" "" "$auth")
 
-    echo -e "${BLUE}Available Modules${NC}"
+    echo -e "${BLUE}Available Extensions${NC}"
     echo "================="
-    echo "$response" | jq -r '.modules[] | "  \(.id): \(.description // "No description")"'
+    echo "$response" | jq -r '.extensions[] | "  \(.id): \(.description // "No description")"'
 }
 
-# Run a module
+# Run a extension
 cmd_run() {
     local endpoint_url="$1"
     local auth="$2"
     shift 2
 
-    local module_id=""
+    local extension_id=""
     local inputs="{}"
 
     while [[ $# -gt 0 ]]; do
@@ -187,24 +187,24 @@ cmd_run() {
                 shift 2
                 ;;
             *)
-                if [[ -z "$module_id" ]]; then
-                    module_id="$1"
+                if [[ -z "$extension_id" ]]; then
+                    extension_id="$1"
                 fi
                 shift
                 ;;
         esac
     done
 
-    if [[ -z "$module_id" ]]; then
-        echo -e "${RED}Usage: homeboy sweatpants run <module-id> [-i key=value]...${NC}"
+    if [[ -z "$extension_id" ]]; then
+        echo -e "${RED}Usage: homeboy sweatpants run <extension-id> [-i key=value]...${NC}"
         exit 1
     fi
 
     local payload
-    payload=$(jq -n --arg module "$module_id" --argjson inputs "$inputs" \
-        '{"module": $module, "inputs": $inputs}')
+    payload=$(jq -n --arg extension "$extension_id" --argjson inputs "$inputs" \
+        '{"extension": $extension, "inputs": $inputs}')
 
-    echo -e "${BLUE}Starting job: $module_id${NC}"
+    echo -e "${BLUE}Starting job: $extension_id${NC}"
 
     local response
     response=$(api_request POST "$endpoint_url" "/api/jobs" "$payload" "$auth")
@@ -281,7 +281,7 @@ cmd_jobs() {
 
     echo -e "${BLUE}Jobs${NC}"
     echo "====="
-    echo "$response" | jq -r '.jobs[] | "\(.id) [\(.status)]: \(.module) - \(.created_at // "unknown")"'
+    echo "$response" | jq -r '.jobs[] | "\(.id) [\(.status)]: \(.extension) - \(.created_at // "unknown")"'
 }
 
 # Cancel a job
@@ -303,7 +303,7 @@ cmd_cancel() {
 
 # Show help
 show_help() {
-    echo "Sweatpants Bridge - Homeboy module for Sweatpants automation engine"
+    echo "Sweatpants Bridge - Homeboy extension for Sweatpants automation engine"
     echo ""
     echo "Usage: homeboy sweatpants [endpoint] <command> [args...]"
     echo ""
@@ -314,8 +314,8 @@ show_help() {
     echo ""
     echo "Commands (use with optional endpoint prefix):"
     echo "  status                       Show Sweatpants status"
-    echo "  module list                  List available modules"
-    echo "  run <module> [-i k=v]...     Run a module with inputs"
+    echo "  extension list                  List available extensions"
+    echo "  run <extension> [-i k=v]...     Run a extension with inputs"
     echo "  jobs                         List jobs"
     echo "  logs <job-id> [--follow]     View job logs"
     echo "  cancel <job-id>              Cancel a running job"
@@ -323,7 +323,7 @@ show_help() {
     echo "Examples:"
     echo "  homeboy sweatpants status"
     echo "  homeboy sweatpants local status"
-    echo "  homeboy sweatpants run my-module -i key=value"
+    echo "  homeboy sweatpants run my-extension -i key=value"
     echo "  homeboy sweatpants vps run scraper -i tags=lo-fi"
     echo "  homeboy sweatpants logs abc123 --follow"
 }
@@ -393,13 +393,13 @@ main() {
         status)
             cmd_status "$endpoint_url" "$auth"
             ;;
-        module)
+        extension)
             case "${args[0]}" in
                 list)
-                    cmd_module_list "$endpoint_url" "$auth"
+                    cmd_extension_list "$endpoint_url" "$auth"
                     ;;
                 *)
-                    echo -e "${RED}Unknown module command: ${args[0]}${NC}"
+                    echo -e "${RED}Unknown extension command: ${args[0]}${NC}"
                     exit 1
                     ;;
             esac

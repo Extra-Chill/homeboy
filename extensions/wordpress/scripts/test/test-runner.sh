@@ -36,7 +36,7 @@ trap print_failure_summary EXIT
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Environment variables:"
-    echo "HOMEBOY_MODULE_PATH=${HOMEBOY_MODULE_PATH:-NOT_SET}"
+    echo "HOMEBOY_EXTENSION_PATH=${HOMEBOY_EXTENSION_PATH:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_ID=${HOMEBOY_COMPONENT_ID:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
     echo "HOMEBOY_PROJECT_PATH=${HOMEBOY_PROJECT_PATH:-NOT_SET}"
@@ -44,9 +44,9 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
 fi
 
 # Determine execution context
-if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then
-    # Called through Homeboy module system
-    MODULE_PATH="${HOMEBOY_MODULE_PATH}"
+if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
+    # Called through Homeboy extension system
+    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
 
     # Check if this is component-level or project-level testing
     if [ -n "${HOMEBOY_COMPONENT_ID:-}" ]; then
@@ -78,7 +78,7 @@ else
     # Called directly (e.g., from composer test in component directory)
     # Derive paths and use defaults
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    MODULE_PATH="$(dirname "$(dirname "$SCRIPT_DIR")")"
+    EXTENSION_PATH="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
     # Assume we're in a component directory (composer test context)
     COMPONENT_PATH="$(pwd)"
@@ -98,7 +98,7 @@ fi
 echo "Running WordPress tests..."
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "Current dir: $(pwd)"
-    echo "Module path: $MODULE_PATH"
+    echo "Extension path: $EXTENSION_PATH"
     if [ -n "${COMPONENT_ID:-}" ]; then
         echo "Component: $COMPONENT_ID ($COMPONENT_PATH)"
         echo "Plugin path: $PLUGIN_PATH"
@@ -110,17 +110,17 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
 fi
 
 # wp-phpunit test library path (always from vendor)
-WP_TESTS_DIR="${MODULE_PATH}/vendor/wp-phpunit/wp-phpunit"
+WP_TESTS_DIR="${EXTENSION_PATH}/vendor/wp-phpunit/wp-phpunit"
 
 # Get WordPress version from wp-phpunit package
 # wp-phpunit versions match WordPress versions (e.g., 6.9.1)
 WP_VERSION=""
-if [ -f "${MODULE_PATH}/composer.lock" ]; then
-    WP_VERSION=$(grep -A5 '"name": "wp-phpunit/wp-phpunit"' "${MODULE_PATH}/composer.lock" | grep '"version"' | head -1 | sed 's/.*"version": "\([^"]*\)".*/\1/' || true)
+if [ -f "${EXTENSION_PATH}/composer.lock" ]; then
+    WP_VERSION=$(grep -A5 '"name": "wp-phpunit/wp-phpunit"' "${EXTENSION_PATH}/composer.lock" | grep '"version"' | head -1 | sed 's/.*"version": "\([^"]*\)".*/\1/' || true)
 fi
 if [ -z "$WP_VERSION" ]; then
     # Fallback: try to get from installed package
-    WP_VERSION=$(composer show wp-phpunit/wp-phpunit --working-dir="${MODULE_PATH}" 2>/dev/null | grep '^versions' | awk '{print $NF}' || echo "6.9.1")
+    WP_VERSION=$(composer show wp-phpunit/wp-phpunit --working-dir="${EXTENSION_PATH}" 2>/dev/null | grep '^versions' | awk '{print $NF}' || echo "6.9.1")
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -235,11 +235,11 @@ if [ "$DATABASE_TYPE" = "sqlite" ]; then
         echo "Or switch to MySQL: homeboy test <component> --setting database_type=mysql"
         exit 1
     fi
-    bash "${MODULE_PATH}/scripts/test/generate-config.sh" "sqlite" "$ABSPATH" "$MODULE_PATH"
+    bash "${EXTENSION_PATH}/scripts/test/generate-config.sh" "sqlite" "$ABSPATH" "$EXTENSION_PATH"
 elif [ "$DATABASE_TYPE" = "mysql" ]; then
     if [ -z "${MYSQL_HOST:-}" ]; then
         # Credentials not set yet (explicit mysql mode, not auto-detected)
-        if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then
+        if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
             # Use Homeboy settings
             MYSQL_HOST=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_host // "localhost"')
             MYSQL_DATABASE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_database // "wordpress_test"')
@@ -253,13 +253,13 @@ elif [ "$DATABASE_TYPE" = "mysql" ]; then
             MYSQL_PASSWORD=""
         fi
     fi
-    bash "${MODULE_PATH}/scripts/test/generate-config.sh" "mysql" "$ABSPATH" "$MODULE_PATH" \
+    bash "${EXTENSION_PATH}/scripts/test/generate-config.sh" "mysql" "$ABSPATH" "$EXTENSION_PATH" \
         "$MYSQL_HOST" "$MYSQL_DATABASE" "$MYSQL_USER" "$MYSQL_PASSWORD"
 fi
 
 # Run linting using external lint-runner.sh with summary mode
 run_lint() {
-    local lint_runner="${MODULE_PATH}/scripts/lint/lint-runner.sh"
+    local lint_runner="${EXTENSION_PATH}/scripts/lint/lint-runner.sh"
     if [ ! -f "$lint_runner" ]; then
         echo "Warning: lint-runner.sh not found, skipping linting"
         return 0
@@ -272,7 +272,7 @@ run_lint() {
 
 # Run autoload validation (blocking - must pass before tests)
 run_autoload_check() {
-    local check_script="${MODULE_PATH}/scripts/validation/autoload-check.sh"
+    local check_script="${EXTENSION_PATH}/scripts/validation/autoload-check.sh"
     if [ -f "$check_script" ]; then
         local output
         set +e
@@ -333,7 +333,7 @@ if [ -f "$LOCAL_BOOTSTRAP" ]; then
     echo ""
     echo "⚠ Warning: Local bootstrap.php found and will be IGNORED"
     echo "  Location: $LOCAL_BOOTSTRAP"
-    echo "  Homeboy WordPress module provides complete test infrastructure."
+    echo "  Homeboy WordPress extension provides complete test infrastructure."
     if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
         echo "  → Auto-fix: Removing $LOCAL_BOOTSTRAP"
         rm -f "$LOCAL_BOOTSTRAP"
@@ -348,7 +348,7 @@ if [ -f "$LOCAL_PHPUNIT_XML" ]; then
     echo ""
     echo "⚠ Warning: Local phpunit.xml found in tests/ and will be IGNORED"
     echo "  Location: $LOCAL_PHPUNIT_XML"
-    echo "  Homeboy WordPress module provides PHPUnit configuration."
+    echo "  Homeboy WordPress extension provides PHPUnit configuration."
     if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
         echo "  → Auto-fix: Removing $LOCAL_PHPUNIT_XML"
         rm -f "$LOCAL_PHPUNIT_XML"
@@ -393,7 +393,7 @@ if [ -f "$LOCAL_PHPUNIT_BIN" ]; then
     echo ""
     echo "⚠ Warning: Local vendor/bin/phpunit found — may conflict with Homeboy's PHPUnit"
     echo "  Location: $LOCAL_PHPUNIT_BIN"
-    echo "  Homeboy WordPress module provides PHPUnit through its own vendor directory."
+    echo "  Homeboy WordPress extension provides PHPUnit through its own vendor directory."
     echo "  Having two PHPUnit versions can cause version mismatches and confusing failures."
     if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
         echo "  → Auto-fix: Removing local phpunit from require-dev and vendor..."
@@ -411,7 +411,7 @@ if [ ! -f "$LOCAL_PHPUNIT_BIN" ] && [ -f "${PLUGIN_PATH}/composer.json" ]; then
     if grep -q '"phpunit/phpunit"' "${PLUGIN_PATH}/composer.json" 2>/dev/null; then
         echo ""
         echo "⚠ Warning: phpunit/phpunit found in composer.json require-dev"
-        echo "  Homeboy WordPress module provides PHPUnit — the local dependency is redundant."
+        echo "  Homeboy WordPress extension provides PHPUnit — the local dependency is redundant."
         if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
             echo "  → Auto-fix: Removing phpunit from require-dev..."
             (cd "$PLUGIN_PATH" && composer remove --dev phpunit/phpunit 2>/dev/null || true)
@@ -439,11 +439,11 @@ if [ ! -d "${TEST_DIR}" ]; then
     exit 0
 fi
 
-# Run PHPUnit with module bootstrap
+# Run PHPUnit with extension bootstrap
 echo "Running PHPUnit tests..."
 
 phpunit_args=(
-    --bootstrap="${MODULE_PATH}/tests/bootstrap.php"
+    --bootstrap="${EXTENSION_PATH}/tests/bootstrap.php"
     --no-configuration
     --colors=auto
     --testdox
@@ -453,7 +453,7 @@ phpunit_args=(
 PHPUNIT_TMPFILE=$(mktemp)
 
 set +e
-"${MODULE_PATH}/vendor/bin/phpunit" "${phpunit_args[@]}" "$@" 2>&1 | tee "$PHPUNIT_TMPFILE"
+"${EXTENSION_PATH}/vendor/bin/phpunit" "${phpunit_args[@]}" "$@" 2>&1 | tee "$PHPUNIT_TMPFILE"
 phpunit_exit=${PIPESTATUS[0]}
 set -e
 

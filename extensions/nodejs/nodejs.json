@@ -28,7 +28,7 @@
   },
   "build": {
     "cleanup_paths": [
-      "node_modules"
+      "node_extensions"
     ]
   }
 }

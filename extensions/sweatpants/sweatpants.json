@@ -8,14 +8,14 @@
   "cli": {
     "tool": "sweatpants",
     "display_name": "Sweatpants",
-    "command_template": "bash {{module_path}}/scripts/sweatpants-bridge.sh {{args}}",
+    "command_template": "bash {{extension_path}}/scripts/sweatpants-bridge.sh {{args}}",
     "help": {
       "project_id_help": "Endpoint ID (local, vps, etc.) or omit to use default",
       "args_help": "Sweatpants command",
       "examples": [
         "homeboy sweatpants status",
         "homeboy sweatpants local status",
-        "homeboy sweatpants run my-module -i key=value",
+        "homeboy sweatpants run my-extension -i key=value",
         "homeboy sweatpants vps run my-scraper -i query=test",
         "homeboy sweatpants logs <job-id> --follow"
       ]

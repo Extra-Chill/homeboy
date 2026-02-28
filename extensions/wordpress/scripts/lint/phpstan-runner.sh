@@ -9,7 +9,7 @@ set -euo pipefail
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: PHPStan Environment variables:"
-    echo "HOMEBOY_MODULE_PATH=${HOMEBOY_MODULE_PATH:-NOT_SET}"
+    echo "HOMEBOY_EXTENSION_PATH=${HOMEBOY_EXTENSION_PATH:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_ID=${HOMEBOY_COMPONENT_ID:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
     echo "HOMEBOY_SUMMARY_MODE=${HOMEBOY_SUMMARY_MODE:-NOT_SET}"
@@ -26,24 +26,24 @@ if [[ "${HOMEBOY_SKIP_PHPSTAN:-}" == "1" ]]; then
 fi
 
 # Determine execution context
-if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then
-    MODULE_PATH="${HOMEBOY_MODULE_PATH}"
+if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
+    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
     COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-.}"
     PLUGIN_PATH="$COMPONENT_PATH"
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    MODULE_PATH="$(dirname "$(dirname "$SCRIPT_DIR")")"
+    EXTENSION_PATH="$(dirname "$(dirname "$SCRIPT_DIR")")"
     COMPONENT_PATH="$(pwd)"
     PLUGIN_PATH="$COMPONENT_PATH"
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-    echo "DEBUG: Module path: $MODULE_PATH"
+    echo "DEBUG: Extension path: $EXTENSION_PATH"
     echo "DEBUG: Plugin path: $PLUGIN_PATH"
 fi
 
-PHPSTAN_BIN="${MODULE_PATH}/vendor/bin/phpstan"
-PHPSTAN_CONFIG="${MODULE_PATH}/phpstan.neon.dist"
+PHPSTAN_BIN="${EXTENSION_PATH}/vendor/bin/phpstan"
+PHPSTAN_CONFIG="${EXTENSION_PATH}/phpstan.neon.dist"
 COMPONENT_BASELINE="${PLUGIN_PATH}/phpstan-baseline.neon"
 
 # Validate PHPStan exists (soft failure - not all installations have it)
@@ -60,7 +60,7 @@ fi
 # Check if component has PHP files
 php_file_count=$(find "$PLUGIN_PATH" -type f -name "*.php" \
     -not -path "*/vendor/*" \
-    -not -path "*/node_modules/*" \
+    -not -path "*/node_extensions/*" \
     -not -path "*/build/*" \
     -not -path "*/dist/*" \
     -not -path "*/tests/*" \

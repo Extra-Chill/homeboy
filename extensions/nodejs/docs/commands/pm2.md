@@ -33,4 +33,4 @@ Exit code matches the executed PM2 command.
 
 ## Related
 
-- [module](module.md)
+- [extension](extension.md)

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Plasma Shield - Desktop module runner
+# Plasma Shield - Desktop extension runner
 # Outputs JSON for Homeboy Desktop table display
 
 set -e

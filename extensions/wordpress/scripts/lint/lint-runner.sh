@@ -41,7 +41,7 @@ should_run_step() {
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Environment variables:"
-    echo "HOMEBOY_MODULE_PATH=${HOMEBOY_MODULE_PATH:-NOT_SET}"
+    echo "HOMEBOY_EXTENSION_PATH=${HOMEBOY_EXTENSION_PATH:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_ID=${HOMEBOY_COMPONENT_ID:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
     echo "HOMEBOY_AUTO_FIX=${HOMEBOY_AUTO_FIX:-NOT_SET}"
@@ -70,13 +70,13 @@ if [ -n "${HOMEBOY_CATEGORY:-}" ]; then
 fi
 
 # Determine execution context
-if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then
-    MODULE_PATH="${HOMEBOY_MODULE_PATH}"
+if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
+    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
     COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-.}"
     PLUGIN_PATH="$COMPONENT_PATH"
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    MODULE_PATH="$(dirname "$SCRIPT_DIR")"
+    EXTENSION_PATH="$(dirname "$SCRIPT_DIR")"
     COMPONENT_PATH="$(pwd)"
     PLUGIN_PATH="$COMPONENT_PATH"
 fi
@@ -113,22 +113,22 @@ else
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-    echo "Module path: $MODULE_PATH"
+    echo "Extension path: $EXTENSION_PATH"
     echo "Plugin path: $PLUGIN_PATH"
     echo "Lint files: ${LINT_FILES[*]}"
     echo "Auto-fix: ${HOMEBOY_AUTO_FIX:-0}"
 fi
 
-PHPCS_BIN="${MODULE_PATH}/vendor/bin/phpcs"
-PHPCBF_BIN="${MODULE_PATH}/vendor/bin/phpcbf"
-YODA_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/yoda-fixer.php"
-IN_ARRAY_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/in-array-strict-fixer.php"
-SHORT_TERNARY_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/short-ternary-fixer.php"
-ESCAPE_I18N_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/escape-i18n-fixer.php"
-ECHO_TRANSLATE_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/echo-translate-fixer.php"
-SAFE_REDIRECT_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/safe-redirect-fixer.php"
-WP_DIE_TRANSLATE_FIXER="${MODULE_PATH}/scripts/lint/php-fixers/wp-die-translate-fixer.php"
-PHPCS_CONFIG="${MODULE_PATH}/phpcs.xml.dist"
+PHPCS_BIN="${EXTENSION_PATH}/vendor/bin/phpcs"
+PHPCBF_BIN="${EXTENSION_PATH}/vendor/bin/phpcbf"
+YODA_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/yoda-fixer.php"
+IN_ARRAY_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/in-array-strict-fixer.php"
+SHORT_TERNARY_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/short-ternary-fixer.php"
+ESCAPE_I18N_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/escape-i18n-fixer.php"
+ECHO_TRANSLATE_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/echo-translate-fixer.php"
+SAFE_REDIRECT_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/safe-redirect-fixer.php"
+WP_DIE_TRANSLATE_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/wp-die-translate-fixer.php"
+PHPCS_CONFIG="${EXTENSION_PATH}/phpcs.xml.dist"
 
 # Validate tools exist
 if [ ! -f "$PHPCS_BIN" ]; then
@@ -362,7 +362,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     fi
 
     # Run ESLint in summary mode
-    ESLINT_RUNNER="${MODULE_PATH}/scripts/lint/eslint-runner.sh"
+    ESLINT_RUNNER="${EXTENSION_PATH}/scripts/lint/eslint-runner.sh"
     ESLINT_PASSED=1
 
     if ! should_run_step "eslint"; then
@@ -382,7 +382,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
 
     # Run PHPStan in summary mode
     run_phpstan_summary() {
-        local phpstan_runner="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
+        local phpstan_runner="${EXTENSION_PATH}/scripts/lint/phpstan-runner.sh"
         if [ ! -f "$phpstan_runner" ]; then
             return 0
         fi
@@ -436,7 +436,7 @@ else
 fi
 
 # Run ESLint for JavaScript files
-ESLINT_RUNNER="${MODULE_PATH}/scripts/lint/eslint-runner.sh"
+ESLINT_RUNNER="${EXTENSION_PATH}/scripts/lint/eslint-runner.sh"
 ESLINT_PASSED=1
 
 if ! should_run_step "eslint"; then
@@ -456,7 +456,7 @@ fi
 
 # Run PHPStan in warn-only mode (optional static analysis)
 run_phpstan() {
-    local phpstan_runner="${MODULE_PATH}/scripts/lint/phpstan-runner.sh"
+    local phpstan_runner="${EXTENSION_PATH}/scripts/lint/phpstan-runner.sh"
     if [ ! -f "$phpstan_runner" ]; then
         return 0
     fi

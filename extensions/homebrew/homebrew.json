@@ -9,7 +9,7 @@
       "id": "release.publish",
       "label": "Publish Homebrew Formula",
       "type": "command",
-      "command": "bash \"{{module_path}}/scripts/publish-homebrew.sh\"",
+      "command": "bash \"{{extension_path}}/scripts/publish-homebrew.sh\"",
       "payload": {
         "release": "{{payload.release}}",
         "config": "{{payload.config}}"
@@ -18,7 +18,7 @@
   ],
   "executable": {
     "runtime": {
-      "run_command": "{{module_path}}/scripts/publish-homebrew.sh"
+      "run_command": "{{extension_path}}/scripts/publish-homebrew.sh"
     }
   }
 }

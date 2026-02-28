@@ -4,22 +4,22 @@ set -euo pipefail
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Environment variables:"
-    echo "HOMEBOY_MODULE_PATH=${HOMEBOY_MODULE_PATH:-NOT_SET}"
+    echo "HOMEBOY_EXTENSION_PATH=${HOMEBOY_EXTENSION_PATH:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_ID=${HOMEBOY_COMPONENT_ID:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
     echo "HOMEBOY_SETTINGS_JSON=${HOMEBOY_SETTINGS_JSON:-NOT_SET}"
 fi
 
 # Determine execution context
-if [ -n "${HOMEBOY_MODULE_PATH:-}" ]; then
-    MODULE_PATH="${HOMEBOY_MODULE_PATH}"
+if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
+    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
     COMPONENT_ID="${HOMEBOY_COMPONENT_ID:-unknown}"
     COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-.}"
     SETTINGS_JSON="${HOMEBOY_SETTINGS_JSON:-}"
 else
     # Called directly
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    MODULE_PATH="$(dirname "$SCRIPT_DIR")"
+    EXTENSION_PATH="$(dirname "$SCRIPT_DIR")"
     COMPONENT_PATH="$(pwd)"
     COMPONENT_ID="$(basename "$COMPONENT_PATH")"
 fi

@@ -1,7 +1,7 @@
 {
-  "name": "homeboy/module-wordpress",
-  "description": "WordPress module with embedded test infrastructure",
-  "type": "homeboy-module",
+  "name": "homeboy/extension-wordpress",
+  "description": "WordPress extension with embedded test infrastructure",
+  "type": "homeboy-extension",
   "license": "GPL-2.0-or-later",
 
   "require": {
@@ -31,7 +31,7 @@
     "setup": [
       "@composer install"
     ],
-    "test": "phpunit --configuration={{modulePath}}/phpunit.xml.dist",
+    "test": "phpunit --configuration={{extensionPath}}/phpunit.xml.dist",
     "lint": "phpcs"
   }
 }

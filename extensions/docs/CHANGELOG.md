@@ -11,15 +11,15 @@
 
 ## [0.5.0] - 2026-02-13
 
-- feat: add openclaw module for AI agent management
+- feat: add openclaw extension for AI agent management
 
 ## [0.4.0] - 2026-02-10
 
 ### Added
-- plasma-shield module with desktop visual UI
+- plasma-shield extension with desktop visual UI
 
 ### Fixed
-- WordPress module: download WordPress on demand instead of bundling
+- WordPress extension: download WordPress on demand instead of bundling
 - plasma-shield: rename manifest to {id}.json pattern
 
 ## [0.3.0] - 2026-02-10
@@ -33,7 +33,7 @@
 - Auto-init context injection for agent hooks
 
 ### Refactored
-- GitHub module: Remove CLI wrapper, focus on release publishing
+- GitHub extension: Remove CLI wrapper, focus on release publishing
 
 ### Fixed
 - Add missing WordPress function stubs to validate-autoload.php
@@ -45,13 +45,13 @@
 
 ## [0.1.3] - 2026-01-22
 
-- feat: add CLI help configuration to WordPress module
+- feat: add CLI help configuration to WordPress extension
 
 ## [0.1.2] - 2026-01-21
 
 ### Fixed
 - lint-runner.sh now surfaces clear error when Text Domain header is missing instead of dying silently
-- PHP fixers now exclude vendor/, node_modules/, and build/ directories via shared fixer-helpers.php
+- PHP fixers now exclude vendor/, node_extensions/, and build/ directories via shared fixer-helpers.php
 - Fixed silent exit 126 failure when linting plugins with many errors (JSON output exceeding macOS ARG_MAX limit now piped via stdin)
 
 ## [0.1.1] - 2026-01-19

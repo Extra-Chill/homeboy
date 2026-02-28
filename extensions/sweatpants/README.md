@@ -1,4 +1,4 @@
-# Sweatpants Module for Homeboy
+# Sweatpants Extension for Homeboy
 
 Bridge to Sweatpants automation engine for long-running, checkpoint-resumable jobs.
 
@@ -16,7 +16,7 @@ Bridge to Sweatpants automation engine for long-running, checkpoint-resumable jo
 ## Installation
 
 ```bash
-homeboy module install homeboy-modules/sweatpants
+homeboy extension install homeboy-extensions/sweatpants
 ```
 
 ## Configuration
@@ -58,8 +58,8 @@ Commands can be prefixed with an endpoint ID, or use the default endpoint:
 ```bash
 # Using default endpoint (local)
 homeboy sweatpants status
-homeboy sweatpants module list
-homeboy sweatpants run <module> [-i key=value]...
+homeboy sweatpants extension list
+homeboy sweatpants run <extension> [-i key=value]...
 homeboy sweatpants jobs
 homeboy sweatpants logs <job-id> [--follow]
 homeboy sweatpants cancel <job-id>
@@ -75,10 +75,10 @@ homeboy sweatpants vps run my-scraper -i query=test
 # Check local Sweatpants status
 homeboy sweatpants status
 
-# List available modules
-homeboy sweatpants module list
+# List available extensions
+homeboy sweatpants extension list
 
-# Run a module with inputs
+# Run a extension with inputs
 homeboy sweatpants run my-scraper -i url=https://example.com -i depth=3
 
 # Follow job logs in real-time

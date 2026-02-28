@@ -10,7 +10,7 @@
       "id": "release.publish",
       "label": "Publish GitHub Release",
       "type": "command",
-      "command": "bash \"{{module_path}}/scripts/publish-github.sh\"",
+      "command": "bash \"{{extension_path}}/scripts/publish-github.sh\"",
       "payload": {
         "release": "{{payload.release}}",
         "config": "{{payload.config}}"

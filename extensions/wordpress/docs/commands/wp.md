@@ -78,5 +78,5 @@ Exit code matches the executed CLI tool command.
 
 ## Related
 
-- [module](module.md)
+- [extension](extension.md)
 - [db](db.md)
