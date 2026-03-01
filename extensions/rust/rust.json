@@ -1,9 +1,16 @@
 {
   "name": "Rust",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "icon": "gearshape.2.fill",
   "description": "Cargo CLI integration for Rust components",
   "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["rs"],
+    "capabilities": ["fingerprint"]
+  },
+  "scripts": {
+    "fingerprint": "scripts/fingerprint.sh"
+  },
   "audit": {
     "feature_patterns": [
       "#\\[derive\\(.*Subcommand.*\\)\\]\\s*(?:pub\\s+)?enum\\s+(\\w+)",

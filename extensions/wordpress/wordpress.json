@@ -1,9 +1,16 @@
 {
   "name": "WordPress",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["php"],
+    "capabilities": ["fingerprint"]
+  },
+  "scripts": {
+    "fingerprint": "scripts/fingerprint.sh"
+  },
   "platform": {
     "config_schema": "wordpress",
     "discovery": {
