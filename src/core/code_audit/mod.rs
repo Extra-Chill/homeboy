@@ -13,15 +13,24 @@
 
 pub mod baseline;
 mod checks;
-mod conventions;
+pub(crate) mod conventions;
+mod discovery;
 mod findings;
+mod fingerprint;
 pub mod fixer;
+pub(crate) mod import_matching;
+mod signatures;
 mod structural;
+pub(crate) mod walker;
+
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 use std::path::Path;
 
 pub use checks::{CheckResult, CheckStatus};
 pub use conventions::{Convention, Deviation, DeviationKind, Language, Outlier};
+pub use fingerprint::FileFingerprint;
 pub use findings::{Finding, Severity};
 
 use crate::{component, utils::is_zero, Result};
@@ -151,12 +160,12 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
     log_status!("audit", "Scanning {} for conventions...", source_path);
 
     // Phase 1: Auto-discover file groups
-    let discovery = conventions::auto_discover_groups(root);
+    let discovery = discovery::auto_discover_groups(root);
     let files_skipped = discovery.files_walked.saturating_sub(discovery.files_fingerprinted);
 
     if discovery.groups.is_empty() {
         let mut warnings = Vec::new();
-        let unclaimed = conventions::count_unclaimed_source_files(root);
+        let unclaimed = walker::count_unclaimed_source_files(root);
         let total_skipped = files_skipped + unclaimed;
 
         if unclaimed > 0 {
@@ -280,7 +289,7 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
     );
 
     // Phase 6: Cross-directory convention discovery
-    let directory_conventions = conventions::discover_cross_directory(&convention_reports);
+    let directory_conventions = discovery::discover_cross_directory(&convention_reports);
 
     if !directory_conventions.is_empty() {
         let total_dir_outliers: usize = directory_conventions.iter().map(|d| d.outlier_dirs.len()).sum();
