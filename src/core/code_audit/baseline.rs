@@ -20,7 +20,7 @@ pub struct AuditBaseline {
     /// Total outlier files at baseline time.
     pub outliers_count: usize,
     /// Alignment score at baseline time.
-    pub alignment_score: f32,
+    pub alignment_score: Option<f32>,
     /// Set of known outlier file paths (accepted drift).
     pub known_outliers: Vec<String>,
     /// Fingerprint of each known finding: "convention::file::kind::description"
@@ -283,7 +283,9 @@ mod tests {
                 files_scanned: 10,
                 conventions_detected: 1,
                 outliers_found: findings.len(),
-                alignment_score: 0.8,
+                alignment_score: Some(0.8),
+                files_skipped: 0,
+                warnings: vec![],
             },
             conventions: vec![],
             directory_conventions: vec![],

@@ -26,3 +26,17 @@ pub mod slugify;
 pub(crate) mod template;
 pub mod token;
 pub mod validation;
+
+// ============================================================================
+// Serde helpers
+// ============================================================================
+
+/// Helper for `#[serde(skip_serializing_if = "is_zero")]` on `usize` fields.
+pub fn is_zero(v: &usize) -> bool {
+    *v == 0
+}
+
+/// Helper for `#[serde(skip_serializing_if = "is_zero_u32")]` on `u32` fields.
+pub fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}

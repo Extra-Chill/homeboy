@@ -1052,7 +1052,9 @@ class BadAbility {
                 files_scanned: 2,
                 conventions_detected: 1,
                 outliers_found: 1,
-                alignment_score: 0.5,
+                alignment_score: Some(0.5),
+                files_skipped: 0,
+                warnings: vec![],
             },
             conventions: vec![ConventionReport {
                 name: "Abilities".to_string(),
@@ -1289,7 +1291,9 @@ class {} {{
                 files_scanned: 4,
                 conventions_detected: 1,
                 outliers_found: 1,
-                alignment_score: 0.75,
+                alignment_score: Some(0.75),
+                files_skipped: 0,
+                warnings: vec![],
             },
             conventions: vec![ConventionReport {
                 name: "Flow".to_string(),
@@ -1363,7 +1367,9 @@ class {} {{
                 files_scanned: 3,
                 conventions_detected: 1,
                 outliers_found: 2,
-                alignment_score: 0.33,
+                alignment_score: Some(0.33),
+                files_skipped: 0,
+                warnings: vec![],
             },
             conventions: vec![ConventionReport {
                 name: "Jobs".to_string(),
@@ -1499,7 +1505,9 @@ pub struct TestOutput {}
                 files_scanned: 2,
                 conventions_detected: 1,
                 outliers_found: 1,
-                alignment_score: 0.5,
+                alignment_score: Some(0.5),
+                files_skipped: 0,
+                warnings: vec![],
             },
             conventions: vec![ConventionReport {
                 name: "Commands".to_string(),

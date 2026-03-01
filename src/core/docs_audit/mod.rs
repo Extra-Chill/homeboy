@@ -20,12 +20,7 @@ pub use verify::VerifyResult;
 
 use regex::Regex;
 
-use crate::{component, git, extension, Result};
-
-/// Helper for `skip_serializing_if` on zero-value usize fields.
-fn is_zero(v: &usize) -> bool {
-    *v == 0
-}
+use crate::{component, git, extension, utils::is_zero, Result};
 
 /// A doc that needs content review due to referenced files changing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -91,12 +86,12 @@ pub struct AlignmentSummary {
     pub broken_references: usize,
     pub unchanged_docs: usize,
     /// Total features detected by extension-defined patterns (omitted when 0).
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub total_features: usize,
     /// Features with at least one mention in documentation (omitted when 0).
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub documented_features: usize,
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub undocumented_features: usize,
 }
 

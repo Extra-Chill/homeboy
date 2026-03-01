@@ -12,7 +12,7 @@ use homeboy::extension::{
 };
 use homeboy::project::{self, Project};
 use homeboy::server::{self, Server};
-use homeboy::utils::parser;
+use homeboy::utils::{self, parser};
 use homeboy::{changelog, git, version};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,14 +48,10 @@ pub struct InitStatus {
     pub docs_only: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub has_uncommitted: Vec<String>,
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(skip_serializing_if = "utils::is_zero")]
     pub config_gaps: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gap_details: Vec<GapSummary>,
-}
-
-fn is_zero(n: &usize) -> bool {
-    *n == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -72,16 +68,12 @@ pub struct ComponentSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,
     pub status: String,
-    #[serde(skip_serializing_if = "is_zero_u32")]
+    #[serde(skip_serializing_if = "utils::is_zero_u32")]
     pub commits_since_version: u32,
-    #[serde(skip_serializing_if = "is_zero_u32")]
+    #[serde(skip_serializing_if = "utils::is_zero_u32")]
     pub code_commits: u32,
-    #[serde(skip_serializing_if = "is_zero_u32")]
+    #[serde(skip_serializing_if = "utils::is_zero_u32")]
     pub docs_only_commits: u32,
-}
-
-fn is_zero_u32(n: &u32) -> bool {
-    *n == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -194,9 +186,9 @@ pub struct ChangelogSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct ComponentReleaseState {
     pub commits_since_version: u32,
-    #[serde(skip_serializing_if = "is_zero_u32")]
+    #[serde(skip_serializing_if = "utils::is_zero_u32")]
     pub code_commits: u32,
-    #[serde(skip_serializing_if = "is_zero_u32")]
+    #[serde(skip_serializing_if = "utils::is_zero_u32")]
     pub docs_only_commits: u32,
     pub has_uncommitted_changes: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

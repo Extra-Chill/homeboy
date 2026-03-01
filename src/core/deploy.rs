@@ -18,7 +18,7 @@ use crate::extension::{
 use crate::permissions;
 use crate::project::{self, Project};
 use crate::ssh::SshClient;
-use crate::utils::artifact;
+use crate::utils::{self, artifact};
 use crate::utils::base_path;
 use crate::utils::parser;
 use crate::utils::shell;
@@ -612,20 +612,16 @@ pub struct ReleaseState {
     /// Number of commits since the last version tag
     pub commits_since_version: u32,
     /// Number of code commits (non-docs)
-    #[serde(skip_serializing_if = "is_zero_u32")]
+    #[serde(skip_serializing_if = "utils::is_zero_u32")]
     pub code_commits: u32,
     /// Number of docs-only commits
-    #[serde(skip_serializing_if = "is_zero_u32")]
+    #[serde(skip_serializing_if = "utils::is_zero_u32")]
     pub docs_only_commits: u32,
     /// Whether there are uncommitted changes in the working directory
     pub has_uncommitted_changes: bool,
     /// The baseline reference (tag or commit hash) used for comparison
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_ref: Option<String>,
-}
-
-fn is_zero_u32(n: &u32) -> bool {
-    *n == 0
 }
 
 /// Result for a single component deployment.

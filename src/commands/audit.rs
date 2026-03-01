@@ -61,7 +61,8 @@ pub enum AuditOutput {
         path: String,
         findings_count: usize,
         outliers_count: usize,
-        alignment_score: f32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alignment_score: Option<f32>,
     },
 
     #[serde(rename = "audit.compared")]
@@ -125,12 +126,20 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
                 "Failed to read back saved baseline",
             ))?;
 
-        eprintln!(
-            "[audit] Baseline saved to {} ({} findings, {:.0}% alignment)",
-            saved.display(),
-            baseline_data.findings_count,
-            baseline_data.alignment_score * 100.0
-        );
+        if let Some(score) = baseline_data.alignment_score {
+            eprintln!(
+                "[audit] Baseline saved to {} ({} findings, {:.0}% alignment)",
+                saved.display(),
+                baseline_data.findings_count,
+                score * 100.0
+            );
+        } else {
+            eprintln!(
+                "[audit] Baseline saved to {} ({} findings, alignment: N/A)",
+                saved.display(),
+                baseline_data.findings_count,
+            );
+        }
 
         return Ok((
             AuditOutput::BaselineSaved {

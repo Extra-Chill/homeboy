@@ -822,6 +822,14 @@ fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput>
         hints.insert(0, "Dry run — no files written".to_string());
     }
 
+    // Deduplicate file lists (a file may be appended to multiple times)
+    let mut seen = std::collections::HashSet::new();
+    files_created.retain(|f| seen.insert(f.clone()));
+    seen.clear();
+    files_updated.retain(|f| seen.insert(f.clone()));
+    // A file that was created shouldn't also appear in updated
+    files_updated.retain(|f| !files_created.contains(f));
+
     Ok((
         DocsOutput::Generate {
             files_created,

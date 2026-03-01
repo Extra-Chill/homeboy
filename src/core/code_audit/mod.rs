@@ -21,12 +21,7 @@ pub use checks::{CheckResult, CheckStatus};
 pub use conventions::{Convention, Deviation, DeviationKind, Language, Outlier};
 pub use findings::{Finding, Severity};
 
-use crate::{component, Result};
-
-/// Helper for `skip_serializing_if` on zero-value usize fields.
-fn is_zero(v: &usize) -> bool {
-    *v == 0
-}
+use crate::{component, utils::is_zero, Result};
 
 /// Summary counts for the audit report.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -36,7 +31,15 @@ pub struct AuditSummary {
     #[serde(skip_serializing_if = "is_zero")]
     pub outliers_found: usize,
     /// Overall alignment score (0.0 = total chaos, 1.0 = perfect consistency).
-    pub alignment_score: f32,
+    /// Null when no files could be fingerprinted (score would be meaningless).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alignment_score: Option<f32>,
+    /// Source files found but not fingerprinted (no extension provides fingerprinting).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub files_skipped: usize,
+    /// Warnings about the audit (e.g., unsupported file types).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Complete result of auditing a component's code conventions.
@@ -145,10 +148,38 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
     log_status!("audit", "Scanning {} for conventions...", source_path);
 
     // Phase 1: Auto-discover file groups
-    let groups = conventions::auto_discover_groups(root);
+    let discovery = conventions::auto_discover_groups(root);
+    let files_skipped = discovery.files_walked.saturating_sub(discovery.files_fingerprinted);
 
-    if groups.is_empty() {
-        log_status!("audit", "No source files found");
+    if discovery.groups.is_empty() {
+        let mut warnings = Vec::new();
+        let unclaimed = conventions::count_unclaimed_source_files(root);
+        let total_skipped = files_skipped + unclaimed;
+
+        if unclaimed > 0 {
+            warnings.push(format!(
+                "Found {} source file(s) but no installed extension provides fingerprinting for these file types. \
+                 Install or update an extension with a `provides.file_extensions` and `scripts.fingerprint` config.",
+                unclaimed
+            ));
+            log_status!(
+                "audit",
+                "WARNING: {} source files found but none could be fingerprinted (no extension claims these file types)",
+                unclaimed
+            );
+        } else if discovery.files_walked > 0 && discovery.files_fingerprinted == 0 {
+            warnings.push(format!(
+                "Found {} source file(s) but no extension could fingerprint them.",
+                discovery.files_walked
+            ));
+            log_status!(
+                "audit",
+                "WARNING: {} source files found but none could be fingerprinted",
+                discovery.files_walked
+            );
+        } else {
+            log_status!("audit", "No source files found");
+        }
         return Ok(CodeAuditResult {
             component_id: component_id.to_string(),
             source_path: source_path.to_string(),
@@ -156,7 +187,9 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
                 files_scanned: 0,
                 conventions_detected: 0,
                 outliers_found: 0,
-                alignment_score: 1.0,
+                alignment_score: None,
+                files_skipped: total_skipped,
+                warnings,
             },
             conventions: vec![],
             directory_conventions: vec![],
@@ -168,7 +201,7 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
     let mut discovered_conventions = Vec::new();
     let mut total_files = 0;
 
-    for (name, glob, fingerprints) in &groups {
+    for (name, glob, fingerprints) in &discovery.groups {
         total_files += fingerprints.len();
         if let Some(convention) =
             conventions::discover_conventions(name, glob, fingerprints)
@@ -191,10 +224,18 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
     let total_conforming: usize = discovered_conventions.iter().map(|c| c.conforming.len()).sum();
     let total_in_conventions = total_conforming + total_outliers;
     let alignment_score = if total_in_conventions > 0 {
-        total_conforming as f32 / total_in_conventions as f32
+        Some(total_conforming as f32 / total_in_conventions as f32)
     } else {
-        1.0
+        None
     };
+
+    let mut warnings = Vec::new();
+    if files_skipped > 0 {
+        warnings.push(format!(
+            "{} source file(s) found but could not be fingerprinted (no extension provides fingerprinting for these file types)",
+            files_skipped
+        ));
+    }
 
     let convention_reports: Vec<ConventionReport> = discovered_conventions
         .iter()
@@ -221,7 +262,7 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
         total_files,
         convention_reports.len(),
         total_outliers,
-        alignment_score * 100.0
+        alignment_score.unwrap_or(0.0) * 100.0
     );
 
     // Phase 6: Cross-directory convention discovery
@@ -245,6 +286,8 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
             conventions_detected: convention_reports.len(),
             outliers_found: total_outliers,
             alignment_score,
+            files_skipped,
+            warnings,
         },
         conventions: convention_reports,
         directory_conventions,
@@ -274,7 +317,7 @@ mod tests {
 
         let result = audit_path(dir.to_str().unwrap()).unwrap();
         assert_eq!(result.summary.files_scanned, 0);
-        assert_eq!(result.summary.alignment_score, 1.0);
+        assert!(result.summary.alignment_score.is_none());
         assert!(result.conventions.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
@@ -328,7 +371,7 @@ class StepC {
         assert_eq!(result.summary.files_scanned, 3);
         assert!(result.summary.conventions_detected >= 1);
         assert!(result.summary.outliers_found >= 1);
-        assert!(result.summary.alignment_score < 1.0);
+        assert!(result.summary.alignment_score.unwrap() < 1.0);
 
         // Find the steps convention
         let steps_conv = result

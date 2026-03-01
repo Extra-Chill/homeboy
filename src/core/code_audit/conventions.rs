@@ -814,19 +814,33 @@ pub fn check_signature_consistency(conventions: &mut [Convention], root: &Path) 
 // Auto-Discovery
 // ============================================================================
 
+/// Result of auto-discovering file groups.
+pub struct DiscoveryResult {
+    /// Grouped files with conventions.
+    pub groups: Vec<(String, String, Vec<FileFingerprint>)>,
+    /// Total source files found by the walker.
+    pub files_walked: usize,
+    /// Files that were successfully fingerprinted by an extension.
+    pub files_fingerprinted: usize,
+}
+
 /// Auto-discover file groups by scanning directories for clusters of similar files.
 ///
-/// Returns (group_name, glob_pattern, files) tuples for directories that
-/// contain 2+ files of the same language.
-pub fn auto_discover_groups(root: &Path) -> Vec<(String, String, Vec<FileFingerprint>)> {
+/// Returns groups of (group_name, glob_pattern, files) for directories that
+/// contain 2+ files of the same language, plus counts of walked vs fingerprinted files.
+pub fn auto_discover_groups(root: &Path) -> DiscoveryResult {
     let mut groups: Vec<(String, String, Vec<FileFingerprint>)> = Vec::new();
 
     // Walk directories, group files by parent dir + language
     let mut dir_files: HashMap<(String, Language), Vec<FileFingerprint>> = HashMap::new();
+    let mut files_walked: usize = 0;
+    let mut files_fingerprinted: usize = 0;
 
     if let Ok(walker) = walk_source_files(root) {
         for path in walker {
+            files_walked += 1;
             if let Some(fp) = fingerprint_file(&path, root) {
+                files_fingerprinted += 1;
                 let parent = path
                     .parent()
                     .and_then(|p| p.strip_prefix(root).ok())
@@ -875,7 +889,11 @@ pub fn auto_discover_groups(root: &Path) -> Vec<(String, String, Vec<FileFingerp
 
     // Sort by group name for deterministic output
     groups.sort_by(|a, b| a.0.cmp(&b.0));
-    groups
+    DiscoveryResult {
+        groups,
+        files_walked,
+        files_fingerprinted,
+    }
 }
 
 // ============================================================================
@@ -1028,6 +1046,11 @@ fn extension_provided_file_extensions() -> Vec<String> {
         .collect()
 }
 
+/// Known source file extensions that may be present even if no extension claims them.
+const COMMON_SOURCE_EXTENSIONS: &[&str] = &[
+    "rs", "php", "js", "ts", "py", "go", "java", "rb", "swift", "kt", "c", "cpp", "h",
+];
+
 fn walk_source_files(root: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     let skip_dirs = [
         "node_modules",
@@ -1051,6 +1074,36 @@ fn walk_source_files(root: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     files.retain(|f| !is_index_file(f));
 
     Ok(files)
+}
+
+/// Count source files that exist in the tree but aren't claimed by any extension.
+/// Used to warn when no extension provides fingerprinting for the dominant language.
+pub fn count_unclaimed_source_files(root: &Path) -> usize {
+    let skip_dirs = [
+        "node_modules", "vendor", ".git", "build", "dist", "target", ".svn", ".hg", "cache", "tmp",
+    ];
+    let claimed = extension_provided_file_extensions();
+
+    let mut count = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    if !skip_dirs.contains(&name.as_str()) {
+                        stack.push(path);
+                    }
+                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if COMMON_SOURCE_EXTENSIONS.contains(&ext) && !claimed.iter().any(|c| c == ext) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
 }
 
 fn walk_recursive(
