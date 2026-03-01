@@ -6,7 +6,8 @@ use std::path::Path;
 
 use crate::docs;
 use homeboy::component;
-use homeboy::docs_audit::{self, AuditResult};
+use homeboy::docs_audit::{self, AuditResult, DetectedFeature};
+use homeboy::extension;
 
 use super::CmdResult;
 
@@ -66,8 +67,15 @@ pub enum DocsCommand {
         /// Explicit JSON spec (takes precedence over positional)
         #[arg(long, value_name = "JSON")]
         json: Option<String>,
-    },
 
+        /// Generate docs from audit output (pipe from `docs audit --features` or use @file)
+        #[arg(long, value_name = "AUDIT_JSON")]
+        from_audit: Option<String>,
+
+        /// Show what would be generated without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // ============================================================================
@@ -167,9 +175,13 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
             detect_by_extension,
         ),
         Some(DocsCommand::Audit { component_id, docs_dir, features }) => run_audit(&component_id, docs_dir.as_deref(), features),
-        Some(DocsCommand::Generate { spec, json }) => {
-            let json_spec = json.as_deref().or(spec.as_deref());
-            run_generate(json_spec)
+        Some(DocsCommand::Generate { spec, json, from_audit, dry_run }) => {
+            if let Some(ref audit_source) = from_audit {
+                run_generate_from_audit(audit_source, dry_run)
+            } else {
+                let json_spec = json.as_deref().or(spec.as_deref());
+                run_generate(json_spec)
+            }
         }
         None => Err(homeboy::Error::validation_invalid_argument(
             "command",
@@ -179,6 +191,7 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
                 "homeboy docs scaffold <component-id>".to_string(),
                 "homeboy docs audit <component-id>".to_string(),
                 "homeboy docs generate --json '<spec>'".to_string(),
+                "homeboy docs generate --from-audit @audit.json".to_string(),
                 "homeboy docs commands/deploy".to_string(),
             ]),
         )),
@@ -623,6 +636,274 @@ fn run_generate(json_spec: Option<&str>) -> CmdResult<DocsOutput> {
         0,
     ))
 }
+
+// ============================================================================
+// Generate from Audit
+// ============================================================================
+
+fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput> {
+    // Read audit JSON from @file, stdin (-), file path, or inline string.
+    // Auto-detect bare file paths: if it doesn't look like JSON or stdin
+    // and a file exists at that path, treat it as @file.
+    let effective_source = if !source.starts_with('{')
+        && !source.starts_with('[')
+        && source != "-"
+        && !source.starts_with('@')
+        && std::path::Path::new(source).exists()
+    {
+        format!("@{}", source)
+    } else {
+        source.to_string()
+    };
+    let json_content = super::merge_json_sources(Some(&effective_source), &[])?;
+
+    // Parse audit result — handle both envelope and raw formats
+    let audit: AuditResult = if let Some(data) = json_content.get("data") {
+        serde_json::from_value(data.clone())
+    } else {
+        serde_json::from_value(json_content)
+    }
+    .map_err(|e| {
+        homeboy::Error::validation_invalid_json(
+            e,
+            Some("parse audit result".to_string()),
+            None,
+        )
+    })?;
+
+    if audit.detected_features.is_empty() {
+        return Err(homeboy::Error::validation_invalid_argument(
+            "from-audit",
+            "Audit result has no detected_features. Run `docs audit --features` to include them.",
+            None,
+            Some(vec![
+                "homeboy docs audit docsync --features > audit.json".to_string(),
+                "homeboy docs generate --from-audit @audit.json".to_string(),
+            ]),
+        ));
+    }
+
+    // Load extension config to get labels and doc targets
+    let comp = component::load(&audit.component_id).ok();
+    let (feature_labels, doc_targets) = collect_extension_doc_config(comp.as_ref());
+
+    // Group features by label
+    let groups = group_features_by_label(&audit.detected_features, &feature_labels);
+
+    // Resolve docs directory
+    let docs_dir = comp
+        .as_ref()
+        .and_then(|c| c.docs_dir.as_deref())
+        .unwrap_or("docs");
+    let source_path = comp
+        .as_ref()
+        .map(|c| Path::new(&c.local_path).to_path_buf())
+        .unwrap_or_else(|| Path::new(".").to_path_buf());
+    let docs_path = source_path.join(docs_dir);
+
+    let mut files_created = Vec::new();
+    let mut files_updated = Vec::new();
+    let mut hints = Vec::new();
+
+    // For each group that has a doc_target, render into that file
+    for (label, features) in &groups {
+        let target = match doc_targets.get(label.as_str()) {
+            Some(t) => t,
+            None => {
+                hints.push(format!(
+                    "Skipped '{}' ({} features) — no doc_target configured in extension",
+                    label,
+                    features.len()
+                ));
+                continue;
+            }
+        };
+
+        let file_path = docs_path.join(&target.file);
+        let default_heading = format!("## {}", label);
+        let heading = target
+            .heading
+            .as_deref()
+            .unwrap_or(&default_heading);
+        let template = target.template.as_deref().unwrap_or("- `{name}` ({source_file}:{line})");
+
+        // Render the section content
+        let mut section_lines: Vec<String> = Vec::new();
+        section_lines.push(heading.to_string());
+        section_lines.push(String::new());
+
+        for feature in features {
+            let line = template
+                .replace("{name}", &feature.name)
+                .replace("{source_file}", &feature.source_file)
+                .replace("{line}", &feature.line.to_string())
+                .replace(
+                    "{documented}",
+                    if feature.documented { "yes" } else { "**undocumented**" },
+                );
+            section_lines.push(line);
+        }
+        section_lines.push(String::new());
+
+        let section_content = section_lines.join("\n");
+
+        // Check if the file already exists and has this heading
+        let existed = file_path.exists();
+        let final_content = if existed {
+            let existing = fs::read_to_string(&file_path).unwrap_or_default();
+            replace_or_append_section(&existing, heading, &section_content)
+        } else {
+            // New file — add title from label
+            let title = format!("# {}\n\n", label);
+            format!("{}{}", title, section_content)
+        };
+
+        if !dry_run {
+            if let Some(parent) = file_path.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        homeboy::Error::internal_io(
+                            e.to_string(),
+                            Some(format!("create {}", parent.display())),
+                        )
+                    })?;
+                }
+            }
+            fs::write(&file_path, &final_content).map_err(|e| {
+                homeboy::Error::internal_io(
+                    e.to_string(),
+                    Some(format!("write {}", file_path.display())),
+                )
+            })?;
+        }
+
+        let relative = format!("{}/{}", docs_dir, target.file);
+        if existed {
+            files_updated.push(relative);
+        } else {
+            files_created.push(relative);
+        }
+    }
+
+    if dry_run {
+        hints.insert(0, "Dry run — no files written".to_string());
+    }
+
+    Ok((
+        DocsOutput::Generate {
+            files_created,
+            files_updated,
+            hints,
+        },
+        0,
+    ))
+}
+
+/// Collect feature_labels and doc_targets from all linked extensions.
+fn collect_extension_doc_config(
+    comp: Option<&component::Component>,
+) -> (HashMap<String, String>, HashMap<String, extension::DocTarget>) {
+    let mut labels = HashMap::new();
+    let mut targets = HashMap::new();
+
+    if let Some(comp) = comp {
+        if let Some(ref extensions) = comp.extensions {
+            for extension_id in extensions.keys() {
+                if let Ok(manifest) = extension::load_extension(extension_id) {
+                    for (key, label) in manifest.audit_feature_labels() {
+                        labels.insert(key.clone(), label.clone());
+                    }
+                    for (label, target) in manifest.audit_doc_targets() {
+                        targets.insert(label.clone(), target.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    (labels, targets)
+}
+
+/// Group detected features by their label (resolved from pattern → label mapping).
+///
+/// The label is determined by finding which key in `feature_labels` is a substring
+/// of the feature's pattern string. Features with no matching label are grouped
+/// under their raw pattern.
+fn group_features_by_label<'a>(
+    features: &'a [DetectedFeature],
+    feature_labels: &HashMap<String, String>,
+) -> Vec<(String, Vec<&'a DetectedFeature>)> {
+    let mut groups: HashMap<String, Vec<&'a DetectedFeature>> = HashMap::new();
+
+    for feature in features {
+        // Find the label for this feature's pattern
+        let label = feature_labels
+            .iter()
+            .find(|(key, _)| feature.pattern.contains(key.as_str()))
+            .map(|(_, label)| label.clone())
+            .unwrap_or_else(|| feature.pattern.clone());
+
+        groups.entry(label).or_default().push(feature);
+    }
+
+    // Sort groups by label for consistent output
+    let mut sorted: Vec<(String, Vec<&DetectedFeature>)> = groups.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted
+}
+
+/// Replace an existing section in a doc file, or append it.
+///
+/// A "section" starts with the heading line and ends at the next heading of equal
+/// or higher level, or end of file.
+fn replace_or_append_section(existing: &str, heading: &str, new_section: &str) -> String {
+    let heading_level = heading.chars().take_while(|c| *c == '#').count();
+    let lines: Vec<&str> = existing.lines().collect();
+
+    // Find the heading line
+    let start = lines.iter().position(|line| line.trim() == heading);
+
+    if let Some(start_idx) = start {
+        // Find the end of this section (next heading of same or higher level, or EOF)
+        let end_idx = lines[start_idx + 1..]
+            .iter()
+            .position(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with('#') {
+                    let level = trimmed.chars().take_while(|c| *c == '#').count();
+                    level <= heading_level
+                } else {
+                    false
+                }
+            })
+            .map(|i| start_idx + 1 + i)
+            .unwrap_or(lines.len());
+
+        // Replace the section
+        let mut result: Vec<&str> = Vec::new();
+        result.extend_from_slice(&lines[..start_idx]);
+        // Insert new section content (already includes heading)
+        let new_lines: Vec<&str> = new_section.lines().collect();
+        result.extend(new_lines);
+        if end_idx < lines.len() {
+            result.extend_from_slice(&lines[end_idx..]);
+        }
+        result.join("\n")
+    } else {
+        // Append the section
+        let mut result = existing.to_string();
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push('\n');
+        result.push_str(new_section);
+        result
+    }
+}
+
+// ============================================================================
+// Section Inference
+// ============================================================================
 
 /// Infer common section headings from sibling markdown files in the same directory.
 ///

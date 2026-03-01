@@ -24,7 +24,7 @@ pub enum ClaimType {
 }
 
 /// How confident we are that a claim is a real reference vs. a placeholder/example.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimConfidence {
     /// Real reference — expected to resolve against codebase

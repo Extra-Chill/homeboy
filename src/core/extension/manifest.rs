@@ -64,6 +64,29 @@ pub struct AuditCapability {
     /// Each pattern should have a capture group for the feature name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feature_patterns: Vec<String>,
+    /// Human-readable labels for feature patterns, keyed by a substring of the pattern.
+    /// Used by `docs generate --from-audit` to group and label features in generated docs.
+    /// Example: `{"register_post_type": "Post Types", "register_rest_route": "REST API Routes"}`
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub feature_labels: HashMap<String, String>,
+    /// Doc generation targets: maps a feature label to a file path and optional heading.
+    /// Used by `docs generate --from-audit` to place features in the right doc files.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub doc_targets: HashMap<String, DocTarget>,
+}
+
+/// Where a feature category should be rendered in documentation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocTarget {
+    /// Relative path within the docs directory (e.g., "api-reference.md").
+    pub file: String,
+    /// Heading under which features are listed (e.g., "## Endpoints").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading: Option<String>,
+    /// Template for rendering each feature. Uses `{name}`, `{source_file}`, `{line}`.
+    /// Default: `- \`{name}\` ({source_file}:{line})`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
 }
 
 /// Executable tool: runtime, inputs, and output schema.
@@ -286,6 +309,26 @@ impl ExtensionManifest {
             .as_ref()
             .map(|a| a.feature_patterns.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Convenience: get feature labels map (empty if no audit capability).
+    pub fn audit_feature_labels(&self) -> &HashMap<String, String> {
+        static EMPTY: std::sync::LazyLock<HashMap<String, String>> =
+            std::sync::LazyLock::new(HashMap::new);
+        self.audit
+            .as_ref()
+            .map(|a| &a.feature_labels)
+            .unwrap_or(&EMPTY)
+    }
+
+    /// Convenience: get doc targets map (empty if no audit capability).
+    pub fn audit_doc_targets(&self) -> &HashMap<String, DocTarget> {
+        static EMPTY: std::sync::LazyLock<HashMap<String, DocTarget>> =
+            std::sync::LazyLock::new(HashMap::new);
+        self.audit
+            .as_ref()
+            .map(|a| &a.doc_targets)
+            .unwrap_or(&EMPTY)
     }
 
     /// Convenience: get database config from platform capability.
