@@ -52,6 +52,10 @@ pub enum DocsCommand {
         /// Docs directory relative to component/project root (overrides config, default: docs)
         #[arg(long)]
         docs_dir: Option<String>,
+
+        /// Include full list of all detected features in output
+        #[arg(long)]
+        features: bool,
     },
 
     /// Generate documentation files from JSON spec
@@ -63,6 +67,7 @@ pub enum DocsCommand {
         #[arg(long, value_name = "JSON")]
         json: Option<String>,
     },
+
 }
 
 // ============================================================================
@@ -161,7 +166,7 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
             source_extensions,
             detect_by_extension,
         ),
-        Some(DocsCommand::Audit { component_id, docs_dir }) => run_audit(&component_id, docs_dir.as_deref()),
+        Some(DocsCommand::Audit { component_id, docs_dir, features }) => run_audit(&component_id, docs_dir.as_deref(), features),
         Some(DocsCommand::Generate { spec, json }) => {
             let json_spec = json.as_deref().or(spec.as_deref());
             run_generate(json_spec)
@@ -262,13 +267,13 @@ fn run_scaffold(
 // Audit (Claim-Based Documentation Verification)
 // ============================================================================
 
-fn run_audit(component_id: &str, docs_dir: Option<&str>) -> CmdResult<DocsOutput> {
+fn run_audit(component_id: &str, docs_dir: Option<&str>, features: bool) -> CmdResult<DocsOutput> {
     // If the argument looks like a filesystem path, audit it directly
     // without requiring component registration
     let result = if std::path::Path::new(component_id).is_dir() {
-        docs_audit::audit_path(component_id, docs_dir)?
+        docs_audit::audit_path(component_id, docs_dir, features)?
     } else {
-        docs_audit::audit_component(component_id, docs_dir)?
+        docs_audit::audit_component(component_id, docs_dir, features)?
     };
     Ok((DocsOutput::Audit(result), 0))
 }

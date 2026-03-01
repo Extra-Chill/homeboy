@@ -46,6 +46,16 @@ pub struct UndocumentedFeature {
     pub pattern: String,
 }
 
+/// A feature detected in source code (documented or not).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DetectedFeature {
+    pub name: String,
+    pub source_file: String,
+    pub line: usize,
+    pub pattern: String,
+    pub documented: bool,
+}
+
 /// A broken reference that needs fixing.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BrokenReference {
@@ -87,13 +97,17 @@ pub struct AuditResult {
     pub priority_docs: Vec<PriorityDoc>,
     pub broken_references: Vec<BrokenReference>,
     pub undocumented_features: Vec<UndocumentedFeature>,
+    /// All detected features (only populated when `--features` flag is set).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub detected_features: Vec<DetectedFeature>,
 }
 
 /// Audit documentation at a direct filesystem path without a registered component.
 ///
 /// Uses the directory name as the label and defaults to "docs" for the docs
 /// directory. Extension patterns and changelog exclusion are not available.
-pub fn audit_path(path: &str, docs_dir_override: Option<&str>) -> Result<AuditResult> {
+/// When `include_features` is true, the full detected features list is included.
+pub fn audit_path(path: &str, docs_dir_override: Option<&str>, include_features: bool) -> Result<AuditResult> {
     let source_path = Path::new(path);
     if !source_path.is_dir() {
         return Err(crate::Error::validation_invalid_argument(
@@ -175,6 +189,7 @@ pub fn audit_path(path: &str, docs_dir_override: Option<&str>) -> Result<AuditRe
         priority_docs,
         broken_references,
         undocumented_features: feature_result.undocumented,
+        detected_features: if include_features { feature_result.all_features } else { Vec::new() },
     })
 }
 
@@ -182,7 +197,8 @@ pub fn audit_path(path: &str, docs_dir_override: Option<&str>) -> Result<AuditRe
 ///
 /// If `docs_dir_override` is provided, it's used instead of the component's
 /// configured `docs_dir`/`docs_dirs` (which defaults to "docs").
-pub fn audit_component(component_id: &str, docs_dir_override: Option<&str>) -> Result<AuditResult> {
+/// When `include_features` is true, the full detected features list is included.
+pub fn audit_component(component_id: &str, docs_dir_override: Option<&str>, include_features: bool) -> Result<AuditResult> {
     let comp = component::load(component_id)?;
     let source_path = Path::new(&comp.local_path);
 
@@ -271,6 +287,7 @@ pub fn audit_component(component_id: &str, docs_dir_override: Option<&str>) -> R
         priority_docs,
         broken_references,
         undocumented_features: feature_result.undocumented,
+        detected_features: if include_features { feature_result.all_features } else { Vec::new() },
     })
 }
 
@@ -556,6 +573,8 @@ struct FeatureDetectionResult {
     documented: usize,
     /// Features with no documentation mention.
     undocumented: Vec<UndocumentedFeature>,
+    /// All detected features (documented and undocumented).
+    all_features: Vec<DetectedFeature>,
 }
 
 /// Detect features across all source files and report documentation coverage.
@@ -577,6 +596,7 @@ fn detect_features(
         total: 0,
         documented: 0,
         undocumented: Vec::new(),
+        all_features: Vec::new(),
     };
 
     if feature_patterns.is_empty() {
@@ -622,6 +642,7 @@ fn detect_features(
     let source_files = find_source_files(source_path);
 
     let mut undocumented = Vec::new();
+    let mut all_features = Vec::new();
     let mut seen_names: HashSet<String> = HashSet::new();
     let mut documented_count: usize = 0;
 
@@ -651,11 +672,21 @@ fn detect_features(
                     }
                     seen_names.insert(name.clone());
 
-                    if all_doc_content.contains(&name) {
+                    let byte_pos = name_match.start();
+                    let line_num = line_offsets.partition_point(|&offset| offset <= byte_pos);
+                    let is_documented = all_doc_content.contains(&name);
+
+                    all_features.push(DetectedFeature {
+                        name: name.clone(),
+                        source_file: file.clone(),
+                        line: line_num,
+                        pattern: pattern.clone(),
+                        documented: is_documented,
+                    });
+
+                    if is_documented {
                         documented_count += 1;
                     } else {
-                        let byte_pos = name_match.start();
-                        let line_num = line_offsets.partition_point(|&offset| offset <= byte_pos);
                         undocumented.push(UndocumentedFeature {
                             name,
                             source_file: file.clone(),
@@ -672,6 +703,7 @@ fn detect_features(
         total: seen_names.len(),
         documented: documented_count,
         undocumented,
+        all_features,
     }
 }
 
