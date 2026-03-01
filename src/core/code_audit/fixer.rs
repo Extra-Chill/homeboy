@@ -16,19 +16,19 @@ use super::conventions::{DeviationKind, Language};
 use super::CodeAuditResult;
 
 /// A planned fix for a single file.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Fix {
     /// Relative path to the file being fixed.
     pub file: String,
     /// What will be inserted.
     pub insertions: Vec<Insertion>,
     /// Whether the fix was applied to disk.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub applied: bool,
 }
 
 /// A single insertion into a file.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Insertion {
     /// What kind of fix.
     pub kind: InsertionKind,
@@ -38,7 +38,7 @@ pub struct Insertion {
     pub description: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InsertionKind {
     MethodStub,
@@ -49,7 +49,7 @@ pub enum InsertionKind {
 }
 
 /// A file that was skipped by the fixer with a reason.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkippedFile {
     /// Relative file path.
     pub file: String,
@@ -58,10 +58,10 @@ pub struct SkippedFile {
 }
 
 /// Result of running the fixer.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FixResult {
     pub fixes: Vec<Fix>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub skipped: Vec<SkippedFile>,
     pub total_insertions: usize,
     pub files_modified: usize,
