@@ -179,6 +179,14 @@
       "WP_CLI::add_command": "WP-CLI Commands",
       "registerTool": "AI Tools"
     },
+    "feature_context": {
+      "register_post_type": { "doc_comment": true, "block_fields": false },
+      "register_taxonomy": { "doc_comment": true, "block_fields": false },
+      "register_rest_route": { "doc_comment": true, "block_fields": false },
+      "WP_CLI::add_command": { "doc_comment": true, "block_fields": false },
+      "wp_register_ability": { "doc_comment": true, "block_fields": false },
+      "registerTool": { "doc_comment": true, "block_fields": false }
+    },
     "doc_targets": {
       "Post Types": {
         "file": "features.md",
