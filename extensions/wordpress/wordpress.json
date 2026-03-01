@@ -5,7 +5,7 @@
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
   "provides": {
-    "file_extensions": ["php"],
+    "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
     "capabilities": ["fingerprint"]
   },
   "scripts": {
