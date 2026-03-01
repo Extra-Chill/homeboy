@@ -14,10 +14,10 @@ pub use runner::{ExtensionRunner, RunnerOutput};
 pub use manifest::{
     ActionConfig, ActionType, AuditCapability, BuildConfig, CliConfig, DatabaseCliConfig,
     DatabaseConfig, DeployCapability, DeployOverride, DeployVerification, DiscoveryConfig,
-    DocTarget, ExecutableCapability, HttpMethod, InputConfig, LintConfig, ExtensionManifest,
-    OutputConfig, OutputSchema, PlatformCapability, ProvidesConfig, RequirementsConfig,
-    RuntimeConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig, TestConfig,
-    VersionPatternConfig,
+    DocTarget, ExecutableCapability, FeatureContextRule, HttpMethod, InputConfig, LintConfig,
+    ExtensionManifest, OutputConfig, OutputSchema, PlatformCapability, ProvidesConfig,
+    RequirementsConfig, RuntimeConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig,
+    TestConfig, VersionPatternConfig,
 };
 
 // Re-export version types

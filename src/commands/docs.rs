@@ -733,15 +733,48 @@ fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput>
         section_lines.push(String::new());
 
         for feature in features {
+            let desc = feature
+                .description
+                .as_deref()
+                .unwrap_or("");
+            let has_fields = template.contains("{fields}") && feature.fields.is_some();
             let line = template
                 .replace("{name}", &feature.name)
                 .replace("{source_file}", &feature.source_file)
                 .replace("{line}", &feature.line.to_string())
+                .replace("{description}", desc)
+                .replace("{fields}", "") // fields rendered separately below
                 .replace(
                     "{documented}",
                     if feature.documented { "yes" } else { "**undocumented**" },
                 );
-            section_lines.push(line);
+
+            // Push each line of the template (handles \n in template strings)
+            for tpl_line in line.lines() {
+                // Skip blank lines that result from empty placeholders
+                if tpl_line.trim().is_empty() {
+                    continue;
+                }
+                section_lines.push(tpl_line.to_string());
+            }
+
+            // Render fields as sub-items if template requested them
+            if has_fields {
+                section_lines.push(String::new());
+                for field in feature.fields.as_ref().unwrap() {
+                    let field_desc = field
+                        .description
+                        .as_deref()
+                        .unwrap_or("");
+                    if field_desc.is_empty() {
+                        section_lines.push(format!("- `{}`", field.name));
+                    } else {
+                        section_lines.push(format!("- `{}` — {}", field.name, field_desc));
+                    }
+                }
+            }
+
+            section_lines.push(String::new());
         }
         section_lines.push(String::new());
 

@@ -73,6 +73,21 @@ pub struct AuditCapability {
     /// Used by `docs generate --from-audit` to place features in the right doc files.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub doc_targets: HashMap<String, DocTarget>,
+    /// Context extraction rules for feature patterns, keyed by a substring of the pattern.
+    /// Tells the audit system what additional context to extract around each detected feature.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub feature_context: HashMap<String, FeatureContextRule>,
+}
+
+/// Rules for extracting context around a detected feature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureContextRule {
+    /// Extract doc comments above the feature (///, /**, #, etc.).
+    #[serde(default)]
+    pub doc_comment: bool,
+    /// Extract fields/items from the block following the feature (struct fields, enum variants).
+    #[serde(default)]
+    pub block_fields: bool,
 }
 
 /// Where a feature category should be rendered in documentation.
@@ -328,6 +343,16 @@ impl ExtensionManifest {
         self.audit
             .as_ref()
             .map(|a| &a.doc_targets)
+            .unwrap_or(&EMPTY)
+    }
+
+    /// Convenience: get feature context rules (empty if no audit capability).
+    pub fn audit_feature_context(&self) -> &HashMap<String, FeatureContextRule> {
+        static EMPTY: std::sync::LazyLock<HashMap<String, FeatureContextRule>> =
+            std::sync::LazyLock::new(HashMap::new);
+        self.audit
+            .as_ref()
+            .map(|a| &a.feature_context)
             .unwrap_or(&EMPTY)
     }
 
