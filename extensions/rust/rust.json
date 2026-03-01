@@ -19,31 +19,37 @@
       "Config)\\b": "Config Structures",
       "Manifest)\\b": "Manifest Structures"
     },
+    "feature_context": {
+      "Subcommand": { "doc_comment": true, "block_fields": true },
+      "Args)\\s*\\{": { "doc_comment": true, "block_fields": true },
+      "Config)\\b": { "doc_comment": true, "block_fields": true },
+      "Manifest)\\b": { "doc_comment": true, "block_fields": true }
+    },
     "doc_targets": {
       "Subcommands": {
         "file": "cli-reference.md",
         "heading": "## Subcommands",
-        "template": "- `{name}` — defined in `{source_file}` (line {line})"
+        "template": "### `{name}`\n\n{description}\n\n{fields}"
       },
       "CLI Commands": {
         "file": "cli-reference.md",
         "heading": "## Commands",
-        "template": "- `{name}` — `{source_file}` (line {line})"
+        "template": "- `{name}` — {description}"
       },
       "Command Arguments": {
         "file": "cli-reference.md",
         "heading": "## Command Arguments",
-        "template": "- `{name}` — `{source_file}` (line {line})"
+        "template": "### `{name}`\n\n{description}\n\n{fields}"
       },
       "Config Structures": {
         "file": "architecture.md",
         "heading": "## Configuration",
-        "template": "- `{name}` — `{source_file}` (line {line})"
+        "template": "### `{name}`\n\n{description}\n\n{fields}"
       },
       "Manifest Structures": {
         "file": "architecture.md",
         "heading": "## Manifests",
-        "template": "- `{name}` — `{source_file}` (line {line})"
+        "template": "### `{name}`\n\n{description}\n\n{fields}"
       }
     }
   },
