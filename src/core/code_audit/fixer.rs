@@ -689,6 +689,16 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         }
     }
 
+    // Merge fixes that target the same file.
+    //
+    // Multiple phases (convention fixes, duplication fixes) or multiple
+    // duplicate groups can produce separate `Fix` objects for the same file.
+    // If applied independently, the second fix uses stale line numbers because
+    // the file was already modified by the first.  Merging into a single `Fix`
+    // per file ensures `apply_insertions_to_content()` sees *all* removals at
+    // once and can sort them in reverse order so line numbers stay valid.
+    let fixes = merge_fixes_per_file(fixes);
+
     let total_insertions: usize = fixes.iter().map(|f| f.insertions.len()).sum();
     let files_modified = fixes.len();
 
@@ -698,6 +708,28 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         total_insertions,
         files_modified,
     }
+}
+
+/// Merge multiple `Fix` objects that target the same file into one.
+///
+/// Preserves insertion order within each original `Fix`, appending later
+/// fixes' insertions after earlier ones.  The resulting vec has at most one
+/// `Fix` per unique file path.
+fn merge_fixes_per_file(fixes: Vec<Fix>) -> Vec<Fix> {
+    let mut map: std::collections::HashMap<String, Fix> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
+    for fix in fixes {
+        if let Some(existing) = map.get_mut(&fix.file) {
+            existing.insertions.extend(fix.insertions);
+        } else {
+            order.push(fix.file.clone());
+            map.insert(fix.file.clone(), fix);
+        }
+    }
+
+    // Preserve original encounter order
+    order.into_iter().filter_map(|f| map.remove(&f)).collect()
 }
 
 /// Convert a relative file path to a Rust module path.
@@ -1736,5 +1768,133 @@ pub struct TestOutput {}
         assert!(content.contains("pub fn run()"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_fixes_per_file_combines_same_file() {
+        let fixes = vec![
+            Fix {
+                file: "src/foo.rs".to_string(),
+                insertions: vec![Insertion {
+                    kind: InsertionKind::FunctionRemoval { start_line: 10, end_line: 20 },
+                    code: String::new(),
+                    description: "Remove fn_a".to_string(),
+                }],
+                applied: false,
+            },
+            Fix {
+                file: "src/bar.rs".to_string(),
+                insertions: vec![Insertion {
+                    kind: InsertionKind::FunctionRemoval { start_line: 5, end_line: 15 },
+                    code: String::new(),
+                    description: "Remove fn_b from bar".to_string(),
+                }],
+                applied: false,
+            },
+            Fix {
+                file: "src/foo.rs".to_string(),
+                insertions: vec![
+                    Insertion {
+                        kind: InsertionKind::FunctionRemoval { start_line: 30, end_line: 40 },
+                        code: String::new(),
+                        description: "Remove fn_c".to_string(),
+                    },
+                    Insertion {
+                        kind: InsertionKind::ImportAdd,
+                        code: "use crate::utils::fn_c;".to_string(),
+                        description: "Import fn_c".to_string(),
+                    },
+                ],
+                applied: false,
+            },
+        ];
+
+        let merged = merge_fixes_per_file(fixes);
+
+        // Should have 2 files, not 3
+        assert_eq!(merged.len(), 2);
+
+        // foo.rs should have 3 insertions (1 from first + 2 from third)
+        let foo = merged.iter().find(|f| f.file == "src/foo.rs").unwrap();
+        assert_eq!(foo.insertions.len(), 3);
+        assert_eq!(foo.insertions[0].description, "Remove fn_a");
+        assert_eq!(foo.insertions[1].description, "Remove fn_c");
+        assert_eq!(foo.insertions[2].description, "Import fn_c");
+
+        // bar.rs should have 1 insertion (unchanged)
+        let bar = merged.iter().find(|f| f.file == "src/bar.rs").unwrap();
+        assert_eq!(bar.insertions.len(), 1);
+
+        // Encounter order preserved: foo first, bar second
+        assert_eq!(merged[0].file, "src/foo.rs");
+        assert_eq!(merged[1].file, "src/bar.rs");
+    }
+
+    #[test]
+    fn apply_multiple_removals_same_file() {
+        // Simulate the exact bug: 3 function removals in one file
+        let content = r#"use std::path::PathBuf;
+
+fn keep_me() -> bool {
+    true
+}
+
+fn remove_first() -> PathBuf {
+    PathBuf::from("/tmp/cache")
+}
+
+fn middle_keeper() -> u32 {
+    42
+}
+
+fn remove_second() -> u64 {
+    1234567890
+}
+
+fn remove_third() -> bool {
+    false
+}
+
+fn last_keeper() {
+    println!("done");
+}
+"#;
+        let insertions = vec![
+            Insertion {
+                kind: InsertionKind::FunctionRemoval { start_line: 7, end_line: 9 },
+                code: String::new(),
+                description: "Remove remove_first".to_string(),
+            },
+            Insertion {
+                kind: InsertionKind::FunctionRemoval { start_line: 15, end_line: 17 },
+                code: String::new(),
+                description: "Remove remove_second".to_string(),
+            },
+            Insertion {
+                kind: InsertionKind::FunctionRemoval { start_line: 19, end_line: 21 },
+                code: String::new(),
+                description: "Remove remove_third".to_string(),
+            },
+            Insertion {
+                kind: InsertionKind::ImportAdd,
+                code: "use crate::utils::{remove_first, remove_second, remove_third};".to_string(),
+                description: "Import removed functions".to_string(),
+            },
+        ];
+
+        let result = apply_insertions_to_content(content, &insertions, &Language::Rust);
+
+        // Removed functions should be gone
+        assert!(!result.contains("fn remove_first()"), "remove_first should be removed");
+        assert!(!result.contains("fn remove_second()"), "remove_second should be removed");
+        assert!(!result.contains("fn remove_third()"), "remove_third should be removed");
+
+        // Kept functions should survive
+        assert!(result.contains("fn keep_me()"), "keep_me should survive");
+        assert!(result.contains("fn middle_keeper()"), "middle_keeper should survive");
+        assert!(result.contains("fn last_keeper()"), "last_keeper should survive");
+
+        // Import should be added
+        assert!(result.contains("use crate::utils::{remove_first, remove_second, remove_third};"));
     }
 }

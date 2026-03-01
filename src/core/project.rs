@@ -177,7 +177,7 @@ fn default_db_port() -> u16 {
     3306
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 

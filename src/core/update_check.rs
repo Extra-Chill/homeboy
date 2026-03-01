@@ -26,7 +26,7 @@ pub struct UpdateCheckCache {
     pub checked_at: u64,
 }
 
-fn cache_path() -> Option<std::path::PathBuf> {
+pub(crate) fn cache_path() -> Option<std::path::PathBuf> {
     paths::homeboy().ok().map(|p| p.join(CACHE_FILENAME))
 }
 
@@ -44,7 +44,7 @@ fn write_cache(cache: &UpdateCheckCache) {
     let _ = std::fs::write(&path, content);
 }
 
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -62,7 +62,7 @@ fn is_disabled_by_env() -> bool {
         .unwrap_or(false)
 }
 
-fn is_disabled_by_config() -> bool {
+pub(crate) fn is_disabled_by_config() -> bool {
     !crate::defaults::load_config().update_check
 }
 
