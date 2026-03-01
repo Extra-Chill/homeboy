@@ -54,6 +54,20 @@ pub struct DetectedFeature {
     pub line: usize,
     pub pattern: String,
     pub documented: bool,
+    /// Doc comment lines found directly above the feature (e.g. `///`, `/**`, `#`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Fields or items inside the feature's block (struct fields, enum variants, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<FeatureField>>,
+}
+
+/// A field or item inside a detected feature's block.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FeatureField {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A broken reference that needs fixing.
@@ -164,7 +178,7 @@ pub fn audit_path(path: &str, docs_dir_override: Option<&str>, include_features:
     let priority_docs = build_priority_docs(&tasks, &changed_files);
     let broken_references = extract_broken_references(&tasks, &doc_contents);
 
-    let feature_result = detect_features(&[], source_path, &docs_dirs, None);
+    let feature_result = detect_features(&[], source_path, &docs_dirs, None, &HashMap::new());
 
     let docs_with_issues: HashSet<_> = priority_docs
         .iter()
@@ -255,12 +269,16 @@ pub fn audit_component(component_id: &str, docs_dir_override: Option<&str>, incl
     let priority_docs = build_priority_docs(&tasks, &changed_files);
     let broken_references = extract_broken_references(&tasks, &doc_contents);
 
+    // Collect feature context extraction rules from extensions
+    let context_rules = collect_extension_feature_context(&comp);
+
     // Detect features and documentation coverage across all source files
     let feature_result = detect_features(
         &feature_patterns,
         source_path,
         &docs_dirs,
         changelog_exclude,
+        &context_rules,
     );
 
     // Calculate unchanged docs (docs with no priority items and no broken refs)
@@ -565,6 +583,23 @@ fn collect_extension_feature_patterns(comp: &component::Component) -> Vec<String
     patterns
 }
 
+/// Collect feature context extraction rules from all linked extensions.
+fn collect_extension_feature_context(
+    comp: &component::Component,
+) -> HashMap<String, extension::FeatureContextRule> {
+    let mut rules = HashMap::new();
+    if let Some(ref extensions) = comp.extensions {
+        for extension_id in extensions.keys() {
+            if let Ok(manifest) = extension::load_extension(extension_id) {
+                for (key, rule) in manifest.audit_feature_context() {
+                    rules.insert(key.clone(), rule.clone());
+                }
+            }
+        }
+    }
+    rules
+}
+
 /// Result of feature detection including coverage counts.
 struct FeatureDetectionResult {
     /// Total unique feature names found in source code.
@@ -575,6 +610,193 @@ struct FeatureDetectionResult {
     undocumented: Vec<UndocumentedFeature>,
     /// All detected features (documented and undocumented).
     all_features: Vec<DetectedFeature>,
+}
+
+/// Extract doc comment lines above a byte position in source content.
+///
+/// Walks backwards from the match position, collecting lines that start with
+/// doc comment markers: `///`, `//!`, `*`, `/**`, `#` (PHP/Python), `--` (SQL/Lua).
+/// Strips the comment markers and returns the combined text.
+fn extract_doc_comment(content: &str, byte_pos: usize) -> Option<String> {
+    // Find the line containing byte_pos
+    let before = &content[..byte_pos];
+    let lines: Vec<&str> = before.lines().collect();
+
+    if lines.is_empty() {
+        return None;
+    }
+
+    let mut comment_lines: Vec<String> = Vec::new();
+
+    // Walk backwards from the line before the match
+    for line in lines.iter().rev() {
+        let trimmed = line.trim();
+
+        // Rust/JS/TS doc comments
+        if let Some(text) = trimmed.strip_prefix("///") {
+            comment_lines.push(text.trim().to_string());
+        } else if let Some(text) = trimmed.strip_prefix("//!") {
+            comment_lines.push(text.trim().to_string());
+        }
+        // Block comment continuation
+        else if let Some(text) = trimmed.strip_prefix("* ") {
+            // Skip opening /** and closing */
+            if !trimmed.starts_with("/**") && !trimmed.starts_with("*/") {
+                comment_lines.push(text.trim().to_string());
+            }
+        } else if trimmed == "*" {
+            // Empty line in block comment
+            comment_lines.push(String::new());
+        }
+        // PHP/Python doc comment openers
+        else if trimmed.starts_with("/**") || trimmed.starts_with("\"\"\"") {
+            // Opening line of a block — may have text after marker
+            if let Some(text) = trimmed.strip_prefix("/**") {
+                let text = text.trim();
+                if !text.is_empty() && text != "*" {
+                    comment_lines.push(text.to_string());
+                }
+            }
+            break; // We've found the start of the block
+        }
+        // Python/Ruby comments
+        else if let Some(text) = trimmed.strip_prefix("# ") {
+            comment_lines.push(text.trim().to_string());
+        } else if trimmed == "#" {
+            comment_lines.push(String::new());
+        }
+        // Attribute lines (skip, keep going)
+        else if trimmed.starts_with("#[") || trimmed.starts_with("#![") {
+            continue;
+        }
+        // Empty lines between attributes and doc comments — keep going
+        else if trimmed.is_empty() {
+            // If we already have comment lines, an empty line means we've left the comment block
+            if !comment_lines.is_empty() {
+                break;
+            }
+            continue;
+        }
+        // Anything else means we've left the comment block
+        else {
+            break;
+        }
+    }
+
+    if comment_lines.is_empty() {
+        return None;
+    }
+
+    // Reverse since we walked backwards
+    comment_lines.reverse();
+
+    // Join and clean up
+    let text = comment_lines.join(" ").trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// Extract field names and their doc comments from a block following a byte position.
+///
+/// Finds the opening `{` after the match, then extracts each field/variant until
+/// the matching closing `}`. Handles Rust struct fields, enum variants, and
+/// generic key-value patterns.
+fn extract_block_fields(content: &str, byte_pos: usize) -> Option<Vec<FeatureField>> {
+    let after = &content[byte_pos..];
+
+    // Find the opening brace
+    let brace_offset = after.find('{')?;
+    let block_start = byte_pos + brace_offset + 1;
+
+    // Find the matching closing brace (tracking nesting)
+    let mut depth = 1;
+    let mut pos = block_start;
+    let bytes = content.as_bytes();
+    while pos < content.len() && depth > 0 {
+        match bytes[pos] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        if depth > 0 {
+            pos += 1;
+        }
+    }
+
+    if depth != 0 {
+        return None; // Unbalanced braces
+    }
+
+    let block_content = &content[block_start..pos];
+    let lines: Vec<&str> = block_content.lines().collect();
+
+    let mut fields = Vec::new();
+    let mut pending_doc: Vec<String> = Vec::new();
+
+    for line in &lines {
+        let trimmed = line.trim();
+
+        // Collect doc comments for the next field
+        if let Some(text) = trimmed.strip_prefix("///") {
+            pending_doc.push(text.trim().to_string());
+            continue;
+        }
+
+        // Skip attributes
+        if trimmed.starts_with("#[") || trimmed.is_empty() {
+            continue;
+        }
+
+        // Try to extract a field name
+        // Strip visibility: pub, pub(crate), pub(super)
+        let rest = trimmed
+            .strip_prefix("pub(crate) ")
+            .or_else(|| trimmed.strip_prefix("pub(super) "))
+            .or_else(|| trimmed.strip_prefix("pub "))
+            .unwrap_or(trimmed);
+
+        // Extract identifier (up to :, (, =, <, ,, {, or whitespace)
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+
+        if name.is_empty() {
+            pending_doc.clear();
+            continue;
+        }
+
+        // Must look like a field declaration or enum variant
+        let after_name = rest[name.len()..].trim_start();
+        let is_field = after_name.starts_with(':')
+            || after_name.starts_with('(')
+            || after_name.starts_with('{')
+            || after_name.starts_with(',')
+            || after_name.is_empty()
+            || after_name == ","
+            || after_name.starts_with("//");
+
+        if is_field {
+            let description = if pending_doc.is_empty() {
+                None
+            } else {
+                Some(pending_doc.join(" "))
+            };
+
+            fields.push(FeatureField { name, description });
+        }
+
+        pending_doc.clear();
+    }
+
+    if fields.is_empty() {
+        None
+    } else {
+        Some(fields)
+    }
 }
 
 /// Detect features across all source files and report documentation coverage.
@@ -591,6 +813,7 @@ fn detect_features(
     source_path: &Path,
     docs_dirs: &[String],
     changelog_exclude: Option<&str>,
+    context_rules: &HashMap<String, extension::FeatureContextRule>,
 ) -> FeatureDetectionResult {
     let empty = FeatureDetectionResult {
         total: 0,
@@ -676,12 +899,32 @@ fn detect_features(
                     let line_num = line_offsets.partition_point(|&offset| offset <= byte_pos);
                     let is_documented = all_doc_content.contains(&name);
 
+                    // Extract context based on extension rules
+                    let rule = context_rules
+                        .iter()
+                        .find(|(key, _)| pattern.contains(key.as_str()))
+                        .map(|(_, r)| r);
+
+                    let description = if rule.is_some_and(|r| r.doc_comment) {
+                        extract_doc_comment(&content, byte_pos)
+                    } else {
+                        None
+                    };
+
+                    let fields = if rule.is_some_and(|r| r.block_fields) {
+                        extract_block_fields(&content, byte_pos)
+                    } else {
+                        None
+                    };
+
                     all_features.push(DetectedFeature {
                         name: name.clone(),
                         source_file: file.clone(),
                         line: line_num,
                         pattern: pattern.clone(),
                         documented: is_documented,
+                        description,
+                        fields,
                     });
 
                     if is_documented {
@@ -1010,7 +1253,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None);
+        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
 
         assert_eq!(result.total, 2);
         assert_eq!(result.documented, 1);
@@ -1023,7 +1266,7 @@ index 111222..333444 100644
     #[test]
     fn test_detect_features_empty_when_no_patterns() {
         let dir = tempfile::tempdir().unwrap();
-        let result = detect_features(&[], dir.path(), &["docs".to_string()], None);
+        let result = detect_features(&[], dir.path(), &["docs".to_string()], None, &HashMap::new());
         assert_eq!(result.total, 0);
         assert!(result.undocumented.is_empty());
     }
@@ -1043,7 +1286,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None);
+        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
         assert_eq!(result.total, 0);
         assert!(result.undocumented.is_empty());
     }
@@ -1068,7 +1311,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None);
+        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
         assert_eq!(result.total, 1);
         assert_eq!(result.documented, 1);
         assert!(result.undocumented.is_empty());
@@ -1092,7 +1335,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"register_rest_route\(\s*['"](\w[\w-]*/v\d+)['"]"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None);
+        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
 
         assert_eq!(result.undocumented.len(), 1);
         assert_eq!(result.undocumented[0].name, "myplugin/v1");
@@ -1117,7 +1360,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"register_rest_route\(\s*['"](\w[\w-]*/v\d+)['"]"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None);
+        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
         assert_eq!(result.total, 0);
         assert!(result.undocumented.is_empty());
     }
@@ -1143,7 +1386,7 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None);
+        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
         assert_eq!(result.total, 1); // Deduplicated
         assert_eq!(result.undocumented.len(), 1);
     }
@@ -1170,7 +1413,7 @@ index 111222..333444 100644
         .unwrap();
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None);
+        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
 
         // readmeStep is documented via README, hiddenStep is not
         assert_eq!(result.total, 2);
@@ -1205,7 +1448,7 @@ index 111222..333444 100644
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
         // Only scanning docs/ — both undocumented
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None);
+        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
         assert_eq!(result.total, 2);
         assert_eq!(result.undocumented.len(), 2);
 
@@ -1215,6 +1458,7 @@ index 111222..333444 100644
             source_path,
             &["docs".to_string(), "wiki".to_string()],
             None,
+            &HashMap::new(),
         );
         assert_eq!(result.total, 2);
         assert_eq!(result.documented, 1);
