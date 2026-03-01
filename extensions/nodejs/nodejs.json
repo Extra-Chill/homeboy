@@ -1,6 +1,6 @@
 {
   "name": "Node.js",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "icon": "server.rack",
   "description": "Node.js project type with PM2 integration",
   "author": "Extra Chill",
@@ -25,6 +25,92 @@
     "display_name": "PM2",
     "command_template": "{{cliPath}} {{args}} {{projectId}}",
     "default_cli_path": "pm2"
+  },
+  "audit": {
+    "feature_patterns": [
+      "app\\.get\\(['\"]([^'\"]+)['\"]",
+      "app\\.post\\(['\"]([^'\"]+)['\"]",
+      "app\\.put\\(['\"]([^'\"]+)['\"]",
+      "app\\.delete\\(['\"]([^'\"]+)['\"]",
+      "app\\.patch\\(['\"]([^'\"]+)['\"]",
+      "router\\.get\\(['\"]([^'\"]+)['\"]",
+      "router\\.post\\(['\"]([^'\"]+)['\"]",
+      "router\\.put\\(['\"]([^'\"]+)['\"]",
+      "router\\.delete\\(['\"]([^'\"]+)['\"]",
+      "router\\.patch\\(['\"]([^'\"]+)['\"]",
+      "app\\.use\\(['\"]([^'\"]+)['\"]",
+      "export (?:default )?class (\\w+)",
+      "export (?:default )?function (\\w+)",
+      "module\\.exports\\s*=\\s*(?:class\\s+|)(\\w+)",
+      "mongoose\\.model\\(['\"]([^'\"]+)['\"]",
+      "program\\.command\\(['\"]([^'\"]+)['\"]",
+      "yargs\\.command\\(['\"]([^'\"]+)['\"]",
+      "io\\.on\\(['\"]([^'\"]+)['\"]",
+      "socket\\.on\\(['\"]([^'\"]+)['\"]"
+    ],
+    "feature_labels": {
+      "app\\.get\\(": "Express Routes",
+      "app\\.post\\(": "Express Routes",
+      "app\\.put\\(": "Express Routes",
+      "app\\.delete\\(": "Express Routes",
+      "app\\.patch\\(": "Express Routes",
+      "router\\.get\\(": "Express Routes",
+      "router\\.post\\(": "Express Routes",
+      "router\\.put\\(": "Express Routes",
+      "router\\.delete\\(": "Express Routes",
+      "router\\.patch\\(": "Express Routes",
+      "app\\.use\\(": "Middleware",
+      "export (?:default )?class": "Exported Classes",
+      "export (?:default )?function": "Exported Functions",
+      "module\\.exports": "Module Exports",
+      "mongoose\\.model": "Mongoose Models",
+      "program\\.command": "CLI Commands",
+      "yargs\\.command": "CLI Commands",
+      "io\\.on": "Socket Events",
+      "socket\\.on": "Socket Events"
+    },
+    "doc_targets": {
+      "Express Routes": {
+        "file": "api-reference.md",
+        "heading": "## Routes",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Middleware": {
+        "file": "api-reference.md",
+        "heading": "## Middleware",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Exported Classes": {
+        "file": "architecture.md",
+        "heading": "## Classes",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Exported Functions": {
+        "file": "architecture.md",
+        "heading": "## Functions",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Module Exports": {
+        "file": "architecture.md",
+        "heading": "## Module Exports",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Mongoose Models": {
+        "file": "features.md",
+        "heading": "## Data Models",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "CLI Commands": {
+        "file": "cli-reference.md",
+        "heading": "## Commands",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Socket Events": {
+        "file": "features.md",
+        "heading": "## Socket Events",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      }
+    }
   },
   "build": {
     "cleanup_paths": [
