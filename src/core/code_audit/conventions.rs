@@ -114,6 +114,10 @@ pub enum DeviationKind {
     SignatureMismatch,
     NamespaceMismatch,
     MissingImport,
+    /// File exceeds line count threshold.
+    GodFile,
+    /// File has too many top-level items.
+    HighItemCount,
 }
 
 // ============================================================================

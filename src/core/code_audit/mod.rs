@@ -1,19 +1,22 @@
-//! Code audit system for convention detection and drift analysis.
+//! Code audit system for convention detection, drift analysis, and structural complexity.
 //!
 //! Scans source code to discover structural conventions, detect outliers,
-//! and report architectural drift. Works by:
+//! report architectural drift, and flag structural issues (god files, high item counts).
+//! Works by:
 //!
 //! 1. Fingerprinting source files (extract methods, registrations, types)
 //! 2. Grouping files by directory and language
 //! 3. Discovering conventions (patterns most files follow)
 //! 4. Checking all files against discovered conventions
 //! 5. Producing actionable findings for outliers
+//! 6. Analyzing structural complexity (god files, high item counts)
 
 pub mod baseline;
 mod checks;
 mod conventions;
 mod findings;
 pub mod fixer;
+mod structural;
 
 use std::path::Path;
 
@@ -217,7 +220,18 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
     let check_results = checks::check_conventions(&discovered_conventions);
 
     // Phase 4: Build findings
-    let all_findings = findings::build_findings(&check_results);
+    let mut all_findings = findings::build_findings(&check_results);
+
+    // Phase 4b: Structural complexity analysis (god files, high item counts)
+    let structural_findings = structural::analyze_structure(root);
+    if !structural_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Structural: {} finding(s) (god files, high item counts)",
+            structural_findings.len()
+        );
+        all_findings.extend(structural_findings);
+    }
 
     // Phase 5: Build report
     let total_outliers: usize = discovered_conventions.iter().map(|c| c.outliers.len()).sum();
