@@ -673,6 +673,9 @@ def add_pub_crate(source: str, kind: str) -> str:
 
     for i, line in enumerate(lines):
         trimmed = line.lstrip()
+        # Skip doc comments and attributes — keywords inside these are not declarations
+        if trimmed.startswith("///") or trimmed.startswith("//!") or trimmed.startswith("#["):
+            continue
         for pat in patterns:
             m = re.search(pat, trimmed)
             if m:
