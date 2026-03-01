@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.2.1] - 2026-03-01
+
+### Added
+- Add fingerprint scripts for Rust and WordPress extensions
+
+### Changed
+- Add feature_context rules and richer templates to Rust and WordPress extensions
+- Add audit config to Node.js extension (feature_patterns, labels, doc_targets)
+- Add audit doc config (feature_labels, doc_targets) to WordPress and Rust extensions
+- Remove agent-hooks extension
+- rename modules to extensions across repo
+
+### Fixed
+- include css, ts, js, json in WordPress file_extensions
+- Fix Rust extension feature_labels keys for substring matching
+- rename HOMEBOY_MODULE_PATH env var to HOMEBOY_EXTENSION_PATH in build scripts
+- use HOMEBOY_COMPONENT_ID for build artifact naming (#227) (#41)
+- Fix PHPUnit test discovery — drop broken XML config (#215)
+- auto-detect MySQL for test runner, fix SQLite driver (#39)
+
 ## [2.1.0] - 2026-02-25
 
 ### Added
