@@ -1,9 +1,52 @@
 {
   "name": "Rust",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "icon": "gearshape.2.fill",
   "description": "Cargo CLI integration for Rust components",
   "author": "Extra Chill",
+  "audit": {
+    "feature_patterns": [
+      "#\\[derive\\(.*Subcommand.*\\)\\]\\s*(?:pub\\s+)?enum\\s+(\\w+)",
+      "#\\[command\\(name\\s*=\\s*\"([^\"]+)\"\\)\\]",
+      "pub struct (\\w+Args)\\s*\\{",
+      "#\\[derive\\(.*Serialize.*Deserialize.*\\)\\]\\s*(?:pub\\s+)?struct\\s+(\\w+Config)\\b",
+      "#\\[derive\\(.*Serialize.*Deserialize.*\\)\\]\\s*(?:pub\\s+)?struct\\s+(\\w+Manifest)\\b"
+    ],
+    "feature_labels": {
+      "Subcommand": "Subcommands",
+      "command(name": "CLI Commands",
+      "Args)": "Command Arguments",
+      "Config)\\b": "Config Structures",
+      "Manifest)\\b": "Manifest Structures"
+    },
+    "doc_targets": {
+      "Subcommands": {
+        "file": "cli-reference.md",
+        "heading": "## Subcommands",
+        "template": "- `{name}` — defined in `{source_file}` (line {line})"
+      },
+      "CLI Commands": {
+        "file": "cli-reference.md",
+        "heading": "## Commands",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Command Arguments": {
+        "file": "cli-reference.md",
+        "heading": "## Command Arguments",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Config Structures": {
+        "file": "architecture.md",
+        "heading": "## Configuration",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Manifest Structures": {
+        "file": "architecture.md",
+        "heading": "## Manifests",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      }
+    }
+  },
   "build": {
     "cleanup_paths": [
       "target"
