@@ -14,8 +14,8 @@
     ],
     "feature_labels": {
       "Subcommand": "Subcommands",
-      "command(name": "CLI Commands",
-      "Args)": "Command Arguments",
+      "command\\(name": "CLI Commands",
+      "Args)\\s*\\{": "Command Arguments",
       "Config)\\b": "Config Structures",
       "Manifest)\\b": "Manifest Structures"
     },
