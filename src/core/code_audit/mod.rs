@@ -15,6 +15,7 @@ pub mod baseline;
 mod checks;
 pub(crate) mod conventions;
 mod discovery;
+mod duplication;
 mod findings;
 mod fingerprint;
 pub mod fixer;
@@ -240,6 +241,22 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
             structural_findings.len()
         );
         all_findings.extend(structural_findings);
+    }
+
+    // Phase 4c: Duplication detection (identical function bodies across files)
+    let all_fingerprints: Vec<&fingerprint::FileFingerprint> = discovery
+        .groups
+        .iter()
+        .flat_map(|(_, _, fps)| fps.iter())
+        .collect();
+    let duplication_findings = duplication::detect_duplicates(&all_fingerprints);
+    if !duplication_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Duplication: {} finding(s) (identical functions across files)",
+            duplication_findings.len()
+        );
+        all_findings.extend(duplication_findings);
     }
 
     // Phase 5: Build report

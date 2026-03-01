@@ -96,6 +96,8 @@ pub enum DeviationKind {
     GodFile,
     /// File has too many top-level items.
     HighItemCount,
+    /// Function body is duplicated across files.
+    DuplicateFunction,
 }
 
 // ============================================================================
@@ -556,6 +558,7 @@ mod tests {
                 namespace: None,
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "steps/webhook.php".to_string(),
@@ -571,6 +574,7 @@ mod tests {
                 namespace: None,
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "steps/agent-ping.php".to_string(),
@@ -582,6 +586,7 @@ mod tests {
                 namespace: None,
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
         ];
 
@@ -611,7 +616,8 @@ mod tests {
             implements: vec![],
             namespace: None,
             imports: vec![],
-        content: String::new(),
+            content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
         }];
 
         assert!(discover_conventions("Single", "*.php", &fingerprints).is_none());
@@ -639,6 +645,7 @@ mod tests {
                 namespace: None,
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "abilities/update.php".to_string(),
@@ -650,6 +657,7 @@ mod tests {
                 namespace: None,
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "abilities/helpers.php".to_string(),
@@ -661,6 +669,7 @@ mod tests {
                 namespace: None,
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
         ];
 
@@ -693,6 +702,7 @@ mod tests {
                 namespace: None,
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "b.php".to_string(),
@@ -704,6 +714,7 @@ mod tests {
                 namespace: None,
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "c.php".to_string(),
@@ -715,6 +726,7 @@ mod tests {
                 namespace: None,
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
         ];
 
@@ -992,6 +1004,7 @@ class AgentPing {
                 namespace: Some("DataMachine\\Abilities\\Flow".to_string()),
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "abilities/UpdateFlow.php".to_string(),
@@ -1003,6 +1016,7 @@ class AgentPing {
                 namespace: Some("DataMachine\\Abilities\\Flow".to_string()),
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "abilities/DeleteFlow.php".to_string(),
@@ -1014,6 +1028,7 @@ class AgentPing {
                 namespace: Some("DataMachine\\Flow".to_string()), // WRONG namespace
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
         ];
 
@@ -1042,6 +1057,7 @@ class AgentPing {
                 namespace: None,
                 imports: vec!["DataMachine\\Core\\Base".to_string()],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "abilities/B.php".to_string(),
@@ -1053,6 +1069,7 @@ class AgentPing {
                 namespace: None,
                 imports: vec!["DataMachine\\Core\\Base".to_string()],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "abilities/C.php".to_string(),
@@ -1065,6 +1082,7 @@ class AgentPing {
                 imports: vec![],
                 // File uses Base but doesn't import it
                 content: "class C extends Base {\n    public function execute() {}\n}".to_string(),
+                method_hashes: std::collections::HashMap::new(),
             },
         ];
 
@@ -1091,6 +1109,7 @@ class AgentPing {
                 namespace: Some("App\\Steps".to_string()),
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "steps/B.php".to_string(),
@@ -1102,6 +1121,7 @@ class AgentPing {
                 namespace: Some("App\\Steps".to_string()),
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
             FileFingerprint {
                 relative_path: "steps/C.php".to_string(),
@@ -1113,6 +1133,7 @@ class AgentPing {
                 namespace: None, // Missing namespace entirely
                 imports: vec![],
             content: String::new(),
+            method_hashes: std::collections::HashMap::new(),
             },
         ];
 

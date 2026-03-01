@@ -170,6 +170,11 @@ pub struct FingerprintOutput {
     pub namespace: Option<String>,
     #[serde(default)]
     pub imports: Vec<String>,
+    /// Method name → normalized body hash for duplication detection.
+    /// Extension scripts compute this by normalizing whitespace and hashing
+    /// the function body. Optional — older scripts may not emit this.
+    #[serde(default)]
+    pub method_hashes: std::collections::HashMap<String, String>,
 }
 
 // ============================================================================

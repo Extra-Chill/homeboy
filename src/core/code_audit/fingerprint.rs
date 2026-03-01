@@ -1,5 +1,6 @@
 //! fingerprint — extracted from conventions.rs.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::conventions::Language;
@@ -26,6 +27,9 @@ pub struct FileFingerprint {
     pub imports: Vec<String>,
     /// Raw file content (for import usage analysis).
     pub content: String,
+    /// Method name → normalized body hash for duplication detection.
+    /// Populated by extension scripts that support it; empty otherwise.
+    pub method_hashes: HashMap<String, String>,
 }
 
 /// Extract a structural fingerprint from a source file.
@@ -58,5 +62,6 @@ pub fn fingerprint_file(path: &Path, root: &Path) -> Option<FileFingerprint> {
         namespace: output.namespace,
         imports: output.imports,
         content,
+        method_hashes: output.method_hashes,
     })
 }
