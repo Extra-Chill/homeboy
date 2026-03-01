@@ -482,6 +482,28 @@ fn run_move(
         );
     }
 
+    for test in &result.tests_moved {
+        homeboy::log_status!(
+            "move",
+            "test {} (lines {}-{})",
+            test.name,
+            test.source_lines.0,
+            test.source_lines.1
+        );
+    }
+
+    if result.imports_updated > 0 {
+        homeboy::log_status!(
+            "move",
+            "{} import reference(s) updated across codebase",
+            result.imports_updated
+        );
+    }
+
+    for warning in &result.warnings {
+        homeboy::log_status!("warning", "{}", warning);
+    }
+
     Ok((
         RefactorOutput::Move { result },
         exit_code,
