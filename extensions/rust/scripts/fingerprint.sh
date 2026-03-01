@@ -116,6 +116,54 @@ for m in re.finditer(r'use\s+((?:crate|super|self)\S+::\{[^}]+\});', content):
 seen = set()
 imports = [i for i in imports if i not in seen and not seen.add(i)]
 
+# --- Method Hashes (for duplication detection) ---
+# Extract function bodies, normalize whitespace, hash with SHA-256.
+# Only hashes top-level functions (not methods inside impl blocks).
+import hashlib
+
+method_hashes = {}
+# Find top-level fn declarations (zero indentation)
+lines = content.split('\n')
+i = 0
+while i < len(lines):
+    line = lines[i]
+    # Skip indented lines (methods inside impl/struct/etc.)
+    if line and line[0] in (' ', '\t'):
+        i += 1
+        continue
+    # Match fn declaration at start of line (with optional pub/async/unsafe/const)
+    fn_match = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)', line)
+    if not fn_match:
+        i += 1
+        continue
+    fn_name = fn_match.group(1)
+    if fn_name.startswith('test_') or fn_name == 'tests':
+        i += 1
+        continue
+    # Find the opening brace
+    brace_depth = 0
+    found_open = False
+    body_lines = []
+    j = i
+    while j < len(lines):
+        for ch in lines[j]:
+            if ch == '{':
+                brace_depth += 1
+                found_open = True
+            elif ch == '}':
+                brace_depth -= 1
+        body_lines.append(lines[j])
+        if found_open and brace_depth == 0:
+            break
+        j += 1
+    if body_lines:
+        # Normalize: join, collapse whitespace, strip
+        body_text = ' '.join(body_lines)
+        normalized = re.sub(r'\s+', ' ', body_text).strip()
+        body_hash = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+        method_hashes[fn_name] = body_hash
+    i = j + 1
+
 result = {
     'methods': methods,
     'type_name': type_name,
@@ -123,6 +171,7 @@ result = {
     'registrations': registrations,
     'namespace': namespace,
     'imports': imports,
+    'method_hashes': method_hashes,
 }
 
 print(json.dumps(result))
