@@ -13,7 +13,6 @@ This is a **monorepo** — each subdirectory is a standalone extension. Install 
 | `rust` | `homeboy extension install … --id rust` | Cargo CLI integration |
 | `github` | `homeboy extension install … --id github` | GitHub CLI for issues, PRs, and repos |
 | `homebrew` | `homeboy extension install … --id homebrew` | Homebrew tap publishing |
-| `agent-hooks` | `homeboy extension install … --id agent-hooks` | AI agent guardrails (Claude Code, OpenCode) |
 | `openclaw` | `homeboy extension install … --id openclaw` | OpenClaw AI agent integration |
 | `sweatpants` | `homeboy extension install … --id sweatpants` | Sweatpants automation engine bridge |
 
