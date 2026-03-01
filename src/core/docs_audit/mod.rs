@@ -28,7 +28,7 @@ fn is_zero(v: &usize) -> bool {
 }
 
 /// A doc that needs content review due to referenced files changing.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PriorityDoc {
     pub doc: String,
     pub reason: String,
@@ -38,7 +38,7 @@ pub struct PriorityDoc {
 }
 
 /// A feature found in source code with no mention in documentation.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UndocumentedFeature {
     pub name: String,
     pub source_file: String,
@@ -47,7 +47,7 @@ pub struct UndocumentedFeature {
 }
 
 /// A feature detected in source code (documented or not).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DetectedFeature {
     pub name: String,
     pub source_file: String,
@@ -57,7 +57,7 @@ pub struct DetectedFeature {
 }
 
 /// A broken reference that needs fixing.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BrokenReference {
     pub doc: String,
     pub line: usize,
@@ -70,7 +70,7 @@ pub struct BrokenReference {
 }
 
 /// Summary counts for the alignment report.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AlignmentSummary {
     pub docs_scanned: usize,
     pub priority_docs: usize,
@@ -87,7 +87,7 @@ pub struct AlignmentSummary {
 }
 
 /// Result of auditing a component's documentation for content alignment.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuditResult {
     pub component_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
