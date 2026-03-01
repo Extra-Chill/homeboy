@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use homeboy::code_audit::{fixer, CodeAuditResult};
 use homeboy::component;
-use homeboy::refactor::{self, AddResult, RenameScope, RenameSpec};
+use homeboy::refactor::{self, AddResult, MoveResult, RenameScope, RenameSpec};
 
 use crate::commands::CmdResult;
 
@@ -70,6 +70,35 @@ enum RefactorCommand {
         #[arg(long)]
         write: bool,
     },
+
+    /// Move functions, structs, or other items from one file to another
+    ///
+    /// Example: `refactor move --item has_import --item contains_word --from src/conventions.rs --to src/import_matching.rs`
+    Move {
+        /// Name(s) of items to move (functions, structs, enums, consts)
+        #[arg(long, value_name = "NAME", required = true, num_args = 1..)]
+        item: Vec<String>,
+
+        /// Source file (relative to component/path root)
+        #[arg(long, value_name = "FILE")]
+        from: String,
+
+        /// Destination file (relative to component/path root, created if needed)
+        #[arg(long, value_name = "FILE")]
+        to: String,
+
+        /// Component ID (uses its local_path as the root)
+        #[arg(short, long)]
+        component: Option<String>,
+
+        /// Directory path (alternative to --component)
+        #[arg(long)]
+        path: Option<String>,
+
+        /// Apply changes to disk (default is dry-run)
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RefactorOutput> {
@@ -92,6 +121,15 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             path,
             write,
         } => run_add(from_audit.as_deref(), import.as_deref(), to.as_deref(), component_id.as_deref(), path.as_deref(), write),
+
+        RefactorCommand::Move {
+            item,
+            from,
+            to,
+            component: component_id,
+            path,
+            write,
+        } => run_move(&item, &from, &to, component_id.as_deref(), path.as_deref(), write),
     }
 }
 
@@ -128,6 +166,12 @@ pub enum RefactorOutput {
         #[serde(flatten)]
         result: AddResult,
         dry_run: bool,
+    },
+
+    #[serde(rename = "refactor.move")]
+    Move {
+        #[serde(flatten)]
+        result: MoveResult,
     },
 }
 
@@ -395,6 +439,51 @@ fn run_add_import(
             result,
             dry_run: !write,
         },
+        exit_code,
+    ))
+}
+
+fn run_move(
+    items: &[String],
+    from: &str,
+    to: &str,
+    component_id: Option<&str>,
+    path: Option<&str>,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let root = refactor::move_items::resolve_root(component_id, path)?;
+
+    let item_refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
+    let result = refactor::move_items(&item_refs, from, to, &root, write)?;
+
+    let exit_code = if result.items_moved.is_empty() { 1 } else { 0 };
+
+    homeboy::log_status!(
+        "refactor",
+        "{} item(s) from {} → {}{}",
+        result.items_moved.len(),
+        from,
+        to,
+        if write {
+            " (applied)".to_string()
+        } else {
+            " (dry run)".to_string()
+        }
+    );
+
+    for item in &result.items_moved {
+        homeboy::log_status!(
+            "move",
+            "{} {:?} (lines {}-{})",
+            item.name,
+            item.kind,
+            item.source_lines.0,
+            item.source_lines.1
+        );
+    }
+
+    Ok((
+        RefactorOutput::Move { result },
         exit_code,
     ))
 }
