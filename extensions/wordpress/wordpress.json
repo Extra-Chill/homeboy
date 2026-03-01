@@ -164,7 +164,73 @@
       "wp_register_ability_category\\(\\s*['\"]([^'\"]+)['\"]",
       "WP_CLI::add_command\\(\\s*['\"]([^'\"]+)['\"]",
       "\\$this->registerTool\\(\\s*['\"][^'\"]+['\"]\\s*,\\s*['\"]([^'\"]+)['\"]"
-    ]
+    ],
+    "feature_labels": {
+      "register_post_type": "Post Types",
+      "register_taxonomy": "Taxonomies",
+      "register_block_type": "Blocks",
+      "register_setting": "Settings",
+      "register_rest_route": "REST API Routes",
+      "add_shortcode": "Shortcodes",
+      "wp_register_script": "Scripts",
+      "wp_register_style": "Styles",
+      "wp_register_ability": "Abilities",
+      "wp_register_ability_category": "Ability Categories",
+      "WP_CLI::add_command": "WP-CLI Commands",
+      "registerTool": "AI Tools"
+    },
+    "doc_targets": {
+      "Post Types": {
+        "file": "features.md",
+        "heading": "## Post Types",
+        "template": "- `{name}` — registered in `{source_file}` (line {line})"
+      },
+      "Taxonomies": {
+        "file": "features.md",
+        "heading": "## Taxonomies",
+        "template": "- `{name}` — registered in `{source_file}` (line {line})"
+      },
+      "Blocks": {
+        "file": "features.md",
+        "heading": "## Blocks",
+        "template": "- `{name}` — registered in `{source_file}` (line {line})"
+      },
+      "Settings": {
+        "file": "features.md",
+        "heading": "## Settings",
+        "template": "- `{name}` — registered in `{source_file}` (line {line})"
+      },
+      "REST API Routes": {
+        "file": "api-reference.md",
+        "heading": "## Endpoints",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Shortcodes": {
+        "file": "features.md",
+        "heading": "## Shortcodes",
+        "template": "- `[{name}]` — registered in `{source_file}` (line {line})"
+      },
+      "Abilities": {
+        "file": "abilities.md",
+        "heading": "## Abilities",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Ability Categories": {
+        "file": "abilities.md",
+        "heading": "## Ability Categories",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "WP-CLI Commands": {
+        "file": "cli-reference.md",
+        "heading": "## Commands",
+        "template": "- `wp {name}` — `{source_file}` (line {line})"
+      },
+      "AI Tools": {
+        "file": "features.md",
+        "heading": "## AI Tools",
+        "template": "- `{name}` — registered in `{source_file}` (line {line})"
+      }
+    }
   },
   "executable": {
     "runtime": {
