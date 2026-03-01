@@ -334,6 +334,7 @@ mod tests {
             conventions: vec![],
             directory_conventions: vec![],
             findings: vec![],
+            duplicate_groups: vec![],
         };
 
         let result = fixes_from_audit(&audit, false);

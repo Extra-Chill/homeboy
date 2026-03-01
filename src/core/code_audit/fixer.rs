@@ -46,6 +46,13 @@ pub enum InsertionKind {
     ConstructorWithRegistration,
     /// Add a missing import/use statement at the top of the file.
     ImportAdd,
+    /// Remove a function definition (lines start_line..=end_line) and replace with an import.
+    FunctionRemoval {
+        /// 1-indexed start line (includes doc comments and attributes).
+        start_line: usize,
+        /// 1-indexed end line (inclusive).
+        end_line: usize,
+    },
 }
 
 /// A file that was skipped by the fixer with a reason.
@@ -572,6 +579,116 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         }
     }
 
+    // Phase 2: Duplication fixes — remove duplicate functions and add imports
+    for group in &result.duplicate_groups {
+        for remove_file in &group.remove_from {
+            let abs_path = root.join(remove_file);
+            let ext = abs_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+
+            // Use the refactor extension to find function boundaries
+            let ext_manifest = crate::extension::find_extension_for_file_ext(ext, "refactor");
+            let content = match std::fs::read_to_string(&abs_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    skipped.push(SkippedFile {
+                        file: remove_file.clone(),
+                        reason: format!("Cannot read file to remove duplicate `{}`", group.function_name),
+                    });
+                    continue;
+                }
+            };
+
+            let Some(manifest) = ext_manifest else {
+                skipped.push(SkippedFile {
+                    file: remove_file.clone(),
+                    reason: format!(
+                        "No refactor extension for .{} files — cannot locate `{}` boundaries",
+                        ext, group.function_name
+                    ),
+                });
+                continue;
+            };
+
+            // Call parse_items to find the function boundaries
+            let parse_cmd = serde_json::json!({
+                "command": "parse_items",
+                "file_path": remove_file,
+                "content": content,
+                "items": [group.function_name],
+            });
+
+            let parsed: Option<Vec<crate::extension::ParsedItem>> =
+                crate::extension::run_refactor_script(&manifest, &parse_cmd)
+                    .and_then(|v| v.get("items").cloned())
+                    .and_then(|v| serde_json::from_value(v).ok());
+
+            let Some(items) = parsed else {
+                skipped.push(SkippedFile {
+                    file: remove_file.clone(),
+                    reason: format!(
+                        "Extension could not parse `{}` boundaries in {}",
+                        group.function_name, remove_file
+                    ),
+                });
+                continue;
+            };
+
+            let Some(item) = items.iter().find(|i| i.name == group.function_name) else {
+                skipped.push(SkippedFile {
+                    file: remove_file.clone(),
+                    reason: format!(
+                        "Function `{}` not found by parser in {}",
+                        group.function_name, remove_file
+                    ),
+                });
+                continue;
+            };
+
+            // Build the import path from the canonical file
+            let import_path = module_path_from_file(&group.canonical_file);
+            let import_stmt = match ext {
+                "rs" => format!("use crate::{}::{};", import_path, group.function_name),
+                "php" => format!("use {};", group.function_name), // simplified
+                _ => format!("import {{ {} }} from '{}';", group.function_name, import_path),
+            };
+
+            let mut insertions = vec![
+                Insertion {
+                    kind: InsertionKind::FunctionRemoval {
+                        start_line: item.start_line,
+                        end_line: item.end_line,
+                    },
+                    code: String::new(),
+                    description: format!(
+                        "Remove duplicate `{}` (canonical copy in {})",
+                        group.function_name, group.canonical_file
+                    ),
+                },
+            ];
+
+            // Only add the import if the file doesn't already have it
+            if !content.contains(&import_stmt) {
+                insertions.push(Insertion {
+                    kind: InsertionKind::ImportAdd,
+                    code: import_stmt,
+                    description: format!(
+                        "Import `{}` from canonical location",
+                        group.function_name
+                    ),
+                });
+            }
+
+            fixes.push(Fix {
+                file: remove_file.clone(),
+                insertions,
+                applied: false,
+            });
+        }
+    }
+
     let total_insertions: usize = fixes.iter().map(|f| f.insertions.len()).sum();
     let files_modified = fixes.len();
 
@@ -581,6 +698,17 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         total_insertions,
         files_modified,
     }
+}
+
+/// Convert a relative file path to a Rust module path.
+///
+/// `src/core/update_check.rs` → `core::update_check`
+/// `src/utils/mod.rs` → `utils`
+fn module_path_from_file(file_path: &str) -> String {
+    let p = file_path.strip_prefix("src/").unwrap_or(file_path);
+    let p = p.strip_suffix(".rs").unwrap_or(p);
+    let p = p.strip_suffix("/mod").unwrap_or(p);
+    p.replace('/', "::")
 }
 
 /// Detect the common naming suffix among conforming files.
@@ -766,17 +894,46 @@ fn apply_insertions_to_content(
     let mut registration_stubs = Vec::new();
     let mut constructor_stubs = Vec::new();
     let mut import_adds = Vec::new();
+    let mut removals: Vec<(usize, usize)> = Vec::new();
 
     for insertion in insertions {
-        match insertion.kind {
+        match &insertion.kind {
             InsertionKind::MethodStub => method_stubs.push(&insertion.code),
             InsertionKind::RegistrationStub => registration_stubs.push(&insertion.code),
             InsertionKind::ConstructorWithRegistration => constructor_stubs.push(&insertion.code),
             InsertionKind::ImportAdd => import_adds.push(&insertion.code),
+            InsertionKind::FunctionRemoval { start_line, end_line } => {
+                removals.push((*start_line, *end_line));
+            }
         }
     }
 
-    // Apply import additions first (they go at the top)
+    // Apply function removals first (before adding imports, to avoid line shifts)
+    // Process in reverse order so earlier removals don't invalidate later line numbers
+    if !removals.is_empty() {
+        removals.sort_by(|a, b| b.0.cmp(&a.0)); // reverse by start_line
+        let mut lines: Vec<&str> = result.lines().collect();
+        for (start, end) in &removals {
+            let start_idx = start.saturating_sub(1); // 1-indexed → 0-indexed
+            let end_idx = (*end).min(lines.len());
+            if start_idx < lines.len() {
+                // Also remove trailing blank line if present
+                let remove_end = if end_idx < lines.len() && lines[end_idx].trim().is_empty() {
+                    end_idx + 1
+                } else {
+                    end_idx
+                };
+                lines.drain(start_idx..remove_end);
+            }
+        }
+        result = lines.join("\n");
+        // Preserve trailing newline if original had one
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
+
+    // Apply import additions (they go at the top)
     for import_line in &import_adds {
         result = insert_import(&result, import_line, language);
     }
@@ -1095,6 +1252,7 @@ class BadAbility {
             }],
             findings: vec![],
             directory_conventions: vec![],
+            duplicate_groups: vec![],
         };
 
         let fix_result = generate_fixes(&audit_result, &dir);
@@ -1338,6 +1496,7 @@ class {} {{
             }],
             findings: vec![],
             directory_conventions: vec![],
+            duplicate_groups: vec![],
         };
 
         let fix_result = generate_fixes(&audit_result, &dir);
@@ -1404,6 +1563,7 @@ class {} {{
             }],
             findings: vec![],
             directory_conventions: vec![],
+            duplicate_groups: vec![],
         };
 
         let fix_result = generate_fixes(&audit_result, &dir);
@@ -1532,6 +1692,7 @@ pub struct TestOutput {}
             }],
             findings: vec![],
             directory_conventions: vec![],
+            duplicate_groups: vec![],
         };
 
         let fix_result = generate_fixes(&audit_result, &dir);

@@ -290,6 +290,7 @@ mod tests {
             conventions: vec![],
             directory_conventions: vec![],
             findings,
+            duplicate_groups: vec![],
         }
     }
 

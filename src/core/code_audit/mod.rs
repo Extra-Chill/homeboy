@@ -65,6 +65,9 @@ pub struct CodeAuditResult {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub directory_conventions: Vec<DirectoryConvention>,
     pub findings: Vec<Finding>,
+    /// Grouped duplications for the fixer — each group has a canonical file and removal targets.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub duplicate_groups: Vec<duplication::DuplicateGroup>,
 }
 
 /// A cross-directory convention: a pattern that sibling subdirectories share.
@@ -207,6 +210,7 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
             conventions: vec![],
             directory_conventions: vec![],
             findings: vec![],
+            duplicate_groups: vec![],
         });
     }
 
@@ -250,11 +254,13 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
         .flat_map(|(_, _, fps)| fps.iter())
         .collect();
     let duplication_findings = duplication::detect_duplicates(&all_fingerprints);
+    let duplicate_groups = duplication::detect_duplicate_groups(&all_fingerprints);
     if !duplication_findings.is_empty() {
         log_status!(
             "audit",
-            "Duplication: {} finding(s) (identical functions across files)",
-            duplication_findings.len()
+            "Duplication: {} finding(s) across {} group(s)",
+            duplication_findings.len(),
+            duplicate_groups.len()
         );
         all_findings.extend(duplication_findings);
     }
@@ -332,6 +338,7 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
         conventions: convention_reports,
         directory_conventions,
         findings: all_findings,
+        duplicate_groups,
     })
 }
 
