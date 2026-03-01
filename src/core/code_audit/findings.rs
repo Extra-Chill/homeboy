@@ -4,7 +4,7 @@ use super::checks::{CheckResult, CheckStatus};
 use super::conventions::DeviationKind;
 
 /// An actionable finding from the code audit.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Finding {
     /// The convention this finding relates to.
     pub convention: String,
@@ -20,7 +20,7 @@ pub struct Finding {
     pub kind: DeviationKind,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Convention violation — should be fixed.

@@ -20,7 +20,7 @@ pub struct CheckResult {
     pub outliers: Vec<Outlier>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     /// All files conform.

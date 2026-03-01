@@ -33,7 +33,7 @@ pub struct FileFingerprint {
     pub content: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
     Php,
@@ -83,7 +83,7 @@ pub struct Convention {
 }
 
 /// A file that deviates from a convention.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Outlier {
     /// Relative file path.
     pub file: String,
@@ -92,7 +92,7 @@ pub struct Outlier {
 }
 
 /// A specific deviation from the convention.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Deviation {
     /// What kind of deviation.
     pub kind: DeviationKind,
@@ -102,7 +102,7 @@ pub struct Deviation {
     pub suggestion: String,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviationKind {
     MissingMethod,
