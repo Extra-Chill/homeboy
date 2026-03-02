@@ -125,6 +125,115 @@ for m in re.finditer(r'^use\s+([\w\\\\]+)(?:\s+as\s+\w+)?;', content, re.MULTILI
 seen = set()
 imports = [i for i in imports if i not in seen and not seen.add(i)]
 
+# --- Method Hashes (for duplication detection) ---
+# Extract method/function bodies, normalize whitespace, hash with SHA-256.
+import hashlib
+
+method_hashes = {}
+structural_hashes = {}
+
+def extract_body(text, start_pos):
+    # Find opening brace from start_pos, then track brace depth
+    brace_start = text.find('{', start_pos)
+    if brace_start < 0:
+        return None
+    depth = 0
+    for i in range(brace_start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[brace_start:i+1]
+    return None
+
+php_keywords = {
+    'abstract', 'and', 'array', 'as', 'break', 'callable', 'case',
+    'catch', 'class', 'clone', 'const', 'continue', 'declare', 'default',
+    'do', 'echo', 'else', 'elseif', 'empty', 'enddeclare', 'endfor',
+    'endforeach', 'endif', 'endswitch', 'endwhile', 'eval', 'exit',
+    'extends', 'final', 'finally', 'fn', 'for', 'foreach', 'function',
+    'global', 'goto', 'if', 'implements', 'include', 'include_once',
+    'instanceof', 'insteadof', 'interface', 'isset', 'list', 'match',
+    'namespace', 'new', 'or', 'print', 'private', 'protected', 'public',
+    'readonly', 'require', 'require_once', 'return', 'static', 'switch',
+    'throw', 'trait', 'try', 'unset', 'use', 'var', 'while', 'xor',
+    'yield', 'null', 'true', 'false', 'self', 'parent',
+    # Common types kept as markers
+    'int', 'float', 'string', 'bool', 'void', 'mixed', 'object',
+    'iterable', 'never', 'array',
+}
+
+def structural_normalize_php(text):
+    # Strip to body only (from first {)
+    brace_idx = text.find('{')
+    if brace_idx >= 0:
+        text = text[brace_idx:]
+    # Replace string literals with STR
+    dq = chr(34)
+    text = re.sub(dq + '[^' + dq + ']*' + dq, 'STR', text)
+    text = re.sub(chr(39) + '[^' + chr(39) + ']*' + chr(39), 'STR', text)
+    # Replace numeric literals with NUM
+    text = re.sub(r'\b\d[\d_]*(?:\.\d[\d_]*)?\b', 'NUM', text)
+    # Replace PHP variables with positional tokens
+    var_map = {}
+    var_counter = [0]
+    def replace_var(m):
+        name = m.group(0)
+        if name == chr(36) + 'this':
+            return name
+        if name not in var_map:
+            var_map[name] = 'VAR_' + str(var_counter[0])
+            var_counter[0] += 1
+        return var_map[name]
+    text = re.sub(chr(36) + r'\w+', replace_var, text)
+    # Replace non-keyword identifiers with positional tokens
+    id_map = {}
+    id_counter = [0]
+    def replace_id(m):
+        word = m.group(0)
+        lower = word.lower()
+        if lower in php_keywords:
+            return word
+        if word not in id_map:
+            id_map[word] = 'ID_' + str(id_counter[0])
+            id_counter[0] += 1
+        return id_map[word]
+    text = re.sub(r'\b[a-zA-Z_]\w*\b', replace_id, text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+# Extract method bodies from class methods
+for m in re.finditer(
+    r'(?:public|protected|private|static|abstract)\s+(?:static\s+)?function\s+(\w+)\s*\([^)]*\)(?:\s*:\s*[\w\\\\|?]+)?\s*',
+    content
+):
+    fn_name = m.group(1)
+    if fn_name.startswith('test_') or fn_name.startswith('test'):
+        continue
+    body = extract_body(content, m.end() - 1)
+    if body and len(body) > 2:
+        # Exact hash: normalize whitespace only
+        normalized = re.sub(r'\s+', ' ', m.group(0) + body).strip()
+        method_hashes[fn_name] = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+        # Structural hash: normalize identifiers and literals
+        struct_text = m.group(0) + body
+        struct_normalized = structural_normalize_php(struct_text)
+        structural_hashes[fn_name] = hashlib.sha256(struct_normalized.encode()).hexdigest()[:16]
+
+# Extract standalone function bodies (not in a class)
+for m in re.finditer(r'^function\s+(\w+)\s*\([^)]*\)(?:\s*:\s*[\w\\\\|?]+)?\s*', content, re.MULTILINE):
+    fn_name = m.group(1)
+    if fn_name in method_hashes:
+        continue
+    body = extract_body(content, m.end() - 1)
+    if body and len(body) > 2:
+        normalized = re.sub(r'\s+', ' ', m.group(0) + body).strip()
+        method_hashes[fn_name] = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+        struct_text = m.group(0) + body
+        struct_normalized = structural_normalize_php(struct_text)
+        structural_hashes[fn_name] = hashlib.sha256(struct_normalized.encode()).hexdigest()[:16]
+
 result = {
     'methods': methods,
     'type_name': type_name,
@@ -132,6 +241,8 @@ result = {
     'registrations': registrations,
     'namespace': namespace,
     'imports': imports,
+    'method_hashes': method_hashes,
+    'structural_hashes': structural_hashes,
 }
 
 print(json.dumps(result))
