@@ -496,19 +496,21 @@ fn run_map(
             counts
         };
         let threshold = (fps.len() as f64 * 0.5).ceil() as usize;
+        let noise_methods = ["__construct", "__destruct", "__toString", "__clone",
+                             "__get", "__set", "__isset", "__unset", "__sleep",
+                             "__wakeup", "__invoke", "__debugInfo", "getInstance",
+                             "instance"];
         let mut shared: Vec<String> = method_counts
             .iter()
             .filter(|(_, &count)| count >= threshold && count > 1)
+            .filter(|(&name, _)| !noise_methods.contains(&name))
             .map(|(&name, _)| name.to_string())
             .collect();
         shared.sort();
 
-        // Derive a human-readable module name from the directory
-        let module_name = dir
-            .split('/')
-            .last()
-            .unwrap_or(dir)
-            .to_string();
+        // Derive a human-readable module name from the directory.
+        // For generic segments (V1, V2, src, lib, includes), prepend parent.
+        let module_name = derive_module_name(dir);
 
         modules.push(MapModule {
             name: module_name,
@@ -623,24 +625,53 @@ fn render_map_to_markdown(
         homeboy::Error::internal_io(e.to_string(), Some(format!("create {}", output_dir.display())))
     })?;
 
+    // Build cross-reference indices
+    let class_index = build_class_module_index(&map.modules);
+    let children_index: HashMap<String, usize> = map
+        .class_hierarchy
+        .iter()
+        .map(|e| (e.parent.clone(), e.children.len()))
+        .collect();
+
     // 1. Write index.md — overview with module listing and hierarchy
     let index = render_index(map);
     let index_path = output_dir.join("index.md");
     write_file(&index_path, &index)?;
     created.push(index_path.to_string_lossy().to_string());
 
-    // 2. Write a doc file per module
+    // 2. Write a doc file per module (with splitting for large modules)
     for module in &map.modules {
         let safe_name = module.path.replace('/', "-");
-        let filename = format!("{}.md", safe_name);
-        let content = render_module(module);
-        let mod_path = output_dir.join(&filename);
-        write_file(&mod_path, &content)?;
-        created.push(mod_path.to_string_lossy().to_string());
+
+        if module.classes.len() > MODULE_SPLIT_THRESHOLD {
+            // Split large modules: write a summary page + sub-pages
+            let summary = render_module_summary(module, &safe_name);
+            let summary_path = output_dir.join(format!("{}.md", safe_name));
+            write_file(&summary_path, &summary)?;
+            created.push(summary_path.to_string_lossy().to_string());
+
+            // Split classes into chunks
+            let chunks = split_classes_by_prefix(&module.classes);
+            for (suffix, chunk_classes) in &chunks {
+                let chunk_name = format!("{}-{}", safe_name, suffix);
+                let content = render_module_chunk(
+                    module, chunk_classes, suffix, &children_index,
+                );
+                let chunk_path = output_dir.join(format!("{}.md", chunk_name));
+                write_file(&chunk_path, &content)?;
+                created.push(chunk_path.to_string_lossy().to_string());
+            }
+        } else {
+            let filename = format!("{}.md", safe_name);
+            let content = render_module(module, &children_index);
+            let mod_path = output_dir.join(&filename);
+            write_file(&mod_path, &content)?;
+            created.push(mod_path.to_string_lossy().to_string());
+        }
     }
 
-    // 3. Write hierarchy.md
-    let hier = render_hierarchy(&map.class_hierarchy);
+    // 3. Write hierarchy.md with cross-references to module docs
+    let hier = render_hierarchy(&map.class_hierarchy, &class_index);
     let hier_path = output_dir.join("hierarchy.md");
     write_file(&hier_path, &hier)?;
     created.push(hier_path.to_string_lossy().to_string());
@@ -678,8 +709,8 @@ fn render_index(map: &CodebaseMap) -> String {
     ));
 
     out.push_str("## Modules\n\n");
-    out.push_str("| Module | Files | Classes | Shared Methods |\n");
-    out.push_str("|--------|------:|--------:|----------------|\n");
+    out.push_str("| Module | Path | Files | Classes | Shared Methods |\n");
+    out.push_str("|--------|------|------:|--------:|----------------|\n");
     for module in &map.modules {
         let shared = if module.shared_methods.is_empty() {
             "—".to_string()
@@ -687,9 +718,10 @@ fn render_index(map: &CodebaseMap) -> String {
             module.shared_methods.join(", ")
         };
         out.push_str(&format!(
-            "| [{}](./{}.md) | {} | {} | {} |\n",
-            module.path,
+            "| [{}](./{}.md) | `{}` | {} | {} | {} |\n",
+            module.name,
             module.path.replace('/', "-"),
+            module.path,
             module.file_count,
             module.classes.len(),
             shared
@@ -709,9 +741,9 @@ fn render_index(map: &CodebaseMap) -> String {
     out
 }
 
-fn render_module(module: &MapModule) -> String {
+fn render_module(module: &MapModule, children_index: &HashMap<String, usize>) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# {}\n\n", module.path));
+    out.push_str(&format!("# {} — {}\n\n", module.name, module.path));
     out.push_str(&format!(
         "{} files, {} classes\n\n",
         module.file_count,
@@ -726,178 +758,395 @@ fn render_module(module: &MapModule) -> String {
     }
 
     for class in &module.classes {
-        out.push_str(&format!("## {}\n\n", class.name));
-        out.push_str(&format!("**File:** `{}`\n", class.file));
+        render_class(&mut out, class, children_index);
+    }
 
-        if let Some(ref parent) = class.extends {
-            out.push_str(&format!("**Extends:** {}\n", parent));
+    out
+}
+
+/// Render a summary page for large modules that get split.
+fn render_module_summary(module: &MapModule, safe_name: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {} — {}\n\n", module.name, module.path));
+    out.push_str(&format!(
+        "{} files, {} classes (split into sub-pages)\n\n",
+        module.file_count,
+        module.classes.len()
+    ));
+
+    if !module.shared_methods.is_empty() {
+        out.push_str(&format!(
+            "**Shared interface:** {}\n\n",
+            module.shared_methods.join(", ")
+        ));
+    }
+
+    // List classes grouped by their prefix-based split
+    let chunks = split_classes_by_prefix(&module.classes);
+    out.push_str("## Sub-pages\n\n");
+    for (suffix, chunk_classes) in &chunks {
+        out.push_str(&format!(
+            "- [{}](./{}-{}.md) — {} classes\n",
+            suffix, safe_name, suffix,
+            chunk_classes.len()
+        ));
+    }
+
+    out.push_str("\n## All Classes\n\n");
+    for class in &module.classes {
+        let extras = match &class.extends {
+            Some(parent) => format!(" (extends {})", parent),
+            None => String::new(),
+        };
+        out.push_str(&format!(
+            "- **{}**{} — {} public methods\n",
+            class.name,
+            extras,
+            class.public_methods.len()
+        ));
+    }
+
+    out
+}
+
+/// Render a chunk of classes from a split module.
+fn render_module_chunk(
+    module: &MapModule,
+    classes: &[&MapClass],
+    suffix: &str,
+    children_index: &HashMap<String, usize>,
+) -> String {
+    let mut out = String::new();
+    let safe_name = module.path.replace('/', "-");
+    out.push_str(&format!(
+        "# {} — {} ({})\n\n",
+        module.name, module.path, suffix
+    ));
+    out.push_str(&format!(
+        "{} classes ([back to module summary](./{}.md))\n\n",
+        classes.len(),
+        safe_name
+    ));
+
+    for class in classes {
+        render_class(&mut out, class, children_index);
+    }
+
+    out
+}
+
+/// Split classes by common prefix for large module splitting.
+/// Groups by next meaningful word after shared prefix (e.g., WC_REST_Product → Product).
+/// Falls back to alphabetical by first unique char when grouping produces bad results.
+fn split_classes_by_prefix(classes: &[MapClass]) -> Vec<(String, Vec<&MapClass>)> {
+    // Find the most common prefix (majority-based, not strict common prefix)
+    let common = majority_prefix(classes);
+
+    // Group by next meaningful word after common prefix
+    let mut groups: HashMap<String, Vec<&MapClass>> = HashMap::new();
+    for class in classes {
+        let remainder = if class.name.starts_with(&common) {
+            &class.name[common.len()..]
+        } else {
+            &class.name
+        };
+        // Take first word (up to next underscore)
+        let key = remainder
+            .find('_')
+            .map(|i| &remainder[..i])
+            .unwrap_or(remainder);
+        let key = if key.is_empty() { "Core" } else { key };
+        groups.entry(key.to_string()).or_default().push(class);
+    }
+
+    // Validate: reject if too many tiny groups (>15), one huge group, or only one group
+    let needs_fallback = groups.len() > 15
+        || groups.len() <= 1
+        || groups.values().any(|g| g.len() > MODULE_SPLIT_THRESHOLD * 2);
+
+    if needs_fallback {
+        // Alphabetical by first char AFTER majority prefix
+        let mut alpha_groups: HashMap<String, Vec<&MapClass>> = HashMap::new();
+        for class in classes {
+            let remainder = if class.name.starts_with(&common) {
+                &class.name[common.len()..]
+            } else {
+                &class.name
+            };
+            let first = remainder.chars().next().unwrap_or('_').to_uppercase().to_string();
+            alpha_groups.entry(first).or_default().push(class);
         }
-        if !class.implements.is_empty() {
-            out.push_str(&format!("**Implements:** {}\n", class.implements.join(", ")));
+
+        // If still just one group, try more chars
+        if alpha_groups.len() <= 1 {
+            alpha_groups.clear();
+            for class in classes {
+                let remainder = if class.name.starts_with(&common) {
+                    &class.name[common.len()..]
+                } else {
+                    &class.name
+                };
+                let key: String = remainder.chars().take(3).collect();
+                let key = if key.is_empty() { "Other".to_string() } else { key };
+                alpha_groups.entry(key).or_default().push(class);
+            }
         }
-        if let Some(ref ns) = class.namespace {
-            out.push_str(&format!("**Namespace:** `{}`\n", ns));
+
+        let mut sorted: Vec<_> = alpha_groups.into_iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        return sorted;
+    }
+
+    let mut sorted: Vec<_> = groups.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted
+}
+
+/// Find the most common underscore-delimited prefix among class names.
+/// Uses a frequency approach: the prefix shared by the majority (>50%) of classes.
+fn majority_prefix(classes: &[MapClass]) -> String {
+    if classes.is_empty() {
+        return String::new();
+    }
+
+    // Count prefix frequencies at each underscore boundary
+    let mut prefix_counts: HashMap<&str, usize> = HashMap::new();
+    for class in classes {
+        let name = &class.name;
+        // Find all underscore positions and count each prefix
+        for (i, _) in name.match_indices('_') {
+            let prefix = &name[..=i]; // include the underscore
+            *prefix_counts.entry(prefix).or_default() += 1;
+        }
+    }
+
+    // Find the longest prefix shared by >50% of classes
+    let threshold = (classes.len() as f64 * 0.5).ceil() as usize;
+    let mut best = String::new();
+    for (prefix, count) in &prefix_counts {
+        if *count >= threshold && prefix.len() > best.len() {
+            best = prefix.to_string();
+        }
+    }
+
+    best
+}
+
+/// Render a single class entry (shared between normal and chunk rendering).
+fn render_class(
+    out: &mut String,
+    class: &MapClass,
+    children_index: &HashMap<String, usize>,
+) {
+    out.push_str(&format!("## {}\n\n", class.name));
+    out.push_str(&format!("**File:** `{}`\n", class.file));
+
+    if let Some(ref parent) = class.extends {
+        out.push_str(&format!("**Extends:** {}\n", parent));
+    }
+    if !class.implements.is_empty() {
+        out.push_str(&format!("**Implements:** {}\n", class.implements.join(", ")));
+    }
+    if let Some(ref ns) = class.namespace {
+        out.push_str(&format!("**Namespace:** `{}`\n", ns));
+    }
+
+    // Cross-reference: note if this class has children in the hierarchy
+    if let Some(&count) = children_index.get(&class.name) {
+        out.push_str(&format!(
+            "**Children:** {} subclasses ([see hierarchy](./hierarchy.md))\n",
+            count
+        ));
+    }
+
+    out.push('\n');
+
+    // Properties
+    if !class.properties.is_empty() {
+        out.push_str("### Properties\n\n");
+        for prop in &class.properties {
+            out.push_str(&format!("- `{}`\n", prop));
         }
         out.push('\n');
+    }
 
-        // Properties
-        if !class.properties.is_empty() {
-            out.push_str("### Properties\n\n");
-            for prop in &class.properties {
-                out.push_str(&format!("- `{}`\n", prop));
-            }
-            out.push('\n');
-        }
+    // Public methods — group getters, setters, booleans, other
+    if !class.public_methods.is_empty() {
+        let getters: Vec<_> = class
+            .public_methods
+            .iter()
+            .filter(|m| m.starts_with("get_") || m.starts_with("get"))
+            .filter(|m| !m.starts_with("get_") || m.len() > 4)
+            .collect();
+        let setters: Vec<_> = class
+            .public_methods
+            .iter()
+            .filter(|m| m.starts_with("set_") || m.starts_with("set"))
+            .filter(|m| !m.starts_with("set_") || m.len() > 4)
+            .collect();
+        let booleans: Vec<_> = class
+            .public_methods
+            .iter()
+            .filter(|m| m.starts_with("is_") || m.starts_with("has_") || m.starts_with("can_"))
+            .collect();
+        let other: Vec<_> = class
+            .public_methods
+            .iter()
+            .filter(|m| {
+                !m.starts_with("get_")
+                    && !m.starts_with("get")
+                    && !m.starts_with("set_")
+                    && !m.starts_with("set")
+                    && !m.starts_with("is_")
+                    && !m.starts_with("has_")
+                    && !m.starts_with("can_")
+            })
+            .collect();
 
-        // Public methods — group getters, setters, booleans, other
-        if !class.public_methods.is_empty() {
-            let getters: Vec<_> = class
-                .public_methods
-                .iter()
-                .filter(|m| m.starts_with("get_"))
-                .collect();
-            let setters: Vec<_> = class
-                .public_methods
-                .iter()
-                .filter(|m| m.starts_with("set_"))
-                .collect();
-            let booleans: Vec<_> = class
-                .public_methods
-                .iter()
-                .filter(|m| m.starts_with("is_") || m.starts_with("has_") || m.starts_with("can_"))
-                .collect();
-            let other: Vec<_> = class
-                .public_methods
-                .iter()
-                .filter(|m| {
-                    !m.starts_with("get_")
-                        && !m.starts_with("set_")
-                        && !m.starts_with("is_")
-                        && !m.starts_with("has_")
-                        && !m.starts_with("can_")
-                })
-                .collect();
+        out.push_str(&format!(
+            "### Public Methods ({})\n\n",
+            class.public_methods.len()
+        ));
 
+        if !getters.is_empty() {
             out.push_str(&format!(
-                "### Public Methods ({})\n\n",
-                class.public_methods.len()
-            ));
-
-            if !getters.is_empty() {
-                out.push_str(&format!(
-                    "**Getters ({}):** {}\n\n",
-                    getters.len(),
-                    getters
-                        .iter()
-                        .map(|m| format!("`{}`", m))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            if !setters.is_empty() {
-                out.push_str(&format!(
-                    "**Setters ({}):** {}\n\n",
-                    setters.len(),
-                    setters
-                        .iter()
-                        .map(|m| format!("`{}`", m))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            if !booleans.is_empty() {
-                out.push_str(&format!(
-                    "**Checks ({}):** {}\n\n",
-                    booleans.len(),
-                    booleans
-                        .iter()
-                        .map(|m| format!("`{}`", m))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            if !other.is_empty() {
-                out.push_str(&format!(
-                    "**Other ({}):** {}\n\n",
-                    other.len(),
-                    other
-                        .iter()
-                        .map(|m| format!("`{}`", m))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-        }
-
-        // Protected methods
-        if !class.protected_methods.is_empty() {
-            out.push_str(&format!(
-                "### Protected Methods ({})\n\n{}\n\n",
-                class.protected_methods.len(),
-                class
-                    .protected_methods
+                "**Getters ({}):** {}\n\n",
+                getters.len(),
+                getters
                     .iter()
                     .map(|m| format!("`{}`", m))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
         }
-
-        // Hooks
-        if !class.hooks.is_empty() {
-            let actions: Vec<_> = class
-                .hooks
-                .iter()
-                .filter(|h| h.hook_type == "action")
-                .collect();
-            let filters: Vec<_> = class
-                .hooks
-                .iter()
-                .filter(|h| h.hook_type == "filter")
-                .collect();
-
-            out.push_str(&format!("### Hooks ({})\n\n", class.hooks.len()));
-            if !actions.is_empty() {
-                out.push_str(&format!(
-                    "**Actions ({}):** {}\n\n",
-                    actions.len(),
-                    actions
-                        .iter()
-                        .map(|h| format!("`{}`", h.name))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            if !filters.is_empty() {
-                out.push_str(&format!(
-                    "**Filters ({}):** {}\n\n",
-                    filters.len(),
-                    filters
-                        .iter()
-                        .map(|h| format!("`{}`", h.name))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
+        if !setters.is_empty() {
+            out.push_str(&format!(
+                "**Setters ({}):** {}\n\n",
+                setters.len(),
+                setters
+                    .iter()
+                    .map(|m| format!("`{}`", m))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
-
-        out.push_str("---\n\n");
+        if !booleans.is_empty() {
+            out.push_str(&format!(
+                "**Checks ({}):** {}\n\n",
+                booleans.len(),
+                booleans
+                    .iter()
+                    .map(|m| format!("`{}`", m))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !other.is_empty() {
+            out.push_str(&format!(
+                "**Other ({}):** {}\n\n",
+                other.len(),
+                other
+                    .iter()
+                    .map(|m| format!("`{}`", m))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
     }
 
-    out
+    // Protected methods
+    if !class.protected_methods.is_empty() {
+        out.push_str(&format!(
+            "### Protected Methods ({})\n\n{}\n\n",
+            class.protected_methods.len(),
+            class
+                .protected_methods
+                .iter()
+                .map(|m| format!("`{}`", m))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    // Hooks — mark dynamic hooks
+    if !class.hooks.is_empty() {
+        let actions: Vec<_> = class
+            .hooks
+            .iter()
+            .filter(|h| h.hook_type == "action")
+            .collect();
+        let filters: Vec<_> = class
+            .hooks
+            .iter()
+            .filter(|h| h.hook_type == "filter")
+            .collect();
+
+        out.push_str(&format!("### Hooks ({})\n\n", class.hooks.len()));
+        if !actions.is_empty() {
+            out.push_str(&format!(
+                "**Actions ({}):** {}\n\n",
+                actions.len(),
+                actions
+                    .iter()
+                    .map(|h| format_hook_name(&h.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !filters.is_empty() {
+            out.push_str(&format!(
+                "**Filters ({}):** {}\n\n",
+                filters.len(),
+                filters
+                    .iter()
+                    .map(|h| format_hook_name(&h.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    out.push_str("---\n\n");
 }
 
-fn render_hierarchy(hierarchy: &[HierarchyEntry]) -> String {
+/// Format a hook name, noting dynamic hooks (those ending with a separator or containing variables).
+fn format_hook_name(name: &str) -> String {
+    let is_dynamic = name.ends_with('_')
+        || name.ends_with('-')
+        || name.ends_with('.')
+        || name.contains('{')
+        || name.contains('$');
+    if is_dynamic {
+        format!("`{}*` *(dynamic)*", name)
+    } else {
+        format!("`{}`", name)
+    }
+}
+
+fn render_hierarchy(
+    hierarchy: &[HierarchyEntry],
+    class_index: &HashMap<String, String>,
+) -> String {
     let mut out = String::new();
     out.push_str("# Class Hierarchy\n\n");
     for entry in hierarchy {
+        // Link parent to its module doc if known
+        let parent_display = if let Some(filename) = class_index.get(&entry.parent) {
+            format!("[{}](./{})", entry.parent, filename)
+        } else {
+            entry.parent.clone()
+        };
         out.push_str(&format!(
             "## {} ({} children)\n\n",
-            entry.parent,
+            parent_display,
             entry.children.len()
         ));
         for child in &entry.children {
-            out.push_str(&format!("- {}\n", child));
+            if let Some(filename) = class_index.get(child) {
+                out.push_str(&format!("- [{}](./{})\n", child, filename));
+            } else {
+                out.push_str(&format!("- {}\n", child));
+            }
         }
         out.push('\n');
     }
@@ -921,6 +1170,50 @@ fn render_hooks_summary(summary: &HookSummary) -> String {
     }
     out
 }
+
+/// Derive a human-readable module name from a directory path.
+/// For generic last segments (V1, V2, Version1, src, lib, includes),
+/// we prepend the parent segment to give context.
+fn derive_module_name(dir: &str) -> String {
+    let segments: Vec<&str> = dir.split('/').collect();
+    if segments.is_empty() {
+        return dir.to_string();
+    }
+
+    let last = *segments.last().unwrap();
+
+    // Segments that are too generic on their own
+    let generic = [
+        "V1", "V2", "V3", "V4", "v1", "v2", "v3", "v4",
+        "Version1", "Version2", "Version3", "Version4",
+        "src", "lib", "includes", "inc", "app",
+        "Controllers", "Models", "Views", "Routes", "Schemas",
+        "Utilities", "Helpers", "Abstract", "Interfaces",
+    ];
+
+    if segments.len() >= 2 && generic.contains(&last) {
+        let parent = segments[segments.len() - 2];
+        format!("{} {}", parent, last)
+    } else {
+        last.to_string()
+    }
+}
+
+/// Build a lookup from class name → module doc filename for cross-references.
+fn build_class_module_index(modules: &[MapModule]) -> HashMap<String, String> {
+    let mut index = HashMap::new();
+    for module in modules {
+        let safe_name = module.path.replace('/', "-");
+        let filename = format!("{}.md", safe_name);
+        for class in &module.classes {
+            index.insert(class.name.clone(), filename.clone());
+        }
+    }
+    index
+}
+
+/// Maximum classes in a single module doc before we split it.
+const MODULE_SPLIT_THRESHOLD: usize = 30;
 
 /// Recursively collect fingerprints from a directory.
 fn collect_fingerprints_recursive(
