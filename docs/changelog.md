@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.52.1] - 2026-03-02
+
+- fix(test): --path and --fix flags now correctly parsed by test command (#366)
+
 ## [0.52.0] - 2026-03-02
 
 ### Added
