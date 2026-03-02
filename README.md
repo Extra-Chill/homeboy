@@ -2,8 +2,6 @@
 
 Config-driven development and deployment CLI with structured JSON output, embedded docs, and predictable contracts — built for AI agents and automation.
 
-Written in Rust. ~50K lines of source across 132 files. 55 embedded documentation topics compiled into the binary.
-
 ## What It Does
 
 Homeboy manages the relationship between **components** (plugins, themes, CLIs, packages), **projects** (sites, applications), and **servers** (machines). You define these as JSON config. Then you deploy, version, release, audit, refactor, and operate across all of them from one tool.
@@ -63,7 +61,7 @@ Exceptions: `homeboy docs` outputs raw markdown. `homeboy ssh` and `homeboy logs
 Everything is discoverable at runtime. No need to read source code or external documentation.
 
 ```bash
-homeboy docs list                        # All 55 embedded doc topics
+homeboy docs list                        # All embedded doc topics
 homeboy docs commands/deploy             # Full deploy command reference
 homeboy docs schemas/component-schema    # Component JSON schema
 homeboy docs architecture/release-pipeline  # How release pipelines work
