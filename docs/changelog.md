@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.52.0] - 2026-03-02
+
+### Added
+- Add refactor propagate subcommand for struct field propagation
+- Add docs map command with mechanical markdown generation from source code
+- Add deploy integration test suite with 29 tests covering safety chain, template rendering, and error messages
+- Add planned/skipped counts to ProjectsSummary for accurate multi-project deploy reporting
+
+### Changed
+- Improve docs map output quality — module naming, cross-references, large module splitting
+- Rewrite SKILL.md as agent bootstrap with discovery-first approach
+- Add group size threshold, skip constructors, and dynamic namespace detection in code audit
+
+### Fixed
+- Add deploy safety guard — prevent deploying to shared parent directories (#353)
+- Improve 'no components configured' error with actionable details and skipped component info (#329)
+- Fix dry-run and check modes reporting 'deployed' status instead of 'planned' in multi-project deploys (#359)
+- Improve fleet/multi-project deploy resilience — skip unknown projects instead of aborting
+
 ## [0.51.0] - 2026-02-28
 
 ### Added
