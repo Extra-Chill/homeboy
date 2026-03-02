@@ -17,7 +17,7 @@ pub(crate) mod conventions;
 mod discovery;
 mod duplication;
 mod findings;
-mod fingerprint;
+pub mod fingerprint;
 pub mod fixer;
 pub(crate) mod import_matching;
 mod signatures;

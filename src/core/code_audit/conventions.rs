@@ -562,6 +562,10 @@ mod tests {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "steps/webhook.php".to_string(),
@@ -579,6 +583,10 @@ mod tests {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "steps/agent-ping.php".to_string(),
@@ -592,6 +600,10 @@ mod tests {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
         ];
 
@@ -624,6 +636,10 @@ mod tests {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
         }];
 
         assert!(discover_conventions("Single", "*.php", &fingerprints).is_none());
@@ -653,6 +669,10 @@ mod tests {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/update.php".to_string(),
@@ -666,6 +686,10 @@ mod tests {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/helpers.php".to_string(),
@@ -679,6 +703,10 @@ mod tests {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
         ];
 
@@ -713,6 +741,10 @@ mod tests {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "b.php".to_string(),
@@ -726,6 +758,10 @@ mod tests {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "c.php".to_string(),
@@ -739,6 +775,10 @@ mod tests {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
         ];
 
@@ -1018,6 +1058,10 @@ class AgentPing {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/UpdateFlow.php".to_string(),
@@ -1031,6 +1075,10 @@ class AgentPing {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/DeleteFlow.php".to_string(),
@@ -1044,6 +1092,10 @@ class AgentPing {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
         ];
 
@@ -1074,6 +1126,10 @@ class AgentPing {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/B.php".to_string(),
@@ -1087,6 +1143,10 @@ class AgentPing {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/C.php".to_string(),
@@ -1101,6 +1161,10 @@ class AgentPing {
                 content: "class C extends Base {\n    public function execute() {}\n}".to_string(),
                 method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
         ];
 
@@ -1129,6 +1193,10 @@ class AgentPing {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "steps/B.php".to_string(),
@@ -1142,6 +1210,10 @@ class AgentPing {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "steps/C.php".to_string(),
@@ -1155,6 +1227,10 @@ class AgentPing {
             content: String::new(),
             method_hashes: std::collections::HashMap::new(),
             structural_hashes: std::collections::HashMap::new(),
+            extends: None,
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
             },
         ];
 

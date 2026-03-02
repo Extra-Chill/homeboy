@@ -154,6 +154,16 @@ pub fn run_fingerprint_script(
     serde_json::from_str(&stdout).ok()
 }
 
+/// A hook reference extracted from source code (do_action / apply_filters).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct HookRef {
+    /// "action" or "filter"
+    #[serde(rename = "type")]
+    pub hook_type: String,
+    /// The hook name (e.g., "woocommerce_product_is_visible")
+    pub name: String,
+}
+
 /// Output from a fingerprint extension script.
 /// Matches the structural data extracted from a source file.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -162,6 +172,10 @@ pub struct FingerprintOutput {
     pub methods: Vec<String>,
     #[serde(default)]
     pub type_name: Option<String>,
+    /// Parent class name (e.g., "WC_Abstract_Order").
+    /// Separated from `implements` for clear hierarchy tracking.
+    #[serde(default)]
+    pub extends: Option<String>,
     #[serde(default)]
     pub implements: Vec<String>,
     #[serde(default)]
@@ -181,6 +195,15 @@ pub struct FingerprintOutput {
     /// variable names or constants produce the same hash.
     #[serde(default)]
     pub structural_hashes: std::collections::HashMap<String, String>,
+    /// Method name → visibility ("public", "protected", "private").
+    #[serde(default)]
+    pub visibility: std::collections::HashMap<String, String>,
+    /// Public/protected class properties (e.g., ["string $name", "$data"]).
+    #[serde(default)]
+    pub properties: Vec<String>,
+    /// Hook references: do_action() and apply_filters() calls.
+    #[serde(default)]
+    pub hooks: Vec<HookRef>,
 }
 
 // ============================================================================

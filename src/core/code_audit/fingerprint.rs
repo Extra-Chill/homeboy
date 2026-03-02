@@ -19,6 +19,8 @@ pub struct FileFingerprint {
     pub registrations: Vec<String>,
     /// Class or struct name if found.
     pub type_name: Option<String>,
+    /// Parent class name (e.g., "WC_Abstract_Order").
+    pub extends: Option<String>,
     /// Interfaces or traits implemented.
     pub implements: Vec<String>,
     /// Namespace declaration (PHP namespace, Rust mod path).
@@ -34,6 +36,12 @@ pub struct FileFingerprint {
     /// Identifiers/literals replaced with positional tokens before hashing.
     /// Populated by extension scripts that support it; empty otherwise.
     pub structural_hashes: HashMap<String, String>,
+    /// Method name → visibility ("public", "protected", "private").
+    pub visibility: HashMap<String, String>,
+    /// Public/protected class properties (e.g., ["string $name", "$data"]).
+    pub properties: Vec<String>,
+    /// Hook references: do_action() and apply_filters() calls.
+    pub hooks: Vec<crate::extension::HookRef>,
 }
 
 /// Extract a structural fingerprint from a source file.
@@ -62,11 +70,15 @@ pub fn fingerprint_file(path: &Path, root: &Path) -> Option<FileFingerprint> {
         methods: output.methods,
         registrations: output.registrations,
         type_name: output.type_name,
+        extends: output.extends,
         implements: output.implements,
         namespace: output.namespace,
         imports: output.imports,
         content,
         method_hashes: output.method_hashes,
         structural_hashes: output.structural_hashes,
+        visibility: output.visibility,
+        properties: output.properties,
+        hooks: output.hooks,
     })
 }

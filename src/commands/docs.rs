@@ -59,6 +59,28 @@ pub enum DocsCommand {
         features: bool,
     },
 
+    /// Generate a machine-optimized codebase map for AI documentation
+    Map {
+        /// Component to analyze
+        component_id: String,
+
+        /// Source directories to analyze (comma-separated). Overrides auto-detection.
+        #[arg(long, value_delimiter = ',')]
+        source_dirs: Option<Vec<String>>,
+
+        /// Include private methods and internals (default: public API surface only)
+        #[arg(long)]
+        include_private: bool,
+
+        /// Write markdown documentation files to disk (default: JSON to stdout)
+        #[arg(long)]
+        write: bool,
+
+        /// Output directory for markdown files (default: docs)
+        #[arg(long, default_value = "docs")]
+        output_dir: String,
+    },
+
     /// Generate documentation files from JSON spec
     Generate {
         /// JSON spec (positional, supports @file and - for stdin)
@@ -90,6 +112,77 @@ pub struct ScaffoldAnalysis {
     pub undocumented: Vec<String>,
 }
 
+/// A module in the codebase map — a group of related files.
+#[derive(Serialize)]
+pub struct MapModule {
+    /// Human-readable module name (e.g., "REST API Controllers")
+    pub name: String,
+    /// Directory path relative to component root
+    pub path: String,
+    /// Number of source files
+    pub file_count: usize,
+    /// Classes/types found in this module
+    pub classes: Vec<MapClass>,
+    /// Methods shared across most files (convention pattern)
+    pub shared_methods: Vec<String>,
+}
+
+/// A class entry in the codebase map.
+#[derive(Serialize)]
+pub struct MapClass {
+    /// Class/type name
+    pub name: String,
+    /// File path relative to component root
+    pub file: String,
+    /// Parent class name, if any
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extends: Option<String>,
+    /// Interfaces and traits
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub implements: Vec<String>,
+    /// Namespace
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// Public methods
+    pub public_methods: Vec<String>,
+    /// Protected methods (only if include_private)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub protected_methods: Vec<String>,
+    /// Public/protected properties
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<String>,
+    /// Hook references (actions and filters)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<homeboy::extension::HookRef>,
+}
+
+/// The class hierarchy: parent → children mapping.
+#[derive(Serialize)]
+pub struct HierarchyEntry {
+    pub parent: String,
+    pub children: Vec<String>,
+}
+
+/// Summary of hooks in the codebase.
+#[derive(Serialize)]
+pub struct HookSummary {
+    pub total_actions: usize,
+    pub total_filters: usize,
+    /// Top hook prefixes (e.g., "woocommerce_" → 847)
+    pub top_prefixes: Vec<(String, usize)>,
+}
+
+/// Full codebase map output.
+#[derive(Serialize)]
+pub struct CodebaseMap {
+    pub component: String,
+    pub modules: Vec<MapModule>,
+    pub class_hierarchy: Vec<HierarchyEntry>,
+    pub hook_summary: HookSummary,
+    pub total_files: usize,
+    pub total_classes: usize,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "command")]
 pub enum DocsOutput {
@@ -102,6 +195,9 @@ pub enum DocsOutput {
 
     #[serde(rename = "docs.audit")]
     Audit(AuditResult),
+
+    #[serde(rename = "docs.map")]
+    Map(CodebaseMap),
 
     #[serde(rename = "docs.generate")]
     Generate {
@@ -134,12 +230,13 @@ pub struct GenerateFileSpec {
 // Public API
 // ============================================================================
 
-/// Check if this invocation should return JSON (scaffold, audit, or generate subcommand)
+/// Check if this invocation should return JSON (scaffold, audit, map, or generate subcommand)
 pub fn is_json_mode(args: &DocsArgs) -> bool {
     matches!(
         args.command,
         Some(DocsCommand::Scaffold { .. })
             | Some(DocsCommand::Audit { .. })
+            | Some(DocsCommand::Map { .. })
             | Some(DocsCommand::Generate { .. })
     )
 }
@@ -175,6 +272,7 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
             detect_by_extension,
         ),
         Some(DocsCommand::Audit { component_id, docs_dir, features }) => run_audit(&component_id, docs_dir.as_deref(), features),
+        Some(DocsCommand::Map { component_id, source_dirs, include_private, write, output_dir }) => run_map(&component_id, source_dirs, include_private, write, &output_dir),
         Some(DocsCommand::Generate { spec, json, from_audit, dry_run }) => {
             if let Some(ref audit_source) = from_audit {
                 run_generate_from_audit(audit_source, dry_run)
@@ -185,7 +283,7 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
         }
         None => Err(homeboy::Error::validation_invalid_argument(
             "command",
-            "JSON output requires scaffold, audit, or generate subcommand. Use `homeboy docs <topic>` for topic display.",
+            "JSON output requires scaffold, audit, map, or generate subcommand. Use `homeboy docs <topic>` for topic display.",
             None,
             Some(vec![
                 "homeboy docs scaffold <component-id>".to_string(),
@@ -274,6 +372,594 @@ fn run_scaffold(
         },
         0,
     ))
+}
+
+// ============================================================================
+// Map (Machine-Optimized Codebase Map)
+// ============================================================================
+
+fn run_map(
+    component_id: &str,
+    explicit_source_dirs: Option<Vec<String>>,
+    include_private: bool,
+    write: bool,
+    output_dir: &str,
+) -> CmdResult<DocsOutput> {
+    use homeboy::code_audit::fingerprint::FileFingerprint;
+
+    let comp = component::load(component_id)?;
+    let root = Path::new(&comp.local_path);
+
+    // Determine which directories to scan
+    let source_dirs = if let Some(dirs) = explicit_source_dirs {
+        dirs
+    } else {
+        // Auto-detect: conventional + extension-based fallback
+        let conventional = find_source_directories(root);
+        if conventional.is_empty() {
+            let extensions = default_source_extensions();
+            find_source_directories_by_extension(root, &extensions)
+        } else {
+            conventional
+        }
+    };
+
+    // Fingerprint all source files
+    let mut all_fingerprints: Vec<FileFingerprint> = Vec::new();
+    for dir in &source_dirs {
+        let dir_path = root.join(dir);
+        if !dir_path.is_dir() {
+            continue;
+        }
+        collect_fingerprints_recursive(&dir_path, root, &mut all_fingerprints);
+    }
+
+    // Group fingerprints by parent directory
+    let mut dir_groups: HashMap<String, Vec<&FileFingerprint>> = HashMap::new();
+    for fp in &all_fingerprints {
+        let parent = Path::new(&fp.relative_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        dir_groups.entry(parent).or_default().push(fp);
+    }
+
+    // Build modules from directory groups
+    let mut modules: Vec<MapModule> = Vec::new();
+    let mut all_classes: Vec<&FileFingerprint> = Vec::new();
+
+    let mut sorted_dirs: Vec<_> = dir_groups.keys().cloned().collect();
+    sorted_dirs.sort();
+
+    for dir in &sorted_dirs {
+        let fps = &dir_groups[dir];
+        if fps.is_empty() {
+            continue;
+        }
+
+        // Build class entries
+        let mut classes: Vec<MapClass> = Vec::new();
+        for fp in fps {
+            let type_name = match &fp.type_name {
+                Some(name) => name.clone(),
+                None => continue, // Skip files without a class/type
+            };
+
+            let public_methods: Vec<String> = fp
+                .methods
+                .iter()
+                .filter(|m| fp.visibility.get(*m).map(|v| v == "public").unwrap_or(true))
+                .cloned()
+                .collect();
+
+            let protected_methods: Vec<String> = if include_private {
+                fp.methods
+                    .iter()
+                    .filter(|m| {
+                        fp.visibility.get(*m).map(|v| v == "protected").unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            classes.push(MapClass {
+                name: type_name,
+                file: fp.relative_path.clone(),
+                extends: fp.extends.clone(),
+                implements: fp.implements.clone(),
+                namespace: fp.namespace.clone(),
+                public_methods,
+                protected_methods,
+                properties: fp.properties.clone(),
+                hooks: fp.hooks.clone(),
+            });
+
+            all_classes.push(fp);
+        }
+
+        if classes.is_empty() {
+            continue;
+        }
+
+        // Compute shared methods (methods appearing in >50% of files)
+        let method_counts: HashMap<&str, usize> = {
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for fp in fps {
+                for method in &fp.methods {
+                    if fp.visibility.get(method).map(|v| v == "public").unwrap_or(true) {
+                        *counts.entry(method.as_str()).or_default() += 1;
+                    }
+                }
+            }
+            counts
+        };
+        let threshold = (fps.len() as f64 * 0.5).ceil() as usize;
+        let mut shared: Vec<String> = method_counts
+            .iter()
+            .filter(|(_, &count)| count >= threshold && count > 1)
+            .map(|(&name, _)| name.to_string())
+            .collect();
+        shared.sort();
+
+        // Derive a human-readable module name from the directory
+        let module_name = dir
+            .split('/')
+            .last()
+            .unwrap_or(dir)
+            .to_string();
+
+        modules.push(MapModule {
+            name: module_name,
+            path: dir.clone(),
+            file_count: fps.len(),
+            classes,
+            shared_methods: shared,
+        });
+    }
+
+    // Build class hierarchy (parent → children)
+    let mut hierarchy_map: HashMap<String, Vec<String>> = HashMap::new();
+    for fp in &all_fingerprints {
+        if let (Some(ref type_name), Some(ref parent)) = (&fp.type_name, &fp.extends) {
+            hierarchy_map
+                .entry(parent.clone())
+                .or_default()
+                .push(type_name.clone());
+        }
+    }
+    let mut class_hierarchy: Vec<HierarchyEntry> = hierarchy_map
+        .into_iter()
+        .map(|(parent, mut children)| {
+            children.sort();
+            children.dedup();
+            HierarchyEntry { parent, children }
+        })
+        .collect();
+    class_hierarchy.sort_by(|a, b| b.children.len().cmp(&a.children.len()));
+
+    // Build hook summary
+    let mut action_count = 0usize;
+    let mut filter_count = 0usize;
+    let mut prefix_counts: HashMap<String, usize> = HashMap::new();
+    for fp in &all_fingerprints {
+        for hook in &fp.hooks {
+            match hook.hook_type.as_str() {
+                "action" => action_count += 1,
+                "filter" => filter_count += 1,
+                _ => {}
+            }
+            // Extract prefix (up to first _)
+            let prefix = hook
+                .name
+                .find('_')
+                .map(|i| &hook.name[..=i])
+                .unwrap_or(&hook.name);
+            *prefix_counts.entry(prefix.to_string()).or_default() += 1;
+        }
+    }
+    let mut top_prefixes: Vec<(String, usize)> = prefix_counts.into_iter().collect();
+    top_prefixes.sort_by(|a, b| b.1.cmp(&a.1));
+    top_prefixes.truncate(10);
+
+    let total_files = all_fingerprints.len();
+    let total_classes = all_fingerprints
+        .iter()
+        .filter(|fp| fp.type_name.is_some())
+        .count();
+
+    let map = CodebaseMap {
+        component: component_id.to_string(),
+        modules,
+        class_hierarchy,
+        hook_summary: HookSummary {
+            total_actions: action_count,
+            total_filters: filter_count,
+            top_prefixes,
+        },
+        total_files,
+        total_classes,
+    };
+
+    // --write: render markdown files to disk
+    if write {
+        let comp = component::load(component_id)?;
+        let base = Path::new(&comp.local_path).join(output_dir);
+        let files = render_map_to_markdown(&map, &base)?;
+        return Ok((
+            DocsOutput::Generate {
+                files_created: files,
+                files_updated: vec![],
+                hints: vec![format!(
+                    "Generated docs from {} classes across {} modules",
+                    map.total_classes,
+                    map.modules.len()
+                )],
+            },
+            0,
+        ));
+    }
+
+    Ok((
+        DocsOutput::Map(map),
+        0,
+    ))
+}
+
+// ============================================================================
+// Markdown Rendering (mechanical doc generation from map data)
+// ============================================================================
+
+/// Render a CodebaseMap into markdown files on disk. Returns list of created file paths.
+fn render_map_to_markdown(
+    map: &CodebaseMap,
+    output_dir: &Path,
+) -> Result<Vec<String>, homeboy::Error> {
+    let mut created = Vec::new();
+
+    // Create output dir
+    fs::create_dir_all(output_dir).map_err(|e| {
+        homeboy::Error::internal_io(e.to_string(), Some(format!("create {}", output_dir.display())))
+    })?;
+
+    // 1. Write index.md — overview with module listing and hierarchy
+    let index = render_index(map);
+    let index_path = output_dir.join("index.md");
+    write_file(&index_path, &index)?;
+    created.push(index_path.to_string_lossy().to_string());
+
+    // 2. Write a doc file per module
+    for module in &map.modules {
+        let safe_name = module.path.replace('/', "-");
+        let filename = format!("{}.md", safe_name);
+        let content = render_module(module);
+        let mod_path = output_dir.join(&filename);
+        write_file(&mod_path, &content)?;
+        created.push(mod_path.to_string_lossy().to_string());
+    }
+
+    // 3. Write hierarchy.md
+    let hier = render_hierarchy(&map.class_hierarchy);
+    let hier_path = output_dir.join("hierarchy.md");
+    write_file(&hier_path, &hier)?;
+    created.push(hier_path.to_string_lossy().to_string());
+
+    // 4. Write hooks.md
+    let hooks = render_hooks_summary(&map.hook_summary);
+    let hooks_path = output_dir.join("hooks.md");
+    write_file(&hooks_path, &hooks)?;
+    created.push(hooks_path.to_string_lossy().to_string());
+
+    Ok(created)
+}
+
+fn write_file(path: &Path, content: &str) -> Result<(), homeboy::Error> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            homeboy::Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
+        })?;
+    }
+    fs::write(path, content).map_err(|e| {
+        homeboy::Error::internal_io(e.to_string(), Some(format!("write {}", path.display())))
+    })
+}
+
+fn render_index(map: &CodebaseMap) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", map.component));
+    out.push_str(&format!(
+        "{} files, {} classes, {} modules\n\n",
+        map.total_files, map.total_classes, map.modules.len()
+    ));
+    out.push_str(&format!(
+        "Hooks: {} actions, {} filters\n\n",
+        map.hook_summary.total_actions, map.hook_summary.total_filters
+    ));
+
+    out.push_str("## Modules\n\n");
+    out.push_str("| Module | Files | Classes | Shared Methods |\n");
+    out.push_str("|--------|------:|--------:|----------------|\n");
+    for module in &map.modules {
+        let shared = if module.shared_methods.is_empty() {
+            "—".to_string()
+        } else {
+            module.shared_methods.join(", ")
+        };
+        out.push_str(&format!(
+            "| [{}](./{}.md) | {} | {} | {} |\n",
+            module.path,
+            module.path.replace('/', "-"),
+            module.file_count,
+            module.classes.len(),
+            shared
+        ));
+    }
+
+    out.push_str("\n## Top Class Hierarchies\n\n");
+    for entry in map.class_hierarchy.iter().take(20) {
+        out.push_str(&format!(
+            "- **{}** → {} children: {}\n",
+            entry.parent,
+            entry.children.len(),
+            entry.children.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    out
+}
+
+fn render_module(module: &MapModule) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", module.path));
+    out.push_str(&format!(
+        "{} files, {} classes\n\n",
+        module.file_count,
+        module.classes.len()
+    ));
+
+    if !module.shared_methods.is_empty() {
+        out.push_str(&format!(
+            "**Shared interface:** {}\n\n",
+            module.shared_methods.join(", ")
+        ));
+    }
+
+    for class in &module.classes {
+        out.push_str(&format!("## {}\n\n", class.name));
+        out.push_str(&format!("**File:** `{}`\n", class.file));
+
+        if let Some(ref parent) = class.extends {
+            out.push_str(&format!("**Extends:** {}\n", parent));
+        }
+        if !class.implements.is_empty() {
+            out.push_str(&format!("**Implements:** {}\n", class.implements.join(", ")));
+        }
+        if let Some(ref ns) = class.namespace {
+            out.push_str(&format!("**Namespace:** `{}`\n", ns));
+        }
+        out.push('\n');
+
+        // Properties
+        if !class.properties.is_empty() {
+            out.push_str("### Properties\n\n");
+            for prop in &class.properties {
+                out.push_str(&format!("- `{}`\n", prop));
+            }
+            out.push('\n');
+        }
+
+        // Public methods — group getters, setters, booleans, other
+        if !class.public_methods.is_empty() {
+            let getters: Vec<_> = class
+                .public_methods
+                .iter()
+                .filter(|m| m.starts_with("get_"))
+                .collect();
+            let setters: Vec<_> = class
+                .public_methods
+                .iter()
+                .filter(|m| m.starts_with("set_"))
+                .collect();
+            let booleans: Vec<_> = class
+                .public_methods
+                .iter()
+                .filter(|m| m.starts_with("is_") || m.starts_with("has_") || m.starts_with("can_"))
+                .collect();
+            let other: Vec<_> = class
+                .public_methods
+                .iter()
+                .filter(|m| {
+                    !m.starts_with("get_")
+                        && !m.starts_with("set_")
+                        && !m.starts_with("is_")
+                        && !m.starts_with("has_")
+                        && !m.starts_with("can_")
+                })
+                .collect();
+
+            out.push_str(&format!(
+                "### Public Methods ({})\n\n",
+                class.public_methods.len()
+            ));
+
+            if !getters.is_empty() {
+                out.push_str(&format!(
+                    "**Getters ({}):** {}\n\n",
+                    getters.len(),
+                    getters
+                        .iter()
+                        .map(|m| format!("`{}`", m))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !setters.is_empty() {
+                out.push_str(&format!(
+                    "**Setters ({}):** {}\n\n",
+                    setters.len(),
+                    setters
+                        .iter()
+                        .map(|m| format!("`{}`", m))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !booleans.is_empty() {
+                out.push_str(&format!(
+                    "**Checks ({}):** {}\n\n",
+                    booleans.len(),
+                    booleans
+                        .iter()
+                        .map(|m| format!("`{}`", m))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !other.is_empty() {
+                out.push_str(&format!(
+                    "**Other ({}):** {}\n\n",
+                    other.len(),
+                    other
+                        .iter()
+                        .map(|m| format!("`{}`", m))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+
+        // Protected methods
+        if !class.protected_methods.is_empty() {
+            out.push_str(&format!(
+                "### Protected Methods ({})\n\n{}\n\n",
+                class.protected_methods.len(),
+                class
+                    .protected_methods
+                    .iter()
+                    .map(|m| format!("`{}`", m))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
+        // Hooks
+        if !class.hooks.is_empty() {
+            let actions: Vec<_> = class
+                .hooks
+                .iter()
+                .filter(|h| h.hook_type == "action")
+                .collect();
+            let filters: Vec<_> = class
+                .hooks
+                .iter()
+                .filter(|h| h.hook_type == "filter")
+                .collect();
+
+            out.push_str(&format!("### Hooks ({})\n\n", class.hooks.len()));
+            if !actions.is_empty() {
+                out.push_str(&format!(
+                    "**Actions ({}):** {}\n\n",
+                    actions.len(),
+                    actions
+                        .iter()
+                        .map(|h| format!("`{}`", h.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !filters.is_empty() {
+                out.push_str(&format!(
+                    "**Filters ({}):** {}\n\n",
+                    filters.len(),
+                    filters
+                        .iter()
+                        .map(|h| format!("`{}`", h.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+
+        out.push_str("---\n\n");
+    }
+
+    out
+}
+
+fn render_hierarchy(hierarchy: &[HierarchyEntry]) -> String {
+    let mut out = String::new();
+    out.push_str("# Class Hierarchy\n\n");
+    for entry in hierarchy {
+        out.push_str(&format!(
+            "## {} ({} children)\n\n",
+            entry.parent,
+            entry.children.len()
+        ));
+        for child in &entry.children {
+            out.push_str(&format!("- {}\n", child));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn render_hooks_summary(summary: &HookSummary) -> String {
+    let mut out = String::new();
+    out.push_str("# Hooks Summary\n\n");
+    out.push_str(&format!(
+        "**{} actions, {} filters** ({} total)\n\n",
+        summary.total_actions,
+        summary.total_filters,
+        summary.total_actions + summary.total_filters
+    ));
+    out.push_str("## Top Prefixes\n\n");
+    out.push_str("| Prefix | Count |\n");
+    out.push_str("|--------|------:|\n");
+    for (prefix, count) in &summary.top_prefixes {
+        out.push_str(&format!("| {} | {} |\n", prefix, count));
+    }
+    out
+}
+
+/// Recursively collect fingerprints from a directory.
+fn collect_fingerprints_recursive(
+    dir: &Path,
+    root: &Path,
+    fingerprints: &mut Vec<homeboy::code_audit::fingerprint::FileFingerprint>,
+) {
+    use homeboy::code_audit::fingerprint;
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // Skip hidden, vendor, node_modules, tests
+        if name.starts_with('.')
+            || name == "vendor"
+            || name == "node_modules"
+            || name == "tests"
+            || name == "test"
+            || name == "__pycache__"
+            || name == "target"
+            || name == "build"
+            || name == "dist"
+        {
+            continue;
+        }
+
+        if path.is_dir() {
+            collect_fingerprints_recursive(&path, root, fingerprints);
+        } else if path.is_file() {
+            if let Some(fp) = fingerprint::fingerprint_file(&path, root) {
+                fingerprints.push(fp);
+            }
+        }
+    }
 }
 
 // ============================================================================

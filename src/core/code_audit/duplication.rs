@@ -385,6 +385,7 @@ mod tests {
             methods: methods.iter().map(|s| s.to_string()).collect(),
             registrations: vec![],
             type_name: None,
+            extends: None,
             implements: vec![],
             namespace: None,
             imports: vec![],
@@ -397,6 +398,9 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            visibility: std::collections::HashMap::new(),
+            properties: vec![],
+            hooks: vec![],
         }
     }
 
