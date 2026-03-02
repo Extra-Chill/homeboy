@@ -238,6 +238,36 @@ impl ReleaseStepExecutor {
             .get("stdout")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+
+        let stderr = response
+            .get("stderr")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let exit_code = response
+            .get("exit_code")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+
+        // If the command failed or produced no output, surface the actual error
+        // instead of a cryptic JSON parse failure.
+        if stdout.trim().is_empty() {
+            let detail = if !stderr.is_empty() {
+                format!("Package command failed (exit {}): {}", exit_code, stderr.trim())
+            } else if exit_code != 0 {
+                format!(
+                    "Package command failed (exit {}) with no output. \
+                     Check that the required packaging tool is installed (e.g., cargo-dist)",
+                    exit_code
+                )
+            } else {
+                "Package command produced no artifact output. \
+                 The packaging tool may not be installed or configured correctly."
+                    .to_string()
+            };
+            return Err(Error::internal_unexpected(detail));
+        }
+
         let artifacts: Vec<super::types::ReleaseArtifact> =
             serde_json::from_str(stdout).map_err(|e| {
                 Error::internal_json(
