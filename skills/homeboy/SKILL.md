@@ -18,8 +18,8 @@ homeboy <command> --help            # subcommands and options for any command
 homeboy <command> <subcommand> --help  # detailed usage for any subcommand
 ```
 
-Every command returns structured JSON: `{"success": true, "data": {...}, "hints": [...]}`.
-Errors include hints: `{"success": false, "error": "...", "hints": [...]}`.
+Every command returns structured JSON: `{"success": true, "data": {...}}`.
+Errors include codes and hints: `{"success": false, "error": {"code": "...", "message": "...", "hints": [...]}}`.
 
 ## Entity Hierarchy
 
@@ -130,7 +130,7 @@ homeboy upgrade --help
 ## Key Principles
 
 - **Version targets are regex patterns** — they work on any file (Cargo.toml, package.json, PHP headers, etc.)
-- **Components support lifecycle hooks** — `pre_version_bump_commands` and `post_version_bump_commands`
+- **Components and extensions support lifecycle hooks** — `hooks` map with events like `pre:version:bump`, `post:deploy`, etc.
 - **Audit discovers conventions automatically** — naming, imports, methods, registrations per directory
 - **All output is JSON** — pipe to `jq` or parse programmatically
 - **When in doubt, run `--help`** — it's always accurate and up to date
