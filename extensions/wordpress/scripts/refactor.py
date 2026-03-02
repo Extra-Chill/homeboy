@@ -331,6 +331,25 @@ def generate_trait_file(function_name, method_source, namespace_base, trait_name
     return '\n'.join(lines)
 
 
+def common_namespace_prefix(namespaces):
+    """Find the longest common namespace prefix from a list of namespaces.
+
+    ['DataMachine\\Abilities\\Flow', 'DataMachine\\Abilities\\Job',
+     'DataMachine\\Abilities\\Taxonomy']
+    → 'DataMachine\\Abilities'
+    """
+    if not namespaces:
+        return ''
+    parts_list = [ns.split('\\') for ns in namespaces]
+    prefix = []
+    for segments in zip(*parts_list):
+        if len(set(segments)) == 1:
+            prefix.append(segments[0])
+        else:
+            break
+    return '\\'.join(prefix)
+
+
 def extract_shared(data):
     """Generate trait extraction plan for a group of duplicate functions.
 
@@ -339,7 +358,7 @@ def extract_shared(data):
         canonical_file: str — file chosen to keep the original
         canonical_content: str — content of the canonical file
         files: list of {path, content} — all files containing the duplicate
-        root_namespace_mapping: str — e.g., "inc:DataMachine"
+        all_file_paths: list of str — all file paths in the group (for namespace computation)
 
     Output:
         trait_file: str — path for the new trait file
@@ -350,7 +369,7 @@ def extract_shared(data):
     canonical_file = data['canonical_file']
     canonical_content = data['canonical_content']
     files = data.get('files', [])
-    root_mapping = data.get('root_namespace_mapping', 'inc:DataMachine')
+    all_file_paths = data.get('all_file_paths', [canonical_file])
 
     # Parse the canonical file to get the method source
     items = parse_php_items(canonical_content, canonical_file, item_filter=[function_name])
@@ -363,17 +382,35 @@ def extract_shared(data):
     # Find imports the method depends on
     dependency_imports = extract_method_dependencies(method_source, canonical_content)
 
-    # Detect namespace of canonical file to determine trait namespace
-    canonical_ns = detect_namespace(canonical_content)
-    if not canonical_ns:
-        # Fall back to path-based namespace
-        canonical_ns = path_to_namespace(canonical_file, root_mapping)
+    # Detect namespaces from all files to find the common ancestor
+    all_contents = {canonical_file: canonical_content}
+    for f in files:
+        all_contents[f['path']] = f['content']
 
-    # Determine base namespace for the trait
-    # Use the common namespace prefix of all files, or the canonical's namespace
-    ns_parts = canonical_ns.split('\\')
-    # Go up one level for the trait (e.g., DataMachine\Abilities -> DataMachine\Abilities\Traits)
-    trait_namespace_base = canonical_ns
+    namespaces = []
+    for fpath in all_file_paths:
+        if fpath in all_contents:
+            ns = detect_namespace(all_contents[fpath])
+            if ns:
+                namespaces.append(ns)
+
+    # Fall back to canonical namespace if we can't read all files
+    if not namespaces:
+        canonical_ns = detect_namespace(canonical_content)
+        if canonical_ns:
+            namespaces = [canonical_ns]
+
+    if not namespaces:
+        return {'error': f'Cannot determine namespace for {function_name}'}
+
+    # Compute the common ancestor namespace for trait placement
+    # e.g., if files are in DataMachine\Abilities\Flow, DataMachine\Abilities\Job,
+    # DataMachine\Abilities — the common ancestor is DataMachine\Abilities
+    trait_namespace_base = common_namespace_prefix(namespaces)
+
+    # If common prefix is too short (just the root namespace), use canonical's namespace
+    if trait_namespace_base.count('\\') < 1:
+        trait_namespace_base = namespaces[0]
 
     trait_name = function_name_to_trait_name(function_name)
     trait_namespace = f'{trait_namespace_base}\\Traits'
@@ -404,8 +441,14 @@ def extract_shared(data):
         fqn = f'{trait_namespace}\\{trait_name}'
         import_stmt = f'use {fqn};'
 
-        # Build the use-inside-class statement
-        use_trait_stmt = f'    use {trait_name};'
+        # Build the use-inside-class statement (detect indentation from file)
+        indent = '\t'  # default to tab
+        for line in fcontent.split('\n'):
+            stripped = line.lstrip()
+            if stripped.startswith('public ') or stripped.startswith('private ') or stripped.startswith('protected '):
+                indent = line[:len(line) - len(stripped)]
+                break
+        use_trait_stmt = f'{indent}use {trait_name};'
 
         # Check if file already has this import
         has_import = fqn in fcontent or import_stmt in fcontent
