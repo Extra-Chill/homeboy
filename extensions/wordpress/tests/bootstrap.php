@@ -137,8 +137,29 @@ if ($component_type === 'theme') {
     });
 }
 
+// Prevent wp_not_installed() from killing the process.
+//
+// When wp-settings.php loads, it calls wp_not_installed() which checks
+// is_blog_installed(). With the SQLite database driver, this check can
+// return false even after install.php has run (the lightweight driver
+// doesn't fully satisfy all the queries is_blog_installed() makes).
+// When is_blog_installed() returns false, wp_not_installed() calls
+// wp_redirect() + die() — silently terminating the PHPUnit process
+// before any tests run, producing zero output with exit code 0.
+//
+// Defining WP_INSTALLING makes wp_installing() return true, which
+// causes wp_not_installed() to bail out early (line 943 of load.php:
+// "if ( is_blog_installed() || wp_installing() ) { return; }").
+if (!defined('WP_INSTALLING')) {
+    define('WP_INSTALLING', true);
+}
+
 // Start up the WP testing environment
 require_once $_tests_dir . '/includes/bootstrap.php';
+
+// Turn off installing mode so tests run against a normally-loaded WordPress.
+// wp_installing() uses a static variable, so this call overrides the constant.
+wp_installing(false);
 
 // Clean WordPress output buffers so PHPUnit's result printer works.
 // The WP bootstrap starts ob_start() during initialization which captures
