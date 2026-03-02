@@ -265,6 +265,17 @@ fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAudit
         all_findings.extend(duplication_findings);
     }
 
+    // Phase 4d: Near-duplicate detection (structural similarity)
+    let near_dup_findings = duplication::detect_near_duplicates(&all_fingerprints);
+    if !near_dup_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Near-duplicates: {} finding(s) (structural matches with different identifiers)",
+            near_dup_findings.len()
+        );
+        all_findings.extend(near_dup_findings);
+    }
+
     // Phase 5: Build report
     let total_outliers: usize = discovered_conventions.iter().map(|c| c.outliers.len()).sum();
     let total_conforming: usize = discovered_conventions.iter().map(|c| c.conforming.len()).sum();

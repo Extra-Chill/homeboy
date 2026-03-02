@@ -175,6 +175,12 @@ pub struct FingerprintOutput {
     /// the function body. Optional — older scripts may not emit this.
     #[serde(default)]
     pub method_hashes: std::collections::HashMap<String, String>,
+    /// Method name → structural hash for near-duplicate detection.
+    /// Identifiers and literals are replaced with positional tokens before
+    /// hashing, so functions with identical control flow but different
+    /// variable names or constants produce the same hash.
+    #[serde(default)]
+    pub structural_hashes: std::collections::HashMap<String, String>,
 }
 
 // ============================================================================

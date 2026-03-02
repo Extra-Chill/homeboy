@@ -30,6 +30,10 @@ pub struct FileFingerprint {
     /// Method name → normalized body hash for duplication detection.
     /// Populated by extension scripts that support it; empty otherwise.
     pub method_hashes: HashMap<String, String>,
+    /// Method name → structural hash for near-duplicate detection.
+    /// Identifiers/literals replaced with positional tokens before hashing.
+    /// Populated by extension scripts that support it; empty otherwise.
+    pub structural_hashes: HashMap<String, String>,
 }
 
 /// Extract a structural fingerprint from a source file.
@@ -63,5 +67,6 @@ pub fn fingerprint_file(path: &Path, root: &Path) -> Option<FileFingerprint> {
         imports: output.imports,
         content,
         method_hashes: output.method_hashes,
+        structural_hashes: output.structural_hashes,
     })
 }
