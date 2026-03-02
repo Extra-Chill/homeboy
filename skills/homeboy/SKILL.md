@@ -1,136 +1,100 @@
 ---
 name: homeboy
-description: "Use Homeboy CLI for version management, deployment, fleet operations, documentation tooling, database ops, extension management, code auditing, and remote file/log access."
+description: "Config-driven CLI for multi-project deployment, versioning, and development automation. Structured JSON output, embedded docs, predictable contracts."
 compatibility: "Cross-platform Rust CLI. Works with any language/framework. Requires SSH for remote operations."
 ---
 
 # Homeboy CLI
 
-Development and deployment automation. Generic — works with any language/framework.
+## Prerequisites
 
-## How to Use This Skill
-
-**Do not memorize commands.** Homeboy has built-in help at every level. Discover what you need:
+Before using any Homeboy commands, verify it is installed and accessible:
 
 ```bash
-homeboy --help                      # list all top-level commands
-homeboy <command> --help            # subcommands and options for any command
-homeboy <command> <subcommand> --help  # detailed usage for any subcommand
+homeboy --version
 ```
 
-Every command returns structured JSON: `{"success": true, "data": {...}}`.
-Errors include codes and hints: `{"success": false, "error": {"code": "...", "message": "...", "hints": [...]}}`.
+If this fails, Homeboy is not installed. Install via Homebrew or from source:
 
-## Entity Hierarchy
+```bash
+# Homebrew
+brew tap Extra-Chill/homebrew-tap && brew install homeboy
+
+# From source (requires Rust toolchain)
+git clone https://github.com/Extra-Chill/homeboy.git && cd homeboy && cargo install --path .
+```
+
+Do not proceed until `homeboy --version` succeeds.
+
+## How to Discover Everything
+
+Homeboy embeds its complete documentation in the binary. You never need external docs, READMEs, or source code. Everything is discoverable at runtime.
+
+### Command help
+
+```bash
+homeboy --help                           # all top-level commands
+homeboy <command> --help                 # subcommands and flags for any command
+homeboy <command> <subcommand> --help    # detailed usage for any subcommand
+```
+
+### Embedded docs
+
+```bash
+homeboy docs list                        # all available doc topics
+homeboy docs <topic>                     # read any topic
+```
+
+This is the authoritative reference. Topics cover commands, JSON schemas, architecture, and developer guides. Start here:
+
+```bash
+homeboy docs commands/commands-index     # full command reference
+homeboy docs schemas/component-schema    # component config schema
+homeboy docs schemas/project-schema      # project config schema
+homeboy docs schemas/server-schema       # server config schema
+homeboy docs schemas/fleet-schema        # fleet config schema
+homeboy docs schemas/extension-manifest-schema  # extension schema
+homeboy docs architecture/output-system  # JSON output contract
+homeboy docs architecture/hooks          # lifecycle hook system
+homeboy docs architecture/release-pipeline      # release pipeline internals
+homeboy docs architecture/keychain-secrets      # secrets/keychain system
+```
+
+Read these docs before guessing at flags or output shapes. They are compiled into the binary and always match the installed version.
+
+## Output Contract
+
+Every command returns a stable JSON envelope:
+
+```json
+{"success": true, "data": { ... }}
+```
+
+```json
+{"success": false, "error": {"code": "...", "message": "...", "hints": [...]}}
+```
+
+Error codes are stable and namespaced (`config.*`, `ssh.*`, `deploy.*`, `git.*`, `internal.*`). The `data` shape is command-specific — read `homeboy docs commands/<command>` for the exact structure.
+
+Exceptions: `homeboy docs` outputs raw markdown. `homeboy ssh` and `homeboy logs --follow` use interactive passthrough.
+
+## Data Model
 
 ```
-Component  →  versioned, deployable unit (plugin, CLI, extension)
+Component  →  versioned, deployable unit (plugin, theme, CLI, package)
 Project    →  deployment target (site on a server, links to components)
 Server     →  SSH connection config
-Fleet      →  named group of projects (batch operations)
-Extension  →  installable plugin (CLI scripts, actions, docs)
+Fleet      →  named group of projects for batch operations
+Extension  →  installable plugin (adds CLI commands, platform behaviors, hooks, docs)
 ```
 
-Storage: `~/.config/homeboy/{components,projects,servers,fleets}/<id>.json`
+All config is JSON files in `~/.config/homeboy/`. Run `homeboy docs schemas/<entity>-schema` for the exact shape of each.
 
-## Core Workflows
+## Rules
 
-### Version + Release
-Add changelog entries, bump versions, tag, and push — all in one flow. Homeboy manages version targets (regex patterns that work on any file format), changelog finalization, git commit, tag, and push.
-
-```bash
-homeboy changelog --help   # how to add entries
-homeboy version --help     # how to bump
-homeboy changes --help     # what changed since last tag
-homeboy release --help     # interactive release planning
-```
-
-### Deploy
-Deploy components to individual projects, entire fleets, or all projects that use a component. Supports build commands, artifact upload, and dry-run checks.
-
-```bash
-homeboy deploy --help
-```
-
-### Fleet Management
-Group projects into fleets for batch operations, drift detection, and status checks.
-
-```bash
-homeboy fleet --help
-```
-
-### Status + Audit + Cleanup
-- `homeboy status` — actionable overview of components (uncommitted, needs-bump, ready to deploy)
-- `homeboy audit` — discover conventions per directory, detect drift and outliers
-- `homeboy cleanup` — identify config drift and stale state
-
-```bash
-homeboy status --help
-homeboy audit --help
-homeboy cleanup --help
-```
-
-### Documentation Tooling
-Scaffold coverage analysis, audit doc claims against code, bulk-generate docs.
-
-```bash
-homeboy docs --help
-```
-
-### Extensions
-Installable plugins that add CLI tools, actions, and project-type support.
-
-```bash
-homeboy extension --help
-```
-
-### Remote Operations
-File ops, log viewing, database queries, SSH, and file transfer — all over SSH tunnels.
-
-```bash
-homeboy file --help
-homeboy logs --help
-homeboy db --help
-homeboy ssh --help
-homeboy transfer --help
-```
-
-### Remote Tool Bridges
-Run project-specific tools (WP-CLI, PM2, OpenClaw, Cargo, Sweatpants) on remote servers without logging in. These appear as top-level commands based on installed extensions.
-
-```bash
-homeboy --help              # bridge commands appear at the bottom
-homeboy wp --help           # WordPress CLI bridge
-homeboy pm2 --help          # PM2 bridge
-homeboy openclaw --help     # OpenClaw bridge
-```
-
-### API Client
-Authenticate with project APIs and make REST requests.
-
-```bash
-homeboy auth --help
-homeboy api --help
-```
-
-### Git, Build, Test
-```bash
-homeboy git --help
-homeboy build --help
-homeboy test --help
-homeboy lint --help
-```
-
-### Config + Upgrade
-```bash
-homeboy config --help
-homeboy upgrade --help
-```
-
-## Key Principles
-
-- **Version targets are regex patterns** — they work on any file (Cargo.toml, package.json, PHP headers, etc.)
-- **Components and extensions support lifecycle hooks** — `hooks` map with events like `pre:version:bump`, `post:deploy`, etc.
-- **Audit discovers conventions automatically** — naming, imports, methods, registrations per directory
-- **All output is JSON** — pipe to `jq` or parse programmatically
-- **When in doubt, run `--help`** — it's always accurate and up to date
+- **Do not memorize commands.** Run `--help` or `homeboy docs` to discover what you need.
+- **Do not edit version files manually.** Use `homeboy version bump` — it manages version targets across multiple files.
+- **Do not deploy manually.** Use `homeboy deploy` — it builds, uploads, and runs post-deploy hooks.
+- **Start with `homeboy init` or `homeboy status`** to understand the current state before operating.
+- **Use `--dry-run`** on destructive operations (`deploy`, `release`, `refactor rename`) to preview before executing.
+- **All output is JSON** — parse it programmatically, don't scrape text.
