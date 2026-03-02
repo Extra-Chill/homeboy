@@ -1,24 +1,16 @@
 # Homeboy
 
-Opinionated CLI for managing codebases at scale — versioning, refactoring, auditing, deploying.
+Config-driven development and deployment CLI with structured JSON output, embedded docs, and predictable contracts — built for AI agents and automation.
+
+Written in Rust. ~50K lines of source across 132 files. 55 embedded documentation topics compiled into the binary.
 
 ## What It Does
 
-Homeboy replaces scattered scripts, FTP clients, and manual SSH sessions with one tool:
-
-- **Deploy anything** — Push plugins, themes, CLIs, and extensions to remote servers
-- **Fleet management** — Group projects, detect shared components, deploy everywhere at once
-- **Release pipelines** — Version bump, changelog, build, tag, publish — one command
-- **Structural refactoring** — Rename terms across a codebase with case-variant awareness and collision detection
-- **Code auditing** — Discover conventions from your codebase and flag drift automatically
-- **Remote operations** — SSH, file management, database queries, log tailing
-- **Structured output** — JSON for scripting and AI agents, human-readable for terminals
-
-## How It Works
+Homeboy manages the relationship between **components** (plugins, themes, CLIs, packages), **projects** (sites, applications), and **servers** (machines). You define these as JSON config. Then you deploy, version, release, audit, refactor, and operate across all of them from one tool.
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  COMPONENT  │ ──▶ │   PROJECT   │ ──▶ │   SERVER    │
+│  COMPONENT  │────▶│   PROJECT   │────▶│   SERVER    │
 │  Plugin,    │     │  Site or    │     │  VPS, host, │
 │  theme, CLI │     │  application│     │  cloud...   │
 └─────────────┘     └─────────────┘     └─────────────┘
@@ -30,137 +22,159 @@ Homeboy replaces scattered scripts, FTP clients, and manual SSH sessions with on
                     └───────────┘
 ```
 
-**Components** are buildable/deployable units. **Projects** are deployment targets. **Servers** are machines. **Fleets** group projects for batch operations.
+- **Components** are buildable/deployable units with version targets, build commands, and remote paths.
+- **Projects** are deployment targets — a site on a server with a set of linked components.
+- **Servers** are machines with SSH connection details.
+- **Fleets** group projects for batch operations.
+- **Extensions** add platform-specific behavior (WordPress, Node.js, Rust, etc.).
 
-## Example Workflows
+## Output Contract
 
-| Workflow | Commands |
-|----------|----------|
-| Deploy a plugin | `homeboy deploy my-site my-plugin` |
-| Deploy to all sites | `homeboy deploy my-plugin --shared` |
-| Fleet rollout | `homeboy deploy my-plugin --fleet production` |
-| Release a new version | `homeboy release run my-plugin` |
-| Rename a term | `homeboy refactor rename --from widget --to gadget -c my-plugin` |
-| Rename exact string | `homeboy refactor rename --literal --from old-slug --to new-slug --path .` |
-| Check what's outdated | `homeboy deploy my-site --check --outdated` |
-| Audit docs vs code | `homeboy docs audit my-component` |
-| Tail remote logs | `homeboy logs show my-site error.log --follow` |
-| Query remote DB | `homeboy db query my-site "SELECT * FROM wp_posts LIMIT 5"` |
+Every command returns a stable JSON envelope:
 
-## Quick Start
-
-```bash
-# Discover your environment
-homeboy init
-
-# Set up infrastructure
-homeboy server create my-vps --host 1.2.3.4 --user root
-homeboy project create my-site example.com --server my-vps
-homeboy component create my-plugin --local-path ./my-plugin --remote-path wp-content/plugins/my-plugin
-
-# Link and deploy
-homeboy project components add my-site my-plugin
-homeboy deploy my-site my-plugin
+```json
+{
+  "success": true,
+  "data": { ... }
+}
 ```
 
-## Core Commands
+On failure:
 
-| Command | Purpose |
-|---------|---------|
-| `init` | Environment discovery and setup guidance |
-| `deploy` | Push components to projects/fleets |
-| `release` | Version bump → changelog → build → tag → publish |
-| `refactor` | Structural refactoring (rename terms across codebase) |
-| `version` | Semantic version management |
-| `changelog` | Add entries, finalize releases |
-| `git` | Status, commit, push, pull with component awareness |
-| `ssh` | Managed SSH connections |
-| `file` | Remote file operations (list, read, write, find, grep) |
-| `db` | Database queries, search, tunneling |
-| `logs` | Remote log viewing and searching |
-| `fleet` | Group projects, coordinated operations |
-| `docs` | Embedded documentation, codebase auditing |
-| `extension` | Install and manage extensions |
-
-Run `homeboy docs commands/commands-index` for the full reference.
-
-## Refactoring
-
-The `refactor rename` command finds and replaces terms across a codebase with automatic case-variant generation and word-boundary awareness.
-
-```bash
-# Dry run (default) — preview what would change
-homeboy refactor rename --from widget --to gadget --path .
-
-# Apply changes
-homeboy refactor rename --from widget --to gadget --path . --write
-
-# Literal mode — exact string match, no boundary detection
-homeboy refactor rename --literal --from old-slug --to new-slug --path . --write
+```json
+{
+  "success": false,
+  "error": {
+    "code": "config.not_found",
+    "message": "Component 'my-plugin' not found",
+    "details": {},
+    "hints": ["Run 'homeboy component list' to see available components"],
+    "retryable": false
+  }
+}
 ```
 
-**Standard mode** generates case variants automatically:
-- `widget` → `gadget` (lowercase)
-- `Widget` → `Gadget` (PascalCase)
-- `WIDGET` → `GADGET` (UPPER_CASE)
-- `widgets` → `gadgets` (plural)
-- Snake_case compounds like `load_widget` → `load_gadget`
+Error codes are stable and namespaced (`config.*`, `ssh.*`, `deploy.*`, `git.*`, `internal.*`). Exit codes map to error categories. `data` is always the command-specific payload — each command documents its own shape.
 
-**Literal mode** (`--literal`) matches the exact string with no boundary detection or case variants. Useful for compound renames like `datamachine-events` → `data-machine-events` where inserting characters breaks boundary rules.
+Exceptions: `homeboy docs` outputs raw markdown. `homeboy ssh` and `homeboy logs --follow` use interactive passthrough.
 
-Both modes include **collision detection** — warnings when a rename would create duplicate identifiers or overwrite existing files.
+## Discoverability
 
-## For AI Agents
-
-Homeboy is built for agentic workflows. Every command returns structured JSON, and embedded docs give agents full context without leaving the terminal.
+Everything is discoverable at runtime. No need to read source code or external documentation.
 
 ```bash
-homeboy docs list                      # Browse available topics
-homeboy docs commands/deploy           # Deep dive on any command
-homeboy docs scaffold my-component     # Analyze codebase for doc gaps
-homeboy docs audit my-component        # Verify docs match code
+homeboy docs list                        # All 55 embedded doc topics
+homeboy docs commands/deploy             # Full deploy command reference
+homeboy docs schemas/component-schema    # Component JSON schema
+homeboy docs architecture/release-pipeline  # How release pipelines work
+homeboy docs developer-guide/architecture-overview  # System internals
 ```
+
+Topics cover commands, schemas, architecture, and developer guides — all embedded in the binary at compile time.
+
+## Commands
+
+| Command | What it does |
+|---------|-------------|
+| `deploy` | Push components to projects. Supports single project, multi-project (`--projects`), fleet (`--fleet`), or shared component (`--shared`) deployment. Builds once, deploys to many. `--check` and `--dry-run` for planning. |
+| `release` | Executes a release pipeline: version bump → changelog finalize → build → git commit → git tag → push. Configurable steps with dependency resolution. Extension-backed steps supported. `--dry-run` to preview the plan. |
+| `version` | Semantic version management. Detects versions from configured file targets using regex patterns. `bump` for patch/minor/major. |
+| `changelog` | Add categorized entries (Feature, Fix, Breaking, Docs, Chore). Finalize for release. Entries stored in `docs/CHANGELOG.md`. |
+| `changes` | Show commits and diffs since last version tag. Works per-component or per-project. `--git-diffs` for full diff output. |
+| `status` | Actionable overview: which components have uncommitted changes, need a version bump, or are ready to deploy. Filters: `--uncommitted`, `--needs-bump`, `--ready`. |
+| `refactor` | Structural renaming across a codebase. Standard mode generates case variants (lowercase, PascalCase, UPPER_CASE, plural, snake_case compounds). Literal mode for exact string matching. Collision detection. Dry-run by default. |
+| `audit` | Discover code conventions from a codebase and flag drift. `--conventions` to see discovered patterns. `--fix --write` to apply corrections. `--baseline` to save state for future comparisons. |
+| `cleanup` | Detect config drift, stale state, and hygiene issues. Filter by `--severity` (error/warning/info) or `--category` (local_path/remote_path/version_targets/extensions). |
+| `build` | Build a component using its configured build command. |
+| `test` | Run tests for a component. |
+| `lint` | Lint a component. |
+| `git` | Git operations with component awareness — status, commit, push, pull scoped to components. |
+| `ssh` | Managed SSH connections to configured servers. |
+| `file` | Remote file operations: list, read, write, find, grep. |
+| `db` | Remote database queries, search, and tunneling. Passwords stored in OS keychain. |
+| `logs` | Remote log viewing and searching. `--follow` for live tailing. |
+| `transfer` | Transfer files between servers or local ↔ server. Supports recursive, compression, exclude patterns, dry-run. |
+| `fleet` | Create and manage named groups of projects for coordinated operations. |
+| `auth` | Authenticate with project APIs. Tokens stored in OS keychain. `login`, `logout`, `status`. |
+| `api` | HTTP requests to project APIs. GET, POST, PUT, PATCH, DELETE. Uses stored auth automatically. |
+| `component` | CRUD for component configs. `show`, `list`, `create`, `set`, `shared` (list projects using a component). |
+| `project` | CRUD for project configs. `show`, `list`, `create`, `set`, `components add/remove`. |
+| `server` | CRUD for server configs. SSH key generation and management. |
+| `extension` | Install, list, update, and manage extensions. |
+| `config` | View and modify global Homeboy settings. |
+| `docs` | Read embedded documentation. `scaffold` to analyze doc gaps. `audit` to verify docs match code. `generate` for bulk doc creation from JSON spec. |
+| `init` | Read-only environment discovery. Returns actionable status: what's ready to deploy, what needs a version bump, config gaps. |
+| `upgrade` | Upgrade Homeboy to the latest version. |
+
+Extensions add top-level commands at runtime. With the WordPress extension installed, `homeboy wp my-site plugin list` runs WP-CLI on the remote server. Rust extension adds `homeboy cargo`. Node.js adds `homeboy pm2`.
+
+## Hooks
+
+Components and extensions can declare lifecycle hooks:
+
+| Event | When | Failure mode |
+|-------|------|-------------|
+| `pre:version:bump` | After version files updated, before git commit | Fatal |
+| `post:version:bump` | After pre-bump hooks, before git commit | Fatal |
+| `post:release` | After release pipeline completes | Non-fatal |
+| `post:deploy` | After deploy completes on remote | Non-fatal |
+
+Hooks are shell commands executed in the component's local path. Extension hooks run first, then component hooks.
+
+## Secrets
+
+Homeboy never stores secrets in config files. All credentials use OS-native keychain:
+
+- **macOS**: Keychain Access
+- **Linux**: libsecret / gnome-keyring
+- **Windows**: Credential Manager
+
+Stored secrets: API tokens (`homeboy auth`), database passwords, SSH key passphrases. Retrieved automatically when needed.
 
 ## Extensions
 
-Extensions add project-type support — WordPress, Node.js, Rust, and more. Browse all available extensions at [homeboy-extensions](https://github.com/Extra-Chill/homeboy-extensions).
+Extensions add platform-specific behavior. Installed from git repos, stored in `~/.config/homeboy/extensions/`.
 
-| Extension | Purpose |
-|-----------|---------|
-| **wordpress** | WP-CLI integration, build, test, lint |
-| **nodejs** | PM2 process management |
-| **rust** | Cargo CLI integration |
-| **github** | Issues, PRs, releases |
-| **homebrew** | Tap publishing |
+| Extension | What it provides |
+|-----------|-----------------|
+| `wordpress` | WP-CLI integration, WordPress-aware build/test/lint, post-deploy hooks (activate plugin, flush cache) |
+| `nodejs` | PM2 process management |
+| `rust` | Cargo integration, crates.io publishing, release artifact packaging |
+| `github` | GitHub release publishing |
+| `homebrew` | Homebrew tap publishing |
+| `swift` | Swift testing infrastructure for macOS, iOS, and Swift CLI projects |
+| `openclaw` | AI agent platform management |
+| `sweatpants` | Bridge to Sweatpants automation engine |
+| `plasma-shield` | Network security control for AI agent fleets |
 
 ```bash
-# Install an extension by name
 homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id wordpress
-
-# List installed extensions
 homeboy extension list
-
-# Use extension commands
-homeboy wp my-site plugin list         # WordPress via extension
 ```
 
-Extensions support **versioning** with constraint matching (`^1.0`, `>=2.0`, `~1.2`), **auto-update checks** on startup, and **language extractors** for fingerprinting project files.
+Extensions can provide: CLI commands, release pipeline steps, platform behaviors (version detection, database, deployment), hooks, actions, and documentation topics.
+
+Extension versioning supports constraint matching (`^1.0`, `>=2.0`, `~1.2`).
+
+Browse available extensions: [homeboy-extensions](https://github.com/Extra-Chill/homeboy-extensions)
 
 ## Configuration
 
-All config lives in `~/.config/homeboy/`:
+All config lives in `~/.config/homeboy/`. No repo-local config files.
 
 ```
 ~/.config/homeboy/
-├── projects/          # Project definitions
-├── servers/           # Server connections
-├── components/        # Component definitions
+├── homeboy.json       # Global defaults
+├── components/        # Component definitions (JSON)
+├── projects/          # Project definitions (JSON)
+├── servers/           # Server connections (JSON)
+├── fleets/            # Fleet definitions (JSON)
 ├── extensions/        # Installed extensions
 ├── keys/              # SSH keys
-└── homeboy.json       # Global defaults
+└── backups/           # Config backups
 ```
 
-No repo-local config files. Everything is centralized.
+Full schemas: `homeboy docs schemas/component-schema`, `homeboy docs schemas/project-schema`, etc.
 
 ## Installation
 
@@ -176,10 +190,15 @@ cd homeboy && cargo install --path .
 
 ## Documentation
 
-- `homeboy docs list` — Browse all embedded topics
-- `homeboy docs commands/commands-index` — Full command reference
-- [docs/](docs/) — Detailed documentation
-- [homeboy-extensions](https://github.com/Extra-Chill/homeboy-extensions) — Public extensions
+All documentation is embedded in the binary and accessible via `homeboy docs`:
+
+```bash
+homeboy docs list                                    # Browse all topics
+homeboy docs commands/commands-index                 # Full command reference
+homeboy docs schemas/component-schema                # Config schemas
+homeboy docs architecture/release-pipeline           # System internals
+homeboy docs developer-guide/architecture-overview   # Architecture overview
+```
 
 ## License
 
