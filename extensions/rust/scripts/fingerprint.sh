@@ -164,6 +164,102 @@ while i < len(lines):
         method_hashes[fn_name] = body_hash
     i = j + 1
 
+# --- Structural Hashes (for near-duplicate detection) ---
+# Same body extraction as method_hashes, but identifiers and literals are
+# replaced with positional placeholders before hashing.  Two functions that
+# differ only in variable names, constant references, or string values will
+# produce the same structural hash.
+
+def structural_normalize(text):
+    # Replace identifiers and literals with positional tokens.
+    # Remove the fn signature line (keeps only the body)
+    brace_idx = text.find('{')
+    if brace_idx >= 0:
+        text = text[brace_idx:]
+
+    # Replace string literals with STR (use chr(34) to avoid breaking bash double-quoting)
+    dq = chr(34)
+    text = re.sub(dq + '[^' + dq + ']*' + dq, 'STR', text)
+    # Replace char literals with CHR
+    text = re.sub(chr(39) + '[^' + chr(39) + ']*' + chr(39), 'CHR', text)
+    # Replace numeric literals (integers, floats) with NUM
+    text = re.sub(r'\b\d[\d_]*(?:\.\d[\d_]*)?\b', 'NUM', text)
+
+    # Replace identifiers with positional tokens.
+    # Collect unique identifiers in order of appearance, map to ID_N.
+    # Preserve Rust keywords as-is (they define structure).
+    rust_keywords = {
+        'as', 'async', 'await', 'break', 'const', 'continue', 'crate',
+        'dyn', 'else', 'enum', 'extern', 'false', 'fn', 'for', 'if',
+        'impl', 'in', 'let', 'loop', 'match', 'mod', 'move', 'mut',
+        'pub', 'ref', 'return', 'self', 'Self', 'static', 'struct',
+        'super', 'trait', 'true', 'type', 'unsafe', 'use', 'where',
+        'while', 'yield',
+        # Common types/macros kept as structural markers
+        'Some', 'None', 'Ok', 'Err', 'Result', 'Option', 'Vec',
+        'String', 'Box', 'Arc', 'Rc', 'HashMap', 'HashSet',
+        'bool', 'u8', 'u16', 'u32', 'u64', 'u128', 'usize',
+        'i8', 'i16', 'i32', 'i64', 'i128', 'isize',
+        'f32', 'f64', 'str', 'char',
+    }
+
+    id_map = {}
+    id_counter = [0]
+
+    def replace_id(m):
+        word = m.group(0)
+        if word in rust_keywords:
+            return word
+        if word not in id_map:
+            id_map[word] = f'ID_{id_counter[0]}'
+            id_counter[0] += 1
+        return id_map[word]
+
+    text = re.sub(r'\b[a-zA-Z_]\w*\b', replace_id, text)
+
+    # Collapse whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+structural_hashes = {}
+# Re-extract bodies and compute structural hashes
+lines = content.split('\n')
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if line and line[0] in (' ', '\t'):
+        i += 1
+        continue
+    fn_match = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)', line)
+    if not fn_match:
+        i += 1
+        continue
+    fn_name = fn_match.group(1)
+    if fn_name.startswith('test_') or fn_name == 'tests':
+        i += 1
+        continue
+    brace_depth = 0
+    found_open = False
+    body_lines_s = []
+    j = i
+    while j < len(lines):
+        for ch in lines[j]:
+            if ch == '{':
+                brace_depth += 1
+                found_open = True
+            elif ch == '}':
+                brace_depth -= 1
+        body_lines_s.append(lines[j])
+        if found_open and brace_depth == 0:
+            break
+        j += 1
+    if body_lines_s:
+        body_text = ' '.join(body_lines_s)
+        struct_normalized = structural_normalize(body_text)
+        struct_hash = hashlib.sha256(struct_normalized.encode()).hexdigest()[:16]
+        structural_hashes[fn_name] = struct_hash
+    i = j + 1
+
 result = {
     'methods': methods,
     'type_name': type_name,
@@ -172,6 +268,7 @@ result = {
     'namespace': namespace,
     'imports': imports,
     'method_hashes': method_hashes,
+    'structural_hashes': structural_hashes,
 }
 
 print(json.dumps(result))
