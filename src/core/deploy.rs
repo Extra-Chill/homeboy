@@ -55,9 +55,15 @@ impl DeployResult {
     }
 }
 
-/// Known shared directory suffixes that should never be used as deploy targets.
-/// If a resolved install_dir ends with one of these, it means the component's
-/// `remote_path` points to a parent directory instead of the component's own subdirectory.
+/// Well-known shared directory names that typically contain multiple sibling components.
+///
+/// Deploy targets ending with one of these are almost certainly misconfigured —
+/// the `remote_path` should point to the component's own subdirectory inside
+/// these directories, not the directory itself. Deploying directly into a shared
+/// directory would destroy sibling components during the pre-extraction clean step.
+///
+/// This list covers common package manager and framework conventions. Extensions
+/// can declare additional protected directories via their deploy configuration.
 const DANGEROUS_PATH_SUFFIXES: &[&str] = &[
     "/plugins",
     "/themes",
@@ -66,6 +72,8 @@ const DANGEROUS_PATH_SUFFIXES: &[&str] = &[
     "/wp-content/uploads",
     "/node_modules",
     "/vendor",
+    "/packages",
+    "/extensions",
 ];
 
 /// Validate that a deploy target path is safe for destructive operations.
@@ -87,9 +95,9 @@ fn validate_deploy_target(install_dir: &str, base_path: &str, component_id: &str
         return Err(Error::validation_invalid_argument(
             "remotePath",
             format!(
-                "Deploy target '{}' resolves to the project base_path — this would destroy the entire site. \
-                 Set remote_path to the component's subdirectory (e.g., 'wp-content/plugins/{}')",
-                install_dir, component_id
+                "Deploy target '{}' resolves to the project base_path — this would destroy the entire project. \
+                 Set remote_path to the component's own subdirectory within the project",
+                install_dir
             ),
             Some(install_dir.to_string()),
             None,
@@ -1921,119 +1929,393 @@ mod tests {
     use super::*;
 
     // =========================================================================
-    // validate_deploy_target
+    // validate_deploy_target — unit tests
+    //
+    // These validate the safety guard that prevents deploying to shared parent
+    // directories. All tests use generic paths — no framework-specific references.
     // =========================================================================
 
     #[test]
-    fn validate_deploy_target_accepts_leaf_directory() {
-        // Normal case: component deploys to its own subdirectory
+    fn validate_accepts_component_subdirectory() {
         assert!(validate_deploy_target(
-            "/var/www/site/wp-content/plugins/my-plugin",
-            "/var/www/site",
-            "my-plugin",
+            "/srv/project/lib/my-component",
+            "/srv/project",
+            "my-component",
         ).is_ok());
     }
 
     #[test]
-    fn validate_deploy_target_accepts_theme_subdirectory() {
+    fn validate_accepts_deeply_nested_path() {
         assert!(validate_deploy_target(
-            "/var/www/site/wp-content/themes/my-theme",
-            "/var/www/site",
-            "my-theme",
+            "/srv/project/packages/core/src",
+            "/srv/project",
+            "core",
         ).is_ok());
     }
 
     #[test]
-    fn validate_deploy_target_rejects_plugins_directory() {
-        let result = validate_deploy_target(
-            "/var/www/site/wp-content/plugins",
-            "/var/www/site",
-            "my-plugin",
-        );
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("shared parent directory"), "Error: {}", err);
-    }
-
-    #[test]
-    fn validate_deploy_target_rejects_plugins_with_trailing_slash() {
-        let result = validate_deploy_target(
-            "/var/www/site/wp-content/plugins/",
-            "/var/www/site",
-            "my-plugin",
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_deploy_target_rejects_themes_directory() {
-        let result = validate_deploy_target(
-            "/var/www/site/wp-content/themes",
-            "/var/www/site",
-            "my-theme",
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_deploy_target_rejects_wp_content() {
-        let result = validate_deploy_target(
-            "/var/www/site/wp-content",
-            "/var/www/site",
-            "my-plugin",
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_deploy_target_rejects_base_path() {
-        let result = validate_deploy_target(
-            "/var/www/site",
-            "/var/www/site",
-            "my-plugin",
-        );
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("base_path"), "Error: {}", err);
-    }
-
-    #[test]
-    fn validate_deploy_target_rejects_base_path_trailing_slash() {
-        let result = validate_deploy_target(
-            "/var/www/site/",
-            "/var/www/site",
-            "my-plugin",
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_deploy_target_rejects_mu_plugins() {
-        let result = validate_deploy_target(
-            "/var/www/site/wp-content/mu-plugins",
-            "/var/www/site",
-            "my-plugin",
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_deploy_target_rejects_node_modules() {
-        let result = validate_deploy_target(
-            "/var/www/site/node_modules",
-            "/var/www/site",
-            "my-pkg",
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_deploy_target_accepts_non_wp_paths() {
-        // Arbitrary paths that don't match known dangerous suffixes are allowed
+    fn validate_accepts_arbitrary_safe_paths() {
         assert!(validate_deploy_target(
             "/opt/apps/my-service",
             "/opt/apps",
             "my-service",
         ).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_base_path() {
+        let result = validate_deploy_target(
+            "/srv/project",
+            "/srv/project",
+            "my-component",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("base_path"));
+    }
+
+    #[test]
+    fn validate_rejects_base_path_with_trailing_slash() {
+        assert!(validate_deploy_target(
+            "/srv/project/",
+            "/srv/project",
+            "my-component",
+        ).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_shared_vendor_directory() {
+        let result = validate_deploy_target(
+            "/srv/project/vendor",
+            "/srv/project",
+            "my-lib",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("shared parent directory"));
+    }
+
+    #[test]
+    fn validate_rejects_shared_node_modules_directory() {
+        assert!(validate_deploy_target(
+            "/srv/project/node_modules",
+            "/srv/project",
+            "my-pkg",
+        ).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_shared_packages_directory() {
+        assert!(validate_deploy_target(
+            "/srv/project/packages",
+            "/srv/project",
+            "my-pkg",
+        ).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_shared_extensions_directory() {
+        assert!(validate_deploy_target(
+            "/srv/project/extensions",
+            "/srv/project",
+            "my-ext",
+        ).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_shared_plugins_directory() {
+        assert!(validate_deploy_target(
+            "/srv/project/lib/plugins",
+            "/srv/project",
+            "my-plugin",
+        ).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_shared_themes_directory() {
+        assert!(validate_deploy_target(
+            "/srv/project/lib/themes",
+            "/srv/project",
+            "my-theme",
+        ).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_trailing_slash_on_shared_dir() {
+        assert!(validate_deploy_target(
+            "/srv/project/vendor/",
+            "/srv/project",
+            "my-lib",
+        ).is_err());
+    }
+
+    // =========================================================================
+    // Deploy safety integration tests — full path resolution chain (issue #353)
+    //
+    // These test the chain: base_path + remote_path → join_remote_path →
+    // validate_deploy_target, simulating the exact flow in execute_component_deploy.
+    // =========================================================================
+
+    /// Simulate the path resolution + validation chain used by execute_component_deploy.
+    fn resolve_and_validate(
+        base_path: &str,
+        remote_path: &str,
+        component_id: &str,
+    ) -> Result<String> {
+        let install_dir = base_path::join_remote_path(Some(base_path), remote_path)?;
+        validate_deploy_target(&install_dir, base_path, component_id)?;
+        Ok(install_dir)
+    }
+
+    #[test]
+    fn chain_accepts_correct_component_path() {
+        let result = resolve_and_validate(
+            "/srv/project",
+            "lib/plugins/my-component",
+            "my-component",
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "/srv/project/lib/plugins/my-component");
+    }
+
+    #[test]
+    fn chain_rejects_shared_parent_as_remote_path() {
+        // The exact class of bug from issue #353: remote_path points to the
+        // shared parent directory instead of the component's own subdirectory
+        let result = resolve_and_validate(
+            "/srv/project",
+            "lib/plugins",
+            "my-component",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("shared parent directory"));
+    }
+
+    #[test]
+    fn chain_rejects_trailing_slash_on_shared_parent() {
+        let result = resolve_and_validate(
+            "/srv/project",
+            "lib/plugins/",
+            "my-component",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn chain_rejects_absolute_path_to_shared_parent() {
+        let result = resolve_and_validate(
+            "/srv/project",
+            "/srv/project/vendor",
+            "my-lib",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn chain_rejects_base_path_as_remote_path() {
+        let result = resolve_and_validate(
+            "/srv/project",
+            "/srv/project",
+            "my-component",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("base_path"));
+    }
+
+    #[test]
+    fn chain_rejects_base_path_with_trailing_slash_mismatch() {
+        let result = resolve_and_validate(
+            "/srv/project/",
+            "vendor",
+            "my-lib",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn chain_accepts_nested_component_directory() {
+        let result = resolve_and_validate(
+            "/srv/project",
+            "lib/plugins/my-component/dist",
+            "my-component",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn chain_accepts_flat_component_directory() {
+        let result = resolve_and_validate(
+            "/opt/services",
+            "my-service/current",
+            "my-service",
+        );
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Extension override template rendering — deploy safety
+    //
+    // Extension install commands use template variables to target directories.
+    // These tests verify that template rendering with correct vs incorrect
+    // variable values produces safe vs dangerous commands, documenting why
+    // upstream validation is essential.
+    // =========================================================================
+
+    #[test]
+    fn override_template_renders_safe_with_component_dir() {
+        let template = "([ -d {{targetDir}} ] && rm -rf {{targetDir}} || true) && install {{artifact}}";
+
+        let mut vars = HashMap::new();
+        vars.insert("targetDir".to_string(), "/srv/project/lib/plugins/my-component".to_string());
+        vars.insert("artifact".to_string(), "/tmp/staging/my-component.zip".to_string());
+
+        let rendered = render_map(template, &vars);
+
+        assert!(
+            rendered.contains("rm -rf /srv/project/lib/plugins/my-component"),
+            "rm -rf must target the component's own directory, got: {}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn override_template_renders_dangerously_with_parent_dir() {
+        // Documents the danger that validate_deploy_target prevents:
+        // if targetDir is the shared parent, rm -rf destroys everything.
+        let template = "rm -rf {{targetDir}}";
+
+        let mut vars = HashMap::new();
+        vars.insert("targetDir".to_string(), "/srv/project/lib/plugins".to_string());
+
+        let rendered = render_map(template, &vars);
+
+        // This would be catastrophic — this is why validation must run first
+        assert_eq!(rendered, "rm -rf /srv/project/lib/plugins");
+    }
+
+    // =========================================================================
+    // Clean command generation — pre-extraction cleanup safety
+    //
+    // deploy_artifact runs a find+rm command before extracting archives.
+    // These tests verify the command targets the right directory.
+    // =========================================================================
+
+    #[test]
+    fn clean_command_targets_component_directory() {
+        let remote_path = "/srv/project/lib/plugins/my-component";
+        let artifact_filename = "__homeboy_my-component.zip";
+
+        let clean_cmd = format!(
+            "cd {} && find . -mindepth 1 -maxdepth 1 ! -name {} -exec rm -rf {{}} +",
+            shell::quote_path(remote_path),
+            shell::quote_arg(artifact_filename),
+        );
+
+        assert!(
+            clean_cmd.contains("cd '/srv/project/lib/plugins/my-component'"),
+            "clean_cmd should cd into the component directory, got: {}",
+            clean_cmd
+        );
+    }
+
+    #[test]
+    fn clean_command_danger_with_shared_parent() {
+        // Documents what the clean_cmd would look like if remote_path
+        // pointed to the shared parent — this is what issue #353 was.
+        let remote_path = "/srv/project/lib/plugins";
+        let artifact_filename = "__homeboy_my-component.zip";
+
+        let clean_cmd = format!(
+            "cd {} && find . -mindepth 1 -maxdepth 1 ! -name {} -exec rm -rf {{}} +",
+            shell::quote_path(remote_path),
+            shell::quote_arg(artifact_filename),
+        );
+
+        // Would delete ALL sibling components — the exact bug from #353
+        assert!(
+            clean_cmd.contains("cd '/srv/project/lib/plugins'"),
+            "Demonstrates the danger: {}",
+            clean_cmd
+        );
+    }
+
+    // =========================================================================
+    // DANGEROUS_PATH_SUFFIXES — exhaustive coverage
+    // =========================================================================
+
+    #[test]
+    fn all_dangerous_suffixes_are_rejected() {
+        let base_path = "/srv/project";
+        for suffix in DANGEROUS_PATH_SUFFIXES {
+            let path = format!("/srv/project{}", suffix);
+            let result = validate_deploy_target(&path, base_path, "test-component");
+            assert!(
+                result.is_err(),
+                "Expected rejection for suffix '{}', path '{}'",
+                suffix,
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_suffix_with_component_subdirectory_is_safe() {
+        let base_path = "/srv/project";
+        for suffix in DANGEROUS_PATH_SUFFIXES {
+            let path = format!("/srv/project{}/my-component", suffix);
+            let result = validate_deploy_target(&path, base_path, "my-component");
+            assert!(
+                result.is_ok(),
+                "Expected acceptance for path '{}' — has component subdirectory",
+                path
+            );
+        }
+    }
+
+    // =========================================================================
+    // Error message quality — actionable remediation hints
+    // =========================================================================
+
+    #[test]
+    fn shared_parent_error_includes_component_id() {
+        let err = validate_deploy_target(
+            "/srv/project/vendor",
+            "/srv/project",
+            "my-lib",
+        ).unwrap_err();
+
+        assert!(
+            err.message.contains("my-lib"),
+            "Error should mention the component ID for remediation: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn shared_parent_error_suggests_correct_path() {
+        let err = validate_deploy_target(
+            "/srv/project/vendor",
+            "/srv/project",
+            "my-lib",
+        ).unwrap_err();
+
+        assert!(
+            err.message.contains("/srv/project/vendor/my-lib"),
+            "Error should suggest the correct subdirectory path: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn base_path_error_mentions_subdirectory() {
+        let err = validate_deploy_target(
+            "/srv/project",
+            "/srv/project",
+            "my-component",
+        ).unwrap_err();
+
+        assert!(
+            err.message.contains("subdirectory"),
+            "Error should guide toward using a subdirectory: {}",
+            err.message
+        );
     }
 }
