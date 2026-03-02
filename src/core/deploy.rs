@@ -55,6 +55,67 @@ impl DeployResult {
     }
 }
 
+/// Known shared directory suffixes that should never be used as deploy targets.
+/// If a resolved install_dir ends with one of these, it means the component's
+/// `remote_path` points to a parent directory instead of the component's own subdirectory.
+const DANGEROUS_PATH_SUFFIXES: &[&str] = &[
+    "/plugins",
+    "/themes",
+    "/mu-plugins",
+    "/wp-content",
+    "/wp-content/uploads",
+    "/node_modules",
+    "/vendor",
+];
+
+/// Validate that a deploy target path is safe for destructive operations.
+///
+/// Prevents catastrophic data loss (issue #353) by catching cases where
+/// `remote_path` resolves to a shared parent directory instead of the
+/// component's own subdirectory. Two checks:
+///
+/// 1. The resolved path must not end with a known shared directory suffix
+///    (e.g., `/wp-content/plugins`).
+/// 2. The resolved path must not equal the project's `base_path` — deploying
+///    directly to the site root would destroy the entire site.
+fn validate_deploy_target(install_dir: &str, base_path: &str, component_id: &str) -> Result<()> {
+    let normalized = install_dir.trim_end_matches('/');
+    let base_normalized = base_path.trim_end_matches('/');
+
+    // Guard 1: target must not be the base_path itself
+    if normalized == base_normalized {
+        return Err(Error::validation_invalid_argument(
+            "remotePath",
+            format!(
+                "Deploy target '{}' resolves to the project base_path — this would destroy the entire site. \
+                 Set remote_path to the component's subdirectory (e.g., 'wp-content/plugins/{}')",
+                install_dir, component_id
+            ),
+            Some(install_dir.to_string()),
+            None,
+        ));
+    }
+
+    // Guard 2: target must not end with a known shared directory
+    for suffix in DANGEROUS_PATH_SUFFIXES {
+        if normalized.ends_with(suffix) {
+            return Err(Error::validation_invalid_argument(
+                "remotePath",
+                format!(
+                    "Deploy target '{}' is a shared parent directory — deploying here would delete \
+                     sibling components. Set remote_path to the component's own subdirectory \
+                     (e.g., '{}/{}')",
+                    install_dir, normalized, component_id
+                ),
+                Some(install_dir.to_string()),
+                None,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Deploy a component via git pull on the remote server.
 fn deploy_via_git(
     ssh_client: &SshClient,
@@ -225,6 +286,24 @@ fn deploy_artifact(
 
         // Step 2: Execute extract command if configured
         if let Some(cmd_template) = extract_command {
+            // Defense-in-depth: refuse to clean known shared parent directories.
+            // The upstream validate_deploy_target() should already catch this,
+            // but since this executes `rm -rf` we add an extra guard.
+            let normalized_remote = remote_path.trim_end_matches('/');
+            let is_dangerous = DANGEROUS_PATH_SUFFIXES
+                .iter()
+                .any(|suffix| normalized_remote.ends_with(suffix));
+            if is_dangerous {
+                return Ok(DeployResult::failure(
+                    1,
+                    format!(
+                        "Refusing to clean '{}' — it is a shared parent directory. \
+                         This would delete sibling components. Fix the component's remote_path.",
+                        remote_path
+                    ),
+                ));
+            }
+
             // Clean the target directory before extraction to prevent stale files.
             // This handles directory renames (e.g. blocks/ → Blocks/) where the old
             // casing would persist because unzip merges into existing directories.
@@ -961,6 +1040,12 @@ fn execute_component_deploy(
                 .with_build_exit_code(build_exit_code);
         }
     };
+
+    // Safety check: prevent deploying to shared parent directories (issue #353)
+    if let Err(err) = validate_deploy_target(&install_dir, base_path, &component.id) {
+        return ComponentDeployResult::failed(component, base_path, local_version, remote_version, err.to_string())
+            .with_build_exit_code(build_exit_code);
+    }
 
     // Dispatch by deploy strategy
     let strategy = component.deploy_strategy.as_deref().unwrap_or("rsync");
@@ -1805,5 +1890,127 @@ fn run_post_deploy_hooks(
         Err(e) => {
             log_status!("deploy", "post:deploy hook error: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // validate_deploy_target
+    // =========================================================================
+
+    #[test]
+    fn validate_deploy_target_accepts_leaf_directory() {
+        // Normal case: component deploys to its own subdirectory
+        assert!(validate_deploy_target(
+            "/var/www/site/wp-content/plugins/my-plugin",
+            "/var/www/site",
+            "my-plugin",
+        ).is_ok());
+    }
+
+    #[test]
+    fn validate_deploy_target_accepts_theme_subdirectory() {
+        assert!(validate_deploy_target(
+            "/var/www/site/wp-content/themes/my-theme",
+            "/var/www/site",
+            "my-theme",
+        ).is_ok());
+    }
+
+    #[test]
+    fn validate_deploy_target_rejects_plugins_directory() {
+        let result = validate_deploy_target(
+            "/var/www/site/wp-content/plugins",
+            "/var/www/site",
+            "my-plugin",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("shared parent directory"), "Error: {}", err);
+    }
+
+    #[test]
+    fn validate_deploy_target_rejects_plugins_with_trailing_slash() {
+        let result = validate_deploy_target(
+            "/var/www/site/wp-content/plugins/",
+            "/var/www/site",
+            "my-plugin",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_deploy_target_rejects_themes_directory() {
+        let result = validate_deploy_target(
+            "/var/www/site/wp-content/themes",
+            "/var/www/site",
+            "my-theme",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_deploy_target_rejects_wp_content() {
+        let result = validate_deploy_target(
+            "/var/www/site/wp-content",
+            "/var/www/site",
+            "my-plugin",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_deploy_target_rejects_base_path() {
+        let result = validate_deploy_target(
+            "/var/www/site",
+            "/var/www/site",
+            "my-plugin",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("base_path"), "Error: {}", err);
+    }
+
+    #[test]
+    fn validate_deploy_target_rejects_base_path_trailing_slash() {
+        let result = validate_deploy_target(
+            "/var/www/site/",
+            "/var/www/site",
+            "my-plugin",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_deploy_target_rejects_mu_plugins() {
+        let result = validate_deploy_target(
+            "/var/www/site/wp-content/mu-plugins",
+            "/var/www/site",
+            "my-plugin",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_deploy_target_rejects_node_modules() {
+        let result = validate_deploy_target(
+            "/var/www/site/node_modules",
+            "/var/www/site",
+            "my-pkg",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_deploy_target_accepts_non_wp_paths() {
+        // Arbitrary paths that don't match known dangerous suffixes are allowed
+        assert!(validate_deploy_target(
+            "/opt/apps/my-service",
+            "/opt/apps",
+            "my-service",
+        ).is_ok());
     }
 }
