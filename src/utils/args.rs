@@ -251,7 +251,15 @@ pub fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
         (
             "test",
             "",
-            &["--skip-lint", "--setting", "--json", "--help", "-h"],
+            &[
+                "--skip-lint",
+                "--fix",
+                "--setting",
+                "--path",
+                "--json",
+                "--help",
+                "-h",
+            ],
         ),
     ];
 
@@ -383,6 +391,60 @@ mod tests {
             "test".into(),
             "my-component".into(),
             "--skip-lint".into(),
+        ];
+        let result = normalize_trailing_flags(args.clone());
+        assert_eq!(result, args); // No separator inserted
+    }
+
+    #[test]
+    fn test_test_command_allows_path_flag() {
+        let args = vec![
+            "homeboy".into(),
+            "test".into(),
+            "my-component".into(),
+            "--path".into(),
+            "/tmp/workspace/my-component".into(),
+        ];
+        let result = normalize_trailing_flags(args.clone());
+        assert_eq!(result, args); // No separator inserted
+    }
+
+    #[test]
+    fn test_test_command_allows_path_flag_equals_syntax() {
+        let args = vec![
+            "homeboy".into(),
+            "test".into(),
+            "my-component".into(),
+            "--path=/tmp/workspace/my-component".into(),
+        ];
+        let result = normalize_trailing_flags(args.clone());
+        assert_eq!(result, args); // No separator inserted
+    }
+
+    #[test]
+    fn test_test_command_allows_fix_flag() {
+        let args = vec![
+            "homeboy".into(),
+            "test".into(),
+            "my-component".into(),
+            "--fix".into(),
+        ];
+        let result = normalize_trailing_flags(args.clone());
+        assert_eq!(result, args); // No separator inserted
+    }
+
+    #[test]
+    fn test_test_command_allows_all_known_flags_combined() {
+        let args = vec![
+            "homeboy".into(),
+            "test".into(),
+            "my-component".into(),
+            "--skip-lint".into(),
+            "--fix".into(),
+            "--path".into(),
+            "/tmp/workspace".into(),
+            "--setting".into(),
+            "key=value".into(),
         ];
         let result = normalize_trailing_flags(args.clone());
         assert_eq!(result, args); // No separator inserted
