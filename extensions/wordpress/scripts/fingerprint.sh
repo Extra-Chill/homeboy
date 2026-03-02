@@ -21,52 +21,64 @@ data = json.load(sys.stdin)
 content = data['content']
 file_path = data['file_path']
 
-# --- Methods ---
-# Match PHP method declarations: public function name, protected function name,
-# private function name, static function name, abstract function name
+# --- Methods + Visibility ---
+# Match PHP method declarations with visibility tracking
 methods = []
+visibility = {}
 for m in re.finditer(
-    r'(?:public|protected|private|static|abstract)\s+(?:static\s+)?function\s+(\w+)',
+    r'((?:public|protected|private|static|abstract|final)\s+(?:(?:static|abstract|final)\s+)*)function\s+(\w+)',
     content
 ):
-    name = m.group(1)
+    modifiers = m.group(1).strip()
+    name = m.group(2)
     # Skip test methods
     if name.startswith('test_') or name.startswith('test'):
         continue
     methods.append(name)
+    # Determine visibility
+    if 'private' in modifiers:
+        visibility[name] = 'private'
+    elif 'protected' in modifiers:
+        visibility[name] = 'protected'
+    else:
+        visibility[name] = 'public'
 
 # Also match standalone function declarations (not in a class)
 for m in re.finditer(r'^function\s+(\w+)', content, re.MULTILINE):
     methods.append(m.group(1))
+    visibility[m.group(1)] = 'public'
 
 # Deduplicate preserving order
 seen = set()
 methods = [m for m in methods if m not in seen and not seen.add(m)]
 
 # --- Type name ---
-# Primary class, interface, or trait in the file
+# Primary class, interface, or trait in the file.
+# Anchor to start-of-line to avoid matching 'class' in comments/strings.
 type_name = None
-# Prefer class, then interface, then trait
 for pattern in [
-    r'class\s+(\w+)',
-    r'interface\s+(\w+)',
-    r'trait\s+(\w+)',
+    r'^(?:abstract\s+|final\s+)?class\s+(\w+)',
+    r'^interface\s+(\w+)',
+    r'^trait\s+(\w+)',
 ]:
-    match = re.search(pattern, content)
+    match = re.search(pattern, content, re.MULTILINE)
     if match:
         type_name = match.group(1)
         break
 
-# --- Implements ---
-# Match: class Foo extends Bar implements Baz, Qux
-implements = []
-# extends
-ext_match = re.search(r'class\s+\w+\s+extends\s+([\w\\\\]+)', content)
+# --- Extends ---
+# Extract the parent class separately (anchored to actual declaration)
+extends = None
+ext_match = re.search(r'^(?:abstract\s+|final\s+)?class\s+\w+\s+extends\s+([\w\\\\]+)', content, re.MULTILINE)
 if ext_match:
-    implements.append(ext_match.group(1).split('\\\\')[-1])
+    extends = ext_match.group(1).split('\\\\')[-1]
 
-# implements (can be comma-separated)
-impl_match = re.search(r'implements\s+([\w\\\\,\s]+?)(?:\s*\{)', content)
+# --- Implements ---
+# Interfaces and traits (NOT extends — that's separate now)
+implements = []
+
+# implements (can be comma-separated, on a class/interface declaration line)
+impl_match = re.search(r'^(?:abstract\s+|final\s+)?(?:class|interface)\s+\w+(?:\s+extends\s+[\w\\\\]+)?\s+implements\s+([\w\\\\,\s]+?)(?:\s*\{)', content, re.MULTILINE)
 if impl_match:
     for iface in impl_match.group(1).split(','):
         iface = iface.strip()
@@ -81,6 +93,43 @@ for m in re.finditer(r'^\s+use\s+([\w\\\\]+)\s*[;{]', content, re.MULTILINE):
 # Deduplicate
 seen = set()
 implements = [i for i in implements if i not in seen and not seen.add(i)]
+
+# --- Properties ---
+# Extract class properties (public/protected with type hints)
+# Use \\$ (backslash + chr(36)) because chr(36) alone is regex end-of-string anchor
+dollar_esc = '\\\\' + chr(36)  # produces \$ in the regex
+dollar_lit = chr(36)  # produces $ for output strings
+properties = []
+for m in re.finditer(
+    r'(public|protected|private)\s+(?:static\s+)?(?:readonly\s+)?(?:([\w\\\\|?]+)\s+)?' + dollar_esc + r'(\w+)',
+    content
+):
+    prop_vis = m.group(1)
+    prop_type = m.group(2) or ''
+    prop_name = m.group(3)
+    # Only include public/protected (the API surface)
+    if prop_vis in ('public', 'protected'):
+        if prop_type:
+            properties.append(prop_type + ' ' + dollar_lit + prop_name)
+        else:
+            properties.append(dollar_lit + prop_name)
+
+# Deduplicate
+seen = set()
+properties = [p for p in properties if p not in seen and not seen.add(p)]
+
+# --- Hooks ---
+# Extract do_action() and apply_filters() calls
+hooks = []
+# do_action( 'hook_name', ... ) and do_action_ref_array
+for m in re.finditer(r'do_action(?:_ref_array)?\s*\(\s*[\x27\x22]([^\x27\x22]+)[\x27\x22]', content):
+    hooks.append({'type': 'action', 'name': m.group(1)})
+# apply_filters( 'hook_name', ... ) and apply_filters_ref_array
+for m in re.finditer(r'apply_filters(?:_ref_array)?\s*\(\s*[\x27\x22]([^\x27\x22]+)[\x27\x22]', content):
+    hooks.append({'type': 'filter', 'name': m.group(1)})
+# Deduplicate by (type, name)
+seen_hooks = set()
+hooks = [h for h in hooks if (h['type'], h['name']) not in seen_hooks and not seen_hooks.add((h['type'], h['name']))]
 
 # --- Registrations ---
 # Match WordPress registration function calls
@@ -237,12 +286,16 @@ for m in re.finditer(r'^function\s+(\w+)\s*\([^)]*\)(?:\s*:\s*[\w\\\\|?]+)?\s*',
 result = {
     'methods': methods,
     'type_name': type_name,
+    'extends': extends,
     'implements': implements,
     'registrations': registrations,
     'namespace': namespace,
     'imports': imports,
     'method_hashes': method_hashes,
     'structural_hashes': structural_hashes,
+    'visibility': visibility,
+    'properties': properties,
+    'hooks': hooks,
 }
 
 print(json.dumps(result))
