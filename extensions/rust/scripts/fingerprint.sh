@@ -260,6 +260,157 @@ while i < len(lines):
         structural_hashes[fn_name] = struct_hash
     i = j + 1
 
+# --- Public API ---
+# Public functions/methods exported from this file.
+public_api = []
+for m in re.finditer(r'^pub(?:\([^)]*\))?\s+(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)', content, re.MULTILINE):
+    name = m.group(1)
+    if not name.startswith('test_') and name != 'tests':
+        public_api.append(name)
+# Deduplicate
+seen = set()
+public_api = [p for p in public_api if p not in seen and not seen.add(p)]
+
+# --- Internal Calls ---
+# Function/method calls within this file (for cross-file reference analysis).
+# Matches: function_name( and self.method_name( and Type::method_name(
+internal_calls = set()
+# Free function calls: word followed by (
+for m in re.finditer(r'\b(\w+)\s*\(', content):
+    name = m.group(1)
+    # Skip keywords, macros (already captured), and common non-function patterns
+    skip_calls = {'if', 'while', 'for', 'match', 'loop', 'return', 'Some', 'None',
+                  'Ok', 'Err', 'Box', 'Vec', 'Arc', 'Rc', 'String', 'println',
+                  'eprintln', 'format', 'write', 'writeln', 'panic', 'assert',
+                  'assert_eq', 'assert_ne', 'todo', 'unimplemented', 'unreachable',
+                  'dbg', 'cfg', 'include', 'include_str', 'concat', 'env',
+                  'compile_error', 'stringify', 'vec', 'hashmap', 'bail', 'ensure',
+                  'anyhow', 'matches', 'debug_assert', 'debug_assert_eq',
+                  'allow', 'deny', 'warn', 'derive', 'serde', 'test',
+                  'inline', 'must_use', 'doc', 'feature'}
+    if name not in skip_calls and not name.startswith('test_'):
+        internal_calls.add(name)
+# Method calls: .method_name( and ::method_name(
+for m in re.finditer(r'[.:](\w+)\s*\(', content):
+    name = m.group(1)
+    if name not in skip_calls and not name.startswith('test_'):
+        internal_calls.add(name)
+internal_calls = sorted(internal_calls)
+
+# --- Unused Parameters ---
+# For each function, extract parameter names and check if they appear in the body.
+unused_parameters = []
+lines = content.split('\n')
+i = 0
+while i < len(lines):
+    line = lines[i]
+    # Only top-level functions (zero indentation)
+    if line and line[0] in (' ', '\t'):
+        i += 1
+        continue
+    fn_match = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)', line)
+    if not fn_match:
+        # Try multi-line signature (params continue on next lines)
+        fn_match_start = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(', line)
+        if fn_match_start:
+            fn_name = fn_match_start.group(1)
+            # Collect lines until we find the closing )
+            sig_lines = [line]
+            j = i + 1
+            paren_depth = line.count('(') - line.count(')')
+            while j < len(lines) and paren_depth > 0:
+                sig_lines.append(lines[j])
+                paren_depth += lines[j].count('(') - lines[j].count(')')
+                j += 1
+            full_sig = ' '.join(sig_lines)
+            params_match = re.search(r'fn\s+\w+\s*(?:<[^>]*>)?\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)', full_sig)
+            if params_match:
+                params_str = params_match.group(1)
+            else:
+                i += 1
+                continue
+        else:
+            i += 1
+            continue
+    else:
+        fn_name = fn_match.group(1)
+        params_str = fn_match.group(2)
+
+    if fn_name.startswith('test_') or fn_name == 'tests':
+        i += 1
+        continue
+
+    # Parse parameter names from the signature
+    param_names = []
+    for param in re.finditer(r'(\w+)\s*:', params_str):
+        pname = param.group(1)
+        # Skip 'self', 'mut' (as in &mut self), and type-only params
+        if pname not in ('self', 'mut', 'Self'):
+            param_names.append(pname)
+
+    if not param_names:
+        i += 1
+        continue
+
+    # Extract function body
+    brace_depth = 0
+    found_open = False
+    body_lines = []
+    j = i
+    while j < len(lines):
+        for ch in lines[j]:
+            if ch == '{':
+                brace_depth += 1
+                found_open = True
+            elif ch == '}':
+                brace_depth -= 1
+        if found_open:
+            body_lines.append(lines[j])
+        if found_open and brace_depth == 0:
+            break
+        j += 1
+
+    if body_lines:
+        # Join body, then strip the signature (everything before the first {)
+        # so parameter names in the signature don't cause false negatives.
+        full_body = '\n'.join(body_lines)
+        brace_pos = full_body.find('{')
+        if brace_pos >= 0:
+            body_only = full_body[brace_pos + 1:]
+        else:
+            body_only = full_body
+        for pname in param_names:
+            # Skip params prefixed with _ (intentionally unused)
+            if pname.startswith('_'):
+                continue
+            # Check if the parameter name appears anywhere in the body
+            # Use word boundary to avoid false positives (e.g., 'id' in 'width')
+            if not re.search(r'\b' + re.escape(pname) + r'\b', body_only):
+                unused_parameters.append({'function': fn_name, 'param': pname})
+
+    i = j + 1
+
+# --- Dead Code Markers ---
+# Find #[allow(dead_code)] annotations and the item they apply to.
+dead_code_markers = []
+lines = content.split('\n')
+for line_num, line in enumerate(lines, 1):
+    stripped = line.strip()
+    if stripped == '#[allow(dead_code)]':
+        # The next non-attribute, non-empty line should be the item
+        for k in range(line_num, min(line_num + 5, len(lines))):
+            next_line = lines[k].strip()
+            if next_line and not next_line.startswith('#[') and not next_line.startswith('//'):
+                # Extract item name
+                item_match = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?(?:static\s+)?(?:fn|struct|enum|type|trait|const|static|mod)\s+(\w+)', next_line)
+                if item_match:
+                    dead_code_markers.append({
+                        'item': item_match.group(1),
+                        'line': line_num,
+                        'marker_type': 'allow_dead_code',
+                    })
+                break
+
 result = {
     'methods': methods,
     'type_name': type_name,
@@ -269,6 +420,10 @@ result = {
     'imports': imports,
     'method_hashes': method_hashes,
     'structural_hashes': structural_hashes,
+    'unused_parameters': unused_parameters,
+    'dead_code_markers': dead_code_markers,
+    'internal_calls': internal_calls,
+    'public_api': public_api,
 }
 
 print(json.dumps(result))

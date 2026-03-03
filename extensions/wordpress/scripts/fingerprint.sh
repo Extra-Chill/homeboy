@@ -283,6 +283,103 @@ for m in re.finditer(r'^function\s+(\w+)\s*\([^)]*\)(?:\s*:\s*[\w\\\\|?]+)?\s*',
         struct_normalized = structural_normalize_php(struct_text)
         structural_hashes[fn_name] = hashlib.sha256(struct_normalized.encode()).hexdigest()[:16]
 
+# --- Public API ---
+# Public methods exported from this file.
+public_api = [m for m in methods if visibility.get(m) == 'public']
+
+# --- Internal Calls ---
+# Function/method calls within this file (for cross-file reference analysis).
+internal_calls = set()
+dollar = chr(36)
+# Method calls: this->method( and self::method( and static::method( and ClassName::method(
+for m in re.finditer(r'(?:' + dollar_esc + r'this->|self::|static::|[A-Z]\w*::)(\w+)\s*\(', content):
+    name = m.group(1)
+    if not name.startswith('test'):
+        internal_calls.add(name)
+# Free function calls: function_name(
+for m in re.finditer(r'\b([a-z_]\w*)\s*\(', content):
+    name = m.group(1)
+    skip_php = {'if', 'while', 'for', 'foreach', 'switch', 'match', 'catch',
+                'return', 'echo', 'print', 'isset', 'unset', 'empty', 'list',
+                'array', 'function', 'class', 'interface', 'trait', 'new',
+                'require', 'require_once', 'include', 'include_once',
+                'define', 'defined', 'die', 'exit', 'eval', 'compact',
+                'extract', 'var_dump', 'print_r', 'var_export'}
+    if name not in skip_php and not name.startswith('test'):
+        internal_calls.add(name)
+internal_calls = sorted(internal_calls)
+
+# --- Unused Parameters ---
+# For each method/function, extract parameter names and check if they appear in the body.
+unused_parameters = []
+
+def check_unused_params(fn_name, params_str, body_text):
+    # Parse parameter names from the signature
+    param_names = []
+    for pm in re.finditer(dollar_esc + r'(\w+)', params_str):
+        pname = pm.group(1)
+        if pname != 'this':
+            param_names.append(pname)
+    for pname in param_names:
+        # Skip params prefixed with _ (intentionally unused)
+        if pname.startswith('_'):
+            continue
+        # Check if the param variable appears in the body (after the signature)
+        # Use dollar_esc (\\$) for regex to match literal $ not end-of-string
+        if not re.search(dollar_esc + re.escape(pname) + r'\b', body_text):
+            unused_parameters.append({'function': fn_name, 'param': pname})
+
+# Class methods
+for m in re.finditer(
+    r'(?:public|protected|private|static|abstract)\s+(?:static\s+)?function\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*[\w\\\\|?]+)?\s*',
+    content
+):
+    fn_name = m.group(1)
+    if fn_name.startswith('test'):
+        continue
+    params_str = m.group(2)
+    body = extract_body(content, m.end() - 1)
+    if body and len(body) > 2:
+        check_unused_params(fn_name, params_str, body)
+
+# Standalone functions
+for m in re.finditer(r'^function\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*[\w\\\\|?]+)?\s*', content, re.MULTILINE):
+    fn_name = m.group(1)
+    params_str = m.group(2)
+    body = extract_body(content, m.end() - 1)
+    if body and len(body) > 2:
+        check_unused_params(fn_name, params_str, body)
+
+# --- Dead Code Markers ---
+# Find @codeCoverageIgnore, @phpstan-ignore, and similar suppression markers.
+dead_code_markers = []
+lines_arr = content.split('\n')
+for line_num, line in enumerate(lines_arr, 1):
+    stripped = line.strip()
+    marker_type = None
+    if '@codeCoverageIgnore' in stripped:
+        marker_type = 'coverage_ignore'
+    elif '@phpstan-ignore' in stripped:
+        marker_type = 'phpstan_ignore'
+    elif 'SuppressWarnings' in stripped:
+        marker_type = 'suppress_warnings'
+    if marker_type:
+        # Find the next function/class/method declaration
+        for k in range(line_num, min(line_num + 5, len(lines_arr))):
+            next_line = lines_arr[k].strip()
+            if next_line and not next_line.startswith('*') and not next_line.startswith('//') and not next_line.startswith('/*'):
+                item_match = re.match(
+                    r'(?:public|protected|private|static|abstract|final)?\s*(?:static\s+)?(?:function|class|interface|trait)\s+(\w+)',
+                    next_line
+                )
+                if item_match:
+                    dead_code_markers.append({
+                        'item': item_match.group(1),
+                        'line': line_num,
+                        'marker_type': marker_type,
+                    })
+                break
+
 result = {
     'methods': methods,
     'type_name': type_name,
@@ -296,6 +393,10 @@ result = {
     'visibility': visibility,
     'properties': properties,
     'hooks': hooks,
+    'unused_parameters': unused_parameters,
+    'dead_code_markers': dead_code_markers,
+    'internal_calls': internal_calls,
+    'public_api': public_api,
 }
 
 print(json.dumps(result))
