@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.54.0] - 2026-03-03
+
+### Changed
+- update audit baseline for v0.53.0 (459 findings, 70% alignment)
+- add pre-release quality gate to release workflow
+
+### Fixed
+- deterministic duplication fingerprints for stable baselines (#394)
+- make release step idempotent for cargo-dist v0.31.0
+
 ## [0.53.0] - 2026-03-03
 
 ### Added
