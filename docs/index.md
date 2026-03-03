@@ -48,8 +48,8 @@ Guides for contributing to Homeboy:
 
 Homeboy provides tooling for AI-assisted documentation generation and maintenance:
 
-- `homeboy docs scaffold <component>` - Analyze codebase and report documentation status
-- `homeboy docs audit <component>` - Validate documentation links and detect stale references
+- `homeboy docs audit <component>` - Validate documentation links, detect stale references and gaps
+- `homeboy docs map <component>` - Generate machine-optimized codebase map for AI context
 - `homeboy docs generate --json` - Bulk create documentation files from JSON spec
 - `homeboy docs documentation/index` - Documentation philosophy and principles
 - `homeboy docs documentation/alignment` - Instructions for maintaining existing docs

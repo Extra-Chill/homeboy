@@ -123,12 +123,6 @@ These belong elsewhere, not in `/docs`:
 - CHANGELOG.md (project root)
 - Build documentation (in code comments or separate dev docs)
 
-## Scaffold Command
+## Documentation Commands
 
-Use `homeboy docs scaffold <component>` to analyze a component's codebase. The command:
-1. Scans source directories
-2. Lists existing documentation files
-3. Identifies potentially undocumented areas
-4. Returns instructions for next steps
-
-This is read-only analysis. Use `homeboy docs generate` to create files.
+Use `homeboy docs audit <component>` to validate existing docs and find gaps. Use `homeboy docs map <component>` to generate a machine-optimized codebase map. Use `homeboy docs generate` to create files in bulk from a JSON spec.

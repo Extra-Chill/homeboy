@@ -41,7 +41,7 @@ Find actual usage workflows in existing code, tests, and examples. Document real
 Create subdirectories in `/docs` that directly correspond to actual code extensions and components.
 
 ### 6. Create Documentation Files
-Use `homeboy docs scaffold <component>` to analyze the component and create the file structure with H1 titles, or create files manually following the structure standards in `homeboy docs documentation/structure`.
+Use `homeboy docs audit <component>` to identify gaps, then create files manually following the structure standards in `homeboy docs documentation/structure`. Use `homeboy docs map <component>` to generate a codebase map for AI-assisted documentation.
 
 ### 7. Write Content
 For each file:

@@ -23,28 +23,6 @@ pub struct DocsArgs {
 
 #[derive(Subcommand)]
 pub enum DocsCommand {
-    /// Analyze codebase and report documentation status (read-only)
-    Scaffold {
-        /// Component to analyze
-        component_id: String,
-
-        /// Docs directory to check for existing documentation (default: docs)
-        #[arg(long, default_value = "docs")]
-        docs_dir: String,
-
-        /// Source directories to analyze (comma-separated, or repeat flag). Overrides auto-detection.
-        #[arg(long, value_delimiter = ',')]
-        source_dirs: Option<Vec<String>>,
-
-        /// File extensions to detect as source code (default: php,rs,js,ts,py,go,java,rb,swift,kt)
-        #[arg(long, value_delimiter = ',')]
-        source_extensions: Option<Vec<String>>,
-
-        /// Include all directories containing source files (extension-based detection)
-        #[arg(long)]
-        detect_by_extension: bool,
-    },
-
     /// Audit documentation for broken links and stale references
     Audit {
         /// Component ID or direct filesystem path to audit
@@ -103,14 +81,6 @@ pub enum DocsCommand {
 // ============================================================================
 // Output Types
 // ============================================================================
-
-#[derive(Serialize)]
-pub struct ScaffoldAnalysis {
-    pub component_id: String,
-    pub source_directories: Vec<String>,
-    pub existing_docs: Vec<String>,
-    pub undocumented: Vec<String>,
-}
 
 /// A module in the codebase map — a group of related files.
 #[derive(Serialize)]
@@ -186,13 +156,6 @@ pub struct CodebaseMap {
 #[derive(Serialize)]
 #[serde(tag = "command")]
 pub enum DocsOutput {
-    #[serde(rename = "docs.scaffold")]
-    Scaffold {
-        analysis: ScaffoldAnalysis,
-        instructions: String,
-        hints: Vec<String>,
-    },
-
     #[serde(rename = "docs.audit")]
     Audit(AuditResult),
 
@@ -230,12 +193,11 @@ pub struct GenerateFileSpec {
 // Public API
 // ============================================================================
 
-/// Check if this invocation should return JSON (scaffold, audit, map, or generate subcommand)
+/// Check if this invocation should return JSON (audit, map, or generate subcommand)
 pub fn is_json_mode(args: &DocsArgs) -> bool {
     matches!(
         args.command,
-        Some(DocsCommand::Scaffold { .. })
-            | Some(DocsCommand::Audit { .. })
+        Some(DocsCommand::Audit { .. })
             | Some(DocsCommand::Map { .. })
             | Some(DocsCommand::Generate { .. })
     )
@@ -255,22 +217,9 @@ pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
     Ok((resolved.content, 0))
 }
 
-/// JSON output mode (scaffold, audit, generate subcommands)
+/// JSON output mode (audit, map, generate subcommands)
 pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput> {
     match args.command {
-        Some(DocsCommand::Scaffold {
-            component_id,
-            docs_dir,
-            source_dirs,
-            source_extensions,
-            detect_by_extension,
-        }) => run_scaffold(
-            &component_id,
-            &docs_dir,
-            source_dirs,
-            source_extensions,
-            detect_by_extension,
-        ),
         Some(DocsCommand::Audit { component_id, docs_dir, features }) => run_audit(&component_id, docs_dir.as_deref(), features),
         Some(DocsCommand::Map { component_id, source_dirs, include_private, write, output_dir }) => run_map(&component_id, source_dirs, include_private, write, &output_dir),
         Some(DocsCommand::Generate { spec, json, from_audit, dry_run }) => {
@@ -283,95 +232,17 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
         }
         None => Err(homeboy::Error::validation_invalid_argument(
             "command",
-            "JSON output requires scaffold, audit, map, or generate subcommand. Use `homeboy docs <topic>` for topic display.",
+            "JSON output requires audit, map, or generate subcommand. Use `homeboy docs <topic>` for topic display.",
             None,
             Some(vec![
-                "homeboy docs scaffold <component-id>".to_string(),
                 "homeboy docs audit <component-id>".to_string(),
+                "homeboy docs map <component-id>".to_string(),
                 "homeboy docs generate --json '<spec>'".to_string(),
                 "homeboy docs generate --from-audit @audit.json".to_string(),
                 "homeboy docs commands/deploy".to_string(),
             ]),
         )),
     }
-}
-
-// ============================================================================
-// Scaffold (Analysis Only)
-// ============================================================================
-
-fn run_scaffold(
-    component_id: &str,
-    docs_dir: &str,
-    explicit_source_dirs: Option<Vec<String>>,
-    source_extensions: Option<Vec<String>>,
-    detect_by_extension: bool,
-) -> CmdResult<DocsOutput> {
-    let comp = component::load(component_id)?;
-    let source_path = Path::new(&comp.local_path);
-    let docs_path = source_path.join(docs_dir);
-
-    // Analyze source structure
-    let source_directories = if let Some(dirs) = explicit_source_dirs {
-        // User provided explicit directories
-        dirs
-    } else if detect_by_extension {
-        // Extension-based detection
-        let extensions = source_extensions
-            .clone()
-            .unwrap_or_else(default_source_extensions);
-        find_source_directories_by_extension(source_path, &extensions)
-    } else if let Some(extensions) = source_extensions {
-        // Custom extensions provided - use extension-based detection automatically
-        find_source_directories_by_extension(source_path, &extensions)
-    } else {
-        // Try conventional directories first
-        let conventional = find_source_directories(source_path);
-        if conventional.is_empty() {
-            // Fallback to extension-based detection with defaults
-            let extensions = default_source_extensions();
-            find_source_directories_by_extension(source_path, &extensions)
-        } else {
-            conventional
-        }
-    };
-
-    // Find existing documentation
-    let existing_docs = find_existing_docs(&docs_path);
-
-    // Identify undocumented areas (source dirs without corresponding docs)
-    let undocumented = identify_undocumented(&source_directories, &existing_docs, &docs_path);
-
-    // Generate hints
-    let mut hints = Vec::new();
-    hints.push(format!(
-        "Found {} source directories",
-        source_directories.len()
-    ));
-    if !existing_docs.is_empty() {
-        hints.push(format!("{} docs already exist", existing_docs.len()));
-    }
-    if !undocumented.is_empty() {
-        hints.push(format!(
-            "{} directories may need documentation",
-            undocumented.len()
-        ));
-    }
-
-    Ok((
-        DocsOutput::Scaffold {
-            analysis: ScaffoldAnalysis {
-                component_id: component_id.to_string(),
-                source_directories,
-                existing_docs,
-                undocumented,
-            },
-            instructions: "Run `homeboy docs documentation/generation` for writing guidelines"
-                .to_string(),
-            hints,
-        },
-        0,
-    ))
 }
 
 // ============================================================================
@@ -1327,7 +1198,7 @@ fn run_audit(component_id: &str, docs_dir: Option<&str>, features: bool) -> CmdR
 }
 
 // ============================================================================
-// Scaffold Helper Functions
+// Source Directory Detection Helpers (shared by map)
 // ============================================================================
 
 fn default_source_extensions() -> Vec<String> {
@@ -1454,93 +1325,6 @@ fn directory_contains_source_files(dir: &Path, extensions: &[String]) -> bool {
         }
     }
     false
-}
-
-fn find_existing_docs(docs_path: &Path) -> Vec<String> {
-    let mut docs = Vec::new();
-
-    if !docs_path.exists() {
-        return docs;
-    }
-
-    fn scan_docs(dir: &Path, prefix: &str, docs: &mut Vec<String>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-
-                if name.starts_with('.') {
-                    continue;
-                }
-
-                if path.is_file() && name.ends_with(".md") {
-                    let relative = if prefix.is_empty() {
-                        name
-                    } else {
-                        format!("{}/{}", prefix, name)
-                    };
-                    docs.push(relative);
-                } else if path.is_dir() {
-                    let new_prefix = if prefix.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{}/{}", prefix, name)
-                    };
-                    scan_docs(&path, &new_prefix, docs);
-                }
-            }
-        }
-    }
-
-    scan_docs(docs_path, "", &mut docs);
-    docs.sort();
-    docs
-}
-
-fn identify_undocumented(
-    source_dirs: &[String],
-    existing_docs: &[String],
-    docs_path: &Path,
-) -> Vec<String> {
-    // Build a set of doc content references by scanning doc files for source dir mentions
-    let mut referenced_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for doc_file in existing_docs {
-        let doc_full_path = docs_path.join(doc_file);
-        if let Ok(content) = fs::read_to_string(&doc_full_path) {
-            for src_dir in source_dirs {
-                // Check if the doc references this source directory by path or name
-                let dir_name = src_dir.split('/').next_back().unwrap_or(src_dir);
-                if content.contains(src_dir)
-                    || content.contains(&format!("`{}`", src_dir))
-                    || content.contains(&format!("`{}/", src_dir))
-                    || content.contains(&format!("{}/", src_dir))
-                {
-                    referenced_dirs.insert(src_dir.clone());
-                }
-                // Also check if the dir name appears meaningfully (as path segment)
-                if content.contains(&format!("{}/", dir_name))
-                    || content.contains(&format!("`{}`", dir_name))
-                {
-                    referenced_dirs.insert(src_dir.clone());
-                }
-            }
-        }
-    }
-
-    source_dirs
-        .iter()
-        .filter(|src_dir| {
-            // Check both: doc filename matching AND content references
-            let dir_name = src_dir.split('/').next_back().unwrap_or(src_dir);
-            let has_matching_doc = existing_docs
-                .iter()
-                .any(|doc| doc.contains(dir_name) || doc.replace(".md", "").contains(dir_name));
-            let is_referenced = referenced_dirs.contains(*src_dir);
-            !has_matching_doc && !is_referenced
-        })
-        .cloned()
-        .collect()
 }
 
 // ============================================================================

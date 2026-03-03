@@ -5,8 +5,8 @@
 ```sh
 homeboy docs [TOPIC]
 homeboy docs list
-homeboy docs scaffold <component-id> [--docs-dir <dir>]
 homeboy docs audit <component-id>
+homeboy docs map <component-id>
 homeboy docs generate --json '<spec>'
 homeboy docs generate @spec.json
 homeboy docs generate -
@@ -20,51 +20,13 @@ This command renders documentation topics and provides tooling for documentation
 1. Embedded core docs in the CLI binary
 2. Installed extension docs under `<config dir>/homeboy/extensions/<extension_id>/docs/`
 
-**Scaffold** analyzes a component's codebase and reports documentation status (read-only).
+**Audit** validates documentation links, detects stale references, and identifies undocumented features.
 
-**Audit** validates documentation links and detects stale references.
+**Map** generates machine-optimized codebase maps for AI documentation.
 
 **Generate** creates documentation files in bulk from a JSON spec.
 
 ## Subcommands
-
-### `scaffold`
-
-Analyzes a component's codebase and reports:
-- Source directories found
-- Existing documentation files
-- Potentially undocumented areas
-
-This is read-only - no files are created. Use the analysis to inform documentation planning.
-
-```sh
-homeboy docs scaffold homeboy
-homeboy docs scaffold extrachill-api --docs-dir documentation
-```
-
-**Arguments:**
-- `<component-id>`: Component to analyze (required)
-
-**Options:**
-- `--docs-dir <dir>`: Documentation directory to scan (default: `docs`)
-
-**Output:**
-```json
-{
-  "success": true,
-  "data": {
-    "command": "docs.scaffold",
-    "analysis": {
-      "component_id": "homeboy",
-      "source_directories": ["src", "src/api", "src/models"],
-      "existing_docs": ["overview.md", "core-system/engine.md"],
-      "undocumented": ["src/api", "src/models"]
-    },
-    "instructions": "Run `homeboy docs documentation/generation` for writing guidelines",
-    "hints": ["Found 3 source directories", "2 docs already exist"]
-  }
-}
-```
 
 ### `audit`
 
@@ -206,18 +168,17 @@ Homeboy includes embedded documentation for AI agents:
 
 Typical documentation workflow using these commands:
 
-1. **Analyze**: `homeboy docs scaffold <component>` - understand current state
+1. **Audit**: `homeboy docs audit <component>` - understand current state, find broken refs and gaps
 2. **Learn**: `homeboy docs documentation/generation` - read guidelines
-3. **Plan**: AI determines structure based on analysis + guidelines
+3. **Map**: `homeboy docs map <component>` - generate codebase map for AI context
 4. **Generate**: `homeboy docs generate --json '<spec>'` - bulk create files
-5. **Validate**: `homeboy docs audit <component>` - check for broken links and stale docs
-6. **Maintain**: `homeboy docs documentation/alignment` - keep docs current
+5. **Maintain**: `homeboy docs documentation/alignment` - keep docs current
 
 ## Errors
 
 If a topic does not exist, the command fails with an error indicating the topic was not found.
 
-If a component does not exist (for scaffold/audit), the command fails with a component not found error.
+If a component does not exist (for audit/map), the command fails with a component not found error.
 
 ## Related
 

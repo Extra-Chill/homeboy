@@ -100,7 +100,7 @@ Topics cover commands, schemas, architecture, and developer guides — all embed
 | `server` | CRUD for server configs. SSH key generation and management. |
 | `extension` | Install, list, update, and manage extensions. |
 | `config` | View and modify global Homeboy settings. |
-| `docs` | Read embedded documentation. `scaffold` to analyze doc gaps. `audit` to verify docs match code. `generate` for bulk doc creation from JSON spec. |
+| `docs` | Read embedded documentation. `audit` to verify docs match code. `map` for machine-optimized codebase maps. `generate` for bulk doc creation from JSON spec. |
 | `init` | Read-only environment discovery. Returns actionable status: what's ready to deploy, what needs a version bump, config gaps. |
 | `upgrade` | Upgrade Homeboy to the latest version. |
 
