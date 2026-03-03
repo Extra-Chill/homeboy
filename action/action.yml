@@ -234,6 +234,10 @@ runs:
         RESULTS="{}"
         OVERALL_EXIT=0
 
+        # Create temp dir for capturing output
+        HOMEBOY_OUTPUT_DIR=$(mktemp -d)
+        echo "homeboy-output-dir=${HOMEBOY_OUTPUT_DIR}" >> "$GITHUB_ENV"
+
         # Parse comma-separated commands
         IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
 
@@ -247,8 +251,13 @@ runs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
 
-          # Build the command
-          FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
+          # Build the command — audit uses positional path, lint/test use --path
+          # See: https://github.com/Extra-Chill/homeboy/issues/374
+          if [ "$CMD" = "audit" ]; then
+            FULL_CMD="homeboy audit ${WORKSPACE}"
+          else
+            FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
+          fi
 
           if [ -n "$EXTRA_ARGS" ]; then
             FULL_CMD="${FULL_CMD} ${EXTRA_ARGS}"
@@ -257,7 +266,7 @@ runs:
           echo "::group::homeboy ${CMD}"
 
           CMD_EXIT=0
-          eval "$FULL_CMD" || CMD_EXIT=$?
+          eval "$FULL_CMD" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${CMD}.log" || CMD_EXIT=${PIPESTATUS[0]}
 
           echo "::endgroup::"
 
@@ -289,3 +298,135 @@ runs:
         echo "results=${RESULTS}" >> "$GITHUB_OUTPUT"
 
         exit $OVERALL_EXIT
+
+    # ── Step 7: Post PR comment ──
+    - name: Post PR comment
+      if: always() && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        COMMANDS: ${{ inputs.commands }}
+        COMPONENT_NAME: ${{ inputs.component }}
+      run: |
+        set -euo pipefail
+
+        RESULTS='${{ steps.run-commands.outputs.results }}'
+        OUTPUT_DIR="${homeboy_output_dir:-}"
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+        REPO="${GITHUB_REPOSITORY}"
+        COMP_ID="${COMPONENT_NAME:-$(basename "$GITHUB_REPOSITORY")}"
+
+        if [ -z "$OUTPUT_DIR" ] || [ -z "$PR_NUMBER" ]; then
+          echo "Skipping PR comment — missing output dir or PR number"
+          exit 0
+        fi
+
+        # ── Build the comment body ──
+        COMMENT_BODY="<!-- homeboy-action-results -->"$'\n'
+        COMMENT_BODY+="## Homeboy Results — \`${COMP_ID}\`"$'\n\n'
+
+        # Parse results and build summary table
+        IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
+        HAS_FAILURE=false
+
+        for CMD in "${CMD_ARRAY[@]}"; do
+          CMD=$(echo "$CMD" | xargs)
+          LOG_FILE="${OUTPUT_DIR}/${CMD}.log"
+
+          # Determine pass/fail from results JSON
+          STATUS=$(echo "$RESULTS" | python3 -c "
+        import json, sys
+        try:
+            d = json.loads(sys.stdin.read())
+            print(d.get('${CMD}', 'unknown'))
+        except:
+            print('unknown')
+        " 2>/dev/null || echo "unknown")
+
+          if [ "$STATUS" = "pass" ]; then
+            ICON="white_check_mark"
+          else
+            ICON="x"
+            HAS_FAILURE=true
+          fi
+
+          COMMENT_BODY+=":${ICON}: **${CMD}**"$'\n'
+
+          # Extract summaries from log file
+          if [ -f "$LOG_FILE" ]; then
+            # PHPCS summary
+            PHPCS_SUMMARY=$(grep -o "LINT SUMMARY: .*" "$LOG_FILE" | head -1 || true)
+            if [ -n "$PHPCS_SUMMARY" ]; then
+              FIXABLE=$(grep -o "Fixable: [0-9]*" "$LOG_FILE" | head -1 || true)
+              FILES_INFO=$(grep -o "Files with issues: .*" "$LOG_FILE" | head -1 || true)
+              COMMENT_BODY+="- PHPCS: ${PHPCS_SUMMARY}"$'\n'
+              if [ -n "$FIXABLE" ]; then
+                COMMENT_BODY+="- ${FIXABLE} | ${FILES_INFO}"$'\n'
+              fi
+            fi
+
+            # Top violations (first 5)
+            TOP_VIOLATIONS=$(sed -n '/TOP VIOLATIONS:/,/^$/p' "$LOG_FILE" | grep -E '^\s+\S' | head -5 || true)
+            if [ -n "$TOP_VIOLATIONS" ]; then
+              COMMENT_BODY+=$'\n'"<details><summary>Top violations</summary>"$'\n\n'"\`\`\`"$'\n'
+              COMMENT_BODY+="${TOP_VIOLATIONS}"$'\n'
+              COMMENT_BODY+="\`\`\`"$'\n'"</details>"$'\n'
+            fi
+
+            # PHPStan summary
+            PHPSTAN_SUMMARY=$(grep -o "PHPSTAN SUMMARY: .*" "$LOG_FILE" | head -1 || true)
+            if [ -n "$PHPSTAN_SUMMARY" ]; then
+              COMMENT_BODY+="- PHPStan: ${PHPSTAN_SUMMARY}"$'\n'
+            fi
+
+            # PHPUnit failure
+            BUILD_FAILED=$(grep -o "BUILD FAILED: .*" "$LOG_FILE" | head -1 || true)
+            if [ -n "$BUILD_FAILED" ]; then
+              COMMENT_BODY+="- ${BUILD_FAILED}"$'\n'
+            fi
+
+            # Fatal errors
+            FATAL=$(grep "PHP Fatal error:" "$LOG_FILE" | head -1 | sed 's/.*PHP Fatal error:/Fatal:/' || true)
+            if [ -n "$FATAL" ]; then
+              COMMENT_BODY+=$'\n'"<details><summary>Fatal error</summary>"$'\n\n'"\`\`\`"$'\n'
+              COMMENT_BODY+="${FATAL}"$'\n'
+              COMMENT_BODY+="\`\`\`"$'\n'"</details>"$'\n'
+            fi
+
+            # Audit findings
+            AUDIT_SCORE=$(grep -o "Alignment score: .*" "$LOG_FILE" | head -1 || true)
+            if [ -n "$AUDIT_SCORE" ]; then
+              COMMENT_BODY+="- ${AUDIT_SCORE}"$'\n'
+            fi
+            AUDIT_FINDINGS=$(grep -oE "[0-9]+ findings?" "$LOG_FILE" | tail -1 || true)
+            if [ -n "$AUDIT_FINDINGS" ]; then
+              COMMENT_BODY+="- ${AUDIT_FINDINGS}"$'\n'
+            fi
+          fi
+
+          COMMENT_BODY+=$'\n'
+        done
+
+        # Footer
+        COMMENT_BODY+="---"$'\n'
+        COMMENT_BODY+="*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1 — "
+        COMMENT_BODY+="$(homeboy --version 2>/dev/null || echo 'homeboy')*"
+
+        # ── Find existing comment or create new one ──
+        EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+          --jq '.[] | select(.body | startswith("<!-- homeboy-action-results -->")) | .id' \
+          2>/dev/null | head -1 || true)
+
+        if [ -n "$EXISTING_COMMENT_ID" ]; then
+          echo "Updating existing comment ${EXISTING_COMMENT_ID}..."
+          gh api "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
+            --method PATCH \
+            --field body="$COMMENT_BODY" > /dev/null
+        else
+          echo "Creating new comment..."
+          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --method POST \
+            --field body="$COMMENT_BODY" > /dev/null
+        fi
+
+        echo "PR comment posted successfully"
