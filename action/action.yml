@@ -43,6 +43,10 @@ inputs:
     description: 'Node.js version to set up (skipped if empty — use with actions/setup-node separately)'
     required: false
     default: ''
+  lint-changed-only:
+    description: 'Only lint files changed in the PR (default: true for PRs, ignored for non-PR events)'
+    required: false
+    default: 'true'
 
 outputs:
   results:
@@ -212,7 +216,57 @@ runs:
         echo "Component '${COMP_ID}' registered successfully"
         echo "component-id=${COMP_ID}" >> "$GITHUB_ENV"
 
-    # ── Step 6: Run commands ──
+    # ── Step 6: Compute changed files for PR scoping ──
+    - name: Compute changed files
+      id: changed-files
+      if: github.event_name == 'pull_request' && inputs.lint-changed-only == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        BASE_REF="${{ github.event.pull_request.base.sha }}"
+        HEAD_REF="${{ github.event.pull_request.head.sha }}"
+
+        # Fetch the base commit (shallow checkout won't have it)
+        git fetch origin "${BASE_REF}" --depth=1 2>/dev/null || true
+
+        # Get changed files (added, modified, renamed — not deleted)
+        CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR "${BASE_REF}...${HEAD_REF}" 2>/dev/null || true)
+
+        if [ -z "$CHANGED_FILES" ]; then
+          echo "No changed files detected — will run full lint"
+          echo "has-changes=false" >> "$GITHUB_OUTPUT"
+        else
+          FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | xargs)
+          echo "Found ${FILE_COUNT} changed files"
+
+          # Build absolute paths and create brace glob for homeboy --glob
+          WORKSPACE="$(pwd)"
+          ABS_FILES=""
+          while IFS= read -r file; do
+            if [ -n "$ABS_FILES" ]; then
+              ABS_FILES="${ABS_FILES},${WORKSPACE}/${file}"
+            else
+              ABS_FILES="${WORKSPACE}/${file}"
+            fi
+          done <<< "$CHANGED_FILES"
+
+          # Single file doesn't need braces, multiple files use {a,b,c} glob
+          if [ "$FILE_COUNT" -eq 1 ]; then
+            GLOB="${ABS_FILES}"
+          else
+            GLOB="{${ABS_FILES}}"
+          fi
+
+          echo "has-changes=true" >> "$GITHUB_OUTPUT"
+          echo "file-count=${FILE_COUNT}" >> "$GITHUB_OUTPUT"
+
+          # Write glob to file to avoid shell escaping issues
+          echo "${GLOB}" > /tmp/homeboy-changed-glob.txt
+          echo "HOMEBOY_CHANGED_GLOB=${GLOB}" >> "$GITHUB_ENV"
+        fi
+
+    # ── Step 7: Run commands ──
     - name: Run Homeboy commands
       id: run-commands
       shell: bash
@@ -257,6 +311,9 @@ runs:
           # See: https://github.com/Extra-Chill/homeboy/issues/374
           if [ "$CMD" = "audit" ]; then
             FULL_CMD="homeboy audit ${WORKSPACE}"
+          elif [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_GLOB:-}" ]; then
+            # Scope lint to changed files only (PR mode)
+            FULL_CMD="homeboy lint ${COMP_ID} --path ${WORKSPACE} --glob '${HOMEBOY_CHANGED_GLOB}'"
           else
             FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
           fi
@@ -355,7 +412,14 @@ runs:
             HAS_FAILURE=true
           fi
 
-          COMMENT_BODY+=":${ICON}: **${CMD}**"$'\n'
+          # Add scope indicator for lint
+          SCOPE_NOTE=""
+          if [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_GLOB:-}" ]; then
+            CHANGED_COUNT="${{ steps.changed-files.outputs.file-count }}"
+            SCOPE_NOTE=" _(${CHANGED_COUNT:-?} changed files)_"
+          fi
+
+          COMMENT_BODY+=":${ICON}: **${CMD}**${SCOPE_NOTE}"$'\n'
 
           # Extract summaries from log file
           if [ -f "$LOG_FILE" ]; then
