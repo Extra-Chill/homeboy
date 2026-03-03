@@ -151,6 +151,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 bump_type: bump_type.as_str().to_string(),
                 dry_run,
                 path_override: path,
+                skip_checks: false,
             };
 
             if dry_run {
