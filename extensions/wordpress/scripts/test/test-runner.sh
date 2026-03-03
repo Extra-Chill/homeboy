@@ -467,7 +467,49 @@ if [ $phpunit_exit -ne 0 ]; then
     fi
     exit $phpunit_exit
 fi
+
+# Detect zero-test runs — PHPUnit exits 0 but ran no tests.
+# This catches silent failures (broken bootstrap, empty test dirs, bad filters).
+# PHPUnit 9+: "No tests executed!" or "OK (0 tests, 0 assertions)"
+# PHPUnit 10+: "No tests executed!" or blank output
+PHPUNIT_OUTPUT=$(cat "$PHPUNIT_TMPFILE")
 rm -f "$PHPUNIT_TMPFILE"
+
+if echo "$PHPUNIT_OUTPUT" | grep -qE 'No tests executed|OK \(0 tests'; then
+    echo ""
+    echo "============================================"
+    echo "WARNING: PHPUnit ran 0 tests"
+    echo "============================================"
+    echo ""
+    echo "PHPUnit exited successfully but executed no tests."
+    echo "This usually means:"
+    echo "  - The test directory has no *Test.php files"
+    echo "  - A --filter pattern matched nothing"
+    echo "  - The bootstrap failed silently (check output above)"
+    echo ""
+    echo "Test directory: ${TEST_DIR}"
+    if [ -n "$*" ]; then
+        echo "Passthrough args: $*"
+    fi
+    echo ""
+    # Exit with code 1 so homeboy reports "failed" instead of false-positive "passed"
+    FAILED_STEP="PHPUnit tests (zero tests executed)"
+    exit 1
+fi
+
+# Also detect completely empty output (no PHPUnit banner at all = bootstrap died)
+if [ -z "$(echo "$PHPUNIT_OUTPUT" | grep -E 'PHPUnit|test|assert|OK|ERRORS|FAILURES' || true)" ]; then
+    echo ""
+    echo "============================================"
+    echo "WARNING: No PHPUnit output detected"
+    echo "============================================"
+    echo ""
+    echo "PHPUnit produced no recognizable output. The bootstrap may have"
+    echo "terminated the process before tests could run."
+    echo ""
+    FAILED_STEP="PHPUnit tests (no output)"
+    exit 1
+fi
 
 # Clean up auto-created test database
 if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
