@@ -62,6 +62,14 @@ pub struct DeployArgs {
     /// Keep build dependencies (skip post-deploy cleanup)
     #[arg(long)]
     pub keep_deps: bool,
+
+    /// Assert expected version before deploying (abort if local version doesn't match)
+    #[arg(long)]
+    pub version: Option<String>,
+
+    /// Skip auto-pulling latest changes before deploy
+    #[arg(long)]
+    pub no_pull: bool,
 }
 
 #[derive(Serialize)]
@@ -245,6 +253,8 @@ pub fn run(
         force: args.force,
         skip_build: false,
         keep_deps: args.keep_deps,
+        expected_version: args.version.clone(),
+        no_pull: args.no_pull,
     };
 
     let result = deploy::run(&project_id, &config).map_err(|e| {
@@ -387,6 +397,8 @@ fn run_multi_project(args: &DeployArgs, project_ids: &[String]) -> CmdResult<Dep
             force: args.force,
             skip_build: !first_project, // Build only on first project
             keep_deps: args.keep_deps,
+            expected_version: args.version.clone(),
+            no_pull: args.no_pull || !first_project, // Only pull on first project
         };
 
         match deploy::run(project_id, &config) {

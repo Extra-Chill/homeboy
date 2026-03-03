@@ -663,6 +663,10 @@ pub struct DeployConfig {
     pub skip_build: bool,
     /// Keep build dependencies (skip cleanup even when auto_cleanup is enabled)
     pub keep_deps: bool,
+    /// Assert expected version before deploying (abort if mismatch)
+    pub expected_version: Option<String>,
+    /// Skip auto-pulling latest changes before deploy
+    pub no_pull: bool,
 }
 
 /// Reason why a component was selected for deployment.
@@ -913,8 +917,18 @@ fn deploy_components(
         ));
     }
 
+    // Sync: pull latest changes before deploying (unless --no-pull or --skip-build)
+    if !config.no_pull && !config.skip_build {
+        sync_components(&components)?;
+    }
+
     if !config.force {
         check_uncommitted_changes(&components)?;
+    }
+
+    // Verify expected version if --version was specified
+    if let Some(ref expected) = config.expected_version {
+        verify_expected_version(&components, expected)?;
     }
 
     // Execute deployments
@@ -1047,6 +1061,83 @@ fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
                 "Commit your changes before deploying to ensure deployed code is tracked"
                     .to_string(),
                 "Use --force to deploy anyway".to_string(),
+            ]),
+        ));
+    }
+    Ok(())
+}
+
+/// Fetch and pull latest changes for each component before deploying.
+///
+/// Prevents deploying stale code when the local clone is behind remote.
+/// Runs `git fetch` + `git pull` for each component that has an upstream.
+/// Aborts if pull fails (e.g., merge conflicts).
+fn sync_components(components: &[Component]) -> Result<()> {
+    for component in components {
+        let path = &component.local_path;
+
+        // Check if behind remote
+        match git::fetch_and_get_behind_count(path) {
+            Ok(Some(behind)) => {
+                log_status!(
+                    "deploy",
+                    "'{}' is {} commit(s) behind remote — pulling...",
+                    component.id,
+                    behind
+                );
+                let pull_result = git::pull(Some(&component.id))?;
+                if !pull_result.success {
+                    return Err(Error::git_command_failed(format!(
+                        "Failed to pull '{}': {}",
+                        component.id,
+                        pull_result.stderr.lines().next().unwrap_or("unknown error")
+                    )));
+                }
+                log_status!("deploy", "'{}' is now up to date", component.id);
+            }
+            Ok(None) => {
+                // Not behind or no upstream — nothing to do
+            }
+            Err(_) => {
+                // git fetch failed — warn but don't block (might be offline)
+                log_status!(
+                    "deploy",
+                    "Warning: could not check remote status for '{}' — deploying local state",
+                    component.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Verify that component versions match the expected version.
+///
+/// When `--version` is used, ensures the local version of each component
+/// matches the asserted version. This catches cases where the local copy
+/// has a different version than what was just released.
+fn verify_expected_version(components: &[Component], expected: &str) -> Result<()> {
+    let mut mismatches = Vec::new();
+
+    for component in components {
+        if let Some(local_version) = version::get_component_version(component) {
+            if local_version != expected {
+                mismatches.push(format!(
+                    "'{}': local version is {} (expected {})",
+                    component.id, local_version, expected
+                ));
+            }
+        }
+    }
+
+    if !mismatches.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "version",
+            format!("Version mismatch: {}", mismatches.join("; ")),
+            None,
+            Some(vec![
+                "Pull latest changes: git pull".to_string(),
+                "Or remove --version to deploy the current local version".to_string(),
             ]),
         ));
     }

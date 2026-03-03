@@ -279,7 +279,9 @@ fn execute_deployment(component_id: &str) -> (Option<DeploymentResult>, i32) {
             check: false,
             force: false,
             skip_build: true,
-            keep_deps: false, // Release deploy doesn't support --keep-deps
+            keep_deps: false,
+            expected_version: None, // Release already validated version
+            no_pull: true,          // Release already pushed, no need to pull
         };
 
         match deploy::run(project_id, &config) {

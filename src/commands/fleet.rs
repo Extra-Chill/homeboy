@@ -433,7 +433,9 @@ fn check(id: &str, only_outdated: bool) -> CmdResult<FleetOutput> {
             check: true,
             force: false,
             skip_build: true,
-            keep_deps: false, // Fleet checks don't support --keep-deps
+            keep_deps: false,
+            expected_version: None,
+            no_pull: true, // Fleet checks are read-only
         };
 
         match deploy::run(project_id, &config) {
