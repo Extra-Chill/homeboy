@@ -254,6 +254,8 @@ pub fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
             &[
                 "--skip-lint",
                 "--fix",
+                "--coverage",
+                "--coverage-min",
                 "--setting",
                 "--path",
                 "--json",

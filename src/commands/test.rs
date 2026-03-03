@@ -4,6 +4,7 @@ use serde::Serialize;
 use homeboy::component::{self, Component};
 use homeboy::error::Error;
 use homeboy::extension::{self, ExtensionRunner};
+use homeboy::utils::io;
 
 use super::CmdResult;
 
@@ -19,6 +20,14 @@ pub struct TestArgs {
     /// Auto-fix linting issues before running tests
     #[arg(long)]
     fix: bool,
+
+    /// Collect code coverage (requires xdebug/pcov for PHP, cargo-tarpaulin for Rust)
+    #[arg(long)]
+    coverage: bool,
+
+    /// Minimum coverage percentage — fail if below this threshold (implies --coverage)
+    #[arg(long, value_name = "PERCENT")]
+    coverage_min: Option<f64>,
 
     /// Override settings as key=value pairs
     #[arg(long, value_parser = super::parse_key_val)]
@@ -43,7 +52,25 @@ pub struct TestOutput {
     component: String,
     exit_code: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<CoverageOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     hints: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+pub struct CoverageOutput {
+    lines_pct: f64,
+    lines_total: u64,
+    lines_covered: u64,
+    methods_pct: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    uncovered_files: Vec<UncoveredFile>,
+}
+
+#[derive(Serialize)]
+pub struct UncoveredFile {
+    file: String,
+    line_pct: f64,
 }
 
 /// Attempt to auto-detect the extension for a component based on contextual clues.
@@ -126,15 +153,44 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     }
     let script_path = resolve_test_script(&component)?;
 
-    let output = ExtensionRunner::new(&args.component, &script_path)
+    // Coverage is enabled by --coverage or --coverage-min
+    let coverage_enabled = args.coverage || args.coverage_min.is_some();
+
+    // Create temp file for coverage output
+    let coverage_file = if coverage_enabled {
+        Some(std::env::temp_dir().join(format!("homeboy-coverage-{}.json", std::process::id())))
+    } else {
+        None
+    };
+
+    let mut runner = ExtensionRunner::new(&args.component, &script_path)
         .path_override(args.path.clone())
         .settings(&args.setting)
         .env_if(args.skip_lint, "HOMEBOY_SKIP_LINT", "1")
         .env_if(args.fix, "HOMEBOY_AUTO_FIX", "1")
-        .script_args(&args.args)
-        .run()?;
+        .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1");
+
+    if let Some(ref file) = coverage_file {
+        runner = runner.env("HOMEBOY_COVERAGE_FILE", &file.to_string_lossy());
+    }
+
+    if let Some(min) = args.coverage_min {
+        runner = runner.env("HOMEBOY_COVERAGE_MIN", &format!("{}", min));
+    }
+
+    let output = runner.script_args(&args.args).run()?;
 
     let status = if output.success { "passed" } else { "failed" };
+
+    // Read coverage results if available
+    let coverage = coverage_file
+        .as_ref()
+        .and_then(|f| parse_coverage_file(f).ok());
+
+    // Clean up coverage temp file
+    if let Some(ref f) = coverage_file {
+        let _ = std::fs::remove_file(f);
+    }
 
     let mut hints = Vec::new();
 
@@ -154,6 +210,14 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
         ));
     }
 
+    // Coverage hint when not using coverage
+    if !coverage_enabled {
+        hints.push(format!(
+            "Collect coverage: homeboy test {} --coverage",
+            args.component
+        ));
+    }
+
     // Capability hint when not using passthrough args
     if args.args.is_empty() {
         hints.push("Pass args to test runner: homeboy test <component> -- [args]".to_string());
@@ -169,8 +233,58 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
             status: status.to_string(),
             component: args.component,
             exit_code: output.exit_code,
+            coverage,
             hints,
         },
         output.exit_code,
     ))
+}
+
+/// Parse the coverage JSON file written by the extension test runner.
+fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<CoverageOutput, ()> {
+    let content = io::read_file(path, "read coverage file").map_err(|_| ())?;
+    let data: serde_json::Value = serde_json::from_str(&content).map_err(|_| ())?;
+
+    let totals = data.get("totals").ok_or(())?;
+    let lines = totals.get("lines").ok_or(())?;
+    let methods = totals.get("methods").ok_or(())?;
+
+    let lines_pct = lines.get("pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let lines_total = lines.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+    let lines_covered = lines.get("covered").and_then(|v| v.as_u64()).unwrap_or(0);
+    let methods_pct = methods.get("pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+    // Collect files below 50% coverage as "uncovered"
+    let uncovered_files = data
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|f| {
+                    let pct = f.get("line_pct").and_then(|v| v.as_f64())?;
+                    if pct < 50.0 {
+                        Some(UncoveredFile {
+                            file: f
+                                .get("file")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                                .to_string(),
+                            line_pct: pct,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(CoverageOutput {
+        lines_pct,
+        lines_total,
+        lines_covered,
+        methods_pct,
+        uncovered_files,
+    })
 }
