@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.54.1] - 2026-03-03
+
+### Fixed
+- fall back to two-dot diff when three-dot fails in shallow CI clones (#397)
+- resolve upgrade panic by looking up binary on PATH instead of /proc/self/exe (#398)
+
 ## [0.54.0] - 2026-03-03
 
 ### Changed
