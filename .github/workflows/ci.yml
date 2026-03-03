@@ -43,9 +43,9 @@ jobs:
         run: cargo test
 
   # ── Homeboy audit (dogfooding) ──
-  # Informational only on PRs — reports findings but doesn't fail on
-  # baseline drift. The release workflow's pre-release gate enforces
-  # the strict baseline ratchet before binaries ship.
+  # Compares audit findings against the committed baseline. Only fails
+  # if a PR introduces NEW drift (new findings not in the baseline).
+  # Resolving existing findings is always allowed (ratchet down).
   audit:
     name: Homeboy Audit
     runs-on: ubuntu-latest
@@ -56,4 +56,3 @@ jobs:
           extension: rust
           commands: audit
           component: homeboy
-          args: '--ignore-baseline'
