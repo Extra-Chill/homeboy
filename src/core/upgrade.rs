@@ -372,12 +372,34 @@ fn execute_upgrade(method: InstallMethod) -> Result<(bool, Option<String>)> {
 pub fn restart_with_new_binary() -> ! {
     use std::os::unix::process::CommandExt;
 
-    let binary = std::env::current_exe().expect("Failed to get current executable path");
+    // After an upgrade, std::env::current_exe() reads /proc/self/exe which
+    // points to the *deleted* old binary inode. Resolve the fresh binary from
+    // $PATH instead so we exec into the newly-installed version.
+    let binary = resolve_binary_on_path()
+        .unwrap_or_else(|| std::env::current_exe().expect("Failed to get current executable path"));
 
     let err = Command::new(&binary).arg("--version").exec();
 
-    // exec() only returns on error
-    panic!("Failed to exec into new binary: {}", err);
+    // exec() only returns on error — fall back to a clean exit instead of panicking
+    eprintln!(
+        "Warning: could not restart automatically ({}). Please run `homeboy --version` to confirm the upgrade.",
+        err
+    );
+    std::process::exit(0);
+}
+
+/// Resolve the `homeboy` binary via $PATH, returning the first match that
+/// exists on disk. This avoids the stale `/proc/self/exe` problem on Linux
+/// where the old inode is deleted after the upgrade replaces the binary.
+fn resolve_binary_on_path() -> Option<std::path::PathBuf> {
+    let path_var = std::env::var("PATH").ok()?;
+    for dir in path_var.split(':') {
+        let candidate = std::path::PathBuf::from(dir).join("homeboy");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[cfg(not(unix))]
