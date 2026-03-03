@@ -3,7 +3,7 @@ use crate::component::{self, Component};
 use crate::core::local_files::FileSystem;
 use crate::engine::pipeline::{self, PipelineStep};
 use crate::error::{Error, Result};
-use crate::extension::ExtensionManifest;
+use crate::extension::{self, ExtensionManifest, ExtensionRunner};
 use crate::git::{self, UncommittedChanges};
 use crate::utils::validation::ValidationCollector;
 use crate::version;
@@ -76,6 +76,13 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
 
     // === Stage 0: Remote sync check (preflight) ===
     v.capture(validate_remote_sync(&component), "remote_sync");
+
+    // === Stage 0.5: Code quality checks (lint + test) ===
+    if options.skip_checks {
+        log_status!("release", "Skipping code quality checks (--skip-checks)");
+    } else {
+        v.capture(validate_code_quality(&component), "code_quality");
+    }
 
     // === Stage 1: Independent validations ===
     v.capture(validate_commits_vs_changelog(&component), "commits");
@@ -245,6 +252,111 @@ fn validate_remote_sync(component: &Component) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Run code quality checks (lint + test) via the component's extension.
+///
+/// Resolves the extension for the component, then runs lint and test scripts
+/// if the extension provides them. If no extension is configured or the extension
+/// doesn't provide lint/test, those checks are silently skipped.
+///
+/// This is the pre-release quality gate — ensures code passes lint and tests
+/// before any version bump or tag is created.
+fn validate_code_quality(component: &Component) -> Result<()> {
+    let extensions = match &component.extensions {
+        Some(ext) if !ext.is_empty() => ext,
+        _ => {
+            log_status!(
+                "release",
+                "No extensions configured — skipping code quality checks"
+            );
+            return Ok(());
+        }
+    };
+
+    // Determine which extension to use (prefer wordpress, then first available)
+    let extension_id = if extensions.contains_key("wordpress") {
+        "wordpress"
+    } else {
+        match extensions.keys().next() {
+            Some(id) => id.as_str(),
+            None => return Ok(()),
+        }
+    };
+
+    let manifest = match extension::load_extension(extension_id) {
+        Ok(m) => m,
+        Err(_) => {
+            log_status!(
+                "release",
+                "Extension '{}' not found — skipping code quality checks",
+                extension_id
+            );
+            return Ok(());
+        }
+    };
+
+    let mut checks_run = 0;
+    let mut failures = Vec::new();
+
+    // Run lint if extension provides it
+    if let Some(lint_script) = manifest.lint_script() {
+        log_status!("release", "Running lint ({})...", extension_id);
+        match ExtensionRunner::new(&component.id, lint_script).run() {
+            Ok(output) if output.success => {
+                log_status!("release", "Lint passed");
+                checks_run += 1;
+            }
+            Ok(output) => {
+                checks_run += 1;
+                failures.push(format!("Lint failed (exit code {})", output.exit_code));
+            }
+            Err(e) => {
+                failures.push(format!("Lint error: {}", e));
+            }
+        }
+    }
+
+    // Run tests if extension provides them
+    if let Some(test_script) = manifest.test_script() {
+        log_status!("release", "Running tests ({})...", extension_id);
+        match ExtensionRunner::new(&component.id, test_script).run() {
+            Ok(output) if output.success => {
+                log_status!("release", "Tests passed");
+                checks_run += 1;
+            }
+            Ok(output) => {
+                checks_run += 1;
+                failures.push(format!("Tests failed (exit code {})", output.exit_code));
+            }
+            Err(e) => {
+                failures.push(format!("Test error: {}", e));
+            }
+        }
+    }
+
+    if checks_run == 0 {
+        log_status!(
+            "release",
+            "Extension '{}' has no lint/test scripts — skipping code quality checks",
+            extension_id
+        );
+        return Ok(());
+    }
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "code_quality",
+        &failures.join("; "),
+        None,
+        Some(vec![
+            "Fix the issues above before releasing".to_string(),
+            "To bypass: homeboy release <component> <bump> --skip-checks".to_string(),
+        ]),
+    ))
 }
 
 /// Validate that commits since the last tag have corresponding changelog entries.

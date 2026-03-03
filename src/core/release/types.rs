@@ -122,4 +122,7 @@ pub struct ReleaseOptions {
     /// Override the component's `local_path` for this release.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_override: Option<String>,
+    /// Skip lint/test code quality checks before release.
+    #[serde(default)]
+    pub skip_checks: bool,
 }

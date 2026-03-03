@@ -54,6 +54,10 @@ pub struct ReleaseArgs {
     /// Recover from an interrupted release (tag + push current version)
     #[arg(long, conflicts_with = "bump_type")]
     recover: bool,
+
+    /// Skip pre-release lint and test checks
+    #[arg(long)]
+    skip_checks: bool,
 }
 
 #[derive(Serialize)]
@@ -103,6 +107,7 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         bump_type: bump_type.as_str().to_string(),
         dry_run: args.dry_run,
         path_override: None,
+        skip_checks: args.skip_checks,
     };
 
     if args.dry_run {
