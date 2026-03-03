@@ -5,6 +5,9 @@ set -euo pipefail
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
 # Supports skip via HOMEBOY_SKIP_PHPSTAN=1
 # Supports level override via HOMEBOY_PHPSTAN_LEVEL (default: 5)
+# NOTE: PHPStan always analyzes the full codebase (ignores HOMEBOY_LINT_GLOB)
+# because it needs the complete type graph to detect collateral damage from
+# changes (broken call sites, type mismatches in untouched files, etc.)
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -281,6 +284,37 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
             echo "ERRORS (raw):"
             echo "$json_output"
         fi
+    fi
+
+    # Write annotations sidecar JSON for CI inline comments
+    if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ] && [ -n "$json_output" ]; then
+        echo "$json_output" | php -r '
+            $json = json_decode(file_get_contents("php://stdin"), true);
+            if (!$json || empty($json["files"])) exit;
+            $componentPath = $argv[1] ?? "";
+            $level = $argv[2] ?? "5";
+            $annotations = [];
+            foreach ($json["files"] as $filePath => $data) {
+                $displayPath = $filePath;
+                if ($componentPath && strpos($filePath, $componentPath) === 0) {
+                    $displayPath = ltrim(substr($filePath, strlen($componentPath)), "/");
+                }
+                foreach ($data["messages"] ?? [] as $msg) {
+                    $annotations[] = [
+                        "file" => $displayPath,
+                        "line" => $msg["line"] ?? 0,
+                        "message" => $msg["message"] ?? "Unknown",
+                        "source" => "phpstan",
+                        "severity" => "error",
+                        "code" => $msg["identifier"] ?? "unknown",
+                    ];
+                }
+            }
+            $outDir = $argv[3] ?? "";
+            if ($outDir && !empty($annotations)) {
+                file_put_contents($outDir . "/phpstan.json", json_encode($annotations, JSON_PRETTY_PRINT) . "\n");
+            }
+        ' "$PLUGIN_PATH" "$PHPSTAN_LEVEL" "${HOMEBOY_ANNOTATIONS_DIR}" 2>/dev/null || true
     fi
 
     # Fallback: show stderr if PHPStan failed without producing JSON

@@ -310,6 +310,37 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
         echo ""
         echo "$summary"
     fi
+
+    # Write annotations sidecar JSON for CI inline comments
+    if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
+        echo "$json_output" | php -r '
+            $json = json_decode(file_get_contents("php://stdin"), true);
+            if (!$json || empty($json["files"])) exit;
+            $componentPath = $argv[1] ?? "";
+            $annotations = [];
+            foreach ($json["files"] as $filePath => $data) {
+                $displayPath = $filePath;
+                if ($componentPath && strpos($filePath, $componentPath) === 0) {
+                    $displayPath = ltrim(substr($filePath, strlen($componentPath)), "/");
+                }
+                foreach ($data["messages"] ?? [] as $msg) {
+                    $annotations[] = [
+                        "file" => $displayPath,
+                        "line" => $msg["line"] ?? 0,
+                        "message" => $msg["message"] ?? "Unknown",
+                        "source" => "phpcs",
+                        "severity" => ($msg["type"] ?? "ERROR") === "ERROR" ? "error" : "warning",
+                        "code" => $msg["source"] ?? "unknown",
+                        "fixable" => $msg["fixable"] ?? false,
+                    ];
+                }
+            }
+            $outDir = $argv[2] ?? "";
+            if ($outDir && !empty($annotations)) {
+                file_put_contents($outDir . "/phpcs.json", json_encode($annotations, JSON_PRETTY_PRINT) . "\n");
+            }
+        ' "$PLUGIN_PATH" "${HOMEBOY_ANNOTATIONS_DIR}" 2>/dev/null || true
+    fi
 fi
 
 # Summary mode: show summary header + top violations, skip full report

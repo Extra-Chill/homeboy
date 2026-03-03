@@ -115,6 +115,30 @@ if should_run_step "fmt"; then
                 echo ""
                 echo "$FMT_OUTPUT"
             fi
+
+            # Write annotations sidecar for fmt issues
+            # Parse "Diff in /path/to/file.rs at line N:" format
+            if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
+                echo "$FMT_OUTPUT" | awk -v comp_path="${PROJECT_PATH}/" '
+                    /^Diff in .+ at line [0-9]+:/ {
+                        file = $3
+                        line = $6
+                        sub(/:$/, "", line)
+                        # Strip component path prefix
+                        sub(comp_path, "", file)
+                        gsub(/"/, "\\\"", file)
+                        annotations = annotations (annotations ? ",\n" : "") \
+                            "  {\"file\": \"" file "\", \"line\": " line ", \"message\": \"File needs formatting (run homeboy lint --fix)\", \"source\": \"rustfmt\", \"severity\": \"warning\", \"code\": \"formatting\"}"
+                    }
+                    END {
+                        if (annotations) {
+                            print "[\n" annotations "\n]"
+                        }
+                    }
+                ' > "${HOMEBOY_ANNOTATIONS_DIR}/rustfmt.json" 2>/dev/null || true
+                [ -s "${HOMEBOY_ANNOTATIONS_DIR}/rustfmt.json" ] || rm -f "${HOMEBOY_ANNOTATIONS_DIR}/rustfmt.json"
+            fi
+
             FAILED_STEP="cargo fmt --check"
             FAILURE_OUTPUT="$(echo "$FMT_OUTPUT" | tail -20)"
             exit 1
@@ -161,6 +185,48 @@ if should_run_step "clippy"; then
 
     CLIPPY_OUTPUT=$(cat "$CLIPPY_TMPFILE")
     rm -f "$CLIPPY_TMPFILE"
+
+    # Write annotations sidecar JSON for CI inline comments
+    # Parse clippy's "warning: message\n  --> file:line:col" format
+    if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
+        # Use awk to pair "warning/error" lines with their "--> file:line:col" location
+        echo "$CLIPPY_OUTPUT" | awk '
+            /^(warning|error)(\[.+\])?: / {
+                severity = ($1 == "error" || $1 ~ /^error/) ? "error" : "warning"
+                # Extract code from brackets: warning[clippy::foo] or error[E0001]
+                code = ""
+                if (match($0, /\[([^\]]+)\]/, m)) { code = m[1] }
+                # Message is everything after "warning: " or "error: " or "error[...]: "
+                msg = $0
+                sub(/^(warning|error)(\[[^\]]+\])?: /, "", msg)
+                next_is_location = 1
+                next
+            }
+            next_is_location && /^\s+-->/ {
+                # Parse "  --> src/foo.rs:42:10"
+                loc = $2
+                split(loc, parts, ":")
+                file = parts[1]
+                line = parts[2]
+                if (file != "" && line != "") {
+                    # Escape quotes in message for JSON
+                    gsub(/"/, "\\\"", msg)
+                    annotations = annotations (annotations ? ",\n" : "") \
+                        "  {\"file\": \"" file "\", \"line\": " line ", \"message\": \"" msg "\", \"source\": \"clippy\", \"severity\": \"" severity "\", \"code\": \"" code "\"}"
+                }
+                next_is_location = 0
+                next
+            }
+            { next_is_location = 0 }
+            END {
+                if (annotations) {
+                    print "[\n" annotations "\n]"
+                }
+            }
+        ' > "${HOMEBOY_ANNOTATIONS_DIR}/clippy.json" 2>/dev/null || true
+        # Remove empty file if no annotations were written
+        [ -s "${HOMEBOY_ANNOTATIONS_DIR}/clippy.json" ] || rm -f "${HOMEBOY_ANNOTATIONS_DIR}/clippy.json"
+    fi
 
     if [ $CLIPPY_EXIT -eq 0 ]; then
         echo "cargo clippy: passed"
