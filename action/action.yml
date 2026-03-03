@@ -308,10 +308,10 @@ runs:
 
           if [ $CMD_EXIT -eq 0 ]; then
             echo "::notice::homeboy ${CMD}: PASSED"
-            RESULTS=$(echo "$RESULTS" | jq --arg cmd "$CMD" '. + {($cmd): "pass"}')
+            RESULTS=$(echo "$RESULTS" | jq -c --arg cmd "$CMD" '. + {($cmd): "pass"}')
           else
             echo "::error::homeboy ${CMD}: FAILED (exit code ${CMD_EXIT})"
-            RESULTS=$(echo "$RESULTS" | jq --arg cmd "$CMD" '. + {($cmd): "fail"}')
+            RESULTS=$(echo "$RESULTS" | jq -c --arg cmd "$CMD" '. + {($cmd): "fail"}')
             OVERALL_EXIT=1
           fi
         done
