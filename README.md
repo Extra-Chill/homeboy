@@ -156,6 +156,23 @@ Extension versioning supports constraint matching (`^1.0`, `>=2.0`, `~1.2`).
 
 Browse available extensions: [homeboy-extensions](https://github.com/Extra-Chill/homeboy-extensions)
 
+## GitHub Action
+
+[homeboy-action](https://github.com/Extra-Chill/homeboy-action) is a composite GitHub Action that runs Homeboy in CI. It installs the binary from GitHub Releases, sets up extensions, registers your component, and runs any Homeboy commands — lint, test, audit, build.
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v1
+  with:
+    component: my-plugin
+    extensions: wordpress
+    commands: |
+      lint
+      test
+      audit
+```
+
+Results are posted as a PR comment with per-command status, auto-updated on re-runs.
+
 ## Configuration
 
 All config lives in `~/.config/homeboy/`. No repo-local config files.
