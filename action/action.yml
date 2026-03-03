@@ -202,29 +202,13 @@ runs:
         echo "Running: ${CREATE_CMD}"
         eval "$CREATE_CMD"
 
-        # Apply settings overrides if provided
+        # Apply settings overrides via homeboy's config system
         if [ -n "$SETTINGS_JSON" ] && [ "$SETTINGS_JSON" != "{}" ] && [ -n "$EXTENSION_ID" ]; then
-          CONFIG_DIR="${HOME}/.config/homeboy/components"
-          CONFIG_FILE="${CONFIG_DIR}/${COMP_ID}.json"
-
-          if [ -f "$CONFIG_FILE" ]; then
-            echo "Applying extension settings..."
-            python3 -c "
-        import json, sys
-        with open('${CONFIG_FILE}', 'r') as f:
-            config = json.load(f)
-        settings = json.loads('${SETTINGS_JSON}')
-        if 'extensions' not in config:
-            config['extensions'] = {}
-        if '${EXTENSION_ID}' not in config['extensions']:
-            config['extensions']['${EXTENSION_ID}'] = {}
-        if 'settings' not in config['extensions']['${EXTENSION_ID}']:
-            config['extensions']['${EXTENSION_ID}']['settings'] = {}
-        config['extensions']['${EXTENSION_ID}']['settings'].update(settings)
-        with open('${CONFIG_FILE}', 'w') as f:
-            json.dump(config, f, indent=2)
-        "
-          fi
+          echo "Applying extension settings..."
+          # Build nested JSON: {"extensions":{"<ext>":{"settings":{...}}}}
+          NESTED_JSON=$(echo "$SETTINGS_JSON" | jq --arg ext "$EXTENSION_ID" \
+            '{extensions: {($ext): {settings: .}}}')
+          homeboy component set "${COMP_ID}" --json "$NESTED_JSON"
         fi
 
         # Verify component was created
@@ -324,20 +308,10 @@ runs:
 
           if [ $CMD_EXIT -eq 0 ]; then
             echo "::notice::homeboy ${CMD}: PASSED"
-            RESULTS=$(echo "$RESULTS" | python3 -c "
-        import json, sys
-        d = json.loads(sys.stdin.read())
-        d['${CMD}'] = 'pass'
-        print(json.dumps(d))
-        ")
+            RESULTS=$(echo "$RESULTS" | jq --arg cmd "$CMD" '. + {($cmd): "pass"}')
           else
             echo "::error::homeboy ${CMD}: FAILED (exit code ${CMD_EXIT})"
-            RESULTS=$(echo "$RESULTS" | python3 -c "
-        import json, sys
-        d = json.loads(sys.stdin.read())
-        d['${CMD}'] = 'fail'
-        print(json.dumps(d))
-        ")
+            RESULTS=$(echo "$RESULTS" | jq --arg cmd "$CMD" '. + {($cmd): "fail"}')
             OVERALL_EXIT=1
           fi
         done
@@ -386,14 +360,7 @@ runs:
           LOG_FILE="${OUTPUT_DIR}/${CMD}.log"
 
           # Determine pass/fail from results JSON
-          STATUS=$(echo "$RESULTS" | python3 -c "
-        import json, sys
-        try:
-            d = json.loads(sys.stdin.read())
-            print(d.get('${CMD}', 'unknown'))
-        except:
-            print('unknown')
-        " 2>/dev/null || echo "unknown")
+          STATUS=$(echo "$RESULTS" | jq -r --arg cmd "$CMD" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
 
           if [ "$STATUS" = "pass" ]; then
             ICON="white_check_mark"
@@ -574,9 +541,5 @@ runs:
           --method POST \
           --input - > /dev/null 2>&1
 
-        COMMENT_COUNT=$(echo "$REVIEW_PAYLOAD" | python3 -c "
-        import json, sys
-        d = json.load(sys.stdin)
-        print(len(d.get('comments', [])))
-        " 2>/dev/null || echo "0")
+        COMMENT_COUNT=$(echo "$REVIEW_PAYLOAD" | jq '.comments | length' 2>/dev/null || echo "0")
         echo "Posted inline review with ${COMMENT_COUNT} comment(s)"
