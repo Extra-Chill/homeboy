@@ -43,10 +43,9 @@ jobs:
         run: cargo test
 
   # ── Homeboy audit (dogfooding) ──
-  # Uses homeboy-action to run audit on the codebase itself.
-  # Baseline ratchet: .homeboy/audit-baseline.json captures known findings.
-  # Audit passes if no NEW findings are introduced (existing drift is accepted).
-  # To re-baseline after fixing things: homeboy audit homeboy --baseline
+  # Informational only on PRs — reports findings but doesn't fail on
+  # baseline drift. The release workflow's pre-release gate enforces
+  # the strict baseline ratchet before binaries ship.
   audit:
     name: Homeboy Audit
     runs-on: ubuntu-latest
@@ -57,3 +56,4 @@ jobs:
           extension: rust
           commands: audit
           component: homeboy
+          args: '--ignore-baseline'

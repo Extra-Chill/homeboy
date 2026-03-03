@@ -200,8 +200,14 @@ pub fn compare(result: &CodeAuditResult, baseline: &AuditBaseline) -> BaselineCo
 // ============================================================================
 
 /// Create a stable fingerprint for a finding.
-fn finding_fingerprint(convention: &str, file: &str, kind: &str, description: &str) -> String {
-    format!("{}::{}::{}::{}", convention, file, kind, description)
+///
+/// Uses `convention::file::kind` as the core identity. The description is
+/// excluded because structural findings embed volatile values (e.g. exact
+/// line counts) that change when a file grows by even one line. Including
+/// them would cause the same finding to appear as "resolved + new" on every
+/// minor change, defeating the baseline ratchet.
+fn finding_fingerprint(convention: &str, file: &str, kind: &str, _description: &str) -> String {
+    format!("{}::{}::{}", convention, file, kind)
 }
 
 /// Get current UTC timestamp as ISO 8601.
@@ -465,6 +471,28 @@ mod tests {
 
         let fp3 = finding_fingerprint("Flow", "b.php", "MissingMethod", "Missing method: execute");
         assert_ne!(fp1, fp3);
+    }
+
+    #[test]
+    fn finding_fingerprint_ignores_description() {
+        // Structural findings embed volatile values (line counts, item counts)
+        // in the description. The fingerprint must be stable across these changes.
+        let fp1 = finding_fingerprint(
+            "structural",
+            "deploy.rs",
+            "GodFile",
+            "File has 2484 lines (threshold: 500)",
+        );
+        let fp2 = finding_fingerprint(
+            "structural",
+            "deploy.rs",
+            "GodFile",
+            "File has 2645 lines (threshold: 500)",
+        );
+        assert_eq!(
+            fp1, fp2,
+            "fingerprint should not change when line count changes"
+        );
     }
 
     #[test]
