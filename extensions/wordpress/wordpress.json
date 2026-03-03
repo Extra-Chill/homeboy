@@ -194,6 +194,14 @@
       "wp_register_ability": { "doc_comment": true, "block_fields": false },
       "registerTool": { "doc_comment": true, "block_fields": false }
     },
+    "test_mapping": {
+      "source_dirs": ["inc"],
+      "test_dirs": ["tests/Unit"],
+      "test_file_pattern": "tests/Unit/{dir}/{name}Test.{ext}",
+      "method_prefix": "test_",
+      "inline_tests": false,
+      "critical_patterns": ["Abilities/", "Core/"]
+    },
     "doc_targets": {
       "Post Types": {
         "file": "features.md",

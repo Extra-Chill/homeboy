@@ -39,6 +39,14 @@
       "Config)\\b": { "doc_comment": true, "block_fields": true },
       "Manifest)\\b": { "doc_comment": true, "block_fields": true }
     },
+    "test_mapping": {
+      "source_dirs": ["src"],
+      "test_dirs": ["tests"],
+      "test_file_pattern": "tests/{dir}/{name}_test.{ext}",
+      "method_prefix": "test_",
+      "inline_tests": true,
+      "critical_patterns": ["core/", "commands/"]
+    },
     "doc_targets": {
       "Subcommands": {
         "file": "cli-reference.md",
