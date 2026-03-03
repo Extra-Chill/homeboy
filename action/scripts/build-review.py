@@ -2,12 +2,17 @@
 """Build a GitHub PR review payload from Homeboy annotation sidecar JSON files.
 
 Usage:
-    build-review.py <annotations_dir> <changed_files_path> <commit_sha>
+    build-review.py <annotations_dir> <changed_files_path> <commit_sha> [<related_files_path>]
 
 Reads all *.json files from <annotations_dir> (written by homeboy extension
 lint scripts), splits annotations into inline (in PR diff) vs collateral
 (in untouched files), and prints a JSON payload suitable for the GitHub
 Pull Request Reviews API.
+
+Collateral damage is scoped: only errors in files that reference symbols
+from the changed files are reported. If <related_files_path> is provided,
+only those files are eligible for collateral. If not provided, collateral
+damage is skipped entirely (no way to distinguish pre-existing vs new).
 
 Exits 0 with no output if there are no annotations to post.
 
@@ -49,8 +54,8 @@ def load_annotations(annotations_dir: str) -> list[dict]:
     return annotations
 
 
-def load_changed_files(path: str) -> set[str]:
-    """Load the set of changed file paths from a newline-delimited file."""
+def load_file_set(path: str) -> set[str]:
+    """Load a set of file paths from a newline-delimited file."""
     with open(path, 'r') as f:
         return set(line.strip() for line in f if line.strip())
 
@@ -68,8 +73,13 @@ def format_comment_body(source: str, code: str, severity: str, message: str) -> 
 def build_collateral_section(collateral: list[dict]) -> list[str]:
     """Build markdown lines for the collateral damage section."""
     lines = []
-    lines.append(f'\n### Collateral damage ({len(collateral)} issue(s) in untouched files)\n')
-    lines.append('These errors are in files you did not modify but may be caused by your changes:\n')
+    lines.append(
+        f'\n### Collateral damage ({len(collateral)} issue(s) in related files)\n'
+    )
+    lines.append(
+        'These errors are in files that reference symbols you changed '
+        'but were not part of this PR:\n'
+    )
 
     by_file: dict[str, list[dict]] = {}
     for c in collateral:
@@ -80,7 +90,9 @@ def build_collateral_section(collateral: list[dict]) -> list[str]:
         for issue in issues[:5]:
             icon = ':x:' if issue['severity'] == 'error' else ':warning:'
             code_str = f' `{issue["code"]}`' if issue.get('code') else ''
-            lines.append(f'- {icon} L{issue["line"]}: {issue["message"]}{code_str}')
+            lines.append(
+                f'- {icon} L{issue["line"]}: {issue["message"]}{code_str}'
+            )
         if len(issues) > 5:
             lines.append(f'- _...and {len(issues) - 5} more_')
         lines.append('')
@@ -89,23 +101,31 @@ def build_collateral_section(collateral: list[dict]) -> list[str]:
 
 
 def main():
-    if len(sys.argv) != 4:
-        print(f"Usage: {sys.argv[0]} <annotations_dir> <changed_files_path> <commit_sha>",
-              file=sys.stderr)
+    if len(sys.argv) < 4 or len(sys.argv) > 5:
+        print(
+            f"Usage: {sys.argv[0]} <annotations_dir> <changed_files_path> "
+            f"<commit_sha> [<related_files_path>]",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     annotations_dir = sys.argv[1]
     changed_files_path = sys.argv[2]
     commit_sha = sys.argv[3]
+    related_files_path = sys.argv[4] if len(sys.argv) > 4 else None
 
     # Load inputs
-    changed_files = load_changed_files(changed_files_path)
+    changed_files = load_file_set(changed_files_path)
     all_annotations = load_annotations(annotations_dir)
+    related_files = load_file_set(related_files_path) if related_files_path else set()
 
     if not all_annotations:
         sys.exit(0)
 
-    # Split into inline (in diff) vs collateral (not in diff)
+    # Split annotations into three buckets:
+    #   1. inline — in changed files (posted as inline PR review comments)
+    #   2. collateral — in related files (shown in review body)
+    #   3. unrelated — in files with no symbol link to changes (dropped)
     inline_comments = []
     collateral = []
     seen: set[str] = set()
@@ -132,7 +152,7 @@ def main():
                 'line': int(line),
                 'body': format_comment_body(source, code, severity, message),
             })
-        else:
+        elif file_path in related_files:
             collateral.append({
                 'file': file_path,
                 'line': int(line),
@@ -141,6 +161,7 @@ def main():
                 'code': code,
                 'severity': severity,
             })
+        # else: unrelated pre-existing error — silently dropped
 
     # Nothing to post
     if not inline_comments and not collateral:
@@ -151,7 +172,10 @@ def main():
     if len(inline_comments) > 50:
         overflow = len(inline_comments) - 50
         inline_comments = inline_comments[:50]
-        overflow_note = f'\n\n_...and {overflow} more annotations not shown (GitHub limits reviews to 50 comments)._'
+        overflow_note = (
+            f'\n\n_...and {overflow} more annotations not shown '
+            f'(GitHub limits reviews to 50 comments)._'
+        )
 
     # Build review body
     review_body_parts = []

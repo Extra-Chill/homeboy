@@ -530,11 +530,26 @@ runs:
           exit 0
         fi
 
-        # Build the review payload
-        REVIEW_PAYLOAD=$(python3 "${ACTION_DIR}/scripts/build-review.py" \
-          "$ANNOTATIONS_DIR" "$CHANGED_FILES_FILE" "$PR_HEAD_SHA" 2>/dev/null || true)
+        # Find files related to the changed files (call sites, importers)
+        # Only errors in these files qualify as collateral damage
+        RELATED_FILES_FILE=$(mktemp)
+        echo "Tracing symbol references from changed files..."
+        python3 "${ACTION_DIR}/scripts/find-related-files.py" \
+          "$(pwd)" "$CHANGED_FILES_FILE" > "$RELATED_FILES_FILE" || true
 
-        rm -f "$CHANGED_FILES_FILE"
+        RELATED_COUNT=$(wc -l < "$RELATED_FILES_FILE" | tr -d ' ')
+        echo "Found ${RELATED_COUNT} related file(s)"
+
+        # Build the review payload (pass related files for collateral scoping)
+        REVIEW_ARGS=("$ANNOTATIONS_DIR" "$CHANGED_FILES_FILE" "$PR_HEAD_SHA")
+        if [ -s "$RELATED_FILES_FILE" ]; then
+          REVIEW_ARGS+=("$RELATED_FILES_FILE")
+        fi
+
+        REVIEW_PAYLOAD=$(python3 "${ACTION_DIR}/scripts/build-review.py" \
+          "${REVIEW_ARGS[@]}" 2>/dev/null || true)
+
+        rm -f "$CHANGED_FILES_FILE" "$RELATED_FILES_FILE"
 
         if [ -z "$REVIEW_PAYLOAD" ]; then
           echo "No annotations to post — skipping inline review"
@@ -543,7 +558,7 @@ runs:
 
         # Dismiss previous homeboy reviews to avoid stacking
         EXISTING_REVIEWS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-          --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | test("Homeboy found"))) | .id] | .[]' \
+          --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | test("Homeboy found|Collateral damage"))) | .id] | .[]' \
           2>/dev/null || true)
 
         for REVIEW_ID in $EXISTING_REVIEWS; do
