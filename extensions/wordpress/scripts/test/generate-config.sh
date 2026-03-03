@@ -7,10 +7,16 @@ EXTENSION_PATH="${3:-$(pwd)}"
 
 echo "Generating wp-config.php for $DB_TYPE..."
 
-# Copy SQLite driver to wp-content location (only needed for SQLite mode)
+# Manage SQLite driver drop-in in wp-content
 mkdir -p "$ABSPATH/wp-content"
 if [ "$DB_TYPE" = "sqlite" ] && [ -f "${EXTENSION_PATH}/sqlitedb/db.php" ]; then
     cp "${EXTENSION_PATH}/sqlitedb/db.php" "$ABSPATH/wp-content/"
+else
+    # Remove any leftover SQLite drop-in when switching to MySQL.
+    # WordPress auto-loads wp-content/db.php as a drop-in — if it persists
+    # from a previous SQLite run, all queries route through SQLite even
+    # when MySQL credentials are configured. (Fixes homeboy#370)
+    rm -f "$ABSPATH/wp-content/db.php"
 fi
 
 # Compute paths shared between both config files
