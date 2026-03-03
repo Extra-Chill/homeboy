@@ -166,29 +166,48 @@ runs:
 
         echo "Registering component: ${COMP_ID}"
 
-        # Check if repo has a homeboy.json (portable config)
-        if [ -f "homeboy.json" ]; then
-          echo "Found homeboy.json — using portable config"
-          # Still register for explicit ID access
-          homeboy component create --local-path "$(pwd)" --json @homeboy.json 2>/dev/null || true
-        else
-          # Build the component JSON
-          COMP_JSON="{\"local_path\": \"$(pwd)\""
+        # Build create command with flags
+        CREATE_CMD="homeboy component create --local-path $(pwd)"
 
-          if [ -n "$EXTENSION_ID" ]; then
-            if [ -n "$SETTINGS_JSON" ] && [ "$SETTINGS_JSON" != "{}" ]; then
-              COMP_JSON="${COMP_JSON}, \"extensions\": {\"${EXTENSION_ID}\": {\"settings\": ${SETTINGS_JSON}}}"
-            else
-              COMP_JSON="${COMP_JSON}, \"extensions\": {\"${EXTENSION_ID}\": {}}"
-            fi
-          fi
-
-          COMP_JSON="${COMP_JSON}}"
-
-          echo "Component config: ${COMP_JSON}"
-          homeboy component create --json "${COMP_JSON}"
+        if [ -n "$EXTENSION_ID" ]; then
+          CREATE_CMD="${CREATE_CMD} --extension ${EXTENSION_ID}"
         fi
 
+        echo "Running: ${CREATE_CMD}"
+        eval "$CREATE_CMD"
+
+        # Apply settings overrides if provided
+        if [ -n "$SETTINGS_JSON" ] && [ "$SETTINGS_JSON" != "{}" ] && [ -n "$EXTENSION_ID" ]; then
+          CONFIG_DIR="${HOME}/.config/homeboy/components"
+          CONFIG_FILE="${CONFIG_DIR}/${COMP_ID}.json"
+
+          if [ -f "$CONFIG_FILE" ]; then
+            echo "Applying extension settings..."
+            python3 -c "
+        import json, sys
+        with open('${CONFIG_FILE}', 'r') as f:
+            config = json.load(f)
+        settings = json.loads('${SETTINGS_JSON}')
+        if 'extensions' not in config:
+            config['extensions'] = {}
+        if '${EXTENSION_ID}' not in config['extensions']:
+            config['extensions']['${EXTENSION_ID}'] = {}
+        if 'settings' not in config['extensions']['${EXTENSION_ID}']:
+            config['extensions']['${EXTENSION_ID}']['settings'] = {}
+        config['extensions']['${EXTENSION_ID}']['settings'].update(settings)
+        with open('${CONFIG_FILE}', 'w') as f:
+            json.dump(config, f, indent=2)
+        "
+          fi
+        fi
+
+        # Verify component was created
+        homeboy component list 2>/dev/null | grep -q "${COMP_ID}" || {
+          echo "::error::Failed to register component '${COMP_ID}'"
+          exit 1
+        }
+
+        echo "Component '${COMP_ID}' registered successfully"
         echo "component-id=${COMP_ID}" >> "$GITHUB_ENV"
 
     # ── Step 6: Run commands ──
