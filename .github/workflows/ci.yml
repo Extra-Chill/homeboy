@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ── Rust build + test (native cargo) ──
+  # These run directly because homeboy-action delegates to cargo anyway,
+  # and we want fast feedback without installing homeboy first.
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -W clippy::all
+
+      - name: cargo test
+        run: cargo test
+
+  # ── Homeboy audit (dogfooding) ──
+  # Uses homeboy-action to run audit on the codebase itself.
+  # This catches convention drift, structural issues, and doc staleness.
+  audit:
+    name: Homeboy Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          extension: rust
+          commands: audit
+          component: homeboy
