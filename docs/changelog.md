@@ -20,6 +20,10 @@ All notable changes to Homeboy CLI are documented in this file.
 - add audit baseline ratchet — only fail on NEW findings (#383)
 - add PR workflow with build/test + homeboy audit dogfooding (#380)
 
+### Fixed
+- fix build.rs raw string delimiter for docs with special characters (#390)
+- fix release workflow cargo-dist version mismatch (#390)
+
 ## [0.52.1] - 2026-03-02
 
 - fix(test): --path and --fix flags now correctly parsed by test command (#366)

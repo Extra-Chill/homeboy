@@ -87,11 +87,12 @@ pub fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<Duplica
         }
 
         let canonical = pick_canonical(locations);
-        let remove_from: Vec<String> = locations
+        let mut remove_from: Vec<String> = locations
             .iter()
             .filter(|f| **f != canonical)
             .cloned()
             .collect();
+        remove_from.sort();
 
         groups.push(DuplicateGroup {
             function_name: method_name.clone(),
@@ -127,12 +128,10 @@ pub fn detect_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
 
         // Emit one finding per file that has the duplicate
         for file in locations {
-            let also_in = locations
-                .iter()
-                .filter(|f| *f != file)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
+            let mut also_in_vec: Vec<_> =
+                locations.iter().filter(|f| *f != file).cloned().collect();
+            also_in_vec.sort();
+            let also_in = also_in_vec.join(", ");
 
             findings.push(Finding {
                 convention: "duplication".to_string(),
@@ -332,12 +331,13 @@ pub fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding>
         );
 
         for (file, _body_hash) in file_hashes {
-            let also_in = file_hashes
+            let mut also_in_vec: Vec<&str> = file_hashes
                 .iter()
                 .filter(|(f, _)| f != file)
                 .map(|(f, _)| f.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+                .collect();
+            also_in_vec.sort();
+            let also_in = also_in_vec.join(", ");
 
             findings.push(Finding {
                 convention: "near-duplication".to_string(),

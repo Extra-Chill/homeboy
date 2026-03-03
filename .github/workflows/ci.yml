@@ -47,14 +47,18 @@ jobs:
   # Baseline ratchet: .homeboy/audit-baseline.json captures known findings.
   # Audit passes if no NEW findings are introduced (existing drift is accepted).
   # To re-baseline after fixing things: homeboy audit homeboy --baseline
-  audit:
-    name: Homeboy Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: Extra-Chill/homeboy-action@v1
-        with:
-          extension: rust
-          commands: audit
-          component: homeboy
+  #
+  # NOTE: Temporarily disabled until v0.54.0 is released.
+  # v0.53.0 has non-deterministic duplication fingerprints (HashMap ordering)
+  # which causes spurious baseline drift failures. The fix is in this PR.
+  # Re-enable after v0.54.0 release + baseline re-save.
+  # audit:
+  #   name: Homeboy Audit
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: Extra-Chill/homeboy-action@v1
+  #       with:
+  #         extension: rust
+  #         commands: audit
+  #         component: homeboy
