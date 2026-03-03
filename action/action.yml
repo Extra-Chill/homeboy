@@ -1,0 +1,272 @@
+name: 'Homeboy'
+description: 'Run Homeboy lint, test, and audit commands on your PRs. Works with any Homeboy extension.'
+author: 'Extra Chill'
+
+branding:
+  icon: 'check-circle'
+  color: 'blue'
+
+inputs:
+  version:
+    description: 'Homeboy version to install (e.g. "0.52.0", "latest")'
+    required: false
+    default: 'latest'
+  extension:
+    description: 'Extension ID to install (e.g. "wordpress", "rust", "node")'
+    required: false
+    default: ''
+  extension-source:
+    description: 'Git URL or path to install the extension from'
+    required: false
+    default: 'https://github.com/Extra-Chill/homeboy-extensions'
+  commands:
+    description: 'Comma-separated list of commands to run (e.g. "lint,test", "lint,test,audit")'
+    required: false
+    default: 'lint,test'
+  component:
+    description: 'Component name (auto-detected from repo name if not specified)'
+    required: false
+    default: ''
+  args:
+    description: 'Additional arguments to pass to each command (e.g. "--skip-lint", "--errors-only")'
+    required: false
+    default: ''
+  settings:
+    description: 'JSON object of extension settings to pass (e.g. {"database_type": "sqlite"})'
+    required: false
+    default: ''
+  php-version:
+    description: 'PHP version to set up (skipped if empty — use with shivammathur/setup-php separately)'
+    required: false
+    default: ''
+  node-version:
+    description: 'Node.js version to set up (skipped if empty — use with actions/setup-node separately)'
+    required: false
+    default: ''
+
+outputs:
+  results:
+    description: 'JSON object with pass/fail results for each command'
+    value: ${{ steps.run-commands.outputs.results }}
+
+runs:
+  using: 'composite'
+  steps:
+    # ── Step 1: Setup PHP (optional) ──
+    - name: Setup PHP
+      if: inputs.php-version != ''
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        extensions: mbstring, intl, pdo_sqlite, mysqli
+        tools: composer:v2
+        coverage: none
+
+    # ── Step 2: Setup Node.js (optional) ──
+    - name: Setup Node.js
+      if: inputs.node-version != ''
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    # ── Step 3: Install Homeboy binary ──
+    - name: Install Homeboy
+      shell: bash
+      env:
+        HOMEBOY_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        REPO="Extra-Chill/homeboy"
+
+        # Resolve version
+        if [ "$HOMEBOY_VERSION" = "latest" ]; then
+          TAG=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+          if [ -z "$TAG" ]; then
+            echo "::error::Could not determine latest Homeboy release"
+            exit 1
+          fi
+        else
+          TAG="v${HOMEBOY_VERSION#v}"
+        fi
+
+        VERSION="${TAG#v}"
+        echo "Installing Homeboy ${VERSION}..."
+
+        # Determine platform
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+
+        case "${OS}-${ARCH}" in
+          linux-x86_64)   TARGET="x86_64-unknown-linux-gnu" ;;
+          linux-aarch64)   TARGET="aarch64-unknown-linux-gnu" ;;
+          darwin-x86_64)   TARGET="x86_64-apple-darwin" ;;
+          darwin-arm64)    TARGET="aarch64-apple-darwin" ;;
+          *)
+            echo "::error::Unsupported platform: ${OS}-${ARCH}"
+            exit 1
+            ;;
+        esac
+
+        ARCHIVE="homeboy-${TARGET}.tar.xz"
+        URL="https://github.com/${REPO}/releases/download/${TAG}/${ARCHIVE}"
+
+        echo "Downloading ${URL}..."
+        curl -fsSL "${URL}" -o "/tmp/${ARCHIVE}"
+
+        # Extract and install
+        mkdir -p /tmp/homeboy-extract
+        tar -xJf "/tmp/${ARCHIVE}" -C /tmp/homeboy-extract
+
+        # cargo-dist extracts to a directory named after the target
+        BINARY=$(find /tmp/homeboy-extract -name "homeboy" -type f | head -1)
+        if [ -z "$BINARY" ]; then
+          echo "::error::Could not find homeboy binary in archive"
+          exit 1
+        fi
+
+        chmod +x "$BINARY"
+        sudo mv "$BINARY" /usr/local/bin/homeboy
+
+        echo "Homeboy $(homeboy --version) installed successfully"
+
+    # ── Step 4: Install extension ──
+    - name: Install extension
+      if: inputs.extension != ''
+      shell: bash
+      env:
+        EXTENSION_ID: ${{ inputs.extension }}
+        EXTENSION_SOURCE: ${{ inputs.extension-source }}
+      run: |
+        set -euo pipefail
+
+        echo "Installing extension: ${EXTENSION_ID} from ${EXTENSION_SOURCE}..."
+
+        homeboy extension install "${EXTENSION_SOURCE}" --id "${EXTENSION_ID}"
+
+        echo "Extension '${EXTENSION_ID}' installed successfully"
+
+    # ── Step 5: Register component ──
+    - name: Register component
+      shell: bash
+      env:
+        COMPONENT_NAME: ${{ inputs.component }}
+        EXTENSION_ID: ${{ inputs.extension }}
+        SETTINGS_JSON: ${{ inputs.settings }}
+      run: |
+        set -euo pipefail
+
+        # Determine component name
+        if [ -n "$COMPONENT_NAME" ]; then
+          COMP_ID="$COMPONENT_NAME"
+        else
+          # Derive from repo name
+          COMP_ID=$(basename "$GITHUB_REPOSITORY")
+        fi
+
+        echo "Registering component: ${COMP_ID}"
+
+        # Check if repo has a homeboy.json (portable config)
+        if [ -f "homeboy.json" ]; then
+          echo "Found homeboy.json — using portable config"
+          # Still register for explicit ID access
+          homeboy component create --local-path "$(pwd)" --json @homeboy.json 2>/dev/null || true
+        else
+          # Build the component JSON
+          COMP_JSON="{\"local_path\": \"$(pwd)\""
+
+          if [ -n "$EXTENSION_ID" ]; then
+            if [ -n "$SETTINGS_JSON" ] && [ "$SETTINGS_JSON" != "{}" ]; then
+              COMP_JSON="${COMP_JSON}, \"extensions\": {\"${EXTENSION_ID}\": {\"settings\": ${SETTINGS_JSON}}}"
+            else
+              COMP_JSON="${COMP_JSON}, \"extensions\": {\"${EXTENSION_ID}\": {}}"
+            fi
+          fi
+
+          COMP_JSON="${COMP_JSON}}"
+
+          echo "Component config: ${COMP_JSON}"
+          homeboy component create --json "${COMP_JSON}"
+        fi
+
+        echo "component-id=${COMP_ID}" >> "$GITHUB_ENV"
+
+    # ── Step 6: Run commands ──
+    - name: Run Homeboy commands
+      id: run-commands
+      shell: bash
+      env:
+        COMMANDS: ${{ inputs.commands }}
+        COMPONENT_NAME: ${{ inputs.component }}
+        EXTRA_ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+
+        # Determine component ID
+        if [ -n "$COMPONENT_NAME" ]; then
+          COMP_ID="$COMPONENT_NAME"
+        elif [ -n "${component_id:-}" ]; then
+          COMP_ID="${component_id}"
+        else
+          COMP_ID=$(basename "$GITHUB_REPOSITORY")
+        fi
+
+        WORKSPACE="$(pwd)"
+        RESULTS="{}"
+        OVERALL_EXIT=0
+
+        # Parse comma-separated commands
+        IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
+
+        for CMD in "${CMD_ARRAY[@]}"; do
+          # Trim whitespace
+          CMD=$(echo "$CMD" | xargs)
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Running: homeboy ${CMD} ${COMP_ID}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+
+          # Build the command
+          FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
+
+          if [ -n "$EXTRA_ARGS" ]; then
+            FULL_CMD="${FULL_CMD} ${EXTRA_ARGS}"
+          fi
+
+          echo "::group::homeboy ${CMD}"
+
+          CMD_EXIT=0
+          eval "$FULL_CMD" || CMD_EXIT=$?
+
+          echo "::endgroup::"
+
+          if [ $CMD_EXIT -eq 0 ]; then
+            echo "::notice::homeboy ${CMD}: PASSED"
+            RESULTS=$(echo "$RESULTS" | python3 -c "
+        import json, sys
+        d = json.loads(sys.stdin.read())
+        d['${CMD}'] = 'pass'
+        print(json.dumps(d))
+        ")
+          else
+            echo "::error::homeboy ${CMD}: FAILED (exit code ${CMD_EXIT})"
+            RESULTS=$(echo "$RESULTS" | python3 -c "
+        import json, sys
+        d = json.loads(sys.stdin.read())
+        d['${CMD}'] = 'fail'
+        print(json.dumps(d))
+        ")
+            OVERALL_EXIT=1
+          fi
+        done
+
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  Results: ${RESULTS}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        echo "results=${RESULTS}" >> "$GITHUB_OUTPUT"
+
+        exit $OVERALL_EXIT
