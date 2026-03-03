@@ -272,6 +272,17 @@ runs:
         # Parse comma-separated commands
         IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
 
+        # Check if lint is a separate command — if so, skip the test runner's
+        # internal lint step to avoid redundant repo-wide PHPCS/PHPStan runs.
+        # The action's lint command already handles --changed-since scoping.
+        HAS_LINT_COMMAND=false
+        for c in "${CMD_ARRAY[@]}"; do
+          if [ "$(echo "$c" | xargs)" = "lint" ]; then
+            HAS_LINT_COMMAND=true
+            break
+          fi
+        done
+
         for CMD in "${CMD_ARRAY[@]}"; do
           # Trim whitespace
           CMD=$(echo "$CMD" | xargs)
@@ -281,6 +292,15 @@ runs:
           echo "  Running: homeboy ${CMD} ${COMP_ID}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
+
+          # When running test and lint is already a separate command, tell the
+          # test runner to skip its internal lint step (avoids duplicate repo-wide
+          # PHPCS that ignores --changed-since scoping)
+          if [ "$CMD" = "test" ] && [ "$HAS_LINT_COMMAND" = "true" ]; then
+            export HOMEBOY_SKIP_LINT=1
+          else
+            unset HOMEBOY_SKIP_LINT 2>/dev/null || true
+          fi
 
           # Build the command
           if [ "$CMD" = "audit" ]; then
