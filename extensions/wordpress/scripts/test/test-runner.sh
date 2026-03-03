@@ -450,6 +450,25 @@ phpunit_args=(
     "${TEST_DIR}"
 )
 
+# Coverage collection (opt-in via HOMEBOY_COVERAGE=1)
+COVERAGE_CLOVER=""
+if [ "${HOMEBOY_COVERAGE:-}" = "1" ]; then
+    # Check for coverage driver (xdebug or pcov)
+    if php -r 'exit(extension_loaded("pcov") || extension_loaded("xdebug") ? 0 : 1);' 2>/dev/null; then
+        COVERAGE_CLOVER=$(mktemp --suffix=.xml)
+        phpunit_args+=(--coverage-clover "$COVERAGE_CLOVER")
+        echo "Coverage collection enabled (output: clover XML)"
+    else
+        echo ""
+        echo "WARNING: Coverage requested but no coverage driver found."
+        echo "  Install one of: pcov (recommended), xdebug"
+        echo "  Ubuntu: sudo apt install php-pcov"
+        echo "  macOS:  pecl install pcov"
+        echo "  Skipping coverage collection."
+        echo ""
+    fi
+fi
+
 PHPUNIT_TMPFILE=$(mktemp)
 
 set +e
@@ -509,6 +528,51 @@ if [ -z "$(echo "$PHPUNIT_OUTPUT" | grep -E 'PHPUnit|test|assert|OK|ERRORS|FAILU
     echo ""
     FAILED_STEP="PHPUnit tests (no output)"
     exit 1
+fi
+
+# Parse and report coverage results
+if [ -n "${COVERAGE_CLOVER:-}" ] && [ -f "$COVERAGE_CLOVER" ]; then
+    COVERAGE_PARSER="${EXTENSION_PATH}/scripts/test/parse-coverage.php"
+    COVERAGE_JSON=$(php "$COVERAGE_PARSER" "$COVERAGE_CLOVER" "${PLUGIN_PATH}/" 2>/dev/null || true)
+
+    if [ -n "$COVERAGE_JSON" ]; then
+        # Print summary to stdout
+        LINE_PCT=$(echo "$COVERAGE_JSON" | jq -r '.totals.lines.pct')
+        LINE_TOTAL=$(echo "$COVERAGE_JSON" | jq -r '.totals.lines.total')
+        LINE_COVERED=$(echo "$COVERAGE_JSON" | jq -r '.totals.lines.covered')
+        METHOD_PCT=$(echo "$COVERAGE_JSON" | jq -r '.totals.methods.pct')
+        echo ""
+        echo "============================================"
+        echo "COVERAGE SUMMARY"
+        echo "============================================"
+        echo "  Lines:   ${LINE_PCT}% (${LINE_COVERED}/${LINE_TOTAL})"
+        echo "  Methods: ${METHOD_PCT}%"
+        echo ""
+
+        # Write coverage JSON to file for homeboy core to read
+        if [ -n "${HOMEBOY_COVERAGE_FILE:-}" ]; then
+            echo "$COVERAGE_JSON" > "$HOMEBOY_COVERAGE_FILE"
+        fi
+
+        # Check minimum threshold
+        if [ -n "${HOMEBOY_COVERAGE_MIN:-}" ]; then
+            BELOW=$(echo "$LINE_PCT < ${HOMEBOY_COVERAGE_MIN}" | bc -l 2>/dev/null || echo "0")
+            if [ "$BELOW" = "1" ]; then
+                echo "COVERAGE FAILED: ${LINE_PCT}% is below minimum ${HOMEBOY_COVERAGE_MIN}%"
+                FAILED_STEP="Coverage threshold (${LINE_PCT}% < ${HOMEBOY_COVERAGE_MIN}%)"
+                rm -f "$COVERAGE_CLOVER"
+                # Clean up auto-created test database
+                if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
+                    mysql -u root -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
+                fi
+                exit 1
+            fi
+        fi
+    else
+        echo "WARNING: Failed to parse coverage report"
+    fi
+
+    rm -f "$COVERAGE_CLOVER"
 fi
 
 # Clean up auto-created test database
