@@ -238,7 +238,7 @@ runs:
 
         # Create temp dir for capturing output
         HOMEBOY_OUTPUT_DIR=$(mktemp -d)
-        echo "homeboy-output-dir=${HOMEBOY_OUTPUT_DIR}" >> "$GITHUB_ENV"
+        echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "$GITHUB_ENV"
 
         # Parse comma-separated commands
         IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
@@ -268,7 +268,10 @@ runs:
           echo "::group::homeboy ${CMD}"
 
           CMD_EXIT=0
-          eval "$FULL_CMD" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${CMD}.log" || CMD_EXIT=${PIPESTATUS[0]}
+          set +e
+          eval "$FULL_CMD" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${CMD}.log"
+          CMD_EXIT=${PIPESTATUS[0]}
+          set -e
 
           echo "::endgroup::"
 
@@ -309,12 +312,12 @@ runs:
         GH_TOKEN: ${{ github.token }}
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
+        RESULTS: ${{ steps.run-commands.outputs.results }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
         set -euo pipefail
 
-        RESULTS='${{ steps.run-commands.outputs.results }}'
-        OUTPUT_DIR="${homeboy_output_dir:-}"
-        PR_NUMBER="${{ github.event.pull_request.number }}"
+        OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
         REPO="${GITHUB_REPOSITORY}"
         COMP_ID="${COMPONENT_NAME:-$(basename "$GITHUB_REPOSITORY")}"
 
