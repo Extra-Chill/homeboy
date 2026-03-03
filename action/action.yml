@@ -73,6 +73,7 @@ runs:
     - name: Install Homeboy
       shell: bash
       env:
+        GH_TOKEN: ${{ github.token }}
         HOMEBOY_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
@@ -135,6 +136,7 @@ runs:
       if: inputs.extension != ''
       shell: bash
       env:
+        GH_TOKEN: ${{ github.token }}
         EXTENSION_ID: ${{ inputs.extension }}
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
       run: |
