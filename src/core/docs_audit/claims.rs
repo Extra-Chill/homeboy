@@ -123,7 +123,15 @@ fn line_suggests_example(line: &str) -> bool {
         || lower.contains("would create")
         || lower.contains("would generate")
         || lower.contains("would produce")
+        || lower.contains("would rename")
+        || lower.contains("would become")
+        || lower.contains("would be")
+        || lower.contains("could be")
+        || lower.contains("hypothetical")
+        || lower.contains("imagine")
+        || lower.contains("suppose")
         || lower.contains("typically:")
+        || lower.contains("renaming")
 }
 
 /// Check if a backslash-separated match is part of an OS filesystem path on the line.
@@ -168,12 +176,12 @@ fn classify_path_confidence(value: &str, line: &str, in_code_block: bool) -> Cla
         return ClaimConfidence::Real;
     }
     if line_suggests_example(line) {
-        return ClaimConfidence::Unclear;
+        return ClaimConfidence::Example;
     }
     // Path references in prose default to real — they should resolve
     let lower = value.to_lowercase();
     if lower.contains("example") || lower.contains("sample") || lower.contains("your-") {
-        return ClaimConfidence::Unclear;
+        return ClaimConfidence::Example;
     }
     ClaimConfidence::Real
 }
@@ -191,7 +199,7 @@ fn classify_class_confidence(value: &str, line: &str, in_code_block: bool) -> Cl
         return ClaimConfidence::Unclear;
     }
     if line_suggests_example(line) {
-        return ClaimConfidence::Unclear;
+        return ClaimConfidence::Example;
     }
     ClaimConfidence::Real
 }
@@ -567,7 +575,7 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
     }
 
     #[test]
-    fn test_example_context_path_is_unclear() {
+    fn test_example_context_path_is_example() {
         let content = "For example, `your-project/src/main.rs` would be the entry point.";
         let claims = extract_claims(content, "test.md", &[]);
 
@@ -575,8 +583,8 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
             .iter()
             .find(|c| c.claim_type == ClaimType::FilePath)
             .expect("should extract file path");
-        // "your-" in path triggers unclear, and "example" in context also does
-        assert_ne!(claim.confidence, ClaimConfidence::Real);
+        // "your-" in path and "example" in context both trigger Example confidence
+        assert_eq!(claim.confidence, ClaimConfidence::Example);
     }
 
     #[test]
@@ -678,16 +686,50 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
     }
 
     #[test]
+    fn test_would_rename_context_is_example() {
+        // Issue #325: "For example, renaming widget -> gadget would rename widget/widget.rs"
+        let content = "For example, renaming widget to gadget would rename `widget/widget.rs` to `gadget/gadget.rs`";
+        let claims = extract_claims(content, "test.md", &[]);
+
+        for claim in &claims {
+            if claim.claim_type == ClaimType::FilePath {
+                assert_eq!(
+                    claim.confidence,
+                    ClaimConfidence::Example,
+                    "paths in 'would rename' context should be Example, not {:?}: {}",
+                    claim.confidence,
+                    claim.value
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_renaming_context_is_example() {
+        let content = "Renaming `scripts/build/` to `scripts/compile/` requires updating imports.";
+        let claims = extract_claims(content, "test.md", &[]);
+
+        for claim in &claims {
+            assert_eq!(
+                claim.confidence,
+                ClaimConfidence::Example,
+                "paths in 'renaming' context should be Example: {}",
+                claim.value
+            );
+        }
+    }
+
+    #[test]
     fn test_this_creates_context_is_example() {
         // Test when path is on the same line as "this creates"
         let content2 = "This creates `docs/api/endpoints.md` with heading";
         let claims2 = extract_claims(content2, "test.md", &[]);
 
         if let Some(claim) = claims2.iter().find(|c| c.claim_type == ClaimType::FilePath) {
-            assert_ne!(
+            assert_eq!(
                 claim.confidence,
-                ClaimConfidence::Real,
-                "paths in 'this creates' context should not be real"
+                ClaimConfidence::Example,
+                "paths in 'this creates' context should be Example confidence"
             );
         }
 
@@ -696,10 +738,10 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
         let claims3 = extract_claims(content3, "test.md", &[]);
 
         if let Some(claim) = claims3.iter().find(|c| c.claim_type == ClaimType::FilePath) {
-            assert_ne!(
+            assert_eq!(
                 claim.confidence,
-                ClaimConfidence::Real,
-                "paths in 'Example:' context should not be real"
+                ClaimConfidence::Example,
+                "paths in 'Example:' context should be Example confidence"
             );
         }
     }
