@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 
 use super::conventions::DeviationKind;
-use super::fingerprint::FileFingerprint;
 use super::findings::{Finding, Severity};
+use super::fingerprint::FileFingerprint;
 
 /// Minimum number of locations for a function to count as duplicated.
 const MIN_DUPLICATE_LOCATIONS: usize = 2;
@@ -138,10 +138,7 @@ pub fn detect_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                 convention: "duplication".to_string(),
                 severity: Severity::Warning,
                 file: file.clone(),
-                description: format!(
-                    "Duplicate function `{}` — also in {}",
-                    method_name, also_in
-                ),
+                description: format!("Duplicate function `{}` — also in {}", method_name, also_in),
                 suggestion: suggestion.clone(),
                 kind: DeviationKind::DuplicateFunction,
             });
@@ -149,7 +146,11 @@ pub fn detect_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     }
 
     // Sort by file path then description for deterministic output
-    findings.sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.description.cmp(&b.description)));
+    findings.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.description.cmp(&b.description))
+    });
     findings
 }
 
@@ -160,11 +161,10 @@ pub fn detect_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
 /// Names that are too generic to flag as near-duplicates.
 /// These appear in many files with completely unrelated implementations.
 const GENERIC_NAMES: &[&str] = &[
-    "run", "new", "default", "build", "list", "show", "set", "get",
-    "delete", "remove", "clear", "create", "update", "status", "search",
-    "find", "read", "write", "rename", "init", "test", "fmt", "from",
-    "into", "clone", "drop", "display", "parse", "validate", "execute",
-    "handle", "process", "merge", "resolve", "pin", "plan",
+    "run", "new", "default", "build", "list", "show", "set", "get", "delete", "remove", "clear",
+    "create", "update", "status", "search", "find", "read", "write", "rename", "init", "test",
+    "fmt", "from", "into", "clone", "drop", "display", "parse", "validate", "execute", "handle",
+    "process", "merge", "resolve", "pin", "plan",
 ];
 
 /// Minimum body line count — skip trivial functions (1-2 line bodies).
@@ -190,7 +190,10 @@ fn build_structural_groups(
                 .or_default()
                 .push((
                     fp.relative_path.clone(),
-                    fp.method_hashes.get(method_name).cloned().unwrap_or_default(),
+                    fp.method_hashes
+                        .get(method_name)
+                        .cloned()
+                        .unwrap_or_default(),
                 ));
         }
     }
@@ -285,10 +288,8 @@ pub fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding>
         }
 
         // Check that exact hashes actually differ (otherwise exact detection covers it)
-        let unique_body_hashes: std::collections::HashSet<&str> = file_hashes
-            .iter()
-            .map(|(_, h)| h.as_str())
-            .collect();
+        let unique_body_hashes: std::collections::HashSet<&str> =
+            file_hashes.iter().map(|(_, h)| h.as_str()).collect();
         if unique_body_hashes.len() < 2 {
             continue;
         }
@@ -352,7 +353,11 @@ pub fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding>
         }
     }
 
-    findings.sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.description.cmp(&b.description)));
+    findings.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.description.cmp(&b.description))
+    });
     findings
 }
 
@@ -365,11 +370,7 @@ mod tests {
     use super::*;
     use crate::code_audit::conventions::Language;
 
-    fn make_fingerprint(
-        path: &str,
-        methods: &[&str],
-        hashes: &[(&str, &str)],
-    ) -> FileFingerprint {
+    fn make_fingerprint(path: &str, methods: &[&str], hashes: &[(&str, &str)]) -> FileFingerprint {
         make_fingerprint_with_structural(path, methods, hashes, &[])
     }
 
@@ -406,11 +407,7 @@ mod tests {
 
     #[test]
     fn detects_exact_duplicate() {
-        let fp1 = make_fingerprint(
-            "src/utils/io.rs",
-            &["is_zero"],
-            &[("is_zero", "abc123")],
-        );
+        let fp1 = make_fingerprint("src/utils/io.rs", &["is_zero"], &[("is_zero", "abc123")]);
         let fp2 = make_fingerprint(
             "src/utils/validation.rs",
             &["is_zero"],
@@ -420,7 +417,9 @@ mod tests {
         let findings = detect_duplicates(&[&fp1, &fp2]);
 
         assert_eq!(findings.len(), 2, "Should emit one finding per location");
-        assert!(findings.iter().all(|f| f.kind == DeviationKind::DuplicateFunction));
+        assert!(findings
+            .iter()
+            .all(|f| f.kind == DeviationKind::DuplicateFunction));
         assert!(findings.iter().any(|f| f.file == "src/utils/io.rs"));
         assert!(findings.iter().any(|f| f.file == "src/utils/validation.rs"));
         assert!(findings[0].description.contains("is_zero"));
@@ -428,28 +427,19 @@ mod tests {
 
     #[test]
     fn no_duplicates_different_hashes() {
-        let fp1 = make_fingerprint(
-            "src/a.rs",
-            &["process"],
-            &[("process", "hash_a")],
-        );
-        let fp2 = make_fingerprint(
-            "src/b.rs",
-            &["process"],
-            &[("process", "hash_b")],
-        );
+        let fp1 = make_fingerprint("src/a.rs", &["process"], &[("process", "hash_a")]);
+        let fp2 = make_fingerprint("src/b.rs", &["process"], &[("process", "hash_b")]);
 
         let findings = detect_duplicates(&[&fp1, &fp2]);
-        assert!(findings.is_empty(), "Different hashes should not flag duplicates");
+        assert!(
+            findings.is_empty(),
+            "Different hashes should not flag duplicates"
+        );
     }
 
     #[test]
     fn no_duplicates_single_location() {
-        let fp = make_fingerprint(
-            "src/only.rs",
-            &["unique_fn"],
-            &[("unique_fn", "abc123")],
-        );
+        let fp = make_fingerprint("src/only.rs", &["unique_fn"], &[("unique_fn", "abc123")]);
 
         let findings = detect_duplicates(&[&fp]);
         assert!(findings.is_empty(), "Single location is not a duplicate");
@@ -473,7 +463,10 @@ mod tests {
         let fp2 = make_fingerprint("src/b.rs", &["foo", "bar"], &[]);
 
         let findings = detect_duplicates(&[&fp1, &fp2]);
-        assert!(findings.is_empty(), "No hashes means no duplication findings");
+        assert!(
+            findings.is_empty(),
+            "No hashes means no duplication findings"
+        );
     }
 
     #[test]
@@ -508,7 +501,10 @@ mod tests {
 
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].canonical_file, "src/utils.rs");
-        assert_eq!(groups[0].remove_from, vec!["src/core/deep/nested/helper.rs"]);
+        assert_eq!(
+            groups[0].remove_from,
+            vec!["src/core/deep/nested/helper.rs"]
+        );
     }
 
     #[test]
@@ -585,7 +581,9 @@ mod tests {
         let findings = detect_near_duplicates(&[&fp1, &fp2]);
 
         assert_eq!(findings.len(), 2, "Should flag both locations");
-        assert!(findings.iter().all(|f| f.kind == DeviationKind::NearDuplicate));
+        assert!(findings
+            .iter()
+            .all(|f| f.kind == DeviationKind::NearDuplicate));
         assert!(findings[0].description.contains("cache_path"));
         assert_eq!(findings[0].severity, Severity::Info);
     }
@@ -627,7 +625,10 @@ mod tests {
         );
 
         let findings = detect_near_duplicates(&[&fp1, &fp2]);
-        assert!(findings.is_empty(), "'run' is a generic name — should be skipped");
+        assert!(
+            findings.is_empty(),
+            "'run' is a generic name — should be skipped"
+        );
     }
 
     #[test]
@@ -689,7 +690,11 @@ mod tests {
         );
 
         let findings = detect_near_duplicates(&[&fp1, &fp2]);
-        assert_eq!(findings.len(), 2, "Non-trivial core↔core near-duplicates should be flagged");
+        assert_eq!(
+            findings.len(),
+            2,
+            "Non-trivial core↔core near-duplicates should be flagged"
+        );
     }
 
     #[test]

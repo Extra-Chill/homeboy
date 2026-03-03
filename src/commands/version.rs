@@ -109,7 +109,9 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
 
             let display_id = component_id.or_else(|| {
                 // Include discovered component ID in output
-                if info.targets.is_empty() { None } else {
+                if info.targets.is_empty() {
+                    None
+                } else {
                     component::resolve(None).ok().map(|c| c.id)
                 }
             });
@@ -128,19 +130,17 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             component_id: _,
             new_version: _,
             path: _,
-        } => {
-            Err(homeboy::Error::validation_invalid_argument(
-                "version set",
-                "'version set' has been deprecated. It skips changelog finalization, hooks, \
+        } => Err(homeboy::Error::validation_invalid_argument(
+            "version set",
+            "'version set' has been deprecated. It skips changelog finalization, hooks, \
                  and push — producing incomplete releases. Use 'homeboy version bump' or \
                  'homeboy release' instead, which handle the full release pipeline atomically.",
-                None,
-                None,
-            )
-            .with_hint("homeboy version bump <component> patch".to_string())
-            .with_hint("homeboy release <component> patch".to_string())
-            .with_hint("See: https://github.com/Extra-Chill/homeboy/issues/259".to_string()))
-        }
+            None,
+            None,
+        )
+        .with_hint("homeboy version bump <component> patch".to_string())
+        .with_hint("homeboy release <component> patch".to_string())
+        .with_hint("See: https://github.com/Extra-Chill/homeboy/issues/259".to_string())),
         VersionCommand::Bump {
             component_id,
             bump_type,
@@ -192,8 +192,6 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         }
     }
 }
-
-
 
 pub fn show_version_output(component_id: &str) -> CmdResult<VersionShowOutput> {
     let info = read_version(Some(component_id))?;

@@ -21,9 +21,9 @@ mod output;
 mod tty;
 
 use commands::{
-    api, audit, auth, build, changelog, changes, cleanup, cli, component, config, db, deploy, file,
-    fleet, git, init, lint, logs, extension, project, refactor, release, server, ssh, status, test,
-    transfer, upgrade, version,
+    api, audit, auth, build, changelog, changes, cleanup, cli, component, config, db, deploy,
+    extension, file, fleet, git, init, lint, logs, project, refactor, release, server, ssh, status,
+    test, transfer, upgrade, version,
 };
 use homeboy::extension::load_all_extensions;
 use homeboy::utils::args;
@@ -342,7 +342,8 @@ fn main() -> std::process::ExitCode {
                     return std::process::ExitCode::from(exit_code_to_u8(exit_code));
                 }
                 Ok(_) => {
-                    let err = homeboy::Error::internal_unexpected("Unexpected output type for raw mode");
+                    let err =
+                        homeboy::Error::internal_unexpected("Unexpected output type for raw mode");
                     output::print_result::<serde_json::Value>(Err(err)).ok();
                     return std::process::ExitCode::from(exit_code_to_u8(1));
                 }

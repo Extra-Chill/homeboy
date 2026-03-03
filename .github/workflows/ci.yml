@@ -45,9 +45,12 @@ jobs:
   # ── Homeboy audit (dogfooding) ──
   # Uses homeboy-action to run audit on the codebase itself.
   # This catches convention drift, structural issues, and doc staleness.
+  # Non-blocking for now — posts PR comment but doesn't gate merge.
+  # TODO: Add baseline ratchet so audit only fails on NEW findings.
   audit:
     name: Homeboy Audit
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

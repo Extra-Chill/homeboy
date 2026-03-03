@@ -118,7 +118,11 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
             fix_result.files_modified = total_modified;
         }
 
-        let exit_code = if fix_result.total_insertions > 0 { 1 } else { 0 };
+        let exit_code = if fix_result.total_insertions > 0 {
+            1
+        } else {
+            0
+        };
 
         return Ok((
             AuditOutput::Fix {
@@ -133,13 +137,13 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
 
     // --baseline: save current state
     if args.baseline {
-        let saved = baseline::save_baseline(&result)
-            .map_err(|e| homeboy::Error::internal_unexpected(e))?;
+        let saved =
+            baseline::save_baseline(&result).map_err(|e| homeboy::Error::internal_unexpected(e))?;
 
-        let baseline_data = baseline::load_baseline(Path::new(&result.source_path))
-            .ok_or_else(|| homeboy::Error::internal_unexpected(
-                "Failed to read back saved baseline",
-            ))?;
+        let baseline_data =
+            baseline::load_baseline(Path::new(&result.source_path)).ok_or_else(|| {
+                homeboy::Error::internal_unexpected("Failed to read back saved baseline")
+            })?;
 
         if let Some(score) = baseline_data.alignment_score {
             eprintln!(

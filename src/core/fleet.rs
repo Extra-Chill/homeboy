@@ -24,7 +24,6 @@ impl Fleet {
             description: None,
         }
     }
-
 }
 
 impl ConfigEntity for Fleet {

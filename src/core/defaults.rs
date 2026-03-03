@@ -339,7 +339,10 @@ fn load_config_from_file() -> crate::Result<HomeboyConfig> {
     let path = paths::homeboy_json()?;
 
     if !path.exists() {
-        return Err(crate::Error::internal_io("homeboy.json not found", Some(path.display().to_string())));
+        return Err(crate::Error::internal_io(
+            "homeboy.json not found",
+            Some(path.display().to_string()),
+        ));
     }
 
     let content = io::read_file(&path, &format!("read {}", path.display()))?;

@@ -121,11 +121,19 @@ fn run_for_project_with_executor(
     local_executor: fn(&str) -> CommandOutput,
 ) -> Result<CliToolResult> {
     if args.is_empty() {
-        return Err(Error::validation_missing_argument(vec!["command".to_string()]));
+        return Err(Error::validation_missing_argument(vec![
+            "command".to_string()
+        ]));
     }
 
-    let extension = find_extension_by_tool(tool)
-        .ok_or_else(|| Error::validation_invalid_argument("tool", format!("No extension provides tool '{}'", tool), Some(tool.to_string()), None))?;
+    let extension = find_extension_by_tool(tool).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "tool",
+            format!("No extension provides tool '{}'", tool),
+            Some(tool.to_string()),
+            None,
+        )
+    })?;
 
     let cli_config = extension.cli.as_ref().ok_or_else(|| {
         Error::config(format!(
@@ -139,7 +147,9 @@ fn run_for_project_with_executor(
     let (target_domain, command_args) = resolve_subtarget(&project, args)?;
 
     if command_args.is_empty() {
-        return Err(Error::validation_missing_argument(vec!["command".to_string()]));
+        return Err(Error::validation_missing_argument(vec![
+            "command".to_string()
+        ]));
     }
 
     // Try direct execution first (bypasses shell escaping issues)
@@ -197,7 +207,9 @@ fn build_project_command(
     let (target_domain, command_args) = resolve_subtarget(project, args)?;
 
     if command_args.is_empty() {
-        return Err(Error::validation_missing_argument(vec!["command".to_string()]));
+        return Err(Error::validation_missing_argument(vec![
+            "command".to_string()
+        ]));
     }
 
     let cli_path = cli_config
@@ -227,7 +239,11 @@ fn build_project_command(
     let mut rendered = render_map(&cli_config.command_template, &variables);
 
     // Append settings-based flags from extension config
-    if let Some(extension_config) = project.extensions.as_ref().and_then(|m| m.get(extension_id)) {
+    if let Some(extension_config) = project
+        .extensions
+        .as_ref()
+        .and_then(|m| m.get(extension_id))
+    {
         for (setting_key, flag_template) in &cli_config.settings_flags {
             if let Some(flag) = extension_config
                 .settings

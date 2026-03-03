@@ -10,19 +10,19 @@ use crate::config;
 use crate::context::{resolve_project_ssh_with_base_path, RemoteProjectContext};
 use crate::defaults;
 use crate::error::{Error, Result};
-use crate::git;
-use crate::hooks::{self, HookFailureMode};
 use crate::extension::{
     self, load_all_extensions, DeployOverride, DeployVerification, ExtensionManifest,
 };
+use crate::git;
+use crate::hooks::{self, HookFailureMode};
 use crate::permissions;
 use crate::project::{self, Project};
 use crate::ssh::SshClient;
-use crate::utils::{self, artifact};
 use crate::utils::base_path;
 use crate::utils::parser;
 use crate::utils::shell;
 use crate::utils::template::{render_map, TemplateVars};
+use crate::utils::{self, artifact};
 use crate::version;
 
 /// Parse bulk component IDs from a JSON spec.
@@ -417,7 +417,10 @@ fn rsync_directory(
     remote_path: &str,
 ) -> Result<DeployResult> {
     // Ensure local_path ends with / so rsync copies contents, not the directory itself
-    let local_str = format!("{}/", local_path.display().to_string().trim_end_matches('/'));
+    let local_str = format!(
+        "{}/",
+        local_path.display().to_string().trim_end_matches('/')
+    );
 
     // Ensure remote_path ends with /
     let remote_str = format!("{}/", remote_path.trim_end_matches('/'));
@@ -432,7 +435,7 @@ fn rsync_directory(
         );
 
         let rsync_args = vec![
-            "-a".to_string(),      // archive mode (recursive, preserves permissions, timestamps, etc.)
+            "-a".to_string(), // archive mode (recursive, preserves permissions, timestamps, etc.)
             "--delete".to_string(), // remove files on target that don't exist in source
             local_str,
             remote_str,
@@ -450,10 +453,7 @@ fn rsync_directory(
     }
 
     // Remote deploy: rsync over SSH
-    let mut rsync_args = vec![
-        "-a".to_string(),
-        "--delete".to_string(),
-    ];
+    let mut rsync_args = vec!["-a".to_string(), "--delete".to_string()];
 
     // Build SSH command with the same options as scp
     let mut ssh_cmd_parts = vec!["ssh".to_string()];
@@ -465,13 +465,18 @@ fn rsync_directory(
     }
     // Use same safety options as SSH client
     ssh_cmd_parts.extend([
-        "-o".to_string(), "BatchMode=yes".to_string(),
-        "-o".to_string(), "ConnectTimeout=10".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=10".to_string(),
     ]);
 
     rsync_args.extend(["-e".to_string(), ssh_cmd_parts.join(" ")]);
     rsync_args.push(local_str.clone());
-    rsync_args.push(format!("{}@{}:{}", ssh_client.user, ssh_client.host, remote_str));
+    rsync_args.push(format!(
+        "{}@{}:{}",
+        ssh_client.user, ssh_client.host, remote_str
+    ));
 
     log_status!(
         "deploy",
@@ -640,8 +645,6 @@ fn scp_file_atomic(
 
     Ok(DeployResult::success(0))
 }
-
-
 
 // =============================================================================
 // Deploy Orchestration
@@ -893,10 +896,21 @@ fn deploy_components(
 
     // Check and dry-run modes return early without building or deploying
     if config.check {
-        return Ok(run_check_mode(&components, &local_versions, &remote_versions, base_path));
+        return Ok(run_check_mode(
+            &components,
+            &local_versions,
+            &remote_versions,
+            base_path,
+        ));
     }
     if config.dry_run {
-        return Ok(run_dry_run_mode(&components, &local_versions, &remote_versions, base_path, config));
+        return Ok(run_dry_run_mode(
+            &components,
+            &local_versions,
+            &remote_versions,
+            base_path,
+            config,
+        ));
     }
 
     if !config.force {
@@ -951,7 +965,10 @@ fn run_check_mode(
             let release_state = calculate_release_state(c);
             let mut result = ComponentDeployResult::new(c, base_path)
                 .with_status("checked")
-                .with_versions(local_versions.get(&c.id).cloned(), remote_versions.get(&c.id).cloned())
+                .with_versions(
+                    local_versions.get(&c.id).cloned(),
+                    remote_versions.get(&c.id).cloned(),
+                )
                 .with_component_status(status);
             if let Some(state) = release_state {
                 result = result.with_release_state(state);
@@ -963,7 +980,12 @@ fn run_check_mode(
     let total = results.len() as u32;
     DeployOrchestrationResult {
         results,
-        summary: DeploySummary { total, succeeded: 0, failed: 0, skipped: 0 },
+        summary: DeploySummary {
+            total,
+            succeeded: 0,
+            failed: 0,
+            skipped: 0,
+        },
     }
 }
 
@@ -985,7 +1007,10 @@ fn run_dry_run_mode(
             };
             let mut result = ComponentDeployResult::new(c, base_path)
                 .with_status("planned")
-                .with_versions(local_versions.get(&c.id).cloned(), remote_versions.get(&c.id).cloned());
+                .with_versions(
+                    local_versions.get(&c.id).cloned(),
+                    remote_versions.get(&c.id).cloned(),
+                );
             if config.check {
                 result = result.with_component_status(status);
             }
@@ -996,7 +1021,12 @@ fn run_dry_run_mode(
     let total = results.len() as u32;
     DeployOrchestrationResult {
         results,
-        summary: DeploySummary { total, succeeded: 0, failed: 0, skipped: 0 },
+        summary: DeploySummary {
+            total,
+            succeeded: 0,
+            failed: 0,
+            skipped: 0,
+        },
     }
 }
 
@@ -1014,7 +1044,8 @@ fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
             format!("Components have uncommitted changes: {}", dirty.join(", ")),
             None,
             Some(vec![
-                "Commit your changes before deploying to ensure deployed code is tracked".to_string(),
+                "Commit your changes before deploying to ensure deployed code is tracked"
+                    .to_string(),
                 "Use --force to deploy anyway".to_string(),
             ]),
         ));
@@ -1041,42 +1072,79 @@ fn execute_component_deploy(
     let (build_exit_code, build_error) = if is_git_deploy || config.skip_build {
         (Some(0), None)
     } else if artifact_is_fresh(component) {
-        log_status!("deploy", "Artifact for '{}' is up-to-date, skipping build", component.id);
+        log_status!(
+            "deploy",
+            "Artifact for '{}' is up-to-date, skipping build",
+            component.id
+        );
         (Some(0), None)
     } else {
         build::build_component(component)
     };
 
     if let Some(ref error) = build_error {
-        return ComponentDeployResult::failed(component, base_path, local_version, remote_version, error.clone())
-            .with_build_exit_code(build_exit_code);
+        return ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            error.clone(),
+        )
+        .with_build_exit_code(build_exit_code);
     }
 
     // Resolve install directory
     let install_dir = match base_path::join_remote_path(Some(base_path), &component.remote_path) {
         Ok(v) => v,
         Err(err) => {
-            return ComponentDeployResult::failed(component, base_path, local_version, remote_version, err.to_string())
-                .with_build_exit_code(build_exit_code);
+            return ComponentDeployResult::failed(
+                component,
+                base_path,
+                local_version,
+                remote_version,
+                err.to_string(),
+            )
+            .with_build_exit_code(build_exit_code);
         }
     };
 
     // Safety check: prevent deploying to shared parent directories (issue #353)
     if let Err(err) = validate_deploy_target(&install_dir, base_path, &component.id) {
-        return ComponentDeployResult::failed(component, base_path, local_version, remote_version, err.to_string())
-            .with_build_exit_code(build_exit_code);
+        return ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            err.to_string(),
+        )
+        .with_build_exit_code(build_exit_code);
     }
 
     // Dispatch by deploy strategy
     let strategy = component.deploy_strategy.as_deref().unwrap_or("rsync");
 
     if strategy == "git" {
-        return execute_git_deploy(component, config, ctx, base_path, &install_dir, local_version, remote_version);
+        return execute_git_deploy(
+            component,
+            config,
+            ctx,
+            base_path,
+            &install_dir,
+            local_version,
+            remote_version,
+        );
     }
 
     execute_artifact_deploy(
-        component, config, ctx, base_path, project, &install_dir,
-        local_version, remote_version, build_exit_code,
+        component,
+        config,
+        ctx,
+        base_path,
+        project,
+        &install_dir,
+        local_version,
+        remote_version,
+        build_exit_code,
     )
 }
 
@@ -1099,7 +1167,11 @@ fn execute_git_deploy(
     );
 
     match deploy_result {
-        Ok(DeployResult { success: true, exit_code, .. }) => {
+        Ok(DeployResult {
+            success: true,
+            exit_code,
+            ..
+        }) => {
             if let Ok(Some(summary)) = cleanup_build_dependencies(component, config) {
                 log_status!("deploy", "Cleanup: {}", summary);
             }
@@ -1111,15 +1183,25 @@ fn execute_git_deploy(
                 .with_remote_path(install_dir.to_string())
                 .with_deploy_exit_code(Some(exit_code))
         }
-        Ok(DeployResult { error, exit_code, .. }) => {
-            ComponentDeployResult::failed(component, base_path, local_version, remote_version, error.unwrap_or_default())
-                .with_remote_path(install_dir.to_string())
-                .with_deploy_exit_code(Some(exit_code))
-        }
-        Err(err) => {
-            ComponentDeployResult::failed(component, base_path, local_version, remote_version, err.to_string())
-                .with_remote_path(install_dir.to_string())
-        }
+        Ok(DeployResult {
+            error, exit_code, ..
+        }) => ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            error.unwrap_or_default(),
+        )
+        .with_remote_path(install_dir.to_string())
+        .with_deploy_exit_code(Some(exit_code)),
+        Err(err) => ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            err.to_string(),
+        )
+        .with_remote_path(install_dir.to_string()),
     }
 }
 
@@ -1139,9 +1221,17 @@ fn execute_artifact_deploy(
     let artifact_pattern = match component.build_artifact.as_ref() {
         Some(pattern) => pattern,
         None => {
-            return ComponentDeployResult::failed(component, base_path, local_version, remote_version,
-                format!("Component '{}' has no build_artifact configured", component.id))
-                .with_build_exit_code(build_exit_code);
+            return ComponentDeployResult::failed(
+                component,
+                base_path,
+                local_version,
+                remote_version,
+                format!(
+                    "Component '{}' has no build_artifact configured",
+                    component.id
+                ),
+            )
+            .with_build_exit_code(build_exit_code);
         }
     };
 
@@ -1153,8 +1243,14 @@ fn execute_artifact_deploy(
             } else {
                 format!("{}. Run build first: homeboy build {}", e, component.id)
             };
-            return ComponentDeployResult::failed(component, base_path, local_version, remote_version, error_msg)
-                .with_build_exit_code(build_exit_code);
+            return ComponentDeployResult::failed(
+                component,
+                base_path,
+                local_version,
+                remote_version,
+                error_msg,
+            )
+            .with_build_exit_code(build_exit_code);
         }
     };
 
@@ -1200,7 +1296,11 @@ fn execute_artifact_deploy(
         };
 
     match deploy_result {
-        Ok(DeployResult { success: true, exit_code, .. }) => {
+        Ok(DeployResult {
+            success: true,
+            exit_code,
+            ..
+        }) => {
             if let Ok(Some(summary)) = cleanup_build_dependencies(component, config) {
                 log_status!("deploy", "Cleanup: {}", summary);
             }
@@ -1220,18 +1320,29 @@ fn execute_artifact_deploy(
                 .with_build_exit_code(build_exit_code)
                 .with_deploy_exit_code(Some(exit_code))
         }
-        Ok(DeployResult { success: false, exit_code, error }) => {
-            ComponentDeployResult::failed(component, base_path, local_version, remote_version,
-                error.unwrap_or_default())
-                .with_remote_path(install_dir.to_string())
-                .with_build_exit_code(build_exit_code)
-                .with_deploy_exit_code(Some(exit_code))
-        }
-        Err(err) => {
-            ComponentDeployResult::failed(component, base_path, local_version, remote_version, err.to_string())
-                .with_remote_path(install_dir.to_string())
-                .with_build_exit_code(build_exit_code)
-        }
+        Ok(DeployResult {
+            success: false,
+            exit_code,
+            error,
+        }) => ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            error.unwrap_or_default(),
+        )
+        .with_remote_path(install_dir.to_string())
+        .with_build_exit_code(build_exit_code)
+        .with_deploy_exit_code(Some(exit_code)),
+        Err(err) => ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            err.to_string(),
+        )
+        .with_remote_path(install_dir.to_string())
+        .with_build_exit_code(build_exit_code),
     }
 }
 
@@ -1568,7 +1679,10 @@ fn load_project_components(component_ids: &[String]) -> Result<LoadedComponents>
         }
     }
 
-    Ok(LoadedComponents { deployable, skipped })
+    Ok(LoadedComponents {
+        deployable,
+        skipped,
+    })
 }
 
 /// Check if a component's build artifact is newer than its latest source commit.
@@ -1777,7 +1891,11 @@ fn deploy_with_override(
         "mkdir -p {}",
         shell::quote_path(&override_config.staging_path)
     );
-    log_status!("deploy", "Using extension deploy override: {}", extension.id);
+    log_status!(
+        "deploy",
+        "Using extension deploy override: {}",
+        extension.id
+    );
     log_status!(
         "deploy",
         "Creating staging directory: {}",
@@ -1894,7 +2012,10 @@ fn run_post_deploy_hooks(
 ) {
     let mut vars = HashMap::new();
     vars.insert(TemplateVars::COMPONENT_ID.to_string(), component.id.clone());
-    vars.insert(TemplateVars::INSTALL_DIR.to_string(), install_dir.to_string());
+    vars.insert(
+        TemplateVars::INSTALL_DIR.to_string(),
+        install_dir.to_string(),
+    );
     vars.insert(TemplateVars::BASE_PATH.to_string(), base_path.to_string());
 
     match hooks::run_hooks_remote(
@@ -1941,110 +2062,84 @@ mod tests {
             "/srv/project/lib/my-component",
             "/srv/project",
             "my-component",
-        ).is_ok());
+        )
+        .is_ok());
     }
 
     #[test]
     fn validate_accepts_deeply_nested_path() {
-        assert!(validate_deploy_target(
-            "/srv/project/packages/core/src",
-            "/srv/project",
-            "core",
-        ).is_ok());
+        assert!(
+            validate_deploy_target("/srv/project/packages/core/src", "/srv/project", "core",)
+                .is_ok()
+        );
     }
 
     #[test]
     fn validate_accepts_arbitrary_safe_paths() {
-        assert!(validate_deploy_target(
-            "/opt/apps/my-service",
-            "/opt/apps",
-            "my-service",
-        ).is_ok());
+        assert!(validate_deploy_target("/opt/apps/my-service", "/opt/apps", "my-service",).is_ok());
     }
 
     #[test]
     fn validate_rejects_base_path() {
-        let result = validate_deploy_target(
-            "/srv/project",
-            "/srv/project",
-            "my-component",
-        );
+        let result = validate_deploy_target("/srv/project", "/srv/project", "my-component");
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("base_path"));
     }
 
     #[test]
     fn validate_rejects_base_path_with_trailing_slash() {
-        assert!(validate_deploy_target(
-            "/srv/project/",
-            "/srv/project",
-            "my-component",
-        ).is_err());
+        assert!(validate_deploy_target("/srv/project/", "/srv/project", "my-component",).is_err());
     }
 
     #[test]
     fn validate_rejects_shared_vendor_directory() {
-        let result = validate_deploy_target(
-            "/srv/project/vendor",
-            "/srv/project",
-            "my-lib",
-        );
+        let result = validate_deploy_target("/srv/project/vendor", "/srv/project", "my-lib");
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("shared parent directory"));
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("shared parent directory"));
     }
 
     #[test]
     fn validate_rejects_shared_node_modules_directory() {
-        assert!(validate_deploy_target(
-            "/srv/project/node_modules",
-            "/srv/project",
-            "my-pkg",
-        ).is_err());
+        assert!(
+            validate_deploy_target("/srv/project/node_modules", "/srv/project", "my-pkg",).is_err()
+        );
     }
 
     #[test]
     fn validate_rejects_shared_packages_directory() {
-        assert!(validate_deploy_target(
-            "/srv/project/packages",
-            "/srv/project",
-            "my-pkg",
-        ).is_err());
+        assert!(
+            validate_deploy_target("/srv/project/packages", "/srv/project", "my-pkg",).is_err()
+        );
     }
 
     #[test]
     fn validate_rejects_shared_extensions_directory() {
-        assert!(validate_deploy_target(
-            "/srv/project/extensions",
-            "/srv/project",
-            "my-ext",
-        ).is_err());
+        assert!(
+            validate_deploy_target("/srv/project/extensions", "/srv/project", "my-ext",).is_err()
+        );
     }
 
     #[test]
     fn validate_rejects_shared_plugins_directory() {
-        assert!(validate_deploy_target(
-            "/srv/project/lib/plugins",
-            "/srv/project",
-            "my-plugin",
-        ).is_err());
+        assert!(
+            validate_deploy_target("/srv/project/lib/plugins", "/srv/project", "my-plugin",)
+                .is_err()
+        );
     }
 
     #[test]
     fn validate_rejects_shared_themes_directory() {
-        assert!(validate_deploy_target(
-            "/srv/project/lib/themes",
-            "/srv/project",
-            "my-theme",
-        ).is_err());
+        assert!(
+            validate_deploy_target("/srv/project/lib/themes", "/srv/project", "my-theme",).is_err()
+        );
     }
 
     #[test]
     fn validate_rejects_trailing_slash_on_shared_dir() {
-        assert!(validate_deploy_target(
-            "/srv/project/vendor/",
-            "/srv/project",
-            "my-lib",
-        ).is_err());
+        assert!(validate_deploy_target("/srv/project/vendor/", "/srv/project", "my-lib",).is_err());
     }
 
     // =========================================================================
@@ -2067,11 +2162,8 @@ mod tests {
 
     #[test]
     fn chain_accepts_correct_component_path() {
-        let result = resolve_and_validate(
-            "/srv/project",
-            "lib/plugins/my-component",
-            "my-component",
-        );
+        let result =
+            resolve_and_validate("/srv/project", "lib/plugins/my-component", "my-component");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "/srv/project/lib/plugins/my-component");
     }
@@ -2080,53 +2172,36 @@ mod tests {
     fn chain_rejects_shared_parent_as_remote_path() {
         // The exact class of bug from issue #353: remote_path points to the
         // shared parent directory instead of the component's own subdirectory
-        let result = resolve_and_validate(
-            "/srv/project",
-            "lib/plugins",
-            "my-component",
-        );
+        let result = resolve_and_validate("/srv/project", "lib/plugins", "my-component");
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("shared parent directory"));
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("shared parent directory"));
     }
 
     #[test]
     fn chain_rejects_trailing_slash_on_shared_parent() {
-        let result = resolve_and_validate(
-            "/srv/project",
-            "lib/plugins/",
-            "my-component",
-        );
+        let result = resolve_and_validate("/srv/project", "lib/plugins/", "my-component");
         assert!(result.is_err());
     }
 
     #[test]
     fn chain_rejects_absolute_path_to_shared_parent() {
-        let result = resolve_and_validate(
-            "/srv/project",
-            "/srv/project/vendor",
-            "my-lib",
-        );
+        let result = resolve_and_validate("/srv/project", "/srv/project/vendor", "my-lib");
         assert!(result.is_err());
     }
 
     #[test]
     fn chain_rejects_base_path_as_remote_path() {
-        let result = resolve_and_validate(
-            "/srv/project",
-            "/srv/project",
-            "my-component",
-        );
+        let result = resolve_and_validate("/srv/project", "/srv/project", "my-component");
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("base_path"));
     }
 
     #[test]
     fn chain_rejects_base_path_with_trailing_slash_mismatch() {
-        let result = resolve_and_validate(
-            "/srv/project/",
-            "vendor",
-            "my-lib",
-        );
+        let result = resolve_and_validate("/srv/project/", "vendor", "my-lib");
         assert!(result.is_err());
     }
 
@@ -2142,11 +2217,7 @@ mod tests {
 
     #[test]
     fn chain_accepts_flat_component_directory() {
-        let result = resolve_and_validate(
-            "/opt/services",
-            "my-service/current",
-            "my-service",
-        );
+        let result = resolve_and_validate("/opt/services", "my-service/current", "my-service");
         assert!(result.is_ok());
     }
 
@@ -2161,11 +2232,18 @@ mod tests {
 
     #[test]
     fn override_template_renders_safe_with_component_dir() {
-        let template = "([ -d {{targetDir}} ] && rm -rf {{targetDir}} || true) && install {{artifact}}";
+        let template =
+            "([ -d {{targetDir}} ] && rm -rf {{targetDir}} || true) && install {{artifact}}";
 
         let mut vars = HashMap::new();
-        vars.insert("targetDir".to_string(), "/srv/project/lib/plugins/my-component".to_string());
-        vars.insert("artifact".to_string(), "/tmp/staging/my-component.zip".to_string());
+        vars.insert(
+            "targetDir".to_string(),
+            "/srv/project/lib/plugins/my-component".to_string(),
+        );
+        vars.insert(
+            "artifact".to_string(),
+            "/tmp/staging/my-component.zip".to_string(),
+        );
 
         let rendered = render_map(template, &vars);
 
@@ -2183,7 +2261,10 @@ mod tests {
         let template = "rm -rf {{targetDir}}";
 
         let mut vars = HashMap::new();
-        vars.insert("targetDir".to_string(), "/srv/project/lib/plugins".to_string());
+        vars.insert(
+            "targetDir".to_string(),
+            "/srv/project/lib/plugins".to_string(),
+        );
 
         let rendered = render_map(template, &vars);
 
@@ -2276,11 +2357,8 @@ mod tests {
 
     #[test]
     fn shared_parent_error_includes_component_id() {
-        let err = validate_deploy_target(
-            "/srv/project/vendor",
-            "/srv/project",
-            "my-lib",
-        ).unwrap_err();
+        let err =
+            validate_deploy_target("/srv/project/vendor", "/srv/project", "my-lib").unwrap_err();
 
         assert!(
             err.message.contains("my-lib"),
@@ -2291,11 +2369,8 @@ mod tests {
 
     #[test]
     fn shared_parent_error_suggests_correct_path() {
-        let err = validate_deploy_target(
-            "/srv/project/vendor",
-            "/srv/project",
-            "my-lib",
-        ).unwrap_err();
+        let err =
+            validate_deploy_target("/srv/project/vendor", "/srv/project", "my-lib").unwrap_err();
 
         assert!(
             err.message.contains("/srv/project/vendor/my-lib"),
@@ -2306,11 +2381,8 @@ mod tests {
 
     #[test]
     fn base_path_error_mentions_subdirectory() {
-        let err = validate_deploy_target(
-            "/srv/project",
-            "/srv/project",
-            "my-component",
-        ).unwrap_err();
+        let err =
+            validate_deploy_target("/srv/project", "/srv/project", "my-component").unwrap_err();
 
         assert!(
             err.message.contains("subdirectory"),

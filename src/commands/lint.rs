@@ -3,8 +3,8 @@ use serde::Serialize;
 
 use homeboy::component::{self, Component};
 use homeboy::error::Error;
-use homeboy::git;
 use homeboy::extension::{self, ExtensionRunner};
+use homeboy::git;
 
 use super::CmdResult;
 

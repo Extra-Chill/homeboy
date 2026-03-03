@@ -8,7 +8,7 @@ use homeboy::context::{
     self, build_component_info, path_is_parent_of, ComponentGap, ContextOutput,
 };
 use homeboy::extension::{
-    is_extension_compatible, is_extension_linked, load_all_extensions, extension_ready_status,
+    extension_ready_status, is_extension_compatible, is_extension_linked, load_all_extensions,
 };
 use homeboy::project::{self, Project};
 use homeboy::server::{self, Server};

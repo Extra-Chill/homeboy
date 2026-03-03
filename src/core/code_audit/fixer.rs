@@ -152,15 +152,10 @@ fn extract_rust_signatures(content: &str) -> Vec<MethodSignature> {
 
 fn extract_js_signatures(content: &str) -> Vec<MethodSignature> {
     // Named function declarations
-    let fn_re = Regex::new(
-        r"(?m)^\s*((?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\([^)]*\))",
-    )
-    .unwrap();
+    let fn_re =
+        Regex::new(r"(?m)^\s*((?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\([^)]*\))").unwrap();
     // Class methods
-    let method_re = Regex::new(
-        r"(?m)^\s+((?:async\s+)?(\w+)\s*\([^)]*\))\s*\{",
-    )
-    .unwrap();
+    let method_re = Regex::new(r"(?m)^\s+((?:async\s+)?(\w+)\s*\([^)]*\))\s*\{").unwrap();
 
     let mut sigs: Vec<MethodSignature> = fn_re
         .captures_iter(content)
@@ -242,7 +237,9 @@ fn generate_import_statement(import_path: &str, language: &Language) -> String {
         Language::Php => format!("use {};", import_path),
         Language::JavaScript | Language::TypeScript => {
             // Extract the last segment as the name
-            let name = import_path.rsplit("::").next()
+            let name = import_path
+                .rsplit("::")
+                .next()
                 .or_else(|| import_path.rsplit('/').next())
                 .unwrap_or(import_path);
             format!("import {{ {} }} from '{}';", name, import_path)
@@ -297,7 +294,11 @@ fn insert_import(content: &str, import_line: &str, language: &Language) -> Strin
             }
         }
         // Insert before first_code (add a blank line separator)
-        if first_code > 0 { first_code - 1 } else { 0 }
+        if first_code > 0 {
+            first_code - 1
+        } else {
+            0
+        }
     };
 
     let mut result = String::with_capacity(content.len() + import_line.len() + 2);
@@ -328,7 +329,10 @@ fn generate_registration_stub(hook_name: &str) -> String {
         .or_else(|| hook_name.strip_prefix("datamachine_"))
         .unwrap_or(hook_name);
 
-    format!("        add_action('{}', [$this, '{}']);", hook_name, callback)
+    format!(
+        "        add_action('{}', [$this, '{}']);",
+        hook_name, callback
+    )
 }
 
 // ============================================================================
@@ -461,7 +465,10 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                             continue;
                         }
 
-                        if method_name == "__construct" || method_name == "new" || method_name == "constructor" {
+                        if method_name == "__construct"
+                            || method_name == "new"
+                            || method_name == "constructor"
+                        {
                             needs_constructor = true;
                         } else {
                             missing_methods.push(method_name);
@@ -505,10 +512,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                         insertions.push(Insertion {
                             kind: InsertionKind::RegistrationStub,
                             code: generate_registration_stub(hook_name),
-                            description: format!(
-                                "Add {} registration in __construct()",
-                                hook_name
-                            ),
+                            description: format!("Add {} registration in __construct()", hook_name),
                         });
                     }
                 } else {
@@ -662,13 +666,15 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
             }
         };
 
-        let manifest = if use_extract_shared { ext_manifest } else { None };
+        let manifest = if use_extract_shared {
+            ext_manifest
+        } else {
+            None
+        };
 
         let Some(manifest) = manifest else {
             // Fall back to simple remove+import for languages without extract_shared
-            generate_simple_duplicate_fixes(
-                group, root, &mut fixes, &mut skipped,
-            );
+            generate_simple_duplicate_fixes(group, root, &mut fixes, &mut skipped);
             continue;
         };
 
@@ -718,9 +724,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
 
         let Some(result_val) = extract_result else {
             // Extension doesn't support extract_shared, fall back
-            generate_simple_duplicate_fixes(
-                group, root, &mut fixes, &mut skipped,
-            );
+            generate_simple_duplicate_fixes(group, root, &mut fixes, &mut skipped);
             continue;
         };
 
@@ -736,17 +740,18 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
             });
             continue;
         }
-        if result_val.get("skip").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if result_val
+            .get("skip")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let reason = result_val
                 .get("reason")
                 .and_then(|v| v.as_str())
                 .unwrap_or("extension decided to skip");
             skipped.push(SkippedFile {
                 file: group.canonical_file.clone(),
-                reason: format!(
-                    "Skipped `{}`: {}",
-                    group.function_name, reason
-                ),
+                reason: format!("Skipped `{}`: {}", group.function_name, reason),
             });
             continue;
         }
@@ -809,10 +814,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     insertions.push(Insertion {
                         kind: InsertionKind::ImportAdd,
                         code: import.to_string(),
-                        description: format!(
-                            "Import shared trait for `{}`",
-                            group.function_name
-                        ),
+                        description: format!("Import shared trait for `{}`", group.function_name),
                     });
                 }
 
@@ -821,10 +823,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     insertions.push(Insertion {
                         kind: InsertionKind::TraitUse,
                         code: use_trait.to_string(),
-                        description: format!(
-                            "Use shared trait for `{}`",
-                            group.function_name
-                        ),
+                        description: format!("Use shared trait for `{}`", group.function_name),
                     });
                 }
 
@@ -875,10 +874,7 @@ fn generate_simple_duplicate_fixes(
 ) {
     for remove_file in &group.remove_from {
         let abs_path = root.join(remove_file.as_str());
-        let ext = abs_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let ext_manifest = crate::extension::find_extension_for_file_ext(ext, "refactor");
         let content = match std::fs::read_to_string(&abs_path) {
@@ -945,7 +941,10 @@ fn generate_simple_duplicate_fixes(
         let import_path = module_path_from_file(&group.canonical_file);
         let import_stmt = match ext {
             "rs" => format!("use crate::{}::{};", import_path, group.function_name),
-            _ => format!("import {{ {} }} from '{}';", group.function_name, import_path),
+            _ => format!(
+                "import {{ {} }} from '{}';",
+                group.function_name, import_path
+            ),
         };
 
         let mut insertions = vec![Insertion {
@@ -965,10 +964,7 @@ fn generate_simple_duplicate_fixes(
             insertions.push(Insertion {
                 kind: InsertionKind::ImportAdd,
                 code: import_stmt,
-                description: format!(
-                    "Import `{}` from canonical location",
-                    group.function_name
-                ),
+                description: format!("Import `{}` from canonical location", group.function_name),
             });
         }
 
@@ -1104,10 +1100,18 @@ fn suffix_matches(file_stem: &str, suffix: &str) -> bool {
 
 /// Simple English pluralization for class suffixes.
 fn pluralize(word: &str) -> String {
-    if word.ends_with('y') && !word.ends_with("ey") && !word.ends_with("ay") && !word.ends_with("oy") {
+    if word.ends_with('y')
+        && !word.ends_with("ey")
+        && !word.ends_with("ay")
+        && !word.ends_with("oy")
+    {
         // Ability → Abilities, Entity → Entities
         format!("{}ies", &word[..word.len() - 1])
-    } else if word.ends_with('s') || word.ends_with('x') || word.ends_with("ch") || word.ends_with("sh") {
+    } else if word.ends_with('s')
+        || word.ends_with('x')
+        || word.ends_with("ch")
+        || word.ends_with("sh")
+    {
         format!("{}es", word)
     } else {
         format!("{}s", word)
@@ -1119,7 +1123,11 @@ fn singularize(word: &str) -> Option<String> {
     if word.ends_with("ies") && word.len() > 3 {
         // Abilities → Ability
         Some(format!("{}y", &word[..word.len() - 3]))
-    } else if word.ends_with("ses") || word.ends_with("xes") || word.ends_with("ches") || word.ends_with("shes") {
+    } else if word.ends_with("ses")
+        || word.ends_with("xes")
+        || word.ends_with("ches")
+        || word.ends_with("shes")
+    {
         Some(word[..word.len() - 2].to_string())
     } else if word.ends_with('s') && !word.ends_with("ss") && word.len() > 1 {
         // Tests → Test, Providers → Provider
@@ -1171,7 +1179,12 @@ pub fn apply_fixes(fixes: &mut [Fix], root: &Path) -> usize {
                 Ok(_) => {
                     fix.applied = true;
                     applied_count += 1;
-                    log_status!("fix", "Applied {} fix(es) to {}", fix.insertions.len(), fix.file);
+                    log_status!(
+                        "fix",
+                        "Applied {} fix(es) to {}",
+                        fix.insertions.len(),
+                        fix.file
+                    );
                 }
                 Err(e) => {
                     log_status!("fix", "Failed to write {}: {}", fix.file, e);
@@ -1246,7 +1259,10 @@ fn apply_insertions_to_content(
             InsertionKind::ConstructorWithRegistration => constructor_stubs.push(&insertion.code),
             InsertionKind::ImportAdd => import_adds.push(&insertion.code),
             InsertionKind::TraitUse => trait_uses.push(&insertion.code),
-            InsertionKind::FunctionRemoval { start_line, end_line } => {
+            InsertionKind::FunctionRemoval {
+                start_line,
+                end_line,
+            } => {
                 removals.push((*start_line, *end_line));
             }
         }
@@ -1294,13 +1310,21 @@ fn apply_insertions_to_content(
 
     // Insert constructor stubs (new __construct with registrations)
     if !constructor_stubs.is_empty() {
-        let combined: String = constructor_stubs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("");
+        let combined: String = constructor_stubs
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("");
         result = insert_before_closing_brace(&result, &combined, language);
     }
 
     // Insert method stubs before closing brace
     if !method_stubs.is_empty() {
-        let combined: String = method_stubs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("");
+        let combined: String = method_stubs
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("");
         result = insert_before_closing_brace(&result, &combined, language);
     }
 
@@ -1363,7 +1387,11 @@ fn insert_trait_uses(content: &str, stubs: &[&String], language: &Language) -> S
         }
         _ => {
             // Other languages: fall back to inserting before closing brace
-            let combined: String = stubs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+            let combined: String = stubs
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
             insert_before_closing_brace(content, &combined, language)
         }
     }
@@ -1497,7 +1525,8 @@ class MyAbility {
     public function execute() {}
 }
 "#;
-        let reg = "        add_action('wp_abilities_api_init', [$this, 'abilities_api_init']);".to_string();
+        let reg = "        add_action('wp_abilities_api_init', [$this, 'abilities_api_init']);"
+            .to_string();
         let result = insert_into_constructor(content, &[&reg], &Language::Php);
 
         assert!(result.contains("add_action('wp_abilities_api_init'"));
@@ -1553,8 +1582,8 @@ class MyAbility {
         // When a file is missing __construct AND a registration,
         // we should get ONE constructor with the registration inside,
         // not two separate insertions.
-        use super::super::conventions::{Deviation, DeviationKind, Outlier};
         use super::super::checks::CheckStatus;
+        use super::super::conventions::{Deviation, DeviationKind, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_merge_test");
@@ -1573,7 +1602,8 @@ class GoodAbility {
     public function registerAbility(): void {}
 }
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Outlier: missing __construct AND registration
         std::fs::write(
@@ -1583,7 +1613,8 @@ class BadAbility {
     public function execute(array $config): array { return []; }
 }
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let audit_result = CodeAuditResult {
             component_id: "test".to_string(),
@@ -1645,27 +1676,39 @@ class BadAbility {
 
         // Should have exactly 2 insertions: constructor_with_registration + registerAbility stub
         // NOT 3 (no separate __construct stub)
-        assert_eq!(fix.insertions.len(), 2, "Expected 2 insertions, got: {:?}",
-            fix.insertions.iter().map(|i| &i.description).collect::<Vec<_>>());
+        assert_eq!(
+            fix.insertions.len(),
+            2,
+            "Expected 2 insertions, got: {:?}",
+            fix.insertions
+                .iter()
+                .map(|i| &i.description)
+                .collect::<Vec<_>>()
+        );
 
-        let has_constructor_with_reg = fix.insertions.iter().any(|i|
+        let has_constructor_with_reg = fix.insertions.iter().any(|i| {
             matches!(i.kind, InsertionKind::ConstructorWithRegistration)
-            && i.code.contains("add_action")
+                && i.code.contains("add_action")
+        });
+        assert!(
+            has_constructor_with_reg,
+            "Should have constructor with registration"
         );
-        assert!(has_constructor_with_reg, "Should have constructor with registration");
 
-        let has_register_ability = fix.insertions.iter().any(|i|
-            matches!(i.kind, InsertionKind::MethodStub)
-            && i.code.contains("registerAbility")
-        );
+        let has_register_ability = fix.insertions.iter().any(|i| {
+            matches!(i.kind, InsertionKind::MethodStub) && i.code.contains("registerAbility")
+        });
         assert!(has_register_ability, "Should have registerAbility stub");
 
         // No standalone __construct method stub
-        let has_bare_constructor = fix.insertions.iter().any(|i|
-            matches!(i.kind, InsertionKind::MethodStub)
-            && i.code.contains("__construct")
+        let has_bare_constructor = fix
+            .insertions
+            .iter()
+            .any(|i| matches!(i.kind, InsertionKind::MethodStub) && i.code.contains("__construct"));
+        assert!(
+            !has_bare_constructor,
+            "Should NOT have bare __construct stub"
         );
-        assert!(!has_bare_constructor, "Should NOT have bare __construct stub");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1682,7 +1725,8 @@ class TestClass {
     public function existing() {}
 }
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut fixes = vec![Fix {
             file: "test.php".to_string(),
@@ -1732,9 +1776,18 @@ class TestClass {
 
     #[test]
     fn extract_class_suffix_pascal_case() {
-        assert_eq!(extract_class_suffix("CreateFlowAbility"), Some("Ability".to_string()));
-        assert_eq!(extract_class_suffix("FlowHelpers"), Some("Helpers".to_string()));
-        assert_eq!(extract_class_suffix("BlockSanitizer"), Some("Sanitizer".to_string()));
+        assert_eq!(
+            extract_class_suffix("CreateFlowAbility"),
+            Some("Ability".to_string())
+        );
+        assert_eq!(
+            extract_class_suffix("FlowHelpers"),
+            Some("Helpers".to_string())
+        );
+        assert_eq!(
+            extract_class_suffix("BlockSanitizer"),
+            Some("Sanitizer".to_string())
+        );
     }
 
     #[test]
@@ -1795,8 +1848,8 @@ class TestClass {
 
     #[test]
     fn skip_helper_files_in_ability_directory() {
-        use super::super::conventions::{Deviation, DeviationKind, Outlier};
         use super::super::checks::CheckStatus;
+        use super::super::conventions::{Deviation, DeviationKind, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_skip_helper_test");
@@ -1804,10 +1857,15 @@ class TestClass {
         let _ = std::fs::create_dir_all(&abilities);
 
         // Conforming files with *Ability naming
-        for name in &["CreateFlowAbility", "UpdateFlowAbility", "DeleteFlowAbility"] {
+        for name in &[
+            "CreateFlowAbility",
+            "UpdateFlowAbility",
+            "DeleteFlowAbility",
+        ] {
             std::fs::write(
                 abilities.join(format!("{}.php", name)),
-                format!(r#"<?php
+                format!(
+                    r#"<?php
 class {} {{
     public function __construct() {{
         add_action('wp_abilities_api_init', [$this, 'registerAbility']);
@@ -1815,15 +1873,19 @@ class {} {{
     public function execute(array $config): array {{ return []; }}
     public function registerAbility(): void {{}}
 }}
-"#, name),
-            ).unwrap();
+"#,
+                    name
+                ),
+            )
+            .unwrap();
         }
 
         // Helper file (outlier)
         std::fs::write(
             abilities.join("FlowHelpers.php"),
             "<?php\nclass FlowHelpers {\n    public function formatFlow() {}\n}\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let audit_result = CodeAuditResult {
             component_id: "test".to_string(),
@@ -1885,7 +1947,10 @@ class {} {{
         let fix_result = generate_fixes(&audit_result, &dir);
 
         // FlowHelpers should be SKIPPED, not fixed
-        assert!(fix_result.fixes.is_empty(), "Should not generate fixes for FlowHelpers");
+        assert!(
+            fix_result.fixes.is_empty(),
+            "Should not generate fixes for FlowHelpers"
+        );
         assert_eq!(fix_result.skipped.len(), 1);
         assert!(fix_result.skipped[0].file.contains("FlowHelpers"));
         assert!(fix_result.skipped[0].reason.contains("utility/helper"));
@@ -1895,8 +1960,8 @@ class {} {{
 
     #[test]
     fn skip_fragmented_conventions() {
-        use super::super::conventions::{Deviation, DeviationKind, Outlier};
         use super::super::checks::CheckStatus;
+        use super::super::conventions::{Deviation, DeviationKind, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_skip_frag_test");
@@ -1985,7 +2050,10 @@ pub fn run() {}
         // Should be after the last existing use line
         let cmd_pos = result.find("use super::CmdResult;").unwrap();
         let project_pos = result.find("use homeboy::project;").unwrap();
-        assert!(cmd_pos > project_pos, "New import should be after existing imports");
+        assert!(
+            cmd_pos > project_pos,
+            "New import should be after existing imports"
+        );
         // Original content preserved
         assert!(result.contains("pub fn run()"));
     }
@@ -2021,8 +2089,8 @@ pub struct TestOutput {}
 
     #[test]
     fn generate_fixes_handles_missing_import() {
-        use super::super::conventions::{Deviation, DeviationKind, Outlier};
         use super::super::checks::CheckStatus;
+        use super::super::conventions::{Deviation, DeviationKind, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_import_test");
@@ -2033,13 +2101,11 @@ pub struct TestOutput {}
         std::fs::write(
             commands.join("good.rs"),
             "use super::CmdResult;\nuse serde::Serialize;\n\npub fn run() {}\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Outlier: missing import
-        std::fs::write(
-            commands.join("bad.rs"),
-            "pub fn run() {}\n",
-        ).unwrap();
+        std::fs::write(commands.join("bad.rs"), "pub fn run() {}\n").unwrap();
 
         let audit_result = CodeAuditResult {
             component_id: "test".to_string(),
@@ -2097,7 +2163,8 @@ pub struct TestOutput {}
         std::fs::write(
             dir.join("test.rs"),
             "use serde::Serialize;\n\npub fn run() {}\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut fixes = vec![Fix {
             file: "test.rs".to_string(),
@@ -2127,7 +2194,10 @@ pub struct TestOutput {}
             Fix {
                 file: "src/foo.rs".to_string(),
                 insertions: vec![Insertion {
-                    kind: InsertionKind::FunctionRemoval { start_line: 10, end_line: 20 },
+                    kind: InsertionKind::FunctionRemoval {
+                        start_line: 10,
+                        end_line: 20,
+                    },
                     code: String::new(),
                     description: "Remove fn_a".to_string(),
                 }],
@@ -2136,7 +2206,10 @@ pub struct TestOutput {}
             Fix {
                 file: "src/bar.rs".to_string(),
                 insertions: vec![Insertion {
-                    kind: InsertionKind::FunctionRemoval { start_line: 5, end_line: 15 },
+                    kind: InsertionKind::FunctionRemoval {
+                        start_line: 5,
+                        end_line: 15,
+                    },
                     code: String::new(),
                     description: "Remove fn_b from bar".to_string(),
                 }],
@@ -2146,7 +2219,10 @@ pub struct TestOutput {}
                 file: "src/foo.rs".to_string(),
                 insertions: vec![
                     Insertion {
-                        kind: InsertionKind::FunctionRemoval { start_line: 30, end_line: 40 },
+                        kind: InsertionKind::FunctionRemoval {
+                            start_line: 30,
+                            end_line: 40,
+                        },
                         code: String::new(),
                         description: "Remove fn_c".to_string(),
                     },
@@ -2212,17 +2288,26 @@ fn last_keeper() {
 "#;
         let insertions = vec![
             Insertion {
-                kind: InsertionKind::FunctionRemoval { start_line: 7, end_line: 9 },
+                kind: InsertionKind::FunctionRemoval {
+                    start_line: 7,
+                    end_line: 9,
+                },
                 code: String::new(),
                 description: "Remove remove_first".to_string(),
             },
             Insertion {
-                kind: InsertionKind::FunctionRemoval { start_line: 15, end_line: 17 },
+                kind: InsertionKind::FunctionRemoval {
+                    start_line: 15,
+                    end_line: 17,
+                },
                 code: String::new(),
                 description: "Remove remove_second".to_string(),
             },
             Insertion {
-                kind: InsertionKind::FunctionRemoval { start_line: 19, end_line: 21 },
+                kind: InsertionKind::FunctionRemoval {
+                    start_line: 19,
+                    end_line: 21,
+                },
                 code: String::new(),
                 description: "Remove remove_third".to_string(),
             },
@@ -2236,14 +2321,29 @@ fn last_keeper() {
         let result = apply_insertions_to_content(content, &insertions, &Language::Rust);
 
         // Removed functions should be gone
-        assert!(!result.contains("fn remove_first()"), "remove_first should be removed");
-        assert!(!result.contains("fn remove_second()"), "remove_second should be removed");
-        assert!(!result.contains("fn remove_third()"), "remove_third should be removed");
+        assert!(
+            !result.contains("fn remove_first()"),
+            "remove_first should be removed"
+        );
+        assert!(
+            !result.contains("fn remove_second()"),
+            "remove_second should be removed"
+        );
+        assert!(
+            !result.contains("fn remove_third()"),
+            "remove_third should be removed"
+        );
 
         // Kept functions should survive
         assert!(result.contains("fn keep_me()"), "keep_me should survive");
-        assert!(result.contains("fn middle_keeper()"), "middle_keeper should survive");
-        assert!(result.contains("fn last_keeper()"), "last_keeper should survive");
+        assert!(
+            result.contains("fn middle_keeper()"),
+            "middle_keeper should survive"
+        );
+        assert!(
+            result.contains("fn last_keeper()"),
+            "last_keeper should survive"
+        );
 
         // Import should be added
         assert!(result.contains("use crate::utils::{remove_first, remove_second, remove_third};"));
@@ -2272,7 +2372,8 @@ class FlowAbilities extends BaseAbility {
         let result = apply_insertions_to_content(content, &insertions, &Language::Php);
 
         // Trait use should appear inside the class body
-        assert!(result.contains("class FlowAbilities extends BaseAbility {\n    use HasCheckPermission;\n"));
+        assert!(result
+            .contains("class FlowAbilities extends BaseAbility {\n    use HasCheckPermission;\n"));
         // Method should still be there (we only added trait use, no removal)
         assert!(result.contains("checkPermission"));
     }
@@ -2315,13 +2416,22 @@ class FlowAbilities {
         let result = apply_insertions_to_content(content, &insertions, &Language::Php);
 
         // Method should be removed
-        assert!(!result.contains("function checkPermission()"), "checkPermission should be removed");
+        assert!(
+            !result.contains("function checkPermission()"),
+            "checkPermission should be removed"
+        );
         // Trait use should be present
-        assert!(result.contains("use HasCheckPermission;"), "trait use should be added");
+        assert!(
+            result.contains("use HasCheckPermission;"),
+            "trait use should be added"
+        );
         // Import should be present
         assert!(result.contains("use DataMachine\\Abilities\\Traits\\HasCheckPermission;"));
         // execute method should survive
-        assert!(result.contains("function execute()"), "execute should survive");
+        assert!(
+            result.contains("function execute()"),
+            "execute should survive"
+        );
     }
 
     #[test]

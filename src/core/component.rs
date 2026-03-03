@@ -773,8 +773,7 @@ pub fn resolve(id: Option<&str>) -> Result<Component> {
     }
 
     // Try portable config discovery from CWD
-    let cwd = std::env::current_dir()
-        .map_err(|e| Error::internal_io(e.to_string(), None))?;
+    let cwd = std::env::current_dir().map_err(|e| Error::internal_io(e.to_string(), None))?;
 
     if let Some(component) = discover_from_portable(&cwd) {
         return Ok(component);
@@ -795,9 +794,8 @@ pub fn resolve(id: Option<&str>) -> Result<Component> {
         "Or run from a directory containing homeboy.json".to_string(),
     ];
     if detect_from_cwd().is_none() {
-        hints.push(
-            "Register a component: homeboy component create <id> --local-path .".to_string(),
-        );
+        hints
+            .push("Register a component: homeboy component create <id> --local-path .".to_string());
     }
 
     Err(Error::validation_invalid_argument(
@@ -1039,16 +1037,16 @@ mod tests {
         std::fs::write(dir.join("homeboy.json"), config.to_string()).unwrap();
 
         let result = discover_from_portable(&dir);
-        assert!(result.is_some(), "Should discover component from homeboy.json");
+        assert!(
+            result.is_some(),
+            "Should discover component from homeboy.json"
+        );
 
         let comp = result.unwrap();
         assert_eq!(comp.id, "homeboy-test-discover");
         assert_eq!(comp.local_path, dir.to_string_lossy());
         assert_eq!(comp.build_command.as_deref(), Some("cargo build --release"));
-        assert_eq!(
-            comp.changelog_target.as_deref(),
-            Some("docs/CHANGELOG.md")
-        );
+        assert_eq!(comp.changelog_target.as_deref(), Some("docs/CHANGELOG.md"));
         assert!(comp.version_targets.is_some());
         assert!(comp.remote_path.is_empty()); // default
 

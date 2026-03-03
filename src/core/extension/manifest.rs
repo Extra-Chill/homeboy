@@ -261,11 +261,15 @@ impl ExtensionManifest {
     }
 
     pub fn lint_script(&self) -> Option<&str> {
-        self.lint.as_ref().and_then(|c| c.extension_script.as_deref())
+        self.lint
+            .as_ref()
+            .and_then(|c| c.extension_script.as_deref())
     }
 
     pub fn test_script(&self) -> Option<&str> {
-        self.test.as_ref().and_then(|c| c.extension_script.as_deref())
+        self.test
+            .as_ref()
+            .and_then(|c| c.extension_script.as_deref())
     }
 
     /// Convenience: get deploy verifications (empty if no deploy capability).

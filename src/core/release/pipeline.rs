@@ -3,8 +3,8 @@ use crate::component::{self, Component};
 use crate::core::local_files::FileSystem;
 use crate::engine::pipeline::{self, PipelineStep};
 use crate::error::{Error, Result};
-use crate::git::{self, UncommittedChanges};
 use crate::extension::ExtensionManifest;
+use crate::git::{self, UncommittedChanges};
 use crate::utils::validation::ValidationCollector;
 use crate::version;
 
@@ -133,7 +133,10 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
             } else if uncommitted.has_changes {
                 // Only changelog/version files are uncommitted — auto-stage them
                 // so the release commit includes them (e.g., after `homeboy changelog add`)
-                log_status!("release", "Auto-staging changelog/version files for release commit");
+                log_status!(
+                    "release",
+                    "Auto-staging changelog/version files for release commit"
+                );
                 let all_files: Vec<&String> = uncommitted
                     .staged
                     .iter()

@@ -213,8 +213,13 @@ impl ReleaseStepExecutor {
             })?;
 
         let payload = self.build_release_payload(step)?;
-        let response =
-            extension::execute_action(&extension.id, "release.package", None, None, Some(&payload))?;
+        let response = extension::execute_action(
+            &extension.id,
+            "release.package",
+            None,
+            None,
+            Some(&payload),
+        )?;
 
         self.store_artifacts_from_output(&response)?;
 
@@ -253,7 +258,11 @@ impl ReleaseStepExecutor {
         // instead of a cryptic JSON parse failure.
         if stdout.trim().is_empty() {
             let detail = if !stderr.is_empty() {
-                format!("Package command failed (exit {}): {}", exit_code, stderr.trim())
+                format!(
+                    "Package command failed (exit {}): {}",
+                    exit_code,
+                    stderr.trim()
+                )
             } else if exit_code != 0 {
                 format!(
                     "Package command failed (exit {}) with no output. \
@@ -369,7 +378,8 @@ impl ReleaseStepExecutor {
         }
 
         let payload = self.build_release_payload(step)?;
-        let response = extension::execute_action(&extension.id, action_id, None, None, Some(&payload))?;
+        let response =
+            extension::execute_action(&extension.id, action_id, None, None, Some(&payload))?;
         let extension_data = serde_json::to_value(&response).map_err(|e| {
             Error::internal_json(e.to_string(), Some("extension action output".to_string()))
         })?;
@@ -396,8 +406,12 @@ impl ReleaseStepExecutor {
 
         let mut removed = false;
         if std::path::Path::new(&distrib_path).exists() {
-            std::fs::remove_dir_all(&distrib_path)
-                .map_err(|e| Error::internal_io(format!("Failed to clean up {}: {}", distrib_path, e), Some(distrib_path.clone())))?;
+            std::fs::remove_dir_all(&distrib_path).map_err(|e| {
+                Error::internal_io(
+                    format!("Failed to clean up {}: {}", distrib_path, e),
+                    Some(distrib_path.clone()),
+                )
+            })?;
             removed = true;
         }
 

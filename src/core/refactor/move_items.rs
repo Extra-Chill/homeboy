@@ -91,14 +91,16 @@ impl ItemKind {
 
 /// Find a refactor-capable extension for a file based on its extension.
 fn find_refactor_extension(file_path: &str) -> Option<ExtensionManifest> {
-    let ext = Path::new(file_path)
-        .extension()
-        .and_then(|e| e.to_str())?;
+    let ext = Path::new(file_path).extension().and_then(|e| e.to_str())?;
     extension::find_extension_for_file_ext(ext, "refactor")
 }
 
 /// Ask an extension to parse all top-level items in a source file.
-fn ext_parse_items(ext: &ExtensionManifest, content: &str, file_path: &str) -> Option<Vec<ParsedItem>> {
+fn ext_parse_items(
+    ext: &ExtensionManifest,
+    content: &str,
+    file_path: &str,
+) -> Option<Vec<ParsedItem>> {
     let cmd = serde_json::json!({
         "command": "parse_items",
         "file_path": file_path,
@@ -218,9 +220,8 @@ pub fn move_items(
         ));
     }
 
-    let content = std::fs::read_to_string(&from_path).map_err(|e| {
-        crate::Error::internal_io(e.to_string(), Some(format!("read {}", from)))
-    })?;
+    let content = std::fs::read_to_string(&from_path)
+        .map_err(|e| crate::Error::internal_io(e.to_string(), Some(format!("read {}", from))))?;
 
     // Try to find a refactor-capable extension for this file type
     let ext = find_refactor_extension(from);
@@ -245,7 +246,9 @@ pub fn move_items(
             "from",
             format!("No items found in {}", from),
             None,
-            Some(vec!["Check that the file contains parseable top-level items".to_string()]),
+            Some(vec![
+                "Check that the file contains parseable top-level items".to_string(),
+            ]),
         ));
     } else if all_items.is_empty() {
         return Err(crate::Error::validation_invalid_argument(
@@ -303,13 +306,22 @@ pub fn move_items(
         let items_to_adjust: Vec<ParsedItem> = found_items.iter().map(|i| (*i).clone()).collect();
         ext_adjust_visibility(ext, &items_to_adjust, from, to)
             .map(|adjusted| {
-                adjusted.into_iter().map(|a| (a.source, a.changed)).collect()
+                adjusted
+                    .into_iter()
+                    .map(|a| (a.source, a.changed))
+                    .collect()
             })
             .unwrap_or_else(|| {
-                found_items.iter().map(|i| (i.source.clone(), false)).collect()
+                found_items
+                    .iter()
+                    .map(|i| (i.source.clone(), false))
+                    .collect()
             })
     } else {
-        found_items.iter().map(|i| (i.source.clone(), false)).collect()
+        found_items
+            .iter()
+            .map(|i| (i.source.clone(), false))
+            .collect()
     };
 
     // ── Phase 4: Resolve imports for destination ────────────────────────
@@ -338,7 +350,8 @@ pub fn move_items(
     let mut dest_additions = String::new();
     if !dest_exists {
         // New file — add module doc comment and imports
-        let module_name = to_path.file_stem()
+        let module_name = to_path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("module");
         let from_basename = Path::new(from)
@@ -362,7 +375,8 @@ pub fn move_items(
         }
     } else {
         // Existing file — add imports that aren't already present
-        let new_imports: Vec<&String> = dest_imports.iter()
+        let new_imports: Vec<&String> = dest_imports
+            .iter()
             .filter(|imp| !existing_dest.contains(imp.trim()))
             .collect();
         if !new_imports.is_empty() {
@@ -486,10 +500,7 @@ pub fn move_items(
                 }
 
                 // Only check files the extension can handle
-                let file_ext = file_path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
+                let file_ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if !ext.handles_file_extension(file_ext) {
                     continue;
                 }
@@ -555,9 +566,8 @@ pub fn move_items(
         }
 
         // Write destination
-        std::fs::write(&to_path, &final_dest).map_err(|e| {
-            crate::Error::internal_io(e.to_string(), Some(format!("write {}", to)))
-        })?;
+        std::fs::write(&to_path, &final_dest)
+            .map_err(|e| crate::Error::internal_io(e.to_string(), Some(format!("write {}", to))))?;
 
         // Write modified source
         std::fs::write(&from_path, &modified_source).map_err(|e| {
@@ -604,11 +614,7 @@ pub fn move_items(
             to
         );
         if !tests_moved.is_empty() {
-            crate::log_status!(
-                "refactor",
-                "Moved {} related test(s)",
-                tests_moved.len()
-            );
+            crate::log_status!("refactor", "Moved {} related test(s)", tests_moved.len());
         }
         if imports_updated > 0 {
             crate::log_status!(
@@ -658,9 +664,7 @@ pub fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> Result<Pa
 
 /// Convert a file path to a module path (e.g., "src/core/code_audit/conventions.rs" → "core::code_audit::conventions").
 fn module_path_from_file(file_path: &str) -> String {
-    let p = file_path
-        .strip_prefix("src/")
-        .unwrap_or(file_path);
+    let p = file_path.strip_prefix("src/").unwrap_or(file_path);
     let p = p.strip_suffix(".rs").unwrap_or(p);
     let p = p.strip_suffix("/mod").unwrap_or(p);
     p.replace('/', "::")
@@ -732,10 +736,7 @@ mod tests {
 
     #[test]
     fn module_path_from_file_no_src_prefix() {
-        assert_eq!(
-            module_path_from_file("lib/utils.rs"),
-            "lib::utils"
-        );
+        assert_eq!(module_path_from_file("lib/utils.rs"), "lib::utils");
     }
 
     #[test]

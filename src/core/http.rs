@@ -4,8 +4,8 @@
 //! Homeboy doesn't know about specific auth types - it just templates strings.
 
 use crate::error::{Error, ErrorCode, Result};
-use crate::keychain;
 use crate::extension::HttpMethod;
+use crate::keychain;
 use crate::project::{ApiConfig, AuthConfig, AuthFlowConfig, VariableSource};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use serde_json::{json, Value};

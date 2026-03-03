@@ -252,10 +252,7 @@ pub fn is_raw_read(args: &FileArgs) -> bool {
     matches!(&args.command, FileCommand::Read { raw: true, .. })
 }
 
-pub fn run(
-    args: FileArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<FileCommandOutput> {
+pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<FileCommandOutput> {
     match args.command {
         FileCommand::List { project_id, path } => {
             let (out, code) = list(&project_id, &path)?;

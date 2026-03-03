@@ -201,17 +201,9 @@ mod tests {
         let src = dir.join("src");
         let _ = std::fs::create_dir_all(&src);
 
-        std::fs::write(
-            src.join("one.rs"),
-            "use std::path::Path;\n\nfn main() {}\n",
-        )
-        .unwrap();
+        std::fs::write(src.join("one.rs"), "use std::path::Path;\n\nfn main() {}\n").unwrap();
 
-        std::fs::write(
-            src.join("two.rs"),
-            "use std::io;\n\nfn helper() {}\n",
-        )
-        .unwrap();
+        std::fs::write(src.join("two.rs"), "use std::io;\n\nfn helper() {}\n").unwrap();
 
         // File that already has the import
         std::fs::write(

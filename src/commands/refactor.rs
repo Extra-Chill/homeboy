@@ -141,7 +141,15 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             scope,
             literal,
             write,
-        } => run_rename(&from, &to, component_id.as_deref(), path.as_deref(), &scope, literal, write),
+        } => run_rename(
+            &from,
+            &to,
+            component_id.as_deref(),
+            path.as_deref(),
+            &scope,
+            literal,
+            write,
+        ),
 
         RefactorCommand::Add {
             from_audit,
@@ -150,7 +158,14 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             component: component_id,
             path,
             write,
-        } => run_add(from_audit.as_deref(), import.as_deref(), to.as_deref(), component_id.as_deref(), path.as_deref(), write),
+        } => run_add(
+            from_audit.as_deref(),
+            import.as_deref(),
+            to.as_deref(),
+            component_id.as_deref(),
+            path.as_deref(),
+            write,
+        ),
 
         RefactorCommand::Move {
             item,
@@ -159,7 +174,14 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             component: component_id,
             path,
             write,
-        } => run_move(&item, &from, &to, component_id.as_deref(), path.as_deref(), write),
+        } => run_move(
+            &item,
+            &from,
+            &to,
+            component_id.as_deref(),
+            path.as_deref(),
+            write,
+        ),
 
         RefactorCommand::Propagate {
             struct_name,
@@ -167,7 +189,13 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             component: component_id,
             path,
             write,
-        } => run_propagate(&struct_name, definition.as_deref(), component_id.as_deref(), path.as_deref(), write),
+        } => run_propagate(
+            &struct_name,
+            definition.as_deref(),
+            component_id.as_deref(),
+            path.as_deref(),
+            write,
+        ),
     }
 }
 
@@ -395,7 +423,8 @@ fn run_add(
                 "--to is required when using --import",
                 None,
                 Some(vec![
-                    "homeboy refactor add --import \"use serde::Serialize;\" --to \"src/**/*.rs\"".to_string(),
+                    "homeboy refactor add --import \"use serde::Serialize;\" --to \"src/**/*.rs\""
+                        .to_string(),
                 ]),
             )
         })?;
@@ -410,7 +439,8 @@ fn run_add(
         None,
         Some(vec![
             "homeboy refactor add --from-audit @audit.json".to_string(),
-            "homeboy refactor add --import \"use serde::Serialize;\" --to \"src/**/*.rs\"".to_string(),
+            "homeboy refactor add --import \"use serde::Serialize;\" --to \"src/**/*.rs\""
+                .to_string(),
         ]),
     ))
 }
@@ -452,7 +482,11 @@ fn run_add_from_audit(source: &str, write: bool) -> CmdResult<RefactorOutput> {
 
     let fix_result = refactor::fixes_from_audit(&audit, write)?;
 
-    let exit_code = if fix_result.total_insertions > 0 { 1 } else { 0 };
+    let exit_code = if fix_result.total_insertions > 0 {
+        1
+    } else {
+        0
+    };
 
     homeboy::log_status!(
         "refactor",
@@ -571,10 +605,7 @@ fn run_move(
         homeboy::log_status!("warning", "{}", warning);
     }
 
-    Ok((
-        RefactorOutput::Move { result },
-        exit_code,
-    ))
+    Ok((RefactorOutput::Move { result }, exit_code))
 }
 
 // ============================================================================
@@ -606,7 +637,10 @@ fn run_propagate(
     let def_content = std::fs::read_to_string(&def_path).map_err(|e| {
         homeboy::Error::internal_io(
             e.to_string(),
-            Some(format!("read struct definition from {}", def_path.display())),
+            Some(format!(
+                "read struct definition from {}",
+                def_path.display()
+            )),
         )
     })?;
 
@@ -614,7 +648,11 @@ fn run_propagate(
     let struct_source = extract_struct_source(struct_name, &def_content).ok_or_else(|| {
         homeboy::Error::validation_invalid_argument(
             "struct_name",
-            format!("Could not find struct `{}` in {}", struct_name, def_path.display()),
+            format!(
+                "Could not find struct `{}` in {}",
+                struct_name,
+                def_path.display()
+            ),
             None,
             None,
         )
@@ -643,7 +681,12 @@ fn run_propagate(
     let mut total_needing_fix = 0usize;
     let mut files_scanned = 0usize;
 
-    homeboy::log_status!("propagate", "Scanning {} .rs files for {} instantiations", rs_files.len(), struct_name);
+    homeboy::log_status!(
+        "propagate",
+        "Scanning {} .rs files for {} instantiations",
+        rs_files.len(),
+        struct_name
+    );
 
     for file_path in &rs_files {
         let relative = file_path
@@ -679,16 +722,31 @@ fn run_propagate(
         if let Some(found) = result.get("instantiations_found").and_then(|v| v.as_u64()) {
             total_instantiations += found as usize;
         }
-        if let Some(needing) = result.get("instantiations_needing_fix").and_then(|v| v.as_u64()) {
+        if let Some(needing) = result
+            .get("instantiations_needing_fix")
+            .and_then(|v| v.as_u64())
+        {
             total_needing_fix += needing as usize;
         }
 
         if let Some(edits) = result.get("edits").and_then(|v| v.as_array()) {
             for edit in edits {
-                let file = edit.get("file").and_then(|v| v.as_str()).unwrap_or(&relative).to_string();
+                let file = edit
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&relative)
+                    .to_string();
                 let line = edit.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let insert_text = edit.get("insert_text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let description = edit.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let insert_text = edit
+                    .get("insert_text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let description = edit
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
                 all_edits.push(PropagateEdit {
                     file,
@@ -712,25 +770,28 @@ fn run_propagate(
     // tells us the field name and the insert_text gives us the default value.
     let fields: Vec<PropagateField> = {
         let mut seen = std::collections::HashSet::new();
-        all_edits.iter().filter_map(|e| {
-            // "Add missing field `verbose` to FileFingerprint instantiation"
-            let start = e.description.find('`')? + 1;
-            let end = e.description[start..].find('`')? + start;
-            let field_name = &e.description[start..end];
-            if seen.insert(field_name.to_string()) {
-                // Extract type and default from insert_text: "        verbose: false,"
-                let trimmed = e.insert_text.trim().trim_end_matches(',');
-                let colon_pos = trimmed.find(':')?;
-                let default = trimmed[colon_pos + 1..].trim().to_string();
-                Some(PropagateField {
-                    name: field_name.to_string(),
-                    field_type: String::new(), // We don't have the type info from edits alone
-                    default,
-                })
-            } else {
-                None
-            }
-        }).collect()
+        all_edits
+            .iter()
+            .filter_map(|e| {
+                // "Add missing field `verbose` to FileFingerprint instantiation"
+                let start = e.description.find('`')? + 1;
+                let end = e.description[start..].find('`')? + start;
+                let field_name = &e.description[start..end];
+                if seen.insert(field_name.to_string()) {
+                    // Extract type and default from insert_text: "        verbose: false,"
+                    let trimmed = e.insert_text.trim().trim_end_matches(',');
+                    let colon_pos = trimmed.find(':')?;
+                    let default = trimmed[colon_pos + 1..].trim().to_string();
+                    Some(PropagateField {
+                        name: field_name.to_string(),
+                        field_type: String::new(), // We don't have the type info from edits alone
+                        default,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
     };
 
     let edit_count = all_edits.len();
@@ -742,7 +803,11 @@ fn run_propagate(
         total_needing_fix,
         edit_count,
         if write {
-            if applied { " (applied)".to_string() } else { " (nothing to apply)".to_string() }
+            if applied {
+                " (applied)".to_string()
+            } else {
+                " (nothing to apply)".to_string()
+            }
         } else {
             " (dry run)".to_string()
         }
@@ -782,8 +847,10 @@ fn find_struct_definition(struct_name: &str, root: &Path) -> Result<PathBuf, hom
         let Ok(content) = std::fs::read_to_string(file_path) else {
             continue;
         };
-        if content.contains(&pattern) || content.contains(&pattern_brace)
-            || content.contains(&pattern_crate) || content.contains(&pattern_crate_brace)
+        if content.contains(&pattern)
+            || content.contains(&pattern_brace)
+            || content.contains(&pattern_crate)
+            || content.contains(&pattern_crate_brace)
         {
             return Ok(file_path.clone());
         }
@@ -791,11 +858,16 @@ fn find_struct_definition(struct_name: &str, root: &Path) -> Result<PathBuf, hom
 
     Err(homeboy::Error::validation_invalid_argument(
         "struct_name",
-        format!("Could not find struct `{}` in any .rs file under {}", struct_name, root.display()),
+        format!(
+            "Could not find struct `{}` in any .rs file under {}",
+            struct_name,
+            root.display()
+        ),
         None,
-        Some(vec![
-            format!("homeboy refactor propagate --struct {} --definition src/path/to/file.rs", struct_name),
-        ]),
+        Some(vec![format!(
+            "homeboy refactor propagate --struct {} --definition src/path/to/file.rs",
+            struct_name
+        )]),
     ))
 }
 
@@ -814,11 +886,17 @@ fn extract_struct_source(struct_name: &str, content: &str) -> Option<String> {
             let mut actual_start = i;
             for j in (0..i).rev() {
                 let trimmed = lines[j].trim();
-                if trimmed.starts_with('#') || trimmed.starts_with("///") || trimmed.starts_with("//!") {
+                if trimmed.starts_with('#')
+                    || trimmed.starts_with("///")
+                    || trimmed.starts_with("//!")
+                {
                     actual_start = j;
                 } else if trimmed.is_empty() {
                     // Allow one blank line between attrs and struct
-                    if j > 0 && (lines[j - 1].trim().starts_with('#') || lines[j - 1].trim().starts_with("///")) {
+                    if j > 0
+                        && (lines[j - 1].trim().starts_with('#')
+                            || lines[j - 1].trim().starts_with("///"))
+                    {
                         actual_start = j;
                     } else {
                         break;
@@ -894,10 +972,7 @@ fn walk_rs_recursive(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) {
 }
 
 /// Apply propagate edits to disk. Edits are line-based insertions.
-fn apply_propagate_edits(
-    edits: &[PropagateEdit],
-    root: &Path,
-) -> Result<(), homeboy::Error> {
+fn apply_propagate_edits(edits: &[PropagateEdit], root: &Path) -> Result<(), homeboy::Error> {
     // Group edits by file
     let mut edits_by_file: std::collections::HashMap<&str, Vec<&PropagateEdit>> =
         std::collections::HashMap::new();

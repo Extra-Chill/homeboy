@@ -90,7 +90,9 @@ pub(crate) fn tokenize_signature(sig: &str) -> Vec<String> {
 ///
 /// If signatures have different token counts (different arity/structure),
 /// returns `None` — those are real structural mismatches.
-pub(crate) fn compute_signature_skeleton(tokenized_sigs: &[Vec<String>]) -> Option<Vec<Option<String>>> {
+pub(crate) fn compute_signature_skeleton(
+    tokenized_sigs: &[Vec<String>],
+) -> Option<Vec<Option<String>>> {
     if tokenized_sigs.is_empty() {
         return None;
     }

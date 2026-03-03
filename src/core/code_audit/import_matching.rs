@@ -29,10 +29,13 @@ pub(crate) fn has_import(expected: &str, actual_imports: &[String], file_content
     let prefix = if prefix_len > 2 {
         // Strip trailing :: or \
         let p = &expected[..prefix_len];
-        let p = p.strip_suffix("::").or_else(|| p.strip_suffix('\\')).unwrap_or(p);
+        let p = p
+            .strip_suffix("::")
+            .or_else(|| p.strip_suffix('\\'))
+            .unwrap_or(p);
         Some(p)
     } else if prefix_len > 0 {
-        Some(&expected[..prefix_len - 1])  // strip single separator char
+        Some(&expected[..prefix_len - 1]) // strip single separator char
     } else {
         None
     };
@@ -50,9 +53,7 @@ pub(crate) fn has_import(expected: &str, actual_imports: &[String], file_content
         }
 
         // Grouped import from any path containing the terminal name
-        if (imp.contains("::{") || imp.contains("\\{"))
-            && grouped_import_contains(imp, terminal)
-        {
+        if (imp.contains("::{") || imp.contains("\\{")) && grouped_import_contains(imp, terminal) {
             return true;
         }
 
@@ -114,8 +115,7 @@ pub(crate) fn contains_word(text: &str, word: &str) -> bool {
                 && text.as_bytes()[abs - 1] != b'_';
         let after = abs + word.len();
         let after_ok = after >= text.len()
-            || !text.as_bytes()[after].is_ascii_alphanumeric()
-                && text.as_bytes()[after] != b'_';
+            || !text.as_bytes()[after].is_ascii_alphanumeric() && text.as_bytes()[after] != b'_';
         if before_ok && after_ok {
             return true;
         }
@@ -131,28 +131,44 @@ mod tests {
     #[test]
     fn has_import_exact_match() {
         let imports = vec!["super::CmdResult".to_string()];
-        assert!(has_import("super::CmdResult", &imports, "use super::CmdResult;\nfn run() -> CmdResult<T> {}"));
+        assert!(has_import(
+            "super::CmdResult",
+            &imports,
+            "use super::CmdResult;\nfn run() -> CmdResult<T> {}"
+        ));
     }
 
     #[test]
     fn has_import_grouped_import() {
         // super::{CmdResult, DynamicSetArgs} should satisfy super::CmdResult
         let imports = vec!["super::{CmdResult, DynamicSetArgs}".to_string()];
-        assert!(has_import("super::CmdResult", &imports, "fn run() -> CmdResult<T> {}"));
+        assert!(has_import(
+            "super::CmdResult",
+            &imports,
+            "fn run() -> CmdResult<T> {}"
+        ));
     }
 
     #[test]
     fn has_import_grouped_serde() {
         // serde::{Deserialize, Serialize} should satisfy serde::Serialize
         let imports = vec!["serde::{Deserialize, Serialize}".to_string()];
-        assert!(has_import("serde::Serialize", &imports, "#[derive(Serialize)]\nstruct Foo {}"));
+        assert!(has_import(
+            "serde::Serialize",
+            &imports,
+            "#[derive(Serialize)]\nstruct Foo {}"
+        ));
     }
 
     #[test]
     fn has_import_path_equivalence() {
         // crate::commands::CmdResult should satisfy super::CmdResult
         let imports = vec!["crate::commands::CmdResult".to_string()];
-        assert!(has_import("super::CmdResult", &imports, "fn run() -> CmdResult<T> {}"));
+        assert!(has_import(
+            "super::CmdResult",
+            &imports,
+            "fn run() -> CmdResult<T> {}"
+        ));
     }
 
     #[test]
@@ -175,7 +191,11 @@ mod tests {
     fn has_import_grouped_from_alternate_path() {
         // crate::commands::{CmdResult, GlobalArgs} should satisfy super::CmdResult
         let imports = vec!["crate::commands::{CmdResult, GlobalArgs}".to_string()];
-        assert!(has_import("super::CmdResult", &imports, "fn run() -> CmdResult<T> {}"));
+        assert!(has_import(
+            "super::CmdResult",
+            &imports,
+            "fn run() -> CmdResult<T> {}"
+        ));
     }
 
     #[test]
@@ -189,9 +209,21 @@ mod tests {
 
     #[test]
     fn grouped_import_contains_finds_name() {
-        assert!(grouped_import_contains("super::{CmdResult, DynamicSetArgs}", "CmdResult"));
-        assert!(grouped_import_contains("super::{CmdResult, DynamicSetArgs}", "DynamicSetArgs"));
-        assert!(!grouped_import_contains("super::{CmdResult, DynamicSetArgs}", "GlobalArgs"));
-        assert!(grouped_import_contains("serde::{Deserialize, Serialize}", "Serialize"));
+        assert!(grouped_import_contains(
+            "super::{CmdResult, DynamicSetArgs}",
+            "CmdResult"
+        ));
+        assert!(grouped_import_contains(
+            "super::{CmdResult, DynamicSetArgs}",
+            "DynamicSetArgs"
+        ));
+        assert!(!grouped_import_contains(
+            "super::{CmdResult, DynamicSetArgs}",
+            "GlobalArgs"
+        ));
+        assert!(grouped_import_contains(
+            "serde::{Deserialize, Serialize}",
+            "Serialize"
+        ));
     }
 }

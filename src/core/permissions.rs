@@ -97,7 +97,12 @@ fn fix_deployed_ownership(
         detected
     };
 
-    log_status!("deploy", "Setting ownership to {} on {}", owner, remote_path);
+    log_status!(
+        "deploy",
+        "Setting ownership to {} on {}",
+        owner,
+        remote_path
+    );
     let chown_cmd = format!(
         "chown -R {} {} 2>/dev/null",
         shell::quote_arg(&owner),

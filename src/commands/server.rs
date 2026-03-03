@@ -116,10 +116,7 @@ enum KeyCommand {
     },
 }
 
-pub fn run(
-    args: ServerArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<ServerOutput> {
+pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ServerOutput> {
     match args.command {
         ServerCommand::Create {
             json,

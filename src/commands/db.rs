@@ -102,10 +102,7 @@ pub enum DbResultVariant {
     Tunnel(DbTunnelResult),
 }
 
-pub fn run(
-    args: DbArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<DbOutput> {
+pub fn run(args: DbArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DbOutput> {
     match args.command {
         DbCommand::Tables { project_id, args } => tables(&project_id, &args),
         DbCommand::Describe { project_id, args } => describe(&project_id, &args),

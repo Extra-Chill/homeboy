@@ -394,7 +394,9 @@ mod tests {
 
     #[test]
     fn display_roundtrip() {
-        let cases = vec!["*", "1.2.3", ">=1.0.0", ">1.0.0", "<=1.0.0", "<1.0.0", "^1.2.3", "~1.2.3"];
+        let cases = vec![
+            "*", "1.2.3", ">=1.0.0", ">1.0.0", "<=1.0.0", "<1.0.0", "^1.2.3", "~1.2.3",
+        ];
         for case in cases {
             let c = VersionConstraint::parse(case).unwrap();
             let displayed = c.to_string();

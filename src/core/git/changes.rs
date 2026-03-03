@@ -25,7 +25,10 @@ pub fn get_uncommitted_changes(path: &str) -> Result<UncommittedChanges> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::git_command_failed(format!("git status failed: {}", stderr)));
+        return Err(Error::git_command_failed(format!(
+            "git status failed: {}",
+            stderr
+        )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -105,9 +108,10 @@ pub fn get_files_changed_since(path: &str, git_ref: &str) -> Result<Vec<String>>
 /// Get diff of uncommitted changes.
 pub fn get_diff(path: &str) -> Result<String> {
     // Get both staged and unstaged diff
-    let staged =
-        execute_git(path, &["diff", "--cached"]).map_err(|e| Error::git_command_failed(e.to_string()))?;
-    let unstaged = execute_git(path, &["diff"]).map_err(|e| Error::git_command_failed(e.to_string()))?;
+    let staged = execute_git(path, &["diff", "--cached"])
+        .map_err(|e| Error::git_command_failed(e.to_string()))?;
+    let unstaged =
+        execute_git(path, &["diff"]).map_err(|e| Error::git_command_failed(e.to_string()))?;
 
     let staged_diff = String::from_utf8_lossy(&staged.stdout);
     let unstaged_diff = String::from_utf8_lossy(&unstaged.stdout);

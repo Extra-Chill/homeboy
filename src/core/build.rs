@@ -53,23 +53,32 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
             if let Ok(extension) = extension::load_extension(extension_id) {
                 if let Some(build) = &extension.build {
                     // Check for extension's bundled script
-                    let bundled = build.extension_script.as_ref().and_then(|extension_script| {
-                        paths::extension(extension_id).ok().and_then(|extension_dir| {
-                            let script_path = extension_dir.join(extension_script);
-                            script_path.exists().then(|| {
-                                let quoted_path = shell::quote_path(&script_path.to_string_lossy());
-                                let command = build
-                                    .command_template
-                                    .as_ref()
-                                    .map(|t| t.replace("{{script}}", &quoted_path))
-                                    .unwrap_or_else(|| format!("sh {}", quoted_path));
-                                ResolvedBuildCommand::ExtensionProvided {
-                                    command,
-                                    source: format!("{}:{}", extension_id, extension_script),
-                                }
-                            })
-                        })
-                    });
+                    let bundled = build
+                        .extension_script
+                        .as_ref()
+                        .and_then(|extension_script| {
+                            paths::extension(extension_id)
+                                .ok()
+                                .and_then(|extension_dir| {
+                                    let script_path = extension_dir.join(extension_script);
+                                    script_path.exists().then(|| {
+                                        let quoted_path =
+                                            shell::quote_path(&script_path.to_string_lossy());
+                                        let command = build
+                                            .command_template
+                                            .as_ref()
+                                            .map(|t| t.replace("{{script}}", &quoted_path))
+                                            .unwrap_or_else(|| format!("sh {}", quoted_path));
+                                        ResolvedBuildCommand::ExtensionProvided {
+                                            command,
+                                            source: format!(
+                                                "{}:{}",
+                                                extension_id, extension_script
+                                            ),
+                                        }
+                                    })
+                                })
+                        });
                     if let Some(result) = bundled {
                         return Ok(result);
                     }
@@ -444,7 +453,10 @@ fn run_pre_build_scripts(comp: &Component) -> Result<Option<(i32, String)>> {
         }
 
         let env: [(&str, &str); 4] = [
-            (exec_context::EXTENSION_PATH, &extension_path.to_string_lossy()),
+            (
+                exec_context::EXTENSION_PATH,
+                &extension_path.to_string_lossy(),
+            ),
             (exec_context::COMPONENT_ID, &comp.id),
             (exec_context::COMPONENT_PATH, &comp.local_path),
             ("HOMEBOY_PLUGIN_PATH", &comp.local_path),
@@ -471,10 +483,7 @@ fn get_build_env_vars(comp: &Component) -> Vec<(String, String)> {
     let mut env = Vec::new();
 
     // Always pass the component ID so build scripts can name artifacts consistently
-    env.push((
-        exec_context::COMPONENT_ID.to_string(),
-        comp.id.clone(),
-    ));
+    env.push((exec_context::COMPONENT_ID.to_string(), comp.id.clone()));
 
     if let Some(extensions) = &comp.extensions {
         for extension_id in extensions.keys() {

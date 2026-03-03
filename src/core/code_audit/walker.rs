@@ -70,7 +70,16 @@ const COMMON_SOURCE_EXTENSIONS: &[&str] = &[
 /// Used to warn when no extension provides fingerprinting for the dominant language.
 pub fn count_unclaimed_source_files(root: &Path) -> usize {
     let skip_dirs = [
-        "node_modules", "vendor", ".git", "build", "dist", "target", ".svn", ".hg", "cache", "tmp",
+        "node_modules",
+        "vendor",
+        ".git",
+        "build",
+        "dist",
+        "target",
+        ".svn",
+        ".hg",
+        "cache",
+        "tmp",
     ];
     let claimed = extension_provided_file_extensions();
 
@@ -81,12 +90,16 @@ pub fn count_unclaimed_source_files(root: &Path) -> usize {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
                     if !skip_dirs.contains(&name.as_str()) {
                         stack.push(path);
                     }
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if COMMON_SOURCE_EXTENSIONS.contains(&ext) && !claimed.iter().any(|c| c == ext) {
+                    if COMMON_SOURCE_EXTENSIONS.contains(&ext) && !claimed.iter().any(|c| c == ext)
+                    {
                         count += 1;
                     }
                 }

@@ -122,7 +122,10 @@ impl ExtensionRunner {
         Ok(comp)
     }
 
-    fn determine_extension(&self, component: &Component) -> Result<(String, Vec<(String, String)>)> {
+    fn determine_extension(
+        &self,
+        component: &Component,
+    ) -> Result<(String, Vec<(String, String)>)> {
         let extensions = component.extensions.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "component",
@@ -288,8 +291,8 @@ impl ExtensionRunner {
             Some(&self.component_id),
             settings_json,
             Some(&extension_path.to_string_lossy()),
-            None, // no project base_path in runner
-            None, // no individual settings
+            None,                  // no project base_path in runner
+            None,                  // no individual settings
             Some(&component_path), // path_override (respects --path flag)
         );
 

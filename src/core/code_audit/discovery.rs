@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::conventions::Language;
-use super::fingerprint::{FileFingerprint, fingerprint_file};
+use super::fingerprint::{fingerprint_file, FileFingerprint};
 use super::walker::walk_source_files;
 
 /// Result of auto-discovering file groups.
@@ -203,15 +203,30 @@ pub fn discover_cross_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_helpers::make_convention;
+    use super::*;
 
     #[test]
     fn cross_directory_detects_shared_methods() {
         let conventions = vec![
-            make_convention("Flow", "inc/Abilities/Flow/*", &["execute", "__construct", "registerAbility"], &[]),
-            make_convention("Job", "inc/Abilities/Job/*", &["execute", "__construct", "registerAbility"], &[]),
-            make_convention("Data", "inc/Abilities/Data/*", &["execute", "__construct", "registerAbility"], &[]),
+            make_convention(
+                "Flow",
+                "inc/Abilities/Flow/*",
+                &["execute", "__construct", "registerAbility"],
+                &[],
+            ),
+            make_convention(
+                "Job",
+                "inc/Abilities/Job/*",
+                &["execute", "__construct", "registerAbility"],
+                &[],
+            ),
+            make_convention(
+                "Data",
+                "inc/Abilities/Data/*",
+                &["execute", "__construct", "registerAbility"],
+                &[],
+            ),
         ];
 
         let results = discover_cross_directory(&conventions);
@@ -221,7 +236,9 @@ mod tests {
         assert_eq!(result.parent, "inc/Abilities");
         assert!(result.expected_methods.contains(&"execute".to_string()));
         assert!(result.expected_methods.contains(&"__construct".to_string()));
-        assert!(result.expected_methods.contains(&"registerAbility".to_string()));
+        assert!(result
+            .expected_methods
+            .contains(&"registerAbility".to_string()));
         assert_eq!(result.conforming_dirs.len(), 3);
         assert!(result.outlier_dirs.is_empty());
         assert_eq!(result.total_dirs, 3);
@@ -231,9 +248,24 @@ mod tests {
     #[test]
     fn cross_directory_detects_outlier_missing_method() {
         let conventions = vec![
-            make_convention("Flow", "inc/Abilities/Flow/*", &["execute", "__construct", "registerAbility"], &[]),
-            make_convention("Job", "inc/Abilities/Job/*", &["execute", "__construct", "registerAbility"], &[]),
-            make_convention("Data", "inc/Abilities/Data/*", &["execute", "__construct"], &[]), // missing registerAbility
+            make_convention(
+                "Flow",
+                "inc/Abilities/Flow/*",
+                &["execute", "__construct", "registerAbility"],
+                &[],
+            ),
+            make_convention(
+                "Job",
+                "inc/Abilities/Job/*",
+                &["execute", "__construct", "registerAbility"],
+                &[],
+            ),
+            make_convention(
+                "Data",
+                "inc/Abilities/Data/*",
+                &["execute", "__construct"],
+                &[],
+            ), // missing registerAbility
         ];
 
         let results = discover_cross_directory(&conventions);
@@ -243,15 +275,20 @@ mod tests {
         assert_eq!(result.conforming_dirs.len(), 2);
         assert_eq!(result.outlier_dirs.len(), 1);
         assert_eq!(result.outlier_dirs[0].dir, "inc/Abilities/Data");
-        assert!(result.outlier_dirs[0].missing_methods.contains(&"registerAbility".to_string()));
+        assert!(result.outlier_dirs[0]
+            .missing_methods
+            .contains(&"registerAbility".to_string()));
     }
 
     #[test]
     fn cross_directory_needs_at_least_two_siblings() {
         // Only one subdirectory — no cross-directory convention possible
-        let conventions = vec![
-            make_convention("Flow", "inc/Abilities/Flow/*", &["execute", "__construct"], &[]),
-        ];
+        let conventions = vec![make_convention(
+            "Flow",
+            "inc/Abilities/Flow/*",
+            &["execute", "__construct"],
+            &[],
+        )];
 
         let results = discover_cross_directory(&conventions);
         assert!(results.is_empty());
@@ -261,8 +298,18 @@ mod tests {
     fn cross_directory_skips_when_no_shared_methods() {
         // Sibling directories have completely different method sets
         let conventions = vec![
-            make_convention("Flow", "inc/Extensions/Flow/*", &["run_flow", "validate_flow"], &[]),
-            make_convention("Job", "inc/Extensions/Job/*", &["dispatch_job", "cancel_job"], &[]),
+            make_convention(
+                "Flow",
+                "inc/Extensions/Flow/*",
+                &["run_flow", "validate_flow"],
+                &[],
+            ),
+            make_convention(
+                "Job",
+                "inc/Extensions/Job/*",
+                &["dispatch_job", "cancel_job"],
+                &[],
+            ),
         ];
 
         let results = discover_cross_directory(&conventions);
@@ -294,20 +341,37 @@ mod tests {
     #[test]
     fn cross_directory_includes_shared_registrations() {
         let conventions = vec![
-            make_convention("Flow", "inc/Abilities/Flow/*", &["execute"], &["wp_abilities_api_init"]),
-            make_convention("Job", "inc/Abilities/Job/*", &["execute"], &["wp_abilities_api_init"]),
+            make_convention(
+                "Flow",
+                "inc/Abilities/Flow/*",
+                &["execute"],
+                &["wp_abilities_api_init"],
+            ),
+            make_convention(
+                "Job",
+                "inc/Abilities/Job/*",
+                &["execute"],
+                &["wp_abilities_api_init"],
+            ),
         ];
 
         let results = discover_cross_directory(&conventions);
 
         assert_eq!(results.len(), 1);
-        assert!(results[0].expected_registrations.contains(&"wp_abilities_api_init".to_string()));
+        assert!(results[0]
+            .expected_registrations
+            .contains(&"wp_abilities_api_init".to_string()));
     }
 
     #[test]
     fn cross_directory_separate_parents_produce_separate_conventions() {
         let conventions = vec![
-            make_convention("Flow", "inc/Abilities/Flow/*", &["execute", "register"], &[]),
+            make_convention(
+                "Flow",
+                "inc/Abilities/Flow/*",
+                &["execute", "register"],
+                &[],
+            ),
             make_convention("Job", "inc/Abilities/Job/*", &["execute", "register"], &[]),
             make_convention("Auth", "inc/Middleware/Auth/*", &["handle", "boot"], &[]),
             make_convention("Cache", "inc/Middleware/Cache/*", &["handle", "boot"], &[]),

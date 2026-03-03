@@ -467,7 +467,12 @@ pub fn create_tunnel(project_id: &str, local_port: Option<u16>) -> Result<DbTunn
 
     let exit_code = match status {
         Ok(s) => s.code().unwrap_or(0),
-        Err(e) => return Err(Error::internal_io(e.to_string(), Some("SSH tunnel".to_string()))),
+        Err(e) => {
+            return Err(Error::internal_io(
+                e.to_string(),
+                Some("SSH tunnel".to_string()),
+            ))
+        }
     };
 
     let success = exit_code == 0 || exit_code == 130;

@@ -15,14 +15,22 @@ const HIGH_ITEM_COUNT_THRESHOLD: usize = 15;
 /// Known source file extensions for structural analysis.
 /// Matches the walker's known extensions so we analyze the same files.
 const SOURCE_EXTENSIONS: &[&str] = &[
-    "rs", "php", "js", "ts", "jsx", "tsx", "mjs", "py", "go", "java", "rb",
-    "swift", "kt", "c", "cpp", "h",
+    "rs", "php", "js", "ts", "jsx", "tsx", "mjs", "py", "go", "java", "rb", "swift", "kt", "c",
+    "cpp", "h",
 ];
 
 /// Directories to skip during structural analysis.
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", "vendor", ".git", "build", "dist", "target",
-    ".svn", ".hg", "cache", "tmp",
+    "node_modules",
+    "vendor",
+    ".git",
+    "build",
+    "dist",
+    "target",
+    ".svn",
+    ".hg",
+    "cache",
+    "tmp",
 ];
 
 /// Run structural analysis on all source files under a root directory.
@@ -42,18 +50,14 @@ pub fn analyze_structure(root: &Path) -> Vec<Finding> {
             let path = entry.path();
 
             if path.is_dir() {
-                let name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if !SKIP_DIRS.contains(&name) {
                     stack.push(path);
                 }
                 continue;
             }
 
-            let ext = path.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if !SOURCE_EXTENSIONS.contains(&ext) {
                 continue;
             }
@@ -63,7 +67,8 @@ pub fn analyze_structure(root: &Path) -> Vec<Finding> {
                 Err(_) => continue,
             };
 
-            let relative = path.strip_prefix(root)
+            let relative = path
+                .strip_prefix(root)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
@@ -170,8 +175,16 @@ fn is_rust_item_declaration(trimmed: &str) -> bool {
     };
 
     // Strip async/unsafe/const modifiers for functions
-    let rest = if let Some(r) = rest.strip_prefix("async ") { r } else { rest };
-    let rest = if let Some(r) = rest.strip_prefix("unsafe ") { r } else { rest };
+    let rest = if let Some(r) = rest.strip_prefix("async ") {
+        r
+    } else {
+        rest
+    };
+    let rest = if let Some(r) = rest.strip_prefix("unsafe ") {
+        r
+    } else {
+        rest
+    };
 
     rest.starts_with("fn ")
         || rest.starts_with("struct ")
@@ -368,7 +381,8 @@ export default function main() {}
         std::fs::write(dir.join("small.rs"), "fn tiny() {}\n").unwrap();
 
         let findings = analyze_structure(&dir);
-        let god_findings: Vec<&Finding> = findings.iter()
+        let god_findings: Vec<&Finding> = findings
+            .iter()
             .filter(|f| f.kind == DeviationKind::GodFile)
             .collect();
 
@@ -392,11 +406,16 @@ export default function main() {}
         std::fs::write(dir.join("many.rs"), &content).unwrap();
 
         let findings = analyze_structure(&dir);
-        let item_findings: Vec<&Finding> = findings.iter()
+        let item_findings: Vec<&Finding> = findings
+            .iter()
             .filter(|f| f.kind == DeviationKind::HighItemCount)
             .collect();
 
-        assert_eq!(item_findings.len(), 1, "Should flag many.rs for high item count");
+        assert_eq!(
+            item_findings.len(),
+            1,
+            "Should flag many.rs for high item count"
+        );
         assert!(item_findings[0].description.contains("20 top-level items"));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -416,7 +435,10 @@ export default function main() {}
         std::fs::write(dir.join("readme.md"), &content).unwrap();
 
         let findings = analyze_structure(&dir);
-        assert!(findings.is_empty(), "Non-source files should not produce findings");
+        assert!(
+            findings.is_empty(),
+            "Non-source files should not produce findings"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -457,7 +479,10 @@ export default function main() {}
         std::fs::write(dir.join("clean.rs"), &content).unwrap();
 
         let findings = analyze_structure(&dir);
-        assert!(findings.is_empty(), "Clean files should produce no findings");
+        assert!(
+            findings.is_empty(),
+            "Clean files should produce no findings"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

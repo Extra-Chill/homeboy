@@ -282,11 +282,7 @@ impl Error {
             tried,
         });
 
-        Self::new(
-            ErrorCode::ValidationInvalidArgument,
-            message,
-            details,
-        )
+        Self::new(ErrorCode::ValidationInvalidArgument, message, details)
     }
 
     pub fn validation_invalid_json(
@@ -333,7 +329,10 @@ impl Error {
             err = err.with_hint(format_suggestions(&suggestions));
         }
         let list_cmd = entity_type.to_lowercase();
-        err.with_hint(format!("Run 'homeboy {} list' to see available {}s", list_cmd, list_cmd))
+        err.with_hint(format!(
+            "Run 'homeboy {} list' to see available {}s",
+            list_cmd, list_cmd
+        ))
     }
 
     pub fn project_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {

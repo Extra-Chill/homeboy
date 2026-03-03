@@ -263,10 +263,7 @@ pub fn discover_conventions(
                             "Namespace mismatch: expected `{}`, found `{}`",
                             expected_ns, actual_ns
                         ),
-                        suggestion: format!(
-                            "Change namespace to `{}`",
-                            expected_ns
-                        ),
+                        suggestion: format!("Change namespace to `{}`", expected_ns),
                     });
                 }
             }
@@ -278,10 +275,7 @@ pub fn discover_conventions(
                         "Missing namespace declaration (expected `{}`)",
                         expected_ns
                     ),
-                    suggestion: format!(
-                        "Add `namespace {};`",
-                        expected_ns
-                    ),
+                    suggestion: format!("Add `namespace {};`", expected_ns),
                 });
             }
         }
@@ -533,8 +527,6 @@ pub fn check_signature_consistency(conventions: &mut [Convention], root: &Path) 
 // Cross-Directory Discovery
 // ============================================================================
 
-
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -559,13 +551,13 @@ mod tests {
                 implements: vec![],
                 namespace: None,
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "steps/webhook.php".to_string(),
@@ -580,13 +572,13 @@ mod tests {
                 implements: vec![],
                 namespace: None,
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "steps/agent-ping.php".to_string(),
@@ -597,21 +589,22 @@ mod tests {
                 implements: vec![],
                 namespace: None,
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
         ];
 
-        let convention =
-            discover_conventions("Step Types", "steps/*.php", &fingerprints).unwrap();
+        let convention = discover_conventions("Step Types", "steps/*.php", &fingerprints).unwrap();
 
         assert_eq!(convention.name, "Step Types");
-        assert!(convention.expected_methods.contains(&"register".to_string()));
+        assert!(convention
+            .expected_methods
+            .contains(&"register".to_string()));
         assert!(convention.expected_methods.contains(&"execute".to_string()));
         assert_eq!(convention.conforming.len(), 2);
         assert_eq!(convention.outliers.len(), 1);
@@ -666,13 +659,13 @@ mod tests {
                 implements: vec!["AbilityInterface".to_string()],
                 namespace: None,
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/update.php".to_string(),
@@ -683,13 +676,13 @@ mod tests {
                 implements: vec!["AbilityInterface".to_string()],
                 namespace: None,
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/helpers.php".to_string(),
@@ -700,13 +693,13 @@ mod tests {
                 implements: vec![], // Missing interface
                 namespace: None,
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
         ];
 
@@ -714,16 +707,19 @@ mod tests {
             discover_conventions("Abilities", "abilities/*.php", &fingerprints).unwrap();
 
         // Should detect AbilityInterface as expected
-        assert!(convention.expected_interfaces.contains(&"AbilityInterface".to_string()));
+        assert!(convention
+            .expected_interfaces
+            .contains(&"AbilityInterface".to_string()));
 
         // helpers.php should be an outlier due to missing interface
         assert_eq!(convention.outliers.len(), 1);
         assert_eq!(convention.outliers[0].file, "abilities/helpers.php");
-        assert!(convention.outliers[0]
-            .deviations
-            .iter()
-            .any(|d| matches!(d.kind, DeviationKind::MissingInterface)
-                && d.description.contains("AbilityInterface")));
+        assert!(convention.outliers[0].deviations.iter().any(|d| matches!(
+            d.kind,
+            DeviationKind::MissingInterface
+        ) && d
+            .description
+            .contains("AbilityInterface")));
     }
 
     #[test]
@@ -738,13 +734,13 @@ mod tests {
                 implements: vec!["FooInterface".to_string()],
                 namespace: None,
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "b.php".to_string(),
@@ -755,13 +751,13 @@ mod tests {
                 implements: vec!["BarInterface".to_string()],
                 namespace: None,
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "c.php".to_string(),
@@ -772,18 +768,17 @@ mod tests {
                 implements: vec![],
                 namespace: None,
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
         ];
 
-        let convention =
-            discover_conventions("Mixed", "*.php", &fingerprints).unwrap();
+        let convention = discover_conventions("Mixed", "*.php", &fingerprints).unwrap();
 
         // No interface appears in ≥60% of files
         assert!(convention.expected_interfaces.is_empty());
@@ -808,7 +803,8 @@ class AiChat {
     public function register(): void {}
 }
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::write(
             dir.join("steps/Webhook.php"),
@@ -818,7 +814,8 @@ class Webhook {
     public function register(): void {}
 }
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         // One file with different signature (missing type hints)
         std::fs::write(
@@ -829,7 +826,8 @@ class AgentPing {
     public function register(): void {}
 }
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut conventions = vec![Convention {
             name: "Steps".to_string(),
@@ -857,8 +855,7 @@ class AgentPing {
         assert_eq!(conv.outliers.len(), 1);
         assert_eq!(conv.outliers[0].file, "steps/AgentPing.php");
         assert!(conv.outliers[0].deviations.iter().any(|d| {
-            d.kind == DeviationKind::SignatureMismatch
-                && d.description.contains("execute")
+            d.kind == DeviationKind::SignatureMismatch && d.description.contains("execute")
         }));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -884,7 +881,8 @@ class AgentPing {
         std::fs::write(
             dir.join("steps/Bad.php"),
             "<?php\nclass Bad {\n    public function execute($config) { return []; }\n}\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut conventions = vec![Convention {
             name: "Steps".to_string(),
@@ -917,8 +915,14 @@ class AgentPing {
         assert_eq!(conv.outliers.len(), 1);
         // Should have BOTH the original MissingMethod AND the new SignatureMismatch
         assert!(conv.outliers[0].deviations.len() >= 2);
-        assert!(conv.outliers[0].deviations.iter().any(|d| d.kind == DeviationKind::MissingMethod));
-        assert!(conv.outliers[0].deviations.iter().any(|d| d.kind == DeviationKind::SignatureMismatch));
+        assert!(conv.outliers[0]
+            .deviations
+            .iter()
+            .any(|d| d.kind == DeviationKind::MissingMethod));
+        assert!(conv.outliers[0]
+            .deviations
+            .iter()
+            .any(|d| d.kind == DeviationKind::SignatureMismatch));
     }
 
     #[test]
@@ -1003,17 +1007,20 @@ class AgentPing {
         std::fs::write(
             dir.join("steps/A.php"),
             "<?php\nclass A {\n    public function run(string $input): bool { return true; }\n}\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::write(
             dir.join("steps/B.php"),
             "<?php\nclass B {\n    public function run(string $input): bool { return true; }\n}\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::write(
             dir.join("steps/C.php"),
             "<?php\nclass C {\n    public function run($input) { return true; }\n}\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut conventions = vec![Convention {
             name: "Steps".to_string(),
@@ -1055,13 +1062,13 @@ class AgentPing {
                 implements: vec![],
                 namespace: Some("DataMachine\\Abilities\\Flow".to_string()),
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/UpdateFlow.php".to_string(),
@@ -1072,13 +1079,13 @@ class AgentPing {
                 implements: vec![],
                 namespace: Some("DataMachine\\Abilities\\Flow".to_string()),
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/DeleteFlow.php".to_string(),
@@ -1089,26 +1096,29 @@ class AgentPing {
                 implements: vec![],
                 namespace: Some("DataMachine\\Flow".to_string()), // WRONG namespace
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
         ];
 
-        let convention =
-            discover_conventions("Flow", "abilities/*", &fingerprints).unwrap();
+        let convention = discover_conventions("Flow", "abilities/*", &fingerprints).unwrap();
 
-        assert_eq!(convention.expected_namespace, Some("DataMachine\\Abilities\\Flow".to_string()));
+        assert_eq!(
+            convention.expected_namespace,
+            Some("DataMachine\\Abilities\\Flow".to_string())
+        );
         assert_eq!(convention.conforming.len(), 2);
         assert_eq!(convention.outliers.len(), 1);
         assert_eq!(convention.outliers[0].file, "abilities/DeleteFlow.php");
-        assert!(convention.outliers[0].deviations.iter().any(|d| {
-            d.kind == DeviationKind::NamespaceMismatch
-        }));
+        assert!(convention.outliers[0]
+            .deviations
+            .iter()
+            .any(|d| { d.kind == DeviationKind::NamespaceMismatch }));
     }
 
     #[test]
@@ -1123,13 +1133,13 @@ class AgentPing {
                 implements: vec![],
                 namespace: None,
                 imports: vec!["DataMachine\\Core\\Base".to_string()],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/B.php".to_string(),
@@ -1140,13 +1150,13 @@ class AgentPing {
                 implements: vec![],
                 namespace: None,
                 imports: vec!["DataMachine\\Core\\Base".to_string()],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "abilities/C.php".to_string(),
@@ -1160,22 +1170,24 @@ class AgentPing {
                 // File uses Base but doesn't import it
                 content: "class C extends Base {\n    public function execute() {}\n}".to_string(),
                 method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
         ];
 
-        let convention =
-            discover_conventions("Abilities", "abilities/*", &fingerprints).unwrap();
+        let convention = discover_conventions("Abilities", "abilities/*", &fingerprints).unwrap();
 
-        assert!(convention.expected_imports.contains(&"DataMachine\\Core\\Base".to_string()));
+        assert!(convention
+            .expected_imports
+            .contains(&"DataMachine\\Core\\Base".to_string()));
         assert_eq!(convention.outliers.len(), 1);
-        assert!(convention.outliers[0].deviations.iter().any(|d| {
-            d.kind == DeviationKind::MissingImport
-        }));
+        assert!(convention.outliers[0]
+            .deviations
+            .iter()
+            .any(|d| { d.kind == DeviationKind::MissingImport }));
     }
 
     #[test]
@@ -1190,13 +1202,13 @@ class AgentPing {
                 implements: vec![],
                 namespace: Some("App\\Steps".to_string()),
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "steps/B.php".to_string(),
@@ -1207,13 +1219,13 @@ class AgentPing {
                 implements: vec![],
                 namespace: Some("App\\Steps".to_string()),
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
             FileFingerprint {
                 relative_path: "steps/C.php".to_string(),
@@ -1224,20 +1236,22 @@ class AgentPing {
                 implements: vec![],
                 namespace: None, // Missing namespace entirely
                 imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
             },
         ];
 
-        let convention =
-            discover_conventions("Steps", "steps/*", &fingerprints).unwrap();
+        let convention = discover_conventions("Steps", "steps/*", &fingerprints).unwrap();
 
-        assert_eq!(convention.expected_namespace, Some("App\\Steps".to_string()));
+        assert_eq!(
+            convention.expected_namespace,
+            Some("App\\Steps".to_string())
+        );
         assert_eq!(convention.outliers.len(), 1);
         assert!(convention.outliers[0].deviations.iter().any(|d| {
             d.kind == DeviationKind::NamespaceMismatch
@@ -1248,5 +1262,4 @@ class AgentPing {
     // ========================================================================
     // has_import tests
     // ========================================================================
-
 }

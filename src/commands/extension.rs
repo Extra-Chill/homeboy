@@ -2,8 +2,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::extension::{
-    self, is_extension_compatible, is_extension_linked, load_all_extensions, load_extension,
-    extension_ready_status, run_setup,
+    self, extension_ready_status, is_extension_compatible, is_extension_linked,
+    load_all_extensions, load_extension, run_setup,
 };
 use homeboy::project::{self, Project};
 
@@ -124,7 +124,10 @@ enum ExtensionCommand {
     },
 }
 
-pub fn run(args: ExtensionArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ExtensionOutput> {
+pub fn run(
+    args: ExtensionArgs,
+    _global: &crate::commands::GlobalArgs,
+) -> CmdResult<ExtensionOutput> {
     match args.command {
         ExtensionCommand::List { project } => list(project),
         ExtensionCommand::Show { extension_id } => show_extension(&extension_id),
@@ -139,7 +142,15 @@ pub fn run(args: ExtensionArgs, _global: &crate::commands::GlobalArgs) -> CmdRes
             stream,
             no_stream,
         } => run_extension(
-            &extension_id, project, component, input, args, stream, no_stream, step, skip,
+            &extension_id,
+            project,
+            component,
+            input,
+            args,
+            stream,
+            no_stream,
+            step,
+            skip,
         ),
         ExtensionCommand::Setup { extension_id } => setup_extension(&extension_id),
         ExtensionCommand::Install { source, id } => install_extension(&source, id),
@@ -556,7 +567,11 @@ fn install_extension(source: &str, id: Option<String>) -> CmdResult<ExtensionOut
     ))
 }
 
-fn update_extension(extension_id: Option<&str>, all: bool, force: bool) -> CmdResult<ExtensionOutput> {
+fn update_extension(
+    extension_id: Option<&str>,
+    all: bool,
+    force: bool,
+) -> CmdResult<ExtensionOutput> {
     if all {
         return update_all_extensions(force);
     }
@@ -659,8 +674,12 @@ fn run_action(
     project_id: Option<String>,
     data: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    let response =
-        homeboy::extension::run_action(extension_id, action_id, project_id.as_deref(), data.as_deref())?;
+    let response = homeboy::extension::run_action(
+        extension_id,
+        action_id,
+        project_id.as_deref(),
+        data.as_deref(),
+    )?;
 
     Ok((
         ExtensionOutput::Action {
@@ -699,10 +718,9 @@ fn exec_extension_tool(
     args: Vec<String>,
 ) -> CmdResult<ExtensionOutput> {
     let extension = load_extension(extension_id)?;
-    let extension_path = extension
-        .extension_path
-        .as_deref()
-        .ok_or_else(|| homeboy::Error::config_missing_key("extension_path", Some(extension_id.into())))?;
+    let extension_path = extension.extension_path.as_deref().ok_or_else(|| {
+        homeboy::Error::config_missing_key("extension_path", Some(extension_id.into()))
+    })?;
 
     // Resolve working directory: component path if given, otherwise current dir
     let working_dir = if let Some(ref cid) = component {
@@ -722,7 +740,10 @@ fn exec_extension_tool(
 
     let env = vec![
         ("PATH", enriched_path.as_str()),
-        (homeboy::extension::exec_context::EXTENSION_PATH, extension_path),
+        (
+            homeboy::extension::exec_context::EXTENSION_PATH,
+            extension_path,
+        ),
         (homeboy::extension::exec_context::EXTENSION_ID, extension_id),
     ];
 

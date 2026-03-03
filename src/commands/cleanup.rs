@@ -53,9 +53,7 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<CleanupO
                 total_issues,
                 result: Some(result),
                 results: Vec::new(),
-                hints: vec![
-                    "Full docs: homeboy docs commands/cleanup".to_string(),
-                ],
+                hints: vec!["Full docs: homeboy docs commands/cleanup".to_string()],
             },
             0,
         ))
@@ -77,7 +75,10 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<CleanupO
             hints.push(format!(
                 "{} total issue(s) across {} component(s).",
                 total_issues,
-                results.iter().filter(|r| r.summary.config_issues > 0).count()
+                results
+                    .iter()
+                    .filter(|r| r.summary.config_issues > 0)
+                    .count()
             ));
         }
         hints.push("Full docs: homeboy docs commands/cleanup".to_string());

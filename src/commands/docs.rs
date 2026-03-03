@@ -456,7 +456,10 @@ fn run_map(
                 fp.methods
                     .iter()
                     .filter(|m| {
-                        fp.visibility.get(*m).map(|v| v == "protected").unwrap_or(false)
+                        fp.visibility
+                            .get(*m)
+                            .map(|v| v == "protected")
+                            .unwrap_or(false)
                     })
                     .cloned()
                     .collect()
@@ -488,7 +491,12 @@ fn run_map(
             let mut counts: HashMap<&str, usize> = HashMap::new();
             for fp in fps {
                 for method in &fp.methods {
-                    if fp.visibility.get(method).map(|v| v == "public").unwrap_or(true) {
+                    if fp
+                        .visibility
+                        .get(method)
+                        .map(|v| v == "public")
+                        .unwrap_or(true)
+                    {
                         *counts.entry(method.as_str()).or_default() += 1;
                     }
                 }
@@ -496,10 +504,22 @@ fn run_map(
             counts
         };
         let threshold = (fps.len() as f64 * 0.5).ceil() as usize;
-        let noise_methods = ["__construct", "__destruct", "__toString", "__clone",
-                             "__get", "__set", "__isset", "__unset", "__sleep",
-                             "__wakeup", "__invoke", "__debugInfo", "getInstance",
-                             "instance"];
+        let noise_methods = [
+            "__construct",
+            "__destruct",
+            "__toString",
+            "__clone",
+            "__get",
+            "__set",
+            "__isset",
+            "__unset",
+            "__sleep",
+            "__wakeup",
+            "__invoke",
+            "__debugInfo",
+            "getInstance",
+            "instance",
+        ];
         let mut shared: Vec<String> = method_counts
             .iter()
             .filter(|(_, &count)| count >= threshold && count > 1)
@@ -603,10 +623,7 @@ fn run_map(
         ));
     }
 
-    Ok((
-        DocsOutput::Map(map),
-        0,
-    ))
+    Ok((DocsOutput::Map(map), 0))
 }
 
 // ============================================================================
@@ -622,7 +639,10 @@ fn render_map_to_markdown(
 
     // Create output dir
     fs::create_dir_all(output_dir).map_err(|e| {
-        homeboy::Error::internal_io(e.to_string(), Some(format!("create {}", output_dir.display())))
+        homeboy::Error::internal_io(
+            e.to_string(),
+            Some(format!("create {}", output_dir.display())),
+        )
     })?;
 
     // Build cross-reference indices
@@ -654,9 +674,7 @@ fn render_map_to_markdown(
             let chunks = split_classes_by_prefix(&module.classes);
             for (suffix, chunk_classes) in &chunks {
                 let chunk_name = format!("{}-{}", safe_name, suffix);
-                let content = render_module_chunk(
-                    module, chunk_classes, suffix, &children_index,
-                );
+                let content = render_module_chunk(module, chunk_classes, suffix, &children_index);
                 let chunk_path = output_dir.join(format!("{}.md", chunk_name));
                 write_file(&chunk_path, &content)?;
                 created.push(chunk_path.to_string_lossy().to_string());
@@ -701,7 +719,9 @@ fn render_index(map: &CodebaseMap) -> String {
     out.push_str(&format!("# {}\n\n", map.component));
     out.push_str(&format!(
         "{} files, {} classes, {} modules\n\n",
-        map.total_files, map.total_classes, map.modules.len()
+        map.total_files,
+        map.total_classes,
+        map.modules.len()
     ));
     out.push_str(&format!(
         "Hooks: {} actions, {} filters\n\n",
@@ -734,7 +754,13 @@ fn render_index(map: &CodebaseMap) -> String {
             "- **{}** → {} children: {}\n",
             entry.parent,
             entry.children.len(),
-            entry.children.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+            entry
+                .children
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
 
@@ -787,7 +813,9 @@ fn render_module_summary(module: &MapModule, safe_name: &str) -> String {
     for (suffix, chunk_classes) in &chunks {
         out.push_str(&format!(
             "- [{}](./{}-{}.md) — {} classes\n",
-            suffix, safe_name, suffix,
+            suffix,
+            safe_name,
+            suffix,
             chunk_classes.len()
         ));
     }
@@ -862,7 +890,9 @@ fn split_classes_by_prefix(classes: &[MapClass]) -> Vec<(String, Vec<&MapClass>)
     // Validate: reject if too many tiny groups (>15), one huge group, or only one group
     let needs_fallback = groups.len() > 15
         || groups.len() <= 1
-        || groups.values().any(|g| g.len() > MODULE_SPLIT_THRESHOLD * 2);
+        || groups
+            .values()
+            .any(|g| g.len() > MODULE_SPLIT_THRESHOLD * 2);
 
     if needs_fallback {
         // Alphabetical by first char AFTER majority prefix
@@ -873,7 +903,12 @@ fn split_classes_by_prefix(classes: &[MapClass]) -> Vec<(String, Vec<&MapClass>)
             } else {
                 &class.name
             };
-            let first = remainder.chars().next().unwrap_or('_').to_uppercase().to_string();
+            let first = remainder
+                .chars()
+                .next()
+                .unwrap_or('_')
+                .to_uppercase()
+                .to_string();
             alpha_groups.entry(first).or_default().push(class);
         }
 
@@ -887,7 +922,11 @@ fn split_classes_by_prefix(classes: &[MapClass]) -> Vec<(String, Vec<&MapClass>)
                     &class.name
                 };
                 let key: String = remainder.chars().take(3).collect();
-                let key = if key.is_empty() { "Other".to_string() } else { key };
+                let key = if key.is_empty() {
+                    "Other".to_string()
+                } else {
+                    key
+                };
                 alpha_groups.entry(key).or_default().push(class);
             }
         }
@@ -933,11 +972,7 @@ fn majority_prefix(classes: &[MapClass]) -> String {
 }
 
 /// Render a single class entry (shared between normal and chunk rendering).
-fn render_class(
-    out: &mut String,
-    class: &MapClass,
-    children_index: &HashMap<String, usize>,
-) {
+fn render_class(out: &mut String, class: &MapClass, children_index: &HashMap<String, usize>) {
     out.push_str(&format!("## {}\n\n", class.name));
     out.push_str(&format!("**File:** `{}`\n", class.file));
 
@@ -945,7 +980,10 @@ fn render_class(
         out.push_str(&format!("**Extends:** {}\n", parent));
     }
     if !class.implements.is_empty() {
-        out.push_str(&format!("**Implements:** {}\n", class.implements.join(", ")));
+        out.push_str(&format!(
+            "**Implements:** {}\n",
+            class.implements.join(", ")
+        ));
     }
     if let Some(ref ns) = class.namespace {
         out.push_str(&format!("**Namespace:** `{}`\n", ns));
@@ -1123,10 +1161,7 @@ fn format_hook_name(name: &str) -> String {
     }
 }
 
-fn render_hierarchy(
-    hierarchy: &[HierarchyEntry],
-    class_index: &HashMap<String, String>,
-) -> String {
+fn render_hierarchy(hierarchy: &[HierarchyEntry], class_index: &HashMap<String, String>) -> String {
     let mut out = String::new();
     out.push_str("# Class Hierarchy\n\n");
     for entry in hierarchy {
@@ -1184,11 +1219,32 @@ fn derive_module_name(dir: &str) -> String {
 
     // Segments that are too generic on their own
     let generic = [
-        "V1", "V2", "V3", "V4", "v1", "v2", "v3", "v4",
-        "Version1", "Version2", "Version3", "Version4",
-        "src", "lib", "includes", "inc", "app",
-        "Controllers", "Models", "Views", "Routes", "Schemas",
-        "Utilities", "Helpers", "Abstract", "Interfaces",
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "v1",
+        "v2",
+        "v3",
+        "v4",
+        "Version1",
+        "Version2",
+        "Version3",
+        "Version4",
+        "src",
+        "lib",
+        "includes",
+        "inc",
+        "app",
+        "Controllers",
+        "Models",
+        "Views",
+        "Routes",
+        "Schemas",
+        "Utilities",
+        "Helpers",
+        "Abstract",
+        "Interfaces",
     ];
 
     if segments.len() >= 2 && generic.contains(&last) {
@@ -1643,11 +1699,7 @@ fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput>
         serde_json::from_value(json_content)
     }
     .map_err(|e| {
-        homeboy::Error::validation_invalid_json(
-            e,
-            Some("parse audit result".to_string()),
-            None,
-        )
+        homeboy::Error::validation_invalid_json(e, Some("parse audit result".to_string()), None)
     })?;
 
     if audit.detected_features.is_empty() {
@@ -1700,11 +1752,11 @@ fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput>
 
         let file_path = docs_path.join(&target.file);
         let default_heading = format!("## {}", label);
-        let heading = target
-            .heading
+        let heading = target.heading.as_deref().unwrap_or(&default_heading);
+        let template = target
+            .template
             .as_deref()
-            .unwrap_or(&default_heading);
-        let template = target.template.as_deref().unwrap_or("- `{name}` ({source_file}:{line})");
+            .unwrap_or("- `{name}` ({source_file}:{line})");
 
         // Render the section content
         let mut section_lines: Vec<String> = Vec::new();
@@ -1712,10 +1764,7 @@ fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput>
         section_lines.push(String::new());
 
         for feature in features {
-            let desc = feature
-                .description
-                .as_deref()
-                .unwrap_or("");
+            let desc = feature.description.as_deref().unwrap_or("");
             let has_fields = template.contains("{fields}") && feature.fields.is_some();
             let line = template
                 .replace("{name}", &feature.name)
@@ -1725,7 +1774,11 @@ fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput>
                 .replace("{fields}", "") // fields rendered separately below
                 .replace(
                     "{documented}",
-                    if feature.documented { "yes" } else { "**undocumented**" },
+                    if feature.documented {
+                        "yes"
+                    } else {
+                        "**undocumented**"
+                    },
                 );
 
             // Push each line of the template (handles \n in template strings)
@@ -1741,10 +1794,7 @@ fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput>
             if has_fields {
                 section_lines.push(String::new());
                 for field in feature.fields.as_ref().unwrap() {
-                    let field_desc = field
-                        .description
-                        .as_deref()
-                        .unwrap_or("");
+                    let field_desc = field.description.as_deref().unwrap_or("");
                     if field_desc.is_empty() {
                         section_lines.push(format!("- `{}`", field.name));
                     } else {
@@ -1822,7 +1872,10 @@ fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput>
 /// Collect feature_labels and doc_targets from all linked extensions.
 fn collect_extension_doc_config(
     comp: Option<&component::Component>,
-) -> (HashMap<String, String>, HashMap<String, extension::DocTarget>) {
+) -> (
+    HashMap<String, String>,
+    HashMap<String, extension::DocTarget>,
+) {
     let mut labels = HashMap::new();
     let mut targets = HashMap::new();
 
@@ -2015,7 +2068,12 @@ fn infer_sections_from_siblings(dir: &Path, exclude_filename: &str) -> Option<Ve
     }
 
     let mut common_headings: Vec<String> = common_set.iter().map(|s| s.to_string()).collect();
-    common_headings.sort_by_key(|h| median_positions.get(h.as_str()).copied().unwrap_or(usize::MAX));
+    common_headings.sort_by_key(|h| {
+        median_positions
+            .get(h.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
 
     if common_headings.is_empty() {
         None
@@ -2068,14 +2126,29 @@ mod tests {
         let tmp = create_temp_dir();
         let dir = tmp.path();
 
-        write_md(dir, "a.md", "# A\n\n## Configuration\n\n## Parameters\n\n## Error Handling\n");
-        write_md(dir, "b.md", "# B\n\n## Configuration\n\n## Parameters\n\n## Error Handling\n");
-        write_md(dir, "c.md", "# C\n\n## Configuration\n\n## Parameters\n\n## Error Handling\n");
+        write_md(
+            dir,
+            "a.md",
+            "# A\n\n## Configuration\n\n## Parameters\n\n## Error Handling\n",
+        );
+        write_md(
+            dir,
+            "b.md",
+            "# B\n\n## Configuration\n\n## Parameters\n\n## Error Handling\n",
+        );
+        write_md(
+            dir,
+            "c.md",
+            "# C\n\n## Configuration\n\n## Parameters\n\n## Error Handling\n",
+        );
 
         let result = infer_sections_from_siblings(dir, "new.md");
         assert!(result.is_some(), "Should find common headings");
         let headings = result.unwrap();
-        assert_eq!(headings, vec!["Configuration", "Parameters", "Error Handling"]);
+        assert_eq!(
+            headings,
+            vec!["Configuration", "Parameters", "Error Handling"]
+        );
     }
 
     #[test]
@@ -2102,8 +2175,16 @@ mod tests {
         let tmp = create_temp_dir();
         let dir = tmp.path();
 
-        write_md(dir, "a.md", "# A\n\n## Config\n\n## Usage\n\n## Special A\n");
-        write_md(dir, "b.md", "# B\n\n## Config\n\n## Usage\n\n## Special B\n");
+        write_md(
+            dir,
+            "a.md",
+            "# A\n\n## Config\n\n## Usage\n\n## Special A\n",
+        );
+        write_md(
+            dir,
+            "b.md",
+            "# B\n\n## Config\n\n## Usage\n\n## Special B\n",
+        );
         write_md(dir, "c.md", "# C\n\n## Config\n\n## Usage\n");
 
         let result = infer_sections_from_siblings(dir, "new.md");

@@ -234,10 +234,7 @@ pub struct ProjectExtra {
 
 pub type ProjectOutput = EntityCrudOutput<Project, ProjectExtra>;
 
-pub fn run(
-    args: ProjectArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<ProjectOutput> {
+pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ProjectOutput> {
     match args.command {
         ProjectCommand::List => list(),
         ProjectCommand::Show { project_id } => show(&project_id),
@@ -583,28 +580,19 @@ fn components_list(project_id: &str) -> CmdResult<ProjectOutput> {
     ))
 }
 
-fn components_set(
-    project_id: &str,
-    component_ids: Vec<String>,
-) -> CmdResult<ProjectOutput> {
+fn components_set(project_id: &str, component_ids: Vec<String>) -> CmdResult<ProjectOutput> {
     project::set_components(project_id, component_ids)?;
     let project = project::load(project_id)?;
     write_project_components(project_id, "set", &project)
 }
 
-fn components_add(
-    project_id: &str,
-    component_ids: Vec<String>,
-) -> CmdResult<ProjectOutput> {
+fn components_add(project_id: &str, component_ids: Vec<String>) -> CmdResult<ProjectOutput> {
     project::add_components(project_id, component_ids)?;
     let project = project::load(project_id)?;
     write_project_components(project_id, "add", &project)
 }
 
-fn components_remove(
-    project_id: &str,
-    component_ids: Vec<String>,
-) -> CmdResult<ProjectOutput> {
+fn components_remove(project_id: &str, component_ids: Vec<String>) -> CmdResult<ProjectOutput> {
     project::remove_components(project_id, component_ids)?;
     let project = project::load(project_id)?;
     write_project_components(project_id, "remove", &project)
@@ -769,11 +757,7 @@ fn pin_add(
     ))
 }
 
-fn pin_remove(
-    project_id: &str,
-    path: &str,
-    pin_type: ProjectPinType,
-) -> CmdResult<ProjectOutput> {
+fn pin_remove(project_id: &str, path: &str, pin_type: ProjectPinType) -> CmdResult<ProjectOutput> {
     let (core_type, type_string) = match pin_type {
         ProjectPinType::File => (project::PinType::File, "file"),
         ProjectPinType::Log => (project::PinType::Log, "log"),

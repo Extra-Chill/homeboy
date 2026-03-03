@@ -8,8 +8,8 @@ pub mod move_items;
 mod rename;
 
 pub use add::{add_import, fixes_from_audit, AddResult};
-pub use move_items::{move_items, MoveResult, MovedItem, ItemKind, ImportRewrite};
+pub use move_items::{move_items, ImportRewrite, ItemKind, MoveResult, MovedItem};
 pub use rename::{
-    find_references, generate_renames, apply_renames, CaseVariant,
-    FileEdit, FileRename, Reference, RenameResult, RenameScope, RenameSpec, RenameWarning,
+    apply_renames, find_references, generate_renames, CaseVariant, FileEdit, FileRename, Reference,
+    RenameResult, RenameScope, RenameSpec, RenameWarning,
 };

@@ -229,7 +229,11 @@ fn parse_direct_template(
         };
 
     // Apply settings_flags from project extension config
-    if let Some(extension_config) = project.extensions.as_ref().and_then(|m| m.get(extension_id)) {
+    if let Some(extension_config) = project
+        .extensions
+        .as_ref()
+        .and_then(|m| m.get(extension_id))
+    {
         for (setting_key, flag_template) in &cli_config.settings_flags {
             if let Some(flag) = extension_config
                 .settings

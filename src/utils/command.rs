@@ -9,17 +9,18 @@ use crate::error::{Error, Result};
 /// Returns trimmed stdout if the command succeeds.
 /// Returns an error with stderr (or stdout fallback) if it fails.
 pub fn run(program: &str, args: &[&str], context: &str) -> Result<String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| Error::internal_io(format!("Failed to run {}: {}", context, e), Some(context.to_string())))?;
+    let output = Command::new(program).args(args).output().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to run {}: {}", context, e),
+            Some(context.to_string()),
+        )
+    })?;
 
     if !output.status.success() {
-        return Err(Error::internal_io(format!(
-            "{} failed: {}",
-            context,
-            error_text(&output)
-        ), Some(context.to_string())));
+        return Err(Error::internal_io(
+            format!("{} failed: {}", context, error_text(&output)),
+            Some(context.to_string()),
+        ));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -34,14 +35,18 @@ pub fn run_in(dir: &str, program: &str, args: &[&str], context: &str) -> Result<
         .args(args)
         .current_dir(dir)
         .output()
-        .map_err(|e| Error::internal_io(format!("Failed to run {}: {}", context, e), Some(context.to_string())))?;
+        .map_err(|e| {
+            Error::internal_io(
+                format!("Failed to run {}: {}", context, e),
+                Some(context.to_string()),
+            )
+        })?;
 
     if !output.status.success() {
-        return Err(Error::internal_io(format!(
-            "{} failed: {}",
-            context,
-            error_text(&output)
-        ), Some(context.to_string())));
+        return Err(Error::internal_io(
+            format!("{} failed: {}", context, error_text(&output)),
+            Some(context.to_string()),
+        ));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -99,7 +104,10 @@ pub fn require_success(success: bool, stderr: &str, operation: &str) -> Result<(
     if success {
         Ok(())
     } else {
-        Err(Error::internal_io(format!("{}_FAILED: {}", operation, stderr), Some(operation.to_string())))
+        Err(Error::internal_io(
+            format!("{}_FAILED: {}", operation, stderr),
+            Some(operation.to_string()),
+        ))
     }
 }
 

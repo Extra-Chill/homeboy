@@ -84,7 +84,11 @@ impl BatchResult {
 
     /// Returns 1 if any errors occurred, 0 otherwise.
     pub fn exit_code(&self) -> i32 {
-        if self.errors > 0 { 1 } else { 0 }
+        if self.errors > 0 {
+            1
+        } else {
+            0
+        }
     }
 
     pub fn record_created(&mut self, id: String) {

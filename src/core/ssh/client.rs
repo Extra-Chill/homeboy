@@ -38,7 +38,11 @@ impl SshClient {
 
         let is_local = is_local_host(&server.host);
         if is_local {
-            log_status!("ssh", "Server '{}' is localhost — using local execution", server_id);
+            log_status!(
+                "ssh",
+                "Server '{}' is localhost — using local execution",
+                server_id
+            );
         }
 
         Ok(Self {
@@ -415,9 +419,7 @@ fn get_local_ips() -> Option<Vec<std::net::IpAddr>> {
 
     #[cfg(target_os = "macos")]
     {
-        let output = std::process::Command::new("ifconfig")
-            .output()
-            .ok()?;
+        let output = std::process::Command::new("ifconfig").output().ok()?;
 
         if !output.status.success() {
             return None;

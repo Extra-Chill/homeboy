@@ -24,12 +24,14 @@ pub fn resolve_artifact_path(pattern: &str) -> Result<PathBuf> {
     }
 
     let entries: Vec<PathBuf> = glob::glob(pattern)
-        .map_err(|e| Error::validation_invalid_argument(
-            "build_artifact",
-            format!("Invalid glob pattern '{}': {}", pattern, e),
-            Some(pattern.to_string()),
-            None,
-        ))?
+        .map_err(|e| {
+            Error::validation_invalid_argument(
+                "build_artifact",
+                format!("Invalid glob pattern '{}': {}", pattern, e),
+                Some(pattern.to_string()),
+                None,
+            )
+        })?
         .filter_map(|entry| entry.ok())
         .filter(|p| p.is_file())
         .collect();

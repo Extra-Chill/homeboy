@@ -2,9 +2,9 @@ use crate::changelog;
 use crate::component::{self, Component, VersionTarget};
 use crate::config::{from_str, set_json_pointer, to_string_pretty};
 use crate::error::{Error, Result};
+use crate::extension::{load_all_extensions, ExtensionManifest};
 use crate::hooks::{self, HookFailureMode};
 use crate::local_files::{self, FileSystem};
-use crate::extension::{load_all_extensions, ExtensionManifest};
 use crate::utils::{self, io, parser, validation};
 use regex::Regex;
 use serde::Serialize;
@@ -44,7 +44,10 @@ pub fn default_pattern_for_file(filename: &str) -> Option<String> {
     None
 }
 
-fn find_version_pattern_in_extension(extension: &ExtensionManifest, filename: &str) -> Option<String> {
+fn find_version_pattern_in_extension(
+    extension: &ExtensionManifest,
+    filename: &str,
+) -> Option<String> {
     for vp in extension.version_patterns() {
         if filename.ends_with(&vp.extension) {
             return Some(vp.pattern.clone());
@@ -396,8 +399,7 @@ pub fn validate_and_finalize_changelog(
                 ];
 
                 for location in &common_locations {
-                    let candidate =
-                        std::path::Path::new(&component.local_path).join(location);
+                    let candidate = std::path::Path::new(&component.local_path).join(location);
                     if candidate.exists() && candidate != changelog_path {
                         hints.push(format!(
                             "Found changelog at {}. Fix with:\n  homeboy component set {} --changelog-target \"{}\"",
@@ -834,7 +836,10 @@ pub fn bump_component_version(component: &Component, bump_type: &str) -> Result<
     // like `cargo publish` fail because Cargo.lock is dirty.
     let has_cargo_target = target_infos.iter().any(|t| t.file.ends_with("Cargo.toml"));
     if has_cargo_target {
-        log_status!("version", "Regenerating Cargo.lock after Cargo.toml version bump");
+        log_status!(
+            "version",
+            "Regenerating Cargo.lock after Cargo.toml version bump"
+        );
         let lockfile_result = std::process::Command::new("cargo")
             .args(["generate-lockfile"])
             .current_dir(&component.local_path)
@@ -970,9 +975,13 @@ pub fn detect_unconfigured_patterns(component: &Component) -> Vec<UnconfiguredPa
                                     // define() line. This avoids false positives from
                                     // textual pattern differences (e.g. ['\"] vs ['\"]).
                                     let full_match = caps.get(0).map(|m| m.as_str()).unwrap_or("");
-                                    let already_configured = configured_patterns.iter().any(|(f, re)| {
-                                        f == &filename && re.as_ref().is_some_and(|r| r.is_match(full_match))
-                                    });
+                                    let already_configured =
+                                        configured_patterns.iter().any(|(f, re)| {
+                                            f == &filename
+                                                && re
+                                                    .as_ref()
+                                                    .is_some_and(|r| r.is_match(full_match))
+                                        });
                                     if !already_configured {
                                         unconfigured.push(UnconfiguredPattern {
                                             file: filename.clone(),

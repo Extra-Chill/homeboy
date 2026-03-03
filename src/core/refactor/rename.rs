@@ -279,7 +279,8 @@ fn find_term_matches(text: &str, term: &str) -> Vec<usize> {
         let end = abs + term_len;
 
         // Left boundary: start of string, non-alphanumeric, or underscore
-        let left_ok = abs == 0 || is_boundary_char(text_bytes[abs - 1]) || text_bytes[abs - 1] == b'_';
+        let left_ok =
+            abs == 0 || is_boundary_char(text_bytes[abs - 1]) || text_bytes[abs - 1] == b'_';
 
         // Right boundary: end of string, or next char is:
         // - not alphanumeric (space, punctuation, etc.)
@@ -324,28 +325,16 @@ fn find_literal_matches(text: &str, term: &str) -> Vec<usize> {
 // ============================================================================
 
 /// Directories to always skip at any depth (dependency/VCS directories).
-const ALWAYS_SKIP_DIRS: &[&str] = &[
-    "node_modules",
-    "vendor",
-    ".git",
-    ".svn",
-    ".hg",
-];
+const ALWAYS_SKIP_DIRS: &[&str] = &["node_modules", "vendor", ".git", ".svn", ".hg"];
 
 /// Directories to skip only at the root level (build output directories).
 /// These are safe to skip at root because they're typically build artifacts,
 /// but at deeper levels (e.g., `scripts/build/`) they may contain source files.
-const ROOT_ONLY_SKIP_DIRS: &[&str] = &[
-    "build",
-    "dist",
-    "target",
-    "cache",
-    "tmp",
-];
+const ROOT_ONLY_SKIP_DIRS: &[&str] = &["build", "dist", "target", "cache", "tmp"];
 
 const SOURCE_EXTENSIONS: &[&str] = &[
-    "rs", "php", "js", "jsx", "ts", "tsx", "mjs", "json", "toml", "yaml", "yml", "md", "txt",
-    "sh", "bash", "py", "rb", "go", "swift", "lock",
+    "rs", "php", "js", "jsx", "ts", "tsx", "mjs", "json", "toml", "yaml", "yml", "md", "txt", "sh",
+    "bash", "py", "rb", "go", "swift", "lock",
 ];
 
 fn walk_files(root: &Path, scope: &RenameScope) -> Vec<PathBuf> {
@@ -761,7 +750,12 @@ pub fn apply_renames(result: &mut RenameResult, root: &Path) -> Result<()> {
 
     // Apply file renames (sort by path depth descending so children rename before parents)
     let mut renames = result.file_renames.clone();
-    renames.sort_by(|a, b| b.from.matches('/').count().cmp(&a.from.matches('/').count()));
+    renames.sort_by(|a, b| {
+        b.from
+            .matches('/')
+            .count()
+            .cmp(&a.from.matches('/').count())
+    });
 
     for rename in &renames {
         let from = root.join(&rename.from);
@@ -862,10 +856,26 @@ mod tests {
 
         // Should find: widget (2x), Widget (1x), WIDGET (1x), widgets (1x)
         let matched: Vec<&str> = refs.iter().map(|r| r.matched.as_str()).collect();
-        assert!(matched.contains(&"widget"), "Expected 'widget' in {:?}", matched);
-        assert!(matched.contains(&"Widget"), "Expected 'Widget' in {:?}", matched);
-        assert!(matched.contains(&"WIDGET"), "Expected 'WIDGET' in {:?}", matched);
-        assert!(matched.contains(&"widgets"), "Expected 'widgets' in {:?}", matched);
+        assert!(
+            matched.contains(&"widget"),
+            "Expected 'widget' in {:?}",
+            matched
+        );
+        assert!(
+            matched.contains(&"Widget"),
+            "Expected 'Widget' in {:?}",
+            matched
+        );
+        assert!(
+            matched.contains(&"WIDGET"),
+            "Expected 'WIDGET' in {:?}",
+            matched
+        );
+        assert!(
+            matched.contains(&"widgets"),
+            "Expected 'widgets' in {:?}",
+            matched
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -899,7 +909,11 @@ mod tests {
 
         assert!(!result.file_renames.is_empty());
         // Should want to rename widget/widget.rs → gadget/gadget.rs
-        let rename = result.file_renames.iter().find(|r| r.from.contains("widget.rs")).unwrap();
+        let rename = result
+            .file_renames
+            .iter()
+            .find(|r| r.from.contains("widget.rs"))
+            .unwrap();
         assert!(rename.to.contains("gadget.rs"));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -917,7 +931,10 @@ mod tests {
         let spec = RenameSpec::new("widget", "gadget", RenameScope::All);
         let refs = find_references(&spec, &dir);
 
-        assert!(refs.is_empty(), "Should not match 'widgetry' when renaming 'widget'");
+        assert!(
+            refs.is_empty(),
+            "Should not match 'widgetry' when renaming 'widget'"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -948,16 +965,28 @@ mod tests {
         assert_eq!(matches, vec![5], "Should match 'widget' in 'load_widget'");
 
         let matches = find_term_matches("is_widget_linked", "widget");
-        assert_eq!(matches, vec![3], "Should match 'widget' in 'is_widget_linked'");
+        assert_eq!(
+            matches,
+            vec![3],
+            "Should match 'widget' in 'is_widget_linked'"
+        );
 
         let matches = find_term_matches("widget_init", "widget");
-        assert_eq!(matches, vec![0], "Should match 'widget' at start of 'widget_init'");
+        assert_eq!(
+            matches,
+            vec![0],
+            "Should match 'widget' at start of 'widget_init'"
+        );
 
         let matches = find_term_matches("WIDGET_DIR", "WIDGET");
         assert_eq!(matches, vec![0], "Should match 'WIDGET' in 'WIDGET_DIR'");
 
         let matches = find_term_matches("THE_WIDGET_CONFIG", "WIDGET");
-        assert_eq!(matches, vec![4], "Should match 'WIDGET' in 'THE_WIDGET_CONFIG'");
+        assert_eq!(
+            matches,
+            vec![4],
+            "Should match 'WIDGET' in 'THE_WIDGET_CONFIG'"
+        );
     }
 
     #[test]
@@ -976,10 +1005,26 @@ mod tests {
 
         assert!(!result.edits.is_empty());
         let content = &result.edits[0].new_content;
-        assert!(content.contains("load_gadget"), "Expected 'load_gadget' in:\n{}", content);
-        assert!(content.contains("is_gadget_linked"), "Expected 'is_gadget_linked' in:\n{}", content);
-        assert!(content.contains("GADGET_DIR"), "Expected 'GADGET_DIR' in:\n{}", content);
-        assert!(content.contains("\"gadgets\""), "Expected '\"gadgets\"' in:\n{}", content);
+        assert!(
+            content.contains("load_gadget"),
+            "Expected 'load_gadget' in:\n{}",
+            content
+        );
+        assert!(
+            content.contains("is_gadget_linked"),
+            "Expected 'is_gadget_linked' in:\n{}",
+            content
+        );
+        assert!(
+            content.contains("GADGET_DIR"),
+            "Expected 'GADGET_DIR' in:\n{}",
+            content
+        );
+        assert!(
+            content.contains("\"gadgets\""),
+            "Expected '\"gadgets\"' in:\n{}",
+            content
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -991,7 +1036,10 @@ mod tests {
         // "node_modules" as a directory name is handled by SKIP_DIRS, but in content
         // the plural variant "modules" should match (not "module" partially).
         let matches = find_term_matches("node_modules", "module");
-        assert!(matches.is_empty(), "Should not match 'module' inside 'node_modules' — 's' follows");
+        assert!(
+            matches.is_empty(),
+            "Should not match 'module' inside 'node_modules' — 's' follows"
+        );
 
         // But "modules" (plural) should match
         let matches = find_term_matches("node_modules", "modules");
@@ -1000,11 +1048,26 @@ mod tests {
 
     #[test]
     fn extract_field_identifier_works() {
-        assert_eq!(extract_field_identifier("pub name: String,"), Some("name".to_string()));
-        assert_eq!(extract_field_identifier("pub(crate) id: u32,"), Some("id".to_string()));
-        assert_eq!(extract_field_identifier("count: usize,"), Some("count".to_string()));
-        assert_eq!(extract_field_identifier("let value = 42;"), Some("value".to_string()));
-        assert_eq!(extract_field_identifier("fn init("), Some("init".to_string()));
+        assert_eq!(
+            extract_field_identifier("pub name: String,"),
+            Some("name".to_string())
+        );
+        assert_eq!(
+            extract_field_identifier("pub(crate) id: u32,"),
+            Some("id".to_string())
+        );
+        assert_eq!(
+            extract_field_identifier("count: usize,"),
+            Some("count".to_string())
+        );
+        assert_eq!(
+            extract_field_identifier("let value = 42;"),
+            Some("value".to_string())
+        );
+        assert_eq!(
+            extract_field_identifier("fn init("),
+            Some("init".to_string())
+        );
         assert_eq!(extract_field_identifier("// a comment"), None);
         assert_eq!(extract_field_identifier("#[serde(skip)]"), None);
         assert_eq!(extract_field_identifier(""), None);
@@ -1066,9 +1129,18 @@ mod tests {
         let spec = RenameSpec::new("widget", "gadget", RenameScope::All);
         let result = generate_renames(&spec, &dir);
 
-        assert!(!result.warnings.is_empty(), "Should detect duplicate 'gadgets' field");
-        assert!(result.warnings.iter().any(|w| w.kind == "duplicate_identifier"));
-        assert!(result.warnings.iter().any(|w| w.message.contains("gadgets")));
+        assert!(
+            !result.warnings.is_empty(),
+            "Should detect duplicate 'gadgets' field"
+        );
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.kind == "duplicate_identifier"));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("gadgets")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1085,7 +1157,10 @@ mod tests {
         let spec = RenameSpec::new("widget", "gadget", RenameScope::All);
         let refs = find_references(&spec, &dir);
 
-        assert!(!refs.is_empty(), "Should find 'WIDGET' in scripts/build/setup.sh");
+        assert!(
+            !refs.is_empty(),
+            "Should find 'WIDGET' in scripts/build/setup.sh"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1102,7 +1177,10 @@ mod tests {
         let spec = RenameSpec::new("widget", "gadget", RenameScope::All);
         let refs = find_references(&spec, &dir);
 
-        assert!(refs.is_empty(), "Should NOT find refs in root-level build/ dir");
+        assert!(
+            refs.is_empty(),
+            "Should NOT find refs in root-level build/ dir"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1113,7 +1191,11 @@ mod tests {
 
     #[test]
     fn literal_spec_has_single_variant() {
-        let spec = RenameSpec::literal("datamachine-events", "data-machine-events", RenameScope::All);
+        let spec = RenameSpec::literal(
+            "datamachine-events",
+            "data-machine-events",
+            RenameScope::All,
+        );
         assert!(spec.literal);
         assert_eq!(spec.variants.len(), 1);
         assert_eq!(spec.variants[0].from, "datamachine-events");
@@ -1132,7 +1214,10 @@ mod tests {
         assert_eq!(matches, vec![4]);
 
         // Multiple occurrences
-        let matches = find_literal_matches("datamachine-events and datamachine-events", "datamachine-events");
+        let matches = find_literal_matches(
+            "datamachine-events and datamachine-events",
+            "datamachine-events",
+        );
         assert_eq!(matches, vec![0, 23]);
 
         // No match
@@ -1152,12 +1237,20 @@ mod tests {
         .unwrap();
 
         // Literal mode: only exact match, no case variants
-        let spec = RenameSpec::literal("datamachine-events", "data-machine-events", RenameScope::All);
+        let spec = RenameSpec::literal(
+            "datamachine-events",
+            "data-machine-events",
+            RenameScope::All,
+        );
         let refs = find_references(&spec, &dir);
 
         // Should find only the hyphenated form, not DATAMACHINE_EVENTS or datamachine_events
-        assert_eq!(refs.len(), 1, "Should find exactly 1 literal match, got: {:?}",
-            refs.iter().map(|r| &r.matched).collect::<Vec<_>>());
+        assert_eq!(
+            refs.len(),
+            1,
+            "Should find exactly 1 literal match, got: {:?}",
+            refs.iter().map(|r| &r.matched).collect::<Vec<_>>()
+        );
         assert_eq!(refs[0].matched, "datamachine-events");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1174,7 +1267,11 @@ mod tests {
         )
         .unwrap();
 
-        let spec = RenameSpec::literal("datamachine-events", "data-machine-events", RenameScope::All);
+        let spec = RenameSpec::literal(
+            "datamachine-events",
+            "data-machine-events",
+            RenameScope::All,
+        );
         let result = generate_renames(&spec, &dir);
 
         assert_eq!(result.edits.len(), 1);
@@ -1192,16 +1289,19 @@ mod tests {
         let dir = std::env::temp_dir().join("homeboy_refactor_literal_file_rename_test");
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(
-            dir.join("datamachine-events.php"),
-            "// main file\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("datamachine-events.php"), "// main file\n").unwrap();
 
-        let spec = RenameSpec::literal("datamachine-events", "data-machine-events", RenameScope::All);
+        let spec = RenameSpec::literal(
+            "datamachine-events",
+            "data-machine-events",
+            RenameScope::All,
+        );
         let result = generate_renames(&spec, &dir);
 
-        assert!(!result.file_renames.is_empty(), "Should rename datamachine-events.php");
+        assert!(
+            !result.file_renames.is_empty(),
+            "Should rename datamachine-events.php"
+        );
         let rename = &result.file_renames[0];
         assert_eq!(rename.from, "datamachine-events.php");
         assert_eq!(rename.to, "data-machine-events.php");
@@ -1214,13 +1314,13 @@ mod tests {
         let dir = std::env::temp_dir().join("homeboy_refactor_literal_apply_test");
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(
-            dir.join("test.php"),
-            "slug: datamachine-events\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("test.php"), "slug: datamachine-events\n").unwrap();
 
-        let spec = RenameSpec::literal("datamachine-events", "data-machine-events", RenameScope::All);
+        let spec = RenameSpec::literal(
+            "datamachine-events",
+            "data-machine-events",
+            RenameScope::All,
+        );
         let mut result = generate_renames(&spec, &dir);
 
         apply_renames(&mut result, &dir).unwrap();
@@ -1236,10 +1336,17 @@ mod tests {
     fn literal_mode_no_boundary_filtering() {
         // Normal mode would NOT match "widget" inside "widgetry" — literal mode SHOULD
         let matches = find_literal_matches("widgetry", "widget");
-        assert_eq!(matches, vec![0], "Literal should match 'widget' inside 'widgetry'");
+        assert_eq!(
+            matches,
+            vec![0],
+            "Literal should match 'widget' inside 'widgetry'"
+        );
 
         // Normal mode boundary test for comparison
         let boundary_matches = find_term_matches("widgetry", "widget");
-        assert!(boundary_matches.is_empty(), "Boundary mode should NOT match 'widget' inside 'widgetry'");
+        assert!(
+            boundary_matches.is_empty(),
+            "Boundary mode should NOT match 'widget' inside 'widgetry'"
+        );
     }
 }

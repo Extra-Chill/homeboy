@@ -299,7 +299,9 @@ pub fn build_component_info(component: &component::Component) -> ContainedCompon
     }
 
     // Check for missing extension configuration
-    if component.extensions.is_none() || component.extensions.as_ref().map_or(true, |m| m.is_empty()) {
+    if component.extensions.is_none()
+        || component.extensions.as_ref().map_or(true, |m| m.is_empty())
+    {
         // Suggest a extension based on project file indicators
         let suggestion =
             if local_path.join("style.css").exists() && local_path.join("functions.php").exists() {

@@ -40,9 +40,8 @@ pub fn to_json_string<T: Serialize>(data: &T) -> Result<String> {
 /// `create_single_from_json()` requires the id to be present. This helper
 /// serializes the entity, injects the id, then returns a compact JSON string.
 pub fn serialize_with_id<T: Serialize>(entity: &T, id: &str) -> Result<String> {
-    let mut value = serde_json::to_value(entity).map_err(|e| {
-        Error::internal_json(e.to_string(), Some("serialize entity".to_string()))
-    })?;
+    let mut value = serde_json::to_value(entity)
+        .map_err(|e| Error::internal_json(e.to_string(), Some("serialize entity".to_string())))?;
     if let serde_json::Value::Object(ref mut map) = value {
         map.insert("id".to_string(), serde_json::Value::String(id.to_string()));
     }

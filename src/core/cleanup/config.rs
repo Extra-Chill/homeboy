@@ -237,12 +237,7 @@ mod tests {
     use crate::component::Component;
 
     fn make_component(id: &str, local_path: &str) -> Component {
-        Component::new(
-            id.to_string(),
-            local_path.to_string(),
-            String::new(),
-            None,
-        )
+        Component::new(id.to_string(), local_path.to_string(), String::new(), None)
     }
 
     #[test]
@@ -276,8 +271,9 @@ mod tests {
     fn empty_remote_path_is_info() {
         let comp = make_component("test", "/tmp");
         let issues = check_config(&comp);
-        assert!(issues.iter().any(|i| i.category == "remote_path"
-            && i.severity == IssueSeverity::Info));
+        assert!(issues
+            .iter()
+            .any(|i| i.category == "remote_path" && i.severity == IssueSeverity::Info));
     }
 
     #[test]

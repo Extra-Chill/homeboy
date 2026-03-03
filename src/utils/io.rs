@@ -42,8 +42,9 @@ pub fn write_file_atomic(path: &Path, content: &str, operation: &str) -> Result<
 
     let tmp_path = parent.join(format!("{}.tmp", filename.to_string_lossy()));
 
-    fs::write(&tmp_path, content)
-        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("{} (write temp)", operation))))?;
+    fs::write(&tmp_path, content).map_err(|e| {
+        Error::internal_io(e.to_string(), Some(format!("{} (write temp)", operation)))
+    })?;
 
     fs::rename(&tmp_path, path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("{} (rename)", operation))))?;

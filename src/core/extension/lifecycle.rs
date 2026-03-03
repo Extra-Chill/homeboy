@@ -126,7 +126,10 @@ fn install_from_url(url: &str, id_override: Option<&str>) -> Result<InstallResul
     // Auto-run setup if extension defines a setup_command
     // Setup is best-effort: install succeeds even if setup fails
     if let Ok(extension) = load_extension(&extension_id) {
-        if extension.runtime().is_some_and(|r| r.setup_command.is_some()) {
+        if extension
+            .runtime()
+            .is_some_and(|r| r.setup_command.is_some())
+        {
             let _ = run_setup(&extension_id);
         }
     }
@@ -258,9 +261,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
-            std::fs::copy(&src_path, &dst_path).map_err(|e| {
-                Error::internal_io(e.to_string(), Some("copy file".into()))
-            })?;
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| Error::internal_io(e.to_string(), Some("copy file".into())))?;
         }
     }
     Ok(())
@@ -397,7 +399,10 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
     // Auto-run setup if extension defines a setup_command
     // Setup is best-effort: update succeeds even if setup fails
     if let Ok(extension) = load_extension(extension_id) {
-        if extension.runtime().is_some_and(|r| r.setup_command.is_some()) {
+        if extension
+            .runtime()
+            .is_some_and(|r| r.setup_command.is_some())
+        {
             let _ = run_setup(extension_id);
         }
     }
@@ -425,7 +430,10 @@ pub fn uninstall(extension_id: &str) -> Result<PathBuf> {
     } else {
         // Cloned extension: remove the directory
         std::fs::remove_dir_all(&extension_dir).map_err(|e| {
-            Error::internal_io(e.to_string(), Some("remove extension directory".to_string()))
+            Error::internal_io(
+                e.to_string(),
+                Some("remove extension directory".to_string()),
+            )
         })?;
     }
 

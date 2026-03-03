@@ -31,8 +31,8 @@ use std::path::Path;
 
 pub use checks::{CheckResult, CheckStatus};
 pub use conventions::{Convention, Deviation, DeviationKind, Language, Outlier};
-pub use fingerprint::FileFingerprint;
 pub use findings::{Finding, Severity};
+pub use fingerprint::FileFingerprint;
 
 use crate::{component, utils::is_zero, Result};
 
@@ -166,7 +166,9 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
 
     // Phase 1: Auto-discover file groups
     let discovery = discovery::auto_discover_groups(root);
-    let files_skipped = discovery.files_walked.saturating_sub(discovery.files_fingerprinted);
+    let files_skipped = discovery
+        .files_walked
+        .saturating_sub(discovery.files_fingerprinted);
 
     if discovery.groups.is_empty() {
         let mut warnings = Vec::new();
@@ -221,9 +223,7 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
 
     for (name, glob, fingerprints) in &discovery.groups {
         total_files += fingerprints.len();
-        if let Some(convention) =
-            conventions::discover_conventions(name, glob, fingerprints)
-        {
+        if let Some(convention) = conventions::discover_conventions(name, glob, fingerprints) {
             discovered_conventions.push(convention);
         }
     }
@@ -278,8 +278,14 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
     }
 
     // Phase 5: Build report
-    let total_outliers: usize = discovered_conventions.iter().map(|c| c.outliers.len()).sum();
-    let total_conforming: usize = discovered_conventions.iter().map(|c| c.conforming.len()).sum();
+    let total_outliers: usize = discovered_conventions
+        .iter()
+        .map(|c| c.outliers.len())
+        .sum();
+    let total_conforming: usize = discovered_conventions
+        .iter()
+        .map(|c| c.conforming.len())
+        .sum();
     let total_in_conventions = total_conforming + total_outliers;
     let alignment_score = if total_in_conventions > 0 {
         Some(total_conforming as f32 / total_in_conventions as f32)
@@ -327,7 +333,10 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
     let directory_conventions = discovery::discover_cross_directory(&convention_reports);
 
     if !directory_conventions.is_empty() {
-        let total_dir_outliers: usize = directory_conventions.iter().map(|d| d.outlier_dirs.len()).sum();
+        let total_dir_outliers: usize = directory_conventions
+            .iter()
+            .map(|d| d.outlier_dirs.len())
+            .sum();
         log_status!(
             "audit",
             "Cross-directory: {} pattern(s), {} outlier dir(s)",
@@ -440,7 +449,9 @@ class StepC {
             .expect("Should find Steps convention");
 
         assert_eq!(steps_conv.total_files, 3);
-        assert!(steps_conv.expected_methods.contains(&"register".to_string()));
+        assert!(steps_conv
+            .expected_methods
+            .contains(&"register".to_string()));
         assert!(steps_conv.expected_methods.contains(&"execute".to_string()));
         assert_eq!(steps_conv.outliers.len(), 1);
         assert!(steps_conv.outliers[0].file.contains("step_c"));

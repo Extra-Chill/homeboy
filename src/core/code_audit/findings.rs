@@ -142,6 +142,9 @@ mod tests {
         }];
 
         let findings = build_findings(&results);
-        assert!(findings.is_empty(), "Fragmented conventions should not produce findings");
+        assert!(
+            findings.is_empty(),
+            "Fragmented conventions should not produce findings"
+        );
     }
 }

@@ -20,7 +20,7 @@ pub use verify::VerifyResult;
 
 use regex::Regex;
 
-use crate::{component, git, extension, utils::is_zero, Result};
+use crate::{component, extension, git, utils::is_zero, Result};
 
 /// A doc that needs content review due to referenced files changing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -116,7 +116,11 @@ pub struct AuditResult {
 /// Uses the directory name as the label and defaults to "docs" for the docs
 /// directory. Extension patterns and changelog exclusion are not available.
 /// When `include_features` is true, the full detected features list is included.
-pub fn audit_path(path: &str, docs_dir_override: Option<&str>, include_features: bool) -> Result<AuditResult> {
+pub fn audit_path(
+    path: &str,
+    docs_dir_override: Option<&str>,
+    include_features: bool,
+) -> Result<AuditResult> {
     let source_path = Path::new(path);
     if !source_path.is_dir() {
         return Err(crate::Error::validation_invalid_argument(
@@ -198,7 +202,11 @@ pub fn audit_path(path: &str, docs_dir_override: Option<&str>, include_features:
         priority_docs,
         broken_references,
         undocumented_features: feature_result.undocumented,
-        detected_features: if include_features { feature_result.all_features } else { Vec::new() },
+        detected_features: if include_features {
+            feature_result.all_features
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -207,7 +215,11 @@ pub fn audit_path(path: &str, docs_dir_override: Option<&str>, include_features:
 /// If `docs_dir_override` is provided, it's used instead of the component's
 /// configured `docs_dir`/`docs_dirs` (which defaults to "docs").
 /// When `include_features` is true, the full detected features list is included.
-pub fn audit_component(component_id: &str, docs_dir_override: Option<&str>, include_features: bool) -> Result<AuditResult> {
+pub fn audit_component(
+    component_id: &str,
+    docs_dir_override: Option<&str>,
+    include_features: bool,
+) -> Result<AuditResult> {
     let comp = component::load(component_id)?;
     let source_path = Path::new(&comp.local_path);
 
@@ -300,7 +312,11 @@ pub fn audit_component(component_id: &str, docs_dir_override: Option<&str>, incl
         priority_docs,
         broken_references,
         undocumented_features: feature_result.undocumented,
-        detected_features: if include_features { feature_result.all_features } else { Vec::new() },
+        detected_features: if include_features {
+            feature_result.all_features
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -1248,7 +1264,13 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
+        let result = detect_features(
+            &patterns,
+            source_path,
+            &["docs".to_string()],
+            None,
+            &HashMap::new(),
+        );
 
         assert_eq!(result.total, 2);
         assert_eq!(result.documented, 1);
@@ -1261,7 +1283,13 @@ index 111222..333444 100644
     #[test]
     fn test_detect_features_empty_when_no_patterns() {
         let dir = tempfile::tempdir().unwrap();
-        let result = detect_features(&[], dir.path(), &["docs".to_string()], None, &HashMap::new());
+        let result = detect_features(
+            &[],
+            dir.path(),
+            &["docs".to_string()],
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(result.total, 0);
         assert!(result.undocumented.is_empty());
     }
@@ -1281,7 +1309,13 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
+        let result = detect_features(
+            &patterns,
+            source_path,
+            &["docs".to_string()],
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(result.total, 0);
         assert!(result.undocumented.is_empty());
     }
@@ -1306,7 +1340,13 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
+        let result = detect_features(
+            &patterns,
+            source_path,
+            &["docs".to_string()],
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(result.total, 1);
         assert_eq!(result.documented, 1);
         assert!(result.undocumented.is_empty());
@@ -1330,7 +1370,13 @@ index 111222..333444 100644
 
         let patterns = vec![r#"register_rest_route\(\s*['"](\w[\w-]*/v\d+)['"]"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
+        let result = detect_features(
+            &patterns,
+            source_path,
+            &["docs".to_string()],
+            None,
+            &HashMap::new(),
+        );
 
         assert_eq!(result.undocumented.len(), 1);
         assert_eq!(result.undocumented[0].name, "myplugin/v1");
@@ -1355,7 +1401,13 @@ index 111222..333444 100644
 
         let patterns = vec![r#"register_rest_route\(\s*['"](\w[\w-]*/v\d+)['"]"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
+        let result = detect_features(
+            &patterns,
+            source_path,
+            &["docs".to_string()],
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(result.total, 0);
         assert!(result.undocumented.is_empty());
     }
@@ -1381,7 +1433,13 @@ index 111222..333444 100644
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
+        let result = detect_features(
+            &patterns,
+            source_path,
+            &["docs".to_string()],
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(result.total, 1); // Deduplicated
         assert_eq!(result.undocumented.len(), 1);
     }
@@ -1408,7 +1466,13 @@ index 111222..333444 100644
         .unwrap();
 
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
+        let result = detect_features(
+            &patterns,
+            source_path,
+            &["docs".to_string()],
+            None,
+            &HashMap::new(),
+        );
 
         // readmeStep is documented via README, hiddenStep is not
         assert_eq!(result.total, 2);
@@ -1443,7 +1507,13 @@ index 111222..333444 100644
         let patterns = vec![r#"registerStepType\(\s*'(\w+)'"#.to_string()];
 
         // Only scanning docs/ — both undocumented
-        let result = detect_features(&patterns, source_path, &["docs".to_string()], None, &HashMap::new());
+        let result = detect_features(
+            &patterns,
+            source_path,
+            &["docs".to_string()],
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(result.total, 2);
         assert_eq!(result.undocumented.len(), 2);
 

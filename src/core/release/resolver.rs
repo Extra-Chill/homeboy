@@ -82,8 +82,9 @@ pub(crate) fn resolve_extensions(
         extension_ids.sort();
         let suggestions = extension::available_extension_ids();
         for extension_id in extension_ids {
-            let manifest = extension::load_extension(&extension_id)
-                .map_err(|_| Error::extension_not_found(extension_id.to_string(), suggestions.clone()))?;
+            let manifest = extension::load_extension(&extension_id).map_err(|_| {
+                Error::extension_not_found(extension_id.to_string(), suggestions.clone())
+            })?;
             extensions.push(manifest);
         }
     }

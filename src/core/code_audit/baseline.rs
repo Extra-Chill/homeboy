@@ -86,7 +86,14 @@ pub fn save_baseline(result: &CodeAuditResult) -> Result<std::path::PathBuf, Str
     let known_findings: Vec<String> = result
         .findings
         .iter()
-        .map(|f| finding_fingerprint(&f.convention, &f.file, &format!("{:?}", f.kind), &f.description))
+        .map(|f| {
+            finding_fingerprint(
+                &f.convention,
+                &f.file,
+                &format!("{:?}", f.kind),
+                &f.description,
+            )
+        })
         .collect();
 
     let baseline = AuditBaseline {
@@ -133,25 +140,38 @@ pub fn compare(result: &CodeAuditResult, baseline: &AuditBaseline) -> BaselineCo
     let current_fingerprints: HashSet<String> = result
         .findings
         .iter()
-        .map(|f| finding_fingerprint(&f.convention, &f.file, &format!("{:?}", f.kind), &f.description))
+        .map(|f| {
+            finding_fingerprint(
+                &f.convention,
+                &f.file,
+                &format!("{:?}", f.kind),
+                &f.description,
+            )
+        })
         .collect();
 
-    let baseline_fingerprints: HashSet<String> = baseline
-        .known_findings
-        .iter()
-        .cloned()
-        .collect();
+    let baseline_fingerprints: HashSet<String> = baseline.known_findings.iter().cloned().collect();
 
     // New = in current but not in baseline
     let new_findings: Vec<NewFinding> = result
         .findings
         .iter()
         .filter(|f| {
-            let fp = finding_fingerprint(&f.convention, &f.file, &format!("{:?}", f.kind), &f.description);
+            let fp = finding_fingerprint(
+                &f.convention,
+                &f.file,
+                &format!("{:?}", f.kind),
+                &f.description,
+            );
             !baseline_fingerprints.contains(&fp)
         })
         .map(|f| NewFinding {
-            fingerprint: finding_fingerprint(&f.convention, &f.file, &format!("{:?}", f.kind), &f.description),
+            fingerprint: finding_fingerprint(
+                &f.convention,
+                &f.file,
+                &format!("{:?}", f.kind),
+                &f.description,
+            ),
             description: f.description.clone(),
             file: f.file.clone(),
             convention: f.convention.clone(),
@@ -231,7 +251,16 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
     let month_days = [
         31,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
 
     let mut month = 1u64;
@@ -257,8 +286,8 @@ fn is_leap_year(year: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::findings::{Finding, Severity};
     use crate::code_audit::conventions::DeviationKind;
+    use crate::code_audit::findings::{Finding, Severity};
     use crate::code_audit::{AuditSummary, CodeAuditResult};
 
     fn make_finding(convention: &str, file: &str, description: &str) -> Finding {
@@ -296,10 +325,13 @@ mod tests {
 
     #[test]
     fn save_and_load_baseline() {
-        let result = make_result(vec![
-            make_finding("Flow", "a.php", "Missing method: execute"),
-            make_finding("Flow", "b.php", "Missing method: validate"),
-        ], "save_load");
+        let result = make_result(
+            vec![
+                make_finding("Flow", "a.php", "Missing method: execute"),
+                make_finding("Flow", "b.php", "Missing method: validate"),
+            ],
+            "save_load",
+        );
 
         let path = save_baseline(&result).unwrap();
         assert!(path.exists());
@@ -314,10 +346,13 @@ mod tests {
 
     #[test]
     fn compare_no_new_drift() {
-        let result = make_result(vec![
-            make_finding("Flow", "a.php", "Missing method: execute"),
-            make_finding("Flow", "b.php", "Missing method: validate"),
-        ], "no_new_drift");
+        let result = make_result(
+            vec![
+                make_finding("Flow", "a.php", "Missing method: execute"),
+                make_finding("Flow", "b.php", "Missing method: validate"),
+            ],
+            "no_new_drift",
+        );
         let _ = save_baseline(&result).unwrap();
         let baseline = load_baseline(Path::new(&result.source_path)).unwrap();
 
@@ -332,17 +367,21 @@ mod tests {
 
     #[test]
     fn compare_detects_new_drift() {
-        let result_original = make_result(vec![
-            make_finding("Flow", "a.php", "Missing method: execute"),
-        ], "new_drift");
+        let result_original = make_result(
+            vec![make_finding("Flow", "a.php", "Missing method: execute")],
+            "new_drift",
+        );
         let _ = save_baseline(&result_original).unwrap();
         let baseline = load_baseline(Path::new(&result_original.source_path)).unwrap();
 
         // New finding added — reuse same source_path
-        let mut current = make_result(vec![
-            make_finding("Flow", "a.php", "Missing method: execute"),
-            make_finding("Flow", "c.php", "Missing method: register"),
-        ], "new_drift_current");
+        let mut current = make_result(
+            vec![
+                make_finding("Flow", "a.php", "Missing method: execute"),
+                make_finding("Flow", "c.php", "Missing method: register"),
+            ],
+            "new_drift_current",
+        );
         current.source_path = result_original.source_path.clone();
 
         let comparison = compare(&current, &baseline);
@@ -356,16 +395,20 @@ mod tests {
 
     #[test]
     fn compare_detects_resolved_drift() {
-        let result_original = make_result(vec![
-            make_finding("Flow", "a.php", "Missing method: execute"),
-            make_finding("Flow", "b.php", "Missing method: validate"),
-        ], "resolved_drift");
+        let result_original = make_result(
+            vec![
+                make_finding("Flow", "a.php", "Missing method: execute"),
+                make_finding("Flow", "b.php", "Missing method: validate"),
+            ],
+            "resolved_drift",
+        );
         let _ = save_baseline(&result_original).unwrap();
         let baseline = load_baseline(Path::new(&result_original.source_path)).unwrap();
 
-        let mut current = make_result(vec![
-            make_finding("Flow", "a.php", "Missing method: execute"),
-        ], "resolved_drift_current");
+        let mut current = make_result(
+            vec![make_finding("Flow", "a.php", "Missing method: execute")],
+            "resolved_drift_current",
+        );
         current.source_path = result_original.source_path.clone();
 
         let comparison = compare(&current, &baseline);
@@ -379,18 +422,24 @@ mod tests {
 
     #[test]
     fn compare_new_and_resolved_simultaneously() {
-        let result_original = make_result(vec![
-            make_finding("Flow", "a.php", "Missing method: execute"),
-            make_finding("Flow", "b.php", "Missing method: validate"),
-        ], "new_and_resolved");
+        let result_original = make_result(
+            vec![
+                make_finding("Flow", "a.php", "Missing method: execute"),
+                make_finding("Flow", "b.php", "Missing method: validate"),
+            ],
+            "new_and_resolved",
+        );
         let _ = save_baseline(&result_original).unwrap();
         let baseline = load_baseline(Path::new(&result_original.source_path)).unwrap();
 
         // b.php fixed, but c.php introduced
-        let mut current = make_result(vec![
-            make_finding("Flow", "a.php", "Missing method: execute"),
-            make_finding("Flow", "c.php", "Missing method: register"),
-        ], "new_and_resolved_current");
+        let mut current = make_result(
+            vec![
+                make_finding("Flow", "a.php", "Missing method: execute"),
+                make_finding("Flow", "c.php", "Missing method: register"),
+            ],
+            "new_and_resolved_current",
+        );
         current.source_path = result_original.source_path.clone();
 
         let comparison = compare(&current, &baseline);
@@ -422,7 +471,12 @@ mod tests {
     fn chrono_now_produces_valid_iso8601() {
         let now = chrono_now();
         // Should match YYYY-MM-DDTHH:MM:SSZ
-        assert!(now.len() == 20, "Expected 20 chars, got {}: {}", now.len(), now);
+        assert!(
+            now.len() == 20,
+            "Expected 20 chars, got {}: {}",
+            now.len(),
+            now
+        );
         assert!(now.ends_with('Z'));
         assert!(now.contains('T'));
     }

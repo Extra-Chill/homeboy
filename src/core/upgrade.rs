@@ -29,7 +29,6 @@ impl InstallMethod {
             InstallMethod::Unknown => "unknown",
         }
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +85,9 @@ fn fetch_latest_crates_io_version() -> Result<String> {
         .send()
         .map_err(|e| Error::internal_io(e.to_string(), Some("query crates.io".to_string())))?
         .json()
-        .map_err(|e| Error::internal_json(e.to_string(), Some("parse crates.io response".to_string())))?;
+        .map_err(|e| {
+            Error::internal_json(e.to_string(), Some("parse crates.io response".to_string()))
+        })?;
 
     Ok(response.crate_info.newest_version)
 }
@@ -103,7 +104,12 @@ fn fetch_latest_github_version() -> Result<String> {
         .send()
         .map_err(|e| Error::internal_io(e.to_string(), Some("query GitHub releases".to_string())))?
         .json()
-        .map_err(|e| Error::internal_json(e.to_string(), Some("parse GitHub release response".to_string())))?;
+        .map_err(|e| {
+            Error::internal_json(
+                e.to_string(),
+                Some("parse GitHub release response".to_string()),
+            )
+        })?;
 
     // Strip "v" prefix if present (e.g., "v0.15.0" -> "0.15.0")
     let version = response
@@ -275,22 +281,24 @@ fn execute_upgrade(method: InstallMethod) -> Result<(bool, Option<String>)> {
     let output = match method {
         InstallMethod::Homebrew => {
             let cmd = &defaults.install_methods.homebrew.upgrade_command;
-            Command::new("sh")
-                .args(["-c", cmd])
-                .output()
-                .map_err(|e| Error::internal_io(e.to_string(), Some("run homebrew upgrade".to_string())))?
+            Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
+                Error::internal_io(e.to_string(), Some("run homebrew upgrade".to_string()))
+            })?
         }
         InstallMethod::Cargo => {
             let cmd = &defaults.install_methods.cargo.upgrade_command;
-            Command::new("sh")
-                .args(["-c", cmd])
-                .output()
-                .map_err(|e| Error::internal_io(e.to_string(), Some("run cargo upgrade".to_string())))?
+            Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
+                Error::internal_io(e.to_string(), Some("run cargo upgrade".to_string()))
+            })?
         }
         InstallMethod::Source => {
             // For source builds, we need to find the git root
-            let exe_path = std::env::current_exe()
-                .map_err(|e| Error::internal_io(e.to_string(), Some("get current executable path".to_string())))?;
+            let exe_path = std::env::current_exe().map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some("get current executable path".to_string()),
+                )
+            })?;
 
             // Navigate up from target/release/homeboy to find the workspace root
             let mut workspace_root = exe_path.clone();
@@ -318,14 +326,15 @@ fn execute_upgrade(method: InstallMethod) -> Result<(bool, Option<String>)> {
                 .args(["-c", cmd])
                 .current_dir(&workspace_root)
                 .output()
-                .map_err(|e| Error::internal_io(e.to_string(), Some("run source upgrade".to_string())))?
+                .map_err(|e| {
+                    Error::internal_io(e.to_string(), Some("run source upgrade".to_string()))
+                })?
         }
         InstallMethod::Binary => {
             let cmd = &defaults.install_methods.binary.upgrade_command;
-            Command::new("sh")
-                .args(["-c", cmd])
-                .output()
-                .map_err(|e| Error::internal_io(e.to_string(), Some("run binary upgrade".to_string())))?
+            Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
+                Error::internal_io(e.to_string(), Some("run binary upgrade".to_string()))
+            })?
         }
         InstallMethod::Unknown => {
             return Err(Error::validation_invalid_argument(

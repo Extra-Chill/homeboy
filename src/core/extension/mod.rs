@@ -14,20 +14,21 @@ pub use runner::{ExtensionRunner, RunnerOutput};
 pub use manifest::{
     ActionConfig, ActionType, AuditCapability, BuildConfig, CliConfig, DatabaseCliConfig,
     DatabaseConfig, DeployCapability, DeployOverride, DeployVerification, DiscoveryConfig,
-    DocTarget, ExecutableCapability, FeatureContextRule, HttpMethod, InputConfig, LintConfig,
-    ExtensionManifest, OutputConfig, OutputSchema, PlatformCapability, ProvidesConfig,
+    DocTarget, ExecutableCapability, ExtensionManifest, FeatureContextRule, HttpMethod,
+    InputConfig, LintConfig, OutputConfig, OutputSchema, PlatformCapability, ProvidesConfig,
     RequirementsConfig, RuntimeConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig,
     TestConfig, VersionPatternConfig,
 };
 
 // Re-export version types
-pub use version::{VersionConstraint, parse_extension_version};
+pub use version::{parse_extension_version, VersionConstraint};
 
 // Re-export execution types and functions
 pub(crate) use execution::execute_action;
 pub use execution::{
-    is_extension_compatible, extension_ready_status, run_action, run_extension, run_setup,
-    ExtensionExecutionMode, ExtensionReadyStatus, ExtensionRunResult, ExtensionSetupResult, ExtensionStepFilter,
+    extension_ready_status, is_extension_compatible, run_action, run_extension, run_setup,
+    ExtensionExecutionMode, ExtensionReadyStatus, ExtensionRunResult, ExtensionSetupResult,
+    ExtensionStepFilter,
 };
 
 // Re-export scope types
@@ -408,7 +409,10 @@ pub fn validate_required_extensions(component: &crate::component::Component) -> 
         err = err.with_hint(hint.to_string());
     }
 
-    err = err.with_hint("Browse available extensions: https://github.com/Extra-Chill/homeboy-extensions".to_string());
+    err = err.with_hint(
+        "Browse available extensions: https://github.com/Extra-Chill/homeboy-extensions"
+            .to_string(),
+    );
 
     Err(err)
 }
@@ -444,28 +448,26 @@ pub fn validate_extension_requirements(component: &crate::component::Component) 
         };
 
         match load_extension(extension_id) {
-            Ok(extension) => {
-                match extension.semver() {
-                    Ok(installed_version) => {
-                        if !constraint.matches(&installed_version) {
-                            errors.push(format!(
-                                "'{}' requires {}, but {} is installed",
-                                extension_id, constraint, installed_version
-                            ));
-                            hints.push(format!(
-                                "Run `homeboy extension update {}` to get the latest version",
-                                extension_id
-                            ));
-                        }
-                    }
-                    Err(_) => {
+            Ok(extension) => match extension.semver() {
+                Ok(installed_version) => {
+                    if !constraint.matches(&installed_version) {
                         errors.push(format!(
-                            "Extension '{}' has invalid version '{}'",
-                            extension_id, extension.version
+                            "'{}' requires {}, but {} is installed",
+                            extension_id, constraint, installed_version
+                        ));
+                        hints.push(format!(
+                            "Run `homeboy extension update {}` to get the latest version",
+                            extension_id
                         ));
                     }
                 }
-            }
+                Err(_) => {
+                    errors.push(format!(
+                        "Extension '{}' has invalid version '{}'",
+                        extension_id, extension.version
+                    ));
+                }
+            },
             Err(_) => {
                 errors.push(format!("Extension '{}' is not installed", extension_id));
                 hints.push(format!(
@@ -571,7 +573,10 @@ mod tests {
         assert!(err.message.contains("test-component"));
         // Should have install hint + browse hint
         assert!(err.hints.len() >= 2);
-        assert!(err.hints.iter().any(|h| h.message.contains("homeboy extension install")));
+        assert!(err
+            .hints
+            .iter()
+            .any(|h| h.message.contains("homeboy extension install")));
         assert!(err
             .hints
             .iter()

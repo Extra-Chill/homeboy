@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use super::exec_context;
 use super::load_extension;
-use super::manifest::{ActionConfig, ActionType, HttpMethod, ExtensionManifest, RuntimeConfig};
+use super::manifest::{ActionConfig, ActionType, ExtensionManifest, HttpMethod, RuntimeConfig};
 use super::scope::ExtensionScope;
 
 /// Result of executing a extension.
@@ -67,8 +67,11 @@ pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
         }
     };
 
-    let extension_path =
-        validation::require(extension.extension_path.as_ref(), "extension", "extension_path not set")?;
+    let extension_path = validation::require(
+        extension.extension_path.as_ref(),
+        "extension",
+        "extension_path not set",
+    )?;
 
     let entrypoint = runtime.entrypoint.clone().unwrap_or_default();
     let vars: Vec<(&str, &str)> = vec![
@@ -169,15 +172,19 @@ pub(crate) fn execute_action(
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "action_id",
-                format!("Action '{}' not found in extension '{}'", action_id, extension_id),
+                format!(
+                    "Action '{}' not found in extension '{}'",
+                    action_id, extension_id
+                ),
                 Some(action_id.to_string()),
                 None,
             )
         })?;
 
     let selected: Vec<serde_json::Value> = if let Some(data_str) = data {
-        serde_json::from_str(data_str)
-            .map_err(|e| Error::internal_json(e.to_string(), Some("parse action data".to_string())))?
+        serde_json::from_str(data_str).map_err(|e| {
+            Error::internal_json(e.to_string(), Some("parse action data".to_string()))
+        })?
     } else {
         Vec::new()
     };
@@ -365,8 +372,12 @@ fn resolve_extension_context(
 }
 
 fn serialize_settings(settings: &HashMap<String, serde_json::Value>) -> Result<String> {
-    serde_json::to_string(settings)
-        .map_err(|e| Error::internal_json(e.to_string(), Some("serialize extension settings".to_string())))
+    serde_json::to_string(settings).map_err(|e| {
+        Error::internal_json(
+            e.to_string(),
+            Some("serialize extension settings".to_string()),
+        )
+    })
 }
 
 fn build_template_vars<'a>(
@@ -511,12 +522,20 @@ fn execute_extension_runtime(
         ))
     })?;
 
-    let extension_path =
-        validation::require(extension.extension_path.as_ref(), "extension", "extension_path not set")?;
+    let extension_path = validation::require(
+        extension.extension_path.as_ref(),
+        "extension",
+        "extension_path not set",
+    )?;
 
     let args_str = build_args_string(&extension, inputs, args);
-    let context =
-        resolve_extension_context(&extension, extension_id, project_id, component_id, run_command)?;
+    let context = resolve_extension_context(
+        &extension,
+        extension_id,
+        project_id,
+        component_id,
+        run_command,
+    )?;
 
     let settings_json = if let Some(payload) = payload {
         payload.to_string()
@@ -577,7 +596,10 @@ pub fn build_exec_env(
             exec_context::VERSION.to_string(),
             exec_context::CURRENT_VERSION.to_string(),
         ),
-        (exec_context::EXTENSION_ID.to_string(), extension_id.to_string()),
+        (
+            exec_context::EXTENSION_ID.to_string(),
+            extension_id.to_string(),
+        ),
         (
             exec_context::SETTINGS_JSON.to_string(),
             settings_json.to_string(),
@@ -603,10 +625,7 @@ pub fn build_exec_env(
                 }
             }
         };
-        env.push((
-            exec_context::COMPONENT_PATH.to_string(),
-            component_path,
-        ));
+        env.push((exec_context::COMPONENT_PATH.to_string(), component_path));
     }
 
     if let Some(mp) = extension_path {

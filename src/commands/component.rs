@@ -226,7 +226,8 @@ pub fn run(
                 if !extensions.is_empty() {
                     let mut extension_map = std::collections::HashMap::new();
                     for extension_id in extensions {
-                        extension_map.insert(extension_id, component::ScopedExtensionConfig::default());
+                        extension_map
+                            .insert(extension_id, component::ScopedExtensionConfig::default());
                     }
                     new_component.extensions = Some(extension_map);
                 }
@@ -396,7 +397,10 @@ fn set(
             extension_map.insert(extension_id.clone(), serde_json::json!({}));
         }
         if let serde_json::Value::Object(ref mut obj) = merged {
-            obj.insert("extensions".to_string(), serde_json::Value::Object(extension_map));
+            obj.insert(
+                "extensions".to_string(),
+                serde_json::Value::Object(extension_map),
+            );
         }
     }
 
@@ -647,5 +651,3 @@ mod tests {
         assert_eq!(obj["remote_path"], serde_json::json!("/keep-this"));
     }
 }
-
-
