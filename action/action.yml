@@ -277,9 +277,13 @@ runs:
         RESULTS="{}"
         OVERALL_EXIT=0
 
-        # Create temp dir for capturing output
+        # Create temp dirs for capturing output and annotations
         HOMEBOY_OUTPUT_DIR=$(mktemp -d)
         echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "$GITHUB_ENV"
+
+        HOMEBOY_ANNOTATIONS_DIR=$(mktemp -d)
+        echo "HOMEBOY_ANNOTATIONS_DIR=${HOMEBOY_ANNOTATIONS_DIR}" >> "$GITHUB_ENV"
+        export HOMEBOY_ANNOTATIONS_DIR
 
         # Parse comma-separated commands
         IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
@@ -484,3 +488,80 @@ runs:
         fi
 
         echo "PR comment posted successfully"
+
+    # ── Step 8: Post inline PR review comments ──
+    - name: Post inline review
+      if: always() && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+
+        ANNOTATIONS_DIR="${HOMEBOY_ANNOTATIONS_DIR:-}"
+        REPO="${GITHUB_REPOSITORY}"
+        ACTION_DIR="${GITHUB_ACTION_PATH}"
+
+        if [ -z "$ANNOTATIONS_DIR" ] || [ -z "$PR_NUMBER" ]; then
+          echo "Skipping inline review — missing annotations dir or PR number"
+          exit 0
+        fi
+
+        # Check if any annotation files exist
+        ANNOTATION_COUNT=$(find "$ANNOTATIONS_DIR" -name "*.json" -type f 2>/dev/null | wc -l)
+        if [ "$ANNOTATION_COUNT" -eq 0 ]; then
+          echo "No annotation files found — skipping inline review"
+          exit 0
+        fi
+
+        echo "Found ${ANNOTATION_COUNT} annotation file(s):"
+        ls -la "$ANNOTATIONS_DIR"/*.json 2>/dev/null || true
+
+        # Get list of changed files from the PR
+        CHANGED_FILES_FILE=$(mktemp)
+        gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+          --paginate --jq '.[].filename' > "$CHANGED_FILES_FILE" 2>/dev/null || true
+
+        if [ ! -s "$CHANGED_FILES_FILE" ]; then
+          echo "Could not fetch PR changed files — skipping inline review"
+          rm -f "$CHANGED_FILES_FILE"
+          exit 0
+        fi
+
+        # Build the review payload
+        REVIEW_PAYLOAD=$(python3 "${ACTION_DIR}/scripts/build-review.py" \
+          "$ANNOTATIONS_DIR" "$CHANGED_FILES_FILE" "$PR_HEAD_SHA" 2>/dev/null || true)
+
+        rm -f "$CHANGED_FILES_FILE"
+
+        if [ -z "$REVIEW_PAYLOAD" ]; then
+          echo "No annotations to post — skipping inline review"
+          exit 0
+        fi
+
+        # Dismiss previous homeboy reviews to avoid stacking
+        EXISTING_REVIEWS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+          --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | test("Homeboy found"))) | .id] | .[]' \
+          2>/dev/null || true)
+
+        for REVIEW_ID in $EXISTING_REVIEWS; do
+          echo "Dismissing previous review ${REVIEW_ID}..."
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews/${REVIEW_ID}/dismissals" \
+            --method PUT \
+            --field message="Superseded by new Homeboy review" \
+            --field event="DISMISS" > /dev/null 2>&1 || true
+        done
+
+        # Post the review
+        echo "$REVIEW_PAYLOAD" | gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+          --method POST \
+          --input - > /dev/null 2>&1
+
+        COMMENT_COUNT=$(echo "$REVIEW_PAYLOAD" | python3 -c "
+        import json, sys
+        d = json.load(sys.stdin)
+        print(len(d.get('comments', [])))
+        " 2>/dev/null || echo "0")
+        echo "Posted inline review with ${COMMENT_COUNT} comment(s)"
