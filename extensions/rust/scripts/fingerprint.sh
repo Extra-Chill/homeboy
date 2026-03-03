@@ -6,10 +6,13 @@
 #
 # Output (JSON on stdout):
 #   {"methods": [...], "type_name": "...", "implements": [...],
-#    "registrations": [], "namespace": "...", "imports": [...]}
+#    "registrations": [], "namespace": "...", "imports": [...],
+#    "method_hashes": {...}, "structural_hashes": {...},
+#    "unused_parameters": [...], "dead_code_markers": [...],
+#    "internal_calls": [...], "public_api": [...]}
 #
 # Extracts structural information from Rust source files using text matching.
-# Does not require a Rust parser — uses grep/sed for speed.
+# Handles methods inside impl blocks and test methods inside #[cfg(test)] modules.
 
 set -euo pipefail
 
@@ -18,31 +21,240 @@ INPUT=$(cat)
 
 # Extract content from JSON — use python3 for reliable JSON parsing
 CONTENT=$(printf '%s' "$INPUT" | python3 -c "
-import json, sys, re
+import json, sys, re, hashlib
 
 data = json.load(sys.stdin)
 content = data['content']
 file_path = data['file_path']
 
-# Strip #[cfg(test)] mod tests { ... } block to exclude test functions.
-# Find the last #[cfg(test)] and remove everything from there to end of file.
-cfg_test = re.search(r'#\[cfg\(test\)\]', content)
-if cfg_test:
-    content = content[:cfg_test.start()]
+lines = content.split('\n')
+
+# ============================================================================
+# Context tracking: parse the file line-by-line to understand nesting.
+# For each line we track:
+#   - brace_depth: overall brace nesting level
+#   - in_test_module: whether we're inside a #[cfg(test)] mod tests { }
+#   - impl_context: the type name if we're inside an impl block
+#   - pending_attrs: attributes accumulated before the next item
+# ============================================================================
+
+class Context:
+    def __init__(self):
+        self.brace_depth = 0
+        # Stack of (kind, depth) where kind is 'impl', 'test_mod', 'other'
+        # and depth is the brace_depth at which the block was entered
+        self.block_stack = []
+        self.pending_attrs = []
+        self.impl_type = None      # Current impl target type (if in impl block)
+        self.in_test_mod = False    # Inside #[cfg(test)] module
+
+    def is_in_impl(self):
+        for kind, _, _ in reversed(self.block_stack):
+            if kind == 'impl':
+                return True
+        return False
+
+    def current_impl_type(self):
+        for kind, _, meta in reversed(self.block_stack):
+            if kind == 'impl':
+                return meta  # The impl type name
+        return None
+
+    def is_in_test_module(self):
+        for kind, _, _ in self.block_stack:
+            if kind == 'test_mod':
+                return True
+        return False
+
+ctx = Context()
+
+# ============================================================================
+# First pass: identify all function locations and their context.
+# We need this to correctly attribute methods to their impl blocks and
+# distinguish test functions from production code.
+# ============================================================================
+
+class FnInfo:
+    def __init__(self, name, line_num, impl_type, is_test, is_public, signature_lines, body_start_line):
+        self.name = name
+        self.line_num = line_num          # 1-indexed line number
+        self.impl_type = impl_type        # None for free fns, 'Type' for impl methods
+        self.is_test = is_test            # Inside #[cfg(test)] or has #[test]
+        self.is_public = is_public        # pub fn
+        self.signature_lines = signature_lines  # Lines comprising the fn signature
+        self.body_start_line = body_start_line  # Index where body starts (0-indexed)
+        self.body_lines = []              # Filled in during body extraction
+
+functions = []
+pending_attrs = []
+
+# Regex patterns
+fn_pattern = re.compile(r'^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)')
+impl_pattern = re.compile(r'^\s*impl(?:<[^>]*>)?\s+(?:(\w+(?:::\w+)*)\s+for\s+)?(\w+)')
+mod_pattern = re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)')
+cfg_test_pattern = re.compile(r'#\[cfg\(test\)\]')
+test_attr_pattern = re.compile(r'#\[test\]')
+
+i = 0
+while i < len(lines):
+    line = lines[i]
+    stripped = line.strip()
+
+    # Track attributes (they apply to the next item)
+    if stripped.startswith('#['):
+        pending_attrs.append(stripped)
+        # Don't count braces inside attributes
+        i += 1
+        continue
+
+    # Track blank lines and comments — reset nothing, just skip
+    if not stripped or stripped.startswith('//'):
+        i += 1
+        continue
+
+    # Check for impl block start
+    impl_match = impl_pattern.match(line)
+    if impl_match and '{' in line:
+        trait_or_type = impl_match.group(2)  # The concrete type
+        old_depth = ctx.brace_depth
+        for ch in line:
+            if ch == '{':
+                ctx.brace_depth += 1
+            elif ch == '}':
+                ctx.brace_depth -= 1
+        ctx.block_stack.append(('impl', old_depth, trait_or_type))
+        pending_attrs = []
+        i += 1
+        continue
+
+    # Check for mod block start (especially #[cfg(test)] mod tests)
+    mod_match = mod_pattern.match(line)
+    if mod_match and '{' in line:
+        mod_name = mod_match.group(1)
+        is_test_mod = any(cfg_test_pattern.search(a) for a in pending_attrs) or mod_name == 'tests'
+        old_depth = ctx.brace_depth
+        for ch in line:
+            if ch == '{':
+                ctx.brace_depth += 1
+            elif ch == '}':
+                ctx.brace_depth -= 1
+        kind = 'test_mod' if is_test_mod else 'other'
+        ctx.block_stack.append((kind, old_depth, mod_name))
+        pending_attrs = []
+        i += 1
+        continue
+
+    # Check for fn declaration
+    fn_match = fn_pattern.match(line)
+    if fn_match:
+        _indent = fn_match.group(1)
+        fn_name = fn_match.group(2)
+
+        has_test_attr = any(test_attr_pattern.search(a) for a in pending_attrs)
+        is_test = has_test_attr or ctx.is_in_test_module()
+        is_public = bool(re.match(r'\s*pub(?:\([^)]*\))?\s+', line))
+        impl_type = ctx.current_impl_type()
+
+        # Collect the full signature (may span multiple lines if params are multi-line)
+        sig_lines = [line]
+        # Check if the signature is complete (has both opening paren and closing paren)
+        paren_depth = line.count('(') - line.count(')')
+        j = i + 1
+        while paren_depth > 0 and j < len(lines):
+            sig_lines.append(lines[j])
+            paren_depth += lines[j].count('(') - lines[j].count(')')
+            j += 1
+
+        # Find where the body starts (the opening brace)
+        # It might be on the same line as params close, or on a subsequent line
+        body_start = j - 1  # Last line of signature
+        combined_sig = '\n'.join(sig_lines)
+        if '{' not in combined_sig:
+            # Opening brace is on a later line (e.g., after -> ReturnType)
+            while body_start + 1 < len(lines) and '{' not in lines[body_start]:
+                body_start += 1
+                sig_lines.append(lines[body_start])
+
+        fn_info = FnInfo(
+            name=fn_name,
+            line_num=i + 1,
+            impl_type=impl_type,
+            is_test=is_test,
+            is_public=is_public,
+            signature_lines=sig_lines,
+            body_start_line=i,
+        )
+
+        # Extract the full body (from fn line to matching closing brace)
+        brace_depth = 0
+        found_open = False
+        body_lines_list = []
+        k = i
+        while k < len(lines):
+            for ch in lines[k]:
+                if ch == '{':
+                    brace_depth += 1
+                    found_open = True
+                elif ch == '}':
+                    brace_depth -= 1
+            body_lines_list.append(lines[k])
+            if found_open and brace_depth == 0:
+                break
+            k += 1
+
+        fn_info.body_lines = body_lines_list
+
+        functions.append(fn_info)
+
+        # Advance context past the function body.
+        # A balanced fn body (open brace ... close brace) nets zero depth change,
+        # so the context brace_depth stays the same. We don't pop blocks here
+        # because the fn body's internal braces are self-contained.
+        # The net brace change for a well-formed function body is always zero.
+        pending_attrs = []
+        i = k + 1
+        continue
+
+    # Default: count braces and pop blocks as needed
+    for ch in line:
+        if ch == '{':
+            ctx.brace_depth += 1
+        elif ch == '}':
+            ctx.brace_depth -= 1
+
+    while ctx.block_stack and ctx.brace_depth <= ctx.block_stack[-1][1]:
+        ctx.block_stack.pop()
+
+    pending_attrs = []
+    i += 1
+
+# ============================================================================
+# Build output from collected function info
+# ============================================================================
 
 # --- Methods ---
-# Match fn declarations: pub fn name, fn name, pub async fn name, pub(crate) fn name
+# All non-test functions. Include impl methods.
 methods = []
-for m in re.finditer(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)', content):
-    name = m.group(1)
-    # Skip test functions and test modules
-    if name.startswith('test_') or name == 'tests':
-        continue
-    methods.append(name)
-
-# Deduplicate while preserving order
 seen = set()
-methods = [m for m in methods if m not in seen and not seen.add(m)]
+for fn in functions:
+    if fn.is_test:
+        continue
+    if fn.name == 'tests':
+        continue
+    if fn.name not in seen:
+        methods.append(fn.name)
+        seen.add(fn.name)
+
+# --- Test Methods ---
+# Functions inside #[cfg(test)] or with #[test] attribute.
+# Included in the methods list with their test_ prefix so test_coverage
+# can see them.
+test_methods = []
+for fn in functions:
+    if fn.is_test and fn.name not in seen:
+        methods.append(fn.name)
+        seen.add(fn.name)
+        test_methods.append(fn.name)
 
 # --- Type name ---
 # Primary struct or enum in the file (first pub struct/enum, or first struct/enum)
@@ -54,23 +266,22 @@ if pub_types:
 elif all_types:
     type_name = all_types[0]
 
+# --- Extends ---
+extends = None
+
 # --- Implements ---
 # Match impl blocks: impl Trait for Type, impl<T> Trait for Type
 implements = []
 for m in re.finditer(r'impl(?:<[^>]*>)?\s+(\w+(?:::\w+)*)\s+for\s+\w+', content):
     trait_name = m.group(1)
-    # Use just the last segment for common traits
     implements.append(trait_name.split('::')[-1])
-# Deduplicate
-seen = set()
-implements = [i for i in implements if i not in seen and not seen.add(i)]
+seen_impl = set()
+implements = [x for x in implements if x not in seen_impl and not seen_impl.add(x)]
 
 # --- Registrations ---
-# Match macro invocations that look like registration patterns
 registrations = []
 for m in re.finditer(r'(\w+)!\s*\(', content):
     macro_name = m.group(1)
-    # Skip common non-registration macros
     skip = {'println', 'eprintln', 'format', 'vec', 'assert', 'assert_eq',
             'assert_ne', 'panic', 'todo', 'unimplemented', 'cfg', 'derive',
             'include', 'include_str', 'include_bytes', 'concat', 'stringify',
@@ -83,21 +294,17 @@ for m in re.finditer(r'(\w+)!\s*\(', content):
             'map', 'hashmap', 'btreemap', 'hashset'}
     if macro_name not in skip and not macro_name.startswith('test'):
         registrations.append(macro_name)
-# Deduplicate
-seen = set()
-registrations = [r for r in registrations if r not in seen and not seen.add(r)]
+seen_reg = set()
+registrations = [r for r in registrations if r not in seen_reg and not seen_reg.add(r)]
 
 # --- Namespace ---
-# Infer from use crate:: patterns — most common prefix
 crate_uses = re.findall(r'use\s+crate::(\w+)', content)
 if crate_uses:
-    # Count frequency of first path segment
     from collections import Counter
     counts = Counter(crate_uses)
     most_common = counts.most_common(1)[0][0]
     namespace = f'crate::{most_common}'
 else:
-    # Try to infer from file path
     parts = file_path.replace('.rs', '').split('/')
     if len(parts) > 1:
         namespace = 'crate::' + '::'.join(parts[1:-1]) if len(parts) > 2 else 'crate::' + parts[-1]
@@ -105,89 +312,44 @@ else:
         namespace = None
 
 # --- Imports ---
-# Collect all use statements
 imports = []
 for m in re.finditer(r'use\s+((?:crate|super|self|std|serde|clap|regex|chrono|tokio|anyhow)\S+);', content):
     imports.append(m.group(1))
-# Also match use with braces: use crate::foo::{bar, baz};
 for m in re.finditer(r'use\s+((?:crate|super|self)\S+::\{[^}]+\});', content):
     imports.append(m.group(1))
-# Deduplicate
-seen = set()
-imports = [i for i in imports if i not in seen and not seen.add(i)]
+seen_imp = set()
+imports = [x for x in imports if x not in seen_imp and not seen_imp.add(x)]
 
-# --- Method Hashes (for duplication detection) ---
-# Extract function bodies, normalize whitespace, hash with SHA-256.
-# Only hashes top-level functions (not methods inside impl blocks).
-import hashlib
+# --- Visibility (method -> visibility level) ---
+visibility = {}
+for fn in functions:
+    if fn.is_test:
+        continue
+    sig = ' '.join(fn.signature_lines)
+    if re.match(r'\s*pub\s*\(crate\)', sig):
+        visibility[fn.name] = 'pub(crate)'
+    elif re.match(r'\s*pub\s*\(super\)', sig):
+        visibility[fn.name] = 'pub(super)'
+    elif re.match(r'\s*pub\s', sig):
+        visibility[fn.name] = 'public'
+    else:
+        visibility[fn.name] = 'private'
 
-method_hashes = {}
-# Find top-level fn declarations (zero indentation)
-lines = content.split('\n')
-i = 0
-while i < len(lines):
-    line = lines[i]
-    # Skip indented lines (methods inside impl/struct/etc.)
-    if line and line[0] in (' ', '\t'):
-        i += 1
-        continue
-    # Match fn declaration at start of line (with optional pub/async/unsafe/const)
-    fn_match = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)', line)
-    if not fn_match:
-        i += 1
-        continue
-    fn_name = fn_match.group(1)
-    if fn_name.startswith('test_') or fn_name == 'tests':
-        i += 1
-        continue
-    # Find the opening brace
-    brace_depth = 0
-    found_open = False
-    body_lines = []
-    j = i
-    while j < len(lines):
-        for ch in lines[j]:
-            if ch == '{':
-                brace_depth += 1
-                found_open = True
-            elif ch == '}':
-                brace_depth -= 1
-        body_lines.append(lines[j])
-        if found_open and brace_depth == 0:
-            break
-        j += 1
-    if body_lines:
-        # Normalize: join, collapse whitespace, strip
-        body_text = ' '.join(body_lines)
-        normalized = re.sub(r'\s+', ' ', body_text).strip()
-        body_hash = hashlib.sha256(normalized.encode()).hexdigest()[:16]
-        method_hashes[fn_name] = body_hash
-    i = j + 1
-
-# --- Structural Hashes (for near-duplicate detection) ---
-# Same body extraction as method_hashes, but identifiers and literals are
-# replaced with positional placeholders before hashing.  Two functions that
-# differ only in variable names, constant references, or string values will
-# produce the same structural hash.
+# ============================================================================
+# Method Hashes & Structural Hashes (for duplication detection)
+# Now works for ALL functions, not just top-level ones.
+# ============================================================================
 
 def structural_normalize(text):
-    # Replace identifiers and literals with positional tokens.
-    # Remove the fn signature line (keeps only the body)
     brace_idx = text.find('{')
     if brace_idx >= 0:
         text = text[brace_idx:]
 
-    # Replace string literals with STR (use chr(34) to avoid breaking bash double-quoting)
     dq = chr(34)
     text = re.sub(dq + '[^' + dq + ']*' + dq, 'STR', text)
-    # Replace char literals with CHR
     text = re.sub(chr(39) + '[^' + chr(39) + ']*' + chr(39), 'CHR', text)
-    # Replace numeric literals (integers, floats) with NUM
     text = re.sub(r'\b\d[\d_]*(?:\.\d[\d_]*)?\b', 'NUM', text)
 
-    # Replace identifiers with positional tokens.
-    # Collect unique identifiers in order of appearance, map to ID_N.
-    # Preserve Rust keywords as-is (they define structure).
     rust_keywords = {
         'as', 'async', 'await', 'break', 'const', 'continue', 'crate',
         'dyn', 'else', 'enum', 'extern', 'false', 'fn', 'for', 'if',
@@ -195,7 +357,6 @@ def structural_normalize(text):
         'pub', 'ref', 'return', 'self', 'Self', 'static', 'struct',
         'super', 'trait', 'true', 'type', 'unsafe', 'use', 'where',
         'while', 'yield',
-        # Common types/macros kept as structural markers
         'Some', 'None', 'Ok', 'Err', 'Result', 'Option', 'Vec',
         'String', 'Box', 'Arc', 'Rc', 'HashMap', 'HashSet',
         'bool', 'u8', 'u16', 'u32', 'u64', 'u128', 'usize',
@@ -216,81 +377,50 @@ def structural_normalize(text):
         return id_map[word]
 
     text = re.sub(r'\b[a-zA-Z_]\w*\b', replace_id, text)
-
-    # Collapse whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
+method_hashes = {}
 structural_hashes = {}
-# Re-extract bodies and compute structural hashes
-lines = content.split('\n')
-i = 0
-while i < len(lines):
-    line = lines[i]
-    if line and line[0] in (' ', '\t'):
-        i += 1
+
+for fn in functions:
+    if fn.is_test or fn.name == 'tests':
         continue
-    fn_match = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)', line)
-    if not fn_match:
-        i += 1
-        continue
-    fn_name = fn_match.group(1)
-    if fn_name.startswith('test_') or fn_name == 'tests':
-        i += 1
-        continue
-    brace_depth = 0
-    found_open = False
-    body_lines_s = []
-    j = i
-    while j < len(lines):
-        for ch in lines[j]:
-            if ch == '{':
-                brace_depth += 1
-                found_open = True
-            elif ch == '}':
-                brace_depth -= 1
-        body_lines_s.append(lines[j])
-        if found_open and brace_depth == 0:
-            break
-        j += 1
-    if body_lines_s:
-        body_text = ' '.join(body_lines_s)
+    if fn.body_lines:
+        body_text = ' '.join(fn.body_lines)
+        # Exact hash
+        normalized = re.sub(r'\s+', ' ', body_text).strip()
+        method_hashes[fn.name] = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+        # Structural hash
         struct_normalized = structural_normalize(body_text)
-        struct_hash = hashlib.sha256(struct_normalized.encode()).hexdigest()[:16]
-        structural_hashes[fn_name] = struct_hash
-    i = j + 1
+        structural_hashes[fn.name] = hashlib.sha256(struct_normalized.encode()).hexdigest()[:16]
 
 # --- Public API ---
-# Public functions/methods exported from this file.
 public_api = []
-for m in re.finditer(r'^pub(?:\([^)]*\))?\s+(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)', content, re.MULTILINE):
-    name = m.group(1)
-    if not name.startswith('test_') and name != 'tests':
-        public_api.append(name)
-# Deduplicate
-seen = set()
-public_api = [p for p in public_api if p not in seen and not seen.add(p)]
+for fn in functions:
+    if fn.is_test:
+        continue
+    if fn.is_public:
+        public_api.append(fn.name)
+seen_pub = set()
+public_api = [p for p in public_api if p not in seen_pub and not seen_pub.add(p)]
 
 # --- Internal Calls ---
 # Function/method calls within this file (for cross-file reference analysis).
-# Matches: function_name( and self.method_name( and Type::method_name(
 internal_calls = set()
-# Free function calls: word followed by (
+skip_calls = {'if', 'while', 'for', 'match', 'loop', 'return', 'Some', 'None',
+              'Ok', 'Err', 'Box', 'Vec', 'Arc', 'Rc', 'String', 'println',
+              'eprintln', 'format', 'write', 'writeln', 'panic', 'assert',
+              'assert_eq', 'assert_ne', 'todo', 'unimplemented', 'unreachable',
+              'dbg', 'cfg', 'include', 'include_str', 'concat', 'env',
+              'compile_error', 'stringify', 'vec', 'hashmap', 'bail', 'ensure',
+              'anyhow', 'matches', 'debug_assert', 'debug_assert_eq',
+              'allow', 'deny', 'warn', 'derive', 'serde', 'test',
+              'inline', 'must_use', 'doc', 'feature', 'pub', 'crate', 'super'}
 for m in re.finditer(r'\b(\w+)\s*\(', content):
     name = m.group(1)
-    # Skip keywords, macros (already captured), and common non-function patterns
-    skip_calls = {'if', 'while', 'for', 'match', 'loop', 'return', 'Some', 'None',
-                  'Ok', 'Err', 'Box', 'Vec', 'Arc', 'Rc', 'String', 'println',
-                  'eprintln', 'format', 'write', 'writeln', 'panic', 'assert',
-                  'assert_eq', 'assert_ne', 'todo', 'unimplemented', 'unreachable',
-                  'dbg', 'cfg', 'include', 'include_str', 'concat', 'env',
-                  'compile_error', 'stringify', 'vec', 'hashmap', 'bail', 'ensure',
-                  'anyhow', 'matches', 'debug_assert', 'debug_assert_eq',
-                  'allow', 'deny', 'warn', 'derive', 'serde', 'test',
-                  'inline', 'must_use', 'doc', 'feature'}
     if name not in skip_calls and not name.startswith('test_'):
         internal_calls.add(name)
-# Method calls: .method_name( and ::method_name(
 for m in re.finditer(r'[.:](\w+)\s*\(', content):
     name = m.group(1)
     if name not in skip_calls and not name.startswith('test_'):
@@ -298,110 +428,43 @@ for m in re.finditer(r'[.:](\w+)\s*\(', content):
 internal_calls = sorted(internal_calls)
 
 # --- Unused Parameters ---
-# For each function, extract parameter names and check if they appear in the body.
+# Now works for all functions (not just top-level).
 unused_parameters = []
-lines = content.split('\n')
-i = 0
-while i < len(lines):
-    line = lines[i]
-    # Only top-level functions (zero indentation)
-    if line and line[0] in (' ', '\t'):
-        i += 1
+for fn in functions:
+    if fn.is_test or fn.name == 'tests':
         continue
-    fn_match = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)', line)
-    if not fn_match:
-        # Try multi-line signature (params continue on next lines)
-        fn_match_start = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(', line)
-        if fn_match_start:
-            fn_name = fn_match_start.group(1)
-            # Collect lines until we find the closing )
-            sig_lines = [line]
-            j = i + 1
-            paren_depth = line.count('(') - line.count(')')
-            while j < len(lines) and paren_depth > 0:
-                sig_lines.append(lines[j])
-                paren_depth += lines[j].count('(') - lines[j].count(')')
-                j += 1
-            full_sig = ' '.join(sig_lines)
-            params_match = re.search(r'fn\s+\w+\s*(?:<[^>]*>)?\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)', full_sig)
-            if params_match:
-                params_str = params_match.group(1)
-            else:
-                i += 1
-                continue
-        else:
-            i += 1
-            continue
-    else:
-        fn_name = fn_match.group(1)
-        params_str = fn_match.group(2)
-
-    if fn_name.startswith('test_') or fn_name == 'tests':
-        i += 1
+    # Parse params from the full signature
+    full_sig = ' '.join(fn.signature_lines)
+    params_match = re.search(r'fn\s+\w+\s*(?:<[^>]*>)?\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)', full_sig)
+    if not params_match:
         continue
-
-    # Parse parameter names from the signature
+    params_str = params_match.group(1)
     param_names = []
     for param in re.finditer(r'(\w+)\s*:', params_str):
         pname = param.group(1)
-        # Skip 'self', 'mut' (as in &mut self), and type-only params
         if pname not in ('self', 'mut', 'Self'):
             param_names.append(pname)
-
     if not param_names:
-        i += 1
         continue
-
-    # Extract function body
-    brace_depth = 0
-    found_open = False
-    body_lines = []
-    j = i
-    while j < len(lines):
-        for ch in lines[j]:
-            if ch == '{':
-                brace_depth += 1
-                found_open = True
-            elif ch == '}':
-                brace_depth -= 1
-        if found_open:
-            body_lines.append(lines[j])
-        if found_open and brace_depth == 0:
-            break
-        j += 1
-
-    if body_lines:
-        # Join body, then strip the signature (everything before the first {)
-        # so parameter names in the signature don't cause false negatives.
-        full_body = '\n'.join(body_lines)
+    # Check if params appear in the body (excluding the signature)
+    if fn.body_lines:
+        full_body = '\n'.join(fn.body_lines)
         brace_pos = full_body.find('{')
-        if brace_pos >= 0:
-            body_only = full_body[brace_pos + 1:]
-        else:
-            body_only = full_body
+        body_only = full_body[brace_pos + 1:] if brace_pos >= 0 else full_body
         for pname in param_names:
-            # Skip params prefixed with _ (intentionally unused)
             if pname.startswith('_'):
                 continue
-            # Check if the parameter name appears anywhere in the body
-            # Use word boundary to avoid false positives (e.g., 'id' in 'width')
             if not re.search(r'\b' + re.escape(pname) + r'\b', body_only):
-                unused_parameters.append({'function': fn_name, 'param': pname})
-
-    i = j + 1
+                unused_parameters.append({'function': fn.name, 'param': pname})
 
 # --- Dead Code Markers ---
-# Find #[allow(dead_code)] annotations and the item they apply to.
 dead_code_markers = []
-lines = content.split('\n')
 for line_num, line in enumerate(lines, 1):
     stripped = line.strip()
     if stripped == '#[allow(dead_code)]':
-        # The next non-attribute, non-empty line should be the item
         for k in range(line_num, min(line_num + 5, len(lines))):
             next_line = lines[k].strip()
             if next_line and not next_line.startswith('#[') and not next_line.startswith('//'):
-                # Extract item name
                 item_match = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?(?:static\s+)?(?:fn|struct|enum|type|trait|const|static|mod)\s+(\w+)', next_line)
                 if item_match:
                     dead_code_markers.append({
@@ -414,12 +477,14 @@ for line_num, line in enumerate(lines, 1):
 result = {
     'methods': methods,
     'type_name': type_name,
+    'extends': extends,
     'implements': implements,
     'registrations': registrations,
     'namespace': namespace,
     'imports': imports,
     'method_hashes': method_hashes,
     'structural_hashes': structural_hashes,
+    'visibility': visibility,
     'unused_parameters': unused_parameters,
     'dead_code_markers': dead_code_markers,
     'internal_calls': internal_calls,
