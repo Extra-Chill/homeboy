@@ -73,18 +73,16 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
-    # ── Step 3: Install Homeboy binary ──
-    - name: Install Homeboy
+    # ── Step 3a: Resolve Homeboy version ──
+    - name: Resolve Homeboy version
+      id: resolve-version
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         HOMEBOY_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-
         REPO="Extra-Chill/homeboy"
-
-        # Resolve version
         if [ "$HOMEBOY_VERSION" = "latest" ]; then
           TAG=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || true)
           if [ -z "$TAG" ]; then
@@ -94,9 +92,31 @@ runs:
         else
           TAG="v${HOMEBOY_VERSION#v}"
         fi
+        echo "resolved-version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-        VERSION="${TAG#v}"
-        echo "Installing Homeboy ${VERSION}..."
+    # ── Step 3b: Cache Homeboy binary + extensions ──
+    - name: Cache Homeboy
+      id: cache-homeboy
+      uses: actions/cache@v4
+      with:
+        path: |
+          /usr/local/bin/homeboy
+          ~/.config/homeboy/extensions/
+        key: homeboy-${{ steps.resolve-version.outputs.resolved-version }}-${{ inputs.extension }}-${{ runner.os }}-${{ runner.arch }}
+
+    # ── Step 3c: Install Homeboy binary (cache miss) ──
+    - name: Install Homeboy
+      if: steps.cache-homeboy.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        HOMEBOY_VERSION: ${{ steps.resolve-version.outputs.resolved-version }}
+      run: |
+        set -euo pipefail
+
+        REPO="Extra-Chill/homeboy"
+        TAG="v${HOMEBOY_VERSION}"
+        echo "Installing Homeboy ${HOMEBOY_VERSION}..."
 
         # Determine platform
         OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -135,9 +155,9 @@ runs:
 
         echo "Homeboy $(homeboy --version) installed successfully"
 
-    # ── Step 4: Install extension ──
+    # ── Step 4: Install extension (cache miss) ──
     - name: Install extension
-      if: inputs.extension != ''
+      if: inputs.extension != '' && steps.cache-homeboy.outputs.cache-hit != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -216,8 +236,8 @@ runs:
         echo "Component '${COMP_ID}' registered successfully"
         echo "component-id=${COMP_ID}" >> "$GITHUB_ENV"
 
-    # ── Step 6: Compute changed files for PR scoping ──
-    - name: Compute changed files
+    # ── Step 6: Determine PR base ref for --changed-since scoping ──
+    - name: Determine PR base ref
       id: changed-files
       if: github.event_name == 'pull_request' && inputs.lint-changed-only == 'true'
       shell: bash
@@ -225,47 +245,13 @@ runs:
         set -euo pipefail
 
         BASE_SHA="${{ github.event.pull_request.base.sha }}"
-        HEAD_SHA="${{ github.event.pull_request.head.sha }}"
 
-        # Fetch both base and head with enough depth for a proper diff
-        echo "Fetching base (${BASE_SHA:0:8}) and head (${HEAD_SHA:0:8})..."
-        git fetch origin "${BASE_SHA}" "${HEAD_SHA}" --depth=1 2>/dev/null || true
+        # Fetch base commit so homeboy --changed-since can diff against it
+        echo "Fetching base commit (${BASE_SHA:0:8})..."
+        git fetch origin "${BASE_SHA}" --depth=1 2>/dev/null || true
 
-        # Try merge-base diff first, fall back to straight diff
-        CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR "${BASE_SHA}..${HEAD_SHA}" 2>/dev/null || true)
-
-        if [ -z "$CHANGED_FILES" ]; then
-          echo "No changed files detected — will run full lint"
-          echo "has-changes=false" >> "$GITHUB_OUTPUT"
-        else
-          FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | xargs)
-          echo "Found ${FILE_COUNT} changed files"
-
-          # Build absolute paths and create brace glob for homeboy --glob
-          WORKSPACE="$(pwd)"
-          ABS_FILES=""
-          while IFS= read -r file; do
-            if [ -n "$ABS_FILES" ]; then
-              ABS_FILES="${ABS_FILES},${WORKSPACE}/${file}"
-            else
-              ABS_FILES="${WORKSPACE}/${file}"
-            fi
-          done <<< "$CHANGED_FILES"
-
-          # Single file doesn't need braces, multiple files use {a,b,c} glob
-          if [ "$FILE_COUNT" -eq 1 ]; then
-            GLOB="${ABS_FILES}"
-          else
-            GLOB="{${ABS_FILES}}"
-          fi
-
-          echo "has-changes=true" >> "$GITHUB_OUTPUT"
-          echo "file-count=${FILE_COUNT}" >> "$GITHUB_OUTPUT"
-
-          # Write glob to file to avoid shell escaping issues
-          echo "${GLOB}" > /tmp/homeboy-changed-glob.txt
-          echo "HOMEBOY_CHANGED_GLOB=${GLOB}" >> "$GITHUB_ENV"
-        fi
+        echo "base-ref=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+        echo "HOMEBOY_CHANGED_SINCE=${BASE_SHA}" >> "$GITHUB_ENV"
 
     # ── Step 7: Run commands ──
     - name: Run Homeboy commands
@@ -308,13 +294,12 @@ runs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
 
-          # Build the command — audit uses positional path, lint/test use --path
-          # See: https://github.com/Extra-Chill/homeboy/issues/374
+          # Build the command
           if [ "$CMD" = "audit" ]; then
-            FULL_CMD="homeboy audit ${WORKSPACE}"
-          elif [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_GLOB:-}" ]; then
-            # Scope lint to changed files only (PR mode)
-            FULL_CMD="homeboy lint ${COMP_ID} --path ${WORKSPACE} --glob '${HOMEBOY_CHANGED_GLOB}'"
+            FULL_CMD="homeboy audit ${COMP_ID}"
+          elif [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            # Scope lint to changed files only (PR mode) using --changed-since
+            FULL_CMD="homeboy lint ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
           else
             FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
           fi
@@ -415,9 +400,8 @@ runs:
 
           # Add scope indicator for lint
           SCOPE_NOTE=""
-          if [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_GLOB:-}" ]; then
-            CHANGED_COUNT="${{ steps.changed-files.outputs.file-count }}"
-            SCOPE_NOTE=" _(${CHANGED_COUNT:-?} changed files)_"
+          if [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            SCOPE_NOTE=" _(changed files only)_"
           fi
 
           COMMENT_BODY+=":${ICON}: **${CMD}**${SCOPE_NOTE}"$'\n'
