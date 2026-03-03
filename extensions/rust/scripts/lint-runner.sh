@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Rust lint runner for homeboy lint.
+#
+# Runs cargo fmt --check and cargo clippy as lint steps.
+# Supports the standard homeboy extension env vars:
+#   HOMEBOY_EXTENSION_PATH  — path to this extension
+#   HOMEBOY_COMPONENT_PATH  — path to the Rust project
+#   HOMEBOY_AUTO_FIX        — if "1", run cargo fmt (fix mode) instead of --check
+#   HOMEBOY_SUMMARY_MODE    — if "1", show compact output
+#   HOMEBOY_LINT_GLOB       — file glob (currently unused for Rust — cargo operates on crates)
+#   HOMEBOY_LINT_FILE       — single file (currently unused for Rust)
+#   HOMEBOY_ERRORS_ONLY     — if "1", only show errors (suppresses warnings in clippy)
+#   HOMEBOY_STEP            — comma-separated steps to run (fmt, clippy)
+#   HOMEBOY_SKIP            — comma-separated steps to skip
+#   HOMEBOY_DEBUG           — if "1", show debug output
+
+FAILED_STEP=""
+FAILURE_OUTPUT=""
+
+# Step filtering
+should_run_step() {
+    local step_name="$1"
+    if [ -n "${HOMEBOY_STEP:-}" ]; then
+        echo ",${HOMEBOY_STEP}," | grep -q ",${step_name}," && return 0 || return 1
+    fi
+    if [ -n "${HOMEBOY_SKIP:-}" ]; then
+        echo ",${HOMEBOY_SKIP}," | grep -q ",${step_name}," && return 1 || return 0
+    fi
+    return 0
+}
+
+print_failure_summary() {
+    if [ -n "$FAILED_STEP" ]; then
+        echo ""
+        echo "============================================"
+        echo "BUILD FAILED: $FAILED_STEP"
+        echo "============================================"
+        if [ -n "$FAILURE_OUTPUT" ]; then
+            echo ""
+            echo "Error details:"
+            echo "$FAILURE_OUTPUT"
+        fi
+    fi
+}
+trap print_failure_summary EXIT
+
+# Determine project path
+if [ -n "${HOMEBOY_COMPONENT_PATH:-}" ]; then
+    PROJECT_PATH="${HOMEBOY_COMPONENT_PATH}"
+else
+    PROJECT_PATH="$(pwd)"
+fi
+
+if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+    echo "DEBUG: Rust Lint Environment:"
+    echo "HOMEBOY_EXTENSION_PATH=${HOMEBOY_EXTENSION_PATH:-NOT_SET}"
+    echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
+    echo "HOMEBOY_AUTO_FIX=${HOMEBOY_AUTO_FIX:-NOT_SET}"
+    echo "HOMEBOY_SUMMARY_MODE=${HOMEBOY_SUMMARY_MODE:-NOT_SET}"
+    echo "HOMEBOY_ERRORS_ONLY=${HOMEBOY_ERRORS_ONLY:-NOT_SET}"
+    echo "PROJECT_PATH=${PROJECT_PATH}"
+fi
+
+# Verify this is a Rust project
+if [ ! -f "${PROJECT_PATH}/Cargo.toml" ]; then
+    echo "Error: No Cargo.toml found at ${PROJECT_PATH}"
+    echo "Not a Rust project — cannot run lint."
+    exit 1
+fi
+
+echo "Running Rust lint checks..."
+
+# ── Step 1: cargo fmt ──
+if should_run_step "fmt"; then
+    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+        echo ""
+        echo "Running cargo fmt (fix mode)..."
+        set +e
+        FMT_OUTPUT=$(cargo fmt --manifest-path "${PROJECT_PATH}/Cargo.toml" 2>&1)
+        FMT_EXIT=$?
+        set -e
+
+        if [ $FMT_EXIT -eq 0 ]; then
+            echo "cargo fmt: applied formatting fixes"
+        else
+            echo "cargo fmt failed:"
+            echo "$FMT_OUTPUT"
+            FAILED_STEP="cargo fmt"
+            FAILURE_OUTPUT="$FMT_OUTPUT"
+            exit 1
+        fi
+    else
+        echo ""
+        echo "Running cargo fmt --check..."
+        set +e
+        FMT_OUTPUT=$(cargo fmt --manifest-path "${PROJECT_PATH}/Cargo.toml" --check 2>&1)
+        FMT_EXIT=$?
+        set -e
+
+        if [ $FMT_EXIT -eq 0 ]; then
+            echo "cargo fmt: passed"
+        else
+            if [ "${HOMEBOY_SUMMARY_MODE:-}" = "1" ]; then
+                # Count files with formatting issues
+                FILE_COUNT=$(echo "$FMT_OUTPUT" | grep -c "^Diff in" || true)
+                echo ""
+                echo "============================================"
+                echo "FMT SUMMARY: ${FILE_COUNT} files need formatting"
+                echo "============================================"
+                echo ""
+                echo "Fix: homeboy lint <component> --fix"
+            else
+                echo ""
+                echo "$FMT_OUTPUT"
+            fi
+            FAILED_STEP="cargo fmt --check"
+            FAILURE_OUTPUT="$(echo "$FMT_OUTPUT" | tail -20)"
+            exit 1
+        fi
+    fi
+else
+    echo "Skipping cargo fmt (step filter)"
+fi
+
+# ── Step 2: cargo clippy ──
+if should_run_step "clippy"; then
+    echo ""
+    echo "Running cargo clippy..."
+
+    CLIPPY_ARGS=(
+        clippy
+        --manifest-path "${PROJECT_PATH}/Cargo.toml"
+        --all-targets
+    )
+
+    # In fix mode, apply clippy suggestions
+    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+        CLIPPY_ARGS+=(--fix --allow-dirty --allow-staged)
+    fi
+
+    CLIPPY_ARGS+=(--)
+
+    if [ "${HOMEBOY_ERRORS_ONLY:-}" = "1" ]; then
+        CLIPPY_ARGS+=(-D warnings)
+    else
+        CLIPPY_ARGS+=(-W clippy::all)
+    fi
+
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: cargo ${CLIPPY_ARGS[*]}"
+    fi
+
+    CLIPPY_TMPFILE=$(mktemp)
+
+    set +e
+    cargo "${CLIPPY_ARGS[@]}" 2>&1 | tee "$CLIPPY_TMPFILE"
+    CLIPPY_EXIT=${PIPESTATUS[0]}
+    set -e
+
+    CLIPPY_OUTPUT=$(cat "$CLIPPY_TMPFILE")
+    rm -f "$CLIPPY_TMPFILE"
+
+    if [ $CLIPPY_EXIT -eq 0 ]; then
+        echo "cargo clippy: passed"
+    else
+        if [ "${HOMEBOY_SUMMARY_MODE:-}" = "1" ]; then
+            WARNING_COUNT=$(echo "$CLIPPY_OUTPUT" | grep -c "^warning\[" || true)
+            ERROR_COUNT=$(echo "$CLIPPY_OUTPUT" | grep -c "^error\[" || true)
+            echo ""
+            echo "============================================"
+            echo "CLIPPY SUMMARY: ${ERROR_COUNT} errors, ${WARNING_COUNT} warnings"
+            echo "============================================"
+        fi
+        FAILED_STEP="cargo clippy"
+        FAILURE_OUTPUT="$(echo "$CLIPPY_OUTPUT" | grep -E "^(error|warning)\[" | head -20)"
+        exit 1
+    fi
+else
+    echo "Skipping cargo clippy (step filter)"
+fi
+
+echo ""
+echo "Rust lint checks passed"

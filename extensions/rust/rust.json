@@ -12,6 +12,12 @@
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.sh"
   },
+  "lint": {
+    "extension_script": "scripts/lint-runner.sh"
+  },
+  "test": {
+    "extension_script": "scripts/test-runner.sh"
+  },
   "audit": {
     "feature_patterns": [
       "#\\[derive\\(.*Subcommand.*\\)\\]\\s*(?:pub\\s+)?enum\\s+(\\w+)",
