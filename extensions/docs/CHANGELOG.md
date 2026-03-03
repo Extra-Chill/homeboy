@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.2] - 2026-03-03
+
+### Fixed
+- WordPress: remove auto-activate from post:deploy hook — deploy no longer changes plugin activation state, fixing incorrect activation on multisite installs (#63)
+
 ## [0.5.1] - 2026-03-03
 
 ### Fixed
