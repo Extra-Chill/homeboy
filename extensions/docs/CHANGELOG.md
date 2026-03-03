@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1] - 2026-03-03
+
+### Fixed
+- SQLite DDL translation: CREATE TABLE now translates MySQL-specific syntax (AUTO_INCREMENT, ENGINE, sized integers, KEY/UNIQUE KEY) to SQLite-compatible DDL — enables 590+ tests to run vs 0 before (homeboy#371)
+- Remove stale SQLite db.php drop-in when switching to MySQL mode — prevents query interception from previous SQLite runs (homeboy#370)
+- Detect zero-test PHPUnit runs and report failure instead of false-positive "passed" (homeboy#369)
+- Add ALTER TABLE translation for ADD COLUMN and RENAME operations
+
 ## [2.2.1] - 2026-03-01
 
 ### Added
