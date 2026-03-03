@@ -108,6 +108,12 @@ pub enum DeviationKind {
     UnreferencedExport,
     /// Private/internal function is never called within the same file.
     OrphanedInternal,
+    /// Source file has no corresponding test file.
+    MissingTestFile,
+    /// Source method/function has no corresponding test method.
+    MissingTestMethod,
+    /// Test file or test method has no corresponding source file/method.
+    OrphanedTest,
 }
 
 // ============================================================================

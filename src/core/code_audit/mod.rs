@@ -23,6 +23,7 @@ pub mod fixer;
 pub(crate) mod import_matching;
 mod signatures;
 mod structural;
+mod test_coverage;
 pub(crate) mod walker;
 
 #[cfg(test)]
@@ -287,6 +288,33 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
             dead_code_findings.len()
         );
         all_findings.extend(dead_code_findings);
+    }
+
+    // Phase 4f: Structural test coverage gap detection
+    // Look up the extension's test mapping config for the component.
+    if let Ok(comp) = component::load(component_id) {
+        if let Some(extensions) = &comp.extensions {
+            for ext_id in extensions.keys() {
+                if let Ok(ext_manifest) = crate::extension::load_extension(ext_id) {
+                    if let Some(test_mapping) = ext_manifest.test_mapping() {
+                        let coverage_findings = test_coverage::analyze_test_coverage(
+                            root,
+                            &all_fingerprints,
+                            test_mapping,
+                        );
+                        if !coverage_findings.is_empty() {
+                            log_status!(
+                                "audit",
+                                "Test coverage: {} finding(s) (missing test files, uncovered methods, orphaned tests)",
+                                coverage_findings.len()
+                            );
+                            all_findings.extend(coverage_findings);
+                        }
+                        break; // Only use the first extension that has test_mapping
+                    }
+                }
+            }
+        }
     }
 
     // Phase 5: Build report

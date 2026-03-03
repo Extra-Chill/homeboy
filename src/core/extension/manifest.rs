@@ -53,6 +53,37 @@ pub struct DeployCapability {
     pub since_tag: Option<SinceTagConfig>,
 }
 
+/// Test mapping convention: how source files map to test files.
+/// Used by the audit pipeline for structural test coverage gap detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestMappingConfig {
+    /// Source directories to scan (relative to component root).
+    /// Example: `["src"]` for Rust, `["inc"]` for WordPress.
+    pub source_dirs: Vec<String>,
+    /// Test directories to scan (relative to component root).
+    /// Example: `["tests"]` for both Rust and WordPress.
+    pub test_dirs: Vec<String>,
+    /// How source file paths map to test file paths.
+    /// Template variables: `{dir}` (relative dir), `{name}` (filename without ext), `{ext}` (extension).
+    /// Example Rust: `"tests/{dir}/{name}_test.{ext}"` or inline `#[cfg(test)]`
+    /// Example WordPress: `"tests/Unit/{dir}/{name}Test.{ext}"`
+    pub test_file_pattern: String,
+    /// Prefix for test method names (e.g., `"test_"` for both Rust and PHP).
+    #[serde(default = "default_test_prefix")]
+    pub method_prefix: String,
+    /// Whether the language uses inline tests (e.g., Rust `#[cfg(test)]` in the same file).
+    #[serde(default)]
+    pub inline_tests: bool,
+    /// Directory path patterns that indicate high-priority test coverage.
+    /// Files in matching directories get `Warning` severity instead of `Info`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub critical_patterns: Vec<String>,
+}
+
+fn default_test_prefix() -> String {
+    "test_".to_string()
+}
+
 /// Docs audit: ignore patterns and feature detection patterns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditCapability {
@@ -77,6 +108,10 @@ pub struct AuditCapability {
     /// Tells the audit system what additional context to extract around each detected feature.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub feature_context: HashMap<String, FeatureContextRule>,
+    /// Test mapping convention for structural test coverage gap detection.
+    /// Defines how source files map to test files and how methods map to test methods.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_mapping: Option<TestMappingConfig>,
 }
 
 /// Rules for extracting context around a detected feature.
@@ -358,6 +393,11 @@ impl ExtensionManifest {
             .as_ref()
             .map(|a| &a.feature_context)
             .unwrap_or(&EMPTY)
+    }
+
+    /// Convenience: get test mapping config from audit capability.
+    pub fn test_mapping(&self) -> Option<&TestMappingConfig> {
+        self.audit.as_ref().and_then(|a| a.test_mapping.as_ref())
     }
 
     /// Convenience: get database config from platform capability.

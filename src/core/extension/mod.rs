@@ -17,7 +17,7 @@ pub use manifest::{
     DocTarget, ExecutableCapability, ExtensionManifest, FeatureContextRule, HttpMethod,
     InputConfig, LintConfig, OutputConfig, OutputSchema, PlatformCapability, ProvidesConfig,
     RequirementsConfig, RuntimeConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig,
-    TestConfig, VersionPatternConfig,
+    TestConfig, TestMappingConfig, VersionPatternConfig,
 };
 
 // Re-export version types
