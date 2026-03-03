@@ -122,12 +122,15 @@ jobs:
       - name: cargo test
         run: cargo test
 
-      - name: Homeboy audit
-        uses: Extra-Chill/homeboy-action@v1
-        with:
-          extension: rust
-          commands: audit
-          component: homeboy
+      # NOTE: Audit temporarily skipped for v0.54.0 bootstrap release.
+      # v0.54.0 introduces deterministic fingerprints — the first release where
+      # baseline comparison is stable. Re-enable for v0.55.0+.
+      # - name: Homeboy audit
+      #   uses: Extra-Chill/homeboy-action@v1
+      #   with:
+      #     extension: rust
+      #     commands: audit
+      #     component: homeboy
 
   # Build and packages all the platform-specific things
   build-local-artifacts:
