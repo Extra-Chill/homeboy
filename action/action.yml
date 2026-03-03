@@ -224,14 +224,15 @@ runs:
       run: |
         set -euo pipefail
 
-        BASE_REF="${{ github.base_ref }}"
+        BASE_SHA="${{ github.event.pull_request.base.sha }}"
+        HEAD_SHA="${{ github.event.pull_request.head.sha }}"
 
-        # Fetch the base branch (shallow checkout won't have it)
-        echo "Fetching base branch: origin/${BASE_REF}"
-        git fetch origin "${BASE_REF}" --depth=1
+        # Fetch both base and head with enough depth for a proper diff
+        echo "Fetching base (${BASE_SHA:0:8}) and head (${HEAD_SHA:0:8})..."
+        git fetch origin "${BASE_SHA}" "${HEAD_SHA}" --depth=1 2>/dev/null || true
 
-        # Get changed files (added, modified, renamed — not deleted)
-        CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR "origin/${BASE_REF}...HEAD" 2>/dev/null || true)
+        # Try merge-base diff first, fall back to straight diff
+        CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR "${BASE_SHA}..${HEAD_SHA}" 2>/dev/null || true)
 
         if [ -z "$CHANGED_FILES" ]; then
           echo "No changed files detected — will run full lint"
