@@ -170,6 +170,47 @@ Step types:
 - Built-in: build, version_bump, git_commit, git_tag, git_push
 - Extension: extension_run, extension_action
 
+### Code Audit
+
+**Location:** `src/core/code_audit/`
+
+Convention detection and drift analysis:
+- Fingerprints source files (methods, registrations, types) via extensions
+- Groups files by directory and language
+- Discovers conventions (patterns most files follow)
+- Detects outliers, structural complexity, duplication, dead code, test coverage gaps
+- Baseline comparison for drift tracking
+- Fix stub generation for outlier files
+
+Audit pipeline phases:
+1. Discovery (auto-discover file groups)
+2. Convention detection
+3. Convention checking
+4. Findings (outliers, structural, duplication, dead code, test coverage)
+5. Report (alignment score)
+6. Cross-directory convention discovery
+
+### Docs Audit
+
+**Location:** `src/core/docs_audit/`
+
+Documentation verification:
+- Extracts claims (file paths, directory paths) from markdown docs
+- Verifies claims against the filesystem
+- Detects features in source code and checks documentation coverage
+- Identifies priority docs (source files changed since baseline tag)
+- Supports `--features` for machine-readable feature inventory
+
+### Cleanup
+
+**Location:** `src/core/cleanup/`
+
+Config health checking:
+- Validates component configs (local_path, remote_path, version_targets, extensions)
+- Detects broken paths, dead version targets, unused extension links
+- Provides actionable fix hints (`homeboy component set` commands)
+- Single component or all-components mode
+
 ### Fleet Management
 
 **Location:** `src/core/fleet.rs`

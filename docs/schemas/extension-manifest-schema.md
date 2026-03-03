@@ -10,11 +10,16 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
   "id": "string",
   "version": "string",
   "description": "string",
-  "runtime": {},
+  "provides": {},
+  "scripts": {},
+  "audit": {},
+  "deploy": {},
+  "executable": {},
   "platform": {},
   "commands": {},
   "actions": {},
   "release_actions": {},
+  "hooks": {},
   "docs": [],
   "capabilities": [],
   "storage_backend": "string"
@@ -32,14 +37,110 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
 ### Optional Fields
 
 - **`description`** (string): Extension description
-- **`runtime`** (object): Executable extension runtime configuration
-- **`platform`** (object): Platform behavior definitions
+- **`provides`** (object): File extensions and capabilities this extension handles
+- **`scripts`** (object): Scripts that implement extension capabilities (fingerprint, refactor)
+- **`audit`** (object): Docs audit config — ignore patterns, feature detection, test mapping
+- **`deploy`** (object): Deploy lifecycle — verifications, overrides, version patterns
+- **`executable`** (object): Standalone tool runtime, inputs, output schema
+- **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
 - **`commands`** (object): Additional CLI commands provided by extension
 - **`actions`** (object): Action definitions for `homeboy extension action`
 - **`release_actions`** (object): Release pipeline step definitions
+- **`hooks`** (object): Lifecycle hooks (pre/post version bump, deploy, release)
 - **`docs`** (array): Documentation topic paths
 - **`capabilities`** (array): Capabilities provided by extension (e.g., `["storage"]`)
 - **`storage_backend`** (string): Storage backend identifier for storage capability
+
+## Provides Configuration
+
+Declares what file types and capabilities this extension handles. Used by the audit system to route files to the correct extension for fingerprinting.
+
+```json
+{
+  "provides": {
+    "file_extensions": ["php", "inc"],
+    "capabilities": ["fingerprint", "refactor"]
+  }
+}
+```
+
+### Provides Fields
+
+- **`file_extensions`** (array): File extensions this extension can process (e.g., `["php", "inc"]`, `["rs"]`)
+- **`capabilities`** (array): Capabilities this extension supports (e.g., `["fingerprint", "refactor"]`)
+
+## Scripts Configuration
+
+Scripts that implement extension capabilities. Each script path is relative to the extension directory.
+
+```json
+{
+  "scripts": {
+    "fingerprint": "scripts/fingerprint.sh",
+    "refactor": "scripts/refactor.sh"
+  }
+}
+```
+
+### Scripts Fields
+
+- **`fingerprint`** (string): Script that extracts structural fingerprints from source files. Receives file content on stdin, outputs `FileFingerprint` JSON on stdout.
+- **`refactor`** (string): Script that applies refactoring edits to source files. Receives edit instructions on stdin, outputs transformed content on stdout.
+
+## Audit Configuration
+
+Configuration for docs audit, feature detection, and test coverage analysis.
+
+```json
+{
+  "audit": {
+    "ignore_claim_patterns": ["/wp-json/**", "*.min.js"],
+    "feature_patterns": ["register_post_type\\(\\s*['\"]([^'\"]+)['\"]"],
+    "feature_labels": {
+      "register_post_type": "Post Types",
+      "register_rest_route": "REST API Routes"
+    },
+    "doc_targets": {
+      "Post Types": {
+        "file": "api-reference.md",
+        "heading": "## Post Types"
+      }
+    },
+    "feature_context": {
+      "register_post_type": {
+        "doc_comment": true,
+        "block_fields": true
+      }
+    },
+    "test_mapping": {
+      "source_dirs": ["src"],
+      "test_dirs": ["tests"],
+      "test_file_pattern": "tests/{dir}/{name}_test.{ext}",
+      "method_prefix": "test_",
+      "inline_tests": true,
+      "critical_patterns": ["src/core/"]
+    }
+  }
+}
+```
+
+### Audit Fields
+
+- **`ignore_claim_patterns`** (array): Glob patterns for paths to ignore during docs audit
+- **`feature_patterns`** (array): Regex patterns to detect features in source code (must have a capture group for the feature name)
+- **`feature_labels`** (object): Maps pattern substrings to human-readable labels for grouping
+- **`doc_targets`** (object): Maps feature labels to documentation file paths and headings
+- **`feature_context`** (object): Context extraction rules per feature pattern (doc comments, block fields)
+- **`test_mapping`** (object): Test coverage mapping convention
+
+### Test Mapping Fields
+
+- **`source_dirs`** (array): Source directories to scan (e.g., `["src"]`, `["inc"]`)
+- **`test_dirs`** (array): Test directories to scan (e.g., `["tests"]`)
+- **`test_file_pattern`** (string): How source paths map to test paths. Variables: `{dir}`, `{name}`, `{ext}`
+- **`method_prefix`** (string): Prefix for test method names (default: `"test_"`)
+- **`inline_tests`** (boolean): Whether the language uses inline tests (e.g., Rust `#[cfg(test)]`)
+- **`critical_patterns`** (array): Directory patterns that indicate high-priority test coverage (get `Warning` severity instead of `Info`)
 
 ## Runtime Configuration
 

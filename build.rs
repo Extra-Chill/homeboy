@@ -64,9 +64,9 @@ fn generate_docs_rs(docs_root: &Path, doc_paths: &[PathBuf]) -> String {
 
         out.push_str("    (\"");
         out.push_str(&escape_rust_string(&key));
-        out.push_str("\", r#\"");
+        out.push_str("\", r###\"");
         out.push_str(&content);
-        out.push_str("\"#),\n");
+        out.push_str("\"###),\n");
     }
 
     out.push_str("];\n");

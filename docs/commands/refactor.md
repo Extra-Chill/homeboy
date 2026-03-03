@@ -92,7 +92,7 @@ The engine walks the target directory recursively, scanning files with these ext
 
 **Always skipped** (any depth): `node_modules`, `vendor`, `.git`, `.svn`, `.hg`
 
-**Skipped at root only**: `build`, `dist`, `target`, `cache`, `tmp` — these are safe to skip at root (build artifacts), but scanned at deeper levels (e.g. `scripts/build/` may contain source files).
+**Skipped at root only**: `build`, `dist`, `target`, `cache`, `tmp` — these are safe to skip at root (build artifacts), but scanned at deeper levels (e.g. a `scripts/build/` directory inside your project may contain source files).
 
 ## Collision Detection
 
@@ -105,7 +105,7 @@ Warnings are informational — `--write` applies changes even when warnings exis
 
 ## File Renames
 
-In addition to content edits, the engine detects files and directories whose names contain the rename term and generates path renames. For example, renaming `widget` → `gadget` would rename `widget/widget.rs` → `gadget/gadget.rs`.
+In addition to content edits, the engine detects files and directories whose names contain the rename term and generates path renames. For example, in a project containing `src/widget/widget.rs`, renaming `widget` → `gadget` would generate the path rename `src/widget/widget.rs` → `src/gadget/gadget.rs`.
 
 ## JSON Output
 

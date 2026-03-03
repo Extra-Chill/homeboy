@@ -1,27 +1,33 @@
 # Commands index
 
+- [api](api.md)
+- [audit](audit.md) — code convention drift and structural analysis
+- [auth](auth.md)
 - [build](build.md)
 - [changelog](changelog.md)
-- [component](component.md)
 - [changes](changes.md)
+- [cleanup](cleanup.md) — config health checks and hygiene
+- [component](component.md)
 - [config](config.md)
 - [db](db.md)
 - [deploy](deploy.md)
-- [docs](docs.md)
+- [docs](docs.md) — topic display, audit, map, generate
+- [extension](extension.md)
 - [file](file.md)
 - [fleet](fleet.md)
 - [git](git.md)
-- [init](init.md) (alias: `status`)
-- [api](api.md)
-- [auth](auth.md)
+- [init](init.md) — repo context (read-only)
+- [lint](lint.md)
 - [list](list.md)
 - [logs](logs.md)
-- [extension](extension.md)
 - [project](project.md)
 - [refactor](refactor.md)
-- [release](release.md) (local release pipeline)
+- [release](release.md) — local release pipeline
 - [server](server.md)
 - [ssh](ssh.md)
+- status — actionable component overview (`--uncommitted`, `--needs-bump`, `--ready`, `--docs-only`, `--all`)
+- [test](test.md)
+- transfer — transfer files between servers (`<source> <destination>`, supports `-r`, `-c`, `--dry-run`, `--exclude`)
 - [upgrade](upgrade.md)
 - [version](version.md)
 

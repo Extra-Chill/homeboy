@@ -5,11 +5,10 @@
 ```sh
 homeboy docs [TOPIC]
 homeboy docs list
-homeboy docs audit <component-id>
-homeboy docs map <component-id>
+homeboy docs audit <component-id> [--features] [--docs-dir <DIR>]
+homeboy docs map <component-id> [--write] [--include-private]
 homeboy docs generate --json '<spec>'
-homeboy docs generate @spec.json
-homeboy docs generate -
+homeboy docs generate --from-audit @audit.json
 ```
 
 ## Description
@@ -20,35 +19,40 @@ This command renders documentation topics and provides tooling for documentation
 1. Embedded core docs in the CLI binary
 2. Installed extension docs under `<config dir>/homeboy/extensions/<extension_id>/docs/`
 
-**Audit** validates documentation links, detects stale references, and identifies undocumented features.
+**Audit** validates documentation links, detects stale references, identifies undocumented features, and flags priority docs that need review.
 
 **Map** generates machine-optimized codebase maps for AI documentation.
 
-**Generate** creates documentation files in bulk from a JSON spec.
+**Generate** creates documentation files in bulk from a JSON spec or from audit output.
 
 ## Subcommands
 
 ### `audit`
 
-Extracts claims from documentation and verifies them against the codebase. Outputs a structured task list that agents can execute step-by-step.
-
-**Claim types extracted:**
-- **File paths**: Backtick paths like `src/core/mod.rs` - verified against filesystem
-- **Directory paths**: Paths ending with `/` like `src/core/` - verified against filesystem
-- **Code examples**: Fenced code blocks - flagged for manual verification
-
-**Task statuses:**
-- `verified`: Claim confirmed true, no action needed
-- `broken`: Claim confirmed false, action required
-- `needs_verification`: Cannot verify mechanically, agent must check
+Validates documentation against the codebase. Extracts claims (file paths, directory paths) from docs and verifies them against the filesystem. Also detects features in source code and checks whether they're documented.
 
 ```sh
 homeboy docs audit homeboy
-homeboy docs audit data-machine
+homeboy docs audit data-machine --features
+homeboy docs audit /path/to/project --docs-dir documentation
 ```
 
 **Arguments:**
-- `<component-id>`: Component to audit (required)
+- `<component-id>`: Component ID or filesystem path to audit (required)
+
+**Options:**
+- `--features`: Include full list of all detected features in output (needed for `generate --from-audit`)
+- `--docs-dir <DIR>`: Docs directory relative to component root (overrides config, default: `docs`)
+
+**Output fields:**
+
+| Field | Description |
+|-------|-------------|
+| `broken_references` | File/directory paths in docs that don't exist on disk |
+| `undocumented_features` | Source features (structs, enums) with no documentation reference |
+| `priority_docs` | Docs whose referenced source files changed since the baseline tag |
+| `detected_features` | All features found in source (only with `--features`) |
+| `summary` | Counts: `docs_scanned`, `broken_references`, `priority_docs`, `documented_features`, `total_features` |
 
 **Output:**
 ```json
@@ -57,52 +61,88 @@ homeboy docs audit data-machine
   "data": {
     "command": "docs.audit",
     "component_id": "homeboy",
+    "baseline_ref": "v0.52.1",
     "summary": {
-      "docs_scanned": 48,
-      "claims_extracted": 81,
-      "verified": 37,
-      "broken": 44,
-      "needs_verification": 0
+      "docs_scanned": 53,
+      "broken_references": 3,
+      "priority_docs": 8,
+      "documented_features": 90,
+      "total_features": 91,
+      "unchanged_docs": 45,
+      "undocumented_features": 1
     },
-    "tasks": [
+    "broken_references": [
       {
-        "doc": "architecture/output-system.md",
-        "line": 12,
-        "claim": "directory path `src/core/`",
-        "type": "directory_path",
-        "claim_value": "src/core/",
-        "status": "verified"
-      },
-      {
-        "doc": "developer-guide/architecture-overview.md",
-        "line": 62,
-        "claim": "file path `src/core/template.rs`",
-        "type": "file_path",
-        "claim_value": "src/core/template.rs",
-        "status": "broken",
-        "action": "File 'src/core/template.rs' not found. Search codebase for actual location or remove if deleted."
+        "doc": "commands/refactor.md",
+        "line": 95,
+        "claim": "directory path `scripts/build/`",
+        "confidence": "unclear",
+        "action": "Directory 'scripts/build/' no longer exists. Update or remove this reference."
       }
     ],
-    "changes_context": {
-      "commits_since_tag": 5,
-      "changed_files": ["src/core/mod.rs", "src/commands/docs.rs"],
-      "priority_docs": ["architecture/output-system.md"]
-    }
+    "priority_docs": [
+      {
+        "doc": "commands/docs.md",
+        "reason": "6 referenced source file(s) changed since baseline",
+        "changed_files_referenced": ["src/commands/docs.rs", "..."],
+        "code_examples": 0,
+        "action": "Review documentation for accuracy against current implementation."
+      }
+    ],
+    "undocumented_features": [
+      {
+        "name": "TestMappingConfig",
+        "source_file": "src/core/extension/manifest.rs",
+        "line": 59
+      }
+    ]
   }
 }
 ```
 
 **Agent workflow:**
 1. Run `homeboy docs audit <component>`
-2. For each task where `status != "verified"`:
-   - If `broken`: Execute the action (fix or remove reference)
-   - If `needs_verification`: Read the referenced file, verify claim, update if wrong
-3. Re-run audit to confirm all tasks resolved
+2. Fix `broken_references` — update or remove stale paths
+3. Review `priority_docs` — source changed, verify doc accuracy
+4. Document `undocumented_features` if they're part of the public API
+5. Re-run audit to confirm findings resolved
+
+### `map`
+
+Generates a machine-optimized codebase map by fingerprinting source files and extracting classes, methods, properties, hooks, and inheritance hierarchies.
+
+```sh
+# JSON output to stdout
+homeboy docs map my-plugin
+
+# Write markdown files to docs directory
+homeboy docs map my-plugin --write
+
+# Include protected methods
+homeboy docs map my-plugin --include-private
+
+# Custom source directories
+homeboy docs map my-plugin --source-dirs src,lib
+```
+
+**Arguments:**
+- `<component-id>`: Component to analyze (required)
+
+**Options:**
+- `--source-dirs <DIRS>`: Source directories to analyze (comma-separated, overrides auto-detection)
+- `--include-private`: Include protected methods and internals (default: public API surface only)
+- `--write`: Write markdown files to disk instead of JSON to stdout
+- `--output-dir <DIR>`: Output directory for markdown files (default: `docs`)
+
+**Auto-detection:** Without `--source-dirs`, the map command looks for conventional directories (`src`, `lib`, `inc`, `app`, `components`, `extensions`, `crates`). Falls back to extension-based file detection if none found.
+
+**Markdown output (--write):** Generates module pages, class hierarchy, hooks summary. Large modules (>30 classes) are split into sub-pages by class name prefix.
 
 ### `generate`
 
-Creates or updates documentation files from a JSON spec. Supports bulk creation with optional content.
+Creates or updates documentation files from a JSON spec or from audit output.
 
+**From JSON spec:**
 ```sh
 homeboy docs generate --json '<spec>'
 homeboy docs generate @spec.json
@@ -125,20 +165,19 @@ homeboy docs generate -  # read from stdin
 - `path` (required): Relative path within output_dir
 - `content`: Full markdown content to write
 - `title`: Creates file with `# {title}\n` (used if no content)
-- Neither: Uses filename converted to title case
+- Neither: Uses filename converted to title case; infers section headings from sibling docs
 
-**Output:**
-```json
-{
-  "success": true,
-  "data": {
-    "command": "docs.generate",
-    "files_created": ["docs/core-system/engine.md", "docs/core-system/handlers.md"],
-    "files_updated": [],
-    "hints": ["Created 2 files"]
-  }
-}
+**From audit output:**
+```sh
+homeboy docs audit my-plugin --features > audit.json
+homeboy docs generate --from-audit @audit.json
+homeboy docs generate --from-audit @audit.json --dry-run
 ```
+
+Generates reference documentation from detected features, grouped by extension-configured labels and written to configured doc targets.
+
+**Options:**
+- `--dry-run`: Show what would be generated without writing files
 
 ## Topic Display
 
@@ -168,11 +207,11 @@ Homeboy includes embedded documentation for AI agents:
 
 Typical documentation workflow using these commands:
 
-1. **Audit**: `homeboy docs audit <component>` - understand current state, find broken refs and gaps
-2. **Learn**: `homeboy docs documentation/generation` - read guidelines
-3. **Map**: `homeboy docs map <component>` - generate codebase map for AI context
-4. **Generate**: `homeboy docs generate --json '<spec>'` - bulk create files
-5. **Maintain**: `homeboy docs documentation/alignment` - keep docs current
+1. **Audit**: `homeboy docs audit <component>` — find broken refs, stale docs, undocumented features
+2. **Learn**: `homeboy docs documentation/generation` — read guidelines
+3. **Map**: `homeboy docs map <component>` — generate codebase map for AI context
+4. **Generate**: `homeboy docs generate --from-audit @audit.json` — bulk create from audit data
+5. **Maintain**: `homeboy docs documentation/alignment` — keep docs current
 
 ## Errors
 
@@ -182,5 +221,6 @@ If a component does not exist (for audit/map), the command fails with a componen
 
 ## Related
 
-- [Changelog command](changelog.md)
+- [audit](audit.md) — code-level convention auditing (different from docs audit)
+- [changelog](changelog.md)
 - [JSON output contract](../architecture/output-system.md)
