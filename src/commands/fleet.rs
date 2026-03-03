@@ -92,6 +92,23 @@ enum FleetCommand {
         #[arg(long)]
         outdated: bool,
     },
+    /// Run a command across all projects in a fleet via SSH
+    Exec {
+        /// Fleet ID
+        id: String,
+
+        /// Command to execute on each project's server
+        #[arg(num_args = 0.., trailing_var_arg = true)]
+        command: Vec<String>,
+
+        /// Show what would execute without running anything
+        #[arg(long)]
+        check: bool,
+
+        /// Reserved for future parallel mode. Currently all execution is serial.
+        #[arg(long, hide = true)]
+        serial: bool,
+    },
     /// [DEPRECATED] Use 'homeboy deploy' instead. See issue #101.
     Sync {
         /// Fleet ID
@@ -124,9 +141,40 @@ pub struct FleetExtra {
     pub check: Option<Vec<FleetProjectCheck>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<FleetCheckSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec: Option<Vec<FleetExecProjectResult>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_summary: Option<FleetExecSummary>,
 }
 
 pub type FleetOutput = EntityCrudOutput<Fleet, FleetExtra>;
+
+#[derive(Debug, Default, Serialize)]
+pub struct FleetExecProjectResult {
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_path: Option<String>,
+    pub command: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct FleetExecSummary {
+    pub total: u32,
+    pub succeeded: u32,
+    pub failed: u32,
+    pub skipped: u32,
+}
 
 #[derive(Debug, Default, Serialize)]
 pub struct FleetProjectCheck {
@@ -191,6 +239,12 @@ pub fn run(args: FleetArgs, _global: &super::GlobalArgs) -> CmdResult<FleetOutpu
         FleetCommand::Components { id } => components(&id),
         FleetCommand::Status { id } => status(&id),
         FleetCommand::Check { id, outdated } => check(&id, outdated),
+        FleetCommand::Exec {
+            id,
+            command,
+            check,
+            serial: _,
+        } => exec(&id, command, check),
         FleetCommand::Sync {
             id,
             category,
@@ -511,6 +565,155 @@ fn check(id: &str, only_outdated: bool) -> CmdResult<FleetOutput> {
             extra: FleetExtra {
                 check: Some(project_checks),
                 summary: Some(summary),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        exit_code,
+    ))
+}
+
+fn exec(id: &str, command: Vec<String>, check: bool) -> CmdResult<FleetOutput> {
+    use homeboy::shell;
+    use homeboy::ssh::{resolve_context, SshClient, SshResolveArgs};
+
+    if command.is_empty() {
+        return Err(
+            homeboy::Error::validation_missing_argument(vec!["command".to_string()])
+                .with_hint("Usage: homeboy fleet exec <fleet> -- <command>".to_string()),
+        );
+    }
+
+    let command_string = if command.len() == 1 {
+        command[0].clone()
+    } else {
+        shell::quote_args(&command)
+    };
+
+    let projects = fleet::get_projects(id)?;
+
+    if projects.is_empty() {
+        return Err(homeboy::Error::validation_invalid_argument(
+            "fleet",
+            "Fleet has no projects",
+            Some(id.to_string()),
+            None,
+        ));
+    }
+
+    let mut results: Vec<FleetExecProjectResult> = Vec::new();
+    let mut summary = FleetExecSummary {
+        total: projects.len() as u32,
+        ..Default::default()
+    };
+
+    for proj in &projects {
+        let server_id = proj.server_id.clone();
+
+        // Check mode: just show the plan
+        if check {
+            let effective_cmd = match &proj.base_path {
+                Some(bp) => format!("cd {} && {}", shell::quote_path(bp), &command_string),
+                None => command_string.clone(),
+            };
+
+            results.push(FleetExecProjectResult {
+                project_id: proj.id.clone(),
+                server_id: server_id.clone(),
+                base_path: proj.base_path.clone(),
+                command: effective_cmd,
+                status: "planned".to_string(),
+                ..Default::default()
+            });
+            continue;
+        }
+
+        homeboy::log_status!("fleet", "Executing on '{}'...", proj.id);
+
+        // Resolve SSH context via project
+        let resolve_result = match resolve_context(&SshResolveArgs {
+            id: None,
+            project: Some(proj.id.clone()),
+            server: None,
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                summary.failed += 1;
+                results.push(FleetExecProjectResult {
+                    project_id: proj.id.clone(),
+                    server_id: server_id.clone(),
+                    base_path: proj.base_path.clone(),
+                    command: command_string.clone(),
+                    status: "failed".to_string(),
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                });
+                continue;
+            }
+        };
+
+        let client = match SshClient::from_server(&resolve_result.server, &resolve_result.server_id)
+        {
+            Ok(c) => c,
+            Err(e) => {
+                summary.failed += 1;
+                results.push(FleetExecProjectResult {
+                    project_id: proj.id.clone(),
+                    server_id: server_id.clone(),
+                    base_path: proj.base_path.clone(),
+                    command: command_string.clone(),
+                    status: "failed".to_string(),
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                });
+                continue;
+            }
+        };
+
+        // Build effective command with cd to base_path if available
+        let effective_cmd = match &resolve_result.base_path {
+            Some(bp) => format!("cd {} && {}", shell::quote_path(bp), &command_string),
+            None => command_string.clone(),
+        };
+
+        let output = client.execute(&effective_cmd);
+
+        if output.success {
+            summary.succeeded += 1;
+        } else {
+            summary.failed += 1;
+        }
+
+        results.push(FleetExecProjectResult {
+            project_id: proj.id.clone(),
+            server_id: server_id.clone(),
+            base_path: proj.base_path.clone(),
+            command: effective_cmd,
+            status: if output.success {
+                "success".to_string()
+            } else {
+                "failed".to_string()
+            },
+            stdout: Some(output.stdout),
+            stderr: Some(output.stderr),
+            exit_code: Some(output.exit_code),
+            error: None,
+        });
+    }
+
+    if check {
+        summary.skipped = summary.total;
+    }
+
+    let exit_code = if summary.failed > 0 { 1 } else { 0 };
+
+    Ok((
+        FleetOutput {
+            command: "fleet.exec".to_string(),
+            id: Some(id.to_string()),
+            extra: FleetExtra {
+                exec: Some(results),
+                exec_summary: Some(summary),
                 ..Default::default()
             },
             ..Default::default()

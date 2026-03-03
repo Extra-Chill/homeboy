@@ -469,6 +469,7 @@ mod tests {
         let fp2 = finding_fingerprint("Flow", "a.php", "MissingMethod", "Missing method: execute");
         assert_eq!(fp1, fp2);
 
+        // Different file = different fingerprint
         let fp3 = finding_fingerprint("Flow", "b.php", "MissingMethod", "Missing method: execute");
         assert_ne!(fp1, fp3);
     }
