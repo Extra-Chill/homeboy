@@ -108,14 +108,59 @@ phpstan_args+=(--no-progress)
 
 # Thread control: HOMEBOY_PHPSTAN_THREADS overrides, otherwise auto-detect.
 # On low-core machines (<=2 CPUs), force single-threaded to avoid parallel worker crashes.
+# PHPStan 2.x removed the --threads CLI flag; parallel config is set via neon includes.
+PHPSTAN_MAX_PROCESSES=""
 if [ -n "${HOMEBOY_PHPSTAN_THREADS:-}" ]; then
-    phpstan_args+=("--threads=${HOMEBOY_PHPSTAN_THREADS}")
+    PHPSTAN_MAX_PROCESSES="${HOMEBOY_PHPSTAN_THREADS}"
 elif [ "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)" -le 2 ]; then
-    phpstan_args+=(--threads=1)
+    PHPSTAN_MAX_PROCESSES="1"
 fi
 
-# Add the path to analyze
-phpstan_args+=("$PLUGIN_PATH")
+# If we need to override parallel processes, generate a temp neon config that
+# includes the main config and overrides the parallel setting.
+PHPSTAN_TMPCONFIG=""
+generate_phpstan_config() {
+    local max_processes="$1"
+    local tmpfile
+    tmpfile=$(mktemp "${TMPDIR:-/tmp}/phpstan-XXXXXX.neon" 2>/dev/null || mktemp)
+    cat > "$tmpfile" <<NEON
+includes:
+    - ${PHPSTAN_CONFIG}
+
+parameters:
+    parallel:
+        maximumNumberOfProcesses: ${max_processes}
+NEON
+    echo "$tmpfile"
+}
+
+cleanup_phpstan_config() {
+    [ -n "$PHPSTAN_TMPCONFIG" ] && rm -f "$PHPSTAN_TMPCONFIG"
+    PHPSTAN_TMPCONFIG=""
+}
+trap cleanup_phpstan_config EXIT
+
+if [ -n "$PHPSTAN_MAX_PROCESSES" ]; then
+    PHPSTAN_TMPCONFIG=$(generate_phpstan_config "$PHPSTAN_MAX_PROCESSES")
+    # Replace the --configuration arg with our temp config
+    phpstan_args=(analyse)
+    phpstan_args+=(--configuration="$PHPSTAN_TMPCONFIG")
+    phpstan_args+=(--level="$PHPSTAN_LEVEL")
+    phpstan_args+=(--memory-limit=2G)
+    if [ -f "$COMPONENT_BASELINE" ]; then
+        phpstan_args+=(--baseline="$COMPONENT_BASELINE")
+    fi
+    if [ -f "$COMPONENT_AUTOLOAD" ]; then
+        phpstan_args+=(--autoload-file="$COMPONENT_AUTOLOAD")
+    fi
+    phpstan_args+=(--no-progress)
+    phpstan_args+=("$PLUGIN_PATH")
+fi
+
+# Add the path to analyze (only when not already set by thread-override block above)
+if [ -z "$PHPSTAN_MAX_PROCESSES" ]; then
+    phpstan_args+=("$PLUGIN_PATH")
+fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: PHPStan command: $PHPSTAN_BIN ${phpstan_args[*]}"
@@ -153,9 +198,15 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
 
     # Retry with single thread if parallel workers failed
     if [ "$json_exit" -ne 0 ] && is_parallel_worker_failure "$json_output"; then
-        echo "Parallel worker failure detected, retrying with --threads=1..."
+        echo "Parallel worker failure detected, retrying single-threaded..."
+        cleanup_phpstan_config
+        PHPSTAN_TMPCONFIG=$(generate_phpstan_config 1)
+        retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress)
+        [ -f "$COMPONENT_BASELINE" ] && retry_args+=(--baseline="$COMPONENT_BASELINE")
+        [ -f "$COMPONENT_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPONENT_AUTOLOAD")
+        retry_args+=("$PLUGIN_PATH")
         stderr_file=$(mktemp)
-        json_output=$("$PHPSTAN_BIN" "${phpstan_args[@]}" --threads=1 --error-format=json 2>"$stderr_file")
+        json_output=$("$PHPSTAN_BIN" "${retry_args[@]}" --error-format=json 2>"$stderr_file")
         json_exit=$?
         stderr_output=$(cat "$stderr_file")
         rm -f "$stderr_file"
@@ -262,8 +313,14 @@ set -e
 
 # Retry with single thread if parallel workers failed
 if [ "$full_exit" -ne 0 ] && echo "$stderr_output" | grep -qi "parallel worker"; then
-    echo "Parallel worker failure detected, retrying with --threads=1..."
-    "$PHPSTAN_BIN" "${phpstan_args[@]}" --threads=1
+    echo "Parallel worker failure detected, retrying single-threaded..."
+    cleanup_phpstan_config
+    PHPSTAN_TMPCONFIG=$(generate_phpstan_config 1)
+    retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress)
+    [ -f "$COMPONENT_BASELINE" ] && retry_args+=(--baseline="$COMPONENT_BASELINE")
+    [ -f "$COMPONENT_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPONENT_AUTOLOAD")
+    retry_args+=("$PLUGIN_PATH")
+    "$PHPSTAN_BIN" "${retry_args[@]}"
     full_exit=$?
 fi
 
