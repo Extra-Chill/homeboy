@@ -62,58 +62,84 @@ pub struct RenameSpec {
 }
 
 impl RenameSpec {
-    /// Create a rename spec, auto-generating case variants.
+    /// Create a rename spec, auto-generating cross-separator case variants.
     ///
-    /// From a base term like "extension", generates:
-    /// - `extension` → `extension` (lowercase)
-    /// - `Extension` → `Extension` (PascalCase)
-    /// - `EXTENSION` → `EXTENSION` (UPPER_CASE)
-    /// - `extensions` → `extensions` (plural)
-    /// - `Extensions` → `Extensions` (plural PascalCase)
-    /// - `EXTENSIONS` → `EXTENSIONS` (plural UPPER)
-    /// - `extension_` → `extension_` (snake prefix, catches snake_case compounds)
-    /// - `_module` → `_extension` (snake suffix)
+    /// Splits the `from` and `to` terms into constituent words, then generates
+    /// all standard naming convention variants:
+    ///
+    /// - `kebab-case` (e.g., `data-machine-agent`)
+    /// - `snake_case` (e.g., `data_machine_agent`)
+    /// - `UPPER_SNAKE` (e.g., `DATA_MACHINE_AGENT`)
+    /// - `PascalCase` (e.g., `DataMachineAgent`)
+    /// - `camelCase` (e.g., `dataMachineAgent`)
+    /// - `Display Name` (e.g., `Data Machine Agent`)
+    /// - Plus plural forms of each
+    ///
+    /// This means a single `--from wp-agent --to data-machine-agent` will also
+    /// match and replace `wp_agent`, `WP_AGENT`, `WPAgent`, `wpAgent`, `WP Agent`,
+    /// and all their plurals.
     pub fn new(from: &str, to: &str, scope: RenameScope) -> Self {
+        let from_words = split_words(from);
+        let to_words = split_words(to);
+
         let mut variants = Vec::new();
 
-        // Singular forms
-        variants.push(CaseVariant {
-            from: from.to_lowercase(),
-            to: to.to_lowercase(),
-            label: "lowercase".to_string(),
-        });
-        variants.push(CaseVariant {
-            from: capitalize(&from.to_lowercase()),
-            to: capitalize(&to.to_lowercase()),
-            label: "PascalCase".to_string(),
-        });
-        variants.push(CaseVariant {
-            from: from.to_uppercase(),
-            to: to.to_uppercase(),
-            label: "UPPER_CASE".to_string(),
-        });
+        // If word splitting produced words, generate cross-separator variants.
+        // If it produced a single word (e.g., "widget"), the joins all collapse
+        // to the same thing, and dedup handles it naturally.
+        if !from_words.is_empty() && !to_words.is_empty() {
+            // Singular forms — all naming conventions
+            let join_fns: [fn(&[String]) -> String; 6] = [
+                join_kebab, join_snake, join_upper_snake, join_pascal, join_camel, join_display,
+            ];
+            let labels = [
+                "kebab",
+                "snake_case",
+                "UPPER_SNAKE",
+                "PascalCase",
+                "camelCase",
+                "Display Name",
+            ];
 
-        // Plural forms
-        let from_plural = pluralize(&from.to_lowercase());
-        let to_plural = pluralize(&to.to_lowercase());
-        variants.push(CaseVariant {
-            from: from_plural.clone(),
-            to: to_plural.clone(),
-            label: "plural".to_string(),
-        });
-        variants.push(CaseVariant {
-            from: capitalize(&from_plural),
-            to: capitalize(&to_plural),
-            label: "plural PascalCase".to_string(),
-        });
-        variants.push(CaseVariant {
-            from: from_plural.to_uppercase(),
-            to: to_plural.to_uppercase(),
-            label: "plural UPPER".to_string(),
-        });
+            for (label, join_fn) in labels.iter().zip(join_fns.iter()) {
+                variants.push(CaseVariant {
+                    from: join_fn(&from_words),
+                    to: join_fn(&to_words),
+                    label: label.to_string(),
+                });
+            }
 
-        // Deduplicate (in case from == plural form)
-        variants.dedup_by(|a, b| a.from == b.from);
+            // Plural forms — pluralize the last word, then generate all conventions
+            let mut from_words_plural = from_words.clone();
+            let mut to_words_plural = to_words.clone();
+            if let Some(last) = from_words_plural.last_mut() {
+                *last = pluralize(last);
+            }
+            if let Some(last) = to_words_plural.last_mut() {
+                *last = pluralize(last);
+            }
+
+            for (label, join_fn) in labels.iter().zip(join_fns.iter()) {
+                variants.push(CaseVariant {
+                    from: join_fn(&from_words_plural),
+                    to: join_fn(&to_words_plural),
+                    label: format!("plural {}", label),
+                });
+            }
+        } else {
+            // Fallback for empty/unparseable input — use the original simple logic
+            variants.push(CaseVariant {
+                from: from.to_lowercase(),
+                to: to.to_lowercase(),
+                label: "lowercase".to_string(),
+            });
+        }
+
+        // Deduplicate — remove variants where from matches a previous one.
+        // Sort by from length descending first so longer matches take priority.
+        variants.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+        let mut seen = std::collections::HashSet::new();
+        variants.retain(|v| seen.insert(v.from.clone()));
 
         RenameSpec {
             from: from.to_string(),
@@ -240,6 +266,117 @@ fn pluralize(s: &str) -> String {
 }
 
 // ============================================================================
+// Word splitting — decompose any naming convention into constituent words
+// ============================================================================
+
+/// Split a term into its constituent words, regardless of naming convention.
+///
+/// Handles:
+/// - `kebab-case` → `["kebab", "case"]`
+/// - `snake_case` → `["snake", "case"]`
+/// - `camelCase` → `["camel", "case"]`
+/// - `PascalCase` → `["pascal", "case"]`
+/// - `UPPER_SNAKE` → `["upper", "snake"]`
+/// - `WPAgent` → `["wp", "agent"]` (consecutive uppercase → separate word)
+/// - `XMLParser` → `["xml", "parser"]`
+/// - `data-machine-agent` → `["data", "machine", "agent"]`
+/// - Mixed: `my_WPAgent-thing` → `["my", "wp", "agent", "thing"]`
+///
+/// All returned words are lowercase.
+fn split_words(term: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+
+    let chars: Vec<char> = term.chars().collect();
+    let len = chars.len();
+
+    for i in 0..len {
+        let c = chars[i];
+
+        // Separators: hyphens, underscores, spaces, dots
+        if c == '-' || c == '_' || c == ' ' || c == '.' {
+            if !current.is_empty() {
+                words.push(current.to_lowercase());
+                current.clear();
+            }
+            continue;
+        }
+
+        if c.is_uppercase() && !current.is_empty() {
+            let prev = chars[i - 1];
+            // Split on camelCase boundary (lowercase/digit → uppercase)
+            // or consecutive-uppercase boundary (uppercase → uppercase+lowercase)
+            let is_camel_boundary = prev.is_lowercase() || prev.is_ascii_digit();
+            let is_acronym_boundary =
+                prev.is_uppercase() && i + 1 < len && chars[i + 1].is_lowercase();
+
+            if is_camel_boundary || is_acronym_boundary {
+                words.push(current.to_lowercase());
+                current.clear();
+            }
+        }
+
+        current.push(c);
+    }
+
+    if !current.is_empty() {
+        words.push(current.to_lowercase());
+    }
+
+    words
+}
+
+// ============================================================================
+// Cross-separator join functions
+// ============================================================================
+
+/// Join words as kebab-case: `["data", "machine", "agent"]` → `"data-machine-agent"`
+fn join_kebab(words: &[String]) -> String {
+    words.join("-")
+}
+
+/// Join words as snake_case: `["data", "machine", "agent"]` → `"data_machine_agent"`
+fn join_snake(words: &[String]) -> String {
+    words.join("_")
+}
+
+/// Join words as UPPER_SNAKE: `["data", "machine", "agent"]` → `"DATA_MACHINE_AGENT"`
+fn join_upper_snake(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| w.to_uppercase())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+/// Join words as PascalCase: `["data", "machine", "agent"]` → `"DataMachineAgent"`
+fn join_pascal(words: &[String]) -> String {
+    words.iter().map(|w| capitalize(w)).collect::<Vec<_>>().join("")
+}
+
+/// Join words as camelCase: `["data", "machine", "agent"]` → `"dataMachineAgent"`
+fn join_camel(words: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (i, w) in words.iter().enumerate() {
+        if i == 0 {
+            parts.push(w.to_lowercase());
+        } else {
+            parts.push(capitalize(w));
+        }
+    }
+    parts.join("")
+}
+
+/// Join words as display name: `["data", "machine", "agent"]` → `"Data Machine Agent"`
+fn join_display(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| capitalize(w))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// ============================================================================
 // Boundary-aware regex
 // ============================================================================
 
@@ -253,7 +390,7 @@ fn is_boundary_char(c: u8) -> bool {
 /// Find all occurrences of `term` in `text` that appear at sensible boundaries.
 ///
 /// Boundary rules:
-/// - Left: start of string, non-alphanumeric char, or underscore
+/// - Left: start of string, non-alphanumeric char, underscore, or camelCase boundary
 /// - Right: end of string, non-alphanumeric, underscore, or uppercase letter (camelCase)
 ///
 /// This handles:
@@ -261,6 +398,8 @@ fn is_boundary_char(c: u8) -> bool {
 /// - `Widget` in `WidgetManifest` (uppercase letter follows = camelCase boundary)
 /// - `WIDGET` in `WIDGET_DIR` (underscore follows)
 /// - `widget` in `load_widget` (underscore precedes = snake_case boundary)
+/// - `WP` in `WPAgent` (consecutive uppercase before lowercase = acronym boundary)
+/// - `Agent` in `WPAgent` (uppercase after uppercase = acronym→word boundary)
 /// - Won't match `widget` inside `widgetry` (lowercase letter follows)
 fn find_term_matches(text: &str, term: &str) -> Vec<usize> {
     let text_bytes = text.as_bytes();
@@ -278,9 +417,22 @@ fn find_term_matches(text: &str, term: &str) -> Vec<usize> {
         let abs = start + pos;
         let end = abs + term_len;
 
-        // Left boundary: start of string, non-alphanumeric, or underscore
-        let left_ok =
-            abs == 0 || is_boundary_char(text_bytes[abs - 1]) || text_bytes[abs - 1] == b'_';
+        // Left boundary: start of string, non-alphanumeric, underscore, or camelCase join
+        let left_ok = abs == 0
+            || is_boundary_char(text_bytes[abs - 1])
+            || text_bytes[abs - 1] == b'_'
+            // camelCase boundary: lowercase/digit → uppercase (e.g., 'l' before 'W' in "loadWidget")
+            || (text_bytes[abs].is_ascii_uppercase()
+                && (text_bytes[abs - 1].is_ascii_lowercase()
+                    || text_bytes[abs - 1].is_ascii_digit()))
+            // Consecutive-uppercase boundary: uppercase → uppercase+lowercase
+            // e.g., 'P' before 'A' in "WPAgent" — the 'A' starts a new word because
+            // the current char is uppercase and the next char (if any) is lowercase
+            || (abs >= 2
+                && text_bytes[abs].is_ascii_uppercase()
+                && text_bytes[abs - 1].is_ascii_uppercase()
+                && term_len > 1
+                && term_bytes[1].is_ascii_lowercase());
 
         // Right boundary: end of string, or next char is:
         // - not alphanumeric (space, punctuation, etc.)
@@ -1348,5 +1500,287 @@ mod tests {
             boundary_matches.is_empty(),
             "Boundary mode should NOT match 'widget' inside 'widgetry'"
         );
+    }
+
+    // ====================================================================
+    // Word splitting tests
+    // ====================================================================
+
+    #[test]
+    fn split_words_kebab() {
+        assert_eq!(split_words("wp-agent"), vec!["wp", "agent"]);
+        assert_eq!(
+            split_words("data-machine-agent"),
+            vec!["data", "machine", "agent"]
+        );
+    }
+
+    #[test]
+    fn split_words_snake() {
+        assert_eq!(split_words("wp_agent"), vec!["wp", "agent"]);
+        assert_eq!(
+            split_words("data_machine_agent"),
+            vec!["data", "machine", "agent"]
+        );
+    }
+
+    #[test]
+    fn split_words_upper_snake() {
+        assert_eq!(split_words("WP_AGENT"), vec!["wp", "agent"]);
+        assert_eq!(
+            split_words("DATA_MACHINE_AGENT"),
+            vec!["data", "machine", "agent"]
+        );
+    }
+
+    #[test]
+    fn split_words_pascal() {
+        assert_eq!(split_words("WpAgent"), vec!["wp", "agent"]);
+        assert_eq!(
+            split_words("DataMachineAgent"),
+            vec!["data", "machine", "agent"]
+        );
+    }
+
+    #[test]
+    fn split_words_consecutive_uppercase() {
+        // WPAgent: WP is an acronym, Agent is a word
+        assert_eq!(split_words("WPAgent"), vec!["wp", "agent"]);
+        assert_eq!(split_words("XMLParser"), vec!["xml", "parser"]);
+        assert_eq!(split_words("HTTPClient"), vec!["http", "client"]);
+        // All-uppercase stays as one word (no lowercase to trigger split)
+        assert_eq!(split_words("HTTP"), vec!["http"]);
+    }
+
+    #[test]
+    fn split_words_camel() {
+        assert_eq!(split_words("wpAgent"), vec!["wp", "agent"]);
+        assert_eq!(
+            split_words("dataMachineAgent"),
+            vec!["data", "machine", "agent"]
+        );
+    }
+
+    #[test]
+    fn split_words_display() {
+        assert_eq!(split_words("WP Agent"), vec!["wp", "agent"]);
+        assert_eq!(
+            split_words("Data Machine Agent"),
+            vec!["data", "machine", "agent"]
+        );
+    }
+
+    #[test]
+    fn split_words_single() {
+        assert_eq!(split_words("widget"), vec!["widget"]);
+        assert_eq!(split_words("Widget"), vec!["widget"]);
+        assert_eq!(split_words("WIDGET"), vec!["widget"]);
+    }
+
+    // ====================================================================
+    // Cross-separator variant generation tests
+    // ====================================================================
+
+    #[test]
+    fn cross_separator_variants_from_kebab() {
+        let spec = RenameSpec::new("wp-agent", "data-machine-agent", RenameScope::All);
+        let from_values: Vec<&str> = spec.variants.iter().map(|v| v.from.as_str()).collect();
+        let to_values: Vec<&str> = spec.variants.iter().map(|v| v.to.as_str()).collect();
+
+        // Singular forms — all naming conventions
+        assert!(from_values.contains(&"wp-agent"), "Missing kebab from");
+        assert!(from_values.contains(&"wp_agent"), "Missing snake from");
+        assert!(from_values.contains(&"WP_AGENT"), "Missing UPPER_SNAKE from");
+        assert!(from_values.contains(&"WpAgent"), "Missing PascalCase from");
+        assert!(from_values.contains(&"wpAgent"), "Missing camelCase from");
+        assert!(from_values.contains(&"Wp Agent"), "Missing display from");
+
+        assert!(to_values.contains(&"data-machine-agent"), "Missing kebab to");
+        assert!(
+            to_values.contains(&"data_machine_agent"),
+            "Missing snake to"
+        );
+        assert!(
+            to_values.contains(&"DATA_MACHINE_AGENT"),
+            "Missing UPPER_SNAKE to"
+        );
+        assert!(
+            to_values.contains(&"DataMachineAgent"),
+            "Missing PascalCase to"
+        );
+        assert!(
+            to_values.contains(&"dataMachineAgent"),
+            "Missing camelCase to"
+        );
+        assert!(
+            to_values.contains(&"Data Machine Agent"),
+            "Missing display to"
+        );
+
+        // Plural forms
+        assert!(
+            from_values.contains(&"wp-agents"),
+            "Missing plural kebab from"
+        );
+        assert!(
+            from_values.contains(&"wp_agents"),
+            "Missing plural snake from"
+        );
+        assert!(
+            from_values.contains(&"WP_AGENTS"),
+            "Missing plural UPPER_SNAKE from"
+        );
+        assert!(
+            from_values.contains(&"WpAgents"),
+            "Missing plural PascalCase from"
+        );
+    }
+
+    #[test]
+    fn cross_separator_variants_from_pascal() {
+        // Providing PascalCase input should produce the same cross-separator variants
+        let spec = RenameSpec::new("WpAgent", "DataMachineAgent", RenameScope::All);
+        let from_values: Vec<&str> = spec.variants.iter().map(|v| v.from.as_str()).collect();
+
+        assert!(from_values.contains(&"wp-agent"), "Missing kebab from");
+        assert!(from_values.contains(&"wp_agent"), "Missing snake from");
+        assert!(from_values.contains(&"WP_AGENT"), "Missing UPPER_SNAKE from");
+        assert!(from_values.contains(&"WpAgent"), "Missing PascalCase from");
+        assert!(from_values.contains(&"wpAgent"), "Missing camelCase from");
+    }
+
+    #[test]
+    fn cross_separator_variants_from_snake() {
+        // Providing snake_case input should produce the same cross-separator variants
+        let spec = RenameSpec::new("wp_agent", "data_machine_agent", RenameScope::All);
+        let from_values: Vec<&str> = spec.variants.iter().map(|v| v.from.as_str()).collect();
+
+        assert!(from_values.contains(&"wp-agent"), "Missing kebab from");
+        assert!(from_values.contains(&"wp_agent"), "Missing snake from");
+        assert!(from_values.contains(&"WP_AGENT"), "Missing UPPER_SNAKE from");
+        assert!(from_values.contains(&"WpAgent"), "Missing PascalCase from");
+    }
+
+    #[test]
+    fn single_word_variants_dedup() {
+        // For a single word, all separator joins produce the same thing
+        let spec = RenameSpec::new("widget", "gadget", RenameScope::All);
+        let from_values: Vec<&str> = spec.variants.iter().map(|v| v.from.as_str()).collect();
+
+        // Should still have the core variants
+        assert!(from_values.contains(&"widget"));
+        assert!(from_values.contains(&"Widget"));
+        assert!(from_values.contains(&"WIDGET"));
+        assert!(from_values.contains(&"widgets"));
+        assert!(from_values.contains(&"Widgets"));
+        assert!(from_values.contains(&"WIDGETS"));
+
+        // No duplicate entries
+        let mut seen = std::collections::HashSet::new();
+        for v in &spec.variants {
+            assert!(
+                seen.insert(&v.from),
+                "Duplicate variant 'from': {}",
+                v.from
+            );
+        }
+    }
+
+    // ====================================================================
+    // Boundary detection for consecutive-uppercase PascalCase
+    // ====================================================================
+
+    #[test]
+    fn boundary_matches_consecutive_uppercase_pascal() {
+        // WPAgent → should match "Agent" at position 2
+        let matches = find_term_matches("WPAgent", "Agent");
+        assert_eq!(
+            matches,
+            vec![2],
+            "Should match 'Agent' in 'WPAgent' at consecutive-uppercase boundary"
+        );
+
+        // WPAgent → should match "WP" at position 0
+        let matches = find_term_matches("WPAgent", "WP");
+        assert_eq!(
+            matches,
+            vec![0],
+            "Should match 'WP' at start of 'WPAgent'"
+        );
+
+        // XMLParser → should match "XML" and "Parser"
+        let matches = find_term_matches("XMLParser", "XML");
+        assert_eq!(
+            matches,
+            vec![0],
+            "Should match 'XML' at start of 'XMLParser'"
+        );
+
+        let matches = find_term_matches("XMLParser", "Parser");
+        assert_eq!(matches, vec![3], "Should match 'Parser' in 'XMLParser'");
+    }
+
+    #[test]
+    fn boundary_matches_wp_agent_display_name() {
+        // "WP Agent" with a space — should match at word boundaries
+        let matches = find_term_matches("Plugin: WP Agent v1", "WP Agent");
+        assert_eq!(
+            matches,
+            vec![8],
+            "Should match 'WP Agent' in display context"
+        );
+    }
+
+    #[test]
+    fn cross_separator_end_to_end_rename() {
+        // The real use case: rename wp-agent → data-machine-agent across all conventions
+        let dir = std::env::temp_dir().join("homeboy_cross_sep_e2e_test");
+        let _ = std::fs::create_dir_all(&dir);
+
+        std::fs::write(
+            dir.join("plugin.php"),
+            concat!(
+                "// Plugin: wp-agent\n",
+                "namespace WpAgent;\n",
+                "define('WP_AGENT_VERSION', '1.0');\n",
+                "function wp_agent_init() {}\n",
+                "// slug: wp-agents\n",
+            ),
+        )
+        .unwrap();
+
+        let spec = RenameSpec::new("wp-agent", "data-machine-agent", RenameScope::All);
+        let result = generate_renames(&spec, &dir);
+
+        assert!(!result.edits.is_empty(), "Should have edits");
+        let content = &result.edits[0].new_content;
+
+        assert!(
+            content.contains("data-machine-agent"),
+            "Should rename kebab: {}",
+            content
+        );
+        assert!(
+            content.contains("DataMachineAgent"),
+            "Should rename PascalCase: {}",
+            content
+        );
+        assert!(
+            content.contains("DATA_MACHINE_AGENT_VERSION"),
+            "Should rename UPPER_SNAKE: {}",
+            content
+        );
+        assert!(
+            content.contains("data_machine_agent_init"),
+            "Should rename snake_case: {}",
+            content
+        );
+        assert!(
+            content.contains("data-machine-agents"),
+            "Should rename plural kebab: {}",
+            content
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
