@@ -117,16 +117,15 @@ if [ "${HOMEBOY_COVERAGE:-}" = "1" ]; then
         TEST_EXIT=${PIPESTATUS[0]}
         set -e
 
+        # Parse test results for homeboy core (best-effort, non-blocking)
+        PARSE_RESULTS="${EXTENSION_PATH}/scripts/parse-test-results.sh"
+        if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
+            bash "$PARSE_RESULTS" "$TEST_TMPFILE" || true
+        fi
+
         TEST_OUTPUT=$(cat "$TEST_TMPFILE")
         rm -f "$TEST_TMPFILE"
 
-        # Parse test results for baseline (tarpaulin path)
-        if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ]; then
-            RESULTS_TMPFILE=$(mktemp)
-            echo "$TEST_OUTPUT" > "$RESULTS_TMPFILE"
-            bash "${EXTENSION_PATH}/scripts/parse-test-results.sh" "$RESULTS_TMPFILE" 2>/dev/null || true
-            rm -f "$RESULTS_TMPFILE"
-        fi
 
         if [ $TEST_EXIT -ne 0 ]; then
             SUMMARY=$(echo "$TEST_OUTPUT" | grep -E "^test result:" | tail -1 || true)
@@ -230,16 +229,15 @@ cargo "${TEST_ARGS[@]}" "$@" 2>&1 | tee "$TEST_TMPFILE"
 TEST_EXIT=${PIPESTATUS[0]}
 set -e
 
+# Parse test results for homeboy core (best-effort, non-blocking)
+PARSE_RESULTS="${EXTENSION_PATH}/scripts/parse-test-results.sh"
+if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
+    bash "$PARSE_RESULTS" "$TEST_TMPFILE" || true
+fi
+
 TEST_OUTPUT=$(cat "$TEST_TMPFILE")
 rm -f "$TEST_TMPFILE"
 
-# Parse test results for baseline (runs before success/failure branching)
-if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ]; then
-    RESULTS_TMPFILE=$(mktemp)
-    echo "$TEST_OUTPUT" > "$RESULTS_TMPFILE"
-    bash "${EXTENSION_PATH}/scripts/parse-test-results.sh" "$RESULTS_TMPFILE" 2>/dev/null || true
-    rm -f "$RESULTS_TMPFILE"
-fi
 
 if [ $TEST_EXIT -eq 0 ]; then
     # Extract test summary line

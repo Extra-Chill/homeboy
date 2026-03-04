@@ -475,12 +475,19 @@ set +e
 "${EXTENSION_PATH}/vendor/bin/phpunit" "${phpunit_args[@]}" "$@" 2>&1 | tee "$PHPUNIT_TMPFILE"
 phpunit_exit=${PIPESTATUS[0]}
 set -e
+# Parse test results and failures for homeboy core (best-effort, non-blocking)
+PARSE_RESULTS="${EXTENSION_PATH}/scripts/test/parse-test-results.sh"
+PARSE_FAILURES="${EXTENSION_PATH}/scripts/test/parse-test-failures.sh"
+if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
+    bash "$PARSE_RESULTS" "$PHPUNIT_TMPFILE" || true
+fi
+if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] && [ -f "$PARSE_FAILURES" ]; then
+    bash "$PARSE_FAILURES" "$PHPUNIT_TMPFILE" "${PLUGIN_PATH:-}" || true
+fi
 
 if [ $phpunit_exit -ne 0 ]; then
     FAILED_STEP="PHPUnit tests"
     FAILURE_OUTPUT=$(tail -30 "$PHPUNIT_TMPFILE")
-    # Parse test results for baseline (even on failure)
-    bash "${EXTENSION_PATH}/scripts/test/parse-test-results.sh" "$PHPUNIT_TMPFILE" 2>/dev/null || true
     rm -f "$PHPUNIT_TMPFILE"
     # Clean up auto-created test database
     if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
@@ -532,14 +539,6 @@ if [ -z "$(echo "$PHPUNIT_OUTPUT" | grep -E 'PHPUnit|test|assert|OK|ERRORS|FAILU
     exit 1
 fi
 
-# Parse test results for baseline
-if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ]; then
-    # Write PHPUNIT_OUTPUT to a temp file for the parser
-    RESULTS_TMPFILE=$(mktemp)
-    echo "$PHPUNIT_OUTPUT" > "$RESULTS_TMPFILE"
-    bash "${EXTENSION_PATH}/scripts/test/parse-test-results.sh" "$RESULTS_TMPFILE" 2>/dev/null || true
-    rm -f "$RESULTS_TMPFILE"
-fi
 
 # Parse and report coverage results
 if [ -n "${COVERAGE_CLOVER:-}" ] && [ -f "$COVERAGE_CLOVER" ]; then
