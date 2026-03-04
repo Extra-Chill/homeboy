@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [Next]
+
+### Added
+- add test scaffold — generate test stubs from source file conventions (#422)
+- add test drift detection — cross-reference production changes with test files (#423)
+- add test failure analysis — cluster by root cause and suggest fixes (#421)
+- add test baseline ratchet — CI floor for pass/fail counts (#411)
+- add refactor transform — regex find/replace across codebases (#410)
+- add audit --changed-since flag to scope audit to changed files (#416)
+- add generic baseline/ratchet primitive for docs audit and cleanup (#413, #417)
+- add generic codebase scanner with variant discovery for refactor rename (#442)
+- add cross-separator variant generation for refactor rename (#440)
+- add shared CLI arg groups via Clap flatten (#436)
+- add grammar-driven structural regex engine for language-agnostic parsing (#432)
+
+### Changed
+- CI audit job runs independently of build — PR comments always posted
+
+### Fixed
+- resolve Rust 1.93 clippy warnings and formatting drift
+- prevent release pipeline from publishing without binaries (#409)
+- resolve merge conflict between shared arg groups and test scaffold
+
 ## [0.55.0] - 2026-03-03
 
 ### Added
