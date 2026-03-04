@@ -32,6 +32,14 @@ pub enum DocsCommand {
         #[arg(long)]
         docs_dir: Option<String>,
 
+        /// Save current audit state as baseline for future comparisons
+        #[arg(long)]
+        baseline: bool,
+
+        /// Skip baseline comparison even if a baseline exists
+        #[arg(long)]
+        ignore_baseline: bool,
+
         /// Include full list of all detected features in output
         #[arg(long)]
         features: bool,
@@ -159,6 +167,21 @@ pub enum DocsOutput {
     #[serde(rename = "docs.audit")]
     Audit(AuditResult),
 
+    #[serde(rename = "docs.audit.baseline")]
+    AuditBaselineSaved {
+        component_id: String,
+        path: String,
+        broken_references: usize,
+        docs_scanned: usize,
+    },
+
+    #[serde(rename = "docs.audit.compared")]
+    AuditCompared {
+        #[serde(flatten)]
+        result: AuditResult,
+        baseline_comparison: homeboy::docs_audit::baseline::BaselineComparison,
+    },
+
     #[serde(rename = "docs.map")]
     Map(CodebaseMap),
 
@@ -220,7 +243,7 @@ pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
 /// JSON output mode (audit, map, generate subcommands)
 pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput> {
     match args.command {
-        Some(DocsCommand::Audit { component_id, docs_dir, features }) => run_audit(&component_id, docs_dir.as_deref(), features),
+        Some(DocsCommand::Audit { component_id, docs_dir, baseline, ignore_baseline, features }) => run_audit(&component_id, docs_dir.as_deref(), features, baseline, ignore_baseline),
         Some(DocsCommand::Map { component_id, source_dirs, include_private, write, output_dir }) => run_map(&component_id, source_dirs, include_private, write, &output_dir),
         Some(DocsCommand::Generate { spec, json, from_audit, dry_run }) => {
             if let Some(ref audit_source) = from_audit {
@@ -1186,7 +1209,13 @@ fn collect_fingerprints_recursive(
 // Audit (Claim-Based Documentation Verification)
 // ============================================================================
 
-fn run_audit(component_id: &str, docs_dir: Option<&str>, features: bool) -> CmdResult<DocsOutput> {
+fn run_audit(
+    component_id: &str,
+    docs_dir: Option<&str>,
+    features: bool,
+    baseline: bool,
+    ignore_baseline: bool,
+) -> CmdResult<DocsOutput> {
     // If the argument looks like a filesystem path, audit it directly
     // without requiring component registration
     let result = if std::path::Path::new(component_id).is_dir() {
@@ -1194,6 +1223,68 @@ fn run_audit(component_id: &str, docs_dir: Option<&str>, features: bool) -> CmdR
     } else {
         docs_audit::audit_component(component_id, docs_dir, features)?
     };
+
+    // Resolve source path for baseline storage
+    let source_path = if std::path::Path::new(component_id).is_dir() {
+        std::path::PathBuf::from(component_id)
+    } else {
+        let comp = homeboy::component::load(component_id)?;
+        std::path::PathBuf::from(&comp.local_path)
+    };
+
+    // --baseline: save current state
+    if baseline {
+        let saved = docs_audit::baseline::save_baseline(&source_path, &result)?;
+
+        eprintln!(
+            "[docs audit] Baseline saved to {} ({} broken reference(s), {} docs scanned)",
+            saved.display(),
+            result.summary.broken_references,
+            result.summary.docs_scanned,
+        );
+
+        return Ok((
+            DocsOutput::AuditBaselineSaved {
+                component_id: result.component_id,
+                path: saved.to_string_lossy().to_string(),
+                broken_references: result.summary.broken_references,
+                docs_scanned: result.summary.docs_scanned,
+            },
+            0,
+        ));
+    }
+
+    // Default: compare against baseline if one exists
+    if !ignore_baseline {
+        if let Some(existing_baseline) = docs_audit::baseline::load_baseline(&source_path) {
+            let comparison = docs_audit::baseline::compare(&result, &existing_baseline);
+
+            let exit_code = if comparison.drift_increased { 1 } else { 0 };
+
+            if comparison.drift_increased {
+                eprintln!(
+                    "[docs audit] DRIFT INCREASED: {} new broken reference(s) since baseline",
+                    comparison.new_items.len()
+                );
+            } else if !comparison.resolved_fingerprints.is_empty() {
+                eprintln!(
+                    "[docs audit] Drift reduced: {} broken reference(s) resolved since baseline",
+                    comparison.resolved_fingerprints.len()
+                );
+            } else {
+                eprintln!("[docs audit] No change from baseline");
+            }
+
+            return Ok((
+                DocsOutput::AuditCompared {
+                    result,
+                    baseline_comparison: comparison,
+                },
+                exit_code,
+            ));
+        }
+    }
+
     Ok((DocsOutput::Audit(result), 0))
 }
 

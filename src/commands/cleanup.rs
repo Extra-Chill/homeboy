@@ -1,7 +1,7 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::cleanup::{self, CleanupResult};
+use homeboy::cleanup::{self, baseline as cleanup_baseline, CleanupResult};
 
 use super::CmdResult;
 
@@ -17,6 +17,18 @@ pub struct CleanupArgs {
     /// Show only issues in a specific category: local_path, remote_path, version_targets, extensions
     #[arg(long)]
     pub category: Option<String>,
+
+    /// Save current cleanup state as baseline for future comparisons
+    #[arg(long)]
+    pub baseline: bool,
+
+    /// Skip baseline comparison even if a baseline exists
+    #[arg(long)]
+    pub ignore_baseline: bool,
+
+    /// Override local_path for this cleanup run
+    #[arg(long)]
+    pub path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -31,6 +43,8 @@ pub struct CleanupOutput {
     pub results: Vec<CleanupResult>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_comparison: Option<cleanup_baseline::BaselineComparison>,
 }
 
 pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<CleanupOutput> {
@@ -46,6 +60,67 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<CleanupO
 
         let total_issues = result.summary.config_issues;
 
+        // Resolve source path for baseline storage
+        let source_path = if let Some(ref path) = args.path {
+            std::path::PathBuf::from(path)
+        } else {
+            let comp = homeboy::component::load(component_id)?;
+            std::path::PathBuf::from(&comp.local_path)
+        };
+
+        // --baseline: save current state
+        if args.baseline {
+            let saved = cleanup_baseline::save_baseline(&source_path, &result)?;
+            eprintln!(
+                "[cleanup] Baseline saved to {} ({} issue(s))",
+                saved.display(),
+                total_issues,
+            );
+
+            return Ok((
+                CleanupOutput {
+                    command: "cleanup.baseline",
+                    component_id: Some(component_id.clone()),
+                    total_issues,
+                    result: Some(result),
+                    results: Vec::new(),
+                    hints: vec!["Full docs: homeboy docs commands/cleanup".to_string()],
+                    baseline_comparison: None,
+                },
+                0,
+            ));
+        }
+
+        // Compare against baseline if one exists
+        let baseline_comparison = if !args.ignore_baseline {
+            if let Some(existing_baseline) = cleanup_baseline::load_baseline(&source_path) {
+                let comparison = cleanup_baseline::compare(&result, &existing_baseline);
+
+                if comparison.drift_increased {
+                    eprintln!(
+                        "[cleanup] DRIFT INCREASED: {} new issue(s) since baseline",
+                        comparison.new_items.len()
+                    );
+                } else if !comparison.resolved_fingerprints.is_empty() {
+                    eprintln!(
+                        "[cleanup] Drift reduced: {} issue(s) resolved since baseline",
+                        comparison.resolved_fingerprints.len()
+                    );
+                }
+
+                Some(comparison)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let exit_code = baseline_comparison
+            .as_ref()
+            .map(|c| if c.drift_increased { 1 } else { 0 })
+            .unwrap_or(0);
+
         Ok((
             CleanupOutput {
                 command: "cleanup",
@@ -54,8 +129,9 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<CleanupO
                 result: Some(result),
                 results: Vec::new(),
                 hints: vec!["Full docs: homeboy docs commands/cleanup".to_string()],
+                baseline_comparison,
             },
-            0,
+            exit_code,
         ))
     } else {
         // All components mode
@@ -91,6 +167,7 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<CleanupO
                 result: None,
                 results,
                 hints,
+                baseline_comparison: None,
             },
             0,
         ))

@@ -4,6 +4,7 @@
 //! 1. Config health - broken paths, dead version targets, unused extensions
 //! 2. Future: git staleness, orphan detection, unused registrations
 
+pub mod baseline;
 pub mod config;
 
 use serde::Serialize;
