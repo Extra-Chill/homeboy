@@ -1,0 +1,160 @@
+# Rust Language Grammar for Homeboy
+#
+# Defines structural patterns for Rust source files.
+# Used by: audit, scaffold, drift, transform, refactor
+#
+# This grammar is loaded by utils/grammar.rs and consumed by all features
+# that need to understand Rust source structure.
+
+[language]
+id = "rust"
+extensions = ["rs"]
+
+[comments]
+line = ["//"]
+block = [["/*", "*/"]]
+doc = ["///", "//!"]
+
+[strings]
+quotes = ['"']
+escape = "\\"
+multiline = []
+
+[blocks]
+open = '{'
+close = '}'
+
+# ===========================================================================
+# Patterns — each key is a concept name used by features
+# ===========================================================================
+
+[patterns.function]
+# Matches: pub fn foo(), pub(crate) async fn bar(), fn baz()
+regex = '^\s*(pub(?:\(crate\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)\s*\(([^)]*)\)'
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.function.captures]
+visibility = 1
+name = 2
+params = 3
+
+[patterns.struct]
+# Matches: pub struct Foo, enum Bar, pub(crate) trait Baz
+regex = '^\s*(pub(?:\(crate\))?\s+)?(struct|enum|trait)\s+(\w+)'
+context = "top_level"
+skip_comments = true
+skip_strings = true
+
+[patterns.struct.captures]
+visibility = 1
+kind = 2
+name = 3
+
+[patterns.import]
+# Matches: use std::path::Path; use crate::error::{Error, Result};
+regex = '^use\s+([\w:]+(?:::\{[^}]+\})?)\s*;'
+context = "top_level"
+skip_comments = true
+skip_strings = true
+
+[patterns.import.captures]
+path = 1
+
+[patterns.impl_block]
+# Matches: impl Foo, impl<T> Bar, impl Trait for Baz
+regex = '^\s*impl(?:<[^>]*>)?\s+(?:(\w+)\s+for\s+)?(\w+)'
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.impl_block.captures]
+trait_name = 1
+type_name = 2
+
+[patterns.macro_invocation]
+# Matches: entity_crud!(Component, ...), log_status!("test", ...)
+regex = '(\w+)!\s*\('
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.macro_invocation.captures]
+name = 1
+
+[patterns.attribute]
+# Matches: #[derive(Debug)], #[cfg(test)], #[test]
+regex = '#\[(\w+)(?:\(([^)]*)\))?\]'
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.attribute.captures]
+name = 1
+args = 2
+
+[patterns.type_alias]
+# Matches: pub type Result<T> = std::result::Result<T, Error>;
+regex = '^\s*(pub(?:\(crate\))?\s+)?type\s+(\w+)'
+context = "top_level"
+skip_comments = true
+skip_strings = true
+
+[patterns.type_alias.captures]
+visibility = 1
+name = 2
+
+[patterns.const_static]
+# Matches: pub const FOO: &str = ...; pub static BAR: ...
+regex = '^\s*(pub(?:\(crate\))?\s+)?(const|static)\s+(\w+)\s*:'
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.const_static.captures]
+visibility = 1
+kind = 2
+name = 3
+
+[patterns.mod_declaration]
+# Matches: pub mod foo; mod bar;
+regex = '^\s*(pub(?:\(crate\))?\s+)?mod\s+(\w+)\s*[;{]'
+context = "top_level"
+skip_comments = true
+skip_strings = true
+
+[patterns.mod_declaration.captures]
+visibility = 1
+name = 2
+
+[patterns.test_attribute]
+# Matches: #[test] — specifically for identifying test functions
+regex = '#\[test\]'
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.cfg_test]
+# Matches: #[cfg(test)] — for identifying test modules
+regex = '#\[cfg\(test\)\]'
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.derive]
+# Matches: #[derive(Debug, Clone, Serialize)]
+regex = '#\[derive\(([^)]+)\)\]'
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.derive.captures]
+traits = 1
+
+[patterns.dead_code_marker]
+# Matches: #[allow(dead_code)]
+regex = '#\[allow\(dead_code\)\]'
+context = "any"
+skip_comments = true
+skip_strings = true

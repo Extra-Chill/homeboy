@@ -1,0 +1,218 @@
+# PHP Language Grammar for Homeboy (WordPress Extension)
+#
+# Defines structural patterns for PHP source files.
+# Used by: audit, scaffold, drift, transform, refactor
+#
+# This grammar is loaded by utils/grammar.rs and consumed by all features
+# that need to understand PHP source structure.
+
+[language]
+id = "php"
+extensions = ["php"]
+
+[comments]
+line = ["//", "#"]
+block = [["/*", "*/"]]
+doc = ["/**"]
+
+[strings]
+quotes = ['"', "'"]
+escape = "\\"
+multiline = []
+
+[blocks]
+open = '{'
+close = '}'
+
+# ===========================================================================
+# Patterns — each key is a concept name used by features
+# ===========================================================================
+
+[patterns.namespace]
+# Matches: namespace DataMachine\Abilities;
+regex = '^namespace\s+([\w\\\\]+)\s*;'
+context = "top_level"
+skip_comments = true
+skip_strings = true
+
+[patterns.namespace.captures]
+name = 1
+
+[patterns.class]
+# Matches: class Foo, abstract class Bar, final class Baz
+# Also: interface Qux, trait Quux
+regex = '^(?:abstract\s+)?(?:final\s+)?(class|trait|interface)\s+(\w+)(?:\s+extends\s+([\w\\\\]+))?'
+context = "top_level"
+skip_comments = true
+skip_strings = true
+
+[patterns.class.captures]
+kind = 1
+name = 2
+extends = 3
+
+[patterns.method]
+# Matches: public function foo(), protected static function bar($x)
+# Also: function standalone_function()
+regex = '((?:(?:public|protected|private|static|abstract|final)\s+)*)function\s+(\w+)\s*\(([^)]*)\)'
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.method.captures]
+modifiers = 1
+name = 2
+params = 3
+
+[patterns.import]
+# Matches: use App\Models\User; use App\Models\User as UserModel;
+regex = '^use\s+([\w\\\\]+)(?:\s+as\s+\w+)?\s*;'
+context = "top_level"
+skip_comments = true
+skip_strings = true
+
+[patterns.import.captures]
+path = 1
+
+[patterns.trait_use]
+# Matches: use SomeTrait; (inside class body — in_block context)
+regex = '^\s+use\s+([\w\\\\]+)\s*[;{]'
+context = "in_block"
+skip_comments = true
+skip_strings = true
+
+[patterns.trait_use.captures]
+name = 1
+
+[patterns.property]
+# Matches: public string $name; protected ?int $count = 0;
+regex = '(public|protected|private)\s+(?:static\s+)?(?:readonly\s+)?(?:([\w\\\\|?]+)\s+)?\$(\w+)'
+context = "in_block"
+skip_comments = true
+skip_strings = true
+
+[patterns.property.captures]
+visibility = 1
+type_hint = 2
+name = 3
+
+[patterns.implements]
+# Matches: class Foo implements Bar, Baz
+regex = '(?:class|interface)\s+\w+(?:\s+extends\s+[\w\\\\]+)?\s+implements\s+([\w\\\\,\s]+?)(?:\s*\{)'
+context = "top_level"
+skip_comments = true
+skip_strings = true
+
+[patterns.implements.captures]
+interfaces = 1
+
+[patterns.const]
+# Matches: const FOO = 'bar'; public const BAZ = 1;
+regex = '(?:public|protected|private)?\s*const\s+(\w+)\s*='
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.const.captures]
+name = 1
+
+# --- WordPress-specific patterns ---
+
+[patterns.register_post_type]
+regex = "register_post_type\\s*\\(\\s*['\"]([\\w-]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.register_post_type.captures]
+name = 1
+
+[patterns.register_taxonomy]
+regex = "register_taxonomy\\s*\\(\\s*['\"]([\\w-]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.register_taxonomy.captures]
+name = 1
+
+[patterns.register_rest_route]
+regex = "register_rest_route\\s*\\([^,]+,\\s*['\"]([^'\"]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.register_rest_route.captures]
+name = 1
+
+[patterns.add_action]
+regex = "add_action\\s*\\(\\s*['\"]([\\w-]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.add_action.captures]
+name = 1
+
+[patterns.add_filter]
+regex = "add_filter\\s*\\(\\s*['\"]([\\w-]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.add_filter.captures]
+name = 1
+
+[patterns.do_action]
+regex = "do_action(?:_ref_array)?\\s*\\(\\s*['\"]([^'\"]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.do_action.captures]
+name = 1
+
+[patterns.apply_filters]
+regex = "apply_filters(?:_ref_array)?\\s*\\(\\s*['\"]([^'\"]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.apply_filters.captures]
+name = 1
+
+[patterns.wp_cli_command]
+regex = "WP_CLI::add_command\\s*\\(\\s*['\"]([^'\"]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.wp_cli_command.captures]
+name = 1
+
+[patterns.wp_register_ability]
+regex = "wp_register_ability\\s*\\(\\s*['\"]([^'\"]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.wp_register_ability.captures]
+name = 1
+
+[patterns.register_block_type]
+regex = "register_block_type\\s*\\(\\s*['\"]([\\w-]+/[\\w-]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.register_block_type.captures]
+name = 1
+
+[patterns.add_shortcode]
+regex = "add_shortcode\\s*\\(\\s*['\"]([\\w-]+)['\"]"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.add_shortcode.captures]
+name = 1
