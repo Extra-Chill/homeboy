@@ -41,6 +41,14 @@ class SQLite_DB extends wpdb {
 
         $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
+        // Register REGEXP function for MySQL compatibility.
+        // MySQL supports REGEXP natively; SQLite needs a user-defined function.
+        $this->pdo->sqliteCreateFunction('REGEXP', function ($pattern, $value) {
+            return (false !== @preg_match('/'. str_replace('/', '\\/', $pattern) . '/', (string) $value))
+                ? preg_match('/'. str_replace('/', '\\/', $pattern) . '/', (string) $value)
+                : 0;
+        }, 2);
+
         // Provide a fake mysqli object so procedural mysqli_* calls do not TypeError
         $this->dbh = new FakeMySQL();
 
