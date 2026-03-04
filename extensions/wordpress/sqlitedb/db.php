@@ -180,6 +180,9 @@ class SQLite_DB extends wpdb {
             $col = preg_replace( '/\b(decimal|numeric)\(\d+,\s*\d+\)/i', 'REAL', $col );
             $col = preg_replace( '/\b(float|double)\b/i', 'REAL', $col );
 
+            // Remove ON UPDATE CURRENT_TIMESTAMP (MySQL-only, no SQLite equivalent)
+            $col = preg_replace( '/\s+ON\s+UPDATE\s+CURRENT_TIMESTAMP\b/i', '', $col );
+
             // Remove COLLATE and CHARACTER SET clauses
             $col = preg_replace( '/\s+COLLATE\s+\S+/i', '', $col );
             $col = preg_replace( '/\s+CHARACTER\s+SET\s+\S+/i', '', $col );
@@ -235,6 +238,7 @@ class SQLite_DB extends wpdb {
             $q = preg_replace( '/\s+AUTO_INCREMENT/i', '', $q );
             $q = preg_replace( '/\s+AFTER\s+\S+/i', '', $q );
             $q = preg_replace( '/\s+FIRST\b/i', '', $q );
+            $q = preg_replace( '/\s+ON\s+UPDATE\s+CURRENT_TIMESTAMP\b/i', '', $q );
             return $q;
         }
 
@@ -246,6 +250,159 @@ class SQLite_DB extends wpdb {
         // Anything else (MODIFY, CHANGE, DROP COLUMN, ADD INDEX, etc.) — skip
         fwrite( STDERR, "[SQLite_DB] Skipping unsupported ALTER TABLE: " . substr( $query, 0, 120 ) . "\n" );
         return null;
+    }
+
+
+    /**
+     * Translate SHOW TABLES LIKE to SQLite equivalent.
+     *
+     * dbDelta() calls $wpdb->get_var("SHOW TABLES LIKE 'table_name'") to check
+     * if a table exists. Returns the table name from sqlite_master.
+     *
+     * @param string $pattern Table name pattern (SQL LIKE with % wildcards).
+     * @return int Number of matching rows (populates last_result).
+     */
+    private function handle_show_tables_like( $pattern ) {
+        $stmt = $this->pdo->prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE :pattern"
+        );
+        $stmt->execute( array( ':pattern' => $pattern ) );
+        $rows = $stmt->fetchAll( PDO::FETCH_OBJ );
+
+        $this->last_result = $rows;
+        $this->num_rows    = count( $rows );
+        $this->num_queries++;
+
+        return $this->num_rows;
+    }
+
+    /**
+     * Translate SHOW TABLES (without LIKE) to SQLite equivalent.
+     *
+     * @return int Number of tables.
+     */
+    private function handle_show_tables() {
+        $stmt = $this->pdo->query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        );
+        $rows = $stmt->fetchAll( PDO::FETCH_OBJ );
+
+        $this->last_result = $rows;
+        $this->num_rows    = count( $rows );
+        $this->num_queries++;
+
+        return $this->num_rows;
+    }
+
+    /**
+     * Translate DESCRIBE <table> to SQLite PRAGMA table_info().
+     *
+     * dbDelta() calls $wpdb->get_results("DESCRIBE table_name") to introspect
+     * existing column definitions. Returns MySQL-compatible column metadata objects.
+     *
+     * @param string $table Table name.
+     * @return int Number of columns (populates last_result with MySQL-format objects).
+     */
+    private function handle_describe( $table ) {
+        $table = trim( $table, '`"\' ;' );
+
+        try {
+            $stmt = $this->pdo->query( "PRAGMA table_info(`{$table}`)" );
+            $pragma_rows = $stmt->fetchAll( PDO::FETCH_ASSOC );
+        } catch ( PDOException $e ) {
+            $this->last_result = array();
+            $this->num_rows    = 0;
+            $this->num_queries++;
+            return 0;
+        }
+
+        if ( empty( $pragma_rows ) ) {
+            $this->last_result = array();
+            $this->num_rows    = 0;
+            $this->num_queries++;
+            return 0;
+        }
+
+        // Map PRAGMA table_info columns to MySQL DESCRIBE format:
+        //   Field, Type, Null, Key, Default, Extra
+        $rows = array();
+        foreach ( $pragma_rows as $col ) {
+            $row = new \stdClass();
+            $row->Field   = $col['name'];
+            $row->Type    = strtolower( $col['type'] ?: 'text' );
+            $row->Null    = $col['notnull'] ? 'NO' : 'YES';
+            $row->Key     = $col['pk'] ? 'PRI' : '';
+            $row->Default = $col['dflt_value'];
+            $row->Extra   = '';
+
+            if ( $col['pk'] && strtoupper( $col['type'] ) === 'INTEGER' ) {
+                $row->Extra = 'auto_increment';
+            }
+
+            $rows[] = $row;
+        }
+
+        $this->last_result = $rows;
+        $this->num_rows    = count( $rows );
+        $this->num_queries++;
+
+        return $this->num_rows;
+    }
+
+    /**
+     * Translate SHOW INDEX FROM <table> to SQLite PRAGMA index_list + index_info.
+     *
+     * dbDelta() uses this to check existing indexes before adding new ones.
+     * Returns MySQL-compatible index metadata objects.
+     *
+     * @param string $table Table name.
+     * @return int Number of index entries.
+     */
+    private function handle_show_index( $table ) {
+        $table = trim( $table, '`"\' ;' );
+
+        try {
+            $list_stmt = $this->pdo->query( "PRAGMA index_list(`{$table}`)" );
+            $indexes   = $list_stmt->fetchAll( PDO::FETCH_ASSOC );
+        } catch ( PDOException $e ) {
+            $this->last_result = array();
+            $this->num_rows    = 0;
+            $this->num_queries++;
+            return 0;
+        }
+
+        $rows = array();
+        foreach ( $indexes as $idx ) {
+            $idx_name = $idx['name'];
+            $unique   = (int) $idx['unique'];
+
+            $info_stmt = $this->pdo->query( "PRAGMA index_info(`{$idx_name}`)" );
+            $cols      = $info_stmt->fetchAll( PDO::FETCH_ASSOC );
+
+            foreach ( $cols as $col_info ) {
+                $row = new \stdClass();
+                $row->Table        = $table;
+                $row->Non_unique   = $unique ? 0 : 1;
+                $row->Key_name     = $idx_name;
+                $row->Seq_in_index = $col_info['seqno'] + 1;
+                $row->Column_name  = $col_info['name'];
+                $row->Collation    = 'A';
+                $row->Cardinality  = 0;
+                $row->Sub_part     = null;
+                $row->Packed       = null;
+                $row->Null         = '';
+                $row->Index_type   = 'BTREE';
+                $row->Comment      = '';
+
+                $rows[] = $row;
+            }
+        }
+
+        $this->last_result = $rows;
+        $this->num_rows    = count( $rows );
+        $this->num_queries++;
+
+        return $this->num_rows;
     }
 
     /**
@@ -278,8 +435,28 @@ class SQLite_DB extends wpdb {
             $this->num_queries++;
             return true;
         }
-        // SHOW, DESCRIBE, SET — various MySQL-only statements that should be no-ops
-        if ( preg_match( '/^(SHOW|DESCRIBE|SET\s+(?:NAMES|CHARACTER|GLOBAL|SESSION|@@))/i', $trimmed_check ) ) {
+        // SHOW TABLES LIKE 'pattern' — used by dbDelta() to check table existence
+        if ( preg_match( "/^SHOW\s+TABLES\s+LIKE\s+'([^']+)'/i", $trimmed_check, $m ) ) {
+            return $this->handle_show_tables_like( $m[1] );
+        }
+
+        // SHOW TABLES (without LIKE) — list all tables
+        if ( preg_match( '/^SHOW\s+TABLES\s*$/i', $trimmed_check ) ) {
+            return $this->handle_show_tables();
+        }
+
+        // SHOW INDEX FROM <table> — used by dbDelta() to check existing indexes
+        if ( preg_match( '/^SHOW\s+INDEX\s+FROM\s+[`"]?(\w+)[`"]?/i', $trimmed_check, $m ) ) {
+            return $this->handle_show_index( $m[1] );
+        }
+
+        // DESCRIBE <table> — used by dbDelta() to introspect column definitions
+        if ( preg_match( '/^DESCRIBE\s+[`"]?(\w+)[`"]?/i', $trimmed_check, $m ) ) {
+            return $this->handle_describe( $m[1] );
+        }
+
+        // Remaining SHOW/SET variants that are pure MySQL — no-op
+        if ( preg_match( '/^(SHOW|SET\s+(?:NAMES|CHARACTER|GLOBAL|SESSION|@@))/i', $trimmed_check ) ) {
             $this->num_queries++;
             return true;
         }
