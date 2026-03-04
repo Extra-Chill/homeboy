@@ -260,7 +260,6 @@ pub fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
                 "--ignore-baseline",
                 "--ratchet",
                 "--analyze",
-                "--auto-fix-drift",
                 "--drift",
                 "--scaffold",
                 "--scaffold-file",

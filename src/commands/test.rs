@@ -46,10 +46,6 @@ pub struct TestArgs {
     #[arg(long)]
     analyze: bool,
 
-    /// Auto-fix test drift before running tests (uses generated transform rules)
-    #[arg(long)]
-    auto_fix_drift: bool,
-
     /// Detect test drift — cross-reference production changes with test files
     #[arg(long)]
     drift: bool,
@@ -197,7 +193,6 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
     // Homeboy-owned boolean flags that should never reach the extension runner
     const HOMEBOY_FLAGS: &[&str] = &[
         "--analyze",
-        "--auto-fix-drift",
         "--drift",
         "--scaffold",
         "--write",
@@ -296,17 +291,6 @@ fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> 
 pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput> {
     let component = args.comp.load()?;
 
-    // Auto-fix drift mode — generate and apply transform rules from git drift
-    if args.auto_fix_drift {
-        return run_auto_fix_drift(
-            args.comp.id(),
-            &component,
-            &args.since,
-            args.write,
-            args.drift,
-        );
-    }
-
     // Scaffold mode — generate test stubs without running tests
     if args.scaffold || args.scaffold_file.is_some() {
         return run_scaffold(
@@ -319,6 +303,9 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
 
     // Drift detection mode — skip running tests, analyze git changes instead
     if args.drift {
+        if args.fix {
+            return run_auto_fix_drift(args.comp.id(), &component, &args.since, args.write, true);
+        }
         return run_drift(args.comp.id(), &component, &args.since);
     }
     let script_path = resolve_test_script(&component)?;
@@ -573,7 +560,8 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
 ///
 /// This mode does NOT run tests. It inspects git changes since `since`, generates
 /// find/replace transform rules for auto-fixable drift types, and applies them to
-/// test files. Use with `--write` to persist changes; default is dry-run.
+/// test files. Triggered by `homeboy test --drift --fix`.
+/// Use with `--write` to persist changes; default is dry-run.
 fn run_auto_fix_drift(
     component_id: &str,
     component: &Component,
@@ -1109,20 +1097,12 @@ mod tests {
         let args = vec!["--analyze".to_string(), "--filter=SomeTest".to_string()];
         let result = filter_homeboy_flags(&args);
         assert_eq!(result, vec!["--filter=SomeTest"]);
-
-        let args = vec![
-            "--auto-fix-drift".to_string(),
-            "--filter=SomeTest".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
     }
 
     #[test]
     fn filter_strips_multiple_boolean_flags() {
         let args = vec![
             "--analyze".to_string(),
-            "--auto-fix-drift".to_string(),
             "--drift".to_string(),
             "--scaffold".to_string(),
             "--baseline".to_string(),
