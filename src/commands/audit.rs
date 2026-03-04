@@ -145,18 +145,18 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
                 homeboy::Error::internal_unexpected("Failed to read back saved baseline")
             })?;
 
-        if let Some(score) = baseline_data.alignment_score {
+        if let Some(score) = baseline_data.metadata.alignment_score {
             eprintln!(
                 "[audit] Baseline saved to {} ({} findings, {:.0}% alignment)",
                 saved.display(),
-                baseline_data.findings_count,
+                baseline_data.item_count,
                 score * 100.0
             );
         } else {
             eprintln!(
                 "[audit] Baseline saved to {} ({} findings, alignment: N/A)",
                 saved.display(),
-                baseline_data.findings_count,
+                baseline_data.item_count,
             );
         }
 
@@ -164,9 +164,9 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
             AuditOutput::BaselineSaved {
                 component_id: result.component_id,
                 path: saved.to_string_lossy().to_string(),
-                findings_count: baseline_data.findings_count,
-                outliers_count: baseline_data.outliers_count,
-                alignment_score: baseline_data.alignment_score,
+                findings_count: baseline_data.item_count,
+                outliers_count: baseline_data.metadata.outliers_count,
+                alignment_score: baseline_data.metadata.alignment_score,
             },
             0,
         ));
@@ -182,12 +182,12 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
             if comparison.drift_increased {
                 eprintln!(
                     "[audit] DRIFT INCREASED: {} new finding(s) since baseline",
-                    comparison.new_findings.len()
+                    comparison.new_items.len()
                 );
-            } else if !comparison.resolved_findings.is_empty() {
+            } else if !comparison.resolved_fingerprints.is_empty() {
                 eprintln!(
                     "[audit] Drift reduced: {} finding(s) resolved since baseline",
-                    comparison.resolved_findings.len()
+                    comparison.resolved_fingerprints.len()
                 );
             } else {
                 eprintln!("[audit] No change from baseline");
