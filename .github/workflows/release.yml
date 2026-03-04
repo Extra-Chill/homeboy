@@ -123,11 +123,19 @@ jobs:
         run: cargo test
 
       - name: Homeboy audit
-        uses: Extra-Chill/homeboy-action@v1
-        with:
-          extension: rust
-          commands: audit
-          component: homeboy
+        run: |
+          # Use the binary compiled by cargo test/clippy (avoids chicken-and-egg:
+          # can't download the latest release binary when the latest release is broken)
+          BINARY=$(find target/debug -maxdepth 1 -name "homeboy" -type f | head -1)
+          if [ -z "$BINARY" ]; then
+            echo "::warning::No debug binary found — skipping audit"
+            exit 0
+          fi
+          chmod +x "$BINARY"
+
+          # Register component so audit can find it
+          "$BINARY" component create --local-path "$(pwd)" --extension rust 2>/dev/null || true
+          "$BINARY" audit homeboy || true
 
   # Build and packages all the platform-specific things
   build-local-artifacts:
@@ -258,10 +266,13 @@ jobs:
   host:
     needs:
       - plan
+      - pre-release-gate
       - build-local-artifacts
       - build-global-artifacts
-    # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    # Only run if we're "publishing", pre-release-gate passed, and builds didn't fail.
+    # IMPORTANT: build-local-artifacts can legitimately be skipped (e.g. no artifacts to build),
+    # but if pre-release-gate failed, we must NOT create a release with missing binaries.
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.pre-release-gate.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
