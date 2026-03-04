@@ -126,6 +126,7 @@ if [ "${HOMEBOY_COVERAGE:-}" = "1" ]; then
         TEST_OUTPUT=$(cat "$TEST_TMPFILE")
         rm -f "$TEST_TMPFILE"
 
+
         if [ $TEST_EXIT -ne 0 ]; then
             SUMMARY=$(echo "$TEST_OUTPUT" | grep -E "^test result:" | tail -1 || true)
             FAILURES=$(echo "$TEST_OUTPUT" | grep -E "^---- .* ----$|^test .* FAILED$" || true)
@@ -236,6 +237,7 @@ fi
 
 TEST_OUTPUT=$(cat "$TEST_TMPFILE")
 rm -f "$TEST_TMPFILE"
+
 
 if [ $TEST_EXIT -eq 0 ]; then
     # Extract test summary line

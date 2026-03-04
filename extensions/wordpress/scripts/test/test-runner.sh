@@ -539,6 +539,7 @@ if [ -z "$(echo "$PHPUNIT_OUTPUT" | grep -E 'PHPUnit|test|assert|OK|ERRORS|FAILU
     exit 1
 fi
 
+
 # Parse and report coverage results
 if [ -n "${COVERAGE_CLOVER:-}" ] && [ -f "$COVERAGE_CLOVER" ]; then
     COVERAGE_PARSER="${EXTENSION_PATH}/scripts/test/parse-coverage.php"

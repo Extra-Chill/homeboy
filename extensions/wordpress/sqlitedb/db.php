@@ -28,6 +28,9 @@ class SQLite_DB extends wpdb {
     /** @var PDO|null */
     public $pdo = null;
 
+    /** @var int|null Rows found by last SQL_CALC_FOUND_ROWS query (for FOUND_ROWS() emulation). */
+    private ?int $found_rows_result = null;
+
     public function __construct($dbuser, $dbpassword, $dbname, $dbhost) {
         // Initialize as PDO-backed DB handle to support SQLite in tests
         if ($dbname === ':memory:') {
@@ -37,6 +40,14 @@ class SQLite_DB extends wpdb {
         }
 
         $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+        // Register REGEXP function for MySQL compatibility.
+        // MySQL supports REGEXP natively; SQLite needs a user-defined function.
+        $this->pdo->sqliteCreateFunction('REGEXP', function ($pattern, $value) {
+            return (false !== @preg_match('/'. str_replace('/', '\\/', $pattern) . '/', (string) $value))
+                ? preg_match('/'. str_replace('/', '\\/', $pattern) . '/', (string) $value)
+                : 0;
+        }, 2);
 
         // Provide a fake mysqli object so procedural mysqli_* calls do not TypeError
         $this->dbh = new FakeMySQL();
@@ -432,11 +443,38 @@ class SQLite_DB extends wpdb {
             return parent::query( $query );
         }
 
+        // Apply the 'query' filter — required for wpdb::remove_placeholder_escape()
+        // which converts hash placeholders back to '%' for LIKE queries.
+        $query = apply_filters( 'query', $query );
+
+        if ( ! $query ) {
+            $this->insert_id = 0;
+            return false;
+        }
+
         $this->last_error = '';
         $this->last_result = array();
         $this->num_rows = 0;
         $this->rows_affected = 0;
         $this->insert_id = 0;
+
+        // Handle SELECT FOUND_ROWS() — return the count from previous SQL_CALC_FOUND_ROWS query.
+        if ( preg_match( '/^\s*SELECT\s+FOUND_ROWS\s*\(\s*\)/i', trim( $query ) ) ) {
+            $count = $this->found_rows_result ?? 0;
+            $row = new \stdClass();
+            $row->{'FOUND_ROWS()'} = $count;
+            $this->last_result = array( $row );
+            $this->num_rows    = 1;
+            $this->num_queries++;
+            return 1;
+        }
+
+        // Handle SQL_CALC_FOUND_ROWS — strip the keyword and run a parallel COUNT query.
+        $has_calc_found_rows = false;
+        if ( stripos( $query, 'SQL_CALC_FOUND_ROWS' ) !== false ) {
+            $has_calc_found_rows = true;
+            $query = preg_replace( '/\bSQL_CALC_FOUND_ROWS\b/i', '', $query );
+        }
 
         // Translate MySQL transaction/session commands to SQLite equivalents.
         // WP_UnitTestCase calls these in set_up()/tear_down() for test isolation.
@@ -557,6 +595,25 @@ class SQLite_DB extends wpdb {
             $this->num_rows = count($rows);
             $this->result = $stmt;
             $this->num_queries++;
+
+            // Emulate SQL_CALC_FOUND_ROWS by running a COUNT(*) version of the query.
+            if ( $has_calc_found_rows ) {
+                $count_query = preg_replace(
+                    '/^\s*SELECT\s+.*?\s+FROM\b/is',
+                    'SELECT COUNT(*) FROM',
+                    $query
+                );
+                // Strip ORDER BY and LIMIT clauses for the count query.
+                $count_query = preg_replace( '/\s+ORDER\s+BY\s+.*$/is', '', $count_query );
+                $count_query = preg_replace( '/\s+LIMIT\s+\d+.*$/is', '', $count_query );
+                try {
+                    $count_stmt = $this->pdo->query( $count_query );
+                    $this->found_rows_result = $count_stmt ? (int) $count_stmt->fetchColumn() : count( $rows );
+                } catch ( PDOException $e ) {
+                    // Fallback to result count if COUNT query fails.
+                    $this->found_rows_result = count( $rows );
+                }
+            }
 
             return $this->num_rows;
 
