@@ -1,0 +1,19 @@
+name: Regenerate README file
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - "features/**"
+      - "README.md"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  regenerate-readme:
+    uses: wp-cli/.github/.github/workflows/reusable-regenerate-readme.yml@main
