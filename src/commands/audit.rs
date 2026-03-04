@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::path::Path;
 
 use homeboy::code_audit::{self, baseline, fixer, CodeAuditResult};
+use homeboy::git;
 
 use super::CmdResult;
 
@@ -34,6 +35,12 @@ pub struct AuditArgs {
     /// Override local_path for this audit run (use a workspace clone or temp checkout)
     #[arg(long)]
     pub path: Option<String>,
+
+    /// Only audit files changed since a git ref (branch, tag, or SHA).
+    /// Uses merge-base for accurate PR-scoped audits.
+    /// Example: --changed-since origin/main
+    #[arg(long)]
+    pub changed_since: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -78,15 +85,55 @@ pub enum AuditOutput {
 }
 
 pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutput> {
-    let result = if Path::new(&args.component_id).is_dir() {
-        // Raw path mode — use --path override if provided, otherwise use the positional arg
-        let effective_path = args.path.as_deref().unwrap_or(&args.component_id);
-        code_audit::audit_path(effective_path)?
+    // Resolve component ID and source path
+    let (resolved_id, resolved_path) = if Path::new(&args.component_id).is_dir() {
+        let effective = args
+            .path
+            .as_deref()
+            .unwrap_or(&args.component_id)
+            .to_string();
+        let name = Path::new(&effective)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        (name, effective)
     } else if let Some(ref path) = args.path {
-        // Component mode with --path override — use component ID but audit at the given path
-        code_audit::audit_path_with_id(&args.component_id, path)?
+        (args.component_id.clone(), path.clone())
     } else {
-        code_audit::audit_component(&args.component_id)?
+        let comp = homeboy::component::load(&args.component_id)?;
+        homeboy::component::validate_local_path(&comp)?;
+        let expanded = shellexpand::tilde(&comp.local_path).to_string();
+        (args.component_id.clone(), expanded)
+    };
+
+    // Run audit — scoped or full
+    let result = if let Some(ref git_ref) = args.changed_since {
+        let changed = git::get_files_changed_since(&resolved_path, git_ref)?;
+        if changed.is_empty() {
+            homeboy::log_status!("audit", "No files changed since {}", git_ref);
+            return Ok((
+                AuditOutput::Full(code_audit::CodeAuditResult {
+                    component_id: resolved_id,
+                    source_path: resolved_path,
+                    summary: code_audit::AuditSummary {
+                        files_scanned: 0,
+                        conventions_detected: 0,
+                        outliers_found: 0,
+                        alignment_score: None,
+                        files_skipped: 0,
+                        warnings: vec![],
+                    },
+                    conventions: vec![],
+                    directory_conventions: vec![],
+                    findings: vec![],
+                    duplicate_groups: vec![],
+                }),
+                0,
+            ));
+        }
+        code_audit::audit_path_scoped(&resolved_id, &resolved_path, &changed)?
+    } else {
+        code_audit::audit_path_with_id(&resolved_id, &resolved_path)?
     };
 
     // --conventions: just show conventions
@@ -138,7 +185,7 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
     // --baseline: save current state
     if args.baseline {
         let saved =
-            baseline::save_baseline(&result).map_err(|e| homeboy::Error::internal_unexpected(e))?;
+            baseline::save_baseline(&result).map_err(homeboy::Error::internal_unexpected)?;
 
         let baseline_data =
             baseline::load_baseline(Path::new(&result.source_path)).ok_or_else(|| {

@@ -88,7 +88,10 @@ jobs:
           # Register the component so audit can find it
           "$BINARY" component create --local-path "$(pwd)" --extension rust
 
-      - name: Run audit
+      - name: Run audit (scoped to changed files)
         run: |
           BINARY=$(find target/debug -maxdepth 1 -name "homeboy" -type f | head -1)
-          "$BINARY" audit homeboy
+          # Fetch enough history for merge-base to work
+          git fetch origin main --depth=1 2>/dev/null || true
+          # Scope audit to only files changed in this PR
+          "$BINARY" audit homeboy --changed-since origin/main

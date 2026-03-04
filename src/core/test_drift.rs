@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::{Error, Result};
+use crate::git;
 
 // ============================================================================
 // Models
@@ -191,10 +192,7 @@ pub fn detect_drift(component: &str, opts: &DriftOptions) -> Result<DriftReport>
     };
     let total_drift_references = drifted.len();
 
-    let auto_fixable = changes
-        .iter()
-        .filter(|c| is_auto_fixable(c))
-        .count();
+    let auto_fixable = changes.iter().filter(|c| is_auto_fixable(c)).count();
 
     Ok(DriftReport {
         component: component.to_string(),
@@ -212,32 +210,10 @@ pub fn detect_drift(component: &str, opts: &DriftOptions) -> Result<DriftReport>
 // ============================================================================
 
 /// Get list of changed files between `since` ref and HEAD.
+/// Delegates to the core `git::changes::get_files_changed_since` primitive.
 fn get_changed_files(root: &Path, since: &str) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only", since, "HEAD"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| {
-            Error::internal_io(
-                format!("Failed to run git diff: {}", e),
-                Some("test_drift.git".to_string()),
-            )
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::internal_io(
-            format!("git diff failed: {}", stderr.trim()),
-            Some("test_drift.git".to_string()),
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect())
+    let root_str = root.to_string_lossy();
+    git::get_files_changed_since(&root_str, since)
 }
 
 /// Get diff for a specific file.
@@ -259,13 +235,7 @@ fn get_file_diff(root: &Path, since: &str, file: &str) -> Result<String> {
 /// Get renamed files from git diff.
 fn get_renamed_files(root: &Path, since: &str) -> Result<Vec<(String, String)>> {
     let output = Command::new("git")
-        .args([
-            "diff",
-            "--diff-filter=R",
-            "--name-status",
-            since,
-            "HEAD",
-        ])
+        .args(["diff", "--diff-filter=R", "--name-status", since, "HEAD"])
         .current_dir(root)
         .output()
         .map_err(|e| {
@@ -310,8 +280,9 @@ fn extract_changes_from_diff(file: &str, diff: &str) -> Vec<ProductionChange> {
 
     // PHP patterns
     let method_re = Regex::new(
-        r"(?:public|protected|private|static|abstract|final)\s+(?:static\s+)?function\s+(\w+)"
-    ).unwrap();
+        r"(?:public|protected|private|static|abstract|final)\s+(?:static\s+)?function\s+(\w+)",
+    )
+    .unwrap();
     let class_re = Regex::new(r"(?:abstract\s+)?(?:class|trait|interface)\s+(\w+)").unwrap();
     let string_re = Regex::new(r#"'([a-z_]{3,50})'"#).unwrap();
 
@@ -323,13 +294,14 @@ fn extract_changes_from_diff(file: &str, diff: &str) -> Vec<ProductionChange> {
     let is_rust = file.ends_with(".rs");
     let fn_re = if is_rust { &rust_fn_re } else { &method_re };
     let cls_re = if is_rust { &rust_struct_re } else { &class_re };
+    let hunk_re = Regex::new(r"@@ -\d+(?:,\d+)? \+(\d+)").unwrap();
 
     let mut line_num: usize = 0;
 
     for line in diff.lines() {
         // Track line numbers from hunk headers
         if line.starts_with("@@") {
-            if let Some(cap) = Regex::new(r"@@ -\d+(?:,\d+)? \+(\d+)").unwrap().captures(line) {
+            if let Some(cap) = hunk_re.captures(line) {
                 line_num = cap[1].parse().unwrap_or(0);
             }
             continue;
@@ -547,8 +519,10 @@ fn find_drift_references(
                 if line.contains(search) {
                     // Skip if it's a comment-only line
                     let trimmed = line.trim();
-                    if trimmed.starts_with("//") || trimmed.starts_with('#')
-                        || trimmed.starts_with('*') || trimmed.starts_with("/*")
+                    if trimmed.starts_with("//")
+                        || trimmed.starts_with('#')
+                        || trimmed.starts_with('*')
+                        || trimmed.starts_with("/*")
                     {
                         continue;
                     }
@@ -599,16 +573,16 @@ pub fn generate_transform_rules(report: &DriftReport) -> Vec<crate::refactor::Tr
             None => continue,
         };
 
-        let id = format!(
-            "{:?}_{}",
-            change.change_type, change.old_symbol
-        )
-        .to_lowercase()
-        .replace(' ', "_");
+        let id = format!("{:?}_{}", change.change_type, change.old_symbol)
+            .to_lowercase()
+            .replace(' ', "_");
 
         let description = match change.change_type {
             ChangeType::MethodRename => {
-                format!("Rename {} → {} ({})", change.old_symbol, new_symbol, change.file)
+                format!(
+                    "Rename {} → {} ({})",
+                    change.old_symbol, new_symbol, change.file
+                )
             }
             ChangeType::ClassRename => {
                 format!(
@@ -625,10 +599,7 @@ pub fn generate_transform_rules(report: &DriftReport) -> Vec<crate::refactor::Tr
             ChangeType::FileMove => {
                 format!("File moved {} → {}", change.old_symbol, new_symbol)
             }
-            _ => format!(
-                "{} → {} ({})",
-                change.old_symbol, new_symbol, change.file
-            ),
+            _ => format!("{} → {} ({})", change.old_symbol, new_symbol, change.file),
         };
 
         rules.push(crate::refactor::TransformRule {
@@ -870,10 +841,7 @@ class FooTest extends TestCase {
         std::fs::write(tests_dir.join("ATest.php"), test1).unwrap();
         std::fs::write(tests_dir.join("BTest.php"), test2).unwrap();
 
-        let test_files = vec![
-            tests_dir.join("ATest.php"),
-            tests_dir.join("BTest.php"),
-        ];
+        let test_files = vec![tests_dir.join("ATest.php"), tests_dir.join("BTest.php")];
         let drifted = find_drift_references(&changes, &test_files, root);
         assert_eq!(drifted.len(), 2);
     }
@@ -888,7 +856,8 @@ class FooTest extends TestCase {
             line: 5,
         }];
 
-        let test_content = "<?php\n// oldMethod was renamed\n/* oldMethod docs */\n$this->oldMethod();\n";
+        let test_content =
+            "<?php\n// oldMethod was renamed\n/* oldMethod docs */\n$this->oldMethod();\n";
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

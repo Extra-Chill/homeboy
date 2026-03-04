@@ -162,11 +162,42 @@ pub fn audit_path(path: &str) -> Result<CodeAuditResult> {
 /// Core audit logic shared by both entry points.
 /// Also available for callers that have a component ID and an overridden path.
 pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAuditResult> {
+    audit_internal(component_id, source_path, None)
+}
+
+/// Audit only specific files within a component path.
+///
+/// Used for PR-scoped audits (`--changed-since`) where only changed files
+/// should be checked. Uses the same conventions and checks as a full audit
+/// but limits file walking to the provided filter.
+pub fn audit_path_scoped(
+    component_id: &str,
+    source_path: &str,
+    file_filter: &[String],
+) -> Result<CodeAuditResult> {
+    audit_internal(component_id, source_path, Some(file_filter))
+}
+
+/// Internal audit implementation supporting optional file scoping.
+fn audit_internal(
+    component_id: &str,
+    source_path: &str,
+    file_filter: Option<&[String]>,
+) -> Result<CodeAuditResult> {
     let root = Path::new(source_path);
 
-    log_status!("audit", "Scanning {} for conventions...", source_path);
+    if let Some(filter) = file_filter {
+        log_status!(
+            "audit",
+            "Scanning {} changed file(s) in {} for conventions...",
+            filter.len(),
+            source_path
+        );
+    } else {
+        log_status!("audit", "Scanning {} for conventions...", source_path);
+    }
 
-    // Phase 1: Auto-discover file groups
+    // Phase 1: Auto-discover file groups (always full codebase for convention detection)
     let discovery = discovery::auto_discover_groups(root);
     let files_skipped = discovery
         .files_walked
@@ -314,6 +345,23 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
                     }
                 }
             }
+        }
+    }
+
+    // Phase 4g: Scope filtering — when auditing changed files only, remove
+    // findings for files that weren't changed. Conventions are still discovered
+    // from the full codebase so drift detection is accurate.
+    if let Some(filter) = file_filter {
+        let before = all_findings.len();
+        all_findings.retain(|f| filter.iter().any(|changed| f.file.contains(changed)));
+        let filtered_out = before - all_findings.len();
+        if filtered_out > 0 {
+            log_status!(
+                "audit",
+                "Scoped: filtered {} finding(s) from unchanged files ({} remaining)",
+                filtered_out,
+                all_findings.len()
+            );
         }
     }
 
