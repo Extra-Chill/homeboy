@@ -43,16 +43,52 @@ jobs:
         run: cargo test
 
   # ── Homeboy audit (dogfooding) ──
-  # Compares audit findings against the committed baseline. Only fails
-  # if a PR introduces NEW drift (new findings not in the baseline).
-  # Resolving existing findings is always allowed (ratchet down).
+  # Build from source instead of downloading a release binary.
+  # This avoids the chicken-and-egg problem: homeboy-action downloads from
+  # the latest GitHub release, but that binary doesn't include the PR's code.
+  # For the homeboy repo itself, we compile the PR branch and audit with that.
+  # See: https://github.com/Extra-Chill/homeboy/issues/416
   audit:
     name: Homeboy Audit
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Extra-Chill/homeboy-action@v1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
         with:
-          extension: rust
-          commands: audit
-          component: homeboy
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build homeboy
+        run: cargo build
+
+      - name: Install extension and register component
+        run: |
+          BINARY=$(find target/debug -maxdepth 1 -name "homeboy" -type f | head -1)
+          if [ -z "$BINARY" ]; then
+            echo "::error::Could not find homeboy binary in target/debug"
+            exit 1
+          fi
+          chmod +x "$BINARY"
+
+          echo "Using $($BINARY --version)"
+
+          # Install the rust extension for audit rules
+          "$BINARY" extension install https://github.com/Extra-Chill/homeboy-extensions --id rust
+
+          # Register the component so audit can find it
+          "$BINARY" component create --local-path "$(pwd)" --extension rust
+
+      - name: Run audit
+        run: |
+          BINARY=$(find target/debug -maxdepth 1 -name "homeboy" -type f | head -1)
+          "$BINARY" audit homeboy
