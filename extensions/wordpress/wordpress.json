@@ -337,7 +337,7 @@
       "id": "mysql_database",
       "label": "MySQL Database",
       "type": "string",
-      "default": "wordpress_test",
+      "default": "homeboy_wptests",
       "description": "MySQL database name (when using mysql database type)"
     },
     {

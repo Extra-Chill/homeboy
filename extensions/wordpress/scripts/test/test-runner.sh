@@ -244,13 +244,13 @@ elif [ "$DATABASE_TYPE" = "mysql" ]; then
         if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
             # Use Homeboy settings
             MYSQL_HOST=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_host // "127.0.0.1"')
-            MYSQL_DATABASE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_database // "wordpress_test"')
+            MYSQL_DATABASE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_database // "homeboy_wptests"')
             MYSQL_USER=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_user // "root"')
             MYSQL_PASSWORD=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_password // ""')
         else
             # Use defaults when called directly
             MYSQL_HOST="127.0.0.1"
-            MYSQL_DATABASE="wordpress_test"
+            MYSQL_DATABASE="homeboy_wptests"
             MYSQL_USER="root"
             MYSQL_PASSWORD=""
         fi
