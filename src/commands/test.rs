@@ -6,6 +6,7 @@ use homeboy::error::Error;
 use homeboy::extension::{self, ExtensionRunner};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
+use homeboy::test_drift::{self, DriftReport, DriftOptions};
 use homeboy::utils::io;
 
 use super::CmdResult;
@@ -47,6 +48,14 @@ pub struct TestArgs {
     #[arg(long)]
     analyze: bool,
 
+    /// Detect test drift — cross-reference production changes with test files
+    #[arg(long)]
+    drift: bool,
+
+    /// Git ref to compare against for drift detection (tag, commit, branch)
+    #[arg(long, value_name = "REF", default_value = "HEAD~10")]
+    since: String,
+
     /// Override settings as key=value pairs
     #[arg(long, value_parser = super::parse_key_val)]
     setting: Vec<(String, String)>,
@@ -79,6 +88,8 @@ pub struct TestOutput {
     analysis: Option<TestAnalysis>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hints: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drift: Option<DriftReport>,
 }
 
 #[derive(Serialize)]
@@ -174,6 +185,11 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     let mut component = component::load(&args.component)?;
     if let Some(ref path) = args.path {
         component.local_path = path.clone();
+    }
+
+    // Drift detection mode — skip running tests, analyze git changes instead
+    if args.drift {
+        return run_drift(&args.component, &component, &args.since);
     }
     let script_path = resolve_test_script(&component)?;
 
@@ -420,6 +436,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
             baseline_comparison,
             analysis,
             hints,
+            drift: None,
         },
         exit_code,
     ))
@@ -491,4 +508,129 @@ fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<CoverageOu
         methods_pct,
         uncovered_files,
     })
+}
+
+/// Run drift detection without running tests.
+fn run_drift(
+    component_id: &str,
+    component: &Component,
+    since: &str,
+) -> CmdResult<TestOutput> {
+    let source_path = {
+        let expanded = shellexpand::tilde(&component.local_path);
+        std::path::PathBuf::from(expanded.as_ref())
+    };
+
+    homeboy::log_status!("drift", "Detecting test drift since {} in {}", since, component_id);
+
+    // Auto-detect language from extension
+    let opts = if source_path.join("Cargo.toml").exists() {
+        DriftOptions::rust(&source_path, since)
+    } else {
+        DriftOptions::php(&source_path, since)
+    };
+
+    let report = test_drift::detect_drift(component_id, &opts)?;
+
+    // Report to stderr
+    if report.production_changes.is_empty() {
+        homeboy::log_status!("drift", "No production changes detected since {}", since);
+    } else {
+        homeboy::log_status!(
+            "drift",
+            "{} production change{} detected",
+            report.production_changes.len(),
+            if report.production_changes.len() == 1 { "" } else { "s" }
+        );
+
+        for change in &report.production_changes {
+            let label = match change.change_type {
+                test_drift::ChangeType::MethodRename => "method rename",
+                test_drift::ChangeType::MethodRemoved => "method removed",
+                test_drift::ChangeType::ClassRename => "class rename",
+                test_drift::ChangeType::ClassRemoved => "class removed",
+                test_drift::ChangeType::ErrorCodeChange => "error code change",
+                test_drift::ChangeType::ReturnTypeChange => "return type change",
+                test_drift::ChangeType::SignatureChange => "signature change",
+                test_drift::ChangeType::FileMove => "file moved",
+                test_drift::ChangeType::StringChange => "string changed",
+            };
+
+            if let Some(ref new) = change.new_symbol {
+                homeboy::log_status!(
+                    "  change",
+                    "{}: {} → {} ({})",
+                    label,
+                    change.old_symbol,
+                    new,
+                    change.file
+                );
+            } else {
+                homeboy::log_status!(
+                    "  change",
+                    "{}: {} ({})",
+                    label,
+                    change.old_symbol,
+                    change.file
+                );
+            }
+        }
+
+        if !report.drifted_tests.is_empty() {
+            homeboy::log_status!(
+                "drift",
+                "{} drifted reference{} in {} test file{}",
+                report.drifted_tests.len(),
+                if report.drifted_tests.len() == 1 { "" } else { "s" },
+                report.total_drifted_files,
+                if report.total_drifted_files == 1 { "" } else { "s" },
+            );
+
+            for dt in report.drifted_tests.iter().take(20) {
+                let change = &report.production_changes[dt.change_index];
+                homeboy::log_status!(
+                    "  ref",
+                    "{}:{} references '{}' ({})",
+                    dt.test_file,
+                    dt.line,
+                    change.old_symbol,
+                    format!("{:?}", change.change_type).to_lowercase()
+                );
+            }
+
+            if report.drifted_tests.len() > 20 {
+                homeboy::log_status!(
+                    "info",
+                    "... and {} more (use --json for full list)",
+                    report.drifted_tests.len() - 20
+                );
+            }
+        }
+
+        if report.auto_fixable > 0 {
+            homeboy::log_status!(
+                "hint",
+                "{} change{} auto-fixable with refactor transform",
+                report.auto_fixable,
+                if report.auto_fixable == 1 { "" } else { "s" }
+            );
+        }
+    }
+
+    let exit_code = if report.drifted_tests.is_empty() { 0 } else { 1 };
+
+    Ok((
+        TestOutput {
+            status: "drift".to_string(),
+            component: component_id.to_string(),
+            exit_code,
+            test_counts: None,
+            coverage: None,
+            baseline_comparison: None,
+            analysis: None,
+            hints: None,
+            drift: Some(report),
+        },
+        exit_code,
+    ))
 }

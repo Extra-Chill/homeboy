@@ -30,6 +30,7 @@ pub mod release;
 pub mod server;
 pub mod test_baseline;
 pub mod test_analyze;
+pub mod test_drift;
 pub mod ssh;
 pub mod update_check;
 pub mod upgrade;
