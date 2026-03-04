@@ -247,9 +247,7 @@ pub fn load<M: for<'de> Deserialize<'de> + Serialize>(
 
     let root = read_json_or_empty(&json_path)?;
 
-    let baseline_value = root
-        .get(BASELINES_KEY)
-        .and_then(|b| b.get(&config.key));
+    let baseline_value = root.get(BASELINES_KEY).and_then(|b| b.get(&config.key));
 
     let Some(value) = baseline_value else {
         return Ok(None);
@@ -546,8 +544,12 @@ mod tests {
         assert_eq!(loaded.context_id, "my-component");
         assert_eq!(loaded.item_count, 2);
         assert_eq!(loaded.known_fingerprints.len(), 2);
-        assert!(loaded.known_fingerprints.contains(&"lint::a.rs".to_string()));
-        assert!(loaded.known_fingerprints.contains(&"lint::b.rs".to_string()));
+        assert!(loaded
+            .known_fingerprints
+            .contains(&"lint::a.rs".to_string()));
+        assert!(loaded
+            .known_fingerprints
+            .contains(&"lint::b.rs".to_string()));
     }
 
     #[test]
@@ -578,11 +580,7 @@ mod tests {
         );
         assert!(root.get("extensions").is_some());
         assert!(root.get("baselines").is_some());
-        assert!(root
-            .get("baselines")
-            .unwrap()
-            .get("audit")
-            .is_some());
+        assert!(root.get("baselines").unwrap().get("audit").is_some());
     }
 
     #[test]
@@ -605,8 +603,12 @@ mod tests {
 
         assert_eq!(audit.item_count, 1);
         assert_eq!(lint.item_count, 1);
-        assert!(audit.known_fingerprints.contains(&"conv::a.php".to_string()));
-        assert!(lint.known_fingerprints.contains(&"psr12::b.php".to_string()));
+        assert!(audit
+            .known_fingerprints
+            .contains(&"conv::a.php".to_string()));
+        assert!(lint
+            .known_fingerprints
+            .contains(&"psr12::b.php".to_string()));
     }
 
     #[test]
@@ -739,7 +741,13 @@ mod tests {
     #[test]
     fn utc_now_produces_valid_iso8601() {
         let now = utc_now_iso8601();
-        assert_eq!(now.len(), 20, "Expected 20 chars, got {}: {}", now.len(), now);
+        assert_eq!(
+            now.len(),
+            20,
+            "Expected 20 chars, got {}: {}",
+            now.len(),
+            now
+        );
         assert!(now.ends_with('Z'));
         assert!(now.contains('T'));
     }
@@ -765,10 +773,7 @@ mod tests {
         let items_v1 = vec![item("lint", "a.rs", "v1")];
         save(&config, "test", &items_v1, ()).unwrap();
 
-        let items_v2 = vec![
-            item("lint", "a.rs", "v2"),
-            item("lint", "b.rs", "new"),
-        ];
+        let items_v2 = vec![item("lint", "a.rs", "v2"), item("lint", "b.rs", "new")];
         save(&config, "test", &items_v2, ()).unwrap();
 
         let loaded = load::<()>(&config).unwrap().unwrap();
@@ -777,10 +782,7 @@ mod tests {
 
     #[test]
     fn compare_empty_current_against_populated_baseline() {
-        let original = vec![
-            item("lint", "a.rs", "unused"),
-            item("lint", "b.rs", "dead"),
-        ];
+        let original = vec![item("lint", "a.rs", "unused"), item("lint", "b.rs", "dead")];
 
         let dir = TempDir::new().unwrap();
         let config = BaselineConfig::new(dir.path(), "test");
@@ -827,11 +829,7 @@ mod tests {
     #[test]
     fn load_returns_error_for_malformed_json() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("homeboy.json"),
-            "not valid json {{{",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("homeboy.json"), "not valid json {{{").unwrap();
 
         let config = BaselineConfig::new(dir.path(), "audit");
         let result = load::<()>(&config);

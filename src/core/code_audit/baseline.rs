@@ -106,14 +106,15 @@ pub fn save_baseline(result: &CodeAuditResult) -> Result<std::path::PathBuf, Str
 
     let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
 
-    generic::save(&config, &result.component_id, &items, metadata)
-        .map_err(|e| e.message)
+    generic::save(&config, &result.component_id, &items, metadata).map_err(|e| e.message)
 }
 
 /// Load a baseline if one exists for the given source path.
 pub fn load_baseline(source_path: &Path) -> Option<AuditBaseline> {
     let config = BaselineConfig::new(source_path, BASELINE_KEY);
-    generic::load::<AuditBaselineMetadata>(&config).ok().flatten()
+    generic::load::<AuditBaselineMetadata>(&config)
+        .ok()
+        .flatten()
 }
 
 /// Compare an audit result against a saved baseline.
@@ -230,7 +231,10 @@ mod tests {
         let comparison = compare(&current, &baseline);
         assert!(comparison.drift_increased);
         assert_eq!(comparison.new_items.len(), 1);
-        assert_eq!(comparison.new_items[0].fingerprint, "Flow::c.php::MissingMethod");
+        assert_eq!(
+            comparison.new_items[0].fingerprint,
+            "Flow::c.php::MissingMethod"
+        );
         assert_eq!(comparison.delta, 1);
 
         let _ = std::fs::remove_dir_all(Path::new(&result_original.source_path));
