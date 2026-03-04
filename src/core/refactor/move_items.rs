@@ -234,9 +234,10 @@ pub fn move_items(
             Vec::new()
         })
     } else {
-        warnings.push(format!(
+        warnings.push(
             "No refactor extension found for file type — language-specific features unavailable"
-        ));
+                .to_string(),
+        );
         Vec::new()
     };
 

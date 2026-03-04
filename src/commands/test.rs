@@ -6,7 +6,7 @@ use homeboy::error::Error;
 use homeboy::extension::{self, ExtensionRunner};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
-use homeboy::test_drift::{self, DriftReport, DriftOptions};
+use homeboy::test_drift::{self, DriftOptions, DriftReport};
 use homeboy::utils::io;
 
 use super::CmdResult;
@@ -210,8 +210,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     // Create temp file for test failures output (for --analyze)
     let failures_file = if args.analyze {
         Some(
-            std::env::temp_dir()
-                .join(format!("homeboy-test-failures-{}.json", std::process::id())),
+            std::env::temp_dir().join(format!("homeboy-test-failures-{}.json", std::process::id())),
         )
     } else {
         None
@@ -343,17 +342,15 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
                 } else if comparison.passed_delta > 0 || comparison.failed_delta < 0 {
                     eprintln!(
                         "[test] Improvement: passed {} ({:+}), failed {} ({:+})",
-                        counts.passed, comparison.passed_delta, counts.failed,
+                        counts.passed,
+                        comparison.passed_delta,
+                        counts.failed,
                         comparison.failed_delta,
                     );
 
                     // Auto-ratchet: update baseline when results improve
                     if args.ratchet {
-                        let _ = test_baseline::save_baseline(
-                            &source_path,
-                            &args.component,
-                            counts,
-                        );
+                        let _ = test_baseline::save_baseline(&source_path, &args.component, counts);
                         eprintln!("[test] Baseline ratcheted forward");
                     }
                 }
@@ -511,17 +508,18 @@ fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<CoverageOu
 }
 
 /// Run drift detection without running tests.
-fn run_drift(
-    component_id: &str,
-    component: &Component,
-    since: &str,
-) -> CmdResult<TestOutput> {
+fn run_drift(component_id: &str, component: &Component, since: &str) -> CmdResult<TestOutput> {
     let source_path = {
         let expanded = shellexpand::tilde(&component.local_path);
         std::path::PathBuf::from(expanded.as_ref())
     };
 
-    homeboy::log_status!("drift", "Detecting test drift since {} in {}", since, component_id);
+    homeboy::log_status!(
+        "drift",
+        "Detecting test drift since {} in {}",
+        since,
+        component_id
+    );
 
     // Auto-detect language from extension
     let opts = if source_path.join("Cargo.toml").exists() {
@@ -540,7 +538,11 @@ fn run_drift(
             "drift",
             "{} production change{} detected",
             report.production_changes.len(),
-            if report.production_changes.len() == 1 { "" } else { "s" }
+            if report.production_changes.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
 
         for change in &report.production_changes {
@@ -581,9 +583,17 @@ fn run_drift(
                 "drift",
                 "{} drifted reference{} in {} test file{}",
                 report.drifted_tests.len(),
-                if report.drifted_tests.len() == 1 { "" } else { "s" },
+                if report.drifted_tests.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
                 report.total_drifted_files,
-                if report.total_drifted_files == 1 { "" } else { "s" },
+                if report.total_drifted_files == 1 {
+                    ""
+                } else {
+                    "s"
+                },
             );
 
             for dt in report.drifted_tests.iter().take(20) {
@@ -617,7 +627,11 @@ fn run_drift(
         }
     }
 
-    let exit_code = if report.drifted_tests.is_empty() { 0 } else { 1 };
+    let exit_code = if report.drifted_tests.is_empty() {
+        0
+    } else {
+        1
+    };
 
     Ok((
         TestOutput {

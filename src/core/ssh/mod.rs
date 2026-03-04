@@ -68,6 +68,7 @@ pub fn resolve_context(args: &SshResolveArgs) -> Result<SshResolveResult> {
     })
 }
 
+#[allow(clippy::type_complexity)]
 fn resolve_internal(
     args: &SshResolveArgs,
 ) -> Result<(String, Option<String>, String, Server, Option<String>)> {

@@ -12,6 +12,7 @@ pub struct FileArgs {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum FileCommand {
     /// List directory contents
     List {

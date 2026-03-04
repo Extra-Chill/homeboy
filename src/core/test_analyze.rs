@@ -282,7 +282,8 @@ fn categorize(error_type: &str, message: &str) -> FailureCategory {
     }
 
     // Missing methods/functions
-    if message.contains("Call to undefined method") || message.contains("Call to undefined function")
+    if message.contains("Call to undefined method")
+        || message.contains("Call to undefined function")
     {
         return FailureCategory::MissingMethod;
     }
@@ -647,7 +648,12 @@ mod tests {
     #[test]
     fn sorted_by_count_descending() {
         let failures = vec![
-            failure("A::a", "a.php", "Error", "Call to undefined method X::foo()"),
+            failure(
+                "A::a",
+                "a.php",
+                "Error",
+                "Call to undefined method X::foo()",
+            ),
             failure("B::b", "b.php", "Error", "Class \"Missing\" not found"),
             failure("C::c", "c.php", "Error", "Class \"Missing\" not found"),
             failure("D::d", "d.php", "Error", "Class \"Missing\" not found"),
@@ -673,14 +679,12 @@ mod tests {
 
     #[test]
     fn return_type_change_detected() {
-        let failures = vec![
-            failure(
-                "FooTest::testA",
-                "tests/FooTest.php",
-                "AssertionFailedError",
-                "Failed asserting that WP_Error Object (...) is an instance of \"array\"",
-            ),
-        ];
+        let failures = vec![failure(
+            "FooTest::testA",
+            "tests/FooTest.php",
+            "AssertionFailedError",
+            "Failed asserting that WP_Error Object (...) is an instance of \"array\"",
+        )];
 
         let result = analyze("test", &input(failures));
         assert_eq!(
@@ -736,18 +740,12 @@ mod tests {
             extract_between("Class \"Foo\\Bar\" not found", "Class \"", "\" not found"),
             Some("Foo\\Bar")
         );
-        assert_eq!(
-            extract_between("no match here", "start", "end"),
-            None
-        );
+        assert_eq!(extract_between("no match here", "start", "end"), None);
     }
 
     #[test]
     fn common_prefix_works() {
-        assert_eq!(
-            common_prefix(&["foobar", "foobaz", "fooqux"]),
-            "foo"
-        );
+        assert_eq!(common_prefix(&["foobar", "foobaz", "fooqux"]), "foo");
         assert_eq!(common_prefix(&["abc"]), "abc");
         assert_eq!(common_prefix(&[]), "");
     }

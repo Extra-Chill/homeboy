@@ -1342,6 +1342,7 @@ fn execute_git_deploy(
 }
 
 /// Deploy a component via artifact upload (rsync / extension override).
+#[allow(clippy::too_many_arguments)]
 fn execute_artifact_deploy(
     component: &Component,
     config: &DeployConfig,
@@ -1997,6 +1998,7 @@ fn find_deploy_override(target_path: &str) -> Option<(DeployOverride, ExtensionM
 }
 
 /// Deploy using extension-defined override strategy.
+#[allow(clippy::too_many_arguments)]
 fn deploy_with_override(
     ssh_client: &SshClient,
     local_path: &Path,

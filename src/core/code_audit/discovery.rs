@@ -61,10 +61,9 @@ pub fn auto_discover_groups(root: &Path) -> DiscoveryResult {
             "Root Files".to_string()
         } else {
             dir.split('/')
-                .last()
+                .next_back()
                 .unwrap_or(&dir)
-                .replace('-', " ")
-                .replace('_', " ")
+                .replace(['-', '_'], " ")
                 .split_whitespace()
                 .map(|w| {
                     let mut chars = w.chars();

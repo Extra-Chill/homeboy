@@ -381,8 +381,7 @@ fn run_rename(
         std::path::PathBuf::from(p)
     } else {
         let comp = component::resolve(component_id)?;
-        let validated = component::validate_local_path(&comp)?;
-        validated
+        component::validate_local_path(&comp)?
     };
 
     let spec = if literal {
@@ -984,8 +983,8 @@ fn extract_struct_source(struct_name: &str, content: &str) -> Option<String> {
     let mut found_open = false;
     let mut end_line = start;
 
-    for i in start..lines.len() {
-        for ch in lines[i].chars() {
+    for (i, line_content) in lines.iter().enumerate().skip(start) {
+        for ch in line_content.chars() {
             if ch == '{' {
                 depth += 1;
                 found_open = true;
@@ -1092,6 +1091,7 @@ fn apply_propagate_edits(edits: &[PropagateEdit], root: &Path) -> Result<(), hom
 // Transform
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn run_transform(
     name: Option<&str>,
     find: Option<&str>,
@@ -1119,10 +1119,12 @@ fn run_transform(
                 "Cannot use both a named transform and --find/--replace",
                 None,
                 None,
-            )
-            .into());
+            ));
         }
-        ("ad-hoc".to_string(), refactor::ad_hoc_transform(f, r, files))
+        (
+            "ad-hoc".to_string(),
+            refactor::ad_hoc_transform(f, r, files),
+        )
     } else if let Some(n) = name {
         // Named mode — load from homeboy.json
         let set = refactor::load_transform_set(&root, n)?;
@@ -1131,8 +1133,7 @@ fn run_transform(
         return Err(homeboy::Error::validation_missing_argument(vec![
             "name".to_string(),
             "--find/--replace".to_string(),
-        ])
-        .into());
+        ]));
     };
 
     // Report what we're about to do
@@ -1163,7 +1164,11 @@ fn run_transform(
             "{}: {} replacement{}",
             rule_result.id,
             rule_result.replacement_count,
-            if rule_result.replacement_count == 1 { "" } else { "s" }
+            if rule_result.replacement_count == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
 
         for m in &rule_result.matches {
@@ -1183,7 +1188,11 @@ fn run_transform(
             "result",
             "{} replacement{} applied across {} file{}",
             result.total_replacements,
-            if result.total_replacements == 1 { "" } else { "s" },
+            if result.total_replacements == 1 {
+                ""
+            } else {
+                "s"
+            },
             result.total_files,
             if result.total_files == 1 { "" } else { "s" },
         );
@@ -1192,7 +1201,11 @@ fn run_transform(
             "result",
             "{} replacement{} across {} file{} (dry-run, use --write to apply)",
             result.total_replacements,
-            if result.total_replacements == 1 { "" } else { "s" },
+            if result.total_replacements == 1 {
+                ""
+            } else {
+                "s"
+            },
             result.total_files,
             if result.total_files == 1 { "" } else { "s" },
         );

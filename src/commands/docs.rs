@@ -1914,7 +1914,7 @@ fn infer_sections_from_siblings(dir: &Path, exclude_filename: &str) -> Option<Ve
     }
 
     // Threshold: heading must appear in at least 3 files or 50% of siblings
-    let threshold = std::cmp::min(3, (sibling_count + 1) / 2);
+    let threshold = std::cmp::min(3, sibling_count.div_ceil(2));
 
     let common_set: std::collections::HashSet<&str> = heading_counts
         .iter()

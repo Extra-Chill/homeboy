@@ -495,6 +495,7 @@ fn execute_extension_command(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_extension_runtime(
     extension_id: &str,
     project_id: Option<&str>,
@@ -581,6 +582,7 @@ fn execute_extension_runtime(
 /// When `component_path_override` is provided, it is used as the component path
 /// instead of loading the component from storage. This supports `--path` overrides
 /// in commands like `homeboy test --path /alt/path`.
+#[allow(clippy::too_many_arguments)]
 pub fn build_exec_env(
     extension_id: &str,
     project_id: Option<&str>,

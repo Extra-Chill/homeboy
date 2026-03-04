@@ -83,8 +83,7 @@ pub fn run(
                     "Add components: homeboy project components add {} <component-id>",
                     target_id
                 )]),
-            )
-            .into());
+            ));
         }
 
         let json_spec = serde_json::json!({
@@ -124,8 +123,7 @@ pub fn run(
                     "Project components: {}",
                     proj.component_ids.join(", ")
                 )]),
-            )
-            .into());
+            ));
         }
 
         let json_spec = serde_json::json!({

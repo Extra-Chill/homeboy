@@ -89,12 +89,13 @@ fn parse_target(target: &str) -> Target {
 
 /// Build scp-compatible SSH args for a server connection.
 fn build_scp_args(client: &SshClient) -> Vec<String> {
-    let mut args = Vec::new();
-    args.push("-O".to_string()); // Use legacy SCP protocol (not SFTP)
-    args.push("-o".to_string());
-    args.push("StrictHostKeyChecking=no".to_string());
-    args.push("-o".to_string());
-    args.push("BatchMode=yes".to_string());
+    let mut args = vec![
+        "-O".to_string(), // Use legacy SCP protocol (not SFTP)
+        "-o".to_string(),
+        "StrictHostKeyChecking=no".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+    ];
 
     if let Some(identity_file) = &client.identity_file {
         args.push("-i".to_string());

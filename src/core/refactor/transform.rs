@@ -127,28 +127,27 @@ pub fn load_transform_set(root: &Path, name: &str) -> Result<TransformSet> {
         )
     })?;
 
-    let transforms = data
-        .get(TRANSFORMS_KEY)
-        .ok_or_else(|| {
-            Error::config_missing_key(
-                TRANSFORMS_KEY.to_string(),
-                Some(json_path.to_string_lossy().to_string()),
-            )
-        })?;
+    let transforms = data.get(TRANSFORMS_KEY).ok_or_else(|| {
+        Error::config_missing_key(
+            TRANSFORMS_KEY.to_string(),
+            Some(json_path.to_string_lossy().to_string()),
+        )
+    })?;
 
-    let set_value = transforms
-        .get(name)
-        .ok_or_else(|| {
-            // List available transforms for a helpful error
-            let available: Vec<&str> = transforms
-                .as_object()
-                .map(|o| o.keys().map(|k| k.as_str()).collect::<Vec<_>>())
-                .unwrap_or_default();
-            Error::internal_io(
-                format!("Transform set '{}' not found. Available: {:?}", name, available),
-                Some("transform.load".to_string()),
-            )
-        })?;
+    let set_value = transforms.get(name).ok_or_else(|| {
+        // List available transforms for a helpful error
+        let available: Vec<&str> = transforms
+            .as_object()
+            .map(|o| o.keys().map(|k| k.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        Error::internal_io(
+            format!(
+                "Transform set '{}' not found. Available: {:?}",
+                name, available
+            ),
+            Some("transform.load".to_string()),
+        )
+    })?;
 
     serde_json::from_value(set_value.clone()).map_err(|e| {
         Error::internal_io(
@@ -192,7 +191,7 @@ pub fn apply_transforms(
     let compiled_rules: Vec<(&TransformRule, Regex)> = set
         .rules
         .iter()
-        .filter(|r| rule_filter.map_or(true, |f| r.id == f))
+        .filter(|r| rule_filter.is_none_or(|f| r.id == f))
         .map(|r| {
             let regex = Regex::new(&r.find).map_err(|e| {
                 Error::internal_io(
@@ -208,7 +207,10 @@ pub fn apply_transforms(
         if let Some(filter) = rule_filter {
             let available: Vec<&str> = set.rules.iter().map(|r| r.id.as_str()).collect();
             return Err(Error::internal_io(
-                format!("Rule '{}' not found in transform set '{}'. Available: {:?}", filter, name, available),
+                format!(
+                    "Rule '{}' not found in transform set '{}'. Available: {:?}",
+                    filter, name, available
+                ),
                 Some("transform.apply".to_string()),
             ));
         }
@@ -461,11 +463,15 @@ mod tests {
     fn line_context_simple_replace() {
         let regex = Regex::new("rest_forbidden").unwrap();
         let content = "if ($code === 'rest_forbidden') {\n    return false;\n}\n";
-        let (new, matches) = apply_line_context(&regex, "ability_invalid_permissions", content, "test.php");
+        let (new, matches) =
+            apply_line_context(&regex, "ability_invalid_permissions", content, "test.php");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].line, 1);
         assert_eq!(matches[0].before, "if ($code === 'rest_forbidden') {");
-        assert_eq!(matches[0].after, "if ($code === 'ability_invalid_permissions') {");
+        assert_eq!(
+            matches[0].after,
+            "if ($code === 'ability_invalid_permissions') {"
+        );
         assert!(new.contains("ability_invalid_permissions"));
         assert!(!new.contains("rest_forbidden"));
     }
@@ -559,24 +565,18 @@ mod tests {
             "<?php\n$this->assertIsArray($result);\n$code = 'rest_forbidden';\n",
         )
         .unwrap();
-        fs::write(
-            root.join("src.php"),
-            "<?php\n$code = 'rest_forbidden';\n",
-        )
-        .unwrap();
+        fs::write(root.join("src.php"), "<?php\n$code = 'rest_forbidden';\n").unwrap();
 
         let set = TransformSet {
             description: "test".into(),
-            rules: vec![
-                TransformRule {
-                    id: "fix_code".into(),
-                    description: "Fix error code".into(),
-                    find: "rest_forbidden".into(),
-                    replace: "ability_invalid_permissions".into(),
-                    files: "tests/**/*.php".into(),
-                    context: "line".into(),
-                },
-            ],
+            rules: vec![TransformRule {
+                id: "fix_code".into(),
+                description: "Fix error code".into(),
+                find: "rest_forbidden".into(),
+                replace: "ability_invalid_permissions".into(),
+                files: "tests/**/*.php".into(),
+                context: "line".into(),
+            }],
         };
 
         let result = apply_transforms(root, "test", &set, false, None).unwrap();
@@ -668,11 +668,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        fs::write(
-            root.join("test.php"),
-            "old_a and old_b\n",
-        )
-        .unwrap();
+        fs::write(root.join("test.php"), "old_a and old_b\n").unwrap();
 
         let set = TransformSet {
             description: "test".into(),

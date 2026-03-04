@@ -5,13 +5,16 @@
 
 pub mod add;
 pub mod move_items;
-pub mod transform;
 mod rename;
+pub mod transform;
 
 pub use add::{add_import, fixes_from_audit, AddResult};
 pub use move_items::{move_items, ImportRewrite, ItemKind, MoveResult, MovedItem};
-pub use transform::{ad_hoc_transform, apply_transforms, load_transform_set, TransformResult, TransformRule, TransformSet};
 pub use rename::{
     apply_renames, find_references, generate_renames, CaseVariant, FileEdit, FileRename, Reference,
     RenameResult, RenameScope, RenameSpec, RenameWarning,
+};
+pub use transform::{
+    ad_hoc_transform, apply_transforms, load_transform_set, TransformResult, TransformRule,
+    TransformSet,
 };

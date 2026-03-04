@@ -350,7 +350,7 @@ fn validate_code_quality(component: &Component) -> Result<()> {
 
     Err(Error::validation_invalid_argument(
         "code_quality",
-        &failures.join("; "),
+        failures.join("; "),
         None,
         Some(vec![
             "Fix the issues above before releasing".to_string(),

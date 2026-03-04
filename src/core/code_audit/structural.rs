@@ -75,10 +75,7 @@ pub fn analyze_structure(root: &Path) -> Vec<Finding> {
             // Check line count
             let line_count = content.lines().count();
             if line_count > GOD_FILE_LINE_THRESHOLD {
-                let suggestion = format!(
-                    "Consider decomposing into focused modules. \
-                     Use `homeboy refactor move` to extract related groups of items."
-                );
+                let suggestion = "Consider decomposing into focused modules.                      Use `homeboy refactor move` to extract related groups of items.".to_string();
                 findings.push(Finding {
                     convention: "structural".to_string(),
                     severity: Severity::Warning,

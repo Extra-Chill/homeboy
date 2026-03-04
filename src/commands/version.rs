@@ -11,6 +11,7 @@ use super::CmdResult;
 
 #[derive(Serialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum VersionOutput {
     Show(VersionShowOutput),
     Bump(VersionBumpOutput),

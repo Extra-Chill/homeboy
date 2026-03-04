@@ -897,7 +897,7 @@ pub fn changes(
             // Use component version for alignment checking
             let current_version = component
                 .as_ref()
-                .and_then(|c| crate::version::get_component_version(c));
+                .and_then(crate::version::get_component_version);
             detect_baseline_with_version(&path, current_version.as_deref())?
         }
     };

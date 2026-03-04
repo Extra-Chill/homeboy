@@ -181,6 +181,7 @@ pub fn run(
 
 #[derive(Serialize)]
 #[serde(tag = "command")]
+#[allow(clippy::large_enum_variant)]
 pub enum ExtensionOutput {
     #[serde(rename = "extension.list")]
     List {
@@ -509,6 +510,7 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
     Ok((ExtensionOutput::Show { extension: detail }, 0))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_extension(
     extension_id: &str,
     project: Option<String>,
