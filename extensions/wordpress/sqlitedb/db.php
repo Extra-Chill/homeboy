@@ -74,17 +74,36 @@ class SQLite_DB extends wpdb {
      * @return string SQLite-compatible CREATE TABLE + CREATE INDEX statements.
      */
     private function translate_create_table( $query ) {
-        // Strip MySQL table options after the closing parenthesis
-        // (ENGINE=InnoDB, DEFAULT CHARSET=..., COLLATE=..., AUTO_INCREMENT=N)
-        $cleaned = preg_replace( '/\)\s*(?:ENGINE|DEFAULT|COLLATE|AUTO_INCREMENT)\b.*/is', ')', $query );
-
-        // Extract table name and body
-        if ( ! preg_match( '/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?(\w+)[`"]?\s*\((.+)\)\s*$/is', $cleaned, $m ) ) {
+        // Extract table name by finding the opening parenthesis of the column list.
+        if ( ! preg_match( '/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?(\w+)[`"]?\s*\(/is', $query, $m, PREG_OFFSET_CAPTURE ) ) {
             return $query; // Not a recognizable CREATE TABLE — return as-is
         }
 
-        $table_name = $m[1];
-        $body       = $m[2];
+        $table_name = $m[1][0];
+        $open_pos   = $m[0][1] + strlen( $m[0][0] ); // position right after the opening "("
+
+        // Find the matching closing parenthesis by tracking depth.
+        // This avoids the previous regex that incorrectly matched "default"
+        // inside column definitions (e.g. "varchar(255) default NULL") and
+        // stripped the rest of the statement, silently dropping meta tables.
+        $depth = 1;
+        $len   = strlen( $query );
+        $close_pos = $len;
+
+        for ( $i = $open_pos; $i < $len; $i++ ) {
+            if ( $query[ $i ] === '(' ) {
+                $depth++;
+            } elseif ( $query[ $i ] === ')' ) {
+                $depth--;
+                if ( $depth === 0 ) {
+                    $close_pos = $i;
+                    break;
+                }
+            }
+        }
+
+        // Body is everything between the matched parentheses (exclusive).
+        $body = substr( $query, $open_pos, $close_pos - $open_pos );
 
         // Split body into column/constraint definitions (respecting parentheses)
         $defs        = array();
@@ -478,6 +497,17 @@ class SQLite_DB extends wpdb {
                         $this->num_queries++;
                         return 0;
                     }
+                }
+
+                // Translate MySQL INSERT ... ON DUPLICATE KEY UPDATE to SQLite.
+                // WordPress 6.9+ uses this in add_option() for upsert semantics.
+                // SQLite does not support this syntax — use INSERT OR REPLACE instead.
+                if ( preg_match( '/^\s*INSERT\s+INTO\b/i', $query ) && stripos( $query, 'ON DUPLICATE KEY UPDATE' ) !== false ) {
+                    // Strip the ON DUPLICATE KEY UPDATE clause entirely.
+                    // INSERT OR REPLACE achieves the same upsert effect when there's
+                    // a UNIQUE constraint on the conflicting column (which option_name has).
+                    $query = preg_replace( '/\s+ON\s+DUPLICATE\s+KEY\s+UPDATE\b.*/is', '', $query );
+                    $query = preg_replace( '/^\s*INSERT\s+INTO\b/i', 'INSERT OR REPLACE INTO', $query );
                 }
 
                 // CREATE TABLE translation may produce multiple statements
