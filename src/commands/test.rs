@@ -68,8 +68,8 @@ pub struct TestArgs {
     #[command(flatten)]
     setting_args: SettingArgs,
 
-    /// Additional arguments to pass to the test runner (after --)
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    /// Additional arguments to pass to the test runner (must follow --)
+    #[arg(last = true)]
     args: Vec<String>,
 
     #[command(flatten)]
@@ -163,6 +163,77 @@ fn no_extensions_error(component: &Component) -> Error {
         "Add a extension: homeboy component set {} --extension wordpress",
         component.id
     ))
+}
+
+/// Filter out homeboy-owned flags from trailing args before passing to extension scripts.
+///
+/// Clap's `trailing_var_arg = true` + `allow_hyphen_values = true` captures all arguments
+/// after the positional component arg — including flags that Clap also parsed into named
+/// fields. This means `--analyze`, `--drift`, etc. end up in both `args.analyze = true`
+/// AND `args.args = ["--analyze"]`. The extension test runner passes `args.args` through
+/// to the underlying tool (e.g. PHPUnit), which then fails on unknown flags.
+///
+/// This function strips homeboy-owned flags so only genuine passthrough args (like
+/// `--filter=TestName`) reach the extension script.
+fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
+    // Homeboy-owned boolean flags that should never reach the extension runner
+    const HOMEBOY_FLAGS: &[&str] = &[
+        "--analyze",
+        "--drift",
+        "--scaffold",
+        "--write",
+        "--baseline",
+        "--ignore-baseline",
+        "--ratchet",
+        "--skip-lint",
+        "--fix",
+        "--coverage",
+        "--json",
+    ];
+
+    // Homeboy-owned flags that take a value (--flag value or --flag=value)
+    const HOMEBOY_VALUE_FLAGS: &[&str] = &[
+        "--coverage-min",
+        "--since",
+        "--scaffold-file",
+        "--setting",
+        "--path",
+    ];
+
+    let mut filtered = Vec::new();
+    let mut skip_next = false;
+
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        // Check boolean flags (exact match)
+        if HOMEBOY_FLAGS.contains(&arg.as_str()) {
+            continue;
+        }
+
+        // Check value flags: --flag=value (single arg) or --flag value (two args)
+        let is_value_flag = HOMEBOY_VALUE_FLAGS.iter().any(|f| {
+            if arg.starts_with(&format!("{}=", f)) {
+                return true; // --flag=value form, skip this arg only
+            }
+            if arg == *f {
+                skip_next = true; // --flag value form, skip this and next
+                return true;
+            }
+            false
+        });
+
+        if is_value_flag {
+            continue;
+        }
+
+        filtered.push(arg.clone());
+    }
+
+    filtered
 }
 
 fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> {
@@ -265,7 +336,8 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
         runner = runner.env("HOMEBOY_COVERAGE_MIN", &format!("{}", min));
     }
 
-    let output = runner.script_args(&args.args).run()?;
+    let passthrough_args = filter_homeboy_flags(&args.args);
+    let output = runner.script_args(&passthrough_args).run()?;
 
     let status = if output.success { "passed" } else { "failed" };
 
@@ -389,7 +461,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     let comp_id = args.comp.id();
 
     // Filter hint when tests fail and no passthrough args were used
-    if !output.success && args.args.is_empty() {
+    if !output.success && passthrough_args.is_empty() {
         hints.push(format!(
             "To run specific tests: homeboy test {} -- --filter=TestName",
             comp_id
@@ -856,5 +928,136 @@ fn run_scaffold(
             },
             0,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_strips_boolean_flags() {
+        let args = vec![
+            "--analyze".to_string(),
+            "--filter=SomeTest".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=SomeTest"]);
+    }
+
+    #[test]
+    fn filter_strips_multiple_boolean_flags() {
+        let args = vec![
+            "--analyze".to_string(),
+            "--drift".to_string(),
+            "--scaffold".to_string(),
+            "--baseline".to_string(),
+            "--ignore-baseline".to_string(),
+            "--ratchet".to_string(),
+            "--skip-lint".to_string(),
+            "--fix".to_string(),
+            "--coverage".to_string(),
+            "--write".to_string(),
+            "--json".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_strips_value_flags_space_separated() {
+        let args = vec![
+            "--since".to_string(),
+            "v0.36.0".to_string(),
+            "--filter=SomeTest".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=SomeTest"]);
+    }
+
+    #[test]
+    fn filter_strips_value_flags_equals_form() {
+        let args = vec![
+            "--since=v0.36.0".to_string(),
+            "--filter=SomeTest".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=SomeTest"]);
+    }
+
+    #[test]
+    fn filter_strips_coverage_min() {
+        let args = vec![
+            "--coverage-min".to_string(),
+            "80".to_string(),
+            "--filter=SomeTest".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=SomeTest"]);
+    }
+
+    #[test]
+    fn filter_strips_scaffold_file() {
+        let args = vec![
+            "--scaffold-file".to_string(),
+            "inc/Core/Foo.php".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_strips_setting() {
+        let args = vec![
+            "--setting".to_string(),
+            "database_type=mysql".to_string(),
+            "--filter=SomeTest".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=SomeTest"]);
+    }
+
+    #[test]
+    fn filter_preserves_unknown_flags() {
+        let args = vec![
+            "--filter=SomeTest".to_string(),
+            "--group".to_string(),
+            "ajax".to_string(),
+            "--verbose".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(args, result);
+    }
+
+    #[test]
+    fn filter_handles_empty() {
+        let result = filter_homeboy_flags(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_handles_mixed() {
+        let args = vec![
+            "--analyze".to_string(),
+            "--skip-lint".to_string(),
+            "--since".to_string(),
+            "v0.35.0".to_string(),
+            "--filter=FlowAbilities".to_string(),
+            "--coverage-min=80".to_string(),
+            "--verbose".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=FlowAbilities", "--verbose"]);
+    }
+
+    #[test]
+    fn filter_strips_path_flag() {
+        let args = vec![
+            "--path".to_string(),
+            "/tmp/checkout".to_string(),
+            "--filter=SomeTest".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=SomeTest"]);
     }
 }
