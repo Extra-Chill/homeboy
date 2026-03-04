@@ -129,6 +129,47 @@ enum RefactorCommand {
         #[arg(long)]
         write: bool,
     },
+
+    /// Apply pattern-based find/replace transforms across a codebase
+    ///
+    /// Rules are defined in homeboy.json under the "transforms" key,
+    /// or passed ad-hoc via --find/--replace/--files flags.
+    ///
+    /// Named:  `refactor transform wp69_migration --component data-machine`
+    /// Ad-hoc: `refactor transform --find "old" --replace "new" --files "**/*.php" --component C`
+    Transform {
+        /// Transform set name (from homeboy.json transforms key)
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+
+        /// Regex pattern to find (ad-hoc mode)
+        #[arg(long, value_name = "REGEX")]
+        find: Option<String>,
+
+        /// Replacement template with $1, $2 capture group refs (ad-hoc mode)
+        #[arg(long, value_name = "TEMPLATE")]
+        replace: Option<String>,
+
+        /// Glob pattern for files to apply to (ad-hoc mode, default: **/*)
+        #[arg(long, value_name = "GLOB", default_value = "**/*")]
+        files: String,
+
+        /// Only apply a specific rule ID within a named transform set
+        #[arg(long, value_name = "RULE_ID")]
+        rule: Option<String>,
+
+        /// Component ID (uses its local_path as the root)
+        #[arg(short, long)]
+        component: Option<String>,
+
+        /// Directory path (alternative to --component)
+        #[arg(long)]
+        path: Option<String>,
+
+        /// Apply changes to disk (default is dry-run)
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RefactorOutput> {
@@ -196,6 +237,26 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             path.as_deref(),
             write,
         ),
+
+        RefactorCommand::Transform {
+            name,
+            find,
+            replace,
+            files,
+            rule,
+            component: component_id,
+            path,
+            write,
+        } => run_transform(
+            name.as_deref(),
+            find.as_deref(),
+            replace.as_deref(),
+            &files,
+            rule.as_deref(),
+            component_id.as_deref(),
+            path.as_deref(),
+            write,
+        ),
     }
 }
 
@@ -251,6 +312,12 @@ pub enum RefactorOutput {
         edits: Vec<PropagateEdit>,
         dry_run: bool,
         applied: bool,
+    },
+
+    #[serde(rename = "refactor.transform")]
+    Transform {
+        #[serde(flatten)]
+        result: homeboy::refactor::TransformResult,
     },
 }
 
@@ -1019,4 +1086,118 @@ fn apply_propagate_edits(edits: &[PropagateEdit], root: &Path) -> Result<(), hom
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Transform
+// ============================================================================
+
+fn run_transform(
+    name: Option<&str>,
+    find: Option<&str>,
+    replace: Option<&str>,
+    files: &str,
+    rule_filter: Option<&str>,
+    component_id: Option<&str>,
+    path: Option<&str>,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    // Resolve root directory
+    let root = if let Some(p) = path {
+        PathBuf::from(p)
+    } else {
+        let comp = component::resolve(component_id)?;
+        component::validate_local_path(&comp)?
+    };
+
+    // Resolve transform set: ad-hoc or named
+    let (set_name, set) = if let (Some(f), Some(r)) = (find, replace) {
+        // Ad-hoc mode
+        if name.is_some() {
+            return Err(homeboy::Error::validation_invalid_argument(
+                "name",
+                "Cannot use both a named transform and --find/--replace",
+                None,
+                None,
+            )
+            .into());
+        }
+        ("ad-hoc".to_string(), refactor::ad_hoc_transform(f, r, files))
+    } else if let Some(n) = name {
+        // Named mode — load from homeboy.json
+        let set = refactor::load_transform_set(&root, n)?;
+        (n.to_string(), set)
+    } else {
+        return Err(homeboy::Error::validation_missing_argument(vec![
+            "name".to_string(),
+            "--find/--replace".to_string(),
+        ])
+        .into());
+    };
+
+    // Report what we're about to do
+    homeboy::log_status!(
+        "transform",
+        "{} ({} rule{})",
+        set_name,
+        set.rules.len(),
+        if set.rules.len() == 1 { "" } else { "s" }
+    );
+
+    if !set.description.is_empty() {
+        homeboy::log_status!("info", "{}", set.description);
+    }
+
+    // Apply transforms
+    let result = refactor::apply_transforms(&root, &set_name, &set, write, rule_filter)?;
+
+    // Report results to stderr
+    for rule_result in &result.rules {
+        if rule_result.matches.is_empty() {
+            homeboy::log_status!("skip", "{}: no matches", rule_result.id);
+            continue;
+        }
+
+        homeboy::log_status!(
+            "rule",
+            "{}: {} replacement{}",
+            rule_result.id,
+            rule_result.replacement_count,
+            if rule_result.replacement_count == 1 { "" } else { "s" }
+        );
+
+        for m in &rule_result.matches {
+            homeboy::log_status!("  match", "{}:{}", m.file, m.line);
+            if !m.before.is_empty() {
+                homeboy::log_status!("  -", "{}", m.before.trim());
+                homeboy::log_status!("  +", "{}", m.after.trim());
+            }
+        }
+    }
+
+    // Summary
+    if result.total_replacements == 0 {
+        homeboy::log_status!("result", "No matches found");
+    } else if write {
+        homeboy::log_status!(
+            "result",
+            "{} replacement{} applied across {} file{}",
+            result.total_replacements,
+            if result.total_replacements == 1 { "" } else { "s" },
+            result.total_files,
+            if result.total_files == 1 { "" } else { "s" },
+        );
+    } else {
+        homeboy::log_status!(
+            "result",
+            "{} replacement{} across {} file{} (dry-run, use --write to apply)",
+            result.total_replacements,
+            if result.total_replacements == 1 { "" } else { "s" },
+            result.total_files,
+            if result.total_files == 1 { "" } else { "s" },
+        );
+    }
+
+    let exit_code = if result.total_replacements == 0 { 1 } else { 0 };
+    Ok((RefactorOutput::Transform { result }, exit_code))
 }
