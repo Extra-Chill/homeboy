@@ -323,8 +323,8 @@
       "id": "database_type",
       "label": "Database Type",
       "type": "string",
-      "default": "sqlite",
-      "description": "Database backend for tests. Valid values: 'sqlite' (in-memory, fastest) or 'mysql' (for production parity)"
+      "default": "auto",
+      "description": "Database backend for tests. 'auto' (default) tries MySQL first, falls back to SQLite. Use 'mysql' or 'sqlite' to force a specific backend."
     },
     {
       "id": "mysql_host",
