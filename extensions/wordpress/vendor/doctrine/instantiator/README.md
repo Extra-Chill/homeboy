@@ -1,4 +1,4 @@
-# Doctrine Instantiator
+# Instantiator
 
 This library provides a way of avoiding usage of constructors when instantiating PHP classes.
 

@@ -688,4 +688,6 @@ return array(
     'TheSeer\\Tokenizer\\TokenCollectionException' => $vendorDir . '/theseer/tokenizer/src/TokenCollectionException.php',
     'TheSeer\\Tokenizer\\Tokenizer' => $vendorDir . '/theseer/tokenizer/src/Tokenizer.php',
     'TheSeer\\Tokenizer\\XMLSerializer' => $vendorDir . '/theseer/tokenizer/src/XMLSerializer.php',
+    'WP_CLI' => $vendorDir . '/wp-cli/wp-cli/php/class-wp-cli.php',
+    'WP_CLI_Command' => $vendorDir . '/wp-cli/wp-cli/php/class-wp-cli-command.php',
 );

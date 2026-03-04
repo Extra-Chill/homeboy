@@ -262,6 +262,28 @@ class SQLite_DB extends wpdb {
         $this->rows_affected = 0;
         $this->insert_id = 0;
 
+        // Translate MySQL transaction/session commands to SQLite equivalents.
+        // WP_UnitTestCase calls these in set_up()/tear_down() for test isolation.
+        $trimmed_check = trim( $query );
+        if ( preg_match( '/^SET\s+autocommit/i', $trimmed_check ) ) {
+            // SQLite doesn't have autocommit toggle — it's always autocommit unless in a transaction
+            $this->num_queries++;
+            return true;
+        }
+        if ( preg_match( '/^START\s+TRANSACTION/i', $trimmed_check ) ) {
+            $query = 'BEGIN TRANSACTION';
+        }
+        if ( preg_match( '/^SET\s+(default_storage_engine|storage_engine)/i', $trimmed_check ) ) {
+            // MySQL storage engine setting — no SQLite equivalent
+            $this->num_queries++;
+            return true;
+        }
+        // SHOW, DESCRIBE, SET — various MySQL-only statements that should be no-ops
+        if ( preg_match( '/^(SHOW|DESCRIBE|SET\s+(?:NAMES|CHARACTER|GLOBAL|SESSION|@@))/i', $trimmed_check ) ) {
+            $this->num_queries++;
+            return true;
+        }
+
         try {
             // Use exec for statements that do not return results
             $trimmed = ltrim($query);
@@ -448,6 +470,22 @@ class SQLite_DB extends wpdb {
     // Match signature of wpdb::check_connection
     public function check_connection( $allow_bail = true ) {
         // With PDO we assume connection is OK (throwing exceptions otherwise)
+        return true;
+    }
+
+    /**
+     * Override db_connect to prevent MySQL connection attempts.
+     *
+     * WP_UnitTestCase::set_up() calls $wpdb->db_connect() on every test.
+     * Without this override, the parent wpdb::db_connect() tries to open
+     * a MySQL connection, which fails with "No such file or directory"
+     * (missing MySQL socket) and calls wp_die().
+     *
+     * @param bool $allow_bail Optional. Not used for SQLite.
+     * @return bool Always true — the PDO connection is established in __construct().
+     */
+    public function db_connect( $allow_bail = true ) {
+        $this->has_connected = true;
         return true;
     }
 }

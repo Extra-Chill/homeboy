@@ -1026,6 +1026,7 @@ namespace {
          *
          * @since 3.0.0
          * @var callable
+         * @phpstan-var ''|callable(): void
          */
         public $admin_header_callback;
         /**
@@ -1033,6 +1034,7 @@ namespace {
          *
          * @since 3.0.0
          * @var callable
+         * @phpstan-var ''|callable(): void
          */
         public $admin_image_div_callback;
         /**
@@ -1044,6 +1046,8 @@ namespace {
          *                                           Default empty string.
          * @param callable $admin_image_div_callback Optional. Custom image div output callback.
          *                                           Default empty string.
+         * @phpstan-param ''|callable(): void $admin_header_callback
+         * @phpstan-param ''|callable(): void $admin_image_div_callback
          */
         public function __construct($admin_header_callback = '', $admin_image_div_callback = '')
         {
@@ -1145,6 +1149,7 @@ namespace {
          *
          * @since 2.1.0
          * @var callable
+         * @phpstan-var ''|callable(): void
          */
         public $admin_header_callback;
         /**
@@ -1152,6 +1157,7 @@ namespace {
          *
          * @since 3.0.0
          * @var callable
+         * @phpstan-var ''|callable(): void
          */
         public $admin_image_div_callback;
         /**
@@ -1169,6 +1175,7 @@ namespace {
          * @param callable $admin_header_callback    Administration header callback.
          * @param callable $admin_image_div_callback Optional. Custom image div output callback.
          *                                           Default empty string.
+         * @phpstan-param ''|callable(): void $admin_image_div_callback
          */
         public function __construct($admin_header_callback, $admin_image_div_callback = '')
         {
@@ -25417,7 +25424,7 @@ namespace SimplePie {
          * @deprecated Use `get_status_code()` method.
          */
         public $status_code = 0;
-        /** @var int<0,max> Number of redirect that were already performed during this request sequence. */
+        /** @var non-negative-int Number of redirect that were already performed during this request sequence. */
         public $redirects = 0;
         /** @var ?string */
         public $error;
@@ -25693,7 +25700,7 @@ namespace SimplePie\HTTP {
          * Prepare headers (take care of proxies headers)
          *
          * @param string  $headers Raw headers
-         * @param int<0,max> $count Redirection count. Default to 1.
+         * @param non-negative-int $count Redirection count. Default to 1.
          *
          * @return string
          */
@@ -30384,14 +30391,14 @@ namespace {
          * The ability execute callback.
          *
          * @since 6.9.0
-         * @var callable( mixed $input= ): (mixed|WP_Error)
+         * @var callable(mixed=): (mixed|WP_Error)
          */
         protected $execute_callback;
         /**
          * The optional ability permission callback.
          *
          * @since 6.9.0
-         * @var callable( mixed $input= ): (bool|WP_Error)
+         * @var callable(mixed=): (bool|WP_Error)
          */
         protected $permission_callback;
         /**
@@ -40978,6 +40985,18 @@ namespace {
         public function get_etag($load)
         {
         }
+        /**
+         * Gets a dependency warning message for a handle.
+         *
+         * @since 6.9.1
+         *
+         * @param string   $handle                     Handle with missing dependencies.
+         * @param string[] $missing_dependency_handles Missing dependency handles.
+         * @return string Formatted, localized warning message.
+         */
+        protected function get_dependency_warning_message($handle, $missing_dependency_handles)
+        {
+        }
     }
     /**
      * Class _WP_Dependency
@@ -45060,6 +45079,7 @@ namespace {
          *
          * @since 6.2.0
          * @var string
+         * @phpstan-var 'characters_excluding_spaces'|'characters_including_spaces'|'words'
          */
         public $word_count_type;
         /**
@@ -45250,6 +45270,7 @@ namespace {
          *
          * @return string Localized word count type. Possible values are `characters_excluding_spaces`,
          *                `characters_including_spaces`, or `words`. Defaults to `words`.
+         * @phpstan-return 'characters_excluding_spaces'|'characters_including_spaces'|'words'
          */
         public function get_word_count_type()
         {
@@ -51144,7 +51165,7 @@ namespace {
          *     ) );
          *
          * @since 2.0.0
-         * @since x.y.z Support was added for a numerically indexed array of strings for the capabilities array.
+         * @since 6.9.0 Support was added for a numerically indexed array of strings for the capabilities array.
          *
          * @param string                               $role         Role name.
          * @param string                               $display_name Role display name.
@@ -51883,6 +51904,18 @@ namespace {
          * @since 2.8.0
          */
         public function reset()
+        {
+        }
+        /**
+         * Gets a script-specific dependency warning message.
+         *
+         * @since 6.9.1
+         *
+         * @param string   $handle                     Script handle with missing dependencies.
+         * @param string[] $missing_dependency_handles Missing dependency handles.
+         * @return string Formatted, localized warning message.
+         */
+        protected function get_dependency_warning_message($handle, $missing_dependency_handles)
         {
         }
     }
@@ -52980,6 +53013,18 @@ namespace {
          * @since 3.3.0
          */
         public function reset()
+        {
+        }
+        /**
+         * Gets a style-specific dependency warning message.
+         *
+         * @since 6.9.1
+         *
+         * @param string   $handle                     Style handle with missing dependencies.
+         * @param string[] $missing_dependency_handles Missing dependency handles.
+         * @return string Formatted, localized warning message.
+         */
+        protected function get_dependency_warning_message($handle, $missing_dependency_handles)
         {
         }
     }
@@ -58574,7 +58619,7 @@ namespace {
      *
      * @since 2.8.0
      * @since 4.4.0 Moved to its own file from wp-includes/widgets.php
-     * @phpstan-template T of array<string, mixed>
+     * @phpstan-template T of array = array<string, mixed>
      */
     #[\AllowDynamicProperties]
     class WP_Widget
@@ -58758,6 +58803,7 @@ namespace {
          *
          * @param string $field_name Field name.
          * @return string Name attribute for `$field_name`.
+         * @phpstan-return non-falsy-string
          */
         public function get_field_name($field_name)
         {
@@ -58773,6 +58819,7 @@ namespace {
          *
          * @param string $field_name Field name.
          * @return string ID attribute for `$field_name`.
+         * @phpstan-return non-falsy-string
          */
         public function get_field_id($field_name)
         {
@@ -58861,6 +58908,7 @@ namespace {
          * @phpstan-param int|array{
          *   number?: int,
          * } $widget_args
+         * @final
          * @phpstan-return void
          */
         public function display_callback($args, $widget_args = 1)
@@ -58874,6 +58922,7 @@ namespace {
          * @global array $wp_registered_widgets
          *
          * @param int $deprecated Not used.
+         * @final
          * @phpstan-return void
          */
         public function update_callback($deprecated = 1)
@@ -58894,6 +58943,7 @@ namespace {
          * @phpstan-param int|array{
          *   number?: int,
          * } $widget_args
+         * @final
          */
         public function form_callback($widget_args = 1)
         {
@@ -72889,7 +72939,7 @@ namespace {
      * @since 4.4.0
      *
      * @link https://www.php.net/manual/en/class.arrayaccess.php
-     * @phpstan-template T of array
+     * @phpstan-template T of array = array<string, mixed>
      * @phpstan-implements ArrayAccess<key-of<T>, value-of<T>>
      */
     #[\AllowDynamicProperties]
@@ -85242,7 +85292,7 @@ namespace Avifinfo {
     /**
      * Reads an unsigned integer with most significant bits first.
      *
-     * @param binary string $input     Must be at least $num_bytes-long.
+     * @param string $input     Must be at least $num_bytes-long.
      * @param int           $num_bytes Number of parsed bytes.
      * @return int                     Value.
      */
@@ -85254,7 +85304,7 @@ namespace Avifinfo {
      *
      * @param stream               $handle    Bytes will be read from this resource.
      * @param int                  $num_bytes Number of bytes read. Must be greater than 0.
-     * @return binary string|false            The raw bytes or false on failure.
+     * @return string|false            The raw bytes or false on failure.
      */
     function read($handle, $num_bytes)
     {
@@ -89317,6 +89367,7 @@ namespace {
      * @param int          $attachment_id Attachment ID for modification.
      * @param string|array $args          Optional. Override defaults.
      * @return string HTML form for attachment.
+     * @phpstan-return non-falsy-string
      */
     function get_media_item($attachment_id, $args = \null)
     {
@@ -94294,6 +94345,7 @@ namespace {
      *                                       e.g. `id="search-submit"`, though the array format is generally preferred.
      *                                       Default empty string.
      * @return string Submit button HTML.
+     * @phpstan-return non-falsy-string
      */
     function get_submit_button($text = '', $type = 'primary large', $name = 'submit', $wrap = \true, $other_attributes = '')
     {
@@ -104589,7 +104641,7 @@ namespace {
      *     ) );
      *
      * @since 2.0.0
-     * @since x.y.z Support was added for a numerically indexed array of strings for the capabilities array.
+     * @since 6.9.0 Support was added for a numerically indexed array of strings for the capabilities array.
      *
      * @param string                               $role         Role name.
      * @param string                               $display_name Display name for role.
@@ -116003,6 +116055,9 @@ namespace {
      *
      * @param string|array|object $data Data that might be serialized.
      * @return mixed A scalar data.
+     * @phpstan-template T of mixed
+     * @phpstan-param T $data
+     * @phpstan-return (T is array|object|string ? string : T)
      */
     function maybe_serialize($data)
     {
@@ -124230,6 +124285,7 @@ namespace {
      *
      * @return string Locale-specific word count type. Possible values are `characters_excluding_spaces`,
      *                `characters_including_spaces`, or `words`. Defaults to `words`.
+     * @phpstan-return 'characters_excluding_spaces'|'characters_including_spaces'|'words'
      */
     function wp_get_word_count_type()
     {
@@ -141980,6 +142036,7 @@ namespace {
      *
      * @param string $type The type of suffix to retrieve.
      * @return string The script suffix.
+     * @phpstan-return ''|'.min'
      */
     function wp_scripts_get_suffix($type = '')
     {
@@ -149018,6 +149075,8 @@ namespace {
      * @global WP_Widget_Factory $wp_widget_factory
      *
      * @param string|WP_Widget $widget Either the name of a `WP_Widget` subclass or an instance of a `WP_Widget` subclass.
+     * @phpstan-param class-string<\WP_Widget>|\WP_Widget $widget
+     * @phpstan-return void
      */
     function register_widget($widget)
     {
