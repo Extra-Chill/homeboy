@@ -3,6 +3,7 @@ set -euo pipefail
 
 FAILED_STEP=""
 FAILURE_OUTPUT=""
+FAILURE_REPLAY_MODE="full"
 
 # Step filtering: HOMEBOY_STEP=phpunit,lint runs only those steps.
 # HOMEBOY_SKIP=lint,phpstan skips those steps.
@@ -24,7 +25,10 @@ print_failure_summary() {
         echo "============================================"
         echo "BUILD FAILED: $FAILED_STEP"
         echo "============================================"
-        if [ -n "$FAILURE_OUTPUT" ]; then
+        if [ "$FAILURE_REPLAY_MODE" = "none" ]; then
+            echo ""
+            echo "See PHPUnit output above (not replayed)."
+        elif [ -n "$FAILURE_OUTPUT" ]; then
             echo ""
             echo "Error details:"
             echo "$FAILURE_OUTPUT"
@@ -489,7 +493,7 @@ fi
 
 if [ $phpunit_exit -ne 0 ]; then
     FAILED_STEP="PHPUnit tests"
-    FAILURE_OUTPUT=$(tail -30 "$PHPUNIT_TMPFILE")
+    FAILURE_REPLAY_MODE="none"
     rm -f "$PHPUNIT_TMPFILE"
     # Clean up auto-created test database
     if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
