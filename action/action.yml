@@ -59,11 +59,23 @@ inputs:
     description: 'Automatically file a GitHub issue on non-PR failures (default: false)'
     required: false
     default: 'false'
+  autofix:
+    description: 'If true, attempt safe autofixes on PR failures, commit, push, and re-run commands'
+    required: false
+    default: 'false'
+  autofix-commands:
+    description: 'Comma-separated autofix commands to run when autofix is enabled (e.g. "lint --fix,test --fix")'
+    required: false
+    default: ''
+  autofix-label:
+    description: 'Optional PR label required to allow autofix (e.g. "autofix")'
+    required: false
+    default: ''
 
 outputs:
   results:
     description: 'JSON object with pass/fail results for each command'
-    value: ${{ steps.run-commands.outputs.results }}
+    value: ${{ steps.select-results.outputs.results }}
   binary-source:
     description: 'How the binary was obtained: "source", "fallback", or "release"'
     value: ${{ steps.resolve-binary.outputs.binary-source }}
@@ -323,6 +335,7 @@ runs:
     # ── Step 7: Run commands ──
     - name: Run Homeboy commands
       id: run-commands
+      continue-on-error: true
       shell: bash
       env:
         COMMANDS: ${{ inputs.commands }}
@@ -430,7 +443,253 @@ runs:
 
         exit $OVERALL_EXIT
 
-    # ── Step 8: Post PR comment ──
+    # ── Step 8: Optional autofix commit on PR failures ──
+    - name: Apply autofix commit
+      id: autofix-commit
+      if: always() && github.event_name == 'pull_request' && inputs.autofix == 'true' && steps.run-commands.outputs.results != '' && contains(steps.run-commands.outputs.results, '"fail"')
+      shell: bash
+      env:
+        COMMANDS: ${{ inputs.commands }}
+        COMPONENT_NAME: ${{ inputs.component }}
+        EXTRA_ARGS: ${{ inputs.args }}
+        AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
+        AUTOFIX_LABEL: ${{ inputs.autofix-label }}
+        PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      run: |
+        set -euo pipefail
+
+        # Safety guard: only auto-push on same-repo PRs (not forks)
+        if [ "${PR_HEAD_REPO}" != "${GITHUB_REPOSITORY}" ]; then
+          echo "Skipping autofix: PR head repo (${PR_HEAD_REPO}) differs from target repo (${GITHUB_REPOSITORY})"
+          echo "committed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Loop guard: don't autofix if workflow was triggered by a prior bot autofix push
+        if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ]; then
+          echo "Skipping autofix: workflow actor is github-actions[bot]"
+          echo "committed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Loop guard: don't chain autofix commits on top of autofix commits
+        LAST_SUBJECT=$(git log -1 --pretty=%s 2>/dev/null || true)
+        if [ "$LAST_SUBJECT" = "chore(ci): apply homeboy autofixes" ]; then
+          echo "Skipping autofix: HEAD already an autofix commit"
+          echo "committed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Optional label gate
+        if [ -n "${AUTOFIX_LABEL:-}" ]; then
+          if ! echo "$PR_LABELS_JSON" | jq -e --arg label "$AUTOFIX_LABEL" 'index($label) != null' > /dev/null; then
+            echo "Skipping autofix: required label '${AUTOFIX_LABEL}' not present"
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+
+        if [ -n "$COMPONENT_NAME" ]; then
+          COMP_ID="$COMPONENT_NAME"
+        elif [ -n "${component_id:-}" ]; then
+          COMP_ID="${component_id}"
+        else
+          COMP_ID=$(basename "$GITHUB_REPOSITORY")
+        fi
+
+        WORKSPACE="$(pwd)"
+
+        # Build autofix command list
+        if [ -n "$AUTOFIX_COMMANDS" ]; then
+          IFS=',' read -ra FIX_ARRAY <<< "$AUTOFIX_COMMANDS"
+        else
+          FIX_ARRAY=()
+          IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
+          for CMD in "${CMD_ARRAY[@]}"; do
+            CMD=$(echo "$CMD" | xargs)
+            case "$CMD" in
+              lint)
+                FIX_ARRAY+=("lint --fix")
+                ;;
+              test)
+                FIX_ARRAY+=("test --fix")
+                ;;
+            esac
+          done
+        fi
+
+        if [ ${#FIX_ARRAY[@]} -eq 0 ]; then
+          echo "No autofix commands configured for this command set"
+          echo "committed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "Applying autofixes..."
+        for FIX_CMD in "${FIX_ARRAY[@]}"; do
+          FIX_CMD=$(echo "$FIX_CMD" | xargs)
+          BASE_CMD="homeboy ${FIX_CMD} ${COMP_ID} --path ${WORKSPACE}"
+
+          # Scope lint/audit-like fixes in PR mode
+          if echo "$FIX_CMD" | grep -q '^lint' && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            BASE_CMD="homeboy ${FIX_CMD} ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+          fi
+
+          if [ -n "$EXTRA_ARGS" ]; then
+            BASE_CMD="${BASE_CMD} ${EXTRA_ARGS}"
+          fi
+
+          echo "Running autofix: ${BASE_CMD}"
+          set +e
+          eval "$BASE_CMD"
+          FIX_EXIT=$?
+          set -e
+
+          if [ $FIX_EXIT -ne 0 ]; then
+            echo "Autofix command exited non-zero (${FIX_EXIT}), continuing to check for file changes"
+          fi
+        done
+
+        if git diff --quiet && git diff --cached --quiet; then
+          echo "No autofix changes detected"
+          echo "committed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        git add -A
+        if git diff --cached --quiet; then
+          echo "No staged changes after autofix"
+          echo "committed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git commit -m "chore(ci): apply homeboy autofixes"
+
+        # Push to the PR head branch
+        git push origin "HEAD:${GITHUB_HEAD_REF}"
+        echo "committed=true" >> "$GITHUB_OUTPUT"
+
+    # ── Step 9: Re-run commands after autofix commit ──
+    - name: Re-run Homeboy commands after autofix
+      id: rerun-commands
+      continue-on-error: true
+      if: github.event_name == 'pull_request' && steps.autofix-commit.outputs.committed == 'true'
+      shell: bash
+      env:
+        COMMANDS: ${{ inputs.commands }}
+        COMPONENT_NAME: ${{ inputs.component }}
+        EXTRA_ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+
+        if [ -n "$COMPONENT_NAME" ]; then
+          COMP_ID="$COMPONENT_NAME"
+        elif [ -n "${component_id:-}" ]; then
+          COMP_ID="${component_id}"
+        else
+          COMP_ID=$(basename "$GITHUB_REPOSITORY")
+        fi
+
+        WORKSPACE="$(pwd)"
+        RESULTS="{}"
+        OVERALL_EXIT=0
+
+        HOMEBOY_OUTPUT_DIR=$(mktemp -d)
+        echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "$GITHUB_ENV"
+
+        HOMEBOY_ANNOTATIONS_DIR=$(mktemp -d)
+        echo "HOMEBOY_ANNOTATIONS_DIR=${HOMEBOY_ANNOTATIONS_DIR}" >> "$GITHUB_ENV"
+        export HOMEBOY_ANNOTATIONS_DIR
+
+        IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
+
+        HAS_LINT_COMMAND=false
+        for c in "${CMD_ARRAY[@]}"; do
+          if [ "$(echo "$c" | xargs)" = "lint" ]; then
+            HAS_LINT_COMMAND=true
+            break
+          fi
+        done
+
+        for CMD in "${CMD_ARRAY[@]}"; do
+          CMD=$(echo "$CMD" | xargs)
+
+          if [ "$CMD" = "test" ] && [ "$HAS_LINT_COMMAND" = "true" ]; then
+            export HOMEBOY_SKIP_LINT=1
+          else
+            unset HOMEBOY_SKIP_LINT 2>/dev/null || true
+          fi
+
+          if [ "$CMD" = "audit" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            FULL_CMD="homeboy audit ${COMP_ID} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+          elif [ "$CMD" = "audit" ]; then
+            FULL_CMD="homeboy audit ${COMP_ID}"
+          elif [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            FULL_CMD="homeboy lint ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+          else
+            FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
+          fi
+
+          if [ -n "$EXTRA_ARGS" ]; then
+            FULL_CMD="${FULL_CMD} ${EXTRA_ARGS}"
+          fi
+
+          echo "::group::homeboy rerun ${CMD}"
+          CMD_EXIT=0
+          set +e
+          eval "$FULL_CMD" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${CMD}.log"
+          CMD_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo "::endgroup::"
+
+          if [ $CMD_EXIT -eq 0 ]; then
+            RESULTS=$(echo "$RESULTS" | jq -c --arg cmd "$CMD" '. + {($cmd): "pass"}')
+          else
+            RESULTS=$(echo "$RESULTS" | jq -c --arg cmd "$CMD" '. + {($cmd): "fail"}')
+            OVERALL_EXIT=1
+          fi
+        done
+
+        echo "results=${RESULTS}" >> "$GITHUB_OUTPUT"
+        exit $OVERALL_EXIT
+
+    # ── Step 10: Select final results output (rerun if present) ──
+    - name: Select final results
+      id: select-results
+      if: always()
+      shell: bash
+      env:
+        FIRST_RESULTS: ${{ steps.run-commands.outputs.results }}
+        RERUN_RESULTS: ${{ steps.rerun-commands.outputs.results }}
+      run: |
+        set -euo pipefail
+        if [ -n "${RERUN_RESULTS:-}" ] && [ "$RERUN_RESULTS" != "{}" ]; then
+          echo "results=${RERUN_RESULTS}" >> "$GITHUB_OUTPUT"
+        else
+          echo "results=${FIRST_RESULTS}" >> "$GITHUB_OUTPUT"
+        fi
+
+    # ── Step 11: Enforce final status ──
+    - name: Enforce final status
+      if: always()
+      shell: bash
+      env:
+        RESULTS: ${{ steps.select-results.outputs.results }}
+      run: |
+        set -euo pipefail
+        if [ -z "${RESULTS:-}" ] || [ "$RESULTS" = "{}" ]; then
+          echo "::error::No command results were produced"
+          exit 1
+        fi
+        if echo "$RESULTS" | jq -e 'to_entries | any(.value == "fail")' > /dev/null; then
+          echo "::error::One or more Homeboy commands failed"
+          exit 1
+        fi
+        echo "All Homeboy commands passed"
+
+    # ── Step 12: Post PR comment ──
     - name: Post PR comment
       if: always() && github.event_name == 'pull_request'
       shell: bash
@@ -438,9 +697,11 @@ runs:
         GH_TOKEN: ${{ github.token }}
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
-        RESULTS: ${{ steps.run-commands.outputs.results }}
+        RESULTS: ${{ steps.select-results.outputs.results }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
+        AUTOFIX_ENABLED: ${{ inputs.autofix }}
+        AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
       run: |
         set -euo pipefail
 
@@ -456,6 +717,12 @@ runs:
         # ── Build the comment body ──
         COMMENT_BODY="<!-- homeboy-action-results -->"$'\n'
         COMMENT_BODY+="## Homeboy Results — \`${COMP_ID}\`"$'\n\n'
+
+        if [ "$AUTOFIX_ENABLED" = "true" ] && [ "$AUTOFIX_COMMITTED" = "true" ]; then
+          COMMENT_BODY+="> :wrench: **Autofix applied** — a CI bot commit was pushed and checks were re-run"$'\n\n'
+        elif [ "$AUTOFIX_ENABLED" = "true" ]; then
+          COMMENT_BODY+="> :information_source: Autofix enabled, but no fixable file changes were produced"$'\n\n'
+        fi
 
         # Show binary source if it was a fallback
         if [ "$BINARY_SOURCE" = "fallback" ]; then
@@ -584,7 +851,7 @@ runs:
 
         echo "PR comment posted successfully"
 
-    # ── Step 9: Post inline PR review comments ──
+    # ── Step 13: Post inline PR review comments ──
     - name: Post inline review
       if: always() && github.event_name == 'pull_request'
       shell: bash
@@ -672,13 +939,13 @@ runs:
         COMMENT_COUNT=$(echo "$REVIEW_PAYLOAD" | jq '.comments | length' 2>/dev/null || echo "0")
         echo "Posted inline review with ${COMMENT_COUNT} comment(s)"
 
-    # ── Step 10: Auto-file issue on non-PR failures ──
+    # ── Step 14: Auto-file issue on non-PR failures ──
     - name: Auto-file issue on failure
-      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.run-commands.outputs.results != '' && contains(steps.run-commands.outputs.results, '"fail"')
+      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"')
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        RESULTS: ${{ steps.run-commands.outputs.results }}
+        RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}

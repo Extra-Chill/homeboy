@@ -67,6 +67,9 @@ If your repo has a `homeboy.json` file, you don't even need to specify the exten
 | `settings` | No | | JSON settings for the extension |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
 | `node-version` | No | | Node.js version (sets up via `actions/setup-node`) |
+| `autofix` | No | `false` | On PR failures, run safe autofixes, commit, push, and re-run checks |
+| `autofix-commands` | No | | Override autofix commands (comma-separated, e.g. `lint --fix,test --fix`) |
+| `autofix-label` | No | | Optional PR label required before autofix runs (e.g. `autofix`) |
 
 ## Outputs
 
@@ -97,6 +100,40 @@ If your repo has a `homeboy.json` file, you don't even need to specify the exten
     php-version: '8.2'
     node-version: '20'
 ```
+
+### Auto-apply Fixable CI Issues (PRs)
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v1
+  with:
+    extension: wordpress
+    commands: lint,test
+    php-version: '8.2'
+    autofix: 'true'
+```
+
+When enabled, the action will:
+1. Run configured commands
+2. If any fail, run safe autofix commands (default: `lint --fix`, `test --fix` when present)
+3. Commit changes as `chore(ci): apply homeboy autofixes`
+4. Push to the PR branch
+5. Re-run checks and report final status
+
+> Autofix mode is PR-only and never force-pushes or amends commits.
+
+Optional label gate:
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v1
+  with:
+    extension: wordpress
+    commands: lint,test
+    php-version: '8.2'
+    autofix: 'true'
+    autofix-label: 'autofix'
+```
+
+With `autofix-label`, no bot commit will be created unless that label is present on the PR.
 
 ### Test with Custom Settings
 
