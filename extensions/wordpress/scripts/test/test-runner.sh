@@ -479,6 +479,8 @@ set -e
 if [ $phpunit_exit -ne 0 ]; then
     FAILED_STEP="PHPUnit tests"
     FAILURE_OUTPUT=$(tail -30 "$PHPUNIT_TMPFILE")
+    # Parse test results for baseline (even on failure)
+    bash "${EXTENSION_PATH}/scripts/test/parse-test-results.sh" "$PHPUNIT_TMPFILE" 2>/dev/null || true
     rm -f "$PHPUNIT_TMPFILE"
     # Clean up auto-created test database
     if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
@@ -528,6 +530,15 @@ if [ -z "$(echo "$PHPUNIT_OUTPUT" | grep -E 'PHPUnit|test|assert|OK|ERRORS|FAILU
     echo ""
     FAILED_STEP="PHPUnit tests (no output)"
     exit 1
+fi
+
+# Parse test results for baseline
+if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ]; then
+    # Write PHPUNIT_OUTPUT to a temp file for the parser
+    RESULTS_TMPFILE=$(mktemp)
+    echo "$PHPUNIT_OUTPUT" > "$RESULTS_TMPFILE"
+    bash "${EXTENSION_PATH}/scripts/test/parse-test-results.sh" "$RESULTS_TMPFILE" 2>/dev/null || true
+    rm -f "$RESULTS_TMPFILE"
 fi
 
 # Parse and report coverage results
