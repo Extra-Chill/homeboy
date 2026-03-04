@@ -117,6 +117,12 @@ if [ "${HOMEBOY_COVERAGE:-}" = "1" ]; then
         TEST_EXIT=${PIPESTATUS[0]}
         set -e
 
+        # Parse test results for homeboy core (best-effort, non-blocking)
+        PARSE_RESULTS="${EXTENSION_PATH}/scripts/parse-test-results.sh"
+        if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
+            bash "$PARSE_RESULTS" "$TEST_TMPFILE" || true
+        fi
+
         TEST_OUTPUT=$(cat "$TEST_TMPFILE")
         rm -f "$TEST_TMPFILE"
 
@@ -221,6 +227,12 @@ set +e
 cargo "${TEST_ARGS[@]}" "$@" 2>&1 | tee "$TEST_TMPFILE"
 TEST_EXIT=${PIPESTATUS[0]}
 set -e
+
+# Parse test results for homeboy core (best-effort, non-blocking)
+PARSE_RESULTS="${EXTENSION_PATH}/scripts/parse-test-results.sh"
+if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
+    bash "$PARSE_RESULTS" "$TEST_TMPFILE" || true
+fi
 
 TEST_OUTPUT=$(cat "$TEST_TMPFILE")
 rm -f "$TEST_TMPFILE"

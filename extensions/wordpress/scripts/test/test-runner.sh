@@ -475,6 +475,15 @@ set +e
 "${EXTENSION_PATH}/vendor/bin/phpunit" "${phpunit_args[@]}" "$@" 2>&1 | tee "$PHPUNIT_TMPFILE"
 phpunit_exit=${PIPESTATUS[0]}
 set -e
+# Parse test results and failures for homeboy core (best-effort, non-blocking)
+PARSE_RESULTS="${EXTENSION_PATH}/scripts/test/parse-test-results.sh"
+PARSE_FAILURES="${EXTENSION_PATH}/scripts/test/parse-test-failures.sh"
+if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
+    bash "$PARSE_RESULTS" "$PHPUNIT_TMPFILE" || true
+fi
+if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] && [ -f "$PARSE_FAILURES" ]; then
+    bash "$PARSE_FAILURES" "$PHPUNIT_TMPFILE" "${PLUGIN_PATH:-}" || true
+fi
 
 if [ $phpunit_exit -ne 0 ]; then
     FAILED_STEP="PHPUnit tests"
