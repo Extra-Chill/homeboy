@@ -8,9 +8,17 @@ branding:
 
 inputs:
   version:
-    description: 'Homeboy version to install (e.g. "0.52.0", "latest")'
+    description: 'Homeboy version to install (e.g. "0.52.0", "latest"). Ignored when source is set.'
     required: false
     default: 'latest'
+  source:
+    description: 'Path to build homeboy from source (e.g. "."). Falls back to release binary on build failure.'
+    required: false
+    default: ''
+  rust-toolchain:
+    description: 'Rust toolchain for source builds (default: stable). Ignored when source is empty.'
+    required: false
+    default: 'stable'
   extension:
     description: 'Extension ID to install (e.g. "wordpress", "rust", "node")'
     required: false
@@ -47,11 +55,18 @@ inputs:
     description: 'Only lint files changed in the PR (default: true for PRs, ignored for non-PR events)'
     required: false
     default: 'true'
+  auto-issue:
+    description: 'Automatically file a GitHub issue on non-PR failures (default: false)'
+    required: false
+    default: 'false'
 
 outputs:
   results:
     description: 'JSON object with pass/fail results for each command'
     value: ${{ steps.run-commands.outputs.results }}
+  binary-source:
+    description: 'How the binary was obtained: "source", "fallback", or "release"'
+    value: ${{ steps.resolve-binary.outputs.binary-source }}
 
 runs:
   using: 'composite'
@@ -73,9 +88,58 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
-    # ── Step 3a: Resolve Homeboy version ──
+    # ── Step 3a: Build from source (when source input is set) ──
+    - name: Install Rust toolchain (source build)
+      if: inputs.source != ''
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+
+    - name: Cache cargo (source build)
+      if: inputs.source != ''
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ${{ inputs.source }}/target
+        key: ${{ runner.os }}-cargo-source-${{ hashFiles(format('{0}/Cargo.lock', inputs.source)) }}
+        restore-keys: ${{ runner.os }}-cargo-source-
+
+    - name: Build from source
+      id: source-build
+      if: inputs.source != ''
+      shell: bash
+      env:
+        SOURCE_PATH: ${{ inputs.source }}
+      run: |
+        set -euo pipefail
+
+        echo "Building homeboy from source at ${SOURCE_PATH}..."
+
+        BUILD_EXIT=0
+        cargo build --release --manifest-path "${SOURCE_PATH}/Cargo.toml" 2>&1 || BUILD_EXIT=$?
+
+        if [ $BUILD_EXIT -eq 0 ]; then
+          BINARY=$(find "${SOURCE_PATH}/target/release" -maxdepth 1 -name "homeboy" -type f | head -1)
+          if [ -n "$BINARY" ]; then
+            chmod +x "$BINARY"
+            sudo cp "$BINARY" /usr/local/bin/homeboy
+            echo "Built from source: $(homeboy --version)"
+            echo "built=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Source build succeeded but binary not found — falling back to release"
+            echo "built=false" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          echo "::warning::Source build failed (exit $BUILD_EXIT) — falling back to release binary"
+          echo "built=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # ── Step 3b: Resolve Homeboy version (skipped if source build succeeded) ──
     - name: Resolve Homeboy version
       id: resolve-version
+      if: inputs.source == '' || steps.source-build.outputs.built != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -94,9 +158,10 @@ runs:
         fi
         echo "resolved-version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-    # ── Step 3b: Cache Homeboy binary + extensions ──
+    # ── Step 3c: Cache Homeboy binary + extensions (skipped if source build succeeded) ──
     - name: Cache Homeboy
       id: cache-homeboy
+      if: inputs.source == '' || steps.source-build.outputs.built != 'true'
       uses: actions/cache@v4
       with:
         path: |
@@ -104,9 +169,9 @@ runs:
           ~/.config/homeboy/extensions/
         key: homeboy-${{ steps.resolve-version.outputs.resolved-version }}-${{ inputs.extension }}-${{ runner.os }}-${{ runner.arch }}
 
-    # ── Step 3c: Install Homeboy binary (cache miss) ──
+    # ── Step 3d: Install Homeboy binary from release (skipped if source build succeeded) ──
     - name: Install Homeboy
-      if: steps.cache-homeboy.outputs.cache-hit != 'true'
+      if: (inputs.source == '' || steps.source-build.outputs.built != 'true') && steps.cache-homeboy.outputs.cache-hit != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -155,9 +220,27 @@ runs:
 
         echo "Homeboy $(homeboy --version) installed successfully"
 
-    # ── Step 4: Install extension (cache miss) ──
+    # ── Step 3e: Record how binary was obtained ──
+    - name: Resolve binary source
+      id: resolve-binary
+      shell: bash
+      env:
+        HAS_SOURCE_INPUT: ${{ inputs.source }}
+        SOURCE_BUILT: ${{ steps.source-build.outputs.built }}
+      run: |
+        if [ -n "$HAS_SOURCE_INPUT" ] && [ "$SOURCE_BUILT" = "true" ]; then
+          echo "binary-source=source" >> "$GITHUB_OUTPUT"
+        elif [ -n "$HAS_SOURCE_INPUT" ]; then
+          echo "binary-source=fallback" >> "$GITHUB_OUTPUT"
+          echo "::warning::Using fallback release binary — source build failed"
+        else
+          echo "binary-source=release" >> "$GITHUB_OUTPUT"
+        fi
+        echo "Homeboy binary: $(homeboy --version 2>/dev/null || echo 'not found')"
+
+    # ── Step 4: Install extension (cache miss or source build) ──
     - name: Install extension
-      if: inputs.extension != '' && steps.cache-homeboy.outputs.cache-hit != 'true'
+      if: inputs.extension != '' && (steps.cache-homeboy.outputs.cache-hit != 'true' || steps.source-build.outputs.built == 'true')
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -302,8 +385,10 @@ runs:
             unset HOMEBOY_SKIP_LINT 2>/dev/null || true
           fi
 
-          # Build the command
-          if [ "$CMD" = "audit" ]; then
+          # Build the command — scope lint and audit to changed files in PR mode
+          if [ "$CMD" = "audit" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            FULL_CMD="homeboy audit ${COMP_ID} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+          elif [ "$CMD" = "audit" ]; then
             FULL_CMD="homeboy audit ${COMP_ID}"
           elif [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
             # Scope lint to changed files only (PR mode) using --changed-since
@@ -345,7 +430,7 @@ runs:
 
         exit $OVERALL_EXIT
 
-    # ── Step 7: Post PR comment ──
+    # ── Step 8: Post PR comment ──
     - name: Post PR comment
       if: always() && github.event_name == 'pull_request'
       shell: bash
@@ -355,6 +440,7 @@ runs:
         COMPONENT_NAME: ${{ inputs.component }}
         RESULTS: ${{ steps.run-commands.outputs.results }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
+        BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
       run: |
         set -euo pipefail
 
@@ -370,6 +456,13 @@ runs:
         # ── Build the comment body ──
         COMMENT_BODY="<!-- homeboy-action-results -->"$'\n'
         COMMENT_BODY+="## Homeboy Results — \`${COMP_ID}\`"$'\n\n'
+
+        # Show binary source if it was a fallback
+        if [ "$BINARY_SOURCE" = "fallback" ]; then
+          COMMENT_BODY+="> :warning: **Source build failed** — results from fallback release binary"$'\n\n'
+        elif [ "$BINARY_SOURCE" = "source" ]; then
+          COMMENT_BODY+="> Built from source (\`$(homeboy --version 2>/dev/null || echo 'unknown')\`)"$'\n\n'
+        fi
 
         # Parse results and build summary table
         IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
@@ -389,9 +482,11 @@ runs:
             HAS_FAILURE=true
           fi
 
-          # Add scope indicator for lint
+          # Add scope indicator for lint and audit
           SCOPE_NOTE=""
           if [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            SCOPE_NOTE=" _(changed files only)_"
+          elif [ "$CMD" = "audit" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
             SCOPE_NOTE=" _(changed files only)_"
           fi
 
@@ -447,6 +542,19 @@ runs:
             if [ -n "$AUDIT_FINDINGS" ]; then
               COMMENT_BODY+="- ${AUDIT_FINDINGS}"$'\n'
             fi
+
+            # Cargo/Rust output (for source builds)
+            CARGO_ERRORS=$(grep -c "^error\[" "$LOG_FILE" 2>/dev/null || echo "0")
+            CARGO_WARNINGS=$(grep -c "^warning\[" "$LOG_FILE" 2>/dev/null || echo "0")
+            if [ "$CARGO_ERRORS" -gt 0 ] || [ "$CARGO_WARNINGS" -gt 0 ]; then
+              COMMENT_BODY+="- Cargo: ${CARGO_ERRORS} error(s), ${CARGO_WARNINGS} warning(s)"$'\n'
+            fi
+
+            # Test summary (cargo test or phpunit)
+            CARGO_TEST_SUMMARY=$(grep -oE "test result: .*\. [0-9]+ passed" "$LOG_FILE" | tail -1 || true)
+            if [ -n "$CARGO_TEST_SUMMARY" ]; then
+              COMMENT_BODY+="- ${CARGO_TEST_SUMMARY}"$'\n'
+            fi
           fi
 
           COMMENT_BODY+=$'\n'
@@ -476,7 +584,7 @@ runs:
 
         echo "PR comment posted successfully"
 
-    # ── Step 8: Post inline PR review comments ──
+    # ── Step 9: Post inline PR review comments ──
     - name: Post inline review
       if: always() && github.event_name == 'pull_request'
       shell: bash
@@ -563,3 +671,113 @@ runs:
 
         COMMENT_COUNT=$(echo "$REVIEW_PAYLOAD" | jq '.comments | length' 2>/dev/null || echo "0")
         echo "Posted inline review with ${COMMENT_COUNT} comment(s)"
+
+    # ── Step 10: Auto-file issue on non-PR failures ──
+    - name: Auto-file issue on failure
+      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.run-commands.outputs.results != '' && contains(steps.run-commands.outputs.results, '"fail"')
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RESULTS: ${{ steps.run-commands.outputs.results }}
+        COMMANDS: ${{ inputs.commands }}
+        COMPONENT_NAME: ${{ inputs.component }}
+        BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
+      run: |
+        set -euo pipefail
+
+        REPO="${GITHUB_REPOSITORY}"
+        COMP_ID="${COMPONENT_NAME:-$(basename "$GITHUB_REPOSITORY")}"
+        OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
+        RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+        # Determine trigger context
+        if [ -n "$GITHUB_REF_NAME" ]; then
+          TRIGGER_CONTEXT="ref \`${GITHUB_REF_NAME}\`"
+        else
+          TRIGGER_CONTEXT="commit \`${GITHUB_SHA:0:8}\`"
+        fi
+
+        # Build list of failed commands
+        FAILED_CMDS=""
+        IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
+        for CMD in "${CMD_ARRAY[@]}"; do
+          CMD=$(echo "$CMD" | xargs)
+          STATUS=$(echo "$RESULTS" | jq -r --arg cmd "$CMD" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
+          if [ "$STATUS" = "fail" ]; then
+            FAILED_CMDS="${FAILED_CMDS}- \`homeboy ${CMD}\`"$'\n'
+          fi
+        done
+
+        # Build issue title with deduplication key
+        ISSUE_TITLE="CI failure: homeboy ${COMP_ID} (${GITHUB_EVENT_NAME})"
+
+        # Check for existing open issue with same title to avoid duplicates
+        EXISTING_ISSUE=$(gh api "repos/${REPO}/issues" \
+          --jq "[.[] | select(.state == \"open\" and .title == \"${ISSUE_TITLE}\" and (.labels[]?.name == \"ci-failure\"))] | first | .number // empty" \
+          2>/dev/null || true)
+
+        if [ -n "$EXISTING_ISSUE" ]; then
+          echo "Found existing open issue #${EXISTING_ISSUE} — adding comment instead of creating new issue"
+
+          COMMENT="### CI failure on ${TRIGGER_CONTEXT}"$'\n\n'
+          COMMENT+="**Failed commands:**"$'\n'
+          COMMENT+="${FAILED_CMDS}"$'\n'
+          COMMENT+="**Run:** ${RUN_URL}"$'\n'
+
+          # Add log excerpts
+          for CMD in "${CMD_ARRAY[@]}"; do
+            CMD=$(echo "$CMD" | xargs)
+            STATUS=$(echo "$RESULTS" | jq -r --arg cmd "$CMD" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
+            if [ "$STATUS" = "fail" ] && [ -f "${OUTPUT_DIR}/${CMD}.log" ]; then
+              LOG_TAIL=$(tail -30 "${OUTPUT_DIR}/${CMD}.log")
+              COMMENT+=$'\n'"<details><summary>${CMD} output (last 30 lines)</summary>"$'\n\n'
+              COMMENT+="\`\`\`"$'\n'"${LOG_TAIL}"$'\n'"\`\`\`"$'\n'"</details>"$'\n'
+            fi
+          done
+
+          gh api "repos/${REPO}/issues/${EXISTING_ISSUE}/comments" \
+            --method POST \
+            --field body="$COMMENT" > /dev/null
+
+          echo "Comment added to issue #${EXISTING_ISSUE}"
+        else
+          echo "Creating new issue..."
+
+          BODY="## CI Failure Report"$'\n\n'
+          BODY+="**Component:** \`${COMP_ID}\`"$'\n'
+          BODY+="**Trigger:** \`${GITHUB_EVENT_NAME}\` on ${TRIGGER_CONTEXT}"$'\n'
+          BODY+="**Binary:** ${BINARY_SOURCE}"$'\n'
+          BODY+="**Run:** ${RUN_URL}"$'\n\n'
+          BODY+="### Failed Commands"$'\n\n'
+          BODY+="${FAILED_CMDS}"$'\n'
+
+          # Add log excerpts
+          for CMD in "${CMD_ARRAY[@]}"; do
+            CMD=$(echo "$CMD" | xargs)
+            STATUS=$(echo "$RESULTS" | jq -r --arg cmd "$CMD" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
+            if [ "$STATUS" = "fail" ] && [ -f "${OUTPUT_DIR}/${CMD}.log" ]; then
+              LOG_TAIL=$(tail -50 "${OUTPUT_DIR}/${CMD}.log")
+              BODY+="### \`homeboy ${CMD}\` output"$'\n\n'
+              BODY+="<details><summary>Last 50 lines</summary>"$'\n\n'
+              BODY+="\`\`\`"$'\n'"${LOG_TAIL}"$'\n'"\`\`\`"$'\n'"</details>"$'\n\n'
+            fi
+          done
+
+          BODY+="---"$'\n'
+          BODY+="*Filed automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action)*"
+
+          # Create the issue with ci-failure label
+          gh api "repos/${REPO}/issues" \
+            --method POST \
+            --field title="$ISSUE_TITLE" \
+            --field body="$BODY" \
+            --field "labels[]=ci-failure" > /dev/null 2>&1 || {
+            # Label might not exist — create without label
+            gh api "repos/${REPO}/issues" \
+              --method POST \
+              --field title="$ISSUE_TITLE" \
+              --field body="$BODY" > /dev/null
+          }
+
+          echo "Issue created: ${ISSUE_TITLE}"
+        fi
