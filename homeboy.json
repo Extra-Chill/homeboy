@@ -3,8 +3,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-03-04T19:10:06Z",
-      "item_count": 496,
+      "created_at": "2026-03-04T20:13:00Z",
+      "item_count": 497,
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "Commands::src/commands/docs.rs::MissingImport",
@@ -15,7 +15,6 @@
         "Commands::src/commands/deploy.rs::MissingImport",
         "Commands::src/commands/fleet.rs::MissingImport",
         "Commands::src/commands/component.rs::MissingImport",
-        "Refactor::src/core/refactor/add.rs::MissingMethod",
         "structural::src/commands/component.rs::GodFile",
         "structural::src/commands/docs.rs::GodFile",
         "structural::src/commands/docs.rs::HighItemCount",
@@ -93,6 +92,8 @@
         "structural::src/utils/args.rs::GodFile",
         "structural::src/utils/baseline.rs::GodFile",
         "structural::src/utils/baseline.rs::HighItemCount",
+        "structural::src/utils/codebase_scan.rs::GodFile",
+        "structural::src/utils/codebase_scan.rs::HighItemCount",
         "duplication::src/core/component.rs::DuplicateFunction",
         "duplication::src/core/component.rs::DuplicateFunction",
         "duplication::src/core/component.rs::DuplicateFunction",
@@ -224,7 +225,6 @@
         "dead_code::src/core/extension/execution.rs::UnusedParameter",
         "dead_code::src/core/extension/lifecycle.rs::UnreferencedExport",
         "dead_code::src/core/extension/lifecycle.rs::UnreferencedExport",
-        "dead_code::src/core/extension/version.rs::UnreferencedExport",
         "dead_code::src/core/extension/version.rs::UnusedParameter",
         "dead_code::src/core/extension/version.rs::UnusedParameter",
         "dead_code::src/core/files.rs::UnreferencedExport",
@@ -487,6 +487,7 @@
         "test_coverage::src/utils/artifact.rs::MissingTestMethod",
         "test_coverage::src/utils/base_path.rs::MissingTestFile",
         "test_coverage::src/utils/baseline.rs::MissingTestFile",
+        "test_coverage::src/utils/codebase_scan.rs::MissingTestFile",
         "test_coverage::src/utils/command.rs::MissingTestFile",
         "test_coverage::src/utils/entity_suggest.rs::MissingTestMethod",
         "test_coverage::src/utils/entity_suggest.rs::MissingTestMethod",
@@ -504,7 +505,7 @@
         "test_coverage::src/utils/validation.rs::MissingTestFile"
       ],
       "metadata": {
-        "alignment_score": 0.7647058963775635,
+        "alignment_score": 0.7666666507720947,
         "known_outliers": [
           "src/commands/docs.rs",
           "src/commands/auth.rs",
@@ -512,10 +513,9 @@
           "src/commands/server.rs",
           "src/commands/deploy.rs",
           "src/commands/fleet.rs",
-          "src/commands/component.rs",
-          "src/core/refactor/add.rs"
+          "src/commands/component.rs"
         ],
-        "outliers_count": 8
+        "outliers_count": 7
       }
     }
   },
