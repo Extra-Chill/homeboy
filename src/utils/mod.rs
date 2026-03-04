@@ -2,6 +2,7 @@
 //!
 //! - `args` - CLI argument normalization
 //! - `base_path` - Remote path joining utilities
+//! - `baseline` - Baseline & ratchet drift detection
 //! - `command` - Command execution with error handling
 //! - `entity_suggest` - Entity suggestion for unrecognized CLI subcommands
 //! - `io` - File I/O with consistent error handling
@@ -16,6 +17,7 @@
 pub mod args;
 pub mod artifact;
 pub mod base_path;
+pub mod baseline;
 pub mod command;
 pub mod entity_suggest;
 pub mod io;

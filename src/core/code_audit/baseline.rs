@@ -1,81 +1,96 @@
-//! Baseline management for CI-friendly audit drift detection.
+//! Audit-specific baseline — delegates to the generic `utils::baseline` primitive.
 //!
-//! Saves a snapshot of audit state and compares future runs against it.
-//! Only NEW drift (findings not in the baseline) triggers a failure.
+//! Provides the audit domain's [`Fingerprintable`] implementation for findings,
+//! plus backward-compatible wrappers (`save_baseline`, `load_baseline`, `compare`)
+//! that the audit command uses directly.
 
-use std::collections::HashSet;
 use std::path::Path;
 
+use crate::baseline::{self as generic, BaselineConfig, Fingerprintable};
+
+use super::findings::Finding;
 use super::CodeAuditResult;
 
-/// A saved baseline snapshot.
+// ============================================================================
+// Baseline key
+// ============================================================================
+
+/// Key used in `homeboy.json` → `baselines.audit`.
+const BASELINE_KEY: &str = "audit";
+
+// ============================================================================
+// Audit-specific metadata
+// ============================================================================
+
+/// Domain-specific metadata stored alongside the generic baseline.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct AuditBaseline {
-    /// ISO 8601 timestamp when the baseline was created.
-    pub created_at: String,
-    /// Component that was audited.
-    pub component_id: String,
-    /// Total findings at baseline time.
-    pub findings_count: usize,
+pub struct AuditBaselineMetadata {
     /// Total outlier files at baseline time.
     pub outliers_count: usize,
     /// Alignment score at baseline time.
     pub alignment_score: Option<f32>,
     /// Set of known outlier file paths (accepted drift).
     pub known_outliers: Vec<String>,
-    /// Fingerprint of each known finding: "convention::file::kind::description"
-    pub known_findings: Vec<String>,
 }
+
+// ============================================================================
+// Fingerprintable implementation for audit findings
+// ============================================================================
+
+/// Wrapper that implements [`Fingerprintable`] for audit findings.
+///
+/// Uses `convention::file::kind` as the core identity. The description is
+/// excluded because structural findings embed volatile values (e.g. exact
+/// line counts) that change when a file grows by even one line. Including
+/// them would cause the same finding to appear as "resolved + new" on every
+/// minor change, defeating the baseline ratchet.
+struct AuditFinding<'a>(&'a Finding);
+
+impl Fingerprintable for AuditFinding<'_> {
+    fn fingerprint(&self) -> String {
+        format!("{}::{}::{:?}", self.0.convention, self.0.file, self.0.kind)
+    }
+
+    fn description(&self) -> String {
+        self.0.description.clone()
+    }
+
+    fn context_label(&self) -> String {
+        self.0.convention.clone()
+    }
+}
+
+// ============================================================================
+// Backward-compatible public types
+// ============================================================================
+
+/// A saved baseline snapshot (backward-compatible alias).
+///
+/// This is the generic baseline parameterized with audit metadata.
+pub type AuditBaseline = generic::Baseline<AuditBaselineMetadata>;
 
 /// Result of comparing an audit against a baseline.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct BaselineComparison {
-    /// Findings that are new since the baseline.
-    pub new_findings: Vec<NewFinding>,
-    /// Findings that were in the baseline but are now resolved.
-    pub resolved_findings: Vec<String>,
-    /// Net change in findings count.
-    pub delta: i64,
-    /// Whether drift increased (true = fail in CI).
-    pub drift_increased: bool,
-}
+pub type BaselineComparison = generic::Comparison;
 
 /// A finding that wasn't in the baseline.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct NewFinding {
-    /// The finding fingerprint.
-    pub fingerprint: String,
-    /// Human-readable description.
-    pub description: String,
-    /// The file involved.
-    pub file: String,
-    /// The convention involved.
-    pub convention: String,
-}
+pub type NewFinding = generic::NewItem;
 
 // ============================================================================
-// Baseline file path
+// Backward-compatible public API
 // ============================================================================
-
-const BASELINE_DIR: &str = ".homeboy";
-const BASELINE_FILE: &str = "audit-baseline.json";
 
 /// Get the baseline file path for a source directory.
+///
+/// Now points to `homeboy.json` instead of `.homeboy/audit-baseline.json`.
 pub fn baseline_path(source_path: &Path) -> std::path::PathBuf {
-    source_path.join(BASELINE_DIR).join(BASELINE_FILE)
+    let config = BaselineConfig::new(source_path, BASELINE_KEY);
+    config.json_path()
 }
-
-// ============================================================================
-// Save baseline
-// ============================================================================
 
 /// Save the current audit result as a baseline.
 pub fn save_baseline(result: &CodeAuditResult) -> Result<std::path::PathBuf, String> {
     let source = Path::new(&result.source_path);
-    let dir = source.join(BASELINE_DIR);
-
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
+    let config = BaselineConfig::new(source, BASELINE_KEY);
 
     let known_outliers: Vec<String> = result
         .conventions
@@ -83,206 +98,28 @@ pub fn save_baseline(result: &CodeAuditResult) -> Result<std::path::PathBuf, Str
         .flat_map(|c| c.outliers.iter().map(|o| o.file.clone()))
         .collect();
 
-    let known_findings: Vec<String> = result
-        .findings
-        .iter()
-        .map(|f| {
-            finding_fingerprint(
-                &f.convention,
-                &f.file,
-                &format!("{:?}", f.kind),
-                &f.description,
-            )
-        })
-        .collect();
-
-    let baseline = AuditBaseline {
-        created_at: chrono_now(),
-        component_id: result.component_id.clone(),
-        findings_count: result.findings.len(),
+    let metadata = AuditBaselineMetadata {
         outliers_count: known_outliers.len(),
         alignment_score: result.summary.alignment_score,
         known_outliers,
-        known_findings,
     };
 
-    let path = baseline_path(source);
-    let json = serde_json::to_string_pretty(&baseline)
-        .map_err(|e| format!("Failed to serialize baseline: {}", e))?;
+    let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
 
-    std::fs::write(&path, json)
-        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-
-    Ok(path)
+    generic::save(&config, &result.component_id, &items, metadata)
+        .map_err(|e| e.message)
 }
-
-// ============================================================================
-// Load baseline
-// ============================================================================
 
 /// Load a baseline if one exists for the given source path.
 pub fn load_baseline(source_path: &Path) -> Option<AuditBaseline> {
-    let path = baseline_path(source_path);
-    if !path.exists() {
-        return None;
-    }
-
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
+    let config = BaselineConfig::new(source_path, BASELINE_KEY);
+    generic::load::<AuditBaselineMetadata>(&config).ok().flatten()
 }
-
-// ============================================================================
-// Compare against baseline
-// ============================================================================
 
 /// Compare an audit result against a saved baseline.
 pub fn compare(result: &CodeAuditResult, baseline: &AuditBaseline) -> BaselineComparison {
-    let current_fingerprints: HashSet<String> = result
-        .findings
-        .iter()
-        .map(|f| {
-            finding_fingerprint(
-                &f.convention,
-                &f.file,
-                &format!("{:?}", f.kind),
-                &f.description,
-            )
-        })
-        .collect();
-
-    let baseline_fingerprints: HashSet<String> = baseline.known_findings.iter().cloned().collect();
-
-    // New = in current but not in baseline
-    let new_findings: Vec<NewFinding> = result
-        .findings
-        .iter()
-        .filter(|f| {
-            let fp = finding_fingerprint(
-                &f.convention,
-                &f.file,
-                &format!("{:?}", f.kind),
-                &f.description,
-            );
-            !baseline_fingerprints.contains(&fp)
-        })
-        .map(|f| NewFinding {
-            fingerprint: finding_fingerprint(
-                &f.convention,
-                &f.file,
-                &format!("{:?}", f.kind),
-                &f.description,
-            ),
-            description: f.description.clone(),
-            file: f.file.clone(),
-            convention: f.convention.clone(),
-        })
-        .collect();
-
-    // Resolved = in baseline but not in current
-    let resolved_findings: Vec<String> = baseline_fingerprints
-        .difference(&current_fingerprints)
-        .cloned()
-        .collect();
-
-    let delta = result.findings.len() as i64 - baseline.findings_count as i64;
-    let drift_increased = !new_findings.is_empty();
-
-    BaselineComparison {
-        new_findings,
-        resolved_findings,
-        delta,
-        drift_increased,
-    }
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/// Create a stable fingerprint for a finding.
-///
-/// Uses `convention::file::kind` as the core identity. The description is
-/// excluded because structural findings embed volatile values (e.g. exact
-/// line counts) that change when a file grows by even one line. Including
-/// them would cause the same finding to appear as "resolved + new" on every
-/// minor change, defeating the baseline ratchet.
-fn finding_fingerprint(convention: &str, file: &str, kind: &str, _description: &str) -> String {
-    format!("{}::{}::{}", convention, file, kind)
-}
-
-/// Get current UTC timestamp as ISO 8601.
-fn chrono_now() -> String {
-    // Use std::time since we don't want a chrono dependency
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    // Simple ISO 8601 from unix timestamp
-    // 2026-02-27T21:00:00Z format
-    let secs_per_day = 86400u64;
-    let secs_per_hour = 3600u64;
-    let secs_per_min = 60u64;
-
-    let days = now / secs_per_day;
-    let remaining = now % secs_per_day;
-    let hours = remaining / secs_per_hour;
-    let remaining = remaining % secs_per_hour;
-    let minutes = remaining / secs_per_min;
-    let seconds = remaining % secs_per_min;
-
-    // Calculate date from days since epoch (1970-01-01)
-    let (year, month, day) = days_to_date(days);
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
-    )
-}
-
-/// Convert days since Unix epoch to (year, month, day).
-fn days_to_date(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970u64;
-
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-
-    let leap = is_leap_year(year);
-    let month_days = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-
-    let mut month = 1u64;
-    for &md in &month_days {
-        if days < md {
-            break;
-        }
-        days -= md;
-        month += 1;
-    }
-
-    (year, month, days + 1)
-}
-
-fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
+    generic::compare(&items, baseline)
 }
 
 // ============================================================================
@@ -343,9 +180,9 @@ mod tests {
         assert!(path.exists());
 
         let loaded = load_baseline(Path::new(&result.source_path)).unwrap();
-        assert_eq!(loaded.component_id, "test");
-        assert_eq!(loaded.findings_count, 2);
-        assert_eq!(loaded.known_findings.len(), 2);
+        assert_eq!(loaded.context_id, "test");
+        assert_eq!(loaded.item_count, 2);
+        assert_eq!(loaded.known_fingerprints.len(), 2);
 
         let _ = std::fs::remove_dir_all(Path::new(&result.source_path));
     }
@@ -364,8 +201,8 @@ mod tests {
 
         let comparison = compare(&result, &baseline);
         assert!(!comparison.drift_increased);
-        assert!(comparison.new_findings.is_empty());
-        assert!(comparison.resolved_findings.is_empty());
+        assert!(comparison.new_items.is_empty());
+        assert!(comparison.resolved_fingerprints.is_empty());
         assert_eq!(comparison.delta, 0);
 
         let _ = std::fs::remove_dir_all(Path::new(&result.source_path));
@@ -392,8 +229,8 @@ mod tests {
 
         let comparison = compare(&current, &baseline);
         assert!(comparison.drift_increased);
-        assert_eq!(comparison.new_findings.len(), 1);
-        assert_eq!(comparison.new_findings[0].file, "c.php");
+        assert_eq!(comparison.new_items.len(), 1);
+        assert_eq!(comparison.new_items[0].fingerprint, "Flow::c.php::MissingMethod");
         assert_eq!(comparison.delta, 1);
 
         let _ = std::fs::remove_dir_all(Path::new(&result_original.source_path));
@@ -419,8 +256,8 @@ mod tests {
 
         let comparison = compare(&current, &baseline);
         assert!(!comparison.drift_increased);
-        assert!(comparison.new_findings.is_empty());
-        assert_eq!(comparison.resolved_findings.len(), 1);
+        assert!(comparison.new_items.is_empty());
+        assert_eq!(comparison.resolved_fingerprints.len(), 1);
         assert_eq!(comparison.delta, -1);
 
         let _ = std::fs::remove_dir_all(Path::new(&result_original.source_path));
@@ -450,8 +287,8 @@ mod tests {
 
         let comparison = compare(&current, &baseline);
         assert!(comparison.drift_increased);
-        assert_eq!(comparison.new_findings.len(), 1);
-        assert_eq!(comparison.resolved_findings.len(), 1);
+        assert_eq!(comparison.new_items.len(), 1);
+        assert_eq!(comparison.resolved_fingerprints.len(), 1);
         assert_eq!(comparison.delta, 0);
 
         let _ = std::fs::remove_dir_all(Path::new(&result_original.source_path));
@@ -464,49 +301,59 @@ mod tests {
     }
 
     #[test]
-    fn finding_fingerprint_is_stable() {
-        let fp1 = finding_fingerprint("Flow", "a.php", "MissingMethod", "Missing method: execute");
-        let fp2 = finding_fingerprint("Flow", "a.php", "MissingMethod", "Missing method: execute");
-        assert_eq!(fp1, fp2);
+    fn audit_metadata_roundtrips() {
+        let result = make_result(
+            vec![make_finding("Flow", "a.php", "Missing method")],
+            "metadata_roundtrip",
+        );
+
+        let _ = save_baseline(&result).unwrap();
+        let loaded = load_baseline(Path::new(&result.source_path)).unwrap();
+
+        assert_eq!(loaded.metadata.alignment_score, Some(0.8));
+
+        let _ = std::fs::remove_dir_all(Path::new(&result.source_path));
+    }
+
+    #[test]
+    fn fingerprint_is_stable() {
+        let f1 = make_finding("Flow", "a.php", "Missing method: execute");
+        let f2 = make_finding("Flow", "a.php", "Missing method: execute");
+        assert_eq!(
+            AuditFinding(&f1).fingerprint(),
+            AuditFinding(&f2).fingerprint()
+        );
 
         // Different file = different fingerprint
-        let fp3 = finding_fingerprint("Flow", "b.php", "MissingMethod", "Missing method: execute");
-        assert_ne!(fp1, fp3);
+        let f3 = make_finding("Flow", "b.php", "Missing method: execute");
+        assert_ne!(
+            AuditFinding(&f1).fingerprint(),
+            AuditFinding(&f3).fingerprint()
+        );
     }
 
     #[test]
-    fn finding_fingerprint_ignores_description() {
-        // Structural findings embed volatile values (line counts, item counts)
-        // in the description. The fingerprint must be stable across these changes.
-        let fp1 = finding_fingerprint(
-            "structural",
-            "deploy.rs",
-            "GodFile",
-            "File has 2484 lines (threshold: 500)",
-        );
-        let fp2 = finding_fingerprint(
-            "structural",
-            "deploy.rs",
-            "GodFile",
-            "File has 2645 lines (threshold: 500)",
-        );
+    fn fingerprint_ignores_description() {
+        let f1 = Finding {
+            convention: "structural".to_string(),
+            severity: Severity::Warning,
+            file: "deploy.rs".to_string(),
+            description: "File has 2484 lines (threshold: 500)".to_string(),
+            suggestion: String::new(),
+            kind: DeviationKind::GodFile,
+        };
+        let f2 = Finding {
+            convention: "structural".to_string(),
+            severity: Severity::Warning,
+            file: "deploy.rs".to_string(),
+            description: "File has 2645 lines (threshold: 500)".to_string(),
+            suggestion: String::new(),
+            kind: DeviationKind::GodFile,
+        };
         assert_eq!(
-            fp1, fp2,
+            AuditFinding(&f1).fingerprint(),
+            AuditFinding(&f2).fingerprint(),
             "fingerprint should not change when line count changes"
         );
-    }
-
-    #[test]
-    fn chrono_now_produces_valid_iso8601() {
-        let now = chrono_now();
-        // Should match YYYY-MM-DDTHH:MM:SSZ
-        assert!(
-            now.len() == 20,
-            "Expected 20 chars, got {}: {}",
-            now.len(),
-            now
-        );
-        assert!(now.ends_with('Z'));
-        assert!(now.contains('T'));
     }
 }
