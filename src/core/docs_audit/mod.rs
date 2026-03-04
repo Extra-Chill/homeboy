@@ -6,6 +6,7 @@
 //! 3. Correlate docs with git changes to identify priority docs needing review
 //! 4. Build an alignment report focused on actionable items
 
+pub mod baseline;
 mod claims;
 mod tasks;
 mod verify;
