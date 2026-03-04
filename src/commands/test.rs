@@ -209,7 +209,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     // Scaffold mode — generate test stubs without running tests
     if args.scaffold || args.scaffold_file.is_some() {
         return run_scaffold(
-            &args.component,
+            args.comp.id(),
             &component,
             args.scaffold_file.as_deref(),
             args.write,
