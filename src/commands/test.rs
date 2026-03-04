@@ -1,7 +1,7 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::component::{self, Component};
+use homeboy::component::Component;
 use homeboy::error::Error;
 use homeboy::extension::{self, ExtensionRunner};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
@@ -9,12 +9,13 @@ use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
 use homeboy::test_drift::{self, DriftOptions, DriftReport};
 use homeboy::utils::io;
 
+use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::CmdResult;
 
 #[derive(Args)]
 pub struct TestArgs {
-    /// Component name to test
-    component: String,
+    #[command(flatten)]
+    comp: PositionalComponentArgs,
 
     /// Skip linting before running tests
     #[arg(long)]
@@ -32,13 +33,8 @@ pub struct TestArgs {
     #[arg(long, value_name = "PERCENT")]
     coverage_min: Option<f64>,
 
-    /// Save current test results as baseline for future ratchet checks
-    #[arg(long)]
-    baseline: bool,
-
-    /// Skip baseline comparison even if a baseline exists
-    #[arg(long)]
-    ignore_baseline: bool,
+    #[command(flatten)]
+    baseline_args: BaselineArgs,
 
     /// Auto-update baseline when test results improve (ratchet forward)
     #[arg(long)]
@@ -56,21 +52,15 @@ pub struct TestArgs {
     #[arg(long, value_name = "REF", default_value = "HEAD~10")]
     since: String,
 
-    /// Override settings as key=value pairs
-    #[arg(long, value_parser = super::parse_key_val)]
-    setting: Vec<(String, String)>,
-
-    /// Override local_path for this test run (use a workspace clone or temp checkout)
-    #[arg(long)]
-    path: Option<String>,
+    #[command(flatten)]
+    setting_args: SettingArgs,
 
     /// Additional arguments to pass to the test runner (after --)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 
-    /// Accept --json for compatibility (output is JSON by default)
-    #[arg(long, hide = true)]
-    json: bool,
+    #[command(flatten)]
+    _json: HiddenJsonArgs,
 }
 
 #[derive(Serialize)]
@@ -182,14 +172,11 @@ fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> 
 }
 
 pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput> {
-    let mut component = component::load(&args.component)?;
-    if let Some(ref path) = args.path {
-        component.local_path = path.clone();
-    }
+    let component = args.comp.load()?;
 
     // Drift detection mode — skip running tests, analyze git changes instead
     if args.drift {
-        return run_drift(&args.component, &component, &args.since);
+        return run_drift(args.comp.id(), &component, &args.since);
     }
     let script_path = resolve_test_script(&component)?;
 
@@ -216,9 +203,9 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
         None
     };
 
-    let mut runner = ExtensionRunner::new(&args.component, &script_path)
-        .path_override(args.path.clone())
-        .settings(&args.setting)
+    let mut runner = ExtensionRunner::new(args.comp.id(), &script_path)
+        .path_override(args.comp.path.clone())
+        .settings(&args.setting_args.setting)
         .env_if(args.skip_lint, "HOMEBOY_SKIP_LINT", "1")
         .env_if(args.fix, "HOMEBOY_AUTO_FIX", "1")
         .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1")
@@ -272,7 +259,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
             let _ = std::fs::remove_file(f);
         }
 
-        let result = test_analyze::analyze(&args.component, &analysis_input);
+        let result = test_analyze::analyze(args.comp.id(), &analysis_input);
 
         if !result.clusters.is_empty() {
             eprintln!(
@@ -301,17 +288,12 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     };
 
     // Resolve source path for baseline storage
-    let source_path = if let Some(ref path) = args.path {
-        std::path::PathBuf::from(path)
-    } else {
-        let expanded = shellexpand::tilde(&component.local_path);
-        std::path::PathBuf::from(expanded.as_ref())
-    };
+    let source_path = args.comp.source_path()?;
 
     // --baseline: save current state
-    if args.baseline {
+    if args.baseline_args.baseline {
         if let Some(ref counts) = test_counts {
-            let saved = test_baseline::save_baseline(&source_path, &args.component, counts)?;
+            let saved = test_baseline::save_baseline(&source_path, args.comp.id(), counts)?;
             eprintln!(
                 "[test] Baseline saved to {} ({} passed, {} failed, {} total)",
                 saved.display(),
@@ -331,7 +313,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
 
-    if !args.baseline && !args.ignore_baseline {
+    if !args.baseline_args.baseline && !args.baseline_args.ignore_baseline {
         if let Some(ref counts) = test_counts {
             if let Some(existing_baseline) = test_baseline::load_baseline(&source_path) {
                 let comparison = test_baseline::compare(counts, &existing_baseline);
@@ -350,7 +332,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
 
                     // Auto-ratchet: update baseline when results improve
                     if args.ratchet {
-                        let _ = test_baseline::save_baseline(&source_path, &args.component, counts);
+                        let _ = test_baseline::save_baseline(&source_path, args.comp.id(), counts);
                         eprintln!("[test] Baseline ratcheted forward");
                     }
                 }
@@ -362,11 +344,13 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
 
     let mut hints = Vec::new();
 
+    let comp_id = args.comp.id();
+
     // Filter hint when tests fail and no passthrough args were used
     if !output.success && args.args.is_empty() {
         hints.push(format!(
             "To run specific tests: homeboy test {} -- --filter=TestName",
-            args.component
+            comp_id
         ));
     }
 
@@ -374,7 +358,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     if !args.skip_lint && !args.fix {
         hints.push(format!(
             "Auto-fix lint issues: homeboy test {} --fix",
-            args.component
+            comp_id
         ));
     }
 
@@ -382,15 +366,15 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     if !coverage_enabled {
         hints.push(format!(
             "Collect coverage: homeboy test {} --coverage",
-            args.component
+            comp_id
         ));
     }
 
     // Baseline hints
-    if test_counts.is_some() && !args.baseline && baseline_comparison.is_none() {
+    if test_counts.is_some() && !args.baseline_args.baseline && baseline_comparison.is_none() {
         hints.push(format!(
             "Save test baseline: homeboy test {} --baseline",
-            args.component
+            comp_id
         ));
     }
 
@@ -398,7 +382,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     if baseline_comparison.is_some() && !args.ratchet {
         hints.push(format!(
             "Auto-update baseline on improvement: homeboy test {} --ratchet",
-            args.component
+            comp_id
         ));
     }
 
@@ -406,7 +390,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     if !output.success && !args.analyze {
         hints.push(format!(
             "Analyze failures: homeboy test {} --analyze",
-            args.component
+            comp_id
         ));
     }
 
@@ -426,7 +410,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     Ok((
         TestOutput {
             status: status.to_string(),
-            component: args.component,
+            component: args.comp.component.clone(),
             exit_code,
             test_counts,
             coverage,

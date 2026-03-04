@@ -7,6 +7,7 @@ use homeboy::component;
 use homeboy::extension;
 use homeboy::refactor::{self, AddResult, MoveResult, RenameScope, RenameSpec};
 
+use super::args::{ComponentArgs, WriteModeArgs};
 use crate::commands::CmdResult;
 
 #[derive(Args)]
@@ -25,21 +26,16 @@ enum RefactorCommand {
         /// Term to rename to
         #[arg(long)]
         to: String,
-        /// Component ID (uses its local_path as the root)
-        #[arg(short, long)]
-        component: Option<String>,
-        /// Directory path to refactor (alternative to --component)
-        #[arg(long)]
-        path: Option<String>,
+        #[command(flatten)]
+        component: ComponentArgs,
         /// Scope: code, config, all (default: all)
         #[arg(long, default_value = "all")]
         scope: String,
         /// Exact string matching (no boundary detection, no case variants)
         #[arg(long)]
         literal: bool,
-        /// Apply changes to disk (default is dry-run)
-        #[arg(long)]
-        write: bool,
+        #[command(flatten)]
+        write_mode: WriteModeArgs,
     },
 
     /// Add imports, stubs, or fixes to source files
@@ -60,17 +56,10 @@ enum RefactorCommand {
         #[arg(long, value_name = "PATTERN")]
         to: Option<String>,
 
-        /// Component ID (uses its local_path as the root)
-        #[arg(short, long)]
-        component: Option<String>,
-
-        /// Directory path (alternative to --component)
-        #[arg(long)]
-        path: Option<String>,
-
-        /// Apply changes to disk (default is dry-run)
-        #[arg(long)]
-        write: bool,
+        #[command(flatten)]
+        component: ComponentArgs,
+        #[command(flatten)]
+        write_mode: WriteModeArgs,
     },
 
     /// Move functions, structs, or other items from one file to another
@@ -89,17 +78,10 @@ enum RefactorCommand {
         #[arg(long, value_name = "FILE")]
         to: String,
 
-        /// Component ID (uses its local_path as the root)
-        #[arg(short, long)]
-        component: Option<String>,
-
-        /// Directory path (alternative to --component)
-        #[arg(long)]
-        path: Option<String>,
-
-        /// Apply changes to disk (default is dry-run)
-        #[arg(long)]
-        write: bool,
+        #[command(flatten)]
+        component: ComponentArgs,
+        #[command(flatten)]
+        write_mode: WriteModeArgs,
     },
 
     /// Add missing fields to struct instantiations after a struct definition changes
@@ -117,17 +99,10 @@ enum RefactorCommand {
         #[arg(long, value_name = "FILE")]
         definition: Option<String>,
 
-        /// Component ID (uses its local_path as the root)
-        #[arg(short, long)]
-        component: Option<String>,
-
-        /// Directory path (alternative to --component)
-        #[arg(long)]
-        path: Option<String>,
-
-        /// Apply changes to disk (default is dry-run)
-        #[arg(long)]
-        write: bool,
+        #[command(flatten)]
+        component: ComponentArgs,
+        #[command(flatten)]
+        write_mode: WriteModeArgs,
     },
 
     /// Apply pattern-based find/replace transforms across a codebase
@@ -158,17 +133,10 @@ enum RefactorCommand {
         #[arg(long, value_name = "RULE_ID")]
         rule: Option<String>,
 
-        /// Component ID (uses its local_path as the root)
-        #[arg(short, long)]
-        component: Option<String>,
-
-        /// Directory path (alternative to --component)
-        #[arg(long)]
-        path: Option<String>,
-
-        /// Apply changes to disk (default is dry-run)
-        #[arg(long)]
-        write: bool,
+        #[command(flatten)]
+        component: ComponentArgs,
+        #[command(flatten)]
+        write_mode: WriteModeArgs,
     },
 }
 
@@ -177,65 +145,61 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
         RefactorCommand::Rename {
             from,
             to,
-            component: component_id,
-            path,
+            component,
             scope,
             literal,
-            write,
+            write_mode,
         } => run_rename(
             &from,
             &to,
-            component_id.as_deref(),
-            path.as_deref(),
+            component.component.as_deref(),
+            component.path.as_deref(),
             &scope,
             literal,
-            write,
+            write_mode.write,
         ),
 
         RefactorCommand::Add {
             from_audit,
             import,
             to,
-            component: component_id,
-            path,
-            write,
+            component,
+            write_mode,
         } => run_add(
             from_audit.as_deref(),
             import.as_deref(),
             to.as_deref(),
-            component_id.as_deref(),
-            path.as_deref(),
-            write,
+            component.component.as_deref(),
+            component.path.as_deref(),
+            write_mode.write,
         ),
 
         RefactorCommand::Move {
             item,
             from,
             to,
-            component: component_id,
-            path,
-            write,
+            component,
+            write_mode,
         } => run_move(
             &item,
             &from,
             &to,
-            component_id.as_deref(),
-            path.as_deref(),
-            write,
+            component.component.as_deref(),
+            component.path.as_deref(),
+            write_mode.write,
         ),
 
         RefactorCommand::Propagate {
             struct_name,
             definition,
-            component: component_id,
-            path,
-            write,
+            component,
+            write_mode,
         } => run_propagate(
             &struct_name,
             definition.as_deref(),
-            component_id.as_deref(),
-            path.as_deref(),
-            write,
+            component.component.as_deref(),
+            component.path.as_deref(),
+            write_mode.write,
         ),
 
         RefactorCommand::Transform {
@@ -244,18 +208,17 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             replace,
             files,
             rule,
-            component: component_id,
-            path,
-            write,
+            component,
+            write_mode,
         } => run_transform(
             name.as_deref(),
             find.as_deref(),
             replace.as_deref(),
             &files,
             rule.as_deref(),
-            component_id.as_deref(),
-            path.as_deref(),
-            write,
+            component.component.as_deref(),
+            component.path.as_deref(),
+            write_mode.write,
         ),
     }
 }

@@ -263,6 +263,7 @@ pub fn finalize_set_spec(
 }
 
 pub mod api;
+pub mod args;
 pub mod audit;
 pub mod auth;
 pub mod build;

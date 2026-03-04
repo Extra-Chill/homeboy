@@ -17,6 +17,7 @@ use homeboy::{changelog, git, version};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::args::HiddenJsonArgs;
 use super::CmdResult;
 
 #[derive(Args)]
@@ -25,9 +26,8 @@ pub struct InitArgs {
     #[arg(long, short = 'a')]
     pub all: bool,
 
-    /// Accept --json for compatibility (output is JSON by default)
-    #[arg(long, hide = true)]
-    pub json: bool,
+    #[command(flatten)]
+    pub json_args: HiddenJsonArgs,
 }
 
 #[derive(Debug, Serialize)]

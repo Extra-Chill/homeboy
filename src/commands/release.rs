@@ -6,6 +6,7 @@ use homeboy::component;
 use homeboy::deploy::{self, DeployConfig};
 use homeboy::release::{self, ReleasePlan, ReleaseRun};
 
+use super::args::{DryRunArgs, HiddenJsonArgs};
 use super::{CmdResult, ProjectsSummary};
 
 #[derive(Clone, ValueEnum)]
@@ -39,13 +40,11 @@ pub struct ReleaseArgs {
     )]
     bump_type: Option<BumpType>,
 
-    /// Preview what will happen without making changes
-    #[arg(long)]
-    dry_run: bool,
+    #[command(flatten)]
+    dry_run_args: DryRunArgs,
 
-    /// Accept --json for compatibility (output is JSON by default)
-    #[arg(long, hide = true)]
-    json: bool,
+    #[command(flatten)]
+    _json: HiddenJsonArgs,
 
     /// Deploy to all projects using this component after release
     #[arg(long)]
@@ -105,12 +104,12 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
     })?;
     let options = release::ReleaseOptions {
         bump_type: bump_type.as_str().to_string(),
-        dry_run: args.dry_run,
+        dry_run: args.dry_run_args.dry_run,
         path_override: None,
         skip_checks: args.skip_checks,
     };
 
-    if args.dry_run {
+    if args.dry_run_args.dry_run {
         let plan = release::plan(&args.component_id, &options)?;
 
         let deployment = if args.deploy {

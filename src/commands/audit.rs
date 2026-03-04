@@ -5,6 +5,7 @@ use std::path::Path;
 use homeboy::code_audit::{self, baseline, fixer, CodeAuditResult};
 use homeboy::git;
 
+use super::args::BaselineArgs;
 use super::CmdResult;
 
 #[derive(Args)]
@@ -24,13 +25,8 @@ pub struct AuditArgs {
     #[arg(long, requires = "fix")]
     pub write: bool,
 
-    /// Save current audit state as baseline for future comparisons
-    #[arg(long)]
-    pub baseline: bool,
-
-    /// Skip baseline comparison even if a baseline exists
-    #[arg(long)]
-    pub ignore_baseline: bool,
+    #[command(flatten)]
+    pub baseline_args: BaselineArgs,
 
     /// Override local_path for this audit run (use a workspace clone or temp checkout)
     #[arg(long)]
@@ -183,7 +179,7 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
     }
 
     // --baseline: save current state
-    if args.baseline {
+    if args.baseline_args.baseline {
         let saved =
             baseline::save_baseline(&result).map_err(homeboy::Error::internal_unexpected)?;
 
@@ -220,7 +216,7 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
     }
 
     // Default: run audit, compare against baseline if one exists
-    if !args.ignore_baseline {
+    if !args.baseline_args.ignore_baseline {
         if let Some(existing_baseline) = baseline::load_baseline(Path::new(&result.source_path)) {
             let comparison = baseline::compare(&result, &existing_baseline);
 

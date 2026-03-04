@@ -3,6 +3,7 @@ use serde::Serialize;
 
 use homeboy::cleanup::{self, baseline as cleanup_baseline, CleanupResult};
 
+use super::args::BaselineArgs;
 use super::CmdResult;
 
 #[derive(Args)]
@@ -18,13 +19,8 @@ pub struct CleanupArgs {
     #[arg(long)]
     pub category: Option<String>,
 
-    /// Save current cleanup state as baseline for future comparisons
-    #[arg(long)]
-    pub baseline: bool,
-
-    /// Skip baseline comparison even if a baseline exists
-    #[arg(long)]
-    pub ignore_baseline: bool,
+    #[command(flatten)]
+    pub baseline_args: BaselineArgs,
 
     /// Override local_path for this cleanup run
     #[arg(long)]
@@ -69,7 +65,7 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<CleanupO
         };
 
         // --baseline: save current state
-        if args.baseline {
+        if args.baseline_args.baseline {
             let saved = cleanup_baseline::save_baseline(&source_path, &result)?;
             eprintln!(
                 "[cleanup] Baseline saved to {} ({} issue(s))",
@@ -92,7 +88,7 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<CleanupO
         }
 
         // Compare against baseline if one exists
-        let baseline_comparison = if !args.ignore_baseline {
+        let baseline_comparison = if !args.baseline_args.ignore_baseline {
             if let Some(existing_baseline) = cleanup_baseline::load_baseline(&source_path) {
                 let comparison = cleanup_baseline::compare(&result, &existing_baseline);
 

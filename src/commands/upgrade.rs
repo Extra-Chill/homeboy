@@ -2,6 +2,7 @@ use clap::Args;
 use homeboy::upgrade;
 use serde_json::Value;
 
+use crate::commands::args::HiddenJsonArgs;
 use crate::commands::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
@@ -22,9 +23,8 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub method: Option<String>,
 
-    /// Accept --json for compatibility (output is JSON by default)
-    #[arg(long, hide = true)]
-    pub json: bool,
+    #[command(flatten)]
+    _json: HiddenJsonArgs,
 }
 
 pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {

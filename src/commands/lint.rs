@@ -1,17 +1,18 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::component::{self, Component};
+use homeboy::component::Component;
 use homeboy::error::Error;
 use homeboy::extension::{self, ExtensionRunner};
 use homeboy::git;
 
+use super::args::{HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::CmdResult;
 
 #[derive(Args)]
 pub struct LintArgs {
-    /// Component name to lint
-    component: String,
+    #[command(flatten)]
+    comp: PositionalComponentArgs,
 
     /// Auto-fix formatting issues before validating
     #[arg(long)]
@@ -53,17 +54,11 @@ pub struct LintArgs {
     #[arg(long)]
     category: Option<String>,
 
-    /// Override settings as key=value pairs
-    #[arg(long, value_parser = super::parse_key_val)]
-    setting: Vec<(String, String)>,
+    #[command(flatten)]
+    setting_args: SettingArgs,
 
-    /// Override local_path for this lint run (use a workspace clone or temp checkout)
-    #[arg(long)]
-    path: Option<String>,
-
-    /// Accept --json for compatibility (output is JSON by default)
-    #[arg(long, hide = true)]
-    json: bool,
+    #[command(flatten)]
+    _json: HiddenJsonArgs,
 }
 
 #[derive(Serialize)]
@@ -125,10 +120,7 @@ fn resolve_lint_script(component: &Component) -> homeboy::error::Result<String> 
 }
 
 pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput> {
-    let mut component = component::load(&args.component)?;
-    if let Some(ref path) = args.path {
-        component.local_path = path.clone();
-    }
+    let component = args.comp.load()?;
     let script_path = resolve_lint_script(&component)?;
 
     // Resolve glob from --changed-only or --changed-since flags
@@ -146,7 +138,7 @@ pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput>
             return Ok((
                 LintOutput {
                     status: "passed".to_string(),
-                    component: args.component,
+                    component: args.comp.component,
                     exit_code: 0,
                     hints: None,
                 },
@@ -175,7 +167,7 @@ pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput>
             return Ok((
                 LintOutput {
                     status: "passed".to_string(),
-                    component: args.component,
+                    component: args.comp.component,
                     exit_code: 0,
                     hints: None,
                 },
@@ -198,9 +190,9 @@ pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput>
         args.glob.clone()
     };
 
-    let output = ExtensionRunner::new(&args.component, &script_path)
-        .path_override(args.path.clone())
-        .settings(&args.setting)
+    let output = ExtensionRunner::new(args.comp.id(), &script_path)
+        .path_override(args.comp.path.clone())
+        .settings(&args.setting_args.setting)
         .env_if(args.fix, "HOMEBOY_AUTO_FIX", "1")
         .env_if(args.summary, "HOMEBOY_SUMMARY_MODE", "1")
         .env_opt("HOMEBOY_LINT_FILE", &args.file)
@@ -219,7 +211,7 @@ pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput>
     if !output.success && !args.fix {
         hints.push(format!(
             "Run 'homeboy lint {} --fix' to auto-fix formatting issues",
-            args.component
+            args.comp.component
         ));
         hints.push("Some issues may require manual fixes".to_string());
     }
@@ -243,7 +235,7 @@ pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput>
     Ok((
         LintOutput {
             status: status.to_string(),
-            component: args.component,
+            component: args.comp.component,
             exit_code: output.exit_code,
             hints,
         },
