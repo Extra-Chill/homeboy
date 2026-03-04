@@ -52,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: Extra-Chill/homeboy-action@feat/source-build
+      - uses: Extra-Chill/homeboy-action@v1
         with:
           source: '.'
           extension: rust
