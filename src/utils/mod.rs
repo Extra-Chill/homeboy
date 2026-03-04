@@ -22,6 +22,7 @@ pub mod baseline;
 pub mod codebase_scan;
 pub mod command;
 pub mod entity_suggest;
+pub mod grammar;
 pub mod io;
 pub mod parser;
 pub mod resolve;

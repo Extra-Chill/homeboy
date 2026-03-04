@@ -7,6 +7,7 @@ use homeboy::extension::{self, ExtensionRunner};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
 use homeboy::test_drift::{self, DriftOptions, DriftReport};
+use homeboy::test_scaffold::{self, ScaffoldConfig};
 use homeboy::utils::io;
 
 use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
@@ -48,6 +49,18 @@ pub struct TestArgs {
     #[arg(long)]
     drift: bool,
 
+    /// Generate test stubs for untested source files
+    #[arg(long)]
+    scaffold: bool,
+
+    /// Scaffold a specific source file (relative to component root)
+    #[arg(long, value_name = "FILE")]
+    scaffold_file: Option<String>,
+
+    /// Write scaffold files to disk (default: dry-run)
+    #[arg(long)]
+    write: bool,
+
     /// Git ref to compare against for drift detection (tag, commit, branch)
     #[arg(long, value_name = "REF", default_value = "HEAD~10")]
     since: String,
@@ -80,6 +93,25 @@ pub struct TestOutput {
     hints: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     drift: Option<DriftReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scaffold: Option<ScaffoldOutput>,
+}
+
+#[derive(Serialize)]
+pub struct ScaffoldOutput {
+    results: Vec<ScaffoldFileOutput>,
+    total_stubs: usize,
+    total_written: usize,
+    total_skipped: usize,
+}
+
+#[derive(Serialize)]
+pub struct ScaffoldFileOutput {
+    source_file: String,
+    test_file: String,
+    stub_count: usize,
+    written: bool,
+    skipped: bool,
 }
 
 #[derive(Serialize)]
@@ -173,6 +205,16 @@ fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> 
 
 pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput> {
     let component = args.comp.load()?;
+
+    // Scaffold mode — generate test stubs without running tests
+    if args.scaffold || args.scaffold_file.is_some() {
+        return run_scaffold(
+            &args.component,
+            &component,
+            args.scaffold_file.as_deref(),
+            args.write,
+        );
+    }
 
     // Drift detection mode — skip running tests, analyze git changes instead
     if args.drift {
@@ -418,6 +460,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
             analysis,
             hints,
             drift: None,
+            scaffold: None,
         },
         exit_code,
     ))
@@ -628,7 +671,190 @@ fn run_drift(component_id: &str, component: &Component, since: &str) -> CmdResul
             analysis: None,
             hints: None,
             drift: Some(report),
+            scaffold: None,
         },
         exit_code,
     ))
+}
+
+/// Run scaffold mode — generate test stubs from source files.
+fn run_scaffold(
+    component_id: &str,
+    component: &Component,
+    scaffold_file: Option<&str>,
+    write: bool,
+) -> CmdResult<TestOutput> {
+    let source_path = {
+        let expanded = shellexpand::tilde(&component.local_path);
+        std::path::PathBuf::from(expanded.as_ref())
+    };
+
+    // Auto-detect language
+    let config = if source_path.join("Cargo.toml").exists() {
+        ScaffoldConfig::rust()
+    } else {
+        ScaffoldConfig::php()
+    };
+
+    let mode_label = if write { "write" } else { "dry-run" };
+
+    if let Some(file) = scaffold_file {
+        // Single file mode
+        let file_path = source_path.join(file);
+        homeboy::log_status!(
+            "scaffold",
+            "Scaffolding tests for {} ({})",
+            file,
+            mode_label
+        );
+
+        let result = test_scaffold::scaffold_file(&file_path, &source_path, &config, write)?;
+
+        if result.skipped {
+            homeboy::log_status!(
+                "scaffold",
+                "Skipped — test file already exists: {}",
+                result.test_file
+            );
+        } else if result.stub_count == 0 {
+            homeboy::log_status!("scaffold", "No public methods found in {}", file);
+        } else {
+            homeboy::log_status!(
+                "scaffold",
+                "Generated {} test stub{} → {}{}",
+                result.stub_count,
+                if result.stub_count == 1 { "" } else { "s" },
+                result.test_file,
+                if write { " (written)" } else { " (dry-run)" }
+            );
+
+            if !write {
+                // Show preview
+                eprintln!("---");
+                for line in result.content.lines().take(40) {
+                    eprintln!("{}", line);
+                }
+                if result.content.lines().count() > 40 {
+                    eprintln!("... ({} more lines)", result.content.lines().count() - 40);
+                }
+                eprintln!("---");
+            }
+        }
+
+        let scaffold_output = ScaffoldOutput {
+            results: vec![ScaffoldFileOutput {
+                source_file: result.source_file.clone(),
+                test_file: result.test_file.clone(),
+                stub_count: result.stub_count,
+                written: result.written,
+                skipped: result.skipped,
+            }],
+            total_stubs: result.stub_count,
+            total_written: if result.written { 1 } else { 0 },
+            total_skipped: if result.skipped { 1 } else { 0 },
+        };
+
+        Ok((
+            TestOutput {
+                status: "scaffold".to_string(),
+                component: component_id.to_string(),
+                exit_code: 0,
+                test_counts: None,
+                coverage: None,
+                baseline_comparison: None,
+                analysis: None,
+                hints: None,
+                drift: None,
+                scaffold: Some(scaffold_output),
+            },
+            0,
+        ))
+    } else {
+        // Batch mode — scaffold all untested files
+        homeboy::log_status!(
+            "scaffold",
+            "Scanning {} for untested {} files ({})",
+            component_id,
+            config.language,
+            mode_label
+        );
+
+        let batch = test_scaffold::scaffold_untested(&source_path, &config, write)?;
+
+        let files_needing_tests = batch
+            .results
+            .iter()
+            .filter(|r| !r.skipped && r.stub_count > 0)
+            .count();
+        let already_tested = batch.total_skipped;
+
+        homeboy::log_status!(
+            "scaffold",
+            "{} file{} need tests, {} already have tests",
+            files_needing_tests,
+            if files_needing_tests == 1 { "" } else { "s" },
+            already_tested
+        );
+
+        if write {
+            homeboy::log_status!(
+                "scaffold",
+                "Wrote {} test file{} with {} total stubs",
+                batch.total_written,
+                if batch.total_written == 1 { "" } else { "s" },
+                batch.total_stubs
+            );
+        } else if files_needing_tests > 0 {
+            // Show summary of what would be created
+            for result in &batch.results {
+                if !result.skipped && result.stub_count > 0 {
+                    homeboy::log_status!(
+                        "  new",
+                        "{} → {} ({} stubs)",
+                        result.source_file,
+                        result.test_file,
+                        result.stub_count
+                    );
+                }
+            }
+            homeboy::log_status!(
+                "hint",
+                "Run with --write to create test files: homeboy test {} --scaffold --write",
+                component_id
+            );
+        }
+
+        let scaffold_output = ScaffoldOutput {
+            results: batch
+                .results
+                .iter()
+                .map(|r| ScaffoldFileOutput {
+                    source_file: r.source_file.clone(),
+                    test_file: r.test_file.clone(),
+                    stub_count: r.stub_count,
+                    written: r.written,
+                    skipped: r.skipped,
+                })
+                .collect(),
+            total_stubs: batch.total_stubs,
+            total_written: batch.total_written,
+            total_skipped: batch.total_skipped,
+        };
+
+        Ok((
+            TestOutput {
+                status: "scaffold".to_string(),
+                component: component_id.to_string(),
+                exit_code: 0,
+                test_counts: None,
+                coverage: None,
+                baseline_comparison: None,
+                analysis: None,
+                hints: None,
+                drift: None,
+                scaffold: Some(scaffold_output),
+            },
+            0,
+        ))
+    }
 }
