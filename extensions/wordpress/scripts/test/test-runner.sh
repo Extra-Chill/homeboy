@@ -195,17 +195,19 @@ export WP_PHPUNIT__TESTS_CONFIG="$WP_TESTS_CONFIG_PATH"
 # Resolve "auto" database type: try MySQL first, fall back to SQLite
 MYSQL_AUTO_CREATED=""
 if [ "$DATABASE_TYPE" = "auto" ]; then
-    if command -v mysql &>/dev/null && mysql -u root -e "SELECT 1" &>/dev/null; then
+    if command -v mysql &>/dev/null && mysql -h 127.0.0.1 -u root -e "SELECT 1" &>/dev/null; then
         DATABASE_TYPE="mysql"
-        MYSQL_HOST="localhost"
+        # Use TCP host by default in CI/local automation. "localhost" can
+        # trigger socket mode and fail in containerized environments.
+        MYSQL_HOST="127.0.0.1"
         MYSQL_DATABASE="homeboy_wptests"
         MYSQL_USER="root"
         MYSQL_PASSWORD=""
         # Auto-create the test database
-        mysql -u root -e "CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null
+        mysql -h "$MYSQL_HOST" -u "$MYSQL_USER" -e "CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null
         MYSQL_AUTO_CREATED="1"
         if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-            echo "DEBUG: Auto-detected MySQL (root@localhost)"
+            echo "DEBUG: Auto-detected MySQL (root@${MYSQL_HOST})"
         fi
     elif php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);' 2>/dev/null; then
         DATABASE_TYPE="sqlite"
@@ -241,13 +243,13 @@ elif [ "$DATABASE_TYPE" = "mysql" ]; then
         # Credentials not set yet (explicit mysql mode, not auto-detected)
         if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
             # Use Homeboy settings
-            MYSQL_HOST=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_host // "localhost"')
+            MYSQL_HOST=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_host // "127.0.0.1"')
             MYSQL_DATABASE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_database // "wordpress_test"')
             MYSQL_USER=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_user // "root"')
             MYSQL_PASSWORD=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_password // ""')
         else
             # Use defaults when called directly
-            MYSQL_HOST="localhost"
+            MYSQL_HOST="127.0.0.1"
             MYSQL_DATABASE="wordpress_test"
             MYSQL_USER="root"
             MYSQL_PASSWORD=""

@@ -330,7 +330,7 @@
       "id": "mysql_host",
       "label": "MySQL Host",
       "type": "string",
-      "default": "localhost",
+      "default": "127.0.0.1",
       "description": "MySQL host (when using mysql database type)"
     },
     {
