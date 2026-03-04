@@ -28,6 +28,7 @@ pub mod refactor;
 pub mod release;
 
 pub mod server;
+pub mod test_baseline;
 pub mod ssh;
 pub mod update_check;
 pub mod upgrade;

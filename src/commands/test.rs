@@ -4,6 +4,7 @@ use serde::Serialize;
 use homeboy::component::{self, Component};
 use homeboy::error::Error;
 use homeboy::extension::{self, ExtensionRunner};
+use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
 use homeboy::utils::io;
 
 use super::CmdResult;
@@ -29,6 +30,18 @@ pub struct TestArgs {
     #[arg(long, value_name = "PERCENT")]
     coverage_min: Option<f64>,
 
+    /// Save current test results as baseline for future ratchet checks
+    #[arg(long)]
+    baseline: bool,
+
+    /// Skip baseline comparison even if a baseline exists
+    #[arg(long)]
+    ignore_baseline: bool,
+
+    /// Auto-update baseline when test results improve (ratchet forward)
+    #[arg(long)]
+    ratchet: bool,
+
     /// Override settings as key=value pairs
     #[arg(long, value_parser = super::parse_key_val)]
     setting: Vec<(String, String)>,
@@ -52,7 +65,11 @@ pub struct TestOutput {
     component: String,
     exit_code: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    test_counts: Option<TestCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     coverage: Option<CoverageOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline_comparison: Option<TestBaselineComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hints: Option<Vec<String>>,
 }
@@ -163,12 +180,17 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
         None
     };
 
+    // Create temp file for test results output
+    let results_file =
+        std::env::temp_dir().join(format!("homeboy-test-results-{}.json", std::process::id()));
+
     let mut runner = ExtensionRunner::new(&args.component, &script_path)
         .path_override(args.path.clone())
         .settings(&args.setting)
         .env_if(args.skip_lint, "HOMEBOY_SKIP_LINT", "1")
         .env_if(args.fix, "HOMEBOY_AUTO_FIX", "1")
-        .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1");
+        .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1")
+        .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy());
 
     if let Some(ref file) = coverage_file {
         runner = runner.env("HOMEBOY_COVERAGE_FILE", &file.to_string_lossy());
@@ -182,6 +204,12 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
 
     let status = if output.success { "passed" } else { "failed" };
 
+    // Read test results if available
+    let test_counts = parse_test_results_file(&results_file);
+
+    // Clean up test results temp file
+    let _ = std::fs::remove_file(&results_file);
+
     // Read coverage results if available
     let coverage = coverage_file
         .as_ref()
@@ -190,6 +218,73 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     // Clean up coverage temp file
     if let Some(ref f) = coverage_file {
         let _ = std::fs::remove_file(f);
+    }
+
+    // Resolve source path for baseline storage
+    let source_path = if let Some(ref path) = args.path {
+        std::path::PathBuf::from(path)
+    } else {
+        let expanded = shellexpand::tilde(&component.local_path);
+        std::path::PathBuf::from(expanded.as_ref())
+    };
+
+    // --baseline: save current state
+    if args.baseline {
+        if let Some(ref counts) = test_counts {
+            let saved = test_baseline::save_baseline(&source_path, &args.component, counts)?;
+            eprintln!(
+                "[test] Baseline saved to {} ({} passed, {} failed, {} total)",
+                saved.display(),
+                counts.passed,
+                counts.failed,
+                counts.total,
+            );
+        } else {
+            eprintln!(
+                "[test] Cannot save baseline: no test results available. \
+                 Ensure the extension writes HOMEBOY_TEST_RESULTS_FILE."
+            );
+        }
+    }
+
+    // Baseline comparison
+    let mut baseline_comparison = None;
+    let mut baseline_exit_override = None;
+
+    if !args.baseline && !args.ignore_baseline {
+        if let Some(ref counts) = test_counts {
+            if let Some(existing_baseline) = test_baseline::load_baseline(&source_path) {
+                let comparison = test_baseline::compare(counts, &existing_baseline);
+
+                if comparison.regression {
+                    eprintln!(
+                        "[test] REGRESSION: {}",
+                        comparison.reasons.join("; ")
+                    );
+                    baseline_exit_override = Some(1);
+                } else {
+                    if comparison.passed_delta > 0 || comparison.failed_delta < 0 {
+                        eprintln!(
+                            "[test] Improvement: passed {} ({:+}), failed {} ({:+})",
+                            counts.passed, comparison.passed_delta,
+                            counts.failed, comparison.failed_delta,
+                        );
+
+                        // Auto-ratchet: update baseline when results improve
+                        if args.ratchet {
+                            let _ = test_baseline::save_baseline(
+                                &source_path,
+                                &args.component,
+                                counts,
+                            );
+                            eprintln!("[test] Baseline ratcheted forward");
+                        }
+                    }
+                }
+
+                baseline_comparison = Some(comparison);
+            }
+        }
     }
 
     let mut hints = Vec::new();
@@ -218,6 +313,22 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
         ));
     }
 
+    // Baseline hints
+    if test_counts.is_some() && !args.baseline && baseline_comparison.is_none() {
+        hints.push(format!(
+            "Save test baseline: homeboy test {} --baseline",
+            args.component
+        ));
+    }
+
+    // Ratchet hint when baseline exists but --ratchet not used
+    if baseline_comparison.is_some() && !args.ratchet {
+        hints.push(format!(
+            "Auto-update baseline on improvement: homeboy test {} --ratchet",
+            args.component
+        ));
+    }
+
     // Capability hint when not using passthrough args
     if args.args.is_empty() {
         hints.push("Pass args to test runner: homeboy test <component> -- [args]".to_string());
@@ -228,16 +339,34 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
 
     let hints = if hints.is_empty() { None } else { Some(hints) };
 
+    // Exit code: baseline regression overrides test exit code
+    let exit_code = baseline_exit_override.unwrap_or(output.exit_code);
+
     Ok((
         TestOutput {
             status: status.to_string(),
             component: args.component,
-            exit_code: output.exit_code,
+            exit_code,
+            test_counts,
             coverage,
+            baseline_comparison,
             hints,
         },
-        output.exit_code,
+        exit_code,
     ))
+}
+
+/// Parse the test results JSON file written by the extension test runner.
+fn parse_test_results_file(path: &std::path::Path) -> Option<TestCounts> {
+    let content = io::read_file(path, "read test results file").ok()?;
+    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let total = data.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+    let passed = data.get("passed").and_then(|v| v.as_u64()).unwrap_or(0);
+    let failed = data.get("failed").and_then(|v| v.as_u64()).unwrap_or(0);
+    let skipped = data.get("skipped").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    Some(TestCounts::new(total, passed, failed, skipped))
 }
 
 /// Parse the coverage JSON file written by the extension test runner.
