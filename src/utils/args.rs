@@ -265,6 +265,7 @@ pub fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
                 "--scaffold-file",
                 "--write",
                 "--since",
+                "--changed-since",
                 "--setting",
                 "--path",
                 "--json",

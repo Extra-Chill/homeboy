@@ -4,6 +4,7 @@ use serde::Serialize;
 use homeboy::component::Component;
 use homeboy::error::Error;
 use homeboy::extension::{self, ExtensionRunner};
+use homeboy::git;
 use homeboy::refactor::{self, TransformSet};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
@@ -66,6 +67,10 @@ pub struct TestArgs {
     #[arg(long, value_name = "REF", default_value = "HEAD~10")]
     since: String,
 
+    /// Limit test execution to files changed since this git ref (PR impact scope)
+    #[arg(long, value_name = "REF")]
+    changed_since: Option<String>,
+
     #[command(flatten)]
     setting_args: SettingArgs,
 
@@ -98,6 +103,8 @@ pub struct TestOutput {
     scaffold: Option<ScaffoldOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_fix_drift: Option<AutoFixDriftOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_scope: Option<TestScopeOutput>,
 }
 
 #[derive(Serialize)]
@@ -126,6 +133,16 @@ pub struct AutoFixDriftOutput {
     files_modified: usize,
     written: bool,
     rerun_recommended: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub struct TestScopeOutput {
+    mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changed_since: Option<String>,
+    selected_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    selected_files: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -209,6 +226,7 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
     const HOMEBOY_VALUE_FLAGS: &[&str] = &[
         "--coverage-min",
         "--since",
+        "--changed-since",
         "--scaffold-file",
         "--setting",
         "--path",
@@ -308,6 +326,13 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
         }
         return run_drift(args.comp.id(), &component, &args.since);
     }
+
+    // Compute optional PR/impact-scoped test selection
+    let changed_scope = if let Some(ref git_ref) = args.changed_since {
+        Some(compute_changed_test_scope(&component, git_ref)?)
+    } else {
+        None
+    };
     let script_path = resolve_test_script(&component)?;
 
     // Coverage is enabled by --coverage or --coverage-min
@@ -353,7 +378,54 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
         runner = runner.env("HOMEBOY_COVERAGE_MIN", &format!("{}", min));
     }
 
-    let passthrough_args = filter_homeboy_flags(&args.args);
+    let mut passthrough_args = filter_homeboy_flags(&args.args);
+
+    if let Some(ref scope) = changed_scope {
+        if scope.selected_files.is_empty() {
+            homeboy::log_status!(
+                "test",
+                "No changed-scope tests found since {}. Skipping test runner.",
+                scope.changed_since.as_deref().unwrap_or("unknown")
+            );
+
+            let hints = Some(vec![
+                format!(
+                    "No impacted tests found for --changed-since {}",
+                    scope.changed_since.as_deref().unwrap_or("unknown")
+                ),
+                format!("Run full suite if needed: homeboy test {}", args.comp.id()),
+            ]);
+
+            return Ok((
+                TestOutput {
+                    status: "passed".to_string(),
+                    component: args.comp.component.clone(),
+                    exit_code: 0,
+                    test_counts: None,
+                    coverage: None,
+                    baseline_comparison: None,
+                    analysis: None,
+                    hints,
+                    drift: None,
+                    scaffold: None,
+                    auto_fix_drift: None,
+                    test_scope: Some(scope.clone()),
+                },
+                0,
+            ));
+        }
+
+        let filter_regex = build_phpunit_filter_regex(&scope.selected_files);
+        passthrough_args.push(format!("--filter={}", filter_regex));
+
+        homeboy::log_status!(
+            "test",
+            "Scoped test run: {} selected file(s) since {}",
+            scope.selected_count,
+            scope.changed_since.as_deref().unwrap_or("unknown")
+        );
+    }
+
     let output = runner.script_args(&passthrough_args).run()?;
 
     let status = if output.success { "passed" } else { "failed" };
@@ -551,6 +623,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
             drift: None,
             scaffold: None,
             auto_fix_drift: None,
+            test_scope: changed_scope,
         },
         exit_code,
     ))
@@ -687,9 +760,86 @@ fn run_auto_fix_drift(
             },
             scaffold: None,
             auto_fix_drift: Some(output),
+            test_scope: None,
         },
         0,
     ))
+}
+
+fn compute_changed_test_scope(
+    component: &Component,
+    git_ref: &str,
+) -> homeboy::error::Result<TestScopeOutput> {
+    let source_path = {
+        let expanded = shellexpand::tilde(&component.local_path);
+        std::path::PathBuf::from(expanded.as_ref())
+    };
+
+    let changed_files = git::get_files_changed_since(&source_path.to_string_lossy(), git_ref)?;
+
+    let opts = if source_path.join("Cargo.toml").exists() {
+        DriftOptions::rust(&source_path, git_ref)
+    } else {
+        DriftOptions::php(&source_path, git_ref)
+    };
+
+    let report = test_drift::detect_drift(&component.id, &opts)?;
+
+    let mut selected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    // Include directly changed test files
+    for file in &changed_files {
+        if is_test_path(file) {
+            selected.insert(file.clone());
+        }
+    }
+
+    // Include drift-detected impacted test files
+    for drifted in &report.drifted_tests {
+        selected.insert(drifted.test_file.clone());
+    }
+
+    let selected_files: Vec<String> = selected.into_iter().collect();
+
+    Ok(TestScopeOutput {
+        mode: "changed".to_string(),
+        changed_since: Some(git_ref.to_string()),
+        selected_count: selected_files.len(),
+        selected_files,
+    })
+}
+
+fn is_test_path(path: &str) -> bool {
+    path.contains("/tests/") || path.ends_with("Test.php") || path.ends_with("_test.rs")
+}
+
+fn build_phpunit_filter_regex(selected_files: &[String]) -> String {
+    // Build a regex that matches test class names derived from selected file basenames.
+    // Example: tests/Unit/Foo/BarBazTest.php -> BarBazTest
+    let mut classes: Vec<String> = selected_files
+        .iter()
+        .filter_map(|f| {
+            if !f.ends_with(".php") {
+                return None;
+            }
+            std::path::Path::new(f)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+        })
+        .filter(|stem| !stem.is_empty())
+        .map(|stem| regex::escape(&stem))
+        .collect();
+
+    classes.sort();
+    classes.dedup();
+
+    if classes.is_empty() {
+        // No PHP class-based test files selected. Use a non-matching regex
+        // to avoid accidentally running the full suite.
+        return "^$".to_string();
+    }
+
+    format!("({})", classes.join("|"))
 }
 
 /// Parse the test failures JSON file written by the extension test runner.
@@ -899,6 +1049,7 @@ fn run_drift(component_id: &str, component: &Component, since: &str) -> CmdResul
             drift: Some(report),
             scaffold: None,
             auto_fix_drift: None,
+            test_scope: None,
         },
         exit_code,
     ))
@@ -994,6 +1145,7 @@ fn run_scaffold(
                 drift: None,
                 scaffold: Some(scaffold_output),
                 auto_fix_drift: None,
+                test_scope: None,
             },
             0,
         ))
@@ -1082,6 +1234,7 @@ fn run_scaffold(
                 drift: None,
                 scaffold: Some(scaffold_output),
                 auto_fix_drift: None,
+                test_scope: None,
             },
             0,
         ))
@@ -1123,6 +1276,14 @@ mod tests {
         let args = vec![
             "--since".to_string(),
             "v0.36.0".to_string(),
+            "--filter=SomeTest".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=SomeTest"]);
+
+        let args = vec![
+            "--changed-since".to_string(),
+            "origin/main".to_string(),
             "--filter=SomeTest".to_string(),
         ];
         let result = filter_homeboy_flags(&args);
