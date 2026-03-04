@@ -55,6 +55,10 @@ inputs:
     description: 'Only lint files changed in the PR (default: true for PRs, ignored for non-PR events)'
     required: false
     default: 'true'
+  test-scope:
+    description: 'Test execution scope: "full" or "changed" (PRs only for changed). Default: full'
+    required: false
+    default: 'full'
   auto-issue:
     description: 'Automatically file a GitHub issue on non-PR failures (default: false)'
     required: false
@@ -341,6 +345,7 @@ runs:
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
+        TEST_SCOPE: ${{ inputs.test-scope }}
       run: |
         set -euo pipefail
 
@@ -406,6 +411,9 @@ runs:
           elif [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
             # Scope lint to changed files only (PR mode) using --changed-since
             FULL_CMD="homeboy lint ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+          elif [ "$CMD" = "test" ] && [ "$TEST_SCOPE" = "changed" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            # Scope tests in PR mode (requires homeboy support for --changed-since on test command)
+            FULL_CMD="homeboy test ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
           else
             FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
           fi
@@ -452,6 +460,7 @@ runs:
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
+        TEST_SCOPE: ${{ inputs.test-scope }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
         AUTOFIX_LABEL: ${{ inputs.autofix-label }}
         PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
@@ -628,6 +637,8 @@ runs:
             FULL_CMD="homeboy audit ${COMP_ID}"
           elif [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
             FULL_CMD="homeboy lint ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+          elif [ "$CMD" = "test" ] && [ "$TEST_SCOPE" = "changed" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            FULL_CMD="homeboy test ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
           else
             FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
           fi

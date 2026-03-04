@@ -70,6 +70,7 @@ If your repo has a `homeboy.json` file, you don't even need to specify the exten
 | `autofix` | No | `false` | On PR failures, run safe autofixes, commit, push, and re-run checks |
 | `autofix-commands` | No | | Override autofix commands (comma-separated, e.g. `lint --fix,test --fix`) |
 | `autofix-label` | No | | Optional PR label required before autofix runs (e.g. `autofix`) |
+| `test-scope` | No | `full` | Test scope for PRs: `full` or `changed` (requires Homeboy test changed-since support) |
 
 ## Outputs
 
@@ -100,6 +101,21 @@ If your repo has a `homeboy.json` file, you don't even need to specify the exten
     php-version: '8.2'
     node-version: '20'
 ```
+
+### PR Scoped Checks (Changed Files)
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v1
+  with:
+    extension: wordpress
+    commands: lint,test,audit
+    php-version: '8.2'
+    lint-changed-only: 'true'
+    test-scope: 'changed'
+```
+
+> `test-scope: changed` requires Homeboy support for `homeboy test --changed-since`.
+> If unsupported in your pinned Homeboy version, keep `test-scope: full`.
 
 ### Auto-apply Fixable CI Issues (PRs)
 
