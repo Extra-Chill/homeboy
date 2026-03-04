@@ -10,8 +10,7 @@ permissions:
 
 jobs:
   # ── Rust build + test (native cargo) ──
-  # These run directly because homeboy-action delegates to cargo anyway,
-  # and we want fast feedback without installing homeboy first.
+  # Fast feedback: fmt, clippy, test run directly without installing homeboy.
   build:
     name: Build & Test
     runs-on: ubuntu-latest
@@ -42,12 +41,10 @@ jobs:
       - name: cargo test
         run: cargo test
 
-  # ── Homeboy audit (dogfooding) ──
-  # Build from source instead of downloading a release binary.
-  # This avoids the chicken-and-egg problem: homeboy-action downloads from
-  # the latest GitHub release, but that binary doesn't include the PR's code.
-  # For the homeboy repo itself, we compile the PR branch and audit with that.
-  # See: https://github.com/Extra-Chill/homeboy/issues/416
+  # ── Homeboy audit (dogfooding via homeboy-action) ──
+  # Uses source build mode to compile from the PR branch, avoiding the
+  # chicken-and-egg problem of needing a released binary to audit itself.
+  # Falls back to latest release binary if source build fails.
   audit:
     name: Homeboy Audit
     needs: [build]
@@ -55,43 +52,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: Extra-Chill/homeboy-action@feat/source-build
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Build homeboy
-        run: cargo build
-
-      - name: Install extension and register component
-        run: |
-          BINARY=$(find target/debug -maxdepth 1 -name "homeboy" -type f | head -1)
-          if [ -z "$BINARY" ]; then
-            echo "::error::Could not find homeboy binary in target/debug"
-            exit 1
-          fi
-          chmod +x "$BINARY"
-
-          echo "Using $($BINARY --version)"
-
-          # Install the rust extension for audit rules
-          "$BINARY" extension install https://github.com/Extra-Chill/homeboy-extensions --id rust
-
-          # Register the component so audit can find it
-          "$BINARY" component create --local-path "$(pwd)" --extension rust
-
-      - name: Run audit (scoped to changed files)
-        run: |
-          BINARY=$(find target/debug -maxdepth 1 -name "homeboy" -type f | head -1)
-          # Fetch enough history for merge-base to work
-          git fetch origin main --depth=1 2>/dev/null || true
-          # Scope audit to only files changed in this PR
-          "$BINARY" audit homeboy --changed-since origin/main
+          source: '.'
+          extension: rust
+          component: homeboy
+          commands: audit

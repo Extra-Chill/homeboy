@@ -16,6 +16,8 @@
 name: Release
 permissions:
   "contents": "write"
+  "issues": "write"
+  "pull-requests": "write"
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -122,20 +124,14 @@ jobs:
       - name: cargo test
         run: cargo test
 
-      - name: Homeboy audit
-        run: |
-          # Use the binary compiled by cargo test/clippy (avoids chicken-and-egg:
-          # can't download the latest release binary when the latest release is broken)
-          BINARY=$(find target/debug -maxdepth 1 -name "homeboy" -type f | head -1)
-          if [ -z "$BINARY" ]; then
-            echo "::warning::No debug binary found — skipping audit"
-            exit 0
-          fi
-          chmod +x "$BINARY"
-
-          # Register component so audit can find it
-          "$BINARY" component create --local-path "$(pwd)" --extension rust 2>/dev/null || true
-          "$BINARY" audit homeboy || true
+      # Audit via homeboy-action (source build, auto-file issue on failure)
+      - uses: Extra-Chill/homeboy-action@feat/source-build
+        with:
+          source: '.'
+          extension: rust
+          component: homeboy
+          commands: audit
+          auto-issue: 'true'
 
   # Build and packages all the platform-specific things
   build-local-artifacts:
