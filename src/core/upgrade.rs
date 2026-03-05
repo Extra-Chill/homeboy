@@ -393,6 +393,10 @@ pub fn restart_with_new_binary() -> ! {
 /// where the old inode is deleted after the upgrade replaces the binary.
 fn resolve_binary_on_path() -> Option<std::path::PathBuf> {
     let path_var = std::env::var("PATH").ok()?;
+    resolve_binary_on_path_var(&path_var)
+}
+
+fn resolve_binary_on_path_var(path_var: &str) -> Option<std::path::PathBuf> {
     for dir in path_var.split(':') {
         let candidate = std::path::PathBuf::from(dir).join("homeboy");
         if candidate.exists() {
@@ -411,6 +415,8 @@ pub fn restart_with_new_binary() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn test_version_comparison() {
@@ -435,5 +441,32 @@ mod tests {
         assert_eq!(InstallMethod::Source.as_str(), "source");
         assert_eq!(InstallMethod::Binary.as_str(), "binary");
         assert_eq!(InstallMethod::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn test_resolve_binary_on_path_var_finds_first_existing_binary() {
+        let base = tempdir().unwrap();
+        let first = base.path().join("first");
+        let second = base.path().join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(second.join("homeboy"), "#!/bin/sh\n").unwrap();
+
+        let path_var = format!("{}:{}", first.display(), second.display());
+        let found = resolve_binary_on_path_var(&path_var).unwrap();
+        assert_eq!(found, second.join("homeboy"));
+    }
+
+    #[test]
+    fn test_resolve_binary_on_path_var_returns_none_when_missing() {
+        let base = tempdir().unwrap();
+        let first = base.path().join("first");
+        let second = base.path().join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+
+        let path_var = format!("{}:{}", first.display(), second.display());
+        let found = resolve_binary_on_path_var(&path_var);
+        assert!(found.is_none());
     }
 }
