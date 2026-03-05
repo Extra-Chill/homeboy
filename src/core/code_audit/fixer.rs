@@ -2230,8 +2230,7 @@ pub struct TestOutput {}
 
     #[test]
     fn extract_expected_test_path_parses_description() {
-        let desc =
-            "No test file found (expected 'tests/utils/token_test.rs') and no inline tests";
+        let desc = "No test file found (expected 'tests/utils/token_test.rs') and no inline tests";
         let parsed = extract_expected_test_path(desc);
         assert_eq!(parsed, Some("tests/utils/token_test.rs".to_string()));
     }
