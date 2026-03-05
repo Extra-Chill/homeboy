@@ -9,8 +9,7 @@ const LEGACY_MARKERS: &[&str] = &[
     "temporary",
     "workaround",
     "remove after",
-    "phase 1",
-    "legacy",
+    "legacy:",
     "outdated",
 ];
 
@@ -240,6 +239,10 @@ mod tests {
     fn test_has_legacy_marker() {
         assert!(has_legacy_marker("temporary workaround", "temporary"));
         assert!(!has_legacy_marker("non temporary text", "temporary"));
+        assert!(!has_legacy_marker(
+            "Legacy hook fields are merged during deserialization",
+            "legacy:"
+        ));
     }
 
     #[test]

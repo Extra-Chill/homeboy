@@ -67,9 +67,9 @@ pub fn resolve_hooks(component: &Component, event: &str) -> Vec<String> {
         }
     }
 
-    // Component hooks second (from the `hooks` map).
-    // Compatibility fields are merged into this map during RawComponent deserialization,
-    // so no separate fallback path is needed here.
+    // Component hooks second (from the new `hooks` map).
+    // Legacy fields (pre_version_bump_commands, etc.) are already merged into this
+    // map during deserialization via RawComponent, so no separate fallback is needed.
     if let Some(component_commands) = component.hooks.get(event) {
         commands.extend(component_commands.clone());
     }

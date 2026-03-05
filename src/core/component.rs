@@ -106,7 +106,7 @@ struct RawComponent {
     changelog_next_section_aliases: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     hooks: HashMap<String, Vec<String>>,
-    // Hook compatibility fields read during deserialization and merged into `hooks`.
+    // Legacy hook fields — read from old JSON, merged into hooks
     #[serde(default, skip_serializing)]
     pre_version_bump_commands: Vec<String>,
     #[serde(default, skip_serializing)]
