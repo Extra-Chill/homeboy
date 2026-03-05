@@ -488,6 +488,10 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                             .unwrap_or(&deviation.description);
                         missing_imports.push(import_path);
                     }
+                    DeviationKind::DirectorySprawl => {
+                        // Structural concern across directories; no safe automatic
+                        // in-file patching yet. Leave for dedicated refactor planning.
+                    }
                     _ => {}
                 }
             }
