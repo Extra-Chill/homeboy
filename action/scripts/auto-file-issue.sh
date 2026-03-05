@@ -6,6 +6,15 @@ REPO="${GITHUB_REPOSITORY}"
 COMP_ID="${COMPONENT_NAME:-$(basename "${GITHUB_REPOSITORY}")}"
 OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+WORKFLOW_NAME="${GITHUB_WORKFLOW:-workflow}"
+REF_LABEL="${GITHUB_REF_NAME:-${GITHUB_SHA:0:8}}"
+
+REPO_NAME="${REPO##*/}"
+if [ "${COMP_ID}" = "${REPO_NAME}" ]; then
+  SCOPE_LABEL="${REPO}"
+else
+  SCOPE_LABEL="${REPO}/${COMP_ID}"
+fi
 
 if [ -n "${GITHUB_REF_NAME:-}" ]; then
   TRIGGER_CONTEXT="ref \`${GITHUB_REF_NAME}\`"
@@ -23,7 +32,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
   fi
 done
 
-ISSUE_TITLE="CI failure: homeboy ${COMP_ID} (${GITHUB_EVENT_NAME})"
+ISSUE_TITLE="CI failure: ${SCOPE_LABEL} • ${WORKFLOW_NAME} • ${GITHUB_EVENT_NAME} • ${REF_LABEL}"
 
 EXISTING_ISSUE=$(gh api "repos/${REPO}/issues" \
   --jq "[.[] | select(.state == \"open\" and .title == \"${ISSUE_TITLE}\" and (.labels[]?.name == \"ci-failure\"))] | first | .number // empty" \
@@ -57,6 +66,9 @@ else
 
   BODY="## CI Failure Report"$'\n\n'
   BODY+="**Component:** \`${COMP_ID}\`"$'\n'
+  BODY+="**Workflow:** \`${WORKFLOW_NAME}\`"$'\n'
+  BODY+="**Scope:** \`${SCOPE_LABEL}\`"$'\n'
+  BODY+="**Ref:** \`${REF_LABEL}\`"$'\n'
   BODY+="**Trigger:** \`${GITHUB_EVENT_NAME}\` on ${TRIGGER_CONTEXT}"$'\n'
   BODY+="**Binary:** ${BINARY_SOURCE}"$'\n'
   BODY+="**Run:** ${RUN_URL}"$'\n\n'
