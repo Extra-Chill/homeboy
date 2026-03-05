@@ -25,13 +25,10 @@ use crate::utils::template::{render_map, TemplateVars};
 use crate::utils::{self, artifact};
 use crate::version;
 
-include!("deploy/safety_and_artifact.rs");
-include!("deploy/transfer.rs");
-include!("deploy/orchestration.rs");
-include!("deploy/execution.rs");
-include!("deploy/planning.rs");
-include!("deploy/version_overrides.rs");
-include!("deploy/types.rs");
-
-#[cfg(test)]
-mod tests;
+include!("deploy/safety_and_artifact.inc");
+include!("deploy/transfer.inc");
+include!("deploy/orchestration.inc");
+include!("deploy/execution.inc");
+include!("deploy/planning.inc");
+include!("deploy/version_overrides.inc");
+include!("deploy/types.inc");

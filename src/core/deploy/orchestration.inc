@@ -1,9 +1,3 @@
-pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
-    let project = project::load(project_id)?;
-    let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
-    deploy_components(config, &project, &ctx, &base_path)
-}
-
 /// Apply per-project component overrides to a cloned component.
 ///
 /// If the project has `component_overrides` entries for this component,
