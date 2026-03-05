@@ -28,6 +28,10 @@ pub enum DocsCommand {
         /// Component ID or direct filesystem path to audit
         component_id: String,
 
+        /// Override component local_path for this audit run
+        #[arg(long)]
+        path: Option<String>,
+
         /// Docs directory relative to component/project root (overrides config, default: docs)
         #[arg(long)]
         docs_dir: Option<String>,
@@ -243,7 +247,21 @@ pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
 /// JSON output mode (audit, map, generate subcommands)
 pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput> {
     match args.command {
-        Some(DocsCommand::Audit { component_id, docs_dir, baseline, ignore_baseline, features }) => run_audit(&component_id, docs_dir.as_deref(), features, baseline, ignore_baseline),
+        Some(DocsCommand::Audit {
+            component_id,
+            path,
+            docs_dir,
+            baseline,
+            ignore_baseline,
+            features,
+        }) => run_audit(
+            &component_id,
+            path.as_deref(),
+            docs_dir.as_deref(),
+            features,
+            baseline,
+            ignore_baseline,
+        ),
         Some(DocsCommand::Map { component_id, source_dirs, include_private, write, output_dir }) => run_map(&component_id, source_dirs, include_private, write, &output_dir),
         Some(DocsCommand::Generate { spec, json, from_audit, dry_run }) => {
             if let Some(ref audit_source) = from_audit {
@@ -1211,26 +1229,37 @@ fn collect_fingerprints_recursive(
 
 fn run_audit(
     component_id: &str,
+    path_override: Option<&str>,
     docs_dir: Option<&str>,
     features: bool,
     baseline: bool,
     ignore_baseline: bool,
 ) -> CmdResult<DocsOutput> {
-    // If the argument looks like a filesystem path, audit it directly
-    // without requiring component registration
-    let result = if std::path::Path::new(component_id).is_dir() {
-        docs_audit::audit_path(component_id, docs_dir, features)?
-    } else {
-        docs_audit::audit_component(component_id, docs_dir, features)?
-    };
-
-    // Resolve source path for baseline storage
-    let source_path = if std::path::Path::new(component_id).is_dir() {
-        std::path::PathBuf::from(component_id)
+    // Resolve effective source path with --path parity to `homeboy audit`
+    let (resolved_id, source_path) = if std::path::Path::new(component_id).is_dir() {
+        let effective = path_override.unwrap_or(component_id);
+        let path = std::path::PathBuf::from(effective);
+        let label = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        (label, path)
+    } else if let Some(path) = path_override {
+        (component_id.to_string(), std::path::PathBuf::from(path))
     } else {
         let comp = homeboy::component::load(component_id)?;
-        std::path::PathBuf::from(&comp.local_path)
+        (
+            component_id.to_string(),
+            std::path::PathBuf::from(&comp.local_path),
+        )
     };
+
+    let source_path_str = source_path.to_string_lossy().to_string();
+
+    // Audit directly by path so --path semantics are consistent
+    let mut result = docs_audit::audit_path(&source_path_str, docs_dir, features)?;
+    result.component_id = resolved_id;
 
     // --baseline: save current state
     if baseline {

@@ -155,6 +155,12 @@ fn auto_detect_extension(component: &Component) -> Option<String> {
         return Some("wordpress".to_string());
     }
 
+    // Check for Cargo.toml in local_path (indicates Rust component)
+    let cargo_path = std::path::Path::new(expanded.as_ref()).join("Cargo.toml");
+    if cargo_path.exists() {
+        return Some("rust".to_string());
+    }
+
     None
 }
 
