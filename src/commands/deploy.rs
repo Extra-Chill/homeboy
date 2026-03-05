@@ -11,69 +11,53 @@ use super::{CmdResult, ProjectsSummary};
 pub struct DeployArgs {
     /// Target ID: project ID or component ID (order is auto-detected)
     pub target_id: Option<String>,
-
     /// Additional component IDs (enables project/component order detection)
     pub component_ids: Vec<String>,
-
     /// Explicit project ID (takes precedence over positional detection)
     #[arg(long, short = 'p')]
     pub project: Option<String>,
-
     /// Explicit component IDs (takes precedence over positional)
     #[arg(long, short = 'c')]
     pub component: Option<Vec<String>>,
-
     /// JSON input spec for bulk operations
     #[arg(long)]
     pub json: Option<String>,
-
     /// Deploy all configured components
     #[arg(long)]
     pub all: bool,
-
     /// Deploy only outdated components
     #[arg(long)]
     pub outdated: bool,
-
     /// Preview what would be deployed without executing
     #[arg(long)]
     pub dry_run: bool,
-
     /// Check component status without building or deploying
     #[arg(long, visible_alias = "status")]
     pub check: bool,
-
     /// Deploy even with uncommitted changes
     #[arg(long)]
     pub force: bool,
-
     /// Deploy to multiple projects (comma-separated or repeated)
     #[arg(long, value_delimiter = ',')]
     pub projects: Option<Vec<String>>,
-
     /// Deploy to all projects in a fleet
     #[arg(long, short = 'f')]
     pub fleet: Option<String>,
-
     /// Deploy to all projects using the specified component(s)
     #[arg(long, short = 's')]
     pub shared: bool,
-
     /// Keep build dependencies (skip post-deploy cleanup)
     #[arg(long)]
     pub keep_deps: bool,
-
     /// Assert expected version before deploying (abort if local version doesn't match)
     #[arg(long)]
     pub version: Option<String>,
-
     /// Skip auto-pulling latest changes before deploy
     #[arg(long)]
     pub no_pull: bool,
 }
 
 #[derive(Serialize)]
-
 pub struct DeployOutput {
     pub command: String,
     pub project_id: String,
@@ -118,7 +102,6 @@ pub fn run(
     mut args: DeployArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<DeployCommandOutput> {
-    // Resolve fleet to project IDs if specified
     if let Some(ref fleet_id) = args.fleet {
         let fl = homeboy::fleet::load(fleet_id)?;
         return run_multi_project(&args, &fl.project_ids);
@@ -126,11 +109,9 @@ pub fn run(
 
     // Resolve --shared: find all projects using the specified component(s)
     if args.shared {
-        // Get component IDs from args
         let component_ids: Vec<String> = if let Some(ref comps) = args.component {
             comps.clone()
         } else if let Some(ref target) = args.target_id {
-            // First positional arg is the component when using --shared
             vec![target.clone()]
         } else {
             return Err(homeboy::Error::validation_invalid_argument(
@@ -150,7 +131,6 @@ pub fn run(
             ));
         }
 
-        // Find all projects using any of these components
         let mut project_ids: Vec<String> = Vec::new();
         for component_id in &component_ids {
             let using = homeboy::component::projects_using(component_id).unwrap_or_default();
@@ -172,9 +152,8 @@ pub fn run(
             ));
         }
 
-        // Override component_ids for multi-project deploy
         args.component_ids = component_ids;
-        args.target_id = None; // Clear since we're using component_ids directly
+        args.target_id = None;
 
         return run_multi_project(&args, &project_ids);
     }
@@ -184,38 +163,56 @@ pub fn run(
         return run_multi_project(&args, project_ids);
     }
 
-    // Require at least one positional arg if no flags provided
-    let target_id = args.target_id.as_ref().ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
-            "input",
-            "Provide component ID, project ID with --all, or use flags",
-            None,
-            Some(vec![
-                "Deploy a single component: homeboy deploy <component-id>".to_string(),
-                "Deploy to a project: homeboy deploy <project-id> --all".to_string(),
-            ]),
-        )
-    })?;
-
     // Resolve project and component IDs based on flag/positional combinations
-    let (project_id, component_ids) = match (&args.project, &args.component) {
-        // Both flags provided - use them directly
-        (Some(ref proj), Some(ref comps)) => (proj.clone(), comps.clone()),
+    let (project_id, component_ids) = match (&args.project, &args.component, &args.target_id) {
+        // Both flags provided - use them directly (no positional required)
+        (Some(proj), Some(comps), _) => (proj.clone(), comps.clone()),
 
-        // Only --project flag - positionals are components
-        (Some(ref proj), None) => {
-            let mut comps = vec![target_id.clone()];
+        // Only --project flag - optional positional components
+        (Some(proj), None, target) => {
+            let mut comps = Vec::new();
+            if let Some(first) = target {
+                comps.push(first.clone());
+            }
             comps.extend(args.component_ids.clone());
+
+            let has_selector_flag = args.all || args.outdated || args.check || args.json.is_some();
+            if comps.is_empty() && !has_selector_flag {
+                return Err(homeboy::Error::validation_invalid_argument(
+                    "input",
+                    "Provide component IDs with --project, or add --all/--outdated/--check",
+                    None,
+                    Some(vec![
+                        "Deploy selected components: homeboy deploy --project <project> --component <id> --component <id>".to_string(),
+                        "Deploy all project components: homeboy deploy --project <project> --all".to_string(),
+                    ]),
+                ));
+            }
+
             (proj.clone(), comps)
         }
 
-        // Only --component flag - resolve project from positional or inference
-        (None, Some(ref comps)) => {
+        // Only --component flag - optional positional project, else infer
+        (None, Some(comps), target) => {
             let projects = homeboy::project::list_ids().unwrap_or_default();
-            if projects.contains(target_id) {
-                (target_id.clone(), comps.clone())
+
+            if let Some(first) = target {
+                if projects.contains(first) {
+                    (first.clone(), comps.clone())
+                } else {
+                    match infer_project_for_components(comps) {
+                        Some(proj) => (proj, comps.clone()),
+                        None => {
+                            return Err(homeboy::Error::validation_invalid_argument(
+                                "project_id",
+                                "Could not infer project. Use --project flag or provide project as first argument.",
+                                None,
+                                None,
+                            ));
+                        }
+                    }
+                }
             } else {
-                // Try to infer project from components
                 match infer_project_for_components(comps) {
                     Some(proj) => (proj, comps.clone()),
                     None => {
@@ -224,14 +221,27 @@ pub fn run(
                             "Could not infer project. Use --project flag or provide project as first argument.",
                             None,
                             None,
-                        ))
+                        ));
                     }
                 }
             }
         }
 
-        // No flags - use shared positional detection
-        (None, None) => resolve_project_components(target_id, &args.component_ids)?,
+        // No flags - positional args required
+        (None, None, Some(target)) => resolve_project_components(target, &args.component_ids)?,
+        (None, None, None) => {
+            return Err(homeboy::Error::validation_invalid_argument(
+                "input",
+                "Provide component ID, project ID with --all, or use flags",
+                None,
+                Some(vec![
+                    "Deploy a single component: homeboy deploy <component-id>".to_string(),
+                    "Deploy to a project: homeboy deploy <project-id> --all".to_string(),
+                    "Flag style: homeboy deploy --project <project> --component <component>"
+                        .to_string(),
+                ]),
+            ));
+        }
     };
 
     // Update args with resolved values

@@ -916,7 +916,13 @@ fn deploy_components(
         ));
     }
 
-    let components = plan_components(config, &loaded.deployable, base_path, &ctx.client)?;
+    let components = plan_components(
+        config,
+        &loaded.deployable,
+        &loaded.skipped,
+        base_path,
+        &ctx.client,
+    )?;
 
     if components.is_empty() {
         return Ok(DeployOrchestrationResult {
@@ -1629,6 +1635,7 @@ fn format_bytes(bytes: u64) -> String {
 fn plan_components(
     config: &DeployConfig,
     all_components: &[Component],
+    skipped_component_ids: &[String],
     base_path: &str,
     client: &SshClient,
 ) -> Result<Vec<Component>> {
@@ -1647,11 +1654,34 @@ fn plan_components(
             .collect();
 
         if !missing.is_empty() {
+            let non_deployable: Vec<String> = missing
+                .iter()
+                .filter(|id| skipped_component_ids.contains(*id))
+                .cloned()
+                .collect();
+
+            let unknown: Vec<String> = missing
+                .iter()
+                .filter(|id| !non_deployable.contains(*id))
+                .cloned()
+                .collect();
+
+            let mut details = Vec::new();
+            if !unknown.is_empty() {
+                details.extend(unknown);
+            }
+            if !non_deployable.is_empty() {
+                details.push(format!(
+                    "Non-deployable components (no artifact/deploy strategy): {}",
+                    non_deployable.join(", ")
+                ));
+            }
+
             return Err(Error::validation_invalid_argument(
                 "componentIds",
-                "Unknown component IDs",
+                "Invalid component selection",
                 None,
-                Some(missing),
+                Some(details),
             ));
         }
 
