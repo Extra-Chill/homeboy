@@ -29,11 +29,11 @@ fi
 
 if [ "${BINARY_SOURCE}" = "fallback" ]; then
   COMMENT_BODY+="> :warning: **Source build failed** — results from fallback release binary"$'\n\n'
-elif [ "${BINARY_SOURCE}" = "source" ]; then
-  COMMENT_BODY+="> Built from source (\`$(homeboy --version 2>/dev/null || echo 'unknown')\`)"$'\n\n'
 fi
 
+HAS_DIGEST="false"
 if [ -n "${DIGEST_FILE}" ] && [ -f "${DIGEST_FILE}" ]; then
+  HAS_DIGEST="true"
   COMMENT_BODY+="$(cat "${DIGEST_FILE}")"$'\n\n'
 fi
 
@@ -66,7 +66,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
 
   COMMENT_BODY+=":${ICON}: **${CMD}**${SCOPE_NOTE}"$'\n'
 
-  if [ -f "${LOG_FILE}" ]; then
+  if [ -f "${LOG_FILE}" ] && [ "${HAS_DIGEST}" != "true" ]; then
     PHPCS_SUMMARY=$(grep -o "LINT SUMMARY: .*" "${LOG_FILE}" | head -1 || true)
     if [ -n "${PHPCS_SUMMARY}" ]; then
       FIXABLE=$(grep -o "Fixable: [0-9]*" "${LOG_FILE}" | head -1 || true)
@@ -111,7 +111,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
 
     CARGO_ERRORS=$(grep -c "^error\[" "${LOG_FILE}" 2>/dev/null || echo "0")
     CARGO_WARNINGS=$(grep -c "^warning\[" "${LOG_FILE}" 2>/dev/null || echo "0")
-    if [ "${CARGO_ERRORS}" -gt 0 ] || [ "${CARGO_WARNINGS}" -gt 0 ]; then
+    if [[ "${CARGO_ERRORS}" =~ ^[0-9]+$ ]] && [[ "${CARGO_WARNINGS}" =~ ^[0-9]+$ ]] && { [ "${CARGO_ERRORS}" -gt 0 ] || [ "${CARGO_WARNINGS}" -gt 0 ]; }; then
       COMMENT_BODY+="- Cargo: ${CARGO_ERRORS} error(s), ${CARGO_WARNINGS} warning(s)"$'\n'
     fi
 

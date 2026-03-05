@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import subprocess
 from json import JSONDecoder
 from typing import Any
 
@@ -269,6 +270,40 @@ def write_json(path: str, payload: dict[str, Any]) -> None:
         f.write("\n")
 
 
+def resolve_failed_job_links(run_url: str) -> dict[str, str]:
+    """Resolve direct failed job URLs for this workflow run via gh api."""
+    run_id = run_url.rstrip("/").split("/")[-1]
+    if not run_id.isdigit():
+        return {}
+
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if not repo:
+        return {}
+
+    cmd = [
+        "gh",
+        "api",
+        f"repos/{repo}/actions/runs/{run_id}/jobs",
+        "--jq",
+        ".jobs[] | select(.conclusion == \"failure\") | [.name, .html_url] | @tsv",
+    ]
+
+    try:
+        output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return {}
+
+    links: dict[str, str] = {}
+    for raw in output.splitlines():
+        parts = raw.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        name, url = parts[0].strip(), parts[1].strip()
+        if name and url:
+            links[name] = url
+    return links
+
+
 def main() -> int:
     if len(sys.argv) != 10:
         print(
@@ -329,6 +364,14 @@ def main() -> int:
     write_json(audit_json_path, audit_digest)
 
     markdown = render_markdown(test_digest, audit_digest, run_url, tooling)
+    job_links = resolve_failed_job_links(run_url)
+    if job_links:
+        extra = ["", "### Failed job links"]
+        if "Build & Test" in job_links:
+            extra.append(f"- Build & Test (failed job): {job_links['Build & Test']}")
+        if "Homeboy Audit" in job_links:
+            extra.append(f"- Homeboy Audit (failed job): {job_links['Homeboy Audit']}")
+        markdown = markdown + "\n" + "\n".join(extra)
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(markdown)
         f.write("\n")
