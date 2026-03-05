@@ -21,6 +21,7 @@ mod findings;
 pub mod fingerprint;
 pub mod fixer;
 pub(crate) mod import_matching;
+mod layer_ownership;
 mod signatures;
 mod structural;
 mod test_coverage;
@@ -30,6 +31,8 @@ pub(crate) mod walker;
 pub(crate) mod test_helpers;
 
 use std::path::Path;
+
+use self::layer_ownership::run as run_layer_ownership;
 
 pub use checks::{CheckResult, CheckStatus};
 pub use conventions::{Convention, Deviation, DeviationKind, Language, Outlier};
@@ -348,6 +351,17 @@ fn audit_internal(
         }
     }
 
+    // Phase 4h: Architecture/layer ownership rule checks (optional config)
+    let layer_findings = run_layer_ownership(root);
+    if !layer_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Layer ownership: {} finding(s) (architecture ownership violations)",
+            layer_findings.len()
+        );
+        all_findings.extend(layer_findings);
+    }
+
     // Phase 4g: Scope filtering — when auditing changed files only, remove
     // findings for files that weren't changed. Conventions are still discovered
     // from the full codebase so drift detection is accurate.
@@ -475,6 +489,42 @@ mod tests {
         assert_eq!(result.summary.files_scanned, 0);
         assert!(result.summary.alignment_score.is_none());
         assert!(result.conventions.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_analyze_layer_ownership() {
+        let dir = std::env::temp_dir().join("homeboy_audit_layer_test");
+        let _ = fs::create_dir_all(dir.join(".homeboy"));
+        let _ = fs::create_dir_all(dir.join("inc/Core/Steps"));
+
+        fs::write(
+            dir.join(".homeboy/audit-rules.json"),
+            r#"{
+              "layer_rules": [
+                {
+                  "name": "engine-owns-terminal-status",
+                  "forbid": {
+                    "glob": "inc/Core/Steps/**/*.php",
+                    "patterns": ["JobStatus::"]
+                  },
+                  "allow": {"glob": "inc/Abilities/Engine/**/*.php"}
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join("inc/Core/Steps/agent_ping.php"),
+            "<?php\n$status = JobStatus::FAILED;\n",
+        )
+        .unwrap();
+
+        let findings = layer_ownership::run(&dir);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].convention, "layer_ownership");
 
         let _ = fs::remove_dir_all(&dir);
     }

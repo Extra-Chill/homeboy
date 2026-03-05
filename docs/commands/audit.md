@@ -41,6 +41,7 @@ The audit runs in 6 phases:
    - **4d: Near-duplication** — Structurally similar files with different identifiers
    - **4e: Dead code** — Unused params, unreferenced exports, orphaned internals
    - **4f: Test coverage gaps** — Missing test files, uncovered methods, orphaned tests (requires extension `test_mapping` config)
+   - **4h: Layer ownership** — Optional architecture/layer ownership rule violations (`layer_ownership_violation`)
 5. **Report** — Aggregate findings, compute alignment score
 6. **Cross-directory conventions** — Detect patterns shared by sibling subdirectories
 
@@ -61,6 +62,13 @@ homeboy audit my-component --ignore-baseline
 ```
 
 The baseline is saved in `homeboy.json` under `baselines.audit` inside the component's `local_path`.
+
+Layer ownership rule config is optional and read from either:
+
+- `.homeboy/audit-rules.json`
+- `homeboy.json` key: `audit_rules`
+
+See: `docs/commands/audit-rules.md`
 
 When a baseline exists, the audit exit code reflects drift:
 - `0`: No drift increase (same or improved)

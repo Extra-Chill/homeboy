@@ -116,6 +116,8 @@ pub enum DeviationKind {
     MissingTestMethod,
     /// Test file or test method has no corresponding source file/method.
     OrphanedTest,
+    /// File violates a configured architecture/layer ownership rule.
+    LayerOwnershipViolation,
 }
 
 // ============================================================================
