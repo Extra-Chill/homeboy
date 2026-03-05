@@ -287,6 +287,29 @@ pub fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
                 "-h",
             ],
         ),
+        (
+            "lint",
+            "",
+            &[
+                "--fix",
+                "--baseline",
+                "--ignore-baseline",
+                "--summary",
+                "--file",
+                "--glob",
+                "--changed-only",
+                "--changed-since",
+                "--errors-only",
+                "--sniffs",
+                "--exclude-sniffs",
+                "--category",
+                "--setting",
+                "--path",
+                "--json",
+                "--help",
+                "-h",
+            ],
+        ),
     ];
 
     // Find matching command pattern
@@ -488,6 +511,18 @@ mod tests {
         ];
         let result = normalize_trailing_flags(args.clone());
         assert_eq!(result, args); // No separator inserted
+    }
+
+    #[test]
+    fn test_lint_allows_baseline_flags() {
+        let args = vec![
+            "homeboy".into(),
+            "lint".into(),
+            "homeboy".into(),
+            "--baseline".into(),
+        ];
+        let result = normalize_trailing_flags(args.clone());
+        assert_eq!(result, args);
     }
 
     #[test]

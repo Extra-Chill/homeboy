@@ -19,6 +19,8 @@ The `lint` command runs code style validation for a component using the linting 
 ## Options
 
 - `--fix`: Auto-fix formatting issues before validating (uses PHPCBF for WordPress)
+- `--baseline`: Save current lint findings as baseline for future comparisons
+- `--ignore-baseline`: Skip baseline comparison even if baseline exists
 - `--file <path>`: Lint only a single file (path relative to component root)
 - `--glob <pattern>`: Lint only files matching glob pattern (e.g., "inc/**/*.php")
 - `--changed-only`: Lint only files modified in the working tree (staged, unstaged, untracked)
@@ -68,6 +70,7 @@ The following environment variables are set for lint runners:
 - `HOMEBOY_LINT_GLOB`: Glob pattern when `--glob` or `--changed-only` is used
 - `HOMEBOY_ERRORS_ONLY`: Set to `1` when `--errors-only` flag is used
 - `HOMEBOY_SETTINGS_JSON`: Merged settings as JSON string
+- `HOMEBOY_LINT_FINDINGS_FILE`: Path for extension to write structured lint findings JSON
 
 ## Output
 
@@ -84,6 +87,9 @@ Returns JSON with lint results:
 ```
 
 The `hints` field appears when linting fails without `--fix`, suggesting the auto-fix option.
+
+When extensions write `HOMEBOY_LINT_FINDINGS_FILE`, Homeboy exposes `lint_findings` in JSON output and
+supports baseline ratchet checks (`--baseline`, `--ignore-baseline`).
 
 ## Exit Codes
 

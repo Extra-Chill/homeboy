@@ -6,10 +6,11 @@ use homeboy::component::Component;
 use homeboy::error::Error;
 use homeboy::extension::{self, ExtensionRunner};
 use homeboy::git;
+use homeboy::lint_baseline::{self, BaselineComparison as LintBaselineComparison, LintFinding};
 use homeboy::utils::autofix::{self, AutofixMode};
 
-use super::args::{HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
-use super::CmdResult;
+use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
+use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
 pub struct LintArgs {
@@ -60,6 +61,9 @@ pub struct LintArgs {
     setting_args: SettingArgs,
 
     #[command(flatten)]
+    baseline_args: BaselineArgs,
+
+    #[command(flatten)]
     _json: HiddenJsonArgs,
 }
 
@@ -72,6 +76,10 @@ pub struct LintOutput {
     autofix: Option<LintAutofixOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hints: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline_comparison: Option<LintBaselineComparison>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lint_findings: Option<Vec<LintFinding>>,
 }
 
 #[derive(Serialize)]
@@ -129,9 +137,18 @@ fn resolve_lint_script(component: &Component) -> homeboy::error::Result<String> 
         })
 }
 
-pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput> {
+pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
     let component = args.comp.load()?;
+    let source_path = args.comp.source_path()?;
     let script_path = resolve_lint_script(&component)?;
+    let lint_findings_file = std::env::temp_dir().join(format!(
+        "homeboy-lint-findings-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
 
     let before_fix_files = if args.fix {
         Some(changed_file_set(&component.local_path)?)
@@ -158,6 +175,8 @@ pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput>
                     exit_code: 0,
                     autofix: None,
                     hints: None,
+                    baseline_comparison: None,
+                    lint_findings: None,
                 },
                 0,
             ));
@@ -188,6 +207,8 @@ pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput>
                     exit_code: 0,
                     autofix: None,
                     hints: None,
+                    baseline_comparison: None,
+                    lint_findings: None,
                 },
                 0,
             ));
@@ -219,7 +240,14 @@ pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput>
         .env_opt("HOMEBOY_SNIFFS", &args.sniffs)
         .env_opt("HOMEBOY_EXCLUDE_SNIFFS", &args.exclude_sniffs)
         .env_opt("HOMEBOY_CATEGORY", &args.category)
+        .env(
+            "HOMEBOY_LINT_FINDINGS_FILE",
+            &lint_findings_file.to_string_lossy(),
+        )
         .run()?;
+
+    let lint_findings = lint_baseline::parse_findings_file(&lint_findings_file)?;
+    let _ = std::fs::remove_file(&lint_findings_file);
 
     let mut status = if output.success { "passed" } else { "failed" }.to_string();
     let mut autofix = None;
@@ -251,6 +279,42 @@ pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput>
         });
     }
 
+    // Baseline lifecycle
+    let mut baseline_comparison = None;
+    let mut baseline_exit_override = None;
+
+    if args.baseline_args.baseline {
+        let saved = lint_baseline::save_baseline(&source_path, args.comp.id(), &lint_findings)?;
+        eprintln!(
+            "[lint] Baseline saved to {} ({} findings)",
+            saved.display(),
+            lint_findings.len()
+        );
+    }
+
+    if !args.baseline_args.baseline && !args.baseline_args.ignore_baseline {
+        if let Some(existing) = lint_baseline::load_baseline(&source_path) {
+            let comparison = lint_baseline::compare(&lint_findings, &existing);
+
+            if comparison.drift_increased {
+                eprintln!(
+                    "[lint] DRIFT INCREASED: {} new finding(s) since baseline",
+                    comparison.new_items.len()
+                );
+                baseline_exit_override = Some(1);
+            } else if !comparison.resolved_fingerprints.is_empty() {
+                eprintln!(
+                    "[lint] Drift reduced: {} finding(s) resolved since baseline",
+                    comparison.resolved_fingerprints.len()
+                );
+            } else {
+                eprintln!("[lint] No change from baseline");
+            }
+
+            baseline_comparison = Some(comparison);
+        }
+    }
+
     // Fix hint when linting fails
     if !output.success && !args.fix {
         hints.push(format!(
@@ -274,17 +338,30 @@ pub fn run(args: LintArgs, _global: &super::GlobalArgs) -> CmdResult<LintOutput>
     // Always include docs reference
     hints.push("Full options: homeboy docs commands/lint".to_string());
 
+    if !args.baseline_args.baseline && baseline_comparison.is_none() {
+        hints.push(format!(
+            "Save lint baseline: homeboy lint {} --baseline",
+            args.comp.component
+        ));
+    }
+
     let hints = if hints.is_empty() { None } else { Some(hints) };
+    let exit_code = baseline_exit_override.unwrap_or(output.exit_code);
+    if exit_code != output.exit_code {
+        status = "failed".to_string();
+    }
 
     Ok((
         LintOutput {
             status,
             component: args.comp.component,
-            exit_code: output.exit_code,
+            exit_code,
             autofix,
             hints,
+            baseline_comparison,
+            lint_findings: Some(lint_findings),
         },
-        output.exit_code,
+        exit_code,
     ))
 }
 
@@ -304,6 +381,8 @@ fn count_newly_changed(before: &HashSet<String>, after: &HashSet<String>) -> usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::lint_baseline::{self, LintFinding};
+    use std::path::Path;
 
     #[test]
     fn count_newly_changed_only_counts_new_entries() {
@@ -321,5 +400,43 @@ mod tests {
         ]);
 
         assert_eq!(count_newly_changed(&before, &after), 2);
+    }
+
+    #[test]
+    fn lint_baseline_roundtrip_and_compare() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let findings = vec![
+            LintFinding {
+                id: "src/foo.php::WordPress.Security.EscapeOutput".to_string(),
+                message: "Missing esc_html()".to_string(),
+                category: "security".to_string(),
+            },
+            LintFinding {
+                id: "src/bar.php::WordPress.WP.I18n".to_string(),
+                message: "Untranslated string".to_string(),
+                category: "i18n".to_string(),
+            },
+        ];
+
+        let saved = lint_baseline::save_baseline(dir.path(), "homeboy", &findings)
+            .expect("baseline should save");
+        assert!(saved.exists());
+
+        let loaded = lint_baseline::load_baseline(dir.path()).expect("baseline should load");
+        assert_eq!(loaded.context_id, "homeboy");
+        assert_eq!(loaded.item_count, 2);
+
+        let current = vec![findings[0].clone()];
+        let comparison = lint_baseline::compare(&current, &loaded);
+        assert!(!comparison.drift_increased);
+        assert_eq!(comparison.resolved_fingerprints.len(), 1);
+    }
+
+    #[test]
+    fn lint_findings_parse_empty_when_file_missing() {
+        let parsed =
+            lint_baseline::parse_findings_file(Path::new("/tmp/definitely-missing-lint.json"))
+                .expect("missing file should parse as empty");
+        assert!(parsed.is_empty());
     }
 }
