@@ -6,75 +6,58 @@ use homeboy::deploy::{self, ComponentDeployResult, DeployConfig, DeploySummary};
 use homeboy::resolve::{infer_project_for_components, resolve_project_components};
 
 use super::{CmdResult, ProjectsSummary};
-use crate::commands::deploy_validation::validate_project_component_selection;
 
 #[derive(Args)]
 pub struct DeployArgs {
     /// Target ID: project ID or component ID (order is auto-detected)
     pub target_id: Option<String>,
-
     /// Additional component IDs (enables project/component order detection)
     pub component_ids: Vec<String>,
-
     /// Explicit project ID (takes precedence over positional detection)
     #[arg(long, short = 'p')]
     pub project: Option<String>,
-
     /// Explicit component IDs (takes precedence over positional)
     #[arg(long, short = 'c')]
     pub component: Option<Vec<String>>,
-
     /// JSON input spec for bulk operations
     #[arg(long)]
     pub json: Option<String>,
-
     /// Deploy all configured components
     #[arg(long)]
     pub all: bool,
-
     /// Deploy only outdated components
     #[arg(long)]
     pub outdated: bool,
-
     /// Preview what would be deployed without executing
     #[arg(long)]
     pub dry_run: bool,
-
     /// Check component status without building or deploying
     #[arg(long, visible_alias = "status")]
     pub check: bool,
-
     /// Deploy even with uncommitted changes
     #[arg(long)]
     pub force: bool,
-
     /// Deploy to multiple projects (comma-separated or repeated)
     #[arg(long, value_delimiter = ',')]
     pub projects: Option<Vec<String>>,
-
     /// Deploy to all projects in a fleet
     #[arg(long, short = 'f')]
     pub fleet: Option<String>,
-
     /// Deploy to all projects using the specified component(s)
     #[arg(long, short = 's')]
     pub shared: bool,
-
     /// Keep build dependencies (skip post-deploy cleanup)
     #[arg(long)]
     pub keep_deps: bool,
-
     /// Assert expected version before deploying (abort if local version doesn't match)
     #[arg(long)]
     pub version: Option<String>,
-
     /// Skip auto-pulling latest changes before deploy
     #[arg(long)]
     pub no_pull: bool,
 }
 
 #[derive(Serialize)]
-
 pub struct DeployOutput {
     pub command: String,
     pub project_id: String,
@@ -198,7 +181,18 @@ pub fn run(
             }
             comps.extend(args.component_ids.clone());
 
-            validate_project_component_selection(&args)?;
+            let has_selector_flag = args.all || args.outdated || args.check || args.json.is_some();
+            if comps.is_empty() && !has_selector_flag {
+                return Err(homeboy::Error::validation_invalid_argument(
+                    "input",
+                    "Provide component IDs with --project, or add --all/--outdated/--check",
+                    None,
+                    Some(vec![
+                        "Deploy selected components: homeboy deploy --project <project> --component <id> --component <id>".to_string(),
+                        "Deploy all project components: homeboy deploy --project <project> --all".to_string(),
+                    ]),
+                ));
+            }
 
             (proj.clone(), comps)
         }
