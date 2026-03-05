@@ -39,7 +39,6 @@ impl RunnerStepFilter {
         }
         env
     }
-
 }
 
 fn csv_set(value: Option<&str>) -> HashSet<String> {
