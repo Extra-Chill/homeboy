@@ -42,7 +42,7 @@ pub fn analyze_layer_ownership(root: &Path) -> Vec<Finding> {
         return Vec::new();
     };
 
-    let files = match super::walker::walk_source_files(root) {
+    let files = match walk_candidate_files(root) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
@@ -96,6 +96,54 @@ pub fn analyze_layer_ownership(root: &Path) -> Vec<Finding> {
     findings
 }
 
+fn walk_candidate_files(root: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    const SKIP_DIRS: &[&str] = &[
+        "node_modules",
+        "vendor",
+        ".git",
+        "build",
+        "dist",
+        "target",
+        ".svn",
+        ".hg",
+        "cache",
+        "tmp",
+    ];
+
+    fn recurse(
+        dir: &Path,
+        skip_dirs: &[&str],
+        files: &mut Vec<std::path::PathBuf>,
+    ) -> std::io::Result<()> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.is_dir() {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if !skip_dirs.contains(&name) {
+                    recurse(&path, skip_dirs, files)?;
+                }
+            } else {
+                files.push(path);
+            }
+        }
+
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    recurse(root, SKIP_DIRS, &mut files)?;
+    Ok(files)
+}
+
 fn load_rules_config(root: &Path) -> Option<AuditRulesConfig> {
     let rules_path = root.join(".homeboy").join("audit-rules.json");
     if let Ok(content) = std::fs::read_to_string(&rules_path) {
@@ -114,6 +162,28 @@ fn load_rules_config(root: &Path) -> Option<AuditRulesConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walk_candidate_files_finds_non_extension_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let steps_dir = dir.path().join("inc/Core/Steps");
+        std::fs::create_dir_all(&steps_dir).unwrap();
+        std::fs::write(steps_dir.join("agent_ping.php"), "<?php\n").unwrap();
+        std::fs::write(steps_dir.join("README.txt"), "notes\n").unwrap();
+
+        let files = walk_candidate_files(dir.path()).unwrap();
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(ToString::to_string)
+            })
+            .collect();
+
+        assert!(names.contains(&"agent_ping.php".to_string()));
+        assert!(names.contains(&"README.txt".to_string()));
+    }
 
     #[test]
     fn detects_violation_from_audit_rules_file() {
