@@ -223,6 +223,40 @@ restore_dev_deps() {
     fi
 }
 
+# Install npm dependencies if missing/stale for detected build tool.
+install_frontend_dependencies() {
+    local build_tool="$1"
+    local scope_label="$2"
+    local expected_bin=""
+    local need_install=0
+
+    case "$build_tool" in
+        wordpress-scripts)
+            expected_bin="wp-scripts"
+            ;;
+        vite)
+            expected_bin="vite"
+            ;;
+    esac
+
+    if [ ! -d "node_modules" ]; then
+        print_status "${scope_label}Installing npm dependencies..."
+        need_install=1
+    elif [ -n "$expected_bin" ] && [ ! -x "node_modules/.bin/$expected_bin" ]; then
+        print_warning "${scope_label}node_modules exists but '$expected_bin' is missing. Reinstalling dependencies..."
+        need_install=1
+    fi
+
+    if [ "$need_install" -eq 1 ]; then
+        if [ -f "package-lock.json" ]; then
+            npm ci --silent --no-audit --no-fund 2>&1
+        else
+            npm install --silent --no-audit --no-fund 2>&1
+        fi
+        print_success "${scope_label}npm dependencies ready"
+    fi
+}
+
 # Build frontend assets (Gutenberg blocks via @wordpress/scripts, or Vite)
 build_frontend_assets() {
     print_status "Checking for frontend build requirements..."
@@ -246,11 +280,8 @@ build_frontend_assets() {
         return 0
     fi
 
-    # Check if node_modules exists, install if missing
-    if [ ! -d "node_modules" ]; then
-        print_status "Installing npm dependencies..."
-        npm install --quiet 2>&1
-    fi
+    # Ensure dependencies exist and expected local build binary is present.
+    install_frontend_dependencies "$build_tool" ""
 
     # Run the build command
     print_status "Building frontend assets..."
@@ -296,11 +327,15 @@ build_nested_packages() {
 
         # Check if it has a build script
         if grep -q '"build"' "package.json"; then
-            # Install dependencies if node_modules doesn't exist
-            if [ ! -d "node_modules" ]; then
-                print_status "  Installing dependencies for $pkg_dir..."
-                npm ci --silent --no-audit --no-fund 2>&1
+            # Detect common build tools for better stale node_modules handling.
+            local nested_build_tool=""
+            if grep -q "@wordpress/scripts" "package.json"; then
+                nested_build_tool="wordpress-scripts"
+            elif grep -q '"vite"' "package.json"; then
+                nested_build_tool="vite"
             fi
+
+            install_frontend_dependencies "$nested_build_tool" "  "
 
             # Run build
             print_status "  Running build for $pkg_dir..."
