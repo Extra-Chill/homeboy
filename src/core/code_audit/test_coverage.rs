@@ -13,6 +13,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use regex::Regex;
+
 use super::conventions::DeviationKind;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
@@ -53,6 +55,10 @@ pub fn analyze_test_coverage(
         let test_fp = expected_test_path
             .as_deref()
             .and_then(|p| test_file_map.get(p).copied());
+        let disk_test_methods = expected_test_path
+            .as_deref()
+            .filter(|_| test_fp.is_none())
+            .and_then(|p| load_test_methods_from_disk(root, p, config));
         let test_file_exists = test_fp.is_some()
             || expected_test_path
                 .as_deref()
@@ -107,6 +113,12 @@ pub fn analyze_test_coverage(
                         covered_methods.insert(source_method);
                     }
                 }
+            } else if let Some(test_methods) = &disk_test_methods {
+                for method in test_methods {
+                    if let Some(source_method) = method.strip_prefix(&config.method_prefix) {
+                        covered_methods.insert(source_method);
+                    }
+                }
             }
 
             // Find source methods without tests
@@ -151,12 +163,22 @@ pub fn analyze_test_coverage(
             }
 
             // Check method coverage from the test file
-            if let Some(test_fingerprint) = test_fp {
-                let covered_methods: HashSet<&str> = test_fingerprint
-                    .methods
+            let test_methods: Vec<String> = if let Some(test_fingerprint) = test_fp {
+                test_fingerprint.methods.clone()
+            } else {
+                disk_test_methods.unwrap_or_default()
+            };
+
+            if !test_methods.is_empty() {
+                let covered_methods: HashSet<&str> = test_methods
                     .iter()
                     .filter_map(|m| m.strip_prefix(&config.method_prefix))
                     .collect();
+
+                let test_file_label = test_fp
+                    .map(|fp| fp.relative_path.clone())
+                    .or(expected_test_path.clone())
+                    .unwrap_or_else(|| "test file".to_string());
 
                 for method in &source_fp.methods {
                     if is_trivial_method(method) {
@@ -169,11 +191,11 @@ pub fn analyze_test_coverage(
                             file: source_fp.relative_path.clone(),
                             description: format!(
                                 "Method '{}' has no corresponding test in '{}'",
-                                method, test_fingerprint.relative_path
+                                method, test_file_label
                             ),
                             suggestion: format!(
                                 "Add test method '{}{}' to '{}'",
-                                config.method_prefix, method, test_fingerprint.relative_path
+                                config.method_prefix, method, test_file_label
                             ),
                             kind: DeviationKind::MissingTestMethod,
                         });
@@ -215,6 +237,64 @@ pub fn analyze_test_coverage(
     // Sort by file path for deterministic output
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
+}
+
+/// Load test methods from disk for a known test file path.
+///
+/// Uses extension fingerprinting when available, with a lightweight regex fallback
+/// so singleton test files still contribute method coverage in scoped audits.
+fn load_test_methods_from_disk(
+    root: &Path,
+    test_path: &str,
+    config: &TestMappingConfig,
+) -> Option<Vec<String>> {
+    let abs = root.join(test_path);
+    if !abs.exists() {
+        return None;
+    }
+
+    if let Some(fp) = super::fingerprint::fingerprint_file(&abs, root) {
+        if !fp.methods.is_empty() {
+            return Some(fp.methods);
+        }
+    }
+
+    let content = std::fs::read_to_string(&abs).ok()?;
+    Some(extract_test_methods_fallback(
+        &content,
+        test_path,
+        &config.method_prefix,
+    ))
+}
+
+fn extract_test_methods_fallback(
+    content: &str,
+    test_path: &str,
+    method_prefix: &str,
+) -> Vec<String> {
+    let ext = Path::new(test_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    let escaped = regex::escape(method_prefix);
+    let pattern = match ext {
+        "rs" => format!(r"(?m)^\s*fn\s+({}\w*)\s*\(", escaped),
+        "php" => format!(r"(?m)^\s*(?:public\s+)?function\s+({}\w*)\s*\(", escaped),
+        "js" | "jsx" | "ts" | "tsx" => {
+            format!(r"(?m)^\s*(?:async\s+)?function\s+({}\w*)\s*\(", escaped)
+        }
+        _ => format!(r"(?m)({}\w*)", escaped),
+    };
+
+    let re = match Regex::new(&pattern) {
+        Ok(re) => re,
+        Err(_) => return Vec::new(),
+    };
+
+    re.captures_iter(content)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+        .collect()
 }
 
 /// Partition fingerprints into source files and test files based on the config.
@@ -691,5 +771,33 @@ mod tests {
             test_to_source_path("tests/Unit/Abilities/Flow/CreateFlowTest.php", &config),
             Some("inc/Abilities/Flow/CreateFlow.php".to_string())
         );
+    }
+
+    #[test]
+    fn rust_inline_uses_disk_test_methods_when_test_file_not_fingerprinted() {
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_disk_methods");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core/refactor")).unwrap();
+        std::fs::create_dir_all(dir.join("tests/core/refactor")).unwrap();
+
+        std::fs::write(
+            dir.join("tests/core/refactor/decompose_test.rs"),
+            "#[test]\nfn test_build_plan() {}\n#[test]\nfn test_apply_plan_skeletons() {}\n",
+        )
+        .unwrap();
+
+        let source = make_fp(
+            "src/core/refactor/decompose.rs",
+            vec!["build_plan", "apply_plan_skeletons"],
+        );
+
+        // Intentionally do not include test fingerprint in `fingerprints` to mimic
+        // singleton test-file directories excluded from convention grouping.
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        assert!(findings.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
