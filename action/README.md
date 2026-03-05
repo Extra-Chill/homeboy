@@ -25,12 +25,14 @@ jobs:
           php-version: '8.2'
 ```
 
-### With Portable Config (`homeboy.json`)
+### Required Portable Config (`homeboy.json`)
 
-If your repo has a `homeboy.json` file, you don't even need to specify the extension:
+`homeboy.json` at repository root is required by Homeboy Action.
+If your repo has a portable extension config, you don't need to specify the extension input:
 
 ```json
 {
+  "id": "my-project",
   "extensions": {
     "wordpress": {}
   }
@@ -64,7 +66,7 @@ If your repo has a `homeboy.json` file, you don't even need to specify the exten
 | `commands` | No | `lint,test` | Comma-separated commands to run |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |
-| `settings` | No | | JSON settings for the extension |
+| `settings` | No | | Deprecated. Use `homeboy.json` extension settings instead. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
 | `node-version` | No | | Node.js version (sets up via `actions/setup-node`) |
 | `autofix` | No | `false` | On PR failures, run safe autofixes, commit, push, and re-run checks |
@@ -218,15 +220,19 @@ Optional label gate:
 
 With `autofix-label`, no bot commit will be created unless that label is present on the PR.
 
-### Test with Custom Settings
+### Configure Settings in `homeboy.json`
 
 ```yaml
-- uses: Extra-Chill/homeboy-action@v1
-  with:
-    extension: wordpress
-    commands: test
-    settings: '{"database_type": "sqlite"}'
-    php-version: '8.2'
+{
+  "id": "my-project",
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "database_type": "sqlite"
+      }
+    }
+  }
+}
 ```
 
 ### Skip Lint During Test (Run Separately)
@@ -277,7 +283,7 @@ With `autofix-label`, no bot commit will be created unless that label is present
 
 1. **Installs Homeboy** — Downloads the correct binary for your runner from GitHub Releases
 2. **Installs Extension** — Clones and sets up the specified extension (runs `composer install`, etc.)
-3. **Registers Component** — Creates a component config pointing at your checkout (or uses `homeboy.json`)
+3. **Validates Portable Config** — Requires `homeboy.json` at repo root
 4. **Runs Commands** — Executes each command with `--path` pointing at your workspace
 
 The action is **extension-agnostic** — Homeboy is the orchestrator, extensions provide the actual lint/test/audit logic. The WordPress extension runs PHPCS, PHPUnit, and PHPStan. Other extensions can run whatever tools they need.
@@ -301,6 +307,7 @@ homeboy changelog add homeboy-action "Describe change" --type Changed
 - Homeboy must have published releases with binary artifacts (uses `cargo-dist`)
 - Extensions must be installable via `homeboy extension install`
 - For WordPress: PHP must be available (use `php-version` input or set up separately)
+- Repository must include `homeboy.json` at root with a top-level `id`
 
 ## License
 

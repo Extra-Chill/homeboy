@@ -7,6 +7,14 @@ resolve_component_id() {
     printf '%s\n' "${COMPONENT_NAME}"
   elif [ -n "${component_id:-}" ]; then
     printf '%s\n' "${component_id}"
+  elif [ -f "homeboy.json" ]; then
+    local from_portable
+    from_portable="$(jq -r '.id // empty' homeboy.json 2>/dev/null || true)"
+    if [ -n "${from_portable}" ]; then
+      printf '%s\n' "${from_portable}"
+    else
+      basename "${GITHUB_REPOSITORY}"
+    fi
   else
     basename "${GITHUB_REPOSITORY}"
   fi

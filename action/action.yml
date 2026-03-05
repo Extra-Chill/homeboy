@@ -40,7 +40,7 @@ inputs:
     required: false
     default: ''
   settings:
-    description: 'JSON object of extension settings to pass (e.g. {"database_type": "sqlite"})'
+    description: 'Deprecated: use homeboy.json for extension settings and project config'
     required: false
     default: ''
   php-version:
@@ -183,13 +183,9 @@ runs:
         ACTION_REPOSITORY: ${{ github.action_repository }}
       run: bash ${{ github.action_path }}/scripts/capture-tooling-metadata.sh
 
-    - name: Register component
+    - name: Verify portable config
       shell: bash
-      env:
-        COMPONENT_NAME: ${{ inputs.component }}
-        EXTENSION_ID: ${{ inputs.extension }}
-        SETTINGS_JSON: ${{ inputs.settings }}
-      run: bash ${{ github.action_path }}/scripts/register-component.sh
+      run: bash ${{ github.action_path }}/scripts/verify-portable-config.sh
 
     - name: Determine PR base ref
       id: changed-files
