@@ -73,6 +73,16 @@ If your repo has a `homeboy.json` file, you don't even need to specify the exten
 | `test-scope` | No | `full` | Test scope for PRs: `full` or `changed` (requires Homeboy test changed-since support) |
 | `auto-issue` | No | `false` | Auto-file issue on non-PR failures (e.g. `push` to `main`) |
 
+### Fork PR note
+
+On fork-based pull requests, GitHub may provide a restricted `GITHUB_TOKEN` that cannot write PR comments or inline reviews.
+Homeboy Action treats those publish steps as best-effort in that context:
+
+- lint/test/audit execution still runs and determines job pass/fail
+- PR comment/inline review publishing is skipped with a warning when token permissions are insufficient
+
+This keeps CI reliable for external contributors while preserving strict token safety defaults.
+
 ## Outputs
 
 | Output | Description |

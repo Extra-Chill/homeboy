@@ -64,9 +64,12 @@ for REVIEW_ID in ${EXISTING_REVIEWS}; do
     --field event="DISMISS" > /dev/null 2>&1 || true
 done
 
-echo "${REVIEW_PAYLOAD}" | gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+if ! echo "${REVIEW_PAYLOAD}" | gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
   --method POST \
-  --input - > /dev/null 2>&1
+  --input - > /dev/null 2>&1; then
+  echo "::warning::Could not post inline review (likely restricted token for fork PR). Skipping inline review publish."
+  exit 0
+fi
 
 COMMENT_COUNT=$(echo "${REVIEW_PAYLOAD}" | jq '.comments | length' 2>/dev/null || echo "0")
 echo "Posted inline review with ${COMMENT_COUNT} comment(s)"
