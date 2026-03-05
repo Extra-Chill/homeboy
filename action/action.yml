@@ -174,6 +174,15 @@ runs:
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
       run: bash ${{ github.action_path }}/scripts/install-extension.sh
 
+    - name: Capture tooling metadata
+      shell: bash
+      env:
+        EXTENSION_ID: ${{ inputs.extension }}
+        EXTENSION_SOURCE: ${{ inputs.extension-source }}
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+      run: bash ${{ github.action_path }}/scripts/capture-tooling-metadata.sh
+
     - name: Register component
       shell: bash
       env:

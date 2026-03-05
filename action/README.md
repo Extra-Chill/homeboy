@@ -88,9 +88,16 @@ On failed runs, Homeboy Action now emits a compact **Failure Digest** to:
 
 Digest includes:
 
+- tooling versions (Homeboy CLI, extension source/revision, action ref)
 - failed test count + top failed tests
 - audit summary (drift/outliers/top findings when structured output is available)
 - links back to the full workflow run logs
+
+Auto-filed failure issues on non-PR runs also include:
+
+- **Primary failure** (first failed command + first fatal/error line)
+- **Secondary findings** (additional failed commands)
+- **Triage order** to reduce debugging time
 
 Machine-readable files are written to the action output directory:
 

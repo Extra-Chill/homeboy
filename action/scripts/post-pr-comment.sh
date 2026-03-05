@@ -15,6 +15,11 @@ DIGEST_FILE="${HOMEBOY_FAILURE_DIGEST_FILE:-}"
 
 COMMENT_BODY="<!-- homeboy-action-results -->"$'\n'
 COMMENT_BODY+="## Homeboy Results — \`${COMP_ID}\`"$'\n\n'
+COMMENT_BODY+="### Tooling versions"$'\n\n'
+COMMENT_BODY+="- Homeboy CLI: \`${HOMEBOY_CLI_VERSION:-unknown}\`"$'\n'
+COMMENT_BODY+="- Extension: \`${HOMEBOY_EXTENSION_ID:-auto}\` from \`${HOMEBOY_EXTENSION_SOURCE:-auto}\`"$'\n'
+COMMENT_BODY+="- Extension revision: \`${HOMEBOY_EXTENSION_REVISION:-unknown}\`"$'\n'
+COMMENT_BODY+="- Action: \`${HOMEBOY_ACTION_REPOSITORY:-unknown}@${HOMEBOY_ACTION_REF:-unknown}\`"$'\n\n'
 
 if [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_COMMITTED:-}" = "true" ]; then
   COMMENT_BODY+="> :wrench: **Autofix applied** — a CI bot commit was pushed and checks were re-run"$'\n\n'
@@ -120,8 +125,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
 done
 
 COMMENT_BODY+="---"$'\n'
-COMMENT_BODY+="*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1 — "
-COMMENT_BODY+="$(homeboy --version 2>/dev/null || echo 'homeboy')*"
+COMMENT_BODY+="*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1 — ${HOMEBOY_CLI_VERSION:-$(homeboy --version 2>/dev/null || echo 'homeboy')}*"
 
 EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
   --jq '.[] | select(.body | startswith("<!-- homeboy-action-results -->")) | .id' \
