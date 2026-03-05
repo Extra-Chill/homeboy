@@ -13,8 +13,10 @@ Also available as: `homeboy version bump <COMPONENT> <BUMP_TYPE> [OPTIONS]`
 ## Options
 
 - `--dry-run`: Preview the release plan without executing
-- `--no-tag`: Skip creating git tag
-- `--no-push`: Skip pushing to remote
+- `--deploy`: Deploy this component to all projects that use it after release
+- `--recover`: Recover from an interrupted release
+- `--skip-checks`: Skip pre-release lint/test checks
+- `--allow-underbump`: Override semver guardrail when requested bump is lower than commit-derived recommendation
 
 ## Description
 
@@ -147,6 +149,43 @@ With `--dry-run`:
 }
 ```
 
+### CI / bot semver recommendation example
+
+For automation, run dry-run JSON and consume:
+
+```sh
+homeboy release <component_id> patch --dry-run --json
+```
+
+Semver recommendation is exposed at:
+
+- `data.result.plan.semver_recommendation`
+
+Example payload:
+
+```json
+{
+  "latest_tag": "v0.56.1",
+  "range": "v0.56.1..HEAD",
+  "commits": [
+    {
+      "sha": "abc1234",
+      "subject": "feat(test): changed-since impact-scoped test execution",
+      "commit_type": "feature",
+      "breaking": false
+    }
+  ],
+  "recommended_bump": "minor",
+  "requested_bump": "patch",
+  "is_underbump": true,
+  "reasons": [
+    "abc1234 feat(test): changed-since impact-scoped test execution"
+  ]
+}
+```
+
+Use this in CI to block accidental under-bumps before tagging/publish.
+
 Without `--dry-run`:
 
 ```json
@@ -197,4 +236,3 @@ This allows safe retry after `partial_success` without manual cleanup.
 
 - [component](component.md)
 - [extension](extension.md)
-

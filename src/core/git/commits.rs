@@ -27,6 +27,41 @@ pub enum CommitCategory {
     Other,
 }
 
+/// Semantic version bump levels in ascending order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SemverBump {
+    Patch,
+    Minor,
+    Major,
+}
+
+impl SemverBump {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SemverBump::Patch => "patch",
+            SemverBump::Minor => "minor",
+            SemverBump::Major => "major",
+        }
+    }
+
+    pub fn rank(&self) -> u8 {
+        match self {
+            SemverBump::Patch => 1,
+            SemverBump::Minor => 2,
+            SemverBump::Major => 3,
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "patch" => Some(SemverBump::Patch),
+            "minor" => Some(SemverBump::Minor),
+            "major" => Some(SemverBump::Major),
+            _ => None,
+        }
+    }
+}
+
 impl CommitCategory {
     pub fn prefix(&self) -> Option<&'static str> {
         match self {
@@ -308,6 +343,34 @@ pub fn categorize_commits(path: &str, commits: &[CommitInfo]) -> CommitCounts {
     counts
 }
 
+/// Recommend minimum semver bump required by commits in a release range.
+///
+/// Rules:
+/// - Breaking => major
+/// - Feature => minor
+/// - Fix/Other => patch
+/// - Docs/Chore/Merge => ignored for bump floor
+pub fn recommended_bump_from_commits(commits: &[CommitInfo]) -> Option<SemverBump> {
+    let mut recommended: Option<SemverBump> = None;
+
+    for commit in commits {
+        let bump = match commit.category {
+            CommitCategory::Breaking => SemverBump::Major,
+            CommitCategory::Feature => SemverBump::Minor,
+            CommitCategory::Fix | CommitCategory::Other => SemverBump::Patch,
+            CommitCategory::Docs | CommitCategory::Chore | CommitCategory::Merge => continue,
+        };
+
+        recommended = match recommended {
+            None => Some(bump),
+            Some(existing) if bump.rank() > existing.rank() => Some(bump),
+            Some(existing) => Some(existing),
+        };
+    }
+
+    recommended
+}
+
 /// Strip conventional commit prefix from a subject line.
 /// "feat: Add new feature" -> "Add new feature"
 /// "fix(scope): Fix bug" -> "Fix bug"
@@ -446,5 +509,70 @@ mod tests {
         assert!(CommitCategory::Docs.to_changelog_entry_type().is_none());
         assert!(CommitCategory::Chore.to_changelog_entry_type().is_none());
         assert!(CommitCategory::Feature.to_changelog_entry_type().is_some());
+    }
+
+    #[test]
+    fn recommended_bump_prefers_highest_severity() {
+        let commits = vec![
+            CommitInfo {
+                hash: "a1".to_string(),
+                subject: "fix: patch fix".to_string(),
+                category: CommitCategory::Fix,
+            },
+            CommitInfo {
+                hash: "b2".to_string(),
+                subject: "feat: add feature".to_string(),
+                category: CommitCategory::Feature,
+            },
+            CommitInfo {
+                hash: "c3".to_string(),
+                subject: "refactor!: break API".to_string(),
+                category: CommitCategory::Breaking,
+            },
+        ];
+
+        assert_eq!(
+            recommended_bump_from_commits(&commits),
+            Some(SemverBump::Major)
+        );
+    }
+
+    #[test]
+    fn recommended_bump_ignores_docs_and_chore() {
+        let commits = vec![
+            CommitInfo {
+                hash: "a1".to_string(),
+                subject: "docs: update".to_string(),
+                category: CommitCategory::Docs,
+            },
+            CommitInfo {
+                hash: "b2".to_string(),
+                subject: "chore: cleanup".to_string(),
+                category: CommitCategory::Chore,
+            },
+        ];
+
+        assert_eq!(recommended_bump_from_commits(&commits), None);
+    }
+
+    #[test]
+    fn recommended_bump_from_fix_and_other_is_patch() {
+        let commits = vec![
+            CommitInfo {
+                hash: "a1".to_string(),
+                subject: "random commit".to_string(),
+                category: CommitCategory::Other,
+            },
+            CommitInfo {
+                hash: "b2".to_string(),
+                subject: "fix: bug".to_string(),
+                category: CommitCategory::Fix,
+            },
+        ];
+
+        assert_eq!(
+            recommended_bump_from_commits(&commits),
+            Some(SemverBump::Patch)
+        );
     }
 }

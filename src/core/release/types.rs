@@ -41,10 +41,33 @@ pub struct ReleasePlan {
     pub component_id: String,
     pub enabled: bool,
     pub steps: Vec<ReleasePlanStep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semver_recommendation: Option<ReleaseSemverRecommendation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseSemverCommit {
+    pub sha: String,
+    pub subject: String,
+    pub commit_type: String,
+    pub breaking: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseSemverRecommendation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_tag: Option<String>,
+    pub range: String,
+    pub commits: Vec<ReleaseSemverCommit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_bump: Option<String>,
+    pub requested_bump: String,
+    pub is_underbump: bool,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,4 +148,7 @@ pub struct ReleaseOptions {
     /// Skip lint/test code quality checks before release.
     #[serde(default)]
     pub skip_checks: bool,
+    /// Allow requested bump to be lower than commit-derived recommendation.
+    #[serde(default)]
+    pub allow_underbump: bool,
 }

@@ -10,7 +10,10 @@ use crate::version;
 
 use super::executor::ReleaseStepExecutor;
 use super::resolver::{resolve_extensions, ReleaseCapabilityResolver};
-use super::types::{ReleaseOptions, ReleasePlan, ReleasePlanStatus, ReleasePlanStep, ReleaseRun};
+use super::types::{
+    ReleaseOptions, ReleasePlan, ReleasePlanStatus, ReleasePlanStep, ReleaseRun,
+    ReleaseSemverCommit, ReleaseSemverRecommendation,
+};
 
 /// Execute a release by computing the plan and executing it.
 /// What you preview (dry-run) is what you execute.
@@ -84,8 +87,16 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         v.capture(validate_code_quality(&component), "code_quality");
     }
 
+    // Build semver recommendation from commits early so both JSON output and
+    // validation paths share a single source of truth.
+    let semver_recommendation = build_semver_recommendation(&component, &options.bump_type)?;
+
     // === Stage 1: Independent validations ===
     v.capture(validate_commits_vs_changelog(&component), "commits");
+    v.capture(
+        validate_bump_guardrail(semver_recommendation.as_ref(), options.allow_underbump),
+        "semver_bump",
+    );
     v.capture(validate_changelog(&component), "changelog");
     let version_info = v.capture(version::read_version(Some(component_id)), "version");
 
@@ -192,9 +203,144 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         component_id: component_id.to_string(),
         enabled: true,
         steps,
+        semver_recommendation,
         warnings,
         hints,
     })
+}
+
+/// Enforce semver floor from commits since latest tag.
+///
+/// Blocks under-bumps by default (e.g., requesting patch when commits include feat).
+fn validate_bump_guardrail(
+    recommendation: Option<&ReleaseSemverRecommendation>,
+    allow_underbump: bool,
+) -> Result<()> {
+    let Some(rec) = recommendation else {
+        return Ok(());
+    };
+
+    if !rec.is_underbump || allow_underbump {
+        return Ok(());
+    }
+
+    let latest_label = rec
+        .latest_tag
+        .clone()
+        .unwrap_or_else(|| "initial commit".to_string());
+
+    let mut hints = vec![
+        format!(
+            "Requested '{}' but commits since {} require at least '{}'",
+            rec.requested_bump,
+            latest_label,
+            rec.recommended_bump.as_deref().unwrap_or("patch")
+        ),
+        "Trigger commits:".to_string(),
+    ];
+
+    for trigger in rec.reasons.iter().take(5) {
+        hints.push(format!("  - {}", trigger));
+    }
+    hints.push(
+        "Use the recommended bump (or higher), or pass --allow-underbump to override intentionally"
+            .to_string(),
+    );
+
+    Err(Error::validation_invalid_argument(
+        "bump_type",
+        "Requested bump is lower than semver recommendation",
+        None,
+        Some(hints),
+    ))
+}
+
+fn build_semver_recommendation(
+    component: &Component,
+    requested_bump: &str,
+) -> Result<Option<ReleaseSemverRecommendation>> {
+    let requested = git::SemverBump::from_str(requested_bump).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "bump_type",
+            format!("Invalid bump type: {}", requested_bump),
+            None,
+            Some(vec!["Use one of: patch, minor, major".to_string()]),
+        )
+    })?;
+
+    let latest_tag = git::get_latest_tag(&component.local_path)?;
+    let commits = git::get_commits_since_tag(&component.local_path, latest_tag.as_deref())?;
+
+    if commits.is_empty() {
+        return Ok(None);
+    }
+
+    let recommended = git::recommended_bump_from_commits(&commits);
+    let is_underbump = recommended
+        .map(|r| requested.rank() < r.rank())
+        .unwrap_or(false);
+
+    let commit_rows: Vec<ReleaseSemverCommit> = commits
+        .iter()
+        .map(|c| ReleaseSemverCommit {
+            sha: c.hash.clone(),
+            subject: c.subject.clone(),
+            commit_type: match c.category {
+                git::CommitCategory::Breaking => "breaking",
+                git::CommitCategory::Feature => "feature",
+                git::CommitCategory::Fix => "fix",
+                git::CommitCategory::Docs => "docs",
+                git::CommitCategory::Chore => "chore",
+                git::CommitCategory::Merge => "merge",
+                git::CommitCategory::Other => "other",
+            }
+            .to_string(),
+            breaking: c.category == git::CommitCategory::Breaking,
+        })
+        .collect();
+
+    let reasons: Vec<String> = commits
+        .iter()
+        .filter(|c| {
+            if let Some(rec) = recommended {
+                match rec {
+                    git::SemverBump::Major => c.category == git::CommitCategory::Breaking,
+                    git::SemverBump::Minor => {
+                        c.category == git::CommitCategory::Breaking
+                            || c.category == git::CommitCategory::Feature
+                    }
+                    git::SemverBump::Patch => {
+                        matches!(
+                            c.category,
+                            git::CommitCategory::Breaking
+                                | git::CommitCategory::Feature
+                                | git::CommitCategory::Fix
+                                | git::CommitCategory::Other
+                        )
+                    }
+                }
+            } else {
+                false
+            }
+        })
+        .take(10)
+        .map(|c| format!("{} {}", c.hash, c.subject))
+        .collect();
+
+    let range = latest_tag
+        .as_ref()
+        .map(|t| format!("{}..HEAD", t))
+        .unwrap_or_else(|| "HEAD".to_string());
+
+    Ok(Some(ReleaseSemverRecommendation {
+        latest_tag,
+        range,
+        commits: commit_rows,
+        recommended_bump: recommended.map(|r| r.as_str().to_string()),
+        requested_bump: requested.as_str().to_string(),
+        is_underbump,
+        reasons,
+    }))
 }
 
 fn validate_changelog(component: &Component) -> Result<()> {

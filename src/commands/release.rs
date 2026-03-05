@@ -57,6 +57,10 @@ pub struct ReleaseArgs {
     /// Skip pre-release lint and test checks
     #[arg(long)]
     skip_checks: bool,
+
+    /// Allow bump type lower than commit-derived semver recommendation
+    #[arg(long)]
+    allow_underbump: bool,
 }
 
 #[derive(Serialize)]
@@ -107,6 +111,7 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         dry_run: args.dry_run_args.dry_run,
         path_override: None,
         skip_checks: args.skip_checks,
+        allow_underbump: args.allow_underbump,
     };
 
     if args.dry_run_args.dry_run {

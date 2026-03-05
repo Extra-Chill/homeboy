@@ -62,6 +62,10 @@ enum VersionCommand {
         /// Override local_path for version operations
         #[arg(long)]
         path: Option<String>,
+
+        /// Allow bump type lower than commit-derived semver recommendation
+        #[arg(long)]
+        allow_underbump: bool,
     },
 }
 
@@ -147,12 +151,14 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             bump_type,
             dry_run,
             path,
+            allow_underbump,
         } => {
             let options = release::ReleaseOptions {
                 bump_type: bump_type.as_str().to_string(),
                 dry_run,
                 path_override: path,
                 skip_checks: false,
+                allow_underbump,
             };
 
             if dry_run {
