@@ -4,11 +4,13 @@
 //! and case-variant awareness), generates edits, and optionally applies them.
 
 pub mod add;
+pub mod decompose;
 pub mod move_items;
 mod rename;
 pub mod transform;
 
 pub use add::{add_import, fixes_from_audit, AddResult};
+pub use decompose::{apply_plan_skeletons, build_plan, DecomposeGroup, DecomposePlan};
 pub use move_items::{move_items, ImportRewrite, ItemKind, MoveResult, MovedItem};
 pub use rename::{
     apply_renames, find_references, generate_renames, CaseVariant, FileEdit, FileRename, Reference,

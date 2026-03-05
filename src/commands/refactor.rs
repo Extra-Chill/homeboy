@@ -138,6 +138,27 @@ enum RefactorCommand {
         #[command(flatten)]
         write_mode: WriteModeArgs,
     },
+
+    /// Build an audit-safe decomposition plan for a large source file
+    Decompose {
+        /// Source file to decompose (relative to component/path root)
+        #[arg(long, value_name = "FILE")]
+        file: String,
+
+        /// Planning strategy (currently: grouped)
+        #[arg(long, default_value = "grouped")]
+        strategy: String,
+
+        /// Prefer audit-safe target suggestions (e.g., include fragments)
+        #[arg(long, default_value_t = true)]
+        audit_safe: bool,
+
+        #[command(flatten)]
+        component: ComponentArgs,
+
+        #[command(flatten)]
+        write_mode: WriteModeArgs,
+    },
 }
 
 pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RefactorOutput> {
@@ -220,6 +241,21 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             component.path.as_deref(),
             write_mode.write,
         ),
+
+        RefactorCommand::Decompose {
+            file,
+            strategy,
+            audit_safe,
+            component,
+            write_mode,
+        } => run_decompose(
+            &file,
+            &strategy,
+            audit_safe,
+            component.component.as_deref(),
+            component.path.as_deref(),
+            write_mode.write,
+        ),
     }
 }
 
@@ -281,6 +317,14 @@ pub enum RefactorOutput {
     Transform {
         #[serde(flatten)]
         result: homeboy::refactor::TransformResult,
+    },
+
+    #[serde(rename = "refactor.decompose")]
+    Decompose {
+        plan: homeboy::refactor::DecomposePlan,
+        created_files: Vec<String>,
+        dry_run: bool,
+        applied: bool,
     },
 }
 
@@ -1176,4 +1220,60 @@ fn run_transform(
 
     let exit_code = if result.total_replacements == 0 { 1 } else { 0 };
     Ok((RefactorOutput::Transform { result }, exit_code))
+}
+
+fn run_decompose(
+    file: &str,
+    strategy: &str,
+    audit_safe: bool,
+    component_id: Option<&str>,
+    path: Option<&str>,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let root = refactor::move_items::resolve_root(component_id, path)?;
+    let plan = refactor::build_plan(file, &root, strategy, audit_safe)?;
+
+    let created_files = if write {
+        refactor::apply_plan_skeletons(&plan, &root)?
+    } else {
+        Vec::new()
+    };
+
+    homeboy::log_status!(
+        "decompose",
+        "{} group(s) planned for {}{}",
+        plan.groups.len(),
+        file,
+        if write {
+            " (skeletons written)"
+        } else {
+            " (dry run)"
+        }
+    );
+
+    for group in &plan.groups {
+        homeboy::log_status!(
+            "decompose",
+            "{} -> {} ({} item(s))",
+            group.name,
+            group.suggested_target,
+            group.item_names.len()
+        );
+    }
+
+    if !plan.warnings.is_empty() {
+        for warning in &plan.warnings {
+            homeboy::log_status!("warning", "{}", warning);
+        }
+    }
+
+    Ok((
+        RefactorOutput::Decompose {
+            plan,
+            created_files,
+            dry_run: !write,
+            applied: write,
+        },
+        0,
+    ))
 }
