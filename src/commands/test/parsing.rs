@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use homeboy::test_analyze::TestAnalysisInput;
+use homeboy::test_analyze::{TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::TestCounts;
 use homeboy::utils::io;
 
@@ -18,6 +18,72 @@ pub struct CoverageOutput {
 pub struct UncoveredFile {
     pub file: String,
     pub line_pct: f64,
+}
+
+#[derive(Serialize)]
+pub struct TestFailureSummaryItem {
+    pub test_name: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct TestSummaryOutput {
+    pub total: u64,
+    pub passed: u64,
+    pub failed: u64,
+    pub skipped: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<TestFailureSummaryItem>,
+    pub exit_code: i32,
+}
+
+pub fn build_test_summary(
+    test_counts: Option<&TestCounts>,
+    analysis: Option<&TestAnalysis>,
+    exit_code: i32,
+) -> TestSummaryOutput {
+    let (total, passed, failed, skipped) = if let Some(counts) = test_counts {
+        (counts.total, counts.passed, counts.failed, counts.skipped)
+    } else {
+        let total = analysis.map(|a| a.total_tests).unwrap_or(0);
+        let passed = analysis.map(|a| a.total_passed).unwrap_or(0);
+        let failed = analysis.map(|a| a.total_failures as u64).unwrap_or(0);
+        let skipped = total.saturating_sub(passed + failed);
+        (total, passed, failed, skipped)
+    };
+
+    let failures = analysis
+        .map(|a| {
+            a.clusters
+                .iter()
+                .flat_map(|cluster| {
+                    cluster
+                        .example_tests
+                        .iter()
+                        .map(|name| TestFailureSummaryItem {
+                            test_name: name.clone(),
+                            message: cluster.pattern.clone(),
+                            file: cluster.affected_files.first().cloned(),
+                            line: None,
+                        })
+                })
+                .take(20)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    TestSummaryOutput {
+        total,
+        passed,
+        failed,
+        skipped,
+        failures,
+        exit_code,
+    }
 }
 
 /// Parse the test failures JSON file written by the extension test runner.
@@ -161,5 +227,17 @@ mod tests {
         assert_eq!(parsed.passed, 3);
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_build_test_summary() {
+        let counts = TestCounts::new(10, 8, 1, 1);
+        let summary = build_test_summary(Some(&counts), None, 0);
+
+        assert_eq!(summary.total, 10);
+        assert_eq!(summary.passed, 8);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.exit_code, 0);
     }
 }

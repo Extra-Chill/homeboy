@@ -20,6 +20,10 @@ The `test` command executes test suites for specified Homeboy components. It aut
 
 - `--skip-lint`: Skip linting before running tests
 - `--setting <key=value>`: Override component settings (can be used multiple times)
+- `--path <PATH>`: Override component `local_path` for this run
+- `--changed-since <REF>`: Limit execution to impacted tests since a git ref
+- `--analyze`: Cluster and summarize failures
+- `--json-summary`: Include compact structured summary in JSON output for CI wrappers
 
 ## Examples
 

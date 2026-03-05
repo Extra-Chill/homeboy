@@ -26,6 +26,7 @@
 - [server](server.md)
 - [ssh](ssh.md)
 - status — actionable component overview (`--uncommitted`, `--needs-bump`, `--ready`, `--docs-only`, `--all`)
+- [supports](supports.md) — machine-readable CLI capability checks
 - [test](test.md)
 - transfer — transfer files between servers (`<source> <destination>`, supports `-r`, `-c`, `--dry-run`, `--exclude`)
 - [upgrade](upgrade.md)

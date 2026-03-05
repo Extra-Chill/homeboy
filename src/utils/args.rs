@@ -268,6 +268,7 @@ pub fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
                 "--changed-since",
                 "--setting",
                 "--path",
+                "--json-summary",
                 "--json",
                 "--help",
                 "-h",

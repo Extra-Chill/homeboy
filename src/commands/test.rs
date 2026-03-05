@@ -13,11 +13,12 @@ use homeboy::utils::autofix::{self, AutofixMode};
 
 use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::test_scope::{build_phpunit_filter_regex, compute_changed_test_scope, TestScopeOutput};
-use super::CmdResult;
+use super::{CmdResult, GlobalArgs};
 
 mod parsing;
 
 pub use parsing::CoverageOutput;
+use parsing::{build_test_summary, TestSummaryOutput};
 
 #[derive(Args)]
 pub struct TestArgs {
@@ -84,6 +85,10 @@ pub struct TestArgs {
 
     #[command(flatten)]
     _json: HiddenJsonArgs,
+
+    /// Print compact machine-readable summary (for CI wrappers)
+    #[arg(long)]
+    json_summary: bool,
 }
 
 #[derive(Serialize)]
@@ -109,6 +114,8 @@ pub struct TestOutput {
     auto_fix_drift: Option<AutoFixDriftOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_scope: Option<TestScopeOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<TestSummaryOutput>,
 }
 
 #[derive(Serialize)]
@@ -197,6 +204,7 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
         "--drift",
         "--scaffold",
         "--write",
+        "--json-summary",
         "--baseline",
         "--ignore-baseline",
         "--ratchet",
@@ -290,7 +298,8 @@ fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> 
         })
 }
 
-pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput> {
+pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
+    let source_path = args.comp.source_path()?;
     let component = args.comp.load()?;
 
     // Scaffold mode — generate test stubs without running tests
@@ -394,6 +403,11 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
                     scaffold: None,
                     auto_fix_drift: None,
                     test_scope: Some(scope.clone()),
+                    summary: if args.json_summary {
+                        Some(build_test_summary(None, None, 0))
+                    } else {
+                        None
+                    },
                 },
                 0,
             ));
@@ -473,9 +487,6 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
         }
         None
     };
-
-    // Resolve source path for baseline storage
-    let source_path = args.comp.source_path()?;
 
     // --baseline: save current state
     if args.baseline_args.baseline {
@@ -593,6 +604,15 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
 
     // Exit code: baseline regression overrides test exit code
     let exit_code = baseline_exit_override.unwrap_or(output.exit_code);
+    let summary = if args.json_summary {
+        Some(build_test_summary(
+            test_counts.as_ref(),
+            analysis.as_ref(),
+            exit_code,
+        ))
+    } else {
+        None
+    };
 
     Ok((
         TestOutput {
@@ -608,6 +628,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
             scaffold: None,
             auto_fix_drift: None,
             test_scope: changed_scope,
+            summary,
         },
         exit_code,
     ))
@@ -744,6 +765,7 @@ fn run_auto_fix_drift(
                 ..output
             }),
             test_scope: None,
+            summary: None,
         },
         0,
     ))
@@ -889,6 +911,7 @@ fn run_drift(component_id: &str, component: &Component, since: &str) -> CmdResul
             scaffold: None,
             auto_fix_drift: None,
             test_scope: None,
+            summary: None,
         },
         exit_code,
     ))
@@ -985,6 +1008,7 @@ fn run_scaffold(
                 scaffold: Some(scaffold_output),
                 auto_fix_drift: None,
                 test_scope: None,
+                summary: None,
             },
             0,
         ))
@@ -1074,6 +1098,7 @@ fn run_scaffold(
                 scaffold: Some(scaffold_output),
                 auto_fix_drift: None,
                 test_scope: None,
+                summary: None,
             },
             0,
         ))
@@ -1209,6 +1234,16 @@ mod tests {
         let args = vec![
             "--path".to_string(),
             "/tmp/checkout".to_string(),
+            "--filter=SomeTest".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=SomeTest"]);
+    }
+
+    #[test]
+    fn filter_strips_json_summary_flag() {
+        let args = vec![
+            "--json-summary".to_string(),
             "--filter=SomeTest".to_string(),
         ];
         let result = filter_homeboy_flags(&args);

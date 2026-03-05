@@ -7,7 +7,7 @@ use homeboy::git;
 use homeboy::utils::autofix::{self, AutofixMode};
 
 use super::args::BaselineArgs;
-use super::CmdResult;
+use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
 pub struct AuditArgs {
@@ -38,6 +38,30 @@ pub struct AuditArgs {
     /// Example: --changed-since origin/main
     #[arg(long)]
     pub changed_since: Option<String>,
+
+    /// Include compact machine-readable summary for CI wrappers
+    #[arg(long)]
+    pub json_summary: bool,
+}
+
+#[derive(Serialize)]
+pub struct AuditSummaryOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alignment_score: Option<f32>,
+    total_findings: usize,
+    warnings: usize,
+    info: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    top_findings: Vec<AuditSummaryFinding>,
+    exit_code: i32,
+}
+
+#[derive(Serialize)]
+pub struct AuditSummaryFinding {
+    file: String,
+    category: String,
+    description: String,
+    suggestion: String,
 }
 
 #[derive(Serialize)]
@@ -81,10 +105,53 @@ pub enum AuditOutput {
         #[serde(flatten)]
         result: CodeAuditResult,
         baseline_comparison: baseline::BaselineComparison,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<AuditSummaryOutput>,
     },
+
+    #[serde(rename = "audit.summary")]
+    Summary(AuditSummaryOutput),
 }
 
-pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutput> {
+pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditOutput> {
+    run_inner(args)
+}
+
+fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSummaryOutput {
+    let warnings = result
+        .findings
+        .iter()
+        .filter(|f| matches!(f.severity, homeboy::code_audit::Severity::Warning))
+        .count();
+    let info = result
+        .findings
+        .iter()
+        .filter(|f| matches!(f.severity, homeboy::code_audit::Severity::Info))
+        .count();
+
+    let top_findings = result
+        .findings
+        .iter()
+        .take(20)
+        .map(|f| AuditSummaryFinding {
+            file: f.file.clone(),
+            category: f.convention.clone(),
+            description: f.description.clone(),
+            suggestion: f.suggestion.clone(),
+        })
+        .collect();
+
+    AuditSummaryOutput {
+        alignment_score: result.summary.alignment_score,
+        total_findings: result.findings.len(),
+        warnings,
+        info,
+        top_findings,
+        exit_code,
+    }
+}
+
+fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
     // Resolve component ID and source path
     let (resolved_id, resolved_path) = if Path::new(&args.component_id).is_dir() {
         let effective = args
@@ -253,10 +320,21 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
                 eprintln!("[audit] No change from baseline");
             }
 
+            let summary = if args.json_summary {
+                Some(build_audit_summary(&result, exit_code))
+            } else {
+                None
+            };
+
             return Ok((
-                AuditOutput::Compared {
-                    result,
-                    baseline_comparison: comparison,
+                if args.json_summary {
+                    AuditOutput::Summary(build_audit_summary(&result, exit_code))
+                } else {
+                    AuditOutput::Compared {
+                        result,
+                        baseline_comparison: comparison,
+                        summary,
+                    }
                 },
                 exit_code,
             ));
@@ -269,5 +347,12 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
     } else {
         0
     };
-    Ok((AuditOutput::Full(result), exit_code))
+    if args.json_summary {
+        Ok((
+            AuditOutput::Summary(build_audit_summary(&result, exit_code)),
+            exit_code,
+        ))
+    } else {
+        Ok((AuditOutput::Full(result), exit_code))
+    }
 }

@@ -24,6 +24,8 @@ Works with registered components (by ID) or raw filesystem paths.
 - `--baseline`: Save current audit state as baseline for future comparisons
 - `--ignore-baseline`: Skip baseline comparison even if a baseline exists
 - `--path <PATH>`: Override `local_path` for this audit run (use a workspace clone or temp checkout)
+- `--changed-since <REF>`: Restrict findings to files changed since a git ref
+- `--json-summary`: Return compact machine-readable summary (`audit.summary`) for CI wrappers
 
 ## Audit Pipeline
 
