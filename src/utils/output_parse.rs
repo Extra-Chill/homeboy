@@ -31,7 +31,13 @@ pub struct ParseSpec {
     pub derive: Vec<DeriveRule>,
 }
 
-pub fn parse_output(text: &str, spec: &ParseSpec) -> HashMap<String, f64> {
+impl ParseSpec {
+    pub fn parse(&self, text: &str) -> HashMap<String, f64> {
+        parse_output(text, self)
+    }
+}
+
+fn parse_output(text: &str, spec: &ParseSpec) -> HashMap<String, f64> {
     let mut out = spec.defaults.clone();
 
     for rule in &spec.rules {
@@ -113,5 +119,39 @@ mod tests {
         ]);
         assert_eq!(evaluate_expr("total - failed - skipped", &values), 9.0);
         assert_eq!(evaluate_expr("total + 1", &values), 13.0);
+    }
+
+    #[test]
+    fn test_parse() {
+        let spec = ParseSpec {
+            rules: vec![ParseRule {
+                pattern: r"Errors:\s*(\d+)".to_string(),
+                field: "errors".to_string(),
+                group: 1,
+                aggregate: Aggregate::Sum,
+            }],
+            defaults: HashMap::new(),
+            derive: vec![],
+        };
+
+        let parsed = spec.parse("Errors: 2\nErrors: 3\n");
+        assert_eq!(parsed.get("errors").copied().unwrap_or(0.0), 5.0);
+    }
+
+    #[test]
+    fn test_parse_output() {
+        let spec = ParseSpec {
+            rules: vec![ParseRule {
+                pattern: r"Errors:\s*(\d+)".to_string(),
+                field: "errors".to_string(),
+                group: 1,
+                aggregate: Aggregate::Sum,
+            }],
+            defaults: HashMap::new(),
+            derive: vec![],
+        };
+
+        let parsed = parse_output("Errors: 2\nErrors: 3\n", &spec);
+        assert_eq!(parsed.get("errors").copied().unwrap_or(0.0), 5.0);
     }
 }

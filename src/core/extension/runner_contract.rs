@@ -39,6 +39,7 @@ impl RunnerStepFilter {
         }
         env
     }
+
 }
 
 fn csv_set(value: Option<&str>) -> HashSet<String> {
@@ -56,13 +57,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_run_with_no_filters() {
+    fn test_should_run_with_no_filters() {
         let filter = RunnerStepFilter::default();
         assert!(filter.should_run("lint"));
     }
 
     #[test]
-    fn should_run_honors_step_include() {
+    fn test_should_run_honors_step_include() {
         let filter = RunnerStepFilter {
             step: Some("lint,test".to_string()),
             skip: None,
@@ -72,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn should_run_honors_skip() {
+    fn test_should_run_honors_skip() {
         let filter = RunnerStepFilter {
             step: None,
             skip: Some("lint".to_string()),
@@ -82,7 +83,7 @@ mod tests {
     }
 
     #[test]
-    fn to_env_pairs_exports_step_and_skip() {
+    fn test_to_env_pairs_exports_step_and_skip() {
         let filter = RunnerStepFilter {
             step: Some("a".to_string()),
             skip: Some("b".to_string()),
@@ -92,4 +93,38 @@ mod tests {
         assert!(env.iter().any(|(k, v)| k == "HOMEBOY_STEP" && v == "a"));
         assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "b"));
     }
+
+    #[test]
+    fn test_csv_set() {
+        let set = csv_set(Some("lint, test,,"));
+        assert!(set.contains("lint"));
+        assert!(set.contains("test"));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn test_should_run() {
+        let filter = RunnerStepFilter {
+            step: Some("lint,test".to_string()),
+            skip: Some("test".to_string()),
+        };
+        assert!(filter.should_run("lint"));
+        assert!(!filter.should_run("test"));
+        assert!(!filter.should_run("deploy"));
+    }
+
+    #[test]
+    fn test_to_env_pairs() {
+        let filter = RunnerStepFilter {
+            step: Some("a".to_string()),
+            skip: Some("b".to_string()),
+        };
+        let env = filter.to_env_pairs();
+        assert!(env.iter().any(|(k, v)| k == "HOMEBOY_STEP" && v == "a"));
+        assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "b"));
+    }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/core/extension/runner_contract_test.rs"]
+mod runner_contract_test;

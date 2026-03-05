@@ -3,7 +3,7 @@ use serde::Serialize;
 use homeboy::test_analyze::{TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::TestCounts;
 use homeboy::utils::io;
-use homeboy::utils::output_parse::{parse_output, Aggregate, DeriveRule, ParseRule, ParseSpec};
+use homeboy::utils::output_parse::{Aggregate, DeriveRule, ParseRule, ParseSpec};
 
 #[derive(Serialize)]
 pub struct CoverageOutput {
@@ -164,7 +164,7 @@ pub fn parse_test_results_text(text: &str) -> Option<TestCounts> {
         }],
     };
 
-    let parsed = parse_output(text, &spec);
+    let parsed = spec.parse(text);
     let total = parsed.get("total").copied().unwrap_or(0.0).max(0.0) as u64;
     if total == 0 {
         return None;
@@ -227,7 +227,7 @@ pub fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<Covera
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::utils::output_parse::{parse_output, Aggregate, ParseRule, ParseSpec};
+    use homeboy::utils::output_parse::{Aggregate, ParseRule, ParseSpec};
 
     #[test]
     fn parse_failures_file_backfills_totals_when_missing() {
@@ -341,7 +341,7 @@ mod tests {
             derive: vec![],
         };
 
-        let parsed = parse_output("Tests: 10\nFailures: 2\n", &spec);
+        let parsed = spec.parse("Tests: 10\nFailures: 2\n");
         assert_eq!(parsed.get("total").copied().unwrap_or(0.0), 10.0);
         assert_eq!(parsed.get("failed").copied().unwrap_or(0.0), 2.0);
     }
@@ -359,7 +359,7 @@ mod tests {
             derive: vec![],
         };
 
-        let parsed = parse_output("Errors: 2\nErrors: 3\n", &spec);
+        let parsed = spec.parse("Errors: 2\nErrors: 3\n");
         assert_eq!(parsed.get("errors").copied().unwrap_or(0.0), 5.0);
     }
 }
