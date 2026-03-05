@@ -102,11 +102,13 @@ fn extract_comments(fp: &FileFingerprint) -> Vec<(usize, &str)> {
 }
 
 fn truncate_comment(comment: &str) -> String {
-    const MAX: usize = 120;
-    if comment.len() <= MAX {
+    const MAX_CHARS: usize = 120;
+    let char_count = comment.chars().count();
+    if char_count <= MAX_CHARS {
         comment.to_string()
     } else {
-        format!("{}...", &comment[..MAX])
+        let truncated: String = comment.chars().take(MAX_CHARS).collect();
+        format!("{}...", truncated)
     }
 }
 
@@ -168,5 +170,13 @@ mod tests {
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0].0, 2);
         assert!(comments[0].1.contains("FIXME"));
+    }
+
+    #[test]
+    fn test_truncate_comment_handles_multibyte() {
+        let comment = format!("Phase 1 {}", "─".repeat(200));
+        let truncated = truncate_comment(&comment);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.chars().count() <= 123);
     }
 }
