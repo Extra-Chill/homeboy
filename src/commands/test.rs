@@ -9,6 +9,7 @@ use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
 use homeboy::test_drift::{self, DriftOptions, DriftReport};
 use homeboy::test_scaffold::{self, ScaffoldConfig};
+use homeboy::utils::autofix::{self, AutofixMode};
 
 use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::test_scope::{build_phpunit_filter_regex, compute_changed_test_scope, TestScopeOutput};
@@ -702,41 +703,40 @@ fn run_auto_fix_drift(
         }
     };
 
+    let outcome = autofix::standard_outcome(
+        if write {
+            AutofixMode::Write
+        } else {
+            AutofixMode::DryRun
+        },
+        output.replacements,
+        Some(format!("homeboy test {} --analyze", component_id)),
+        vec![format!(
+            "Use --since <ref> to target a drift window (current: {})",
+            since
+        )],
+    );
+
     Ok((
         TestOutput {
-            status: if output.replacements > 0 {
-                if write {
-                    "auto_fixed"
-                } else {
-                    "auto_fix_preview"
-                }
-            } else {
-                "auto_fix_noop"
-            }
-            .to_string(),
+            status: outcome.status,
             component: component_id.to_string(),
             exit_code: 0,
             test_counts: None,
             coverage: None,
             baseline_comparison: None,
             analysis: None,
-            hints: Some(vec![
-                format!(
-                    "Use --since <ref> to target a drift window (current: {})",
-                    since
-                ),
-                format!(
-                    "Use --write to apply fixes, then run: homeboy test {} --analyze",
-                    component_id
-                ),
-            ]),
+            hints: Some(outcome.hints),
             drift: if include_report {
                 Some(drift_report)
             } else {
                 None
             },
             scaffold: None,
-            auto_fix_drift: Some(output),
+            auto_fix_drift: Some(AutoFixDriftOutput {
+                rerun_recommended: outcome.rerun_recommended,
+                ..output
+            }),
             test_scope: None,
         },
         0,

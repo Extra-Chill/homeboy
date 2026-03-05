@@ -1,6 +1,7 @@
 //! Generic utility primitives with zero domain knowledge.
 //!
 //! - `args` - CLI argument normalization
+//! - `autofix` - Shared autofix outcome/status primitives
 //! - `base_path` - Remote path joining utilities
 //! - `baseline` - Baseline & ratchet drift detection
 //! - `codebase_scan` - File walking and content search across codebases
@@ -17,6 +18,7 @@
 
 pub mod args;
 pub mod artifact;
+pub mod autofix;
 pub mod base_path;
 pub mod baseline;
 pub mod codebase_scan;

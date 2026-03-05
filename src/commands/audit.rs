@@ -4,6 +4,7 @@ use std::path::Path;
 
 use homeboy::code_audit::{self, baseline, fixer, CodeAuditResult};
 use homeboy::git;
+use homeboy::utils::autofix::{self, AutofixMode};
 
 use super::args::BaselineArgs;
 use super::CmdResult;
@@ -57,9 +58,12 @@ pub enum AuditOutput {
     Fix {
         component_id: String,
         source_path: String,
+        status: String,
         #[serde(flatten)]
         fix_result: fixer::FixResult,
         written: bool,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        hints: Vec<String>,
     },
 
     #[serde(rename = "audit.baseline")]
@@ -161,6 +165,17 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
             fix_result.files_modified = total_modified;
         }
 
+        let outcome = autofix::standard_outcome(
+            if written {
+                AutofixMode::Write
+            } else {
+                AutofixMode::DryRun
+            },
+            fix_result.total_insertions,
+            Some(format!("homeboy audit {}", result.component_id)),
+            vec![],
+        );
+
         let exit_code = if fix_result.total_insertions > 0 {
             1
         } else {
@@ -171,8 +186,10 @@ pub fn run(args: AuditArgs, _global: &super::GlobalArgs) -> CmdResult<AuditOutpu
             AuditOutput::Fix {
                 component_id: result.component_id,
                 source_path: result.source_path,
+                status: outcome.status,
                 fix_result,
                 written,
+                hints: outcome.hints,
             },
             exit_code,
         ));
