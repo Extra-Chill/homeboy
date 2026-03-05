@@ -11,6 +11,10 @@ HOMEBOY_EXTENSION_SOURCE="${HOMEBOY_EXTENSION_SOURCE:-auto}"
 HOMEBOY_EXTENSION_REVISION="${HOMEBOY_EXTENSION_REVISION:-unknown}"
 HOMEBOY_ACTION_REF="${HOMEBOY_ACTION_REF:-unknown}"
 HOMEBOY_ACTION_REPOSITORY="${HOMEBOY_ACTION_REPOSITORY:-unknown}"
+COMMANDS_CSV="${COMMANDS:-}"
+AUTOFIX_ENABLED="${AUTOFIX_ENABLED:-false}"
+AUTOFIX_ATTEMPTED="${AUTOFIX_ATTEMPTED:-false}"
+AUTOFIX_COMMANDS="${AUTOFIX_COMMANDS:-}"
 
 if [ -z "${OUTPUT_DIR}" ] || [ ! -d "${OUTPUT_DIR}" ]; then
   echo "No output directory available; skipping failure digest"
@@ -27,6 +31,10 @@ DIGEST_FILE=$(python3 "${GITHUB_ACTION_PATH}/scripts/build-failure-digest.py" \
   "${HOMEBOY_EXTENSION_REVISION}" \
   "${HOMEBOY_ACTION_REPOSITORY}" \
   "${HOMEBOY_ACTION_REF}" \
+  "${COMMANDS_CSV}" \
+  "${AUTOFIX_ENABLED}" \
+  "${AUTOFIX_ATTEMPTED}" \
+  "${AUTOFIX_COMMANDS}" \
   2>/dev/null || true)
 if [ -z "${DIGEST_FILE}" ] || [ ! -f "${DIGEST_FILE}" ]; then
   echo "Failure digest generation returned no file"

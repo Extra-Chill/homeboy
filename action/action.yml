@@ -287,6 +287,10 @@ runs:
       shell: bash
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}
+        COMMANDS: ${{ inputs.commands }}
+        AUTOFIX_ENABLED: ${{ inputs.autofix }}
+        AUTOFIX_ATTEMPTED: ${{ steps.autofix-commit.outputs.committed == 'true' || steps.autofix-prepare-nonpr.outputs.committed == 'true' }}
+        AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
       run: bash ${{ github.action_path }}/scripts/generate-failure-digest.sh
 
     - name: Enforce final status
@@ -330,4 +334,5 @@ runs:
         COMPONENT_NAME: ${{ inputs.component }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-prepare-nonpr.outputs.committed }}
+        AUTOFIX_PR_CREATED: ${{ steps.autofix-open-pr.outputs.created }}
       run: bash ${{ github.action_path }}/scripts/auto-file-issue.sh

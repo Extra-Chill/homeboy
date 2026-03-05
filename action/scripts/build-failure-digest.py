@@ -187,9 +187,84 @@ def extract_audit_digest(log_text: str) -> dict[str, Any]:
     }
 
 
+def parse_bool(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def derive_fixable_commands(
+    commands_csv: str,
+    autofix_enabled: bool,
+    autofix_commands_csv: str,
+) -> set[str]:
+    if not autofix_enabled:
+        return set()
+
+    if autofix_commands_csv.strip():
+        out: set[str] = set()
+        for raw in autofix_commands_csv.split(","):
+            token = raw.strip().split(" ", 1)[0].strip().lower()
+            if token:
+                out.add(token)
+        return out
+
+    defaults: set[str] = set()
+    for raw in commands_csv.split(","):
+        cmd = raw.strip().lower()
+        if cmd in {"lint", "test", "audit"}:
+            defaults.add(cmd)
+    return defaults
+
+
+def classify_autofixability(
+    results: dict[str, Any],
+    commands_csv: str,
+    autofix_enabled: bool,
+    autofix_attempted: bool,
+    autofix_commands_csv: str,
+) -> dict[str, Any]:
+    failed_commands = sorted(
+        [str(cmd) for cmd, status in results.items() if isinstance(cmd, str) and status == "fail"]
+    )
+    fixable_candidates = derive_fixable_commands(
+        commands_csv, autofix_enabled, autofix_commands_csv
+    )
+
+    auto_fixable_failed: list[str] = []
+    human_needed_failed: list[str] = []
+
+    for cmd in failed_commands:
+        normalized = cmd.strip().lower()
+        if normalized in fixable_candidates and not autofix_attempted:
+            auto_fixable_failed.append(cmd)
+        else:
+            human_needed_failed.append(cmd)
+
+    if failed_commands and auto_fixable_failed and not human_needed_failed:
+        overall = "auto_fixable"
+    elif failed_commands and auto_fixable_failed and human_needed_failed:
+        overall = "mixed"
+    elif failed_commands:
+        overall = "human_needed"
+    else:
+        overall = "none"
+
+    return {
+        "autofix_enabled": autofix_enabled,
+        "autofix_attempted": autofix_attempted,
+        "fixable_candidates": sorted(fixable_candidates),
+        "failed_commands": failed_commands,
+        "auto_fixable_failed_commands": auto_fixable_failed,
+        "human_needed_failed_commands": human_needed_failed,
+        "overall": overall,
+    }
+
+
 def render_markdown(
     test_digest: dict[str, Any],
     audit_digest: dict[str, Any],
+    autofixability: dict[str, Any],
     run_url: str,
     tooling: dict[str, str],
 ) -> str:
@@ -257,9 +332,33 @@ def render_markdown(
     lines.append(f"- Full audit log: {run_url}")
     lines.append("")
 
+    lines.append("### Autofixability classification")
+    lines.append(f"- Overall: **{autofixability.get('overall', 'unknown')}**")
+    lines.append(
+        f"- Autofix enabled: **{'yes' if autofixability.get('autofix_enabled') else 'no'}**"
+    )
+    lines.append(
+        f"- Autofix attempted this run: **{'yes' if autofixability.get('autofix_attempted') else 'no'}**"
+    )
+
+    fixable = autofixability.get("auto_fixable_failed_commands", []) or []
+    human = autofixability.get("human_needed_failed_commands", []) or []
+    if fixable:
+        lines.append("- Auto-fixable failed commands:")
+        for cmd in fixable:
+            lines.append(f"  - `{cmd}`")
+    if human:
+        lines.append("- Human-needed failed commands:")
+        for cmd in human:
+            lines.append(f"  - `{cmd}`")
+    if not fixable and not human:
+        lines.append("- No failed commands to classify.")
+    lines.append("")
+
     lines.append("### Machine-readable artifacts")
     lines.append("- `homeboy-test-failures.json`")
     lines.append("- `homeboy-audit-summary.json`")
+    lines.append("- `homeboy-autofixability.json`")
 
     return "\n".join(lines)
 
@@ -305,12 +404,13 @@ def resolve_failed_job_links(run_url: str) -> dict[str, str]:
 
 
 def main() -> int:
-    if len(sys.argv) != 10:
+    if len(sys.argv) != 14:
         print(
             f"Usage: {sys.argv[0]} "
             "<output_dir> <results_json> <run_url> "
             "<homeboy_cli_version> <extension_id> <extension_source> "
-            "<extension_revision> <action_repository> <action_ref>",
+            "<extension_revision> <action_repository> <action_ref> "
+            "<commands_csv> <autofix_enabled> <autofix_attempted> <autofix_commands_csv>",
             file=sys.stderr,
         )
         return 1
@@ -325,7 +425,11 @@ def main() -> int:
         extension_revision,
         action_repository,
         action_ref,
-    ) = sys.argv[1:10]
+        commands_csv,
+        autofix_enabled_raw,
+        autofix_attempted_raw,
+        autofix_commands_csv,
+    ) = sys.argv[1:14]
     os.makedirs(output_dir, exist_ok=True)
 
     tooling = {
@@ -342,6 +446,9 @@ def main() -> int:
     except json.JSONDecodeError:
         results = {}
 
+    autofix_enabled = parse_bool(autofix_enabled_raw)
+    autofix_attempted = parse_bool(autofix_attempted_raw)
+
     test_log = read_text(os.path.join(output_dir, "test.log"))
     audit_log = read_text(os.path.join(output_dir, "audit.log"))
 
@@ -355,15 +462,24 @@ def main() -> int:
         "severity_counts": {},
         "top_findings": [],
     }
+    autofixability = classify_autofixability(
+        results,
+        commands_csv,
+        autofix_enabled,
+        autofix_attempted,
+        autofix_commands_csv,
+    )
 
     test_json_path = os.path.join(output_dir, "homeboy-test-failures.json")
     audit_json_path = os.path.join(output_dir, "homeboy-audit-summary.json")
+    autofixability_json_path = os.path.join(output_dir, "homeboy-autofixability.json")
     md_path = os.path.join(output_dir, "homeboy-failure-digest.md")
 
     write_json(test_json_path, test_digest)
     write_json(audit_json_path, audit_digest)
+    write_json(autofixability_json_path, autofixability)
 
-    markdown = render_markdown(test_digest, audit_digest, run_url, tooling)
+    markdown = render_markdown(test_digest, audit_digest, autofixability, run_url, tooling)
     job_links = resolve_failed_job_links(run_url)
     if job_links:
         extra = ["", "### Failed job links"]

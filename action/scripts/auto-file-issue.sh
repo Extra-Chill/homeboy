@@ -9,6 +9,7 @@ RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 WORKFLOW_NAME="${GITHUB_WORKFLOW:-workflow}"
 REF_LABEL="${GITHUB_REF_NAME:-${GITHUB_SHA:0:8}}"
 AUTOFIX_ATTEMPTED="${AUTOFIX_ATTEMPTED:-false}"
+AUTOFIX_PR_CREATED="${AUTOFIX_PR_CREATED:-false}"
 
 HOMEBOY_CLI_VERSION="${HOMEBOY_CLI_VERSION:-unknown}"
 HOMEBOY_EXTENSION_ID="${HOMEBOY_EXTENSION_ID:-auto}"
@@ -105,6 +106,9 @@ if [ -n "${EXISTING_ISSUE}" ]; then
     COMMENT+=$'\n'"### Autofix outcome"$'\n\n'
     COMMENT+="- Safe autofix pass was attempted before filing this issue."$'\n'
     COMMENT+="- Remaining failures are likely non-mechanical and need human decision-making."$'\n'
+    if [ "${AUTOFIX_PR_CREATED}" = "true" ]; then
+      COMMENT+="- Autofix PR was created, but unresolved failures still require follow-up."$'\n'
+    fi
   fi
 
   COMMENT+="### Triage order"$'\n\n'
@@ -150,6 +154,9 @@ else
     BODY+=$'\n'"### Autofix outcome"$'\n\n'
     BODY+="- Safe autofix pass was attempted before filing this issue."$'\n'
     BODY+="- Remaining failures are likely non-mechanical and need human decision-making."$'\n'
+    if [ "${AUTOFIX_PR_CREATED}" = "true" ]; then
+      BODY+="- Autofix PR was created, but unresolved failures still require follow-up."$'\n'
+    fi
   fi
 
   BODY+="### Primary failure"$'\n\n'

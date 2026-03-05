@@ -117,6 +117,13 @@ Machine-readable files are written to the action output directory:
 
 - `homeboy-test-failures.json`
 - `homeboy-audit-summary.json`
+- `homeboy-autofixability.json`
+
+Autofixability classification includes:
+
+- `overall`: `auto_fixable`, `mixed`, `human_needed`, or `none`
+- `auto_fixable_failed_commands`
+- `human_needed_failed_commands`
 
 ## Examples
 
