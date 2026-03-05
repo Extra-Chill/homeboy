@@ -71,6 +71,7 @@ If your repo has a portable extension config, you don't need to specify the exte
 | `node-version` | No | | Node.js version (sets up via `actions/setup-node`) |
 | `autofix` | No | `false` | On PR failures, run safe autofixes, commit, push, and re-run checks |
 | `autofix-open-pr` | No | `false` | On non-PR failures, open an autofix PR if safe fixes allow rerun to pass |
+| `autofix-max-commits` | No | `2` | Safety limit for autofix commit chain depth per branch |
 | `autofix-commands` | No | | Override autofix commands (comma-separated, e.g. `lint --fix,test --fix`) |
 | `autofix-label` | No | | Optional PR label required before autofix runs (e.g. `autofix`) |
 | `test-scope` | No | `full` | Test scope for PRs: `full` or `changed` (requires Homeboy test changed-since support) |
@@ -224,6 +225,7 @@ Behavior:
 - If CI fails, action runs safe autofix commands on a new `ci/autofix/*` branch.
 - If rerun passes, action opens an autofix PR and skips auto-issue filing.
 - If rerun still fails, action files/updates the CI failure issue with autofix attempt context.
+- `autofix-max-commits` prevents infinite autofix loops by capping chain depth.
 
 Optional label gate:
 

@@ -71,6 +71,10 @@ inputs:
     description: 'If true, non-PR failures can open an autofix PR when rerun passes after fixes'
     required: false
     default: 'false'
+  autofix-max-commits:
+    description: 'Maximum autofix commits allowed per branch before stopping (loop safety)'
+    required: false
+    default: '2'
   autofix-commands:
     description: 'Comma-separated autofix commands to run when autofix is enabled (e.g. "lint --fix,test --fix")'
     required: false
@@ -229,6 +233,7 @@ runs:
         EXTRA_ARGS: ${{ inputs.args }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
         AUTOFIX_LABEL: ${{ inputs.autofix-label }}
+        AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
         PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
         PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
       run: bash ${{ github.action_path }}/scripts/apply-autofix-commit.sh
@@ -242,6 +247,7 @@ runs:
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
+        AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
       run: bash ${{ github.action_path }}/scripts/prepare-autofix-branch.sh
 
     - name: Re-run Homeboy commands after autofix
