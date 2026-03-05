@@ -10,6 +10,7 @@ use clap::Args;
 use std::path::PathBuf;
 
 use homeboy::component::{self, Component};
+use homeboy::error::ErrorCode;
 
 // ============================================================================
 // ComponentArgs: --component + --path + resolve()
@@ -95,11 +96,23 @@ pub struct PositionalComponentArgs {
 impl PositionalComponentArgs {
     /// Load the component, applying path override if provided.
     pub fn load(&self) -> homeboy::Result<Component> {
-        let mut comp = component::load(&self.component)?;
         if let Some(ref path) = self.path {
-            comp.local_path = path.clone();
+            match component::load(&self.component) {
+                Ok(mut comp) => {
+                    comp.local_path = path.clone();
+                    Ok(comp)
+                }
+                Err(err) if matches!(err.code, ErrorCode::ComponentNotFound) => Ok(Component::new(
+                    self.component.clone(),
+                    path.clone(),
+                    String::new(),
+                    None,
+                )),
+                Err(err) => Err(err),
+            }
+        } else {
+            component::load(&self.component)
         }
-        Ok(comp)
     }
 
     /// Get the component ID.
@@ -116,6 +129,27 @@ impl PositionalComponentArgs {
             let expanded = shellexpand::tilde(&comp.local_path);
             Ok(PathBuf::from(expanded.as_ref()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_uses_path_when_component_missing() {
+        let args = PositionalComponentArgs {
+            component: "missing-component".to_string(),
+            path: Some("/tmp/homeboy-missing-component".to_string()),
+        };
+
+        let loaded = args
+            .load()
+            .expect("path-based synthetic component should load");
+
+        assert_eq!(loaded.id, "missing-component");
+        assert_eq!(loaded.local_path, "/tmp/homeboy-missing-component");
+        assert_eq!(loaded.remote_path, "");
     }
 }
 

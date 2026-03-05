@@ -273,6 +273,19 @@ pub fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
                 "-h",
             ],
         ),
+        (
+            "docs",
+            "audit",
+            &[
+                "--path",
+                "--docs-dir",
+                "--baseline",
+                "--ignore-baseline",
+                "--features",
+                "--help",
+                "-h",
+            ],
+        ),
     ];
 
     // Find matching command pattern
@@ -457,6 +470,20 @@ mod tests {
             "/tmp/workspace".into(),
             "--setting".into(),
             "key=value".into(),
+        ];
+        let result = normalize_trailing_flags(args.clone());
+        assert_eq!(result, args); // No separator inserted
+    }
+
+    #[test]
+    fn test_docs_audit_allows_path_flag() {
+        let args = vec![
+            "homeboy".into(),
+            "docs".into(),
+            "audit".into(),
+            "homeboy".into(),
+            "--path".into(),
+            "/tmp/workspace/homeboy".into(),
         ];
         let result = normalize_trailing_flags(args.clone());
         assert_eq!(result, args); // No separator inserted
