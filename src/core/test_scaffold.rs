@@ -340,7 +340,8 @@ fn extract_rust_impl_methods(content: &str, type_name: &str) -> Vec<ExtractedMet
 
 /// Extract top-level pub functions (not in impl blocks).
 fn extract_rust_free_functions(content: &str) -> Vec<ExtractedMethod> {
-    let fn_re = Regex::new(r"(?m)^\s*(pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([^)]*)\)").unwrap();
+    let fn_re = Regex::new(r"(?m)^\s*(pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([^)]*)\)")
+        .unwrap();
 
     let mut methods = Vec::new();
     let mut pending_test_attribute = false;
