@@ -4,6 +4,8 @@ All notable changes to Homeboy Action will be documented in this file.
 
 ## Unreleased
 
+## [1.1.0] - 2026-03-05
+
 ### Added
 - add compact CI failure digest with top failed tests and audit findings in job summary and PR comment
 - add capability probe for `test-scope: changed` with automatic fallback to `full` when Homeboy test changed-since support is unavailable
