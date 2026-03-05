@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use super::exec_context;
 use super::load_extension;
 use super::manifest::{ActionConfig, ActionType, ExtensionManifest, HttpMethod, RuntimeConfig};
+use super::runner_contract::RunnerStepFilter;
 use super::scope::ExtensionScope;
 
 /// Result of executing a extension.
@@ -92,14 +93,8 @@ pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
     Ok(ExtensionSetupResult { exit_code })
 }
 
-/// Options for filtering which steps a extension script executes.
-#[derive(Default)]
-pub struct ExtensionStepFilter {
-    /// Run only these steps (comma-separated).
-    pub step: Option<String>,
-    /// Skip these steps (comma-separated).
-    pub skip: Option<String>,
-}
+/// Backward-compatible alias for existing command API usage.
+pub type ExtensionStepFilter = RunnerStepFilter;
 
 /// Execute a extension with optional project context.
 pub fn run_extension(
@@ -553,12 +548,7 @@ fn execute_extension_runtime(
     );
     let mut env_pairs = build_runtime_env(runtime, &context, &vars, &settings_json, extension_path);
 
-    if let Some(ref step) = filter.step {
-        env_pairs.push((exec_context::STEP.to_string(), step.clone()));
-    }
-    if let Some(ref skip) = filter.skip {
-        env_pairs.push((exec_context::SKIP.to_string(), skip.clone()));
-    }
+    env_pairs.extend(filter.to_env_pairs());
 
     let execution = execute_extension_command(
         run_command,

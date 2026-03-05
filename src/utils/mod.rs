@@ -26,6 +26,7 @@ pub mod command;
 pub mod entity_suggest;
 pub mod grammar;
 pub mod io;
+pub mod output_parse;
 pub mod parser;
 pub mod resolve;
 pub mod shell;

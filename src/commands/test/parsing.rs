@@ -3,6 +3,7 @@ use serde::Serialize;
 use homeboy::test_analyze::{TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::TestCounts;
 use homeboy::utils::io;
+use homeboy::utils::output_parse::{Aggregate, DeriveRule, ParseRule, ParseSpec};
 
 #[derive(Serialize)]
 pub struct CoverageOutput {
@@ -117,6 +118,63 @@ pub fn parse_test_results_file(path: &std::path::Path) -> Option<TestCounts> {
     Some(TestCounts::new(total, passed, failed, skipped))
 }
 
+/// Parse human-readable test runner output (fallback when sidecar JSON isn't present).
+pub fn parse_test_results_text(text: &str) -> Option<TestCounts> {
+    let spec = ParseSpec {
+        rules: vec![
+            ParseRule {
+                pattern: r"Tests:\s*(\d+)".to_string(),
+                field: "total".to_string(),
+                group: 1,
+                aggregate: Aggregate::Last,
+            },
+            ParseRule {
+                pattern: r"Failures:\s*(\d+)".to_string(),
+                field: "failed".to_string(),
+                group: 1,
+                aggregate: Aggregate::Last,
+            },
+            ParseRule {
+                pattern: r"Errors:\s*(\d+)".to_string(),
+                field: "errors".to_string(),
+                group: 1,
+                aggregate: Aggregate::Last,
+            },
+            ParseRule {
+                pattern: r"Skipped:\s*(\d+)".to_string(),
+                field: "skipped".to_string(),
+                group: 1,
+                aggregate: Aggregate::Last,
+            },
+            ParseRule {
+                pattern: r"OK\s*\((\d+) tests".to_string(),
+                field: "total".to_string(),
+                group: 1,
+                aggregate: Aggregate::Last,
+            },
+        ],
+        defaults: std::collections::HashMap::from([
+            ("failed".to_string(), 0.0),
+            ("errors".to_string(), 0.0),
+            ("skipped".to_string(), 0.0),
+        ]),
+        derive: vec![DeriveRule {
+            field: "passed".to_string(),
+            expr: "total - failed - errors - skipped".to_string(),
+        }],
+    };
+
+    let parsed = spec.parse(text);
+    let total = parsed.get("total").copied().unwrap_or(0.0).max(0.0) as u64;
+    if total == 0 {
+        return None;
+    }
+    let passed = parsed.get("passed").copied().unwrap_or(0.0).max(0.0) as u64;
+    let failed = parsed.get("failed").copied().unwrap_or(0.0).max(0.0) as u64;
+    let skipped = parsed.get("skipped").copied().unwrap_or(0.0).max(0.0) as u64;
+    Some(TestCounts::new(total, passed, failed, skipped))
+}
+
 /// Parse the coverage JSON file written by the extension test runner.
 pub fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<CoverageOutput, ()> {
     let content = io::read_file(path, "read coverage file").map_err(|_| ())?;
@@ -169,6 +227,7 @@ pub fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<Covera
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::utils::output_parse::{Aggregate, ParseRule, ParseSpec};
 
     #[test]
     fn parse_failures_file_backfills_totals_when_missing() {
@@ -239,5 +298,68 @@ mod tests {
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.skipped, 1);
         assert_eq!(summary.exit_code, 0);
+    }
+
+    #[test]
+    fn parse_test_results_text_works_for_phpunit_style_summary() {
+        let text = "Tests: 20, Assertions: 50, Failures: 2, Errors: 1, Skipped: 3.";
+        let counts = parse_test_results_text(text).expect("should parse summary text");
+        assert_eq!(counts.total, 20);
+        assert_eq!(counts.failed, 2);
+        assert_eq!(counts.skipped, 3);
+        assert_eq!(counts.passed, 14);
+    }
+
+    #[test]
+    fn parse_test_results_text_works_for_ok_line() {
+        let text = "OK (12 tests, 44 assertions)";
+        let counts = parse_test_results_text(text).expect("should parse ok line");
+        assert_eq!(counts.total, 12);
+        assert_eq!(counts.failed, 0);
+        assert_eq!(counts.skipped, 0);
+        assert_eq!(counts.passed, 12);
+    }
+
+    #[test]
+    fn test_parse_output_applies_rules_and_derives() {
+        let spec = ParseSpec {
+            rules: vec![
+                ParseRule {
+                    pattern: r"Tests:\s*(\d+)".to_string(),
+                    field: "total".to_string(),
+                    group: 1,
+                    aggregate: Aggregate::Last,
+                },
+                ParseRule {
+                    pattern: r"Failures:\s*(\d+)".to_string(),
+                    field: "failed".to_string(),
+                    group: 1,
+                    aggregate: Aggregate::Last,
+                },
+            ],
+            defaults: std::collections::HashMap::new(),
+            derive: vec![],
+        };
+
+        let parsed = spec.parse("Tests: 10\nFailures: 2\n");
+        assert_eq!(parsed.get("total").copied().unwrap_or(0.0), 10.0);
+        assert_eq!(parsed.get("failed").copied().unwrap_or(0.0), 2.0);
+    }
+
+    #[test]
+    fn test_parse_output_supports_sum_aggregate() {
+        let spec = ParseSpec {
+            rules: vec![ParseRule {
+                pattern: r"Errors:\s*(\d+)".to_string(),
+                field: "errors".to_string(),
+                group: 1,
+                aggregate: Aggregate::Sum,
+            }],
+            defaults: std::collections::HashMap::new(),
+            derive: vec![],
+        };
+
+        let parsed = spec.parse("Errors: 2\nErrors: 3\n");
+        assert_eq!(parsed.get("errors").copied().unwrap_or(0.0), 5.0);
     }
 }

@@ -429,7 +429,8 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
     let status = if output.success { "passed" } else { "failed" };
 
     // Read test results if available
-    let test_counts = parsing::parse_test_results_file(&results_file);
+    let test_counts = parsing::parse_test_results_file(&results_file)
+        .or_else(|| parsing::parse_test_results_text(&output.stdout));
 
     // Clean up test results temp file
     let _ = std::fs::remove_file(&results_file);

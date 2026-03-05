@@ -2,6 +2,7 @@ mod execution;
 mod lifecycle;
 mod manifest;
 mod runner;
+mod runner_contract;
 mod scope;
 pub mod version;
 
@@ -9,6 +10,7 @@ pub mod exec_context;
 
 // Re-export runner types
 pub use runner::{ExtensionRunner, RunnerOutput};
+pub use runner_contract::RunnerStepFilter;
 
 // Re-export manifest types
 pub use manifest::{
@@ -638,5 +640,27 @@ mod tests {
         assert!(err.message.contains("missing-mod-b"));
         // Should have install hint for each + browse hint
         assert!(err.hints.len() >= 3);
+    }
+
+    #[test]
+    fn test_should_run() {
+        let filter = RunnerStepFilter {
+            step: Some("lint,test".to_string()),
+            skip: Some("test".to_string()),
+        };
+        assert!(filter.should_run("lint"));
+        assert!(!filter.should_run("test"));
+        assert!(!filter.should_run("deploy"));
+    }
+
+    #[test]
+    fn test_to_env_pairs() {
+        let filter = RunnerStepFilter {
+            step: Some("a".to_string()),
+            skip: Some("b".to_string()),
+        };
+        let env = filter.to_env_pairs();
+        assert!(env.iter().any(|(k, v)| k == "HOMEBOY_STEP" && v == "a"));
+        assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "b"));
     }
 }

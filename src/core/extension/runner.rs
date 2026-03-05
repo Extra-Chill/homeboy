@@ -9,6 +9,8 @@ use crate::utils::{io, shell};
 pub struct RunnerOutput {
     pub exit_code: i32,
     pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 /// Orchestrates extension script execution for test/lint runners.
@@ -111,6 +113,8 @@ impl ExtensionRunner {
         Ok(RunnerOutput {
             exit_code: output.exit_code,
             success: output.success,
+            stdout: output.stdout,
+            stderr: output.stderr,
         })
     }
 
