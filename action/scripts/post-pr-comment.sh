@@ -32,6 +32,12 @@ if [ -n "${DIGEST_FILE}" ] && [ -f "${DIGEST_FILE}" ]; then
   COMMENT_BODY+="$(cat "${DIGEST_FILE}")"$'\n\n'
 fi
 
+if [ "${TEST_SCOPE_EFFECTIVE:-}" = "full" ] && [ "${HOMEBOY_CHANGED_SINCE:-}" != "" ]; then
+  COMMENT_BODY+="> :information_source: PR test scope resolved to **full** for compatibility with installed Homeboy CLI"$'\n\n'
+elif [ "${TEST_SCOPE_EFFECTIVE:-}" = "changed" ]; then
+  COMMENT_BODY+="> :zap: PR test scope resolved to **changed**"$'\n\n'
+fi
+
 IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
 
 for CMD in "${CMD_ARRAY[@]}"; do

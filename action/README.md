@@ -71,6 +71,7 @@ If your repo has a `homeboy.json` file, you don't even need to specify the exten
 | `autofix-commands` | No | | Override autofix commands (comma-separated, e.g. `lint --fix,test --fix`) |
 | `autofix-label` | No | | Optional PR label required before autofix runs (e.g. `autofix`) |
 | `test-scope` | No | `full` | Test scope for PRs: `full` or `changed` (requires Homeboy test changed-since support) |
+| `auto-issue` | No | `false` | Auto-file issue on non-PR failures (e.g. `push` to `main`) |
 
 ## Outputs
 
@@ -134,6 +135,37 @@ Machine-readable files are written to the action output directory:
 
 > `test-scope: changed` requires Homeboy support for `homeboy test --changed-since`.
 > If unsupported in your pinned Homeboy version, keep `test-scope: full`.
+
+Homeboy Action now performs a capability probe for `test-scope: changed` on PRs.
+If your installed Homeboy CLI does not support `--changed-since` for tests yet, the action automatically falls back to `full` test scope and emits a warning.
+
+### Recommended org-wide CI profile
+
+Use two workflows for clear signal:
+
+1. **PR workflow** (fast + scoped)
+   - `commands: lint,test,audit`
+   - `lint-changed-only: 'true'`
+   - `test-scope: 'changed'` (auto-falls back to `full` if unsupported)
+
+2. **Main workflow** (authoritative)
+   - trigger on `push` to `main` (or release/version bump branches)
+   - `commands: lint,test,audit`
+   - `test-scope: 'full'`
+   - `auto-issue: 'true'`
+
+Example main workflow step:
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v1
+  with:
+    extension: wordpress
+    commands: lint,test,audit
+    test-scope: 'full'
+    auto-issue: 'true'
+    php-version: '8.2'
+    node-version: '20'
+```
 
 ### Auto-apply Fixable CI Issues (PRs)
 
