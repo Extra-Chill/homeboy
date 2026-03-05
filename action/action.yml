@@ -83,6 +83,9 @@ outputs:
   binary-source:
     description: 'How the binary was obtained: "source", "fallback", or "release"'
     value: ${{ steps.resolve-binary.outputs.binary-source }}
+  test-scope-effective:
+    description: 'Effective test scope used by the action (full or changed)'
+    value: ${{ steps.resolve-test-scope.outputs.effective-test-scope }}
 
 runs:
   using: 'composite'
@@ -171,6 +174,15 @@ runs:
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
       run: bash ${{ github.action_path }}/scripts/install-extension.sh
 
+    - name: Capture tooling metadata
+      shell: bash
+      env:
+        EXTENSION_ID: ${{ inputs.extension }}
+        EXTENSION_SOURCE: ${{ inputs.extension-source }}
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+      run: bash ${{ github.action_path }}/scripts/capture-tooling-metadata.sh
+
     - name: Register component
       shell: bash
       env:
@@ -181,11 +193,19 @@ runs:
 
     - name: Determine PR base ref
       id: changed-files
-      if: github.event_name == 'pull_request' && inputs.lint-changed-only == 'true'
+      if: github.event_name == 'pull_request' && (inputs.lint-changed-only == 'true' || inputs.test-scope == 'changed')
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: bash ${{ github.action_path }}/scripts/determine-pr-base-ref.sh
+
+    - name: Resolve effective test scope
+      id: resolve-test-scope
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        TEST_SCOPE: ${{ inputs.test-scope }}
+      run: bash ${{ github.action_path }}/scripts/resolve-test-scope.sh
 
     - name: Run Homeboy commands
       id: run-commands
@@ -195,7 +215,7 @@ runs:
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
-        TEST_SCOPE: ${{ inputs.test-scope }}
+        TEST_SCOPE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
         RUN_GROUP_PREFIX: homeboy
       run: bash ${{ github.action_path }}/scripts/run-homeboy-commands.sh
 
@@ -222,7 +242,7 @@ runs:
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
-        TEST_SCOPE: ${{ inputs.test-scope }}
+        TEST_SCOPE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
         RUN_GROUP_PREFIX: homeboy rerun
       run: bash ${{ github.action_path }}/scripts/run-homeboy-commands.sh
 
@@ -261,6 +281,7 @@ runs:
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         AUTOFIX_ENABLED: ${{ inputs.autofix }}
         AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
+        TEST_SCOPE_EFFECTIVE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
       run: bash ${{ github.action_path }}/scripts/post-pr-comment.sh
 
     - name: Post inline review

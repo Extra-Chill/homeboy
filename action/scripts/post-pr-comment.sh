@@ -15,6 +15,11 @@ DIGEST_FILE="${HOMEBOY_FAILURE_DIGEST_FILE:-}"
 
 COMMENT_BODY="<!-- homeboy-action-results -->"$'\n'
 COMMENT_BODY+="## Homeboy Results — \`${COMP_ID}\`"$'\n\n'
+COMMENT_BODY+="### Tooling versions"$'\n\n'
+COMMENT_BODY+="- Homeboy CLI: \`${HOMEBOY_CLI_VERSION:-unknown}\`"$'\n'
+COMMENT_BODY+="- Extension: \`${HOMEBOY_EXTENSION_ID:-auto}\` from \`${HOMEBOY_EXTENSION_SOURCE:-auto}\`"$'\n'
+COMMENT_BODY+="- Extension revision: \`${HOMEBOY_EXTENSION_REVISION:-unknown}\`"$'\n'
+COMMENT_BODY+="- Action: \`${HOMEBOY_ACTION_REPOSITORY:-unknown}@${HOMEBOY_ACTION_REF:-unknown}\`"$'\n\n'
 
 if [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_COMMITTED:-}" = "true" ]; then
   COMMENT_BODY+="> :wrench: **Autofix applied** — a CI bot commit was pushed and checks were re-run"$'\n\n'
@@ -30,6 +35,12 @@ HAS_DIGEST="false"
 if [ -n "${DIGEST_FILE}" ] && [ -f "${DIGEST_FILE}" ]; then
   HAS_DIGEST="true"
   COMMENT_BODY+="$(cat "${DIGEST_FILE}")"$'\n\n'
+fi
+
+if [ "${TEST_SCOPE_EFFECTIVE:-}" = "full" ] && [ "${HOMEBOY_CHANGED_SINCE:-}" != "" ]; then
+  COMMENT_BODY+="> :information_source: PR test scope resolved to **full** for compatibility with installed Homeboy CLI"$'\n\n'
+elif [ "${TEST_SCOPE_EFFECTIVE:-}" = "changed" ]; then
+  COMMENT_BODY+="> :zap: PR test scope resolved to **changed**"$'\n\n'
 fi
 
 IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
@@ -114,7 +125,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
 done
 
 COMMENT_BODY+="---"$'\n'
-COMMENT_BODY+="*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1*"
+COMMENT_BODY+="*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1 — ${HOMEBOY_CLI_VERSION:-$(homeboy --version 2>/dev/null || echo 'homeboy')}*"
 
 EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
   --jq '.[] | select(.body | startswith("<!-- homeboy-action-results -->")) | .id' \
@@ -122,14 +133,20 @@ EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
 
 if [ -n "${EXISTING_COMMENT_ID}" ]; then
   echo "Updating existing comment ${EXISTING_COMMENT_ID}..."
-  gh api "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
+  if ! gh api "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
     --method PATCH \
-    --field body="${COMMENT_BODY}" > /dev/null
+    --field body="${COMMENT_BODY}" > /dev/null 2>&1; then
+    echo "::warning::Could not update PR comment (likely restricted token for fork PR). Skipping comment publish."
+    exit 0
+  fi
 else
   echo "Creating new comment..."
-  gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+  if ! gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
     --method POST \
-    --field body="${COMMENT_BODY}" > /dev/null
+    --field body="${COMMENT_BODY}" > /dev/null 2>&1; then
+    echo "::warning::Could not create PR comment (likely restricted token for fork PR). Skipping comment publish."
+    exit 0
+  fi
 fi
 
 echo "PR comment posted successfully"

@@ -188,10 +188,29 @@ def extract_audit_digest(log_text: str) -> dict[str, Any]:
 
 
 def render_markdown(
-    test_digest: dict[str, Any], audit_digest: dict[str, Any], run_url: str
+    test_digest: dict[str, Any],
+    audit_digest: dict[str, Any],
+    run_url: str,
+    tooling: dict[str, str],
 ) -> str:
     lines: list[str] = []
     lines.append("## Failure Digest")
+    lines.append("")
+
+    lines.append("### Tooling versions")
+    lines.append(f"- Homeboy CLI: **{tooling.get('homeboy_cli_version', 'unknown')}**")
+    lines.append(
+        "- Extension: "
+        f"**{tooling.get('extension_id', 'auto')}** from "
+        f"`{tooling.get('extension_source', 'auto')}`"
+    )
+    lines.append(
+        f"- Extension revision: `{tooling.get('extension_revision', 'unknown')}`"
+    )
+    lines.append(
+        "- Action: "
+        f"`{tooling.get('action_repository', 'unknown')}@{tooling.get('action_ref', 'unknown')}`"
+    )
     lines.append("")
 
     lines.append("### Test Failure Digest")
@@ -286,12 +305,37 @@ def resolve_failed_job_links(run_url: str) -> dict[str, str]:
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
-        print(f"Usage: {sys.argv[0]} <output_dir> <results_json> <run_url>", file=sys.stderr)
+    if len(sys.argv) != 10:
+        print(
+            f"Usage: {sys.argv[0]} "
+            "<output_dir> <results_json> <run_url> "
+            "<homeboy_cli_version> <extension_id> <extension_source> "
+            "<extension_revision> <action_repository> <action_ref>",
+            file=sys.stderr,
+        )
         return 1
 
-    output_dir, results_raw, run_url = sys.argv[1], sys.argv[2], sys.argv[3]
+    (
+        output_dir,
+        results_raw,
+        run_url,
+        homeboy_cli_version,
+        extension_id,
+        extension_source,
+        extension_revision,
+        action_repository,
+        action_ref,
+    ) = sys.argv[1:10]
     os.makedirs(output_dir, exist_ok=True)
+
+    tooling = {
+        "homeboy_cli_version": homeboy_cli_version,
+        "extension_id": extension_id,
+        "extension_source": extension_source,
+        "extension_revision": extension_revision,
+        "action_repository": action_repository,
+        "action_ref": action_ref,
+    }
 
     try:
         results = json.loads(results_raw) if results_raw else {}
@@ -319,7 +363,7 @@ def main() -> int:
     write_json(test_json_path, test_digest)
     write_json(audit_json_path, audit_digest)
 
-    markdown = render_markdown(test_digest, audit_digest, run_url)
+    markdown = render_markdown(test_digest, audit_digest, run_url, tooling)
     job_links = resolve_failed_job_links(run_url)
     if job_links:
         extra = ["", "### Failed job links"]

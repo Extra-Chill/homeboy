@@ -71,6 +71,17 @@ If your repo has a `homeboy.json` file, you don't even need to specify the exten
 | `autofix-commands` | No | | Override autofix commands (comma-separated, e.g. `lint --fix,test --fix`) |
 | `autofix-label` | No | | Optional PR label required before autofix runs (e.g. `autofix`) |
 | `test-scope` | No | `full` | Test scope for PRs: `full` or `changed` (requires Homeboy test changed-since support) |
+| `auto-issue` | No | `false` | Auto-file issue on non-PR failures (e.g. `push` to `main`) |
+
+### Fork PR note
+
+On fork-based pull requests, GitHub may provide a restricted `GITHUB_TOKEN` that cannot write PR comments or inline reviews.
+Homeboy Action treats those publish steps as best-effort in that context:
+
+- lint/test/audit execution still runs and determines job pass/fail
+- PR comment/inline review publishing is skipped with a warning when token permissions are insufficient
+
+This keeps CI reliable for external contributors while preserving strict token safety defaults.
 
 ## Outputs
 
@@ -87,9 +98,16 @@ On failed runs, Homeboy Action now emits a compact **Failure Digest** to:
 
 Digest includes:
 
+- tooling versions (Homeboy CLI, extension source/revision, action ref)
 - failed test count + top failed tests
 - audit summary (drift/outliers/top findings when structured output is available)
 - links back to the full workflow run logs
+
+Auto-filed failure issues on non-PR runs also include:
+
+- **Primary failure** (first failed command + first fatal/error line)
+- **Secondary findings** (additional failed commands)
+- **Triage order** to reduce debugging time
 
 Machine-readable files are written to the action output directory:
 
@@ -134,6 +152,37 @@ Machine-readable files are written to the action output directory:
 
 > `test-scope: changed` requires Homeboy support for `homeboy test --changed-since`.
 > If unsupported in your pinned Homeboy version, keep `test-scope: full`.
+
+Homeboy Action now performs a capability probe for `test-scope: changed` on PRs.
+If your installed Homeboy CLI does not support `--changed-since` for tests yet, the action automatically falls back to `full` test scope and emits a warning.
+
+### Recommended org-wide CI profile
+
+Use two workflows for clear signal:
+
+1. **PR workflow** (fast + scoped)
+   - `commands: lint,test,audit`
+   - `lint-changed-only: 'true'`
+   - `test-scope: 'changed'` (auto-falls back to `full` if unsupported)
+
+2. **Main workflow** (authoritative)
+   - trigger on `push` to `main` (or release/version bump branches)
+   - `commands: lint,test,audit`
+   - `test-scope: 'full'`
+   - `auto-issue: 'true'`
+
+Example main workflow step:
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v1
+  with:
+    extension: wordpress
+    commands: lint,test,audit
+    test-scope: 'full'
+    auto-issue: 'true'
+    php-version: '8.2'
+    node-version: '20'
+```
 
 ### Auto-apply Fixable CI Issues (PRs)
 
