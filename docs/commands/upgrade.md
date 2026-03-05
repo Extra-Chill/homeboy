@@ -18,7 +18,7 @@ By default, after a successful upgrade, Homeboy restarts itself to use the new v
 - `--check`: Check for updates without installing. Returns version information without making changes.
 - `--force`: Force upgrade even if already at the latest version.
 - `--no-restart`: Skip automatic restart after upgrade. Useful for scripted environments.
-- `--method`: Override install method detection (homebrew|cargo|source|binary).
+- `--method`: Override install method detection (`homebrew|cargo|source|binary`).
 
 ## Installation Method Detection
 

@@ -12,7 +12,7 @@ Homeboy is a config-driven automation engine for development and deployment auto
 - Config health checks: [cleanup](commands/cleanup.md)
 - Changes summary: [changes](commands/changes.md)
 - JSON output envelope: [JSON output contract](architecture/output-system.md)
-- Embedded docs behavior: [Embedded docs topic resolution](architecture/embedded-docs/embedded-docs-topic-resolution.md)
+- Embedded docs behavior: [Embedded docs topic resolution](architecture/embedded-docs-topic-resolution.md)
 - Changelog content: [Changelog](changelog.md)
 - Template variables: [Template variables reference](templates.md)
 
@@ -36,7 +36,7 @@ Internal system architecture and internals:
 - [SSH key management](architecture/ssh-key-management.md) - SSH key handling
 - [Release pipeline system](architecture/release-pipeline.md) - Local release orchestration
 - [Execution context](architecture/execution-context.md) - Runtime context for extensions
-- [Embedded docs](architecture/embedded-docs/embedded-docs-topic-resolution.md) - Documentation system internals
+- [Embedded docs](architecture/embedded-docs-topic-resolution.md) - Documentation system internals
 
 ## Developer Guide
 
@@ -78,7 +78,7 @@ Common paths:
 
 Notes:
 
-- Embedded CLI docs ship inside the binary (see [Embedded docs topic resolution](architecture/embedded-docs/embedded-docs-topic-resolution.md)).
+- Embedded CLI docs ship inside the binary (see [Embedded docs topic resolution](architecture/embedded-docs-topic-resolution.md)).
 - Extension docs load from each installed extension's `docs/` folder under the Homeboy config root: `~/.config/homeboy/extensions/<extension_id>/docs/` (same topic-key rules as core docs).
 - The CLI does not write documentation into `~/.config/homeboy/docs/`.
 

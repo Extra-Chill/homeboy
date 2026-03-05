@@ -39,7 +39,7 @@ Related:
 
 - [Root command](../cli/homeboy-root-command.md)
 - [JSON output contract](../architecture/output-system.md) (global output envelope)
-- [Embedded docs](../architecture/embedded-docs/embedded-docs-topic-resolution.md)
+- [Embedded docs](../architecture/embedded-docs-topic-resolution.md)
 - [Schema Reference](../schemas/) - JSON configuration schemas (component, project, server, extension)
 - [Architecture](../architecture/) - System internals (API client, keychain, SSH, release pipeline, execution context)
 - [Developer Guide](../developer-guide/) - Contributing guides (architecture overview, config directory, error handling)
