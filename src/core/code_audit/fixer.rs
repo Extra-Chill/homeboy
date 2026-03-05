@@ -629,6 +629,76 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         });
     }
 
+    // Phase 1c: Missing test methods from test_coverage findings.
+    // For deterministic safety, scaffold ignored TODO tests instead of fake-pass assertions.
+    for finding in &result.findings {
+        if finding.kind != DeviationKind::MissingTestMethod {
+            continue;
+        }
+
+        let Some(expected_test_method) = extract_expected_test_method(&finding.description) else {
+            continue;
+        };
+        let Some(source_method) = extract_source_method_name(&finding.description) else {
+            continue;
+        };
+
+        let Some(test_file) = derive_expected_test_file_path(root, &finding.file) else {
+            skipped.push(SkippedFile {
+                file: finding.file.clone(),
+                reason: format!(
+                    "Could not derive test file path for missing test method '{}'",
+                    expected_test_method
+                ),
+            });
+            continue;
+        };
+
+        let ext = Path::new(&test_file)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(Language::from_extension)
+            .unwrap_or(Language::Unknown);
+
+        if test_method_exists_in_file(root, &test_file, &expected_test_method, &new_files) {
+            continue;
+        }
+
+        let test_stub =
+            generate_test_method_stub(&ext, &expected_test_method, &finding.file, &source_method);
+
+        let file_exists = root.join(&test_file).exists();
+        if file_exists {
+            fixes.push(Fix {
+                file: test_file,
+                insertions: vec![Insertion {
+                    kind: InsertionKind::MethodStub,
+                    code: test_stub,
+                    description: format!(
+                        "Scaffold missing test method '{}' for '{}::{}'",
+                        expected_test_method, finding.file, source_method
+                    ),
+                }],
+                applied: false,
+            });
+        } else if let Some(existing) = new_files.iter_mut().find(|nf| nf.file == test_file) {
+            if !existing.content.contains(&expected_test_method) {
+                existing.content.push('\n');
+                existing.content.push_str(&test_stub);
+            }
+        } else {
+            let mut content = generate_test_file_stub(&test_file, &finding.file);
+            content.push('\n');
+            content.push_str(&test_stub);
+            new_files.push(NewFile {
+                file: test_file,
+                content,
+                description: format!("Create missing test file for '{}'", finding.file),
+                written: false,
+            });
+        }
+    }
+
     // Phase 2: Duplication fixes — extract shared code via extension protocol
 
     /// Minimum number of files (including canonical) before extracting to shared code.
@@ -898,6 +968,112 @@ fn extract_expected_test_path(description: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// Extract expected test method from MissingTestMethod description.
+///
+/// Example:
+/// "Method 'run' has no corresponding test (expected 'test_run')"
+fn extract_expected_test_method(description: &str) -> Option<String> {
+    let needle = "expected '";
+    let start = description.find(needle)? + needle.len();
+    let rest = &description[start..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
+/// Extract source method name from MissingTestMethod description.
+fn extract_source_method_name(description: &str) -> Option<String> {
+    let needle = "Method '";
+    let start = description.find(needle)? + needle.len();
+    let rest = &description[start..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
+fn test_method_exists_in_file(
+    root: &Path,
+    test_file: &str,
+    test_method: &str,
+    pending_new_files: &[NewFile],
+) -> bool {
+    if let Some(nf) = pending_new_files.iter().find(|nf| nf.file == test_file) {
+        return nf.content.contains(test_method);
+    }
+
+    let path = root.join(test_file);
+    if !path.exists() {
+        return false;
+    }
+
+    std::fs::read_to_string(path)
+        .map(|content| content.contains(test_method))
+        .unwrap_or(false)
+}
+
+fn derive_expected_test_file_path(root: &Path, source_file: &str) -> Option<String> {
+    let ext = Path::new(source_file).extension()?.to_str()?;
+    let manifest = crate::extension::find_extension_for_file_ext(ext, "audit")?;
+    let mapping = manifest.test_mapping()?;
+
+    let source_dir = mapping
+        .source_dirs
+        .iter()
+        .find(|dir| source_file.starts_with(&format!("{}/", dir)) || source_file == dir.as_str())?;
+
+    let source_rel = source_file
+        .strip_prefix(&format!("{}/", source_dir))
+        .unwrap_or(source_file);
+
+    let rel_path = Path::new(source_rel);
+    let dir = rel_path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let name = rel_path.file_stem()?.to_str()?.to_string();
+    let ext = rel_path.extension()?.to_str()?.to_string();
+
+    let mut path = mapping
+        .test_file_pattern
+        .replace("{dir}", &dir)
+        .replace("{name}", &name)
+        .replace("{ext}", &ext);
+
+    while path.contains("//") {
+        path = path.replace("//", "/");
+    }
+    if path.starts_with('/') {
+        path = path.trim_start_matches('/').to_string();
+    }
+
+    let abs = root.join(&path);
+    if abs.components().count() == 0 {
+        return None;
+    }
+
+    Some(path)
+}
+
+fn generate_test_method_stub(
+    language: &Language,
+    expected_test_method: &str,
+    source_file: &str,
+    source_method: &str,
+) -> String {
+    match language {
+        Language::Rust => format!(
+            "#[test]\n#[ignore = \"autogenerated scaffold\"]\nfn {}() {{\n    todo!(\"Autogenerated scaffold for {}::{}\");\n}}\n",
+            expected_test_method, source_file, source_method
+        ),
+        Language::Php => format!(
+            "public function {}(): void {{\n    $this->markTestIncomplete('Autogenerated scaffold for {}::{}');\n}}\n",
+            expected_test_method, source_file, source_method
+        ),
+        _ => format!(
+            "// TODO: add {} for {}::{}\n",
+            expected_test_method, source_file, source_method
+        ),
+    }
+}
+
 /// Generate a minimal test file stub for the given test file path.
 ///
 /// Keeps stubs intentionally simple and compiling. This unblocks CI/audit
@@ -917,13 +1093,13 @@ fn generate_test_file_stub(test_file: &str, source_file: &str) -> String {
                 .unwrap_or("module")
                 .replace('-', "_");
             format!(
-                "// Auto-generated by `homeboy audit --fix`\n// Source: {}\n\n#[test]\nfn test_{}_placeholder() {{\n    assert!(true, \"TODO: add real tests\");\n}}\n",
+                "// Auto-generated by `homeboy audit --fix`\n// Source: {}\n\n#[test]\n#[ignore = \"autogenerated scaffold\"]\nfn test_{}_placeholder() {{\n    todo!(\"Autogenerated scaffold - replace with real assertions\");\n}}\n",
                 source_file, name
             )
         }
         Language::Php => {
             format!(
-                "<?php\n\n// Auto-generated by `homeboy audit --fix`\n// Source: {}\n\nuse PHPUnit\\Framework\\TestCase;\n\nfinal class GeneratedPlaceholderTest extends TestCase {{\n    public function test_placeholder(): void {{\n        $this->assertTrue(true);\n    }}\n}}\n",
+                "<?php\n\n// Auto-generated by `homeboy audit --fix`\n// Source: {}\n\nuse PHPUnit\\Framework\\TestCase;\n\nfinal class GeneratedPlaceholderTest extends TestCase {{\n    public function test_placeholder(): void {{\n        $this->markTestIncomplete('Autogenerated scaffold - replace with real assertions');\n    }}\n}}\n",
                 source_file
             )
         }
@@ -2233,6 +2409,42 @@ pub struct TestOutput {}
         let desc = "No test file found (expected 'tests/utils/token_test.rs') and no inline tests";
         let parsed = extract_expected_test_path(desc);
         assert_eq!(parsed, Some("tests/utils/token_test.rs".to_string()));
+    }
+
+    #[test]
+    fn extract_expected_test_method_parses_description() {
+        let desc = "Method 'run' has no corresponding test (expected 'test_run')";
+        let parsed = extract_expected_test_method(desc);
+        assert_eq!(parsed, Some("test_run".to_string()));
+    }
+
+    #[test]
+    fn extract_source_method_name_parses_description() {
+        let desc = "Method 'run_add' has no corresponding test (expected 'test_run_add')";
+        let parsed = extract_source_method_name(desc);
+        assert_eq!(parsed, Some("run_add".to_string()));
+    }
+
+    #[test]
+    fn generate_test_method_stub_rust_uses_ignored_todo() {
+        let stub = generate_test_method_stub(
+            &Language::Rust,
+            "test_run",
+            "src/commands/refactor.rs",
+            "run",
+        );
+        assert!(stub.contains("#[ignore = \"autogenerated scaffold\"]"));
+        assert!(
+            stub.contains("todo!(\"Autogenerated scaffold for src/commands/refactor.rs::run\")")
+        );
+    }
+
+    #[test]
+    fn generate_test_method_stub_php_marks_incomplete() {
+        let stub =
+            generate_test_method_stub(&Language::Php, "test_run", "inc/class-example.php", "run");
+        assert!(stub.contains("markTestIncomplete"));
+        assert!(stub.contains("Autogenerated scaffold for inc/class-example.php::run"));
     }
 
     #[test]
