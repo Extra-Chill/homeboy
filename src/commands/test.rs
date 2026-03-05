@@ -759,7 +759,20 @@ fn run_auto_fix_drift(
 /// Parse the test failures JSON file written by the extension test runner.
 fn parse_failures_file(path: &std::path::Path) -> Option<TestAnalysisInput> {
     let content = io::read_file(path, "read test failures file").ok()?;
-    serde_json::from_str(&content).ok()
+    let mut parsed: TestAnalysisInput = serde_json::from_str(&content).ok()?;
+
+    // Backfill aggregate counters from failure list when extension output omits
+    // totals (legacy parser shape). This keeps --analyze metadata accurate.
+    if parsed.total == 0 && !parsed.failures.is_empty() {
+        let inferred_failures = parsed.failures.len() as u64;
+        parsed.total = inferred_failures;
+    }
+
+    if parsed.passed > parsed.total {
+        parsed.passed = parsed.total;
+    }
+
+    Some(parsed)
 }
 
 /// Parse the test results JSON file written by the extension test runner.
@@ -1288,5 +1301,64 @@ mod tests {
         ];
         let result = filter_homeboy_flags(&args);
         assert_eq!(result, vec!["--filter=SomeTest"]);
+    }
+
+    #[test]
+    fn parse_failures_file_backfills_totals_when_missing() {
+        let tmp = std::env::temp_dir().join("homeboy-test-failures-backfill.json");
+        let _ = std::fs::remove_file(&tmp);
+
+        let payload = r#"{
+            "failures": [
+                {
+                    "test_name": "Suite::test_one",
+                    "test_file": "tests/suite_test.php",
+                    "error_type": "Error",
+                    "message": "Call to undefined method Foo::bar()"
+                },
+                {
+                    "test_name": "Suite::test_two",
+                    "test_file": "tests/suite_test.php",
+                    "error_type": "Error",
+                    "message": "Call to undefined method Foo::bar()"
+                }
+            ]
+        }"#;
+
+        std::fs::write(&tmp, payload).unwrap();
+        let parsed = parse_failures_file(&tmp).expect("should parse failures file");
+
+        assert_eq!(parsed.failures.len(), 2);
+        assert_eq!(parsed.total, 2);
+        assert_eq!(parsed.passed, 0);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn parse_failures_file_clamps_invalid_passed_count() {
+        let tmp = std::env::temp_dir().join("homeboy-test-failures-clamp.json");
+        let _ = std::fs::remove_file(&tmp);
+
+        let payload = r#"{
+            "failures": [
+                {
+                    "test_name": "Suite::test_one",
+                    "test_file": "tests/suite_test.php",
+                    "error_type": "Error",
+                    "message": "Call to undefined method Foo::bar()"
+                }
+            ],
+            "total": 3,
+            "passed": 9
+        }"#;
+
+        std::fs::write(&tmp, payload).unwrap();
+        let parsed = parse_failures_file(&tmp).expect("should parse failures file");
+
+        assert_eq!(parsed.total, 3);
+        assert_eq!(parsed.passed, 3);
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }
