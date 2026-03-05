@@ -36,9 +36,9 @@ for CMD in "${CMD_ARRAY[@]}"; do
   fi
 
   if [ "${CMD}" = "audit" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-    FULL_CMD="homeboy audit ${COMP_ID} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+    FULL_CMD="homeboy audit ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
   elif [ "${CMD}" = "audit" ]; then
-    FULL_CMD="homeboy audit ${COMP_ID}"
+    FULL_CMD="homeboy audit ${COMP_ID} --path ${WORKSPACE}"
   elif [ "${CMD}" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
     FULL_CMD="homeboy lint ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
   elif [ "${CMD}" = "test" ] && [ "${TEST_SCOPE:-full}" = "changed" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then

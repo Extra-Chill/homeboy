@@ -4,6 +4,18 @@ set -euo pipefail
 
 source "${GITHUB_ACTION_PATH}/scripts/lib.sh"
 
+AUTOFIX_MAX_COMMITS="${AUTOFIX_MAX_COMMITS:-2}"
+if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then
+  AUTOFIX_MAX_COMMITS=2
+fi
+
+AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep '^chore(ci): apply homeboy autofixes$' | wc -l | xargs)
+if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
+  echo "Skipping autofix: reached max autofix commits (${AUTOFIX_COMMIT_COUNT}/${AUTOFIX_MAX_COMMITS})"
+  echo "committed=false" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
 if [ "${PR_HEAD_REPO}" != "${GITHUB_REPOSITORY}" ]; then
   echo "Skipping autofix: PR head repo (${PR_HEAD_REPO}) differs from target repo (${GITHUB_REPOSITORY})"
   echo "committed=false" >> "${GITHUB_OUTPUT}"

@@ -25,12 +25,14 @@ jobs:
           php-version: '8.2'
 ```
 
-### With Portable Config (`homeboy.json`)
+### Required Portable Config (`homeboy.json`)
 
-If your repo has a `homeboy.json` file, you don't even need to specify the extension:
+`homeboy.json` at repository root is required by Homeboy Action.
+If your repo has a portable extension config, you don't need to specify the extension input:
 
 ```json
 {
+  "id": "my-project",
   "extensions": {
     "wordpress": {}
   }
@@ -64,10 +66,12 @@ If your repo has a `homeboy.json` file, you don't even need to specify the exten
 | `commands` | No | `lint,test` | Comma-separated commands to run |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |
-| `settings` | No | | JSON settings for the extension |
+| `settings` | No | | Deprecated. Use `homeboy.json` extension settings instead. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
 | `node-version` | No | | Node.js version (sets up via `actions/setup-node`) |
 | `autofix` | No | `false` | On PR failures, run safe autofixes, commit, push, and re-run checks |
+| `autofix-open-pr` | No | `false` | On non-PR failures, open an autofix PR if safe fixes allow rerun to pass |
+| `autofix-max-commits` | No | `2` | Safety limit for autofix commit chain depth per branch |
 | `autofix-commands` | No | | Override autofix commands (comma-separated, e.g. `lint --fix,test --fix`) |
 | `autofix-label` | No | | Optional PR label required before autofix runs (e.g. `autofix`) |
 | `test-scope` | No | `full` | Test scope for PRs: `full` or `changed` (requires Homeboy test changed-since support) |
@@ -113,6 +117,13 @@ Machine-readable files are written to the action output directory:
 
 - `homeboy-test-failures.json`
 - `homeboy-audit-summary.json`
+- `homeboy-autofixability.json`
+
+Autofixability classification includes:
+
+- `overall`: `auto_fixable`, `mixed`, `human_needed`, or `none`
+- `auto_fixable_failed_commands`
+- `human_needed_failed_commands`
 
 ## Examples
 
@@ -204,6 +215,25 @@ When enabled, the action will:
 
 > Autofix mode is PR-only and never force-pushes or amends commits.
 
+### Auto-open Fix PRs on non-PR runs
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v1
+  with:
+    extension: wordpress
+    commands: lint,test,audit
+    php-version: '8.2'
+    autofix: 'true'
+    autofix-open-pr: 'true'
+    auto-issue: 'true'
+```
+
+Behavior:
+- If CI fails, action runs safe autofix commands on a new `ci/autofix/*` branch.
+- If rerun passes, action opens an autofix PR and skips auto-issue filing.
+- If rerun still fails, action files/updates the CI failure issue with autofix attempt context.
+- `autofix-max-commits` prevents infinite autofix loops by capping chain depth.
+
 Optional label gate:
 
 ```yaml
@@ -218,15 +248,19 @@ Optional label gate:
 
 With `autofix-label`, no bot commit will be created unless that label is present on the PR.
 
-### Test with Custom Settings
+### Configure Settings in `homeboy.json`
 
 ```yaml
-- uses: Extra-Chill/homeboy-action@v1
-  with:
-    extension: wordpress
-    commands: test
-    settings: '{"database_type": "sqlite"}'
-    php-version: '8.2'
+{
+  "id": "my-project",
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "database_type": "sqlite"
+      }
+    }
+  }
+}
 ```
 
 ### Skip Lint During Test (Run Separately)
@@ -277,7 +311,7 @@ With `autofix-label`, no bot commit will be created unless that label is present
 
 1. **Installs Homeboy** — Downloads the correct binary for your runner from GitHub Releases
 2. **Installs Extension** — Clones and sets up the specified extension (runs `composer install`, etc.)
-3. **Registers Component** — Creates a component config pointing at your checkout (or uses `homeboy.json`)
+3. **Validates Portable Config** — Requires `homeboy.json` at repo root
 4. **Runs Commands** — Executes each command with `--path` pointing at your workspace
 
 The action is **extension-agnostic** — Homeboy is the orchestrator, extensions provide the actual lint/test/audit logic. The WordPress extension runs PHPCS, PHPUnit, and PHPStan. Other extensions can run whatever tools they need.
@@ -301,6 +335,7 @@ homeboy changelog add homeboy-action "Describe change" --type Changed
 - Homeboy must have published releases with binary artifacts (uses `cargo-dist`)
 - Extensions must be installable via `homeboy extension install`
 - For WordPress: PHP must be available (use `php-version` input or set up separately)
+- Repository must include `homeboy.json` at root with a top-level `id`
 
 ## License
 
