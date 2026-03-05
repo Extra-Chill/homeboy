@@ -16,6 +16,7 @@ set -euo pipefail
 
 FAILED_STEP=""
 FAILURE_OUTPUT=""
+FAILURE_REPLAY_MODE="full"
 
 # Step filtering
 should_run_step() {
@@ -35,7 +36,10 @@ print_failure_summary() {
         echo "============================================"
         echo "BUILD FAILED: $FAILED_STEP"
         echo "============================================"
-        if [ -n "$FAILURE_OUTPUT" ]; then
+        if [ "$FAILURE_REPLAY_MODE" = "none" ]; then
+            echo ""
+            echo "See test output above (not replayed)."
+        elif [ -n "$FAILURE_OUTPUT" ]; then
             echo ""
             echo "Error details:"
             echo "$FAILURE_OUTPUT"
@@ -132,7 +136,7 @@ if [ "${HOMEBOY_COVERAGE:-}" = "1" ]; then
             FAILURES=$(echo "$TEST_OUTPUT" | grep -E "^---- .* ----$|^test .* FAILED$" || true)
             if [ -n "$SUMMARY" ]; then echo ""; echo "$SUMMARY"; fi
             FAILED_STEP="cargo tarpaulin"
-            FAILURE_OUTPUT="$(echo "$FAILURES" | head -20)"
+            FAILURE_REPLAY_MODE="none"
             rm -f "$COVERAGE_JSON_FILE"
             exit $TEST_EXIT
         fi
@@ -259,7 +263,7 @@ else
     fi
 
     FAILED_STEP="cargo test"
-    FAILURE_OUTPUT="$(echo "$FAILURES" | head -20)"
+    FAILURE_REPLAY_MODE="none"
     exit $TEST_EXIT
 fi
 
