@@ -133,14 +133,20 @@ EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
 
 if [ -n "${EXISTING_COMMENT_ID}" ]; then
   echo "Updating existing comment ${EXISTING_COMMENT_ID}..."
-  gh api "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
+  if ! gh api "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
     --method PATCH \
-    --field body="${COMMENT_BODY}" > /dev/null
+    --field body="${COMMENT_BODY}" > /dev/null 2>&1; then
+    echo "::warning::Could not update PR comment (likely restricted token for fork PR). Skipping comment publish."
+    exit 0
+  fi
 else
   echo "Creating new comment..."
-  gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+  if ! gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
     --method POST \
-    --field body="${COMMENT_BODY}" > /dev/null
+    --field body="${COMMENT_BODY}" > /dev/null 2>&1; then
+    echo "::warning::Could not create PR comment (likely restricted token for fork PR). Skipping comment publish."
+    exit 0
+  fi
 fi
 
 echo "PR comment posted successfully"
