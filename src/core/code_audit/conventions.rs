@@ -96,6 +96,8 @@ pub enum DeviationKind {
     GodFile,
     /// File has too many top-level items.
     HighItemCount,
+    /// Directory has too many source files in a flat namespace.
+    DirectorySprawl,
     /// Function body is duplicated across files.
     DuplicateFunction,
     /// Function has identical structure but different identifiers/literals.

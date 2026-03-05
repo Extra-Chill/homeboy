@@ -3,6 +3,7 @@
 //!
 //! Plugs into the audit pipeline as an additional findings source.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::conventions::DeviationKind;
@@ -11,6 +12,7 @@ use super::findings::{Finding, Severity};
 /// Thresholds for structural findings.
 const GOD_FILE_LINE_THRESHOLD: usize = 500;
 const HIGH_ITEM_COUNT_THRESHOLD: usize = 15;
+const DIRECTORY_SPRAWL_FILE_THRESHOLD: usize = 25;
 
 /// Known source file extensions for structural analysis.
 /// Matches the walker's known extensions so we analyze the same files.
@@ -39,6 +41,7 @@ const SKIP_DIRS: &[&str] = &[
 pub fn analyze_structure(root: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut stack = vec![root.to_path_buf()];
+    let mut dir_source_counts: HashMap<String, usize> = HashMap::new();
 
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
@@ -61,6 +64,13 @@ pub fn analyze_structure(root: &Path) -> Vec<Finding> {
             if !SOURCE_EXTENSIONS.contains(&ext) {
                 continue;
             }
+
+            let parent_rel = path
+                .parent()
+                .and_then(|p| p.strip_prefix(root).ok())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            *dir_source_counts.entry(parent_rel).or_insert(0) += 1;
 
             let content = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
@@ -105,6 +115,27 @@ pub fn analyze_structure(root: &Path) -> Vec<Finding> {
                 });
             }
         }
+    }
+
+    for (dir, count) in dir_source_counts {
+        if count <= DIRECTORY_SPRAWL_FILE_THRESHOLD {
+            continue;
+        }
+
+        let dir_label = if dir.is_empty() { ".".to_string() } else { dir };
+        findings.push(Finding {
+            convention: "structural".to_string(),
+            severity: Severity::Info,
+            file: dir_label,
+            description: format!(
+                "Directory has {} source files (threshold: {})",
+                count, DIRECTORY_SPRAWL_FILE_THRESHOLD
+            ),
+            suggestion:
+                "Directory sprawl detected — group related files into focused subdirectories"
+                    .to_string(),
+            kind: DeviationKind::DirectorySprawl,
+        });
     }
 
     // Sort by file path for deterministic output
@@ -386,34 +417,6 @@ export default function main() {}
         assert_eq!(god_findings.len(), 1, "Should flag big.rs as god file");
         assert_eq!(god_findings[0].file, "big.rs");
         assert!(god_findings[0].description.contains("600 lines"));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn high_item_count_detected() {
-        let dir = std::env::temp_dir().join("homeboy_structural_items_test");
-        let _ = std::fs::create_dir_all(&dir);
-
-        // Create a file with 20 top-level functions (over threshold of 15)
-        let mut content = String::new();
-        for i in 0..20 {
-            content.push_str(&format!("fn func_{}() {{}}\n", i));
-        }
-        std::fs::write(dir.join("many.rs"), &content).unwrap();
-
-        let findings = analyze_structure(&dir);
-        let item_findings: Vec<&Finding> = findings
-            .iter()
-            .filter(|f| f.kind == DeviationKind::HighItemCount)
-            .collect();
-
-        assert_eq!(
-            item_findings.len(),
-            1,
-            "Should flag many.rs for high item count"
-        );
-        assert!(item_findings[0].description.contains("20 top-level items"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

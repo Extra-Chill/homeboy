@@ -340,18 +340,38 @@ fn extract_rust_impl_methods(content: &str, type_name: &str) -> Vec<ExtractedMet
 
 /// Extract top-level pub functions (not in impl blocks).
 fn extract_rust_free_functions(content: &str) -> Vec<ExtractedMethod> {
-    let fn_re =
-        Regex::new(r"(?m)^(pub(?:\(crate\))?\s+)(?:async\s+)?fn\s+(\w+)\s*\(([^)]*)\)").unwrap();
+    let fn_re = Regex::new(r"(?m)^\s*(pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([^)]*)\)")
+        .unwrap();
 
     let mut methods = Vec::new();
+    let mut pending_test_attribute = false;
 
-    // Simple heuristic: only match functions at zero indentation
     for (i, line) in content.lines().enumerate() {
-        if !line.starts_with("pub") {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("#[") {
+            if trimmed.contains("test") {
+                pending_test_attribute = true;
+            }
+            continue;
+        }
+
+        if trimmed.is_empty() {
             continue;
         }
 
         if let Some(cap) = fn_re.captures(line) {
+            let visibility = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+            let is_test_function = pending_test_attribute;
+            pending_test_attribute = false;
+
+            // Keep existing behavior for public functions, but also include
+            // test-annotated private functions so scaffold can mirror existing
+            // inline test names into dedicated test files when needed.
+            if !visibility.starts_with("pub") && !is_test_function {
+                continue;
+            }
+
             let name = cap[2].to_string();
             let params = cap[3].trim().to_string();
 
@@ -362,11 +382,17 @@ fn extract_rust_free_functions(content: &str) -> Vec<ExtractedMethod> {
 
             methods.push(ExtractedMethod {
                 name,
-                visibility: "pub".to_string(),
+                visibility: if visibility.is_empty() {
+                    "private".to_string()
+                } else {
+                    visibility.trim().to_string()
+                },
                 is_static: true,
                 line: i + 1,
                 params,
             });
+        } else {
+            pending_test_attribute = false;
         }
     }
 
@@ -950,6 +976,23 @@ fn internal_helper() {}
         assert!(names.contains(&"parse_config"));
         assert!(names.contains(&"validate"));
         assert!(!names.contains(&"internal_helper"));
+    }
+
+    #[test]
+    fn extract_rust_includes_test_annotated_private_functions() {
+        let content = r#"
+#[test]
+fn high_item_count_detected() {}
+
+fn helper_not_a_test() {}
+"#;
+
+        let classes = extract_rust(content);
+        let module = classes.iter().find(|c| c.kind == "module").unwrap();
+        let names: Vec<&str> = module.methods.iter().map(|m| m.name.as_str()).collect();
+
+        assert!(names.contains(&"high_item_count_detected"));
+        assert!(!names.contains(&"helper_not_a_test"));
     }
 
     #[test]
