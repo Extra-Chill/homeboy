@@ -67,6 +67,10 @@ inputs:
     description: 'If true, attempt safe autofixes on PR failures, commit, push, and re-run commands'
     required: false
     default: 'false'
+  autofix-open-pr:
+    description: 'If true, non-PR failures can open an autofix PR when rerun passes after fixes'
+    required: false
+    default: 'false'
   autofix-commands:
     description: 'Comma-separated autofix commands to run when autofix is enabled (e.g. "lint --fix,test --fix")'
     required: false
@@ -229,10 +233,21 @@ runs:
         PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
       run: bash ${{ github.action_path }}/scripts/apply-autofix-commit.sh
 
+    - name: Prepare non-PR autofix branch
+      id: autofix-prepare-nonpr
+      if: always() && github.event_name != 'pull_request' && inputs.autofix == 'true' && inputs.autofix-open-pr == 'true' && steps.run-commands.outputs.results != '' && contains(steps.run-commands.outputs.results, '"fail"')
+      shell: bash
+      env:
+        COMMANDS: ${{ inputs.commands }}
+        COMPONENT_NAME: ${{ inputs.component }}
+        EXTRA_ARGS: ${{ inputs.args }}
+        AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
+      run: bash ${{ github.action_path }}/scripts/prepare-autofix-branch.sh
+
     - name: Re-run Homeboy commands after autofix
       id: rerun-commands
       continue-on-error: true
-      if: github.event_name == 'pull_request' && steps.autofix-commit.outputs.committed == 'true'
+      if: (github.event_name == 'pull_request' && steps.autofix-commit.outputs.committed == 'true') || (github.event_name != 'pull_request' && steps.autofix-prepare-nonpr.outputs.committed == 'true')
       shell: bash
       env:
         COMMANDS: ${{ inputs.commands }}
@@ -241,6 +256,16 @@ runs:
         TEST_SCOPE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
         RUN_GROUP_PREFIX: homeboy rerun
       run: bash ${{ github.action_path }}/scripts/run-homeboy-commands.sh
+
+    - name: Open non-PR autofix PR
+      id: autofix-open-pr
+      if: github.event_name != 'pull_request' && steps.autofix-prepare-nonpr.outputs.committed == 'true' && steps.rerun-commands.outputs.results != '' && !contains(steps.rerun-commands.outputs.results, '"fail"')
+      shell: bash
+      env:
+        COMPONENT_NAME: ${{ inputs.component }}
+        AUTOFIX_BRANCH: ${{ steps.autofix-prepare-nonpr.outputs.autofix-branch }}
+        RESULTS: ${{ steps.rerun-commands.outputs.results }}
+      run: bash ${{ github.action_path }}/scripts/open-autofix-pr.sh
 
     - name: Select final results
       id: select-results
@@ -290,7 +315,7 @@ runs:
       run: bash ${{ github.action_path }}/scripts/post-inline-review.sh
 
     - name: Auto-file issue on failure
-      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"')
+      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"') && steps.autofix-open-pr.outputs.created != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -298,4 +323,5 @@ runs:
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
+        AUTOFIX_ATTEMPTED: ${{ steps.autofix-prepare-nonpr.outputs.committed }}
       run: bash ${{ github.action_path }}/scripts/auto-file-issue.sh

@@ -8,6 +8,7 @@ OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 WORKFLOW_NAME="${GITHUB_WORKFLOW:-workflow}"
 REF_LABEL="${GITHUB_REF_NAME:-${GITHUB_SHA:0:8}}"
+AUTOFIX_ATTEMPTED="${AUTOFIX_ATTEMPTED:-false}"
 
 HOMEBOY_CLI_VERSION="${HOMEBOY_CLI_VERSION:-unknown}"
 HOMEBOY_EXTENSION_ID="${HOMEBOY_EXTENSION_ID:-auto}"
@@ -100,6 +101,12 @@ if [ -n "${EXISTING_ISSUE}" ]; then
   COMMENT+=$'\n'"### Tooling versions"$'\n\n'
   COMMENT+="${TOOLING_MD}"$'\n'
 
+  if [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
+    COMMENT+=$'\n'"### Autofix outcome"$'\n\n'
+    COMMENT+="- Safe autofix pass was attempted before filing this issue."$'\n'
+    COMMENT+="- Remaining failures are likely non-mechanical and need human decision-making."$'\n'
+  fi
+
   COMMENT+="### Triage order"$'\n\n'
   COMMENT+="1. Fix \`${PRIMARY_COMMAND:-first failing command}\`"$'\n'
   COMMENT+="2. Re-run CI"$'\n'
@@ -138,6 +145,12 @@ else
 
   BODY+="### Tooling versions"$'\n\n'
   BODY+="${TOOLING_MD}"$'\n'
+
+  if [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
+    BODY+=$'\n'"### Autofix outcome"$'\n\n'
+    BODY+="- Safe autofix pass was attempted before filing this issue."$'\n'
+    BODY+="- Remaining failures are likely non-mechanical and need human decision-making."$'\n'
+  fi
 
   BODY+="### Primary failure"$'\n\n'
   if [ -n "${PRIMARY_COMMAND}" ]; then
