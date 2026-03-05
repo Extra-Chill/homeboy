@@ -78,6 +78,24 @@ If your repo has a `homeboy.json` file, you don't even need to specify the exten
 |--------|-------------|
 | `results` | JSON object with pass/fail for each command (e.g. `{"lint":"pass","test":"fail"}`) |
 
+## Failure Digest
+
+On failed runs, Homeboy Action now emits a compact **Failure Digest** to:
+
+- the job summary (`GITHUB_STEP_SUMMARY`)
+- the PR comment block (when running on pull requests)
+
+Digest includes:
+
+- failed test count + top failed tests
+- audit summary (drift/outliers/top findings when structured output is available)
+- links back to the full workflow run logs
+
+Machine-readable files are written to the action output directory:
+
+- `homeboy-test-failures.json`
+- `homeboy-audit-summary.json`
+
 ## Examples
 
 ### Lint Only (Fast PR Check)
@@ -214,6 +232,20 @@ With `autofix-label`, no bot commit will be created unless that label is present
 4. **Runs Commands** — Executes each command with `--path` pointing at your workspace
 
 The action is **extension-agnostic** — Homeboy is the orchestrator, extensions provide the actual lint/test/audit logic. The WordPress extension runs PHPCS, PHPUnit, and PHPStan. Other extensions can run whatever tools they need.
+
+## Project Maintenance (Dogfooding Homeboy)
+
+This repository dogfoods Homeboy project metadata and release bookkeeping:
+
+- `homeboy.json` defines component metadata and changelog/version targets
+- `docs/CHANGELOG.md` is the canonical changelog
+- `VERSION` is the version source for Homeboy version automation
+
+Use Homeboy to add changelog entries:
+
+```bash
+homeboy changelog add homeboy-action "Describe change" --type Changed
+```
 
 ## Requirements
 

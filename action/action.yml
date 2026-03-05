@@ -87,7 +87,6 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    # ── Step 1: Setup PHP (optional) ──
     - name: Setup PHP
       if: inputs.php-version != ''
       uses: shivammathur/setup-php@v2
@@ -97,14 +96,12 @@ runs:
         tools: composer:v2
         coverage: none
 
-    # ── Step 2: Setup Node.js (optional) ──
     - name: Setup Node.js
       if: inputs.node-version != ''
       uses: actions/setup-node@v4
       with:
         node-version: ${{ inputs.node-version }}
 
-    # ── Step 3a: Build from source (when source input is set) ──
     - name: Install Rust toolchain (source build)
       if: inputs.source != ''
       uses: dtolnay/rust-toolchain@master
@@ -128,31 +125,8 @@ runs:
       shell: bash
       env:
         SOURCE_PATH: ${{ inputs.source }}
-      run: |
-        set -euo pipefail
+      run: bash ${{ github.action_path }}/scripts/build-source-homeboy.sh
 
-        echo "Building homeboy from source at ${SOURCE_PATH}..."
-
-        BUILD_EXIT=0
-        cargo build --release --manifest-path "${SOURCE_PATH}/Cargo.toml" 2>&1 || BUILD_EXIT=$?
-
-        if [ $BUILD_EXIT -eq 0 ]; then
-          BINARY=$(find "${SOURCE_PATH}/target/release" -maxdepth 1 -name "homeboy" -type f | head -1)
-          if [ -n "$BINARY" ]; then
-            chmod +x "$BINARY"
-            sudo cp "$BINARY" /usr/local/bin/homeboy
-            echo "Built from source: $(homeboy --version)"
-            echo "built=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::Source build succeeded but binary not found — falling back to release"
-            echo "built=false" >> "$GITHUB_OUTPUT"
-          fi
-        else
-          echo "::warning::Source build failed (exit $BUILD_EXIT) — falling back to release binary"
-          echo "built=false" >> "$GITHUB_OUTPUT"
-        fi
-
-    # ── Step 3b: Resolve Homeboy version (skipped if source build succeeded) ──
     - name: Resolve Homeboy version
       id: resolve-version
       if: inputs.source == '' || steps.source-build.outputs.built != 'true'
@@ -160,21 +134,8 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         HOMEBOY_VERSION: ${{ inputs.version }}
-      run: |
-        set -euo pipefail
-        REPO="Extra-Chill/homeboy"
-        if [ "$HOMEBOY_VERSION" = "latest" ]; then
-          TAG=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || true)
-          if [ -z "$TAG" ]; then
-            echo "::error::Could not determine latest Homeboy release"
-            exit 1
-          fi
-        else
-          TAG="v${HOMEBOY_VERSION#v}"
-        fi
-        echo "resolved-version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      run: bash ${{ github.action_path }}/scripts/resolve-homeboy-version.sh
 
-    # ── Step 3c: Cache Homeboy binary + extensions (skipped if source build succeeded) ──
     - name: Cache Homeboy
       id: cache-homeboy
       if: inputs.source == '' || steps.source-build.outputs.built != 'true'
@@ -185,76 +146,22 @@ runs:
           ~/.config/homeboy/extensions/
         key: homeboy-${{ steps.resolve-version.outputs.resolved-version }}-${{ inputs.extension }}-${{ runner.os }}-${{ runner.arch }}
 
-    # ── Step 3d: Install Homeboy binary from release (skipped if source build succeeded) ──
     - name: Install Homeboy
       if: (inputs.source == '' || steps.source-build.outputs.built != 'true') && steps.cache-homeboy.outputs.cache-hit != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         HOMEBOY_VERSION: ${{ steps.resolve-version.outputs.resolved-version }}
-      run: |
-        set -euo pipefail
+      run: bash ${{ github.action_path }}/scripts/install-homeboy-release.sh
 
-        REPO="Extra-Chill/homeboy"
-        TAG="v${HOMEBOY_VERSION}"
-        echo "Installing Homeboy ${HOMEBOY_VERSION}..."
-
-        # Determine platform
-        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-        ARCH=$(uname -m)
-
-        case "${OS}-${ARCH}" in
-          linux-x86_64)   TARGET="x86_64-unknown-linux-gnu" ;;
-          linux-aarch64)   TARGET="aarch64-unknown-linux-gnu" ;;
-          darwin-x86_64)   TARGET="x86_64-apple-darwin" ;;
-          darwin-arm64)    TARGET="aarch64-apple-darwin" ;;
-          *)
-            echo "::error::Unsupported platform: ${OS}-${ARCH}"
-            exit 1
-            ;;
-        esac
-
-        ARCHIVE="homeboy-${TARGET}.tar.xz"
-        URL="https://github.com/${REPO}/releases/download/${TAG}/${ARCHIVE}"
-
-        echo "Downloading ${URL}..."
-        curl -fsSL "${URL}" -o "/tmp/${ARCHIVE}"
-
-        # Extract and install
-        mkdir -p /tmp/homeboy-extract
-        tar -xJf "/tmp/${ARCHIVE}" -C /tmp/homeboy-extract
-
-        # cargo-dist extracts to a directory named after the target
-        BINARY=$(find /tmp/homeboy-extract -name "homeboy" -type f | head -1)
-        if [ -z "$BINARY" ]; then
-          echo "::error::Could not find homeboy binary in archive"
-          exit 1
-        fi
-
-        chmod +x "$BINARY"
-        sudo mv "$BINARY" /usr/local/bin/homeboy
-
-        echo "Homeboy $(homeboy --version) installed successfully"
-
-    # ── Step 3e: Record how binary was obtained ──
     - name: Resolve binary source
       id: resolve-binary
       shell: bash
       env:
         HAS_SOURCE_INPUT: ${{ inputs.source }}
         SOURCE_BUILT: ${{ steps.source-build.outputs.built }}
-      run: |
-        if [ -n "$HAS_SOURCE_INPUT" ] && [ "$SOURCE_BUILT" = "true" ]; then
-          echo "binary-source=source" >> "$GITHUB_OUTPUT"
-        elif [ -n "$HAS_SOURCE_INPUT" ]; then
-          echo "binary-source=fallback" >> "$GITHUB_OUTPUT"
-          echo "::warning::Using fallback release binary — source build failed"
-        else
-          echo "binary-source=release" >> "$GITHUB_OUTPUT"
-        fi
-        echo "Homeboy binary: $(homeboy --version 2>/dev/null || echo 'not found')"
+      run: bash ${{ github.action_path }}/scripts/resolve-binary-source.sh
 
-    # ── Step 4: Install extension (cache miss or source build) ──
     - name: Install extension
       if: inputs.extension != '' && (steps.cache-homeboy.outputs.cache-hit != 'true' || steps.source-build.outputs.built == 'true')
       shell: bash
@@ -262,81 +169,24 @@ runs:
         GH_TOKEN: ${{ github.token }}
         EXTENSION_ID: ${{ inputs.extension }}
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
-      run: |
-        set -euo pipefail
+      run: bash ${{ github.action_path }}/scripts/install-extension.sh
 
-        echo "Installing extension: ${EXTENSION_ID} from ${EXTENSION_SOURCE}..."
-
-        homeboy extension install "${EXTENSION_SOURCE}" --id "${EXTENSION_ID}"
-
-        echo "Extension '${EXTENSION_ID}' installed successfully"
-
-    # ── Step 5: Register component ──
     - name: Register component
       shell: bash
       env:
         COMPONENT_NAME: ${{ inputs.component }}
         EXTENSION_ID: ${{ inputs.extension }}
         SETTINGS_JSON: ${{ inputs.settings }}
-      run: |
-        set -euo pipefail
+      run: bash ${{ github.action_path }}/scripts/register-component.sh
 
-        # Determine component name
-        if [ -n "$COMPONENT_NAME" ]; then
-          COMP_ID="$COMPONENT_NAME"
-        else
-          # Derive from repo name
-          COMP_ID=$(basename "$GITHUB_REPOSITORY")
-        fi
-
-        echo "Registering component: ${COMP_ID}"
-
-        # Build create command with flags
-        CREATE_CMD="homeboy component create --local-path $(pwd)"
-
-        if [ -n "$EXTENSION_ID" ]; then
-          CREATE_CMD="${CREATE_CMD} --extension ${EXTENSION_ID}"
-        fi
-
-        echo "Running: ${CREATE_CMD}"
-        eval "$CREATE_CMD"
-
-        # Apply settings overrides via homeboy's config system
-        if [ -n "$SETTINGS_JSON" ] && [ "$SETTINGS_JSON" != "{}" ] && [ -n "$EXTENSION_ID" ]; then
-          echo "Applying extension settings..."
-          # Build nested JSON: {"extensions":{"<ext>":{"settings":{...}}}}
-          NESTED_JSON=$(echo "$SETTINGS_JSON" | jq --arg ext "$EXTENSION_ID" \
-            '{extensions: {($ext): {settings: .}}}')
-          homeboy component set "${COMP_ID}" --json "$NESTED_JSON"
-        fi
-
-        # Verify component was created
-        homeboy component list 2>/dev/null | grep -q "${COMP_ID}" || {
-          echo "::error::Failed to register component '${COMP_ID}'"
-          exit 1
-        }
-
-        echo "Component '${COMP_ID}' registered successfully"
-        echo "component-id=${COMP_ID}" >> "$GITHUB_ENV"
-
-    # ── Step 6: Determine PR base ref for --changed-since scoping ──
     - name: Determine PR base ref
       id: changed-files
       if: github.event_name == 'pull_request' && inputs.lint-changed-only == 'true'
       shell: bash
-      run: |
-        set -euo pipefail
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      run: bash ${{ github.action_path }}/scripts/determine-pr-base-ref.sh
 
-        BASE_SHA="${{ github.event.pull_request.base.sha }}"
-
-        # Fetch base commit so homeboy --changed-since can diff against it
-        echo "Fetching base commit (${BASE_SHA:0:8})..."
-        git fetch origin "${BASE_SHA}" --depth=1 2>/dev/null || true
-
-        echo "base-ref=${BASE_SHA}" >> "$GITHUB_OUTPUT"
-        echo "HOMEBOY_CHANGED_SINCE=${BASE_SHA}" >> "$GITHUB_ENV"
-
-    # ── Step 7: Run commands ──
     - name: Run Homeboy commands
       id: run-commands
       continue-on-error: true
@@ -346,112 +196,9 @@ runs:
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
         TEST_SCOPE: ${{ inputs.test-scope }}
-      run: |
-        set -euo pipefail
+        RUN_GROUP_PREFIX: homeboy
+      run: bash ${{ github.action_path }}/scripts/run-homeboy-commands.sh
 
-        # Determine component ID
-        if [ -n "$COMPONENT_NAME" ]; then
-          COMP_ID="$COMPONENT_NAME"
-        elif [ -n "${component_id:-}" ]; then
-          COMP_ID="${component_id}"
-        else
-          COMP_ID=$(basename "$GITHUB_REPOSITORY")
-        fi
-
-        WORKSPACE="$(pwd)"
-        RESULTS="{}"
-        OVERALL_EXIT=0
-
-        # Create temp dirs for capturing output and annotations
-        HOMEBOY_OUTPUT_DIR=$(mktemp -d)
-        echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "$GITHUB_ENV"
-
-        HOMEBOY_ANNOTATIONS_DIR=$(mktemp -d)
-        echo "HOMEBOY_ANNOTATIONS_DIR=${HOMEBOY_ANNOTATIONS_DIR}" >> "$GITHUB_ENV"
-        export HOMEBOY_ANNOTATIONS_DIR
-
-        # Parse comma-separated commands
-        IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
-
-        # Check if lint is a separate command — if so, skip the test runner's
-        # internal lint step to avoid redundant repo-wide PHPCS/PHPStan runs.
-        # The action's lint command already handles --changed-since scoping.
-        HAS_LINT_COMMAND=false
-        for c in "${CMD_ARRAY[@]}"; do
-          if [ "$(echo "$c" | xargs)" = "lint" ]; then
-            HAS_LINT_COMMAND=true
-            break
-          fi
-        done
-
-        for CMD in "${CMD_ARRAY[@]}"; do
-          # Trim whitespace
-          CMD=$(echo "$CMD" | xargs)
-
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  Running: homeboy ${CMD} ${COMP_ID}"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-
-          # When running test and lint is already a separate command, tell the
-          # test runner to skip its internal lint step (avoids duplicate repo-wide
-          # PHPCS that ignores --changed-since scoping)
-          if [ "$CMD" = "test" ] && [ "$HAS_LINT_COMMAND" = "true" ]; then
-            export HOMEBOY_SKIP_LINT=1
-          else
-            unset HOMEBOY_SKIP_LINT 2>/dev/null || true
-          fi
-
-          # Build the command — scope lint and audit to changed files in PR mode
-          if [ "$CMD" = "audit" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-            FULL_CMD="homeboy audit ${COMP_ID} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-          elif [ "$CMD" = "audit" ]; then
-            FULL_CMD="homeboy audit ${COMP_ID}"
-          elif [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-            # Scope lint to changed files only (PR mode) using --changed-since
-            FULL_CMD="homeboy lint ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-          elif [ "$CMD" = "test" ] && [ "$TEST_SCOPE" = "changed" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-            # Scope tests in PR mode (requires homeboy support for --changed-since on test command)
-            FULL_CMD="homeboy test ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-          else
-            FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
-          fi
-
-          if [ -n "$EXTRA_ARGS" ]; then
-            FULL_CMD="${FULL_CMD} ${EXTRA_ARGS}"
-          fi
-
-          echo "::group::homeboy ${CMD}"
-
-          CMD_EXIT=0
-          set +e
-          eval "$FULL_CMD" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${CMD}.log"
-          CMD_EXIT=${PIPESTATUS[0]}
-          set -e
-
-          echo "::endgroup::"
-
-          if [ $CMD_EXIT -eq 0 ]; then
-            echo "::notice::homeboy ${CMD}: PASSED"
-            RESULTS=$(echo "$RESULTS" | jq -c --arg cmd "$CMD" '. + {($cmd): "pass"}')
-          else
-            echo "::error::homeboy ${CMD}: FAILED (exit code ${CMD_EXIT})"
-            RESULTS=$(echo "$RESULTS" | jq -c --arg cmd "$CMD" '. + {($cmd): "fail"}')
-            OVERALL_EXIT=1
-          fi
-        done
-
-        echo ""
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "  Results: ${RESULTS}"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-        echo "results=${RESULTS}" >> "$GITHUB_OUTPUT"
-
-        exit $OVERALL_EXIT
-
-    # ── Step 8: Optional autofix commit on PR failures ──
     - name: Apply autofix commit
       id: autofix-commit
       if: always() && github.event_name == 'pull_request' && inputs.autofix == 'true' && steps.run-commands.outputs.results != '' && contains(steps.run-commands.outputs.results, '"fail"')
@@ -460,127 +207,12 @@ runs:
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
-        TEST_SCOPE: ${{ inputs.test-scope }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
         AUTOFIX_LABEL: ${{ inputs.autofix-label }}
         PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
         PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-      run: |
-        set -euo pipefail
+      run: bash ${{ github.action_path }}/scripts/apply-autofix-commit.sh
 
-        # Safety guard: only auto-push on same-repo PRs (not forks)
-        if [ "${PR_HEAD_REPO}" != "${GITHUB_REPOSITORY}" ]; then
-          echo "Skipping autofix: PR head repo (${PR_HEAD_REPO}) differs from target repo (${GITHUB_REPOSITORY})"
-          echo "committed=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        # Loop guard: don't autofix if workflow was triggered by a prior bot autofix push
-        if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ]; then
-          echo "Skipping autofix: workflow actor is github-actions[bot]"
-          echo "committed=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        # Loop guard: don't chain autofix commits on top of autofix commits
-        LAST_SUBJECT=$(git log -1 --pretty=%s 2>/dev/null || true)
-        if [ "$LAST_SUBJECT" = "chore(ci): apply homeboy autofixes" ]; then
-          echo "Skipping autofix: HEAD already an autofix commit"
-          echo "committed=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        # Optional label gate
-        if [ -n "${AUTOFIX_LABEL:-}" ]; then
-          if ! echo "$PR_LABELS_JSON" | jq -e --arg label "$AUTOFIX_LABEL" 'index($label) != null' > /dev/null; then
-            echo "Skipping autofix: required label '${AUTOFIX_LABEL}' not present"
-            echo "committed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-        fi
-
-        if [ -n "$COMPONENT_NAME" ]; then
-          COMP_ID="$COMPONENT_NAME"
-        elif [ -n "${component_id:-}" ]; then
-          COMP_ID="${component_id}"
-        else
-          COMP_ID=$(basename "$GITHUB_REPOSITORY")
-        fi
-
-        WORKSPACE="$(pwd)"
-
-        # Build autofix command list
-        if [ -n "$AUTOFIX_COMMANDS" ]; then
-          IFS=',' read -ra FIX_ARRAY <<< "$AUTOFIX_COMMANDS"
-        else
-          FIX_ARRAY=()
-          IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
-          for CMD in "${CMD_ARRAY[@]}"; do
-            CMD=$(echo "$CMD" | xargs)
-            case "$CMD" in
-              lint)
-                FIX_ARRAY+=("lint --fix")
-                ;;
-              test)
-                FIX_ARRAY+=("test --fix")
-                ;;
-            esac
-          done
-        fi
-
-        if [ ${#FIX_ARRAY[@]} -eq 0 ]; then
-          echo "No autofix commands configured for this command set"
-          echo "committed=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        echo "Applying autofixes..."
-        for FIX_CMD in "${FIX_ARRAY[@]}"; do
-          FIX_CMD=$(echo "$FIX_CMD" | xargs)
-          BASE_CMD="homeboy ${FIX_CMD} ${COMP_ID} --path ${WORKSPACE}"
-
-          # Scope lint/audit-like fixes in PR mode
-          if echo "$FIX_CMD" | grep -q '^lint' && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-            BASE_CMD="homeboy ${FIX_CMD} ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-          fi
-
-          if [ -n "$EXTRA_ARGS" ]; then
-            BASE_CMD="${BASE_CMD} ${EXTRA_ARGS}"
-          fi
-
-          echo "Running autofix: ${BASE_CMD}"
-          set +e
-          eval "$BASE_CMD"
-          FIX_EXIT=$?
-          set -e
-
-          if [ $FIX_EXIT -ne 0 ]; then
-            echo "Autofix command exited non-zero (${FIX_EXIT}), continuing to check for file changes"
-          fi
-        done
-
-        if git diff --quiet && git diff --cached --quiet; then
-          echo "No autofix changes detected"
-          echo "committed=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        git add -A
-        if git diff --cached --quiet; then
-          echo "No staged changes after autofix"
-          echo "committed=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git commit -m "chore(ci): apply homeboy autofixes"
-
-        # Push to the PR head branch
-        git push origin "HEAD:${GITHUB_HEAD_REF}"
-        echo "committed=true" >> "$GITHUB_OUTPUT"
-
-    # ── Step 9: Re-run commands after autofix commit ──
     - name: Re-run Homeboy commands after autofix
       id: rerun-commands
       continue-on-error: true
@@ -590,83 +222,10 @@ runs:
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
-      run: |
-        set -euo pipefail
+        TEST_SCOPE: ${{ inputs.test-scope }}
+        RUN_GROUP_PREFIX: homeboy rerun
+      run: bash ${{ github.action_path }}/scripts/run-homeboy-commands.sh
 
-        if [ -n "$COMPONENT_NAME" ]; then
-          COMP_ID="$COMPONENT_NAME"
-        elif [ -n "${component_id:-}" ]; then
-          COMP_ID="${component_id}"
-        else
-          COMP_ID=$(basename "$GITHUB_REPOSITORY")
-        fi
-
-        WORKSPACE="$(pwd)"
-        RESULTS="{}"
-        OVERALL_EXIT=0
-
-        HOMEBOY_OUTPUT_DIR=$(mktemp -d)
-        echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "$GITHUB_ENV"
-
-        HOMEBOY_ANNOTATIONS_DIR=$(mktemp -d)
-        echo "HOMEBOY_ANNOTATIONS_DIR=${HOMEBOY_ANNOTATIONS_DIR}" >> "$GITHUB_ENV"
-        export HOMEBOY_ANNOTATIONS_DIR
-
-        IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
-
-        HAS_LINT_COMMAND=false
-        for c in "${CMD_ARRAY[@]}"; do
-          if [ "$(echo "$c" | xargs)" = "lint" ]; then
-            HAS_LINT_COMMAND=true
-            break
-          fi
-        done
-
-        for CMD in "${CMD_ARRAY[@]}"; do
-          CMD=$(echo "$CMD" | xargs)
-
-          if [ "$CMD" = "test" ] && [ "$HAS_LINT_COMMAND" = "true" ]; then
-            export HOMEBOY_SKIP_LINT=1
-          else
-            unset HOMEBOY_SKIP_LINT 2>/dev/null || true
-          fi
-
-          if [ "$CMD" = "audit" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-            FULL_CMD="homeboy audit ${COMP_ID} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-          elif [ "$CMD" = "audit" ]; then
-            FULL_CMD="homeboy audit ${COMP_ID}"
-          elif [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-            FULL_CMD="homeboy lint ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-          elif [ "$CMD" = "test" ] && [ "$TEST_SCOPE" = "changed" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-            FULL_CMD="homeboy test ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-          else
-            FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
-          fi
-
-          if [ -n "$EXTRA_ARGS" ]; then
-            FULL_CMD="${FULL_CMD} ${EXTRA_ARGS}"
-          fi
-
-          echo "::group::homeboy rerun ${CMD}"
-          CMD_EXIT=0
-          set +e
-          eval "$FULL_CMD" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${CMD}.log"
-          CMD_EXIT=${PIPESTATUS[0]}
-          set -e
-          echo "::endgroup::"
-
-          if [ $CMD_EXIT -eq 0 ]; then
-            RESULTS=$(echo "$RESULTS" | jq -c --arg cmd "$CMD" '. + {($cmd): "pass"}')
-          else
-            RESULTS=$(echo "$RESULTS" | jq -c --arg cmd "$CMD" '. + {($cmd): "fail"}')
-            OVERALL_EXIT=1
-          fi
-        done
-
-        echo "results=${RESULTS}" >> "$GITHUB_OUTPUT"
-        exit $OVERALL_EXIT
-
-    # ── Step 10: Select final results output (rerun if present) ──
     - name: Select final results
       id: select-results
       if: always()
@@ -674,33 +233,22 @@ runs:
       env:
         FIRST_RESULTS: ${{ steps.run-commands.outputs.results }}
         RERUN_RESULTS: ${{ steps.rerun-commands.outputs.results }}
-      run: |
-        set -euo pipefail
-        if [ -n "${RERUN_RESULTS:-}" ] && [ "$RERUN_RESULTS" != "{}" ]; then
-          echo "results=${RERUN_RESULTS}" >> "$GITHUB_OUTPUT"
-        else
-          echo "results=${FIRST_RESULTS}" >> "$GITHUB_OUTPUT"
-        fi
+      run: bash ${{ github.action_path }}/scripts/select-final-results.sh
 
-    # ── Step 11: Enforce final status ──
+    - name: Generate failure digest
+      if: always() && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"')
+      shell: bash
+      env:
+        RESULTS: ${{ steps.select-results.outputs.results }}
+      run: bash ${{ github.action_path }}/scripts/generate-failure-digest.sh
+
     - name: Enforce final status
       if: always()
       shell: bash
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}
-      run: |
-        set -euo pipefail
-        if [ -z "${RESULTS:-}" ] || [ "$RESULTS" = "{}" ]; then
-          echo "::error::No command results were produced"
-          exit 1
-        fi
-        if echo "$RESULTS" | jq -e 'to_entries | any(.value == "fail")' > /dev/null; then
-          echo "::error::One or more Homeboy commands failed"
-          exit 1
-        fi
-        echo "All Homeboy commands passed"
+      run: bash ${{ github.action_path }}/scripts/enforce-final-status.sh
 
-    # ── Step 12: Post PR comment ──
     - name: Post PR comment
       if: always() && github.event_name == 'pull_request'
       shell: bash
@@ -713,155 +261,8 @@ runs:
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         AUTOFIX_ENABLED: ${{ inputs.autofix }}
         AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
-      run: |
-        set -euo pipefail
+      run: bash ${{ github.action_path }}/scripts/post-pr-comment.sh
 
-        OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
-        REPO="${GITHUB_REPOSITORY}"
-        COMP_ID="${COMPONENT_NAME:-$(basename "$GITHUB_REPOSITORY")}"
-
-        if [ -z "$OUTPUT_DIR" ] || [ -z "$PR_NUMBER" ]; then
-          echo "Skipping PR comment — missing output dir or PR number"
-          exit 0
-        fi
-
-        # ── Build the comment body ──
-        COMMENT_BODY="<!-- homeboy-action-results -->"$'\n'
-        COMMENT_BODY+="## Homeboy Results — \`${COMP_ID}\`"$'\n\n'
-
-        if [ "$AUTOFIX_ENABLED" = "true" ] && [ "$AUTOFIX_COMMITTED" = "true" ]; then
-          COMMENT_BODY+="> :wrench: **Autofix applied** — a CI bot commit was pushed and checks were re-run"$'\n\n'
-        elif [ "$AUTOFIX_ENABLED" = "true" ]; then
-          COMMENT_BODY+="> :information_source: Autofix enabled, but no fixable file changes were produced"$'\n\n'
-        fi
-
-        # Show binary source if it was a fallback
-        if [ "$BINARY_SOURCE" = "fallback" ]; then
-          COMMENT_BODY+="> :warning: **Source build failed** — results from fallback release binary"$'\n\n'
-        elif [ "$BINARY_SOURCE" = "source" ]; then
-          COMMENT_BODY+="> Built from source (\`$(homeboy --version 2>/dev/null || echo 'unknown')\`)"$'\n\n'
-        fi
-
-        # Parse results and build summary table
-        IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
-        HAS_FAILURE=false
-
-        for CMD in "${CMD_ARRAY[@]}"; do
-          CMD=$(echo "$CMD" | xargs)
-          LOG_FILE="${OUTPUT_DIR}/${CMD}.log"
-
-          # Determine pass/fail from results JSON
-          STATUS=$(echo "$RESULTS" | jq -r --arg cmd "$CMD" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
-
-          if [ "$STATUS" = "pass" ]; then
-            ICON="white_check_mark"
-          else
-            ICON="x"
-            HAS_FAILURE=true
-          fi
-
-          # Add scope indicator for lint and audit
-          SCOPE_NOTE=""
-          if [ "$CMD" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-            SCOPE_NOTE=" _(changed files only)_"
-          elif [ "$CMD" = "audit" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-            SCOPE_NOTE=" _(changed files only)_"
-          fi
-
-          COMMENT_BODY+=":${ICON}: **${CMD}**${SCOPE_NOTE}"$'\n'
-
-          # Extract summaries from log file
-          if [ -f "$LOG_FILE" ]; then
-            # PHPCS summary
-            PHPCS_SUMMARY=$(grep -o "LINT SUMMARY: .*" "$LOG_FILE" | head -1 || true)
-            if [ -n "$PHPCS_SUMMARY" ]; then
-              FIXABLE=$(grep -o "Fixable: [0-9]*" "$LOG_FILE" | head -1 || true)
-              FILES_INFO=$(grep -o "Files with issues: .*" "$LOG_FILE" | head -1 || true)
-              COMMENT_BODY+="- PHPCS: ${PHPCS_SUMMARY}"$'\n'
-              if [ -n "$FIXABLE" ]; then
-                COMMENT_BODY+="- ${FIXABLE} | ${FILES_INFO}"$'\n'
-              fi
-            fi
-
-            # Top violations (first 5)
-            TOP_VIOLATIONS=$(sed -n '/TOP VIOLATIONS:/,/^$/p' "$LOG_FILE" | grep -E '^\s+\S' | head -5 || true)
-            if [ -n "$TOP_VIOLATIONS" ]; then
-              COMMENT_BODY+=$'\n'"<details><summary>Top violations</summary>"$'\n\n'"\`\`\`"$'\n'
-              COMMENT_BODY+="${TOP_VIOLATIONS}"$'\n'
-              COMMENT_BODY+="\`\`\`"$'\n'"</details>"$'\n'
-            fi
-
-            # PHPStan summary
-            PHPSTAN_SUMMARY=$(grep -o "PHPSTAN SUMMARY: .*" "$LOG_FILE" | head -1 || true)
-            if [ -n "$PHPSTAN_SUMMARY" ]; then
-              COMMENT_BODY+="- PHPStan: ${PHPSTAN_SUMMARY}"$'\n'
-            fi
-
-            # PHPUnit failure
-            BUILD_FAILED=$(grep -o "BUILD FAILED: .*" "$LOG_FILE" | head -1 || true)
-            if [ -n "$BUILD_FAILED" ]; then
-              COMMENT_BODY+="- ${BUILD_FAILED}"$'\n'
-            fi
-
-            # Fatal errors
-            FATAL=$(grep "PHP Fatal error:" "$LOG_FILE" | head -1 | sed 's/.*PHP Fatal error:/Fatal:/' || true)
-            if [ -n "$FATAL" ]; then
-              COMMENT_BODY+=$'\n'"<details><summary>Fatal error</summary>"$'\n\n'"\`\`\`"$'\n'
-              COMMENT_BODY+="${FATAL}"$'\n'
-              COMMENT_BODY+="\`\`\`"$'\n'"</details>"$'\n'
-            fi
-
-            # Audit summary (strict JSON parsing only; no log-grep fallback)
-            if [ "$CMD" = "audit" ]; then
-              AUDIT_MD=$(python3 "${GITHUB_ACTION_PATH}/scripts/render-audit-summary.py" "$LOG_FILE" 2>/dev/null || true)
-              if [ -n "$AUDIT_MD" ]; then
-                COMMENT_BODY+=$'\n'"### Audit summary"$'\n'
-                COMMENT_BODY+="${AUDIT_MD}"$'\n'
-              fi
-            fi
-
-            # Cargo/Rust output (for source builds)
-            CARGO_ERRORS=$(grep -c "^error\[" "$LOG_FILE" 2>/dev/null || echo "0")
-            CARGO_WARNINGS=$(grep -c "^warning\[" "$LOG_FILE" 2>/dev/null || echo "0")
-            if [ "$CARGO_ERRORS" -gt 0 ] || [ "$CARGO_WARNINGS" -gt 0 ]; then
-              COMMENT_BODY+="- Cargo: ${CARGO_ERRORS} error(s), ${CARGO_WARNINGS} warning(s)"$'\n'
-            fi
-
-            # Test summary (cargo test or phpunit)
-            CARGO_TEST_SUMMARY=$(grep -oE "test result: .*\. [0-9]+ passed" "$LOG_FILE" | tail -1 || true)
-            if [ -n "$CARGO_TEST_SUMMARY" ]; then
-              COMMENT_BODY+="- ${CARGO_TEST_SUMMARY}"$'\n'
-            fi
-          fi
-
-          COMMENT_BODY+=$'\n'
-        done
-
-        # Footer
-        COMMENT_BODY+="---"$'\n'
-        COMMENT_BODY+="*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1 — "
-        COMMENT_BODY+="$(homeboy --version 2>/dev/null || echo 'homeboy')*"
-
-        # ── Find existing comment or create new one ──
-        EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-          --jq '.[] | select(.body | startswith("<!-- homeboy-action-results -->")) | .id' \
-          2>/dev/null | head -1 || true)
-
-        if [ -n "$EXISTING_COMMENT_ID" ]; then
-          echo "Updating existing comment ${EXISTING_COMMENT_ID}..."
-          gh api "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
-            --method PATCH \
-            --field body="$COMMENT_BODY" > /dev/null
-        else
-          echo "Creating new comment..."
-          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-            --method POST \
-            --field body="$COMMENT_BODY" > /dev/null
-        fi
-
-        echo "PR comment posted successfully"
-
-    # ── Step 13: Post inline PR review comments ──
     - name: Post inline review
       if: always() && github.event_name == 'pull_request'
       shell: bash
@@ -869,87 +270,8 @@ runs:
         GH_TOKEN: ${{ github.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: |
-        set -euo pipefail
+      run: bash ${{ github.action_path }}/scripts/post-inline-review.sh
 
-        ANNOTATIONS_DIR="${HOMEBOY_ANNOTATIONS_DIR:-}"
-        REPO="${GITHUB_REPOSITORY}"
-        ACTION_DIR="${GITHUB_ACTION_PATH}"
-
-        if [ -z "$ANNOTATIONS_DIR" ] || [ -z "$PR_NUMBER" ]; then
-          echo "Skipping inline review — missing annotations dir or PR number"
-          exit 0
-        fi
-
-        # Check if any annotation files exist
-        ANNOTATION_COUNT=$(find "$ANNOTATIONS_DIR" -name "*.json" -type f 2>/dev/null | wc -l)
-        if [ "$ANNOTATION_COUNT" -eq 0 ]; then
-          echo "No annotation files found — skipping inline review"
-          exit 0
-        fi
-
-        echo "Found ${ANNOTATION_COUNT} annotation file(s):"
-        ls -la "$ANNOTATIONS_DIR"/*.json 2>/dev/null || true
-
-        # Get list of changed files from the PR
-        CHANGED_FILES_FILE=$(mktemp)
-        gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
-          --paginate --jq '.[].filename' > "$CHANGED_FILES_FILE" 2>/dev/null || true
-
-        if [ ! -s "$CHANGED_FILES_FILE" ]; then
-          echo "Could not fetch PR changed files — skipping inline review"
-          rm -f "$CHANGED_FILES_FILE"
-          exit 0
-        fi
-
-        # Find files related to the changed files (call sites, importers)
-        # Only errors in these files qualify as collateral damage
-        RELATED_FILES_FILE=$(mktemp)
-        echo "Tracing symbol references from changed files..."
-        python3 "${ACTION_DIR}/scripts/find-related-files.py" \
-          "$(pwd)" "$CHANGED_FILES_FILE" > "$RELATED_FILES_FILE" || true
-
-        RELATED_COUNT=$(wc -l < "$RELATED_FILES_FILE" | tr -d ' ')
-        echo "Found ${RELATED_COUNT} related file(s)"
-
-        # Build the review payload (pass related files for collateral scoping)
-        REVIEW_ARGS=("$ANNOTATIONS_DIR" "$CHANGED_FILES_FILE" "$PR_HEAD_SHA")
-        if [ -s "$RELATED_FILES_FILE" ]; then
-          REVIEW_ARGS+=("$RELATED_FILES_FILE")
-        fi
-
-        REVIEW_PAYLOAD=$(python3 "${ACTION_DIR}/scripts/build-review.py" \
-          "${REVIEW_ARGS[@]}" 2>/dev/null || true)
-
-        rm -f "$CHANGED_FILES_FILE" "$RELATED_FILES_FILE"
-
-        if [ -z "$REVIEW_PAYLOAD" ]; then
-          echo "No annotations to post — skipping inline review"
-          exit 0
-        fi
-
-        # Dismiss previous homeboy reviews to avoid stacking
-        EXISTING_REVIEWS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-          --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | test("Homeboy found|Collateral damage"))) | .id] | .[]' \
-          2>/dev/null || true)
-
-        for REVIEW_ID in $EXISTING_REVIEWS; do
-          echo "Dismissing previous review ${REVIEW_ID}..."
-          gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews/${REVIEW_ID}/dismissals" \
-            --method PUT \
-            --field message="Superseded by new Homeboy review" \
-            --field event="DISMISS" > /dev/null 2>&1 || true
-        done
-
-        # Post the review
-        echo "$REVIEW_PAYLOAD" | gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-          --method POST \
-          --input - > /dev/null 2>&1
-
-        COMMENT_COUNT=$(echo "$REVIEW_PAYLOAD" | jq '.comments | length' 2>/dev/null || echo "0")
-        echo "Posted inline review with ${COMMENT_COUNT} comment(s)"
-
-    # ── Step 14: Auto-file issue on non-PR failures ──
     - name: Auto-file issue on failure
       if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"')
       shell: bash
@@ -959,102 +281,4 @@ runs:
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
-      run: |
-        set -euo pipefail
-
-        REPO="${GITHUB_REPOSITORY}"
-        COMP_ID="${COMPONENT_NAME:-$(basename "$GITHUB_REPOSITORY")}"
-        OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
-        RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-
-        # Determine trigger context
-        if [ -n "$GITHUB_REF_NAME" ]; then
-          TRIGGER_CONTEXT="ref \`${GITHUB_REF_NAME}\`"
-        else
-          TRIGGER_CONTEXT="commit \`${GITHUB_SHA:0:8}\`"
-        fi
-
-        # Build list of failed commands
-        FAILED_CMDS=""
-        IFS=',' read -ra CMD_ARRAY <<< "$COMMANDS"
-        for CMD in "${CMD_ARRAY[@]}"; do
-          CMD=$(echo "$CMD" | xargs)
-          STATUS=$(echo "$RESULTS" | jq -r --arg cmd "$CMD" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
-          if [ "$STATUS" = "fail" ]; then
-            FAILED_CMDS="${FAILED_CMDS}- \`homeboy ${CMD}\`"$'\n'
-          fi
-        done
-
-        # Build issue title with deduplication key
-        ISSUE_TITLE="CI failure: homeboy ${COMP_ID} (${GITHUB_EVENT_NAME})"
-
-        # Check for existing open issue with same title to avoid duplicates
-        EXISTING_ISSUE=$(gh api "repos/${REPO}/issues" \
-          --jq "[.[] | select(.state == \"open\" and .title == \"${ISSUE_TITLE}\" and (.labels[]?.name == \"ci-failure\"))] | first | .number // empty" \
-          2>/dev/null || true)
-
-        if [ -n "$EXISTING_ISSUE" ]; then
-          echo "Found existing open issue #${EXISTING_ISSUE} — adding comment instead of creating new issue"
-
-          COMMENT="### CI failure on ${TRIGGER_CONTEXT}"$'\n\n'
-          COMMENT+="**Failed commands:**"$'\n'
-          COMMENT+="${FAILED_CMDS}"$'\n'
-          COMMENT+="**Run:** ${RUN_URL}"$'\n'
-
-          # Add log excerpts
-          for CMD in "${CMD_ARRAY[@]}"; do
-            CMD=$(echo "$CMD" | xargs)
-            STATUS=$(echo "$RESULTS" | jq -r --arg cmd "$CMD" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
-            if [ "$STATUS" = "fail" ] && [ -f "${OUTPUT_DIR}/${CMD}.log" ]; then
-              LOG_TAIL=$(tail -30 "${OUTPUT_DIR}/${CMD}.log")
-              COMMENT+=$'\n'"<details><summary>${CMD} output (last 30 lines)</summary>"$'\n\n'
-              COMMENT+="\`\`\`"$'\n'"${LOG_TAIL}"$'\n'"\`\`\`"$'\n'"</details>"$'\n'
-            fi
-          done
-
-          gh api "repos/${REPO}/issues/${EXISTING_ISSUE}/comments" \
-            --method POST \
-            --field body="$COMMENT" > /dev/null
-
-          echo "Comment added to issue #${EXISTING_ISSUE}"
-        else
-          echo "Creating new issue..."
-
-          BODY="## CI Failure Report"$'\n\n'
-          BODY+="**Component:** \`${COMP_ID}\`"$'\n'
-          BODY+="**Trigger:** \`${GITHUB_EVENT_NAME}\` on ${TRIGGER_CONTEXT}"$'\n'
-          BODY+="**Binary:** ${BINARY_SOURCE}"$'\n'
-          BODY+="**Run:** ${RUN_URL}"$'\n\n'
-          BODY+="### Failed Commands"$'\n\n'
-          BODY+="${FAILED_CMDS}"$'\n'
-
-          # Add log excerpts
-          for CMD in "${CMD_ARRAY[@]}"; do
-            CMD=$(echo "$CMD" | xargs)
-            STATUS=$(echo "$RESULTS" | jq -r --arg cmd "$CMD" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
-            if [ "$STATUS" = "fail" ] && [ -f "${OUTPUT_DIR}/${CMD}.log" ]; then
-              LOG_TAIL=$(tail -50 "${OUTPUT_DIR}/${CMD}.log")
-              BODY+="### \`homeboy ${CMD}\` output"$'\n\n'
-              BODY+="<details><summary>Last 50 lines</summary>"$'\n\n'
-              BODY+="\`\`\`"$'\n'"${LOG_TAIL}"$'\n'"\`\`\`"$'\n'"</details>"$'\n\n'
-            fi
-          done
-
-          BODY+="---"$'\n'
-          BODY+="*Filed automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action)*"
-
-          # Create the issue with ci-failure label
-          gh api "repos/${REPO}/issues" \
-            --method POST \
-            --field title="$ISSUE_TITLE" \
-            --field body="$BODY" \
-            --field "labels[]=ci-failure" > /dev/null 2>&1 || {
-            # Label might not exist — create without label
-            gh api "repos/${REPO}/issues" \
-              --method POST \
-              --field title="$ISSUE_TITLE" \
-              --field body="$BODY" > /dev/null
-          }
-
-          echo "Issue created: ${ISSUE_TITLE}"
-        fi
+      run: bash ${{ github.action_path }}/scripts/auto-file-issue.sh
