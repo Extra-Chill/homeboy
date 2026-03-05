@@ -1,4 +1,13 @@
 use homeboy::code_audit::audit_path;
+use std::path::PathBuf;
+
+fn tmp_dir(name: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("homeboy-layer-ownership-{name}-{nanos}"))
+}
 
 #[test]
 fn test_analyze_layer_ownership() {
@@ -38,4 +47,11 @@ fn test_analyze_layer_ownership() {
                 .contains("engine-owns-terminal-status")
             && f.description.contains("JobStatus::")
     }));
+}
+
+#[test]
+fn test_tmp_dir() {
+    let one = tmp_dir("a");
+    let two = tmp_dir("b");
+    assert_ne!(one, two);
 }

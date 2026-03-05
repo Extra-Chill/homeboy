@@ -32,6 +32,8 @@ pub(crate) mod test_helpers;
 
 use std::path::Path;
 
+use self::layer_ownership::run as run_layer_ownership;
+
 pub use checks::{CheckResult, CheckStatus};
 pub use conventions::{Convention, Deviation, DeviationKind, Language, Outlier};
 pub use findings::{Finding, Severity};
@@ -350,7 +352,7 @@ fn audit_internal(
     }
 
     // Phase 4h: Architecture/layer ownership rule checks (optional config)
-    let layer_findings = layer_ownership::analyze_layer_ownership(root);
+    let layer_findings = run_layer_ownership(root);
     if !layer_findings.is_empty() {
         log_status!(
             "audit",
@@ -520,7 +522,7 @@ mod tests {
         )
         .unwrap();
 
-        let findings = layer_ownership::analyze_layer_ownership(&dir);
+        let findings = layer_ownership::run(&dir);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].convention, "layer_ownership");
 

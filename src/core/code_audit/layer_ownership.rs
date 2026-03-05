@@ -37,7 +37,11 @@ pub struct LayerAllow {
     pub glob: String,
 }
 
-pub fn analyze_layer_ownership(root: &Path) -> Vec<Finding> {
+pub(super) fn run(root: &Path) -> Vec<Finding> {
+    analyze_layer_ownership(root)
+}
+
+fn analyze_layer_ownership(root: &Path) -> Vec<Finding> {
     let Some(config) = load_rules_config(root) else {
         return Vec::new();
     };
@@ -164,7 +168,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn walk_candidate_files_finds_non_extension_files() {
+    fn test_walk_candidate_files_finds_non_extension_files() {
         let dir = tempfile::tempdir().unwrap();
         let steps_dir = dir.path().join("inc/Core/Steps");
         std::fs::create_dir_all(&steps_dir).unwrap();
@@ -186,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_violation_from_audit_rules_file() {
+    fn test_detects_violation_from_audit_rules_file() {
         let dir = tempfile::tempdir().unwrap();
         let homeboy_dir = dir.path().join(".homeboy");
         let steps_dir = dir.path().join("inc/Core/Steps");
@@ -223,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn supports_homeboy_json_audit_rules() {
+    fn test_supports_homeboy_json_audit_rules() {
         let dir = tempfile::tempdir().unwrap();
         let steps_dir = dir.path().join("inc/Core/Steps");
         std::fs::create_dir_all(&steps_dir).unwrap();
@@ -257,9 +261,52 @@ mod tests {
     }
 
     #[test]
-    fn no_config_means_no_findings() {
+    fn test_no_config_means_no_findings() {
         let dir = tempfile::tempdir().unwrap();
         let findings = analyze_layer_ownership(dir.path());
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let findings = run(dir.path());
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_load_rules_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{
+              "audit_rules": {
+                "layer_rules": [
+                  {
+                    "name": "example-rule",
+                    "forbid": {
+                      "glob": "src/**/*.rs",
+                      "patterns": ["println!"]
+                    }
+                  }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let config = load_rules_config(dir.path()).expect("config should load");
+        assert_eq!(config.layer_rules.len(), 1);
+        assert_eq!(config.layer_rules[0].name, "example-rule");
+    }
+
+    #[test]
+    fn test_walk_candidate_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+
+        let files = walk_candidate_files(dir.path()).expect("walk should succeed");
+        assert!(files.iter().any(|p| p.ends_with("src/lib.rs")));
     }
 }
