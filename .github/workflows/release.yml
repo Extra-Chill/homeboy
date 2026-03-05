@@ -125,7 +125,7 @@ jobs:
         run: cargo test
 
       # Audit via homeboy-action (source build, auto-file issue on failure)
-      - uses: Extra-Chill/homeboy-action@feat/source-build
+      - uses: Extra-Chill/homeboy-action@v1.1.1
         with:
           source: '.'
           extension: rust
