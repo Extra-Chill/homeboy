@@ -4,6 +4,11 @@ All notable changes to Homeboy Action will be documented in this file.
 
 ## Unreleased
 
+## [1.1.1] - 2026-03-05
+
+### Fixed
+- make PR comment and inline review publishing best-effort for fork PR tokens (avoid failing checks on 403)
+
 ## [1.1.0] - 2026-03-05
 
 ### Added
