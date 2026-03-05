@@ -810,6 +810,17 @@ mod tests {
         assert!(out.contains("- Bug 1"));
     }
 
+    #[test]
+    fn find_next_section_matches_next_alias() {
+        let lines: Vec<&str> = "# Changelog\n\n## [Next]\n\n- Item\n\n## 0.1.0\n"
+            .lines()
+            .collect();
+        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string(), "Next".to_string(), "[Next]".to_string()];
+
+        let start = find_next_section_start(&lines, &aliases);
+        assert_eq!(start, Some(2));
+    }
+
     // === Typed Subsection Tests (--type flag) ===
 
     #[test]
