@@ -184,38 +184,55 @@ pub fn run(
         return run_multi_project(&args, project_ids);
     }
 
-    // Require at least one positional arg if no flags provided
-    let target_id = args.target_id.as_ref().ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
-            "input",
-            "Provide component ID, project ID with --all, or use flags",
-            None,
-            Some(vec![
-                "Deploy a single component: homeboy deploy <component-id>".to_string(),
-                "Deploy to a project: homeboy deploy <project-id> --all".to_string(),
-            ]),
-        )
-    })?;
-
     // Resolve project and component IDs based on flag/positional combinations
-    let (project_id, component_ids) = match (&args.project, &args.component) {
-        // Both flags provided - use them directly
-        (Some(ref proj), Some(ref comps)) => (proj.clone(), comps.clone()),
+    let (project_id, component_ids) = match (&args.project, &args.component, &args.target_id) {
+        // Both flags provided - use them directly (no positional required)
+        (Some(proj), Some(comps), _) => (proj.clone(), comps.clone()),
 
-        // Only --project flag - positionals are components
-        (Some(ref proj), None) => {
-            let mut comps = vec![target_id.clone()];
+        // Only --project flag - optional positional components
+        (Some(proj), None, target) => {
+            let mut comps = Vec::new();
+            if let Some(first) = target {
+                comps.push(first.clone());
+            }
             comps.extend(args.component_ids.clone());
+
+            if comps.is_empty() && !(args.all || args.outdated || args.check || args.json.is_some()) {
+                return Err(homeboy::Error::validation_invalid_argument(
+                    "input",
+                    "Provide component IDs with --project, or add --all/--outdated/--check",
+                    None,
+                    Some(vec![
+                        "Deploy selected components: homeboy deploy --project <project> --component <id> --component <id>".to_string(),
+                        "Deploy all project components: homeboy deploy --project <project> --all".to_string(),
+                    ]),
+                ));
+            }
+
             (proj.clone(), comps)
         }
 
-        // Only --component flag - resolve project from positional or inference
-        (None, Some(ref comps)) => {
+        // Only --component flag - optional positional project, else infer
+        (None, Some(comps), target) => {
             let projects = homeboy::project::list_ids().unwrap_or_default();
-            if projects.contains(target_id) {
-                (target_id.clone(), comps.clone())
+
+            if let Some(first) = target {
+                if projects.contains(first) {
+                    (first.clone(), comps.clone())
+                } else {
+                    match infer_project_for_components(comps) {
+                        Some(proj) => (proj, comps.clone()),
+                        None => {
+                            return Err(homeboy::Error::validation_invalid_argument(
+                                "project_id",
+                                "Could not infer project. Use --project flag or provide project as first argument.",
+                                None,
+                                None,
+                            ));
+                        }
+                    }
+                }
             } else {
-                // Try to infer project from components
                 match infer_project_for_components(comps) {
                     Some(proj) => (proj, comps.clone()),
                     None => {
@@ -224,14 +241,26 @@ pub fn run(
                             "Could not infer project. Use --project flag or provide project as first argument.",
                             None,
                             None,
-                        ))
+                        ));
                     }
                 }
             }
         }
 
-        // No flags - use shared positional detection
-        (None, None) => resolve_project_components(target_id, &args.component_ids)?,
+        // No flags - positional args required
+        (None, None, Some(target)) => resolve_project_components(target, &args.component_ids)?,
+        (None, None, None) => {
+            return Err(homeboy::Error::validation_invalid_argument(
+                "input",
+                "Provide component ID, project ID with --all, or use flags",
+                None,
+                Some(vec![
+                    "Deploy a single component: homeboy deploy <component-id>".to_string(),
+                    "Deploy to a project: homeboy deploy <project-id> --all".to_string(),
+                    "Flag style: homeboy deploy --project <project> --component <component>".to_string(),
+                ]),
+            ));
+        }
     };
 
     // Update args with resolved values
