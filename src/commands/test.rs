@@ -4,7 +4,6 @@ use serde::Serialize;
 use homeboy::component::Component;
 use homeboy::error::Error;
 use homeboy::extension::{self, ExtensionRunner};
-use homeboy::git;
 use homeboy::refactor::{self, TransformSet};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
@@ -13,6 +12,7 @@ use homeboy::test_scaffold::{self, ScaffoldConfig};
 use homeboy::utils::io;
 
 use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
+use super::test_scope::{build_phpunit_filter_regex, compute_changed_test_scope, TestScopeOutput};
 use super::CmdResult;
 
 #[derive(Args)]
@@ -133,16 +133,6 @@ pub struct AutoFixDriftOutput {
     files_modified: usize,
     written: bool,
     rerun_recommended: bool,
-}
-
-#[derive(Clone, Serialize)]
-pub struct TestScopeOutput {
-    mode: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changed_since: Option<String>,
-    selected_count: usize,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    selected_files: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -764,82 +754,6 @@ fn run_auto_fix_drift(
         },
         0,
     ))
-}
-
-fn compute_changed_test_scope(
-    component: &Component,
-    git_ref: &str,
-) -> homeboy::error::Result<TestScopeOutput> {
-    let source_path = {
-        let expanded = shellexpand::tilde(&component.local_path);
-        std::path::PathBuf::from(expanded.as_ref())
-    };
-
-    let changed_files = git::get_files_changed_since(&source_path.to_string_lossy(), git_ref)?;
-
-    let opts = if source_path.join("Cargo.toml").exists() {
-        DriftOptions::rust(&source_path, git_ref)
-    } else {
-        DriftOptions::php(&source_path, git_ref)
-    };
-
-    let report = test_drift::detect_drift(&component.id, &opts)?;
-
-    let mut selected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-
-    // Include directly changed test files
-    for file in &changed_files {
-        if is_test_path(file) {
-            selected.insert(file.clone());
-        }
-    }
-
-    // Include drift-detected impacted test files
-    for drifted in &report.drifted_tests {
-        selected.insert(drifted.test_file.clone());
-    }
-
-    let selected_files: Vec<String> = selected.into_iter().collect();
-
-    Ok(TestScopeOutput {
-        mode: "changed".to_string(),
-        changed_since: Some(git_ref.to_string()),
-        selected_count: selected_files.len(),
-        selected_files,
-    })
-}
-
-fn is_test_path(path: &str) -> bool {
-    path.contains("/tests/") || path.ends_with("Test.php") || path.ends_with("_test.rs")
-}
-
-fn build_phpunit_filter_regex(selected_files: &[String]) -> String {
-    // Build a regex that matches test class names derived from selected file basenames.
-    // Example: tests/Unit/Foo/BarBazTest.php -> BarBazTest
-    let mut classes: Vec<String> = selected_files
-        .iter()
-        .filter_map(|f| {
-            if !f.ends_with(".php") {
-                return None;
-            }
-            std::path::Path::new(f)
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-        })
-        .filter(|stem| !stem.is_empty())
-        .map(|stem| regex::escape(&stem))
-        .collect();
-
-    classes.sort();
-    classes.dedup();
-
-    if classes.is_empty() {
-        // No PHP class-based test files selected. Use a non-matching regex
-        // to avoid accidentally running the full suite.
-        return "^$".to_string();
-    }
-
-    format!("({})", classes.join("|"))
 }
 
 /// Parse the test failures JSON file written by the extension test runner.

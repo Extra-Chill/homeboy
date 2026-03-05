@@ -290,6 +290,7 @@ pub mod server;
 pub mod ssh;
 pub mod status;
 pub mod test;
+pub mod test_scope;
 pub mod transfer;
 pub mod upgrade;
 pub mod version;
