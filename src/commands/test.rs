@@ -9,11 +9,14 @@ use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
 use homeboy::test_drift::{self, DriftOptions, DriftReport};
 use homeboy::test_scaffold::{self, ScaffoldConfig};
-use homeboy::utils::io;
 
 use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::test_scope::{build_phpunit_filter_regex, compute_changed_test_scope, TestScopeOutput};
 use super::CmdResult;
+
+mod parsing;
+
+pub use parsing::CoverageOutput;
 
 #[derive(Args)]
 pub struct TestArgs {
@@ -133,22 +136,6 @@ pub struct AutoFixDriftOutput {
     files_modified: usize,
     written: bool,
     rerun_recommended: bool,
-}
-
-#[derive(Serialize)]
-pub struct CoverageOutput {
-    lines_pct: f64,
-    lines_total: u64,
-    lines_covered: u64,
-    methods_pct: f64,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    uncovered_files: Vec<UncoveredFile>,
-}
-
-#[derive(Serialize)]
-pub struct UncoveredFile {
-    file: String,
-    line_pct: f64,
 }
 
 /// Attempt to auto-detect the extension for a component based on contextual clues.
@@ -421,7 +408,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     let status = if output.success { "passed" } else { "failed" };
 
     // Read test results if available
-    let test_counts = parse_test_results_file(&results_file);
+    let test_counts = parsing::parse_test_results_file(&results_file);
 
     // Clean up test results temp file
     let _ = std::fs::remove_file(&results_file);
@@ -429,7 +416,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     // Read coverage results if available
     let coverage = coverage_file
         .as_ref()
-        .and_then(|f| parse_coverage_file(f).ok());
+        .and_then(|f| parsing::parse_coverage_file(f).ok());
 
     // Clean up coverage temp file
     if let Some(ref f) = coverage_file {
@@ -440,7 +427,7 @@ pub fn run(args: TestArgs, _global: &super::GlobalArgs) -> CmdResult<TestOutput>
     let analysis = if args.analyze {
         let analysis_input = failures_file
             .as_ref()
-            .and_then(|f| parse_failures_file(f))
+            .and_then(|f| parsing::parse_failures_file(f))
             .unwrap_or_else(|| TestAnalysisInput {
                 failures: Vec::new(),
                 total: test_counts.as_ref().map(|c| c.total).unwrap_or(0),
@@ -754,87 +741,6 @@ fn run_auto_fix_drift(
         },
         0,
     ))
-}
-
-/// Parse the test failures JSON file written by the extension test runner.
-fn parse_failures_file(path: &std::path::Path) -> Option<TestAnalysisInput> {
-    let content = io::read_file(path, "read test failures file").ok()?;
-    let mut parsed: TestAnalysisInput = serde_json::from_str(&content).ok()?;
-
-    // Backfill aggregate counters from failure list when extension output omits
-    // totals (legacy parser shape). This keeps --analyze metadata accurate.
-    if parsed.total == 0 && !parsed.failures.is_empty() {
-        let inferred_failures = parsed.failures.len() as u64;
-        parsed.total = inferred_failures;
-    }
-
-    if parsed.passed > parsed.total {
-        parsed.passed = parsed.total;
-    }
-
-    Some(parsed)
-}
-
-/// Parse the test results JSON file written by the extension test runner.
-fn parse_test_results_file(path: &std::path::Path) -> Option<TestCounts> {
-    let content = io::read_file(path, "read test results file").ok()?;
-    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    let total = data.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
-    let passed = data.get("passed").and_then(|v| v.as_u64()).unwrap_or(0);
-    let failed = data.get("failed").and_then(|v| v.as_u64()).unwrap_or(0);
-    let skipped = data.get("skipped").and_then(|v| v.as_u64()).unwrap_or(0);
-
-    Some(TestCounts::new(total, passed, failed, skipped))
-}
-
-/// Parse the coverage JSON file written by the extension test runner.
-fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<CoverageOutput, ()> {
-    let content = io::read_file(path, "read coverage file").map_err(|_| ())?;
-    let data: serde_json::Value = serde_json::from_str(&content).map_err(|_| ())?;
-
-    let totals = data.get("totals").ok_or(())?;
-    let lines = totals.get("lines").ok_or(())?;
-    let methods = totals.get("methods").ok_or(())?;
-
-    let lines_pct = lines.get("pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let lines_total = lines.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
-    let lines_covered = lines.get("covered").and_then(|v| v.as_u64()).unwrap_or(0);
-    let methods_pct = methods.get("pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
-    // Collect files below 50% coverage as "uncovered"
-    let uncovered_files = data
-        .get("files")
-        .and_then(|f| f.as_array())
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|f| {
-                    let pct = f.get("line_pct").and_then(|v| v.as_f64())?;
-                    if pct < 50.0 {
-                        Some(UncoveredFile {
-                            file: f
-                                .get("file")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?")
-                                .to_string(),
-                            line_pct: pct,
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Ok(CoverageOutput {
-        lines_pct,
-        lines_total,
-        lines_covered,
-        methods_pct,
-        uncovered_files,
-    })
 }
 
 /// Run drift detection without running tests.
@@ -1301,64 +1207,5 @@ mod tests {
         ];
         let result = filter_homeboy_flags(&args);
         assert_eq!(result, vec!["--filter=SomeTest"]);
-    }
-
-    #[test]
-    fn parse_failures_file_backfills_totals_when_missing() {
-        let tmp = std::env::temp_dir().join("homeboy-test-failures-backfill.json");
-        let _ = std::fs::remove_file(&tmp);
-
-        let payload = r#"{
-            "failures": [
-                {
-                    "test_name": "Suite::test_one",
-                    "test_file": "tests/suite_test.php",
-                    "error_type": "Error",
-                    "message": "Call to undefined method Foo::bar()"
-                },
-                {
-                    "test_name": "Suite::test_two",
-                    "test_file": "tests/suite_test.php",
-                    "error_type": "Error",
-                    "message": "Call to undefined method Foo::bar()"
-                }
-            ]
-        }"#;
-
-        std::fs::write(&tmp, payload).unwrap();
-        let parsed = parse_failures_file(&tmp).expect("should parse failures file");
-
-        assert_eq!(parsed.failures.len(), 2);
-        assert_eq!(parsed.total, 2);
-        assert_eq!(parsed.passed, 0);
-
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    #[test]
-    fn parse_failures_file_clamps_invalid_passed_count() {
-        let tmp = std::env::temp_dir().join("homeboy-test-failures-clamp.json");
-        let _ = std::fs::remove_file(&tmp);
-
-        let payload = r#"{
-            "failures": [
-                {
-                    "test_name": "Suite::test_one",
-                    "test_file": "tests/suite_test.php",
-                    "error_type": "Error",
-                    "message": "Call to undefined method Foo::bar()"
-                }
-            ],
-            "total": 3,
-            "passed": 9
-        }"#;
-
-        std::fs::write(&tmp, payload).unwrap();
-        let parsed = parse_failures_file(&tmp).expect("should parse failures file");
-
-        assert_eq!(parsed.total, 3);
-        assert_eq!(parsed.passed, 3);
-
-        let _ = std::fs::remove_file(&tmp);
     }
 }
