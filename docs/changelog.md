@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.57.0] - 2026-03-05
+
+### Added
+- detect legacy and stale comment markers (#500)
+- runner step contract and generic output parser substrate (#499)
+- add configurable layer ownership rules (#498)
+- add structured findings baseline contract (#497)
+- add capability probes and CI-focused JSON summaries (#496)
+- feat(test/docs): support path-first runs in dogfood workflows (#495)
+- add shared --fix outcome primitive (#493)
+- detect directory sprawl hotspots (#486)
+- block under-bumped version bumps by default (#481)
+- add decompose planning mode for large-file refactors (#476)
+- feat(audit fix): scaffold missing test methods as ignored TODO tests (#480)
+- feat(audit fix): scaffold missing test files from coverage findings (#479)
+
+### Changed
+- pin homeboy-action to v1.1.1 across workflows (#494)
+- cover resolve_binary_on_path lookup (#401)
+
+### Fixed
+- correct --analyze aggregate totals when parser omits counts (#484)
+
 ## [0.56.1] - 2026-03-05
 
 ### Added
