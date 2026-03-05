@@ -24,11 +24,11 @@ fi
 
 if [ "${BINARY_SOURCE}" = "fallback" ]; then
   COMMENT_BODY+="> :warning: **Source build failed** — results from fallback release binary"$'\n\n'
-elif [ "${BINARY_SOURCE}" = "source" ]; then
-  COMMENT_BODY+="> Built from source (\`$(homeboy --version 2>/dev/null || echo 'unknown')\`)"$'\n\n'
 fi
 
+HAS_DIGEST="false"
 if [ -n "${DIGEST_FILE}" ] && [ -f "${DIGEST_FILE}" ]; then
+  HAS_DIGEST="true"
   COMMENT_BODY+="$(cat "${DIGEST_FILE}")"$'\n\n'
 fi
 
@@ -55,7 +55,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
 
   COMMENT_BODY+=":${ICON}: **${CMD}**${SCOPE_NOTE}"$'\n'
 
-  if [ -f "${LOG_FILE}" ]; then
+  if [ -f "${LOG_FILE}" ] && [ "${HAS_DIGEST}" != "true" ]; then
     PHPCS_SUMMARY=$(grep -o "LINT SUMMARY: .*" "${LOG_FILE}" | head -1 || true)
     if [ -n "${PHPCS_SUMMARY}" ]; then
       FIXABLE=$(grep -o "Fixable: [0-9]*" "${LOG_FILE}" | head -1 || true)
@@ -114,8 +114,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
 done
 
 COMMENT_BODY+="---"$'\n'
-COMMENT_BODY+="*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1 — "
-COMMENT_BODY+="$(homeboy --version 2>/dev/null || echo 'homeboy')*"
+COMMENT_BODY+="*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1*"
 
 EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
   --jq '.[] | select(.body | startswith("<!-- homeboy-action-results -->")) | .id' \
