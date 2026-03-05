@@ -2,6 +2,7 @@ use crate::component::{self, Component};
 use crate::project;
 
 pub(super) const DEFAULT_NEXT_SECTION_LABEL: &str = "Unreleased";
+pub(super) const DEFAULT_NEXT_SECTION_ALIASES: &[&str] = &["Unreleased", "Next"];
 
 pub(super) const KEEP_A_CHANGELOG_SUBSECTIONS: &[&str] = &[
     "### Added",
@@ -54,34 +55,27 @@ pub fn resolve_effective_settings(component: Option<&Component>) -> EffectiveCha
         .unwrap_or_default();
 
     if next_section_aliases.is_empty() {
-        next_section_aliases.extend([
-            next_section_label.clone(),
-            format!("[{}]", next_section_label),
-        ]);
-    } else {
-        let label_alias = next_section_label.trim();
-        let bracketed_alias = format!("[{}]", label_alias);
-
-        let mut has_label = false;
-        let mut has_bracketed = false;
-
-        for alias in &next_section_aliases {
-            let trimmed_alias = alias.trim();
-            if trimmed_alias == label_alias {
-                has_label = true;
-            }
-            if trimmed_alias == bracketed_alias {
-                has_bracketed = true;
-            }
-        }
-
-        if !has_label {
-            next_section_aliases.push(next_section_label.clone());
-        }
-        if !has_bracketed {
-            next_section_aliases.push(format!("[{}]", next_section_label));
+        for alias in DEFAULT_NEXT_SECTION_ALIASES {
+            next_section_aliases.push((*alias).to_string());
         }
     }
+
+    let mut ensure_alias = |alias: &str| {
+        if !next_section_aliases
+            .iter()
+            .any(|existing| existing.trim().eq_ignore_ascii_case(alias.trim()))
+        {
+            next_section_aliases.push(alias.to_string());
+        }
+    };
+
+    for alias in DEFAULT_NEXT_SECTION_ALIASES {
+        ensure_alias(alias);
+        ensure_alias(&format!("[{}]", alias));
+    }
+
+    ensure_alias(&next_section_label);
+    ensure_alias(&format!("[{}]", next_section_label));
 
     EffectiveChangelogSettings {
         next_section_label,
@@ -126,4 +120,20 @@ pub(super) fn subsection_header_from_type(entry_type: &str) -> String {
         .unwrap_or_default()
         + &entry_type[1..];
     format!("### {}", capitalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_include_unreleased_and_next_aliases() {
+        let settings = resolve_effective_settings(None);
+        let aliases = settings.next_section_aliases;
+
+        assert!(aliases.iter().any(|a| a == "Unreleased"));
+        assert!(aliases.iter().any(|a| a == "[Unreleased]"));
+        assert!(aliases.iter().any(|a| a == "Next"));
+        assert!(aliases.iter().any(|a| a == "[Next]"));
+    }
 }
