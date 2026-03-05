@@ -811,14 +811,13 @@ runs:
               COMMENT_BODY+="\`\`\`"$'\n'"</details>"$'\n'
             fi
 
-            # Audit findings
-            AUDIT_SCORE=$(grep -o "Alignment score: .*" "$LOG_FILE" | head -1 || true)
-            if [ -n "$AUDIT_SCORE" ]; then
-              COMMENT_BODY+="- ${AUDIT_SCORE}"$'\n'
-            fi
-            AUDIT_FINDINGS=$(grep -oE "[0-9]+ findings?" "$LOG_FILE" | tail -1 || true)
-            if [ -n "$AUDIT_FINDINGS" ]; then
-              COMMENT_BODY+="- ${AUDIT_FINDINGS}"$'\n'
+            # Audit summary (strict JSON parsing only; no log-grep fallback)
+            if [ "$CMD" = "audit" ]; then
+              AUDIT_MD=$(python3 "${GITHUB_ACTION_PATH}/scripts/render-audit-summary.py" "$LOG_FILE" 2>/dev/null || true)
+              if [ -n "$AUDIT_MD" ]; then
+                COMMENT_BODY+=$'\n'"### Audit summary"$'\n'
+                COMMENT_BODY+="${AUDIT_MD}"$'\n'
+              fi
             fi
 
             # Cargo/Rust output (for source builds)
