@@ -197,7 +197,8 @@ pub fn run(
             }
             comps.extend(args.component_ids.clone());
 
-            if comps.is_empty() && !(args.all || args.outdated || args.check || args.json.is_some()) {
+            if comps.is_empty() && !(args.all || args.outdated || args.check || args.json.is_some())
+            {
                 return Err(homeboy::Error::validation_invalid_argument(
                     "input",
                     "Provide component IDs with --project, or add --all/--outdated/--check",
@@ -257,7 +258,8 @@ pub fn run(
                 Some(vec![
                     "Deploy a single component: homeboy deploy <component-id>".to_string(),
                     "Deploy to a project: homeboy deploy <project-id> --all".to_string(),
-                    "Flag style: homeboy deploy --project <project> --component <component>".to_string(),
+                    "Flag style: homeboy deploy --project <project> --component <component>"
+                        .to_string(),
                 ]),
             ));
         }
