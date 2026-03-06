@@ -184,6 +184,10 @@ function is_preceded_by_double_colon($tokens, $index) {
  * - $var === 'literal'
  * - $arr['key'] === 'literal'
  * - $arr['key']['nested'] === 'literal'
+ * - $this->property === 'literal'
+ * - $obj->prop->sub === 'literal'
+ * - $var === self::CONSTANT
+ * - $this->prop === static::CONSTANT
  *
  * @param array $tokens Token array.
  * @param int   $i      Current index (at variable token).
@@ -193,27 +197,32 @@ function is_preceded_by_double_colon($tokens, $index) {
 function try_fix_yoda($tokens, $i, $count) {
     $j = $i;
 
-    // Capture the left side expression (variable + optional array access)
+    // Capture the left side expression (variable + optional array/property access)
     $left_side = '';
     $left_side .= $tokens[$j][1]; // The variable
     $j++;
 
-    // Check for array access: $var['key'] or $var['key']['nested']
+    // Check for array access and property access chains:
+    // $var['key'], $var['key']['nested'], $this->prop, $obj->prop->sub,
+    // $arr['key']->prop, etc.
     while ($j < $count) {
-        // Skip inline whitespace between variable and bracket
-        $ws_before_bracket = '';
+        // Peek ahead for whitespace without consuming
+        $ws_start = $j;
+        $ws_before = '';
         while ($j < $count && is_inline_whitespace($tokens[$j])) {
-            $ws_before_bracket .= $tokens[$j][1];
+            $ws_before .= $tokens[$j][1];
             $j++;
         }
 
         if ($j >= $count) {
+            // Restore position — whitespace belongs to the caller
+            $j = $ws_start;
             break;
         }
 
         // Check for array access
         if ($tokens[$j] === '[') {
-            $left_side .= $ws_before_bracket;
+            $left_side .= $ws_before;
             $bracket_content = capture_bracket_content($tokens, $j, $count);
             if ($bracket_content === null) {
                 return null; // Malformed bracket
@@ -223,12 +232,46 @@ function try_fix_yoda($tokens, $i, $count) {
             continue;
         }
 
-        // Check for object operator - skip these (too complex)
+        // Check for property access (-> or ?->)
         if (is_array($tokens[$j]) && in_array($tokens[$j][0], [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR], true)) {
+            $left_side .= $ws_before;
+            $left_side .= $tokens[$j][1]; // -> or ?->
+            $j++;
+
+            // Skip whitespace after operator
+            while ($j < $count && is_inline_whitespace($tokens[$j])) {
+                $left_side .= $tokens[$j][1];
+                $j++;
+            }
+
+            if ($j >= $count) {
+                return null;
+            }
+
+            // Expect property name (T_STRING) or variable (T_VARIABLE for dynamic)
+            if (is_array($tokens[$j]) && in_array($tokens[$j][0], [T_STRING, T_VARIABLE], true)) {
+                $left_side .= $tokens[$j][1];
+                $j++;
+
+                // Skip method calls — too complex / side effects
+                $peek = $j;
+                while ($peek < $count && is_inline_whitespace($tokens[$peek])) {
+                    $peek++;
+                }
+                if ($peek < $count && $tokens[$peek] === '(') {
+                    return null;
+                }
+
+                continue;
+            }
+
+            // Unexpected token after ->
             return null;
         }
 
-        // Not array access, restore position and break
+        // Not array access or property access — restore position so caller
+        // captures the whitespace as ws_after_left
+        $j = $ws_start;
         break;
     }
 
@@ -261,11 +304,13 @@ function try_fix_yoda($tokens, $i, $count) {
         return null;
     }
 
-    // Check for simple literal on right side
-    if (!is_simple_literal($tokens[$j])) {
+    // Try to capture the right side: simple literal OR class constant
+    $right_side = try_capture_right_side($tokens, $j, $count);
+    if ($right_side === null) {
         return null;
     }
-    $literal_str = $tokens[$j][1];
+    $literal_str = $right_side['content'];
+    $j = $right_side['end_index'];
 
     // Check next token to ensure we're not in a complex expression
     $k = $j + 1;
@@ -292,6 +337,90 @@ function try_fix_yoda($tokens, $i, $count) {
         'replacement' => $replacement,
         'end_index' => $j,
     ];
+}
+
+/**
+ * Try to capture the right side of a comparison.
+ *
+ * Supports:
+ * - Simple literals: 'string', 123, true, false, null
+ * - Class constants: self::CONST, static::CONST, ClassName::CONST
+ *
+ * @param array $tokens Token array.
+ * @param int   $j      Current index.
+ * @param int   $count  Total token count.
+ * @return array|null ['content' => string, 'end_index' => int] or null.
+ */
+function try_capture_right_side($tokens, $j, $count) {
+    // Try simple literal first
+    if (is_simple_literal($tokens[$j])) {
+        return [
+            'content' => $tokens[$j][1],
+            'end_index' => $j,
+        ];
+    }
+
+    // Try class constant: self::X, static::X, parent::X, ClassName::X
+    if (is_array($tokens[$j]) && is_class_reference($tokens[$j])) {
+        $content = $tokens[$j][1];
+        $k = $j + 1;
+
+        // Expect ::
+        if ($k < $count && is_array($tokens[$k]) && $tokens[$k][0] === T_DOUBLE_COLON) {
+            $content .= $tokens[$k][1];
+            $k++;
+
+            // Expect constant name (T_STRING) — NOT a variable (self::$var is a property)
+            if ($k < $count && is_array($tokens[$k]) && $tokens[$k][0] === T_STRING) {
+                $content .= $tokens[$k][1];
+
+                // Make sure it's not followed by ( which would be a method call
+                $peek = $k + 1;
+                while ($peek < $count && is_inline_whitespace($tokens[$peek])) {
+                    $peek++;
+                }
+                if ($peek < $count && $tokens[$peek] === '(') {
+                    return null; // self::method() — not a constant
+                }
+
+                return [
+                    'content' => $content,
+                    'end_index' => $k,
+                ];
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Check if token is a class reference (self, static, parent, or a class name).
+ */
+function is_class_reference($token) {
+    if (!is_array($token)) {
+        return false;
+    }
+
+    // self, parent, static
+    if (in_array($token[0], [T_STRING, T_STATIC], true)) {
+        $lower = strtolower($token[1]);
+        if (in_array($lower, ['self', 'static', 'parent'], true)) {
+            return true;
+        }
+    }
+
+    // ClassName (T_STRING that starts with uppercase)
+    if ($token[0] === T_STRING && preg_match('/^[A-Z]/', $token[1])) {
+        return true;
+    }
+
+    // PHP 8+ fully qualified names
+    if (defined('T_NAME_FULLY_QUALIFIED') && in_array($token[0], [T_NAME_FULLY_QUALIFIED, T_NAME_QUALIFIED], true)) {
+        return true;
+    }
+
+    return false;
 }
 
 /**
