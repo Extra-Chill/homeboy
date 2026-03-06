@@ -133,6 +133,10 @@ LONELY_IF_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/lonely-if-fixer.php"
 LOOP_COUNT_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/loop-count-fixer.php"
 RESERVED_PARAM_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/reserved-param-fixer.php"
 UNUSED_PARAM_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/unused-param-fixer.php"
+SILENCED_ERROR_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/silenced-error-fixer.php"
+EMPTY_CATCH_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/empty-catch-fixer.php"
+READDIR_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/readdir-fixer.php"
+COMMENTED_CODE_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/commented-code-fixer.php"
 PHPCS_CONFIG="${EXTENSION_PATH}/phpcs.xml.dist"
 
 # Validate tools exist
@@ -233,6 +237,27 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
         # This fixer runs PHPCS internally so needs the binary and standard paths
         if [ -f "$UNUSED_PARAM_FIXER" ]; then
             php "$UNUSED_PARAM_FIXER" "$lint_target" --phpcs-binary="$PHPCS_BIN" --phpcs-standard="$PHPCS_CONFIG"
+        fi
+
+        # Run silenced error fixer (@unlink -> file_exists guard, @file -> is_readable guard)
+        if [ -f "$SILENCED_ERROR_FIXER" ]; then
+            php "$SILENCED_ERROR_FIXER" "$lint_target"
+        fi
+
+        # Run empty catch fixer (add wp_trigger_error to empty catch blocks)
+        if [ -f "$EMPTY_CATCH_FIXER" ]; then
+            php "$EMPTY_CATCH_FIXER" "$lint_target"
+        fi
+
+        # Run readdir fixer (readdir loops -> scandir + array_diff)
+        if [ -f "$READDIR_FIXER" ]; then
+            php "$READDIR_FIXER" "$lint_target"
+        fi
+
+        # Run commented code fixer (reword false-positive comments)
+        # This fixer runs PHPCS internally to find CommentedOutCode violations
+        if [ -f "$COMMENTED_CODE_FIXER" ]; then
+            php "$COMMENTED_CODE_FIXER" "$lint_target"
         fi
     done
 
