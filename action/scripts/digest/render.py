@@ -13,6 +13,39 @@ def _format_audit_finding(finding: dict[str, Any]) -> str:
     return " — ".join(parts)
 
 
+def _append_details_block(lines: list[str], summary: str, block_lines: list[str]) -> None:
+    content = [str(line) for line in block_lines if str(line) != ""]
+    if not content:
+        return
+    lines.append("")
+    lines.append(f"<details><summary>{summary}</summary>")
+    lines.append("")
+    lines.append("```text")
+    lines.extend(content)
+    lines.append("```")
+    lines.append("")
+    lines.append("</details>")
+
+
+def _summarize_test_failure(test: dict[str, Any], idx: int) -> str:
+    name = str(test.get("name", "unknown"))
+    detail = str(test.get("detail", "")).strip()
+    location = str(test.get("location", "")).strip()
+    parts = [f"{idx}. {name}"]
+    if detail:
+        parts.append(detail)
+    if location:
+        parts.append(location)
+    return " — ".join(parts)
+
+
+def _resolve_job_link(job_links: dict[str, str], run_url: str, *candidates: str) -> str:
+    for candidate in candidates:
+        if candidate in job_links:
+            return job_links[candidate]
+    return run_url
+
+
 def render_markdown(
     lint_digest: dict[str, Any],
     test_digest: dict[str, Any],
@@ -53,26 +86,41 @@ def render_markdown(
             lines.append(f"- PHPStan: {lint_digest.get('phpstan_summary')}")
         if lint_digest.get("build_failed"):
             lines.append(f"- Build failed: {lint_digest.get('build_failed')}")
+        if lint_digest.get("error_code"):
+            lines.append(f"- Error code: `{lint_digest.get('error_code')}`")
+        if lint_digest.get("error_message"):
+            lines.append(f"- Error message: {lint_digest.get('error_message')}")
+        if lint_digest.get("error_field"):
+            lines.append(f"- Error field: `{lint_digest.get('error_field')}`")
+        if lint_digest.get("error_hint"):
+            lines.append(f"- Hint: {lint_digest.get('error_hint')}")
+
         top_violations = lint_digest.get("top_violations", []) or []
         if top_violations:
-            lines.append("")
-            lines.append("<details><summary>Top lint violations</summary>")
-            lines.append("")
-            lines.append("```text")
-            for violation in top_violations[:10]:
-                lines.append(str(violation))
-            lines.append("```")
-            lines.append("")
-            lines.append("</details>")
+            _append_details_block(lines, "Top lint violations", [str(v) for v in top_violations[:10]])
+
+        raw_excerpt = [str(line) for line in (lint_digest.get("raw_excerpt", []) or [])]
+        if raw_excerpt:
+            _append_details_block(lines, "Lint failure details", raw_excerpt)
+
         if (
             not lint_digest.get("lint_summary")
             and not lint_digest.get("phpcs_summary")
             and not lint_digest.get("phpstan_summary")
             and not lint_digest.get("build_failed")
+            and not lint_digest.get("error_code")
+            and not lint_digest.get("error_message")
             and not top_violations
+            and not raw_excerpt
         ):
             lines.append("- No structured lint details parsed from lint log.")
-        build_job_url = job_links.get("Homeboy Build (Lint & Test)", run_url)
+        build_job_url = _resolve_job_link(
+            job_links,
+            run_url,
+            "Lint",
+            "Homeboy Lint",
+            "Homeboy Build (Lint & Test)",
+        )
         lines.append(f"- Full lint log: {build_job_url}")
         lines.append("")
 
@@ -81,20 +129,25 @@ def render_markdown(
         lines.append(f"- Failed tests: **{test_digest.get('failed_tests_count', 0)}**")
         top_tests = test_digest.get("top_failed_tests", []) or []
         if top_tests:
-            lines.append("- Top failed tests:")
-            for idx, test in enumerate(top_tests[:5], start=1):
-                name = test.get("name", "unknown")
-                detail = test.get("detail", "")
-                location = test.get("location", "")
-                parts = [f"{idx}. **{name}**"]
-                if detail:
-                    parts.append(detail)
-                if location:
-                    parts.append(f"`{location}`")
-                lines.append("  " + " — ".join(parts))
+            _append_details_block(
+                lines,
+                f"Failed test details ({min(len(top_tests), 10)} shown)",
+                [_summarize_test_failure(test, idx) for idx, test in enumerate(top_tests[:10], start=1)],
+            )
         else:
             lines.append("- No per-test failure details parsed from test log.")
-        test_job_url = job_links.get("Homeboy Build (Lint & Test)", run_url)
+
+        raw_excerpt = [str(line) for line in (test_digest.get("raw_excerpt", []) or [])]
+        if raw_excerpt:
+            _append_details_block(lines, "Raw test failure excerpt", raw_excerpt)
+
+        test_job_url = _resolve_job_link(
+            job_links,
+            run_url,
+            "Test",
+            "Homeboy Test",
+            "Homeboy Build (Lint & Test)",
+        )
         lines.append(f"- Full test log: {test_job_url}")
         lines.append("")
 
@@ -136,28 +189,26 @@ def render_markdown(
             for idx, finding in enumerate(top_findings[:5], start=1):
                 lines.append(f"  {idx}. {_format_audit_finding(finding)}")
 
-            lines.append("")
-            lines.append(
-                f"<details><summary>All parsed audit findings ({len(top_findings)})</summary>"
-            )
-            lines.append("")
             max_full_findings = 300
-            full_findings = top_findings
-            if len(full_findings) > max_full_findings:
-                full_findings = full_findings[:max_full_findings]
-            for idx, finding in enumerate(full_findings, start=1):
-                lines.append(f"{idx}. {_format_audit_finding(finding)}")
+            full_findings = top_findings[:max_full_findings]
+            detail_lines = [
+                f"{idx}. {_format_audit_finding(finding)}"
+                for idx, finding in enumerate(full_findings, start=1)
+            ]
             if len(top_findings) > max_full_findings:
-                lines.append("")
-                lines.append(
-                    f"_Truncated to {max_full_findings} findings to avoid oversized PR comments "
-                    f"({len(top_findings)} total parsed)._"
+                detail_lines.append("")
+                detail_lines.append(
+                    f"_Truncated to {max_full_findings} findings to avoid oversized PR comments ({len(top_findings)} total parsed)._"
                 )
-            lines.append("")
-            lines.append("</details>")
+            _append_details_block(lines, f"All parsed audit findings ({len(top_findings)})", detail_lines)
         else:
             lines.append("- No structured audit findings parsed from audit log.")
-        audit_job_url = job_links.get("Homeboy Audit", run_url)
+
+        raw_excerpt = [str(line) for line in (audit_digest.get("raw_excerpt", []) or [])]
+        if raw_excerpt:
+            _append_details_block(lines, "Raw audit failure excerpt", raw_excerpt)
+
+        audit_job_url = _resolve_job_link(job_links, run_url, "Homeboy Audit", "Audit")
         lines.append(f"- Full audit log: {audit_job_url}")
         lines.append("")
 
