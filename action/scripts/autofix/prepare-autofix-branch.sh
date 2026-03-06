@@ -60,15 +60,7 @@ git checkout -b "${AUTOFIX_BRANCH}"
 echo "Applying non-PR autofixes..."
 for FIX_CMD in "${FIX_ARRAY[@]}"; do
   FIX_CMD=$(echo "${FIX_CMD}" | xargs)
-  BASE_CMD="homeboy ${FIX_CMD} ${COMP_ID} --path ${WORKSPACE}"
-
-  if [ "${FIX_CMD}" = "audit --fix --write" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-    BASE_CMD="homeboy audit ${COMP_ID} --path ${WORKSPACE} --fix --write --changed-since ${HOMEBOY_CHANGED_SINCE}"
-  fi
-
-  if [ -n "${EXTRA_ARGS:-}" ]; then
-    BASE_CMD="${BASE_CMD} ${EXTRA_ARGS}"
-  fi
+  BASE_CMD="$(build_autofix_command "${FIX_CMD}" "${COMP_ID}" "${WORKSPACE}")"
 
   echo "Running autofix: ${BASE_CMD}"
   set +e

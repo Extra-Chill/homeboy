@@ -38,3 +38,60 @@ has_lint_command() {
 
   printf '%s\n' "false"
 }
+
+build_run_command() {
+  local cmd="$1"
+  local component_id="$2"
+  local workspace="$3"
+  local full_cmd="homeboy ${cmd} ${component_id} --path ${workspace}"
+
+  case "${cmd}" in
+    audit)
+      if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+        full_cmd="${full_cmd} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+      fi
+      ;;
+    lint)
+      if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+        full_cmd="${full_cmd} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+      fi
+      ;;
+    test)
+      if [ "${TEST_SCOPE:-full}" = "changed" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+        full_cmd="${full_cmd} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+      fi
+      ;;
+  esac
+
+  if [ -n "${EXTRA_ARGS:-}" ]; then
+    full_cmd="${full_cmd} ${EXTRA_ARGS}"
+  fi
+
+  printf '%s\n' "${full_cmd}"
+}
+
+build_autofix_command() {
+  local fix_cmd="$1"
+  local component_id="$2"
+  local workspace="$3"
+  local full_cmd="homeboy ${fix_cmd} ${component_id} --path ${workspace}"
+
+  case "${fix_cmd}" in
+    lint*)
+      if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+        full_cmd="${full_cmd} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+      fi
+      ;;
+    audit*)
+      if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+        full_cmd="${full_cmd} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+      fi
+      ;;
+  esac
+
+  if [ -n "${EXTRA_ARGS:-}" ]; then
+    full_cmd="${full_cmd} ${EXTRA_ARGS}"
+  fi
+
+  printf '%s\n' "${full_cmd}"
+}

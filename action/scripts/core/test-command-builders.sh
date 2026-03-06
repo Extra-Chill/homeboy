@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
+
+assert_equals() {
+  local expected="$1"
+  local actual="$2"
+  local label="$3"
+
+  if [ "${expected}" != "${actual}" ]; then
+    printf 'FAIL: %s\nexpected: %s\nactual:   %s\n' "${label}" "${expected}" "${actual}"
+    exit 1
+  fi
+
+  printf 'PASS: %s\n' "${label}"
+}
+
+WORKSPACE="/tmp/workspace"
+COMPONENT="data-machine"
+
+unset HOMEBOY_CHANGED_SINCE TEST_SCOPE EXTRA_ARGS || true
+assert_equals \
+  "homeboy lint data-machine --path /tmp/workspace" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
+  "lint includes workspace path"
+
+HOMEBOY_CHANGED_SINCE="origin/main"
+assert_equals \
+  "homeboy lint data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
+  "lint keeps path with changed-since"
+
+TEST_SCOPE="changed"
+assert_equals \
+  "homeboy test data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "test" "${COMPONENT}" "${WORKSPACE}")" \
+  "test keeps path with changed scope"
+
+assert_equals \
+  "homeboy audit data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
+  "audit keeps path with changed-since"
+
+EXTRA_ARGS="--format json"
+assert_equals \
+  "homeboy audit data-machine --path /tmp/workspace --changed-since origin/main --format json" \
+  "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
+  "run command appends extra args"
+
+assert_equals \
+  "homeboy lint --fix data-machine --path /tmp/workspace --changed-since origin/main --format json" \
+  "$(build_autofix_command "lint --fix" "${COMPONENT}" "${WORKSPACE}")" \
+  "autofix lint keeps path and changed-since"
+
+assert_equals \
+  "homeboy audit --fix --write data-machine --path /tmp/workspace --changed-since origin/main --format json" \
+  "$(build_autofix_command "audit --fix --write" "${COMPONENT}" "${WORKSPACE}")" \
+  "autofix audit keeps path and changed-since"
+
+unset HOMEBOY_CHANGED_SINCE TEST_SCOPE EXTRA_ARGS || true
+assert_equals \
+  "homeboy test --fix data-machine --path /tmp/workspace" \
+  "$(build_autofix_command "test --fix" "${COMPONENT}" "${WORKSPACE}")" \
+  "autofix test keeps workspace path"
+
+printf 'All command builder checks passed.\n'
