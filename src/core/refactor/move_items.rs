@@ -40,6 +40,21 @@ pub struct MoveResult {
     pub warnings: Vec<String>,
 }
 
+/// Behavioral options for move operations.
+#[derive(Debug, Clone, Copy)]
+pub struct MoveOptions {
+    /// Whether related test functions should be moved alongside requested items.
+    pub move_related_tests: bool,
+}
+
+impl Default for MoveOptions {
+    fn default() -> Self {
+        Self {
+            move_related_tests: true,
+        }
+    }
+}
+
 /// A single item that was moved.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MovedItem {
@@ -208,8 +223,24 @@ pub fn move_items(
     root: &Path,
     write: bool,
 ) -> Result<MoveResult> {
+    move_items_with_options(item_names, from, to, root, write, MoveOptions::default())
+}
+
+/// Plan and optionally execute a move of named items with custom behavior.
+pub fn move_items_with_options(
+    item_names: &[&str],
+    from: &str,
+    to: &str,
+    root: &Path,
+    write: bool,
+    options: MoveOptions,
+) -> Result<MoveResult> {
     let from_path = root.join(from);
     let to_path = root.join(to);
+    let is_include_fragment = to_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext == "inc");
 
     if !from_path.is_file() {
         return Err(crate::Error::validation_invalid_argument(
@@ -286,18 +317,22 @@ pub fn move_items(
     }
 
     // ── Phase 2: Find related tests ─────────────────────────────────────
-    let related_tests: Vec<ParsedItem> = if let Some(ref ext) = ext {
-        ext_find_related_tests(ext, item_names, &content, from)
-            .map(|rt| {
-                for name in &rt.ambiguous {
-                    warnings.push(format!(
-                        "Test '{}' references both moved and unmoved items — skipped",
-                        name
-                    ));
-                }
-                rt.tests
-            })
-            .unwrap_or_default()
+    let related_tests: Vec<ParsedItem> = if options.move_related_tests {
+        if let Some(ref ext) = ext {
+            ext_find_related_tests(ext, item_names, &content, from)
+                .map(|rt| {
+                    for name in &rt.ambiguous {
+                        warnings.push(format!(
+                            "Test '{}' references both moved and unmoved items — skipped",
+                            name
+                        ));
+                    }
+                    rt.tests
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        }
     } else {
         Vec::new()
     };
@@ -326,7 +361,9 @@ pub fn move_items(
     };
 
     // ── Phase 4: Resolve imports for destination ────────────────────────
-    let dest_imports: Vec<String> = if let Some(ref ext) = ext {
+    let dest_imports: Vec<String> = if is_include_fragment {
+        Vec::new()
+    } else if let Some(ref ext) = ext {
         let items_for_resolve: Vec<ParsedItem> = found_items.iter().map(|i| (*i).clone()).collect();
         ext_resolve_imports(ext, &items_for_resolve, &content, from, to)
             .map(|ri| {
@@ -350,28 +387,31 @@ pub fn move_items(
 
     let mut dest_additions = String::new();
     if !dest_exists {
-        // New file — add module doc comment and imports
-        let module_name = to_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("module");
-        let from_basename = Path::new(from)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(from);
-        dest_additions.push_str(&format!(
-            "//! {} — extracted from {}.\n\n",
-            module_name, from_basename
-        ));
+        if !is_include_fragment {
+            // New file — add module doc comment and imports
+            let module_name = to_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("module");
+            let from_basename = Path::new(from)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(from);
+            dest_additions.push_str(&format!(
+                "//! {} — extracted from {}.\n\n",
+                module_name, from_basename
+            ));
 
-        // Add resolved imports
-        for imp in &dest_imports {
-            dest_additions.push_str(imp);
-            if !imp.ends_with('\n') {
+            // Add resolved imports
+            for imp in &dest_imports {
+                dest_additions.push_str(imp);
+                if !imp.ends_with('\n') {
+                    dest_additions.push('\n');
+                }
+            }
+            if !dest_imports.is_empty() {
                 dest_additions.push('\n');
             }
-        }
-        if !dest_imports.is_empty() {
             dest_additions.push('\n');
         }
     } else {

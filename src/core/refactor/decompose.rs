@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::extension::{self, ParsedItem};
 use crate::Result;
 
+use super::move_items::MoveOptions;
 use super::MoveResult;
 
 #[derive(Debug, Clone, Serialize)]
@@ -163,12 +164,15 @@ fn run_moves(plan: &DecomposePlan, root: &Path, write: bool) -> Result<Vec<MoveR
             })
             .collect();
 
-        let result = super::move_items::move_items(
+        let result = super::move_items::move_items_with_options(
             &deduped_item_names,
             &plan.file,
             &group.suggested_target,
             root,
             write,
+            MoveOptions {
+                move_related_tests: false,
+            },
         )?;
         results.push(result);
     }
