@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::changelog;
 use crate::component::{self, Component};
+use crate::core::lint_baseline;
 use crate::core::local_files::FileSystem;
 use crate::engine::pipeline::{self, PipelineStep};
 use crate::error::{Error, ErrorCode, Result};
@@ -120,7 +121,10 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     let semver_recommendation = build_semver_recommendation(&component, &options.bump_type)?;
 
     // === Stage 1: Independent validations ===
-    v.capture(validate_commits_vs_changelog(&component), "commits");
+    v.capture(
+        validate_commits_vs_changelog(&component, options.dry_run),
+        "commits",
+    );
     v.capture(
         validate_bump_guardrail(semver_recommendation.as_ref(), options.allow_underbump),
         "semver_bump",
@@ -176,9 +180,10 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
                         "hint": "Commit changes or stash before release"
                     })),
                 );
-            } else if uncommitted.has_changes {
+            } else if uncommitted.has_changes && !options.dry_run {
                 // Only changelog/version files are uncommitted — auto-stage them
-                // so the release commit includes them (e.g., after `homeboy changelog add`)
+                // so the release commit includes them (e.g., after `homeboy changelog add`).
+                // Skip in dry-run mode to avoid mutating working tree.
                 log_status!(
                     "release",
                     "Auto-staging changelog/version files for release commit"
@@ -476,16 +481,69 @@ fn validate_code_quality(component: &Component) -> Result<()> {
     // Run lint if extension provides it
     if let Some(lint_script) = manifest.lint_script() {
         log_status!("release", "Running lint ({})...", extension_id);
-        match ExtensionRunner::new(&component.id, lint_script).run() {
-            Ok(output) if output.success => {
-                log_status!("release", "Lint passed");
-                checks_run += 1;
-            }
+
+        // Create a temporary findings file so we can compare against baseline
+        let lint_findings_file = std::env::temp_dir().join(format!(
+            "homeboy-release-lint-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+
+        match ExtensionRunner::new(&component.id, lint_script)
+            .env(
+                "HOMEBOY_LINT_FINDINGS_FILE",
+                &lint_findings_file.to_string_lossy(),
+            )
+            .run()
+        {
             Ok(output) => {
                 checks_run += 1;
-                failures.push(format!("Lint failed (exit code {})", output.exit_code));
+
+                // Check baseline before declaring pass/fail
+                let lint_passed = if output.success {
+                    true
+                } else {
+                    // Lint failed — but check if baseline says drift didn't increase
+                    let source_path = std::path::Path::new(&component.local_path);
+                    let findings =
+                        lint_baseline::parse_findings_file(&lint_findings_file).unwrap_or_default();
+                    let _ = std::fs::remove_file(&lint_findings_file);
+
+                    if let Some(baseline) = lint_baseline::load_baseline(source_path) {
+                        let comparison = lint_baseline::compare(&findings, &baseline);
+                        if comparison.drift_increased {
+                            log_status!(
+                                "release",
+                                "Lint baseline drift increased: {} new finding(s)",
+                                comparison.new_items.len()
+                            );
+                            false
+                        } else {
+                            log_status!(
+                                "release",
+                                "Lint has known findings but no new drift (baseline honored)"
+                            );
+                            true
+                        }
+                    } else {
+                        // No baseline — raw exit code is authoritative
+                        false
+                    }
+                };
+
+                // Clean up findings file if not already removed
+                let _ = std::fs::remove_file(&lint_findings_file);
+
+                if lint_passed {
+                    log_status!("release", "Lint passed");
+                } else {
+                    failures.push(format!("Lint failed (exit code {})", output.exit_code));
+                }
             }
             Err(e) => {
+                let _ = std::fs::remove_file(&lint_findings_file);
                 failures.push(format!("Lint error: {}", e));
             }
         }
@@ -535,7 +593,8 @@ fn validate_code_quality(component: &Component) -> Result<()> {
 
 /// Validate that commits since the last tag have corresponding changelog entries.
 /// Returns Ok(()) if validation passes, or Err if commits exist without entries.
-fn validate_commits_vs_changelog(component: &Component) -> Result<()> {
+/// When `dry_run` is true, reports what would be generated without writing to disk.
+fn validate_commits_vs_changelog(component: &Component, dry_run: bool) -> Result<()> {
     // Get latest tag
     let latest_tag = git::get_latest_tag(&component.local_path)?;
 
@@ -575,6 +634,22 @@ fn validate_commits_vs_changelog(component: &Component) -> Result<()> {
                 return Ok(());
             }
         }
+    }
+
+    // In dry-run mode, report what would be generated without writing to disk.
+    if dry_run {
+        let count = missing_commits
+            .iter()
+            .filter(|c| c.category.to_changelog_entry_type().is_some())
+            .count();
+        if count > 0 {
+            log_status!(
+                "release",
+                "Would auto-generate {} changelog entries from commits (dry run)",
+                count
+            );
+        }
+        return Ok(());
     }
 
     // Auto-generate changelog entries only for uncovered commits.
