@@ -23,33 +23,19 @@ HAS_LINT_COMMAND="$(has_lint_command "${COMMANDS}")"
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD=$(echo "${CMD}" | xargs)
 
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  Running: homeboy ${CMD} ${COMP_ID}"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo ""
-
   if [ "${CMD}" = "test" ] && [ "${HAS_LINT_COMMAND}" = "true" ]; then
     export HOMEBOY_SKIP_LINT=1
   else
     unset HOMEBOY_SKIP_LINT 2>/dev/null || true
   fi
 
-  if [ "${CMD}" = "audit" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-    FULL_CMD="homeboy audit ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-  elif [ "${CMD}" = "audit" ]; then
-    FULL_CMD="homeboy audit ${COMP_ID} --path ${WORKSPACE}"
-  elif [ "${CMD}" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-    FULL_CMD="homeboy lint ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-  elif [ "${CMD}" = "test" ] && [ "${TEST_SCOPE:-full}" = "changed" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-    FULL_CMD="homeboy test ${COMP_ID} --path ${WORKSPACE} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-  else
-    FULL_CMD="homeboy ${CMD} ${COMP_ID} --path ${WORKSPACE}"
-  fi
+  FULL_CMD="$(build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}")"
 
-  if [ -n "${EXTRA_ARGS:-}" ]; then
-    FULL_CMD="${FULL_CMD} ${EXTRA_ARGS}"
-  fi
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  Running: ${FULL_CMD}"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
 
   echo "::group::${GROUP_PREFIX} ${CMD}"
   CMD_EXIT=0
