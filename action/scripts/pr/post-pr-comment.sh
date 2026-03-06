@@ -297,6 +297,11 @@ else
   POSTED_COMMENT_ID=$(printf '%s' "${CREATE_RESPONSE}" | jq -r '.id // empty')
 fi
 
+if [ -n "${POSTED_COMMENT_ID:-}" ]; then
+  echo "HOMEBOY_PR_COMMENT_POSTED=true" >> "${GITHUB_ENV}"
+  echo "HOMEBOY_PR_COMMENT_ID=${POSTED_COMMENT_ID}" >> "${GITHUB_ENV}"
+fi
+
 printf '%s' "${MERGE_RESULT}" | jq -r '.delete_ids[]?' | while IFS= read -r comment_id; do
   if [ -n "${comment_id}" ]; then
     echo "Deleting superseded comment ${comment_id}..."

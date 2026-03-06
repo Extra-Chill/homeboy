@@ -11,7 +11,28 @@ if [ -z "${ANNOTATIONS_DIR}" ] || [ -z "${PR_NUMBER}" ]; then
   exit 0
 fi
 
+dismiss_existing_bot_reviews() {
+  local existing_reviews
+  existing_reviews=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+    --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | test("Homeboy found|Collateral damage|Homeboy Failure Digest"))) | .id] | .[]' \
+    2>/dev/null || true)
+
+  for review_id in ${existing_reviews}; do
+    echo "Dismissing previous review ${review_id}..."
+    gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews/${review_id}/dismissals" \
+      --method PUT \
+      --field message="Superseded by shared Homeboy PR comment" \
+      --field event="DISMISS" > /dev/null 2>&1 || true
+  done
+}
+
 post_digest_review_fallback() {
+  if [ "${HOMEBOY_PR_COMMENT_POSTED:-false}" = "true" ]; then
+    echo "Shared PR comment already posted; skipping digest fallback review"
+    dismiss_existing_bot_reviews
+    return 0
+  fi
+
   local digest_file="${HOMEBOY_FAILURE_DIGEST_FILE:-}"
   if [ -z "${digest_file}" ] || [ ! -f "${digest_file}" ]; then
     echo "No failure digest available for inline review fallback"
@@ -41,6 +62,8 @@ PY
     echo "Failure digest fallback produced empty review body"
     return 0
   fi
+
+  dismiss_existing_bot_reviews
 
   if ! gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
     --method POST \
@@ -96,17 +119,7 @@ if [ -z "${REVIEW_PAYLOAD}" ]; then
   exit 0
 fi
 
-EXISTING_REVIEWS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-  --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | test("Homeboy found|Collateral damage|Homeboy Failure Digest"))) | .id] | .[]' \
-  2>/dev/null || true)
-
-for REVIEW_ID in ${EXISTING_REVIEWS}; do
-  echo "Dismissing previous review ${REVIEW_ID}..."
-  gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews/${REVIEW_ID}/dismissals" \
-    --method PUT \
-    --field message="Superseded by new Homeboy review" \
-    --field event="DISMISS" > /dev/null 2>&1 || true
-done
+dismiss_existing_bot_reviews
 
 if ! echo "${REVIEW_PAYLOAD}" | gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
   --method POST \
