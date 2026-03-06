@@ -9,5 +9,10 @@
       "file": "VERSION",
       "pattern": "(?m)^([0-9]+\\.[0-9]+\\.[0-9]+)$"
     }
-  ]
+  ],
+  "hooks": {
+    "post:release": [
+      "current_branch=$(git rev-parse --abbrev-ref HEAD) && [ \"$current_branch\" = \"main\" ] && gh api repos/Extra-Chill/homeboy-action/git/refs/tags/v1 --method PATCH -f sha=$(git rev-parse HEAD) -F force=true || { echo \"Skipping v1 tag update (branch: $current_branch)\"; }"
+    ]
+  }
 }
