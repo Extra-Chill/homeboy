@@ -1,5 +1,6 @@
 {
   "auto_cleanup": false,
+  "id": "homeboy",
   "baselines": {
     "audit": {
       "context_id": "homeboy",
