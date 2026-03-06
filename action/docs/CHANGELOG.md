@@ -2,7 +2,7 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
-## Unreleased
+## [1.2.0] - 2026-03-06
 
 ### Added
 - aggregate split CI job comments into shared PR comment with section keys
