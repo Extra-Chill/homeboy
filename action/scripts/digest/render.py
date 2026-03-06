@@ -3,6 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 
+def _format_audit_finding(finding: dict[str, Any]) -> str:
+    file_value = str(finding.get("file", "unknown"))
+    rule_value = str(finding.get("rule", "unknown"))
+    message_value = str(finding.get("message", ""))
+    parts = [f"**{file_value}**", rule_value]
+    if message_value:
+        parts.append(message_value)
+    return " — ".join(parts)
+
+
 def render_markdown(
     lint_digest: dict[str, Any],
     test_digest: dict[str, Any],
@@ -90,6 +100,9 @@ def render_markdown(
 
     if "audit" in results:
         lines.append("### Audit Failure Digest")
+        alignment_score = audit_digest.get("alignment_score")
+        if isinstance(alignment_score, (int, float)):
+            lines.append(f"- Alignment score: **{alignment_score:.3f}**")
         severity_counts = audit_digest.get("severity_counts", {}) or {}
         if severity_counts:
             sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(severity_counts.items()))
@@ -102,15 +115,26 @@ def render_markdown(
             lines.append(f"- Parsed outlier entries: **{parsed_outliers}**")
         lines.append(f"- Drift increased: **{'yes' if audit_digest.get('drift_increased') else 'no'}**")
 
+        new_findings = audit_digest.get("new_findings", []) or []
+        new_findings_count = audit_digest.get("new_findings_count", 0)
+        if isinstance(new_findings_count, int) and new_findings_count > 0:
+            lines.append(f"- New findings since baseline: **{new_findings_count}**")
+            for idx, finding in enumerate(new_findings[:5], start=1):
+                context = str(finding.get("context", "unknown"))
+                message = str(finding.get("message", ""))
+                fingerprint = str(finding.get("fingerprint", ""))
+                line = f"  {idx}. **{context}**"
+                if message:
+                    line += f" — {message}"
+                if fingerprint:
+                    line += f" (`{fingerprint}`)"
+                lines.append(line)
+
         top_findings = audit_digest.get("top_findings", []) or []
         if top_findings:
             lines.append("- Top actionable findings:")
             for idx, finding in enumerate(top_findings[:5], start=1):
-                line = (
-                    f"  {idx}. **{finding.get('file','unknown')}** — "
-                    f"{finding.get('rule','unknown')} — {finding.get('message','')}"
-                )
-                lines.append(line)
+                lines.append(f"  {idx}. {_format_audit_finding(finding)}")
 
             lines.append("")
             lines.append(
@@ -122,11 +146,7 @@ def render_markdown(
             if len(full_findings) > max_full_findings:
                 full_findings = full_findings[:max_full_findings]
             for idx, finding in enumerate(full_findings, start=1):
-                line = (
-                    f"{idx}. **{finding.get('file','unknown')}** — "
-                    f"{finding.get('rule','unknown')} — {finding.get('message','')}"
-                )
-                lines.append(line)
+                lines.append(f"{idx}. {_format_audit_finding(finding)}")
             if len(top_findings) > max_full_findings:
                 lines.append("")
                 lines.append(
@@ -164,7 +184,13 @@ def render_markdown(
         for cmd in human:
             lines.append(f"  - `{cmd}`")
     if not fixable and not human:
-        lines.append("- No failed commands to classify.")
+        failed_commands = autofixability.get("failed_commands", []) or []
+        if failed_commands:
+            lines.append("- Failed commands:")
+            for cmd in failed_commands:
+                lines.append(f"  - `{cmd}`")
+        else:
+            lines.append("- No failed commands to classify.")
 
     if potential_fixable_failed:
         lines.append("- Potentially auto-fixable failed commands (if autofix enabled):")

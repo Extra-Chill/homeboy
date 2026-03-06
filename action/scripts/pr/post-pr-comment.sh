@@ -2,6 +2,68 @@
 
 set -euo pipefail
 
+render_audit_summary_from_log() {
+  local log_file="$1"
+  python3 "${GITHUB_ACTION_PATH}/scripts/digest/render-audit-summary.py" "${log_file}" 2>/dev/null || true
+}
+
+render_audit_summary_from_json() {
+  local json_file="$1"
+  python3 - "$json_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit(0)
+
+data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+
+alignment_score = data.get("alignment_score")
+if isinstance(alignment_score, (int, float)):
+    print(f"- Alignment score: **{alignment_score:.3f}**")
+
+severity_counts = data.get("severity_counts") or {}
+if severity_counts:
+    sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(severity_counts.items()))
+    print(f"- Severity counts: **{sev_text}**")
+
+print(f"- Drift increased: **{'yes' if data.get('drift_increased') else 'no'}**")
+
+outliers_found = data.get("outliers_found")
+if isinstance(outliers_found, int):
+    print(f"- Outliers in current run: **{outliers_found}**")
+
+new_findings_count = data.get("new_findings_count")
+new_findings = data.get("new_findings") or []
+if isinstance(new_findings_count, int) and new_findings_count > 0:
+    print(f"- New findings since baseline: **{new_findings_count}**")
+    for idx, item in enumerate(new_findings[:5], start=1):
+        context = str(item.get("context", "unknown"))
+        message = str(item.get("message", ""))
+        fingerprint = str(item.get("fingerprint", ""))
+        line = f"  {idx}. **{context}**"
+        if message:
+            line += f" — {message}"
+        if fingerprint:
+            line += f" (`{fingerprint}`)"
+        print(line)
+
+top_findings = data.get("top_findings") or []
+if top_findings:
+    print("- Top actionable findings:")
+    for idx, item in enumerate(top_findings[:5], start=1):
+        file_value = str(item.get("file", "unknown"))
+        rule_value = str(item.get("rule", "unknown"))
+        message = str(item.get("message", ""))
+        line = f"  {idx}. **{file_value}** — {rule_value}"
+        if message:
+            line += f" — {message}"
+        print(line)
+PY
+}
+
 OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
 REPO="${GITHUB_REPOSITORY}"
 COMP_ID="${COMPONENT_NAME:-$(basename "${GITHUB_REPOSITORY}")}"
@@ -38,6 +100,8 @@ else
   COMMENT_BODY+="- Action: \`${HOMEBOY_ACTION_REPOSITORY:-unknown}@${HOMEBOY_ACTION_REF:-unknown}\`"$'\n\n'
 fi
 
+AUDIT_SUMMARY_JSON="${OUTPUT_DIR}/homeboy-audit-summary.json"
+
 if [ "${TEST_SCOPE_EFFECTIVE:-}" = "full" ] && [ "${HOMEBOY_CHANGED_SINCE:-}" != "" ]; then
   COMMENT_BODY+="> :information_source: PR test scope resolved to **full** for compatibility with installed Homeboy CLI"$'\n\n'
 elif [ "${TEST_SCOPE_EFFECTIVE:-}" = "changed" ]; then
@@ -66,6 +130,17 @@ for CMD in "${CMD_ARRAY[@]}"; do
   fi
 
   COMMENT_BODY+=":${ICON}: **${CMD}**${SCOPE_NOTE}"$'\n'
+
+  if [ "${CMD}" = "audit" ] && [ -f "${AUDIT_SUMMARY_JSON}" ]; then
+    COMMENT_BODY+="- Actionable audit summary:"$'\n'
+    COMMENT_BODY+="$(render_audit_summary_from_json "${AUDIT_SUMMARY_JSON}")"$'\n'
+  elif [ "${CMD}" = "audit" ] && [ -f "${LOG_FILE}" ]; then
+    AUDIT_MD="$(render_audit_summary_from_log "${LOG_FILE}")"
+    if [ -n "${AUDIT_MD}" ]; then
+      COMMENT_BODY+="- Actionable audit summary:"$'\n'
+      COMMENT_BODY+="${AUDIT_MD}"$'\n'
+    fi
+  fi
 
   if [ -f "${LOG_FILE}" ] && [ "${HAS_DIGEST}" != "true" ]; then
     PHPCS_SUMMARY=$(grep -o "LINT SUMMARY: .*" "${LOG_FILE}" | head -1 || true)
@@ -100,14 +175,6 @@ for CMD in "${CMD_ARRAY[@]}"; do
       COMMENT_BODY+=$'\n'"<details><summary>Fatal error</summary>"$'\n\n'"\`\`\`"$'\n'
       COMMENT_BODY+="${FATAL}"$'\n'
       COMMENT_BODY+="\`\`\`"$'\n'"</details>"$'\n'
-    fi
-
-    if [ "${CMD}" = "audit"; then
-      AUDIT_MD=$(python3 "${GITHUB_ACTION_PATH}/scripts/digest/render-audit-summary.py" "${LOG_FILE}" 2>/dev/null || true)
-      if [ -n "${AUDIT_MD}" ]; then
-        COMMENT_BODY+=$'\n'"### Audit summary"$'\n'
-        COMMENT_BODY+="${AUDIT_MD}"$'\n'
-      fi
     fi
 
     CARGO_ERRORS=$(grep -c "^error\[" "${LOG_FILE}" 2>/dev/null || echo "0")
