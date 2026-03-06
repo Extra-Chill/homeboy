@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.58.0] - 2026-03-06
+
+### Added
+- add extension-driven test topology policy
+
+### Changed
+- cover topology helpers and script execution
+- track homeboy-action via v1 tag (#502)
+
+### Fixed
+- restore legacy hook wording and tune marker matching
+- resolve release-gate drift and rebaseline
+
 ## [0.57.0] - 2026-03-05
 
 ### Added
