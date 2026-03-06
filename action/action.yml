@@ -1,5 +1,5 @@
 name: 'Homeboy'
-description: 'Run Homeboy lint, test, and audit commands on your PRs. Works with any Homeboy extension.'
+description: 'Run Homeboy lint, test, audit, and release commands in CI. Works with any Homeboy extension.'
 author: 'Extra Chill'
 
 branding:
@@ -95,6 +95,22 @@ inputs:
     description: 'Optional section title within the shared PR comment. Defaults to a humanized command or job id.'
     required: false
     default: ''
+  release-bump-type:
+    description: 'Version bump type for release: "auto" (from conventional commits), "patch", "minor", or "major"'
+    required: false
+    default: 'auto'
+  release-dry-run:
+    description: 'If true, preview the release without making changes'
+    required: false
+    default: 'false'
+  release-branch:
+    description: 'Branch that releases are allowed from (default: main)'
+    required: false
+    default: 'main'
+  release-skip-changelog:
+    description: 'If true, skip auto-generating changelog entries from conventional commits'
+    required: false
+    default: 'false'
 
 outputs:
   results:
@@ -106,6 +122,15 @@ outputs:
   test-scope-effective:
     description: 'Effective test scope used by the action (full or changed)'
     value: ${{ steps.resolve-test-scope.outputs.effective-test-scope }}
+  released:
+    description: 'Whether a release was created (true/false)'
+    value: ${{ steps.release.outputs.released }}
+  release-version:
+    description: 'The released version number (e.g. 1.2.3)'
+    value: ${{ steps.release.outputs.release-version }}
+  release-tag:
+    description: 'The release git tag (e.g. v1.2.3)'
+    value: ${{ steps.release.outputs.release-tag }}
 
 runs:
   using: 'composite'
@@ -306,11 +331,27 @@ runs:
       run: bash ${{ github.action_path }}/scripts/digest/generate-failure-digest.sh
 
     - name: Enforce final status
+      id: enforce-status
       if: always()
       shell: bash
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}
+        COMMANDS: ${{ inputs.commands }}
       run: bash ${{ github.action_path }}/scripts/core/enforce-final-status.sh
+
+    - name: Run release
+      id: release
+      if: contains(inputs.commands, 'release') && github.event_name != 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        QUALITY_RESULTS: ${{ steps.select-results.outputs.results }}
+        RELEASE_BUMP_TYPE: ${{ inputs.release-bump-type }}
+        RELEASE_DRY_RUN: ${{ inputs.release-dry-run }}
+        RELEASE_BRANCH: ${{ inputs.release-branch }}
+        RELEASE_SKIP_CHANGELOG: ${{ inputs.release-skip-changelog }}
+        COMPONENT_NAME: ${{ inputs.component }}
+      run: bash ${{ github.action_path }}/scripts/release/run-release.sh
 
     - name: Post PR comment
       if: always() && github.event_name == 'pull_request'

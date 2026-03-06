@@ -23,6 +23,11 @@ HAS_LINT_COMMAND="$(has_lint_command "${COMMANDS}")"
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD=$(echo "${CMD}" | xargs)
 
+  # Release is handled by the dedicated release step, not the command loop
+  if [ "${CMD}" = "release" ]; then
+    continue
+  fi
+
   if [ "${CMD}" = "test" ] && [ "${HAS_LINT_COMMAND}" = "true" ]; then
     export HOMEBOY_SKIP_LINT=1
   else
