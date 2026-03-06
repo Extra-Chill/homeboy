@@ -257,7 +257,7 @@ install_frontend_dependencies() {
     fi
 }
 
-# Build frontend assets (Gutenberg blocks via @wordpress/scripts, or Vite)
+# Build frontend assets (Gutenberg blocks via @wordpress/scripts, Vite, or generic npm build)
 build_frontend_assets() {
     print_status "Checking for frontend build requirements..."
 
@@ -275,8 +275,11 @@ build_frontend_assets() {
     elif grep -q '"vite"' "package.json"; then
         build_tool="vite"
         print_status "Detected Vite build tool"
+    elif node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)" 2>/dev/null; then
+        build_tool="npm"
+        print_status "Detected npm build script"
     else
-        print_status "No recognized build tool found, skipping frontend build"
+        print_status "No build script found, skipping frontend build"
         return 0
     fi
 
