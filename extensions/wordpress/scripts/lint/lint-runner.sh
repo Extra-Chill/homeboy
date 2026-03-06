@@ -26,17 +26,10 @@ fi
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
 # Supports step filtering via HOMEBOY_STEP/HOMEBOY_SKIP (steps: phpcs, eslint, phpstan)
 
-# Step filtering helper (matches test-runner.sh pattern)
-should_run_step() {
-    local step_name="$1"
-    if [ -n "${HOMEBOY_STEP:-}" ]; then
-        echo ",${HOMEBOY_STEP}," | grep -q ",${step_name}," && return 0 || return 1
-    fi
-    if [ -n "${HOMEBOY_SKIP:-}" ]; then
-        echo ",${HOMEBOY_SKIP}," | grep -q ",${step_name}," && return 1 || return 0
-    fi
-    return 0
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
+# shellcheck source=../lib/runner-steps.sh
+source "${RUNNER_STEPS_HELPER}"
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -75,7 +68,6 @@ if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
     COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-.}"
     PLUGIN_PATH="$COMPONENT_PATH"
 else
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     EXTENSION_PATH="$(dirname "$SCRIPT_DIR")"
     COMPONENT_PATH="$(pwd)"
     PLUGIN_PATH="$COMPONENT_PATH"
