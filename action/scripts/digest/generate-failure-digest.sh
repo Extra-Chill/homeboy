@@ -21,7 +21,7 @@ if [ -z "${OUTPUT_DIR}" ] || [ ! -d "${OUTPUT_DIR}" ]; then
   exit 0
 fi
 
-DIGEST_FILE=$(python3 "${GITHUB_ACTION_PATH}/scripts/build-failure-digest.py" \
+DIGEST_FILE=$(python3 "${GITHUB_ACTION_PATH}/scripts/digest/build-failure-digest.py" \
   "${OUTPUT_DIR}" \
   "${RESULTS_JSON}" \
   "${RUN_URL}" \

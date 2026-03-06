@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-source "${GITHUB_ACTION_PATH}/scripts/lib.sh"
+source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
 AUTOFIX_MAX_COMMITS="${AUTOFIX_MAX_COMMITS:-2}"
 if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then

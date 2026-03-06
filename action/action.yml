@@ -136,7 +136,7 @@ runs:
       shell: bash
       env:
         SOURCE_PATH: ${{ inputs.source }}
-      run: bash ${{ github.action_path }}/scripts/build-source-homeboy.sh
+      run: bash ${{ github.action_path }}/scripts/setup/build-source-homeboy.sh
 
     - name: Resolve Homeboy version
       id: resolve-version
@@ -145,7 +145,7 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         HOMEBOY_VERSION: ${{ inputs.version }}
-      run: bash ${{ github.action_path }}/scripts/resolve-homeboy-version.sh
+      run: bash ${{ github.action_path }}/scripts/setup/resolve-homeboy-version.sh
 
     - name: Cache Homeboy
       id: cache-homeboy
@@ -163,7 +163,7 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         HOMEBOY_VERSION: ${{ steps.resolve-version.outputs.resolved-version }}
-      run: bash ${{ github.action_path }}/scripts/install-homeboy-release.sh
+      run: bash ${{ github.action_path }}/scripts/setup/install-homeboy-release.sh
 
     - name: Resolve binary source
       id: resolve-binary
@@ -171,7 +171,7 @@ runs:
       env:
         HAS_SOURCE_INPUT: ${{ inputs.source }}
         SOURCE_BUILT: ${{ steps.source-build.outputs.built }}
-      run: bash ${{ github.action_path }}/scripts/resolve-binary-source.sh
+      run: bash ${{ github.action_path }}/scripts/setup/resolve-binary-source.sh
 
     - name: Install extension
       if: inputs.extension != '' && (steps.cache-homeboy.outputs.cache-hit != 'true' || steps.source-build.outputs.built == 'true')
@@ -180,7 +180,7 @@ runs:
         GH_TOKEN: ${{ github.token }}
         EXTENSION_ID: ${{ inputs.extension }}
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
-      run: bash ${{ github.action_path }}/scripts/install-extension.sh
+      run: bash ${{ github.action_path }}/scripts/setup/install-extension.sh
 
     - name: Capture tooling metadata
       shell: bash
@@ -189,11 +189,11 @@ runs:
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
         ACTION_REF: ${{ github.action_ref }}
         ACTION_REPOSITORY: ${{ github.action_repository }}
-      run: bash ${{ github.action_path }}/scripts/capture-tooling-metadata.sh
+      run: bash ${{ github.action_path }}/scripts/setup/capture-tooling-metadata.sh
 
     - name: Verify portable config
       shell: bash
-      run: bash ${{ github.action_path }}/scripts/verify-portable-config.sh
+      run: bash ${{ github.action_path }}/scripts/setup/verify-portable-config.sh
 
     - name: Determine PR base ref
       id: changed-files
@@ -201,7 +201,7 @@ runs:
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      run: bash ${{ github.action_path }}/scripts/determine-pr-base-ref.sh
+      run: bash ${{ github.action_path }}/scripts/pr/determine-pr-base-ref.sh
 
     - name: Resolve effective test scope
       id: resolve-test-scope
@@ -209,7 +209,7 @@ runs:
       shell: bash
       env:
         TEST_SCOPE: ${{ inputs.test-scope }}
-      run: bash ${{ github.action_path }}/scripts/resolve-test-scope.sh
+      run: bash ${{ github.action_path }}/scripts/setup/resolve-test-scope.sh
 
     - name: Run Homeboy commands
       id: run-commands
@@ -221,7 +221,7 @@ runs:
         EXTRA_ARGS: ${{ inputs.args }}
         TEST_SCOPE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
         RUN_GROUP_PREFIX: homeboy
-      run: bash ${{ github.action_path }}/scripts/run-homeboy-commands.sh
+      run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
 
     - name: Apply autofix commit
       id: autofix-commit
@@ -236,7 +236,7 @@ runs:
         AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
         PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
         PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-      run: bash ${{ github.action_path }}/scripts/apply-autofix-commit.sh
+      run: bash ${{ github.action_path }}/scripts/autofix/apply-autofix-commit.sh
 
     - name: Prepare non-PR autofix branch
       id: autofix-prepare-nonpr
@@ -248,7 +248,7 @@ runs:
         EXTRA_ARGS: ${{ inputs.args }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
         AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
-      run: bash ${{ github.action_path }}/scripts/prepare-autofix-branch.sh
+      run: bash ${{ github.action_path }}/scripts/autofix/prepare-autofix-branch.sh
 
     - name: Re-run Homeboy commands after autofix
       id: rerun-commands
@@ -261,7 +261,7 @@ runs:
         EXTRA_ARGS: ${{ inputs.args }}
         TEST_SCOPE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
         RUN_GROUP_PREFIX: homeboy rerun
-      run: bash ${{ github.action_path }}/scripts/run-homeboy-commands.sh
+      run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
 
     - name: Open non-PR autofix PR
       id: autofix-open-pr
@@ -271,7 +271,7 @@ runs:
         COMPONENT_NAME: ${{ inputs.component }}
         AUTOFIX_BRANCH: ${{ steps.autofix-prepare-nonpr.outputs.autofix-branch }}
         RESULTS: ${{ steps.rerun-commands.outputs.results }}
-      run: bash ${{ github.action_path }}/scripts/open-autofix-pr.sh
+      run: bash ${{ github.action_path }}/scripts/autofix/open-autofix-pr.sh
 
     - name: Select final results
       id: select-results
@@ -280,7 +280,7 @@ runs:
       env:
         FIRST_RESULTS: ${{ steps.run-commands.outputs.results }}
         RERUN_RESULTS: ${{ steps.rerun-commands.outputs.results }}
-      run: bash ${{ github.action_path }}/scripts/select-final-results.sh
+      run: bash ${{ github.action_path }}/scripts/core/select-final-results.sh
 
     - name: Generate failure digest
       if: always() && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"')
@@ -291,14 +291,14 @@ runs:
         AUTOFIX_ENABLED: ${{ inputs.autofix }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-commit.outputs.committed == 'true' || steps.autofix-prepare-nonpr.outputs.committed == 'true' }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
-      run: bash ${{ github.action_path }}/scripts/generate-failure-digest.sh
+      run: bash ${{ github.action_path }}/scripts/digest/generate-failure-digest.sh
 
     - name: Enforce final status
       if: always()
       shell: bash
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}
-      run: bash ${{ github.action_path }}/scripts/enforce-final-status.sh
+      run: bash ${{ github.action_path }}/scripts/core/enforce-final-status.sh
 
     - name: Post PR comment
       if: always() && github.event_name == 'pull_request'
@@ -313,7 +313,7 @@ runs:
         AUTOFIX_ENABLED: ${{ inputs.autofix }}
         AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
         TEST_SCOPE_EFFECTIVE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
-      run: bash ${{ github.action_path }}/scripts/post-pr-comment.sh
+      run: bash ${{ github.action_path }}/scripts/pr/post-pr-comment.sh
 
     - name: Post inline review
       if: always() && github.event_name == 'pull_request'
@@ -322,7 +322,7 @@ runs:
         GH_TOKEN: ${{ github.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: bash ${{ github.action_path }}/scripts/post-inline-review.sh
+      run: bash ${{ github.action_path }}/scripts/pr/post-inline-review.sh
 
     - name: Auto-file issue on failure
       if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"') && steps.autofix-open-pr.outputs.created != 'true'
@@ -335,4 +335,4 @@ runs:
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-prepare-nonpr.outputs.committed }}
         AUTOFIX_PR_CREATED: ${{ steps.autofix-open-pr.outputs.created }}
-      run: bash ${{ github.action_path }}/scripts/auto-file-issue.sh
+      run: bash ${{ github.action_path }}/scripts/issues/auto-file-issue.sh

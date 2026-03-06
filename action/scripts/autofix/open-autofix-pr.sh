@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-source "${GITHUB_ACTION_PATH}/scripts/lib.sh"
+source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
 if [ -z "${AUTOFIX_BRANCH:-}" ]; then
   echo "No autofix branch provided; skipping PR creation"

@@ -14,8 +14,8 @@ import subprocess
 from json import JSONDecoder
 from typing import Any
 
-from digest.parsers import extract_audit_digest, extract_lint_digest, extract_test_failures
-from digest.render import render_markdown
+from scripts.digest.parsers import extract_audit_digest, extract_lint_digest, extract_test_failures
+from scripts.digest.render import render_markdown
 
 
 def read_text(path: str) -> str:
