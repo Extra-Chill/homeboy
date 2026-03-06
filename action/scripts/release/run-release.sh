@@ -180,7 +180,7 @@ fi
 
 CURRENT_VERSION=""
 if command -v homeboy &> /dev/null; then
-  CURRENT_VERSION="$(homeboy version read "${COMP_ID}" --path "${WORKSPACE}" 2>/dev/null | jq -r '.data.version // empty' 2>/dev/null || true)"
+  CURRENT_VERSION="$(homeboy version show "${COMP_ID}" --path "${WORKSPACE}" 2>/dev/null | jq -r '.data.version // empty' 2>/dev/null || true)"
 fi
 
 if [ -z "${CURRENT_VERSION}" ]; then

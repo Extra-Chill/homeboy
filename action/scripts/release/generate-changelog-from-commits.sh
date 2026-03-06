@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Parse conventional commits since the last release tag and add changelog entries
-# via homeboy changelog add. Also outputs the recommended bump type.
+# directly to the changelog file. No component registration required.
 #
 # Conventional commit format: type(scope): description
 #   feat:     → Added   → minor
@@ -20,19 +20,37 @@ set -euo pipefail
 
 OUTPUT_FILE="${CHANGELOG_GEN_OUTPUT:-${GITHUB_OUTPUT}}"
 
-COMP_ID="${COMPONENT_NAME:-}"
 WORKSPACE="${GITHUB_WORKSPACE:-.}"
 
-if [ -z "${COMP_ID}" ]; then
-  if [ -f "${WORKSPACE}/homeboy.json" ]; then
-    COMP_ID="$(jq -r '.id // empty' "${WORKSPACE}/homeboy.json" 2>/dev/null || true)"
-  fi
-  if [ -z "${COMP_ID}" ]; then
-    COMP_ID="$(basename "${GITHUB_REPOSITORY:-unknown}")"
-  fi
+# --- Locate changelog file ---
+
+CHANGELOG_FILE=""
+if [ -f "${WORKSPACE}/homeboy.json" ]; then
+  CHANGELOG_FILE="$(jq -r '.changelog_target // empty' "${WORKSPACE}/homeboy.json" 2>/dev/null || true)"
+fi
+if [ -z "${CHANGELOG_FILE}" ]; then
+  for candidate in "docs/changelog.md" "docs/CHANGELOG.md" "CHANGELOG.md" "changelog.md"; do
+    if [ -f "${WORKSPACE}/${candidate}" ]; then
+      CHANGELOG_FILE="${candidate}"
+      break
+    fi
+  done
 fi
 
-# Find the last release tag
+CHANGELOG_PATH="${WORKSPACE}/${CHANGELOG_FILE}"
+
+if [ -z "${CHANGELOG_FILE}" ] || [ ! -f "${CHANGELOG_PATH}" ]; then
+  echo "::warning::No changelog file found — skipping changelog generation"
+  {
+    echo "recommended-bump=none"
+    echo "changelog-added=false"
+    echo "commit-count=0"
+  } >> "${OUTPUT_FILE}"
+  exit 0
+fi
+
+# --- Find the last release tag ---
+
 LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo "")"
 
 if [ -z "${LAST_TAG}" ]; then
@@ -43,7 +61,8 @@ else
   COMMIT_RANGE="${LAST_TAG}..HEAD"
 fi
 
-# Parse commits into conventional commit types
+# --- Parse commits into conventional commit types ---
+
 declare -A TYPE_ENTRIES
 declare -A TYPE_MAP
 TYPE_MAP=(
@@ -58,7 +77,6 @@ COMMIT_COUNT=0
 HAS_BREAKING=false
 
 # Regex for conventional commit: hash type(scope)!: message
-# Stored in variable to avoid bash [[ =~ ]] quoting issues with parentheses
 COMMIT_RE='^[a-f0-9]+ ([a-z]+)(\(([^)]*)\))?(!)?: (.+)$'
 
 while IFS= read -r line; do
@@ -137,26 +155,59 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 CHANGELOG_ADDED=false
 
 if [ "${COMMIT_COUNT}" -gt 0 ]; then
+  # Build the [Next] section content
+  NEXT_SECTION=""
+
   for CHANGELOG_TYPE in "Added" "Changed" "Fixed" "Refactored" "Removed" "Deprecated" "Security"; do
     ENTRIES="${TYPE_ENTRIES[${CHANGELOG_TYPE}]:-}"
     [ -z "${ENTRIES}" ] && continue
 
-    # Build -m flags for each entry
-    ARGS=()
-    while IFS= read -r entry; do
-      [ -z "${entry}" ] && continue
-      ARGS+=(-m "${entry}")
-    done <<< "${ENTRIES}"
+    NEXT_SECTION+=$'\n'"### ${CHANGELOG_TYPE}"
 
     echo "  Adding ${CHANGELOG_TYPE} entries:"
     while IFS= read -r entry; do
       [ -z "${entry}" ] && continue
+      NEXT_SECTION+=$'\n'"- ${entry}"
       echo "    - ${entry}"
     done <<< "${ENTRIES}"
-
-    homeboy changelog add "${COMP_ID}" "${ARGS[@]}" --type "${CHANGELOG_TYPE}"
-    CHANGELOG_ADDED=true
   done
+
+  if [ -n "${NEXT_SECTION}" ]; then
+    # Insert [Next] section into changelog file.
+    # Strategy: find the first ## heading and insert before it.
+    # If a [Next] section already exists, replace it.
+
+    if grep -qE '^\#\# \[?(Next|Unreleased)\]?' "${CHANGELOG_PATH}"; then
+      # [Next] section exists — replace everything between it and the next ## heading
+      # Use awk to replace the section
+      awk -v new_content="## [Next]${NEXT_SECTION}" '
+        /^## \[?(Next|Unreleased)\]?/ {
+          print new_content
+          print ""
+          in_next = 1
+          next
+        }
+        /^## / && in_next {
+          in_next = 0
+        }
+        !in_next { print }
+      ' "${CHANGELOG_PATH}" > "${CHANGELOG_PATH}.tmp"
+      mv "${CHANGELOG_PATH}.tmp" "${CHANGELOG_PATH}"
+    else
+      # No [Next] section — insert before the first version heading
+      awk -v new_content="## [Next]${NEXT_SECTION}" '
+        !inserted && /^## \[/ {
+          print new_content
+          print ""
+          inserted = 1
+        }
+        { print }
+      ' "${CHANGELOG_PATH}" > "${CHANGELOG_PATH}.tmp"
+      mv "${CHANGELOG_PATH}.tmp" "${CHANGELOG_PATH}"
+    fi
+
+    CHANGELOG_ADDED=true
+  fi
 fi
 
 echo ""
