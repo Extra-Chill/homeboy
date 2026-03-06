@@ -160,7 +160,34 @@ def extract_audit_digest(log_text: str) -> dict[str, Any]:
     if not isinstance(findings, list):
         findings = []
 
+    conventions = data.get("conventions", []) if isinstance(data, dict) else []
+    if not isinstance(conventions, list):
+        conventions = []
+
+    outlier_items: list[dict[str, Any]] = []
+    for conv in conventions:
+        if not isinstance(conv, dict):
+            continue
+        context_label = str(
+            conv.get("context_label")
+            or conv.get("name")
+            or conv.get("rule")
+            or conv.get("pattern")
+            or "unknown"
+        )
+        outliers = conv.get("outliers", [])
+        if not isinstance(outliers, list):
+            continue
+        for outlier in outliers:
+            if not isinstance(outlier, dict):
+                continue
+            item = dict(outlier)
+            item.setdefault("context_label", context_label)
+            outlier_items.append(item)
+
     source_items = new_items if new_items else findings
+    if not source_items and outlier_items:
+        source_items = outlier_items
     severity_counts: dict[str, int] = {}
     top_findings: list[dict[str, str]] = []
 
@@ -170,11 +197,20 @@ def extract_audit_digest(log_text: str) -> dict[str, Any]:
         severity = str(item.get("severity") or item.get("level") or "unknown").lower()
         severity_counts[severity] = severity_counts.get(severity, 0) + 1
 
+        file_value = item.get("file")
+        if isinstance(file_value, dict):
+            file_value = file_value.get("path") or file_value.get("file")
+
+        message = item.get("description") or item.get("message")
+        if not message:
+            # Some outlier payloads encode details in other keys
+            message = item.get("expected_namespace") or item.get("expected_pattern") or "(outlier)"
+
         top_findings.append(
             {
-                "file": str(item.get("file") or item.get("path") or item.get("context_label") or "unknown"),
-                "rule": str(item.get("rule") or item.get("category") or item.get("type") or "unknown"),
-                "message": str(item.get("description") or item.get("message") or "(no description)"),
+                "file": str(file_value or item.get("path") or item.get("context_label") or "unknown"),
+                "rule": str(item.get("rule") or item.get("category") or item.get("type") or item.get("status") or "outlier"),
+                "message": str(message),
                 "suggested_fix": str(item.get("suggested_fix") or item.get("suggestion") or ""),
             }
         )
@@ -182,6 +218,7 @@ def extract_audit_digest(log_text: str) -> dict[str, Any]:
     return {
         "drift_increased": bool(baseline.get("drift_increased", False)),
         "outliers_found": summary.get("outliers_found") if isinstance(summary, dict) else None,
+        "parsed_outlier_items": len(outlier_items),
         "severity_counts": severity_counts,
         "top_findings": top_findings[:10],
     }
@@ -267,6 +304,7 @@ def render_markdown(
     autofixability: dict[str, Any],
     run_url: str,
     tooling: dict[str, str],
+    job_links: dict[str, str],
 ) -> str:
     lines: list[str] = []
     lines.append("## Failure Digest")
@@ -305,7 +343,8 @@ def render_markdown(
             lines.append("  " + " — ".join(parts))
     else:
         lines.append("- No per-test failure details parsed from test log.")
-    lines.append(f"- Full test log: {run_url}")
+    test_job_url = job_links.get("Homeboy Build (Lint & Test)", run_url)
+    lines.append(f"- Full test log: {test_job_url}")
     lines.append("")
 
     lines.append("### Audit Failure Digest")
@@ -316,6 +355,9 @@ def render_markdown(
     outliers = audit_digest.get("outliers_found")
     if isinstance(outliers, int):
         lines.append(f"- Outliers in current run: **{outliers}**")
+    parsed_outliers = audit_digest.get("parsed_outlier_items")
+    if isinstance(parsed_outliers, int) and parsed_outliers > 0:
+        lines.append(f"- Parsed outlier entries: **{parsed_outliers}**")
     lines.append(f"- Drift increased: **{'yes' if audit_digest.get('drift_increased') else 'no'}**")
 
     top_findings = audit_digest.get("top_findings", []) or []
@@ -329,7 +371,8 @@ def render_markdown(
             lines.append(line)
     else:
         lines.append("- No structured audit findings parsed from audit log.")
-    lines.append(f"- Full audit log: {run_url}")
+    audit_job_url = job_links.get("Homeboy Audit", run_url)
+    lines.append(f"- Full audit log: {audit_job_url}")
     lines.append("")
 
     lines.append("### Autofixability classification")
@@ -359,6 +402,12 @@ def render_markdown(
     lines.append("- `homeboy-test-failures.json`")
     lines.append("- `homeboy-audit-summary.json`")
     lines.append("- `homeboy-autofixability.json`")
+
+    if job_links:
+        lines.append("")
+        lines.append("### Failed job links")
+        for name, url in sorted(job_links.items()):
+            lines.append(f"- {name}: {url}")
 
     return "\n".join(lines)
 
@@ -479,15 +528,15 @@ def main() -> int:
     write_json(audit_json_path, audit_digest)
     write_json(autofixability_json_path, autofixability)
 
-    markdown = render_markdown(test_digest, audit_digest, autofixability, run_url, tooling)
     job_links = resolve_failed_job_links(run_url)
-    if job_links:
-        extra = ["", "### Failed job links"]
-        if "Build & Test" in job_links:
-            extra.append(f"- Build & Test (failed job): {job_links['Build & Test']}")
-        if "Homeboy Audit" in job_links:
-            extra.append(f"- Homeboy Audit (failed job): {job_links['Homeboy Audit']}")
-        markdown = markdown + "\n" + "\n".join(extra)
+    markdown = render_markdown(
+        test_digest,
+        audit_digest,
+        autofixability,
+        run_url,
+        tooling,
+        job_links,
+    )
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(markdown)
         f.write("\n")
