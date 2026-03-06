@@ -93,6 +93,34 @@ def extract_test_failures(log_text: str) -> dict[str, Any]:
                 break
         failures.append({"name": test_name, "detail": detail, "location": location})
 
+    # PHPUnit testdox format: lines starting with ✘ indicate failures
+    for idx, line in enumerate(lines):
+        m = re.match(r"^\s*[✘✗]\s+(.+)$", line.strip())
+        if not m:
+            continue
+        test_name = m.group(1).strip()
+        detail = ""
+        location = ""
+        for j in range(idx + 1, min(idx + 10, len(lines))):
+            candidate = lines[j].strip()
+            if not candidate:
+                continue
+            if not detail and (
+                "Failed asserting" in candidate
+                or "is not" in candidate
+                or "Error:" in candidate
+                or "TypeError" in candidate
+                or "Exception" in candidate
+            ):
+                detail = candidate
+            # Match location with or without in/at prefix (testdox indents without prefix)
+            loc_match = re.search(r"(?:(?:in|at)\s+)?([^\s]+\.php:\d+)", candidate)
+            if loc_match and not location:
+                location = loc_match.group(1)
+            if detail and location:
+                break
+        failures.append({"name": test_name, "detail": detail, "location": location})
+
     deduped: list[dict[str, str]] = []
     seen: set[str] = set()
     for item in failures:
@@ -124,11 +152,14 @@ def extract_test_failures(log_text: str) -> dict[str, Any]:
         [
             r"^\d+\)\s+",
             r"^----\s+.+\s+stdout\s+----$",
+            r"^\s*[✘✗]\s+",
             r"Failed asserting",
             r"\bpanicked at\b",
             r"\bERROR!\b",
             r"\bFAILURES!\b",
             r"test result:\s+FAILED",
+            r'"success":\s*false',
+            r'"code":\s*"',
         ],
         before=1,
         after=18,
