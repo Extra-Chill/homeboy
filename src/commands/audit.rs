@@ -151,6 +151,20 @@ fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSummary
     }
 }
 
+fn default_audit_exit_code(result: &CodeAuditResult, is_scoped: bool) -> i32 {
+    if is_scoped {
+        if result.findings.is_empty() {
+            0
+        } else {
+            1
+        }
+    } else if result.summary.outliers_found > 0 {
+        1
+    } else {
+        0
+    }
+}
+
 fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
     // Resolve component ID and source path
     let (resolved_id, resolved_path) = if Path::new(&args.component_id).is_dir() {
@@ -342,11 +356,7 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
     }
 
     // No baseline — standard output
-    let exit_code = if result.summary.outliers_found > 0 {
-        1
-    } else {
-        0
-    };
+    let exit_code = default_audit_exit_code(&result, args.changed_since.is_some());
     if args.json_summary {
         Ok((
             AuditOutput::Summary(build_audit_summary(&result, exit_code)),
@@ -354,5 +364,55 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
         ))
     } else {
         Ok((AuditOutput::Full(result), exit_code))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_audit_exit_code;
+    use homeboy::code_audit::{AuditSummary, CodeAuditResult, Finding, Severity};
+    use homeboy::code_audit::DeviationKind;
+
+    fn mk_result(outliers_found: usize, findings_len: usize) -> CodeAuditResult {
+        CodeAuditResult {
+            component_id: "component".to_string(),
+            source_path: "/tmp/component".to_string(),
+            summary: AuditSummary {
+                files_scanned: 1,
+                conventions_detected: 1,
+                outliers_found,
+                alignment_score: Some(1.0),
+                files_skipped: 0,
+                warnings: vec![],
+            },
+            conventions: vec![],
+            directory_conventions: vec![],
+            findings: (0..findings_len)
+                .map(|i| Finding {
+                    file: format!("src/file{i}.rs"),
+                    convention: "Example".to_string(),
+                    severity: Severity::Warning,
+                    description: "desc".to_string(),
+                    suggestion: "suggest".to_string(),
+                    kind: DeviationKind::MissingMethod,
+                })
+                .collect(),
+            duplicate_groups: vec![],
+        }
+    }
+
+    #[test]
+    fn test_default_audit_exit_code_full_uses_outliers() {
+        let result = mk_result(2, 0);
+        assert_eq!(default_audit_exit_code(&result, false), 1);
+    }
+
+    #[test]
+    fn test_default_audit_exit_code_scoped_uses_findings() {
+        let result = mk_result(71, 0);
+        assert_eq!(default_audit_exit_code(&result, true), 0);
+
+        let result = mk_result(0, 1);
+        assert_eq!(default_audit_exit_code(&result, true), 1);
     }
 }

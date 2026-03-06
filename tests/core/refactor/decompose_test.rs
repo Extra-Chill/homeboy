@@ -42,6 +42,12 @@ fn test_apply_plan_skeletons() {
             suggested_target: "src/core/deploy/execution.inc".to_string(),
             item_names: vec!["run".to_string()],
         }],
+        projected_audit_impact: refactor::DecomposeAuditImpact {
+            estimated_new_files: 1,
+            estimated_new_test_files: 0,
+            recommended_test_files: vec![],
+            likely_findings: vec![],
+        },
         checklist: vec![],
         warnings: vec![],
     };
@@ -53,43 +59,126 @@ fn test_apply_plan_skeletons() {
 }
 
 #[test]
+fn test_apply_plan_empty_groups() {
+    let root = tmp_dir("apply-plan-empty");
+    fs::create_dir_all(&root).expect("create root");
+
+    let plan = DecomposePlan {
+        file: "src/core/deploy.rs".to_string(),
+        strategy: "grouped".to_string(),
+        audit_safe: true,
+        total_items: 0,
+        groups: vec![],
+        projected_audit_impact: refactor::DecomposeAuditImpact {
+            estimated_new_files: 0,
+            estimated_new_test_files: 0,
+            recommended_test_files: vec![],
+            likely_findings: vec![],
+        },
+        checklist: vec![],
+        warnings: vec![],
+    };
+
+    let preview = refactor::apply_plan(&plan, &root, false).expect("preview apply");
+    assert!(preview.is_empty());
+
+    let applied = refactor::apply_plan(&plan, &root, true).expect("apply");
+    assert!(applied.is_empty());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn test_classify_function() {
-    assert_eq!(refactor::classify_function("validate_input"), "validation");
-    assert_eq!(refactor::classify_function("parse_output"), "planning");
-    assert_eq!(refactor::classify_function("run"), "execution");
-    assert_eq!(refactor::classify_function("something_else"), "helpers");
+    let root = tmp_dir("classify-function");
+    fs::create_dir_all(root.join("src/core")).expect("create source dir");
+    fs::write(
+        root.join("src/core/deploy.rs"),
+        "fn validate_input() {}\nfn parse_output() {}\nfn run() {}\nfn something_else() {}\n",
+    )
+    .expect("write source file");
+
+    let plan = refactor::build_plan("src/core/deploy.rs", &root, "grouped", true)
+        .expect("build grouped plan");
+
+    let mut groups_by_name = std::collections::HashMap::new();
+    for group in &plan.groups {
+        groups_by_name.insert(group.name.as_str(), &group.item_names);
+    }
+
+    assert!(groups_by_name
+        .get("validation")
+        .is_some_and(|items| items.contains(&"validate_input".to_string())));
+    assert!(groups_by_name
+        .get("planning")
+        .is_some_and(|items| items.contains(&"parse_output".to_string())));
+    assert!(groups_by_name
+        .get("execution")
+        .is_some_and(|items| items.contains(&"run".to_string())));
+    assert!(groups_by_name
+        .get("helpers")
+        .is_some_and(|items| items.contains(&"something_else".to_string())));
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
 fn test_group_items() {
-    let items = vec![
-        ParsedItem {
-            kind: "struct".to_string(),
-            name: "Config".to_string(),
-            start_line: 1,
-            end_line: 5,
-            source: "pub struct Config {}".to_string(),
-            visibility: "pub".to_string(),
-        },
-        ParsedItem {
-            kind: "function".to_string(),
-            name: "run".to_string(),
-            start_line: 6,
-            end_line: 10,
-            source: "fn run() {}".to_string(),
-            visibility: "".to_string(),
-        },
-    ];
+    let root = tmp_dir("group-items");
+    fs::create_dir_all(root.join("src/core")).expect("create source dir");
+    fs::write(
+        root.join("src/core/deploy.rs"),
+        "pub struct Config {}\nfn run() {}\n",
+    )
+    .expect("write source file");
 
-    let groups = refactor::group_items("src/core/deploy.rs", &items, true);
+    let plan = refactor::build_plan("src/core/deploy.rs", &root, "grouped", true)
+        .expect("build grouped plan");
+    let groups = plan.groups;
     assert!(groups.iter().any(|g| g.name == "types"));
     assert!(groups.iter().any(|g| g.name == "execution"));
     assert!(groups.iter().all(|g| g.suggested_target.ends_with(".inc")));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_group_items_dedupes_duplicate_names() {
+    let root = tmp_dir("group-items-dedup");
+    fs::create_dir_all(root.join("src/core")).expect("create source dir");
+    fs::write(
+        root.join("src/core/upgrade.rs"),
+        "pub enum InstallMethod { A }\npub enum InstallMethod { A }\n",
+    )
+    .expect("write source file");
+
+    let plan = refactor::build_plan("src/core/upgrade.rs", &root, "grouped", true)
+        .expect("build grouped plan");
+    let groups = plan.groups;
+    let types = groups
+        .iter()
+        .find(|group| group.name == "types")
+        .expect("types group");
+    assert_eq!(types.item_names, vec!["InstallMethod".to_string()]);
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
 fn test_parse_items() {
     // Unknown extension should return None without trying extension scripts.
-    let result = refactor::parse_items("src/example.unknown", "content");
-    assert!(result.is_none());
+    let root = tmp_dir("parse-items-unknown");
+    fs::create_dir_all(root.join("src")).expect("create source dir");
+    fs::write(root.join("src/example.unknown"), "content\n").expect("write source file");
+
+    let plan = refactor::build_plan("src/example.unknown", &root, "grouped", true)
+        .expect("build plan");
+    assert_eq!(plan.total_items, 0);
+    assert!(
+        plan.warnings
+            .iter()
+            .any(|warning| warning.contains("No refactor parser available"))
+    );
+
+    let _ = fs::remove_dir_all(root);
 }

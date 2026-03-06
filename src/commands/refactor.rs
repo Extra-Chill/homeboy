@@ -337,7 +337,7 @@ pub enum RefactorOutput {
     #[serde(rename = "refactor.decompose")]
     Decompose {
         plan: homeboy::refactor::DecomposePlan,
-        created_files: Vec<String>,
+        move_results: Vec<homeboy::refactor::MoveResult>,
         dry_run: bool,
         applied: bool,
     },
@@ -1256,22 +1256,18 @@ fn run_decompose(
     let root = refactor::move_items::resolve_root(component_id, path)?;
     let plan = refactor::build_plan(file, &root, strategy, audit_safe)?;
 
-    let created_files = if write {
-        refactor::apply_plan_skeletons(&plan, &root)?
-    } else {
-        Vec::new()
-    };
+    let move_results = refactor::apply_plan(&plan, &root, write)?;
+    let groups_applied = move_results
+        .iter()
+        .filter(|result| !result.items_moved.is_empty())
+        .count();
 
     homeboy::log_status!(
         "decompose",
         "{} group(s) planned for {}{}",
         plan.groups.len(),
         file,
-        if write {
-            " (skeletons written)"
-        } else {
-            " (dry run)"
-        }
+        if write { " (applied)" } else { " (dry run)" }
     );
 
     for group in &plan.groups {
@@ -1290,10 +1286,23 @@ fn run_decompose(
         }
     }
 
+    if !plan.projected_audit_impact.likely_findings.is_empty() {
+        for finding in &plan.projected_audit_impact.likely_findings {
+            homeboy::log_status!("impact", "{}", finding);
+        }
+    }
+
+    homeboy::log_status!(
+        "decompose",
+        "{} move group(s) {}",
+        groups_applied,
+        if write { "applied" } else { "planned" }
+    );
+
     Ok((
         RefactorOutput::Decompose {
             plan,
-            created_files,
+            move_results,
             dry_run: !write,
             applied: write,
         },

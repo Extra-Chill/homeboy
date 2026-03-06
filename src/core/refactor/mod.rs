@@ -10,7 +10,10 @@ mod rename;
 pub mod transform;
 
 pub use add::{add_import, fixes_from_audit, AddResult};
-pub use decompose::{apply_plan_skeletons, build_plan, DecomposeGroup, DecomposePlan};
+pub use decompose::{
+    apply_plan, apply_plan_skeletons, build_plan, DecomposeAuditImpact, DecomposeGroup,
+    DecomposePlan,
+};
 pub use move_items::{move_items, ImportRewrite, ItemKind, MoveResult, MovedItem};
 pub use rename::{
     apply_renames, find_references, find_references_with_targeting, generate_renames,

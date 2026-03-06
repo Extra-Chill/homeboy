@@ -45,6 +45,12 @@ fn test_apply_plan_skeletons() {
                 item_names: vec!["run".to_string()],
             },
         ],
+        projected_audit_impact: refactor::DecomposeAuditImpact {
+            estimated_new_files: 2,
+            estimated_new_test_files: 0,
+            recommended_test_files: vec![],
+            likely_findings: vec![],
+        },
         checklist: vec![],
         warnings: vec![],
     };
