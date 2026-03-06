@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.61.0] - 2026-03-06
+
+### Added
+- standardize component resolution for release and audit commands — enables --path override and portable config fallback for CI-owned releases
+- standardize component resolution for release and audit commands (#525)
+
 ## [0.60.0] - 2026-03-06
 
 ### Added
