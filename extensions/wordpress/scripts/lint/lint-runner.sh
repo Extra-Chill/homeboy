@@ -128,6 +128,10 @@ ESCAPE_I18N_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/escape-i18n-fixer.p
 ECHO_TRANSLATE_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/echo-translate-fixer.php"
 SAFE_REDIRECT_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/safe-redirect-fixer.php"
 WP_DIE_TRANSLATE_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/wp-die-translate-fixer.php"
+STRICT_COMPARISON_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/strict-comparison-fixer.php"
+LONELY_IF_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/lonely-if-fixer.php"
+LOOP_COUNT_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/loop-count-fixer.php"
+RESERVED_PARAM_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/reserved-param-fixer.php"
 PHPCS_CONFIG="${EXTENSION_PATH}/phpcs.xml.dist"
 
 # Validate tools exist
@@ -201,6 +205,27 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
         # Run wp_die translate fixer (wp_die(__()) -> wp_die(esc_html__()))
         if [ -f "$WP_DIE_TRANSLATE_FIXER" ]; then
             php "$WP_DIE_TRANSLATE_FIXER" "$lint_target"
+        fi
+
+        # Run strict comparison fixer (== -> ===, != -> !==)
+        # WPCS marks StrictComparisons as phpcs-only, so phpcbf won't fix these
+        if [ -f "$STRICT_COMPARISON_FIXER" ]; then
+            php "$STRICT_COMPARISON_FIXER" "$lint_target"
+        fi
+
+        # Run lonely if fixer (else { if -> elseif)
+        if [ -f "$LONELY_IF_FIXER" ]; then
+            php "$LONELY_IF_FIXER" "$lint_target"
+        fi
+
+        # Run loop count hoister (count() in for condition -> variable)
+        if [ -f "$LOOP_COUNT_FIXER" ]; then
+            php "$LOOP_COUNT_FIXER" "$lint_target"
+        fi
+
+        # Run reserved keyword parameter name fixer ($default -> $default_value, etc.)
+        if [ -f "$RESERVED_PARAM_FIXER" ]; then
+            php "$RESERVED_PARAM_FIXER" "$lint_target"
         fi
     done
 
