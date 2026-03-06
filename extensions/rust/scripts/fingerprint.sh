@@ -440,10 +440,19 @@ for fn in functions:
         continue
     params_str = params_match.group(1)
     param_names = []
-    for param in re.finditer(r'(\w+)\s*:', params_str):
-        pname = param.group(1)
-        if pname not in ('self', 'mut', 'Self'):
-            param_names.append(pname)
+    # Split on commas to get individual params, then extract the name
+    # before the first colon. This avoids matching type path segments
+    # like crate::commands::GlobalArgs as parameter names.
+    for param_chunk in params_str.split(','):
+        param_chunk = param_chunk.strip()
+        if not param_chunk:
+            continue
+        # Match: optional mut, then the param name, then colon
+        pmatch = re.match(r'(?:mut\s+)?(\w+)\s*:', param_chunk)
+        if pmatch:
+            pname = pmatch.group(1)
+            if pname not in ('self', 'mut', 'Self'):
+                param_names.append(pname)
     if not param_names:
         continue
     # Check if params appear in the body (excluding the signature)
