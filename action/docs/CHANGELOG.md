@@ -2,11 +2,13 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
-## Unreleased
+## [1.3.0] - 2026-03-06
 
 ### Added
 - add release command support — CI-owned version bump, changelog generation from conventional commits, tagging, and publish via homeboy release
 - add release command support for CI-owned version management
+- release command support for CI-owned version management with conventional commit changelog generation
+- add release command support (#46)
 
 ## [1.2.2] - 2026-03-06
 
