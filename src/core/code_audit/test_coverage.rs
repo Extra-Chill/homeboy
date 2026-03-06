@@ -18,6 +18,7 @@ use regex::Regex;
 use super::conventions::DeviationKind;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use super::test_mapping::{partition_fingerprints, source_to_test_path, test_to_source_path};
 use crate::extension::TestMappingConfig;
 
 /// Analyze test coverage gaps given source fingerprints and a test mapping config.
@@ -297,139 +298,6 @@ fn extract_test_methods_fallback(
         .collect()
 }
 
-/// Partition fingerprints into source files and test files based on the config.
-fn partition_fingerprints<'a>(
-    fingerprints: &[&'a FileFingerprint],
-    config: &TestMappingConfig,
-) -> (Vec<&'a FileFingerprint>, Vec<&'a FileFingerprint>) {
-    let mut source = Vec::new();
-    let mut test = Vec::new();
-
-    for fp in fingerprints {
-        if is_test_file(&fp.relative_path, config) {
-            test.push(*fp);
-        } else if is_source_file(&fp.relative_path, config) {
-            source.push(*fp);
-        }
-    }
-
-    (source, test)
-}
-
-/// Check if a file path is within one of the configured source directories.
-fn is_source_file(path: &str, config: &TestMappingConfig) -> bool {
-    config.source_dirs.iter().any(|dir| path.starts_with(dir)) || path.ends_with(".inc")
-}
-
-/// Check if a file path is within one of the configured test directories.
-fn is_test_file(path: &str, config: &TestMappingConfig) -> bool {
-    config.test_dirs.iter().any(|dir| path.starts_with(dir))
-}
-
-/// Convert a source file path to its expected test file path using the template.
-///
-/// Template variables: `{dir}` (relative dir within source_dir), `{name}` (stem), `{ext}` (extension).
-fn source_to_test_path(source_path: &str, config: &TestMappingConfig) -> Option<String> {
-    if source_path.ends_with(".inc") {
-        return None;
-    }
-
-    // Find which source_dir this file is in
-    let source_dir = config
-        .source_dirs
-        .iter()
-        .find(|dir| source_path.starts_with(dir.as_str()))?;
-
-    let relative = source_path.strip_prefix(source_dir)?;
-    let relative = relative.strip_prefix('/').unwrap_or(relative);
-
-    let path = Path::new(relative);
-    let name = path.file_stem()?.to_str()?;
-    let ext = path.extension()?.to_str()?;
-    let dir = path
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    let test_path = config
-        .test_file_pattern
-        .replace("{dir}", &dir)
-        .replace("{name}", name)
-        .replace("{ext}", ext);
-
-    // Clean up double slashes from empty {dir}
-    let test_path = test_path.replace("//", "/");
-
-    Some(test_path)
-}
-
-/// Convert a test file path back to its expected source file path.
-/// This is the reverse of `source_to_test_path` — used for orphaned test detection.
-fn test_to_source_path(test_path: &str, config: &TestMappingConfig) -> Option<String> {
-    // Try each source_dir to see which one produces this test path
-    // We use a heuristic: parse the test_file_pattern to understand the structure
-    // and reverse-engineer the source path.
-
-    // Parse the pattern to extract prefix, suffix around {name}
-    let pattern = &config.test_file_pattern;
-
-    // Find the test_dir prefix in the pattern
-    let test_dir = config.test_dirs.first()?;
-
-    // Strip the test dir from the test path
-    let relative_in_test = if test_path.starts_with(test_dir.as_str()) {
-        let stripped = test_path.strip_prefix(test_dir.as_str())?;
-        stripped.strip_prefix('/').unwrap_or(stripped)
-    } else {
-        return None;
-    };
-
-    // Extract {dir} prefix from the pattern (everything before {name} in the test_dir-relative part)
-    // e.g., pattern "tests/{dir}/{name}_test.{ext}" -> after "tests/" it's "{dir}/{name}_test.{ext}"
-    let pattern_after_test_dir = if pattern.starts_with(test_dir.as_str()) {
-        let stripped = pattern.strip_prefix(test_dir.as_str())?;
-        stripped.strip_prefix('/').unwrap_or(stripped)
-    } else {
-        // Pattern might start with the test dir implicitly
-        pattern.as_str()
-    };
-
-    // Find the {name} position in the pattern to figure out the test file naming convention
-    let name_pos = pattern_after_test_dir.find("{name}")?;
-    let _dir_part = &pattern_after_test_dir[..name_pos];
-    let after_name = &pattern_after_test_dir[name_pos + 6..]; // skip "{name}"
-
-    // after_name should be something like "_test.{ext}" or "Test.{ext}"
-    // Replace {ext} with the actual extension
-    let test_file_path = Path::new(relative_in_test);
-    let test_ext = test_file_path.extension()?.to_str()?;
-    let test_stem = test_file_path.file_stem()?.to_str()?;
-    let test_dir_part = test_file_path
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    // Figure out the suffix that was appended to the source name
-    // e.g., if after_name is "_test.{ext}", the suffix before .{ext} is "_test"
-    let suffix_before_ext = after_name.strip_suffix(".{ext}").unwrap_or("");
-
-    // Strip the suffix from the test stem to recover the source name
-    let source_name = test_stem.strip_suffix(suffix_before_ext)?;
-
-    // Reconstruct source path
-    let source_dir = config.source_dirs.first()?;
-    let source_path = if test_dir_part.is_empty() {
-        format!("{}/{}.{}", source_dir, source_name, test_ext)
-    } else {
-        format!(
-            "{}/{}/{}.{}",
-            source_dir, test_dir_part, source_name, test_ext
-        )
-    };
-
-    Some(source_path)
-}
-
 /// Check if a source file matches any critical pattern.
 fn is_critical(path: &str, config: &TestMappingConfig) -> bool {
     config
@@ -469,6 +337,7 @@ fn is_trivial_method(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::code_audit::conventions::Language;
+    use crate::code_audit::test_mapping::is_source_file;
     use std::collections::HashMap;
 
     fn make_config() -> TestMappingConfig {

@@ -102,8 +102,15 @@ pub fn add_import(
 
         fixes.push(Fix {
             file: file_path.clone(),
+            required_methods: vec![],
+            required_registrations: vec![],
             insertions: vec![Insertion {
                 kind: InsertionKind::ImportAdd,
+                fix_kind: fixer::FixKind::ImportAdd,
+                safety_tier: fixer::FixKind::ImportAdd.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
                 code: import_line.trim().to_string(),
                 description: format!("Add import: {}", import_line.trim()),
             }],

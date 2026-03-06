@@ -233,6 +233,32 @@ pub fn count_unreleased_entries(content: &str, aliases: &[String]) -> usize {
         .count()
 }
 
+/// Extract bullet item text from the unreleased section.
+/// Returns normalized bullet content without the leading marker.
+pub fn get_unreleased_entries(content: &str, aliases: &[String]) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let start = match find_next_section_start(&lines, aliases) {
+        Some(idx) => idx,
+        None => return vec![],
+    };
+
+    let end = find_section_end(&lines, start);
+
+    lines[start + 1..end]
+        .iter()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("- ") {
+                Some(rest.trim().to_string())
+            } else {
+                trimmed
+                    .strip_prefix("* ")
+                    .map(|rest| rest.trim().to_string())
+            }
+        })
+        .collect()
+}
+
 pub(super) fn ensure_next_section(content: &str, aliases: &[String]) -> Result<(String, bool)> {
     let lines: Vec<&str> = content.lines().collect();
     if find_next_section_start(&lines, aliases).is_some() {
@@ -974,5 +1000,15 @@ mod tests {
         let content = "# Changelog\n\n## Unreleased\n\n- Dash item\n* Asterisk item\n\n## 0.1.0\n";
         let aliases = vec!["Unreleased".to_string()];
         assert_eq!(count_unreleased_entries(content, &aliases), 2);
+    }
+
+    #[test]
+    fn get_unreleased_entries_extracts_bullet_text() {
+        let content = "# Changelog\n\n## Unreleased\n\n### Fixed\n\n- Dash item\n* Asterisk item\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        assert_eq!(
+            get_unreleased_entries(content, &aliases),
+            vec!["Dash item".to_string(), "Asterisk item".to_string()]
+        );
     }
 }

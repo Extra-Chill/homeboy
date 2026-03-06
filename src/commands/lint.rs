@@ -88,7 +88,7 @@ pub struct LintAutofixOutput {
     rerun_recommended: bool,
 }
 
-fn resolve_lint_script(component: &Component) -> homeboy::error::Result<String> {
+pub(crate) fn resolve_lint_script(component: &Component) -> homeboy::error::Result<String> {
     let extensions = component.extensions.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "component",

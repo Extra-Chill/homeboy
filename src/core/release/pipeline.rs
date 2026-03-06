@@ -519,15 +519,17 @@ fn validate_commits_vs_changelog(component: &Component) -> Result<()> {
         return Ok(());
     }
 
-    // Count unreleased changelog entries
+    // Read unreleased changelog entries
     let changelog_path = changelog::resolve_changelog_path(component)?;
     let changelog_content = crate::core::local_files::local().read(&changelog_path)?;
     let settings = changelog::resolve_effective_settings(Some(component));
-    let entry_count =
-        changelog::count_unreleased_entries(&changelog_content, &settings.next_section_aliases);
+    let unreleased_entries =
+        changelog::get_unreleased_entries(&changelog_content, &settings.next_section_aliases);
 
-    // If entries exist, validation passes
-    if entry_count > 0 {
+    let missing_commits = find_uncovered_commits(&commits, &unreleased_entries);
+
+    // If all relevant commits are represented, validation passes.
+    if missing_commits.is_empty() {
         return Ok(());
     }
 
@@ -547,9 +549,44 @@ fn validate_commits_vs_changelog(component: &Component) -> Result<()> {
         }
     }
 
-    // Auto-generate changelog entries from conventional commits
-    auto_generate_changelog_entries(component, &commits)?;
+    // Auto-generate changelog entries only for uncovered commits.
+    auto_generate_changelog_entries(component, &missing_commits)?;
     Ok(())
+}
+
+fn normalize_changelog_text(value: &str) -> String {
+    value
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn find_uncovered_commits<'a>(
+    commits: &'a [git::CommitInfo],
+    unreleased_entries: &[String],
+) -> Vec<git::CommitInfo> {
+    let normalized_entries: Vec<String> = unreleased_entries
+        .iter()
+        .map(|entry| normalize_changelog_text(entry))
+        .collect();
+
+    commits
+        .iter()
+        .filter(|commit| commit.category.to_changelog_entry_type().is_some())
+        .filter(|commit| {
+            let normalized_subject =
+                normalize_changelog_text(git::strip_conventional_prefix(&commit.subject));
+
+            !normalized_entries
+                .iter()
+                .any(|entry| !entry.is_empty() && entry.contains(&normalized_subject))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Generate changelog entries from conventional commit messages.
@@ -605,6 +642,82 @@ fn auto_generate_changelog_entries(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_uncovered_commits, normalize_changelog_text};
+    use crate::git::{CommitCategory, CommitInfo};
+
+    fn commit(subject: &str, category: CommitCategory) -> CommitInfo {
+        CommitInfo {
+            hash: "abc1234".to_string(),
+            subject: subject.to_string(),
+            category,
+        }
+    }
+
+    #[test]
+    fn test_normalize_changelog_text() {
+        assert_eq!(
+            normalize_changelog_text(
+                "Fixed scoped audit exit codes to ignore unchanged legacy outliers"
+            ),
+            "fixed scoped audit exit codes to ignore unchanged legacy outliers"
+        );
+        assert_eq!(
+            normalize_changelog_text("fix(audit): use scoped findings for changed-since exit"),
+            "fix audit use scoped findings for changed since exit"
+        );
+    }
+
+    #[test]
+    fn test_find_uncovered_commits_ignores_covered_fix_commit() {
+        let commits = vec![commit(
+            "fix(audit): use scoped findings for changed-since exit",
+            CommitCategory::Fix,
+        )];
+        let unreleased = vec![
+            "use scoped findings for changed-since exit".to_string(),
+            "another manual note".to_string(),
+        ];
+
+        let uncovered = find_uncovered_commits(&commits, &unreleased);
+        assert!(uncovered.is_empty());
+    }
+
+    #[test]
+    fn test_find_uncovered_commits_requires_feature_coverage() {
+        let commits = vec![
+            commit(
+                "fix(audit): use scoped findings for changed-since exit",
+                CommitCategory::Fix,
+            ),
+            commit(
+                "feat(refactor): apply decompose plans with audit impact projection",
+                CommitCategory::Feature,
+            ),
+        ];
+        let unreleased = vec!["use scoped findings for changed-since exit".to_string()];
+
+        let uncovered = find_uncovered_commits(&commits, &unreleased);
+        assert_eq!(uncovered.len(), 1);
+        assert_eq!(
+            uncovered[0].subject,
+            "feat(refactor): apply decompose plans with audit impact projection"
+        );
+    }
+
+    #[test]
+    fn test_find_uncovered_commits_skips_docs_and_merge() {
+        let commits = vec![
+            commit("docs: update release notes", CommitCategory::Docs),
+            commit("Merge pull request #1 from branch", CommitCategory::Merge),
+        ];
+
+        let uncovered = find_uncovered_commits(&commits, &[]);
+        assert!(uncovered.is_empty());
+    }
 }
 
 /// Derive publish targets from extensions that have `release.publish` action.

@@ -23,9 +23,11 @@ pub mod fingerprint;
 pub mod fixer;
 pub(crate) mod import_matching;
 mod layer_ownership;
+pub(crate) mod preflight;
 mod signatures;
 mod structural;
 mod test_coverage;
+pub(crate) mod test_mapping;
 mod test_topology;
 pub(crate) mod walker;
 

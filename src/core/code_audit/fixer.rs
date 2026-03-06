@@ -9,10 +9,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::str::FromStr;
 
 use regex::Regex;
 
 use super::conventions::{DeviationKind, Language};
+use super::preflight;
+use super::test_mapping::source_to_test_path;
 use super::{duplication, CodeAuditResult};
 
 /// A planned fix for a single file.
@@ -20,6 +23,12 @@ use super::{duplication, CodeAuditResult};
 pub struct Fix {
     /// Relative path to the file being fixed.
     pub file: String,
+    /// Expected methods that should still be present after applying this fix.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub required_methods: Vec<String>,
+    /// Expected registration calls that should still be present after applying this fix.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub required_registrations: Vec<String>,
     /// What will be inserted.
     pub insertions: Vec<Insertion>,
     /// Whether the fix was applied to disk.
@@ -32,10 +41,105 @@ pub struct Fix {
 pub struct Insertion {
     /// What kind of fix.
     pub kind: InsertionKind,
+    /// Normalized fix kind for selection/filtering.
+    pub fix_kind: FixKind,
+    /// Safety contract for this insertion.
+    pub safety_tier: FixSafetyTier,
+    /// Whether this fix is eligible for auto-apply under the current policy.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub auto_apply: bool,
+    /// Why the fix is not auto-applied under the current policy.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub blocked_reason: Option<String>,
+    /// Deterministic preflight validation report for safe_with_checks writes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub preflight: Option<PreflightReport>,
     /// The code to insert.
     pub code: String,
     /// Human-readable description.
     pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixSafetyTier {
+    SafeAuto,
+    SafeWithChecks,
+    PlanOnly,
+}
+
+impl FixSafetyTier {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixKind {
+    MethodStub,
+    RegistrationStub,
+    ConstructorWithRegistration,
+    ImportAdd,
+    FunctionRemoval,
+    TraitUse,
+    MissingTestFile,
+    MissingTestMethod,
+    SharedExtraction,
+}
+
+impl FixKind {
+    pub fn safety_tier(self) -> FixSafetyTier {
+        match self {
+            Self::ImportAdd => FixSafetyTier::SafeAuto,
+            Self::MethodStub
+            | Self::RegistrationStub
+            | Self::ConstructorWithRegistration
+            | Self::MissingTestFile
+            | Self::MissingTestMethod => FixSafetyTier::SafeWithChecks,
+            Self::FunctionRemoval | Self::TraitUse | Self::SharedExtraction => {
+                FixSafetyTier::PlanOnly
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PreflightReport {
+    pub status: PreflightStatus,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub checks: Vec<PreflightCheck>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightStatus {
+    Passed,
+    Failed,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PreflightCheck {
+    pub name: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
+impl FromStr for FixKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
+            "method_stub" => Ok(Self::MethodStub),
+            "registration_stub" => Ok(Self::RegistrationStub),
+            "constructor_with_registration" => Ok(Self::ConstructorWithRegistration),
+            "import_add" => Ok(Self::ImportAdd),
+            "function_removal" => Ok(Self::FunctionRemoval),
+            "trait_use" => Ok(Self::TraitUse),
+            "missing_test_file" => Ok(Self::MissingTestFile),
+            "missing_test_method" => Ok(Self::MissingTestMethod),
+            "shared_extraction" => Ok(Self::SharedExtraction),
+            _ => Err(format!("unknown fix kind '{}'", value)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -73,6 +177,19 @@ pub struct SkippedFile {
 pub struct NewFile {
     /// Relative path for the new file.
     pub file: String,
+    /// Normalized fix kind for selection/filtering.
+    pub fix_kind: FixKind,
+    /// Safety contract for this file creation.
+    pub safety_tier: FixSafetyTier,
+    /// Whether this file is eligible for auto-apply under the current policy.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub auto_apply: bool,
+    /// Why this file is not auto-applied under the current policy.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub blocked_reason: Option<String>,
+    /// Deterministic preflight validation report for safe_with_checks writes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub preflight: Option<PreflightReport>,
     /// Content to write.
     pub content: String,
     /// Human-readable description.
@@ -90,8 +207,428 @@ pub struct FixResult {
     pub new_files: Vec<NewFile>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub skipped: Vec<SkippedFile>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub chunk_results: Vec<ApplyChunkResult>,
     pub total_insertions: usize,
     pub files_modified: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApplyChunkResult {
+    pub chunk_id: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub files: Vec<String>,
+    pub status: ChunkStatus,
+    pub applied_files: usize,
+    #[serde(skip_serializing_if = "is_zero_usize", default)]
+    pub reverted_files: usize,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub verification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkStatus {
+    Applied,
+    Reverted,
+}
+
+#[derive(Clone)]
+pub struct ApplyOptions<'a> {
+    pub verifier: Option<&'a dyn Fn(&ApplyChunkResult) -> Result<String, String>>,
+}
+
+#[derive(Debug, Clone)]
+struct FileSnapshot {
+    path: std::path::PathBuf,
+    original: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FixPolicy {
+    pub only: Option<Vec<FixKind>>,
+    pub exclude: Vec<FixKind>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreflightContext<'a> {
+    pub root: &'a Path,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicySummary {
+    pub visible_insertions: usize,
+    pub visible_new_files: usize,
+    pub auto_apply_insertions: usize,
+    pub auto_apply_new_files: usize,
+    pub blocked_insertions: usize,
+    pub blocked_new_files: usize,
+    pub preflight_failures: usize,
+}
+
+impl PolicySummary {
+    pub fn has_blocked_items(&self) -> bool {
+        self.blocked_insertions > 0 || self.blocked_new_files > 0
+    }
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+fn insertion(
+    kind: InsertionKind,
+    fix_kind: FixKind,
+    code: String,
+    description: String,
+) -> Insertion {
+    Insertion {
+        kind,
+        fix_kind,
+        safety_tier: fix_kind.safety_tier(),
+        auto_apply: false,
+        blocked_reason: None,
+        preflight: None,
+        code,
+        description,
+    }
+}
+
+fn new_file(fix_kind: FixKind, file: String, content: String, description: String) -> NewFile {
+    NewFile {
+        file,
+        fix_kind,
+        safety_tier: fix_kind.safety_tier(),
+        auto_apply: false,
+        blocked_reason: None,
+        preflight: None,
+        content,
+        description,
+        written: false,
+    }
+}
+
+fn fix_kind_allowed(fix_kind: FixKind, policy: &FixPolicy) -> bool {
+    let included = policy
+        .only
+        .as_ref()
+        .is_none_or(|only| only.contains(&fix_kind));
+
+    included && !policy.exclude.contains(&fix_kind)
+}
+
+fn annotate_insertion_for_policy(
+    file: &str,
+    insertion: &mut Insertion,
+    write: bool,
+    policy: &FixPolicy,
+    context: &PreflightContext<'_>,
+) -> bool {
+    if !fix_kind_allowed(insertion.fix_kind, policy) {
+        return false;
+    }
+
+    insertion.preflight = preflight::run_insertion_preflight(file, insertion, context);
+
+    insertion.auto_apply = if !write {
+        true
+    } else {
+        match insertion.safety_tier {
+            FixSafetyTier::SafeAuto => true,
+            FixSafetyTier::SafeWithChecks => insertion.preflight.as_ref().is_some_and(|report| {
+                matches!(
+                    report.status,
+                    PreflightStatus::Passed | PreflightStatus::NotApplicable
+                )
+            }),
+            FixSafetyTier::PlanOnly => false,
+        }
+    };
+
+    insertion.blocked_reason = if insertion.auto_apply {
+        None
+    } else {
+        Some(match insertion.safety_tier {
+            FixSafetyTier::SafeAuto => "Blocked by current write policy".to_string(),
+            FixSafetyTier::SafeWithChecks => insertion
+                .preflight
+                .as_ref()
+                .and_then(first_failed_detail)
+                .unwrap_or_else(|| {
+                    "Blocked: requires preflight validation before auto-write".to_string()
+                }),
+            FixSafetyTier::PlanOnly => {
+                "Blocked: plan-only fix, not eligible for auto-write".to_string()
+            }
+        })
+    };
+
+    true
+}
+
+fn annotate_new_file_for_policy(
+    new_file: &mut NewFile,
+    write: bool,
+    policy: &FixPolicy,
+    context: &PreflightContext<'_>,
+) -> bool {
+    if !fix_kind_allowed(new_file.fix_kind, policy) {
+        return false;
+    }
+
+    new_file.preflight = preflight::run_new_file_preflight(new_file, context);
+
+    new_file.auto_apply = if !write {
+        true
+    } else {
+        match new_file.safety_tier {
+            FixSafetyTier::SafeAuto => true,
+            FixSafetyTier::SafeWithChecks => new_file.preflight.as_ref().is_some_and(|report| {
+                matches!(
+                    report.status,
+                    PreflightStatus::Passed | PreflightStatus::NotApplicable
+                )
+            }),
+            FixSafetyTier::PlanOnly => false,
+        }
+    };
+
+    new_file.blocked_reason = if new_file.auto_apply {
+        None
+    } else {
+        Some(match new_file.safety_tier {
+            FixSafetyTier::SafeAuto => "Blocked by current write policy".to_string(),
+            FixSafetyTier::SafeWithChecks => new_file
+                .preflight
+                .as_ref()
+                .and_then(first_failed_detail)
+                .unwrap_or_else(|| {
+                    "Blocked: requires preflight validation before auto-write".to_string()
+                }),
+            FixSafetyTier::PlanOnly => {
+                "Blocked: plan-only fix, not eligible for auto-write".to_string()
+            }
+        })
+    };
+
+    true
+}
+
+pub fn apply_fix_policy(
+    result: &mut FixResult,
+    write: bool,
+    policy: &FixPolicy,
+    context: &PreflightContext<'_>,
+) -> PolicySummary {
+    let mut summary = PolicySummary::default();
+
+    result.fixes = result
+        .fixes
+        .drain(..)
+        .filter_map(|mut fix| {
+            fix.insertions.retain_mut(|insertion| {
+                annotate_insertion_for_policy(&fix.file, insertion, write, policy, context)
+            });
+
+            preflight::run_fix_preflight(&mut fix, context, write);
+
+            for insertion in &mut fix.insertions {
+                insertion.auto_apply = if !write {
+                    true
+                } else {
+                    match insertion.safety_tier {
+                        FixSafetyTier::SafeAuto => true,
+                        FixSafetyTier::SafeWithChecks => {
+                            insertion.preflight.as_ref().is_some_and(|report| {
+                                matches!(
+                                    report.status,
+                                    PreflightStatus::Passed | PreflightStatus::NotApplicable
+                                )
+                            })
+                        }
+                        FixSafetyTier::PlanOnly => false,
+                    }
+                };
+
+                insertion.blocked_reason = if insertion.auto_apply {
+                    None
+                } else {
+                    Some(match insertion.safety_tier {
+                        FixSafetyTier::SafeAuto => "Blocked by current write policy".to_string(),
+                        FixSafetyTier::SafeWithChecks => insertion
+                            .preflight
+                            .as_ref()
+                            .and_then(first_failed_detail)
+                            .unwrap_or_else(|| {
+                                "Blocked: requires preflight validation before auto-write"
+                                    .to_string()
+                            }),
+                        FixSafetyTier::PlanOnly => {
+                            "Blocked: plan-only fix, not eligible for auto-write".to_string()
+                        }
+                    })
+                };
+
+                summary.visible_insertions += 1;
+                if insertion.auto_apply {
+                    summary.auto_apply_insertions += 1;
+                } else {
+                    summary.blocked_insertions += 1;
+                    if insertion
+                        .preflight
+                        .as_ref()
+                        .is_some_and(|report| report.status == PreflightStatus::Failed)
+                    {
+                        summary.preflight_failures += 1;
+                    }
+                }
+            }
+
+            if fix.insertions.is_empty() {
+                None
+            } else {
+                Some(fix)
+            }
+        })
+        .collect();
+
+    result.new_files = result
+        .new_files
+        .drain(..)
+        .filter_map(|mut pending| {
+            if !annotate_new_file_for_policy(&mut pending, write, policy, context) {
+                return None;
+            }
+
+            summary.visible_new_files += 1;
+            if pending.auto_apply {
+                summary.auto_apply_new_files += 1;
+            } else {
+                summary.blocked_new_files += 1;
+                if pending
+                    .preflight
+                    .as_ref()
+                    .is_some_and(|report| report.status == PreflightStatus::Failed)
+                {
+                    summary.preflight_failures += 1;
+                }
+            }
+
+            Some(pending)
+        })
+        .collect();
+
+    result.total_insertions = summary.visible_insertions + summary.visible_new_files;
+    summary
+}
+
+pub fn auto_apply_subset(result: &FixResult) -> FixResult {
+    let fixes: Vec<Fix> = result
+        .fixes
+        .iter()
+        .filter_map(|fix| {
+            let insertions: Vec<Insertion> = fix
+                .insertions
+                .iter()
+                .filter(|insertion| insertion.auto_apply)
+                .cloned()
+                .collect();
+
+            if insertions.is_empty() {
+                None
+            } else {
+                Some(Fix {
+                    file: fix.file.clone(),
+                    required_methods: fix.required_methods.clone(),
+                    required_registrations: fix.required_registrations.clone(),
+                    insertions,
+                    applied: false,
+                })
+            }
+        })
+        .collect();
+
+    let new_files: Vec<NewFile> = result
+        .new_files
+        .iter()
+        .filter(|new_file| new_file.auto_apply)
+        .cloned()
+        .collect();
+
+    let total_insertions =
+        fixes.iter().map(|fix| fix.insertions.len()).sum::<usize>() + new_files.len();
+
+    FixResult {
+        fixes,
+        new_files,
+        skipped: vec![],
+        chunk_results: vec![],
+        total_insertions,
+        files_modified: 0,
+    }
+}
+
+pub(crate) fn first_failed_detail(report: &PreflightReport) -> Option<String> {
+    report
+        .checks
+        .iter()
+        .find(|check| !check.passed)
+        .map(|check| format!("Blocked by preflight {}: {}", check.name, check.detail))
+}
+
+fn extract_source_file_from_comment(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("// Source: ")
+            .or_else(|| line.trim().strip_prefix("* Source: "))
+            .or_else(|| line.trim().strip_prefix("// Source: "))
+            .map(|value| value.trim().to_string())
+    })
+}
+
+pub(crate) fn mapping_from_source_comment(content: &str) -> Option<(String, String)> {
+    let source_file = extract_source_file_from_comment(content)?;
+    let expected_test_path = derive_expected_test_file_path(Path::new("."), &source_file)
+        .or_else(|| fallback_expected_test_path(&source_file))?;
+
+    Some((source_file, expected_test_path))
+}
+
+fn fallback_expected_test_path(source_file: &str) -> Option<String> {
+    let source_path = Path::new(source_file);
+    let ext = source_path.extension()?.to_str()?;
+    let name = source_path.file_stem()?.to_str()?;
+    let dir = source_path
+        .parent()
+        .and_then(|parent| parent.strip_prefix("src").ok())
+        .map(|parent| parent.to_string_lossy().trim_start_matches('/').to_string())
+        .unwrap_or_default();
+
+    Some(if dir.is_empty() {
+        format!("tests/{}_test.{}", name, ext)
+    } else {
+        format!("tests/{}/{}_test.{}", dir, name, ext)
+    })
+}
+
+pub(crate) fn extract_source_file_from_test_stub(description: &str) -> Option<String> {
+    let marker = " for '";
+    let start = description.find(marker)? + marker.len();
+    let rest = &description[start..];
+    let end = rest.find("::")?;
+    Some(rest[..end].to_string())
+}
+
+pub(crate) fn extract_expected_test_method_from_fix_description(
+    description: &str,
+) -> Option<String> {
+    let marker = "Scaffold missing test method '";
+    let start = description.find(marker)? + marker.len();
+    let rest = &description[start..];
+    let end = rest.find('"').or_else(|| rest.find('\''))?;
+    Some(rest[..end].to_string())
 }
 
 // ============================================================================
@@ -100,7 +637,7 @@ pub struct FixResult {
 
 /// Full method signature extracted from a conforming file.
 #[derive(Debug, Clone)]
-pub(super) struct MethodSignature {
+pub(crate) struct MethodSignature {
     /// Method name.
     pub(super) name: String,
     /// Full signature line (e.g., "public function execute(array $config): array").
@@ -111,7 +648,7 @@ pub(super) struct MethodSignature {
 }
 
 /// Extract full method signatures from a source file.
-pub(super) fn extract_signatures(content: &str, language: &Language) -> Vec<MethodSignature> {
+pub(crate) fn extract_signatures(content: &str, language: &Language) -> Vec<MethodSignature> {
     match language {
         Language::Php => extract_php_signatures(content),
         Language::Rust => extract_rust_signatures(content),
@@ -120,7 +657,7 @@ pub(super) fn extract_signatures(content: &str, language: &Language) -> Vec<Meth
     }
 }
 
-fn extract_php_signatures(content: &str) -> Vec<MethodSignature> {
+pub(crate) fn extract_php_signatures(content: &str) -> Vec<MethodSignature> {
     let re = Regex::new(
         r"(?m)^\s*((?:public|protected|private)\s+(?:static\s+)?function\s+(\w+)\s*\([^)]*\)(?:\s*:\s*[\w\\|?]+)?)",
     )
@@ -135,7 +672,7 @@ fn extract_php_signatures(content: &str) -> Vec<MethodSignature> {
         .collect()
 }
 
-fn extract_rust_signatures(content: &str) -> Vec<MethodSignature> {
+pub(crate) fn extract_rust_signatures(content: &str) -> Vec<MethodSignature> {
     let re = Regex::new(
         r"(?m)^\s*(pub(?:\(crate\))?\s+(?:async\s+)?fn\s+(\w+)\s*\([^)]*\)(?:\s*->\s*[^\{]+)?)",
     )
@@ -150,7 +687,7 @@ fn extract_rust_signatures(content: &str) -> Vec<MethodSignature> {
         .collect()
 }
 
-fn extract_js_signatures(content: &str) -> Vec<MethodSignature> {
+pub(crate) fn extract_js_signatures(content: &str) -> Vec<MethodSignature> {
     // Named function declarations
     let fn_re =
         Regex::new(r"(?m)^\s*((?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\([^)]*\))").unwrap();
@@ -366,7 +903,7 @@ fn build_signature_map(
 }
 
 /// Detect the language of a file from its path.
-fn detect_language(path: &Path) -> Language {
+pub(crate) fn detect_language(path: &Path) -> Language {
     path.extension()
         .and_then(|e| e.to_str())
         .map(Language::from_extension)
@@ -504,11 +1041,12 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
             // Handle missing imports: generate use statements
             for import_path in &missing_imports {
                 let use_stmt = generate_import_statement(import_path, &language);
-                insertions.push(Insertion {
-                    kind: InsertionKind::ImportAdd,
-                    code: use_stmt,
-                    description: format!("Add missing import: {}", import_path),
-                });
+                insertions.push(insertion(
+                    InsertionKind::ImportAdd,
+                    FixKind::ImportAdd,
+                    use_stmt,
+                    format!("Add missing import: {}", import_path),
+                ));
             }
 
             // Handle registrations: either inject into existing constructor, or create new one
@@ -516,11 +1054,12 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                 if has_constructor && !needs_constructor {
                     // Inject registrations into existing __construct
                     for hook_name in &missing_registrations {
-                        insertions.push(Insertion {
-                            kind: InsertionKind::RegistrationStub,
-                            code: generate_registration_stub(hook_name),
-                            description: format!("Add {} registration in __construct()", hook_name),
-                        });
+                        insertions.push(insertion(
+                            InsertionKind::RegistrationStub,
+                            FixKind::RegistrationStub,
+                            generate_registration_stub(hook_name),
+                            format!("Add {} registration in __construct()", hook_name),
+                        ));
                     }
                 } else {
                     // Create new __construct with all registrations inside
@@ -533,14 +1072,15 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                         "\n    public function __construct() {{\n{}\n    }}\n",
                         reg_lines
                     );
-                    insertions.push(Insertion {
-                        kind: InsertionKind::ConstructorWithRegistration,
-                        code: construct_code,
-                        description: format!(
+                    insertions.push(insertion(
+                        InsertionKind::ConstructorWithRegistration,
+                        FixKind::ConstructorWithRegistration,
+                        construct_code,
+                        format!(
                             "Add __construct() with {} registration(s)",
                             missing_registrations.len()
                         ),
-                    });
+                    ));
                     // Mark constructor as handled so we don't also add a bare stub
                     needs_constructor = false;
                 }
@@ -555,54 +1095,60 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     Language::Unknown => "__construct",
                 };
                 if let Some(sig) = sig_map.get(constructor_name) {
-                    insertions.push(Insertion {
-                        kind: InsertionKind::MethodStub,
-                        code: generate_method_stub(sig),
-                        description: format!(
+                    insertions.push(insertion(
+                        InsertionKind::MethodStub,
+                        FixKind::MethodStub,
+                        generate_method_stub(sig),
+                        format!(
                             "Add {}() stub to match {} convention",
                             constructor_name, conv_report.name
                         ),
-                    });
+                    ));
                 } else {
                     let fallback_sig = generate_fallback_signature(constructor_name, &language);
-                    insertions.push(Insertion {
-                        kind: InsertionKind::MethodStub,
-                        code: generate_method_stub(&fallback_sig),
-                        description: format!(
+                    insertions.push(insertion(
+                        InsertionKind::MethodStub,
+                        FixKind::MethodStub,
+                        generate_method_stub(&fallback_sig),
+                        format!(
                             "Add {}() stub to match {} convention (signature inferred)",
                             constructor_name, conv_report.name
                         ),
-                    });
+                    ));
                 }
             }
 
             // Generate method stubs for all other missing methods
             for method_name in &missing_methods {
                 if let Some(sig) = sig_map.get(*method_name) {
-                    insertions.push(Insertion {
-                        kind: InsertionKind::MethodStub,
-                        code: generate_method_stub(sig),
-                        description: format!(
+                    insertions.push(insertion(
+                        InsertionKind::MethodStub,
+                        FixKind::MethodStub,
+                        generate_method_stub(sig),
+                        format!(
                             "Add {}() stub to match {} convention",
                             method_name, conv_report.name
                         ),
-                    });
+                    ));
                 } else {
                     let fallback_sig = generate_fallback_signature(method_name, &language);
-                    insertions.push(Insertion {
-                        kind: InsertionKind::MethodStub,
-                        code: generate_method_stub(&fallback_sig),
-                        description: format!(
+                    insertions.push(insertion(
+                        InsertionKind::MethodStub,
+                        FixKind::MethodStub,
+                        generate_method_stub(&fallback_sig),
+                        format!(
                             "Add {}() stub to match {} convention (signature inferred)",
                             method_name, conv_report.name
                         ),
-                    });
+                    ));
                 }
             }
 
             if !insertions.is_empty() {
                 fixes.push(Fix {
                     file: outlier.file.clone(),
+                    required_methods: conv_report.expected_methods.clone(),
+                    required_registrations: conv_report.expected_registrations.clone(),
                     insertions,
                     applied: false,
                 });
@@ -627,13 +1173,25 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
             continue;
         }
 
-        let content = generate_test_file_content(root, &test_file, &finding.file);
-        new_files.push(NewFile {
-            file: test_file,
-            content,
-            description: format!("Create missing test file for '{}'", finding.file),
-            written: false,
-        });
+        let Some(candidate) = generate_test_file_candidate(root, &test_file, &finding.file) else {
+            continue;
+        };
+        if candidate.confidence == TestFileConfidence::Placeholder {
+            skipped.push(SkippedFile {
+                file: finding.file.clone(),
+                reason: format!(
+                    "Skipped low-confidence missing test file autofix for '{}' (placeholder-only scaffold)",
+                    test_file
+                ),
+            });
+            continue;
+        }
+        new_files.push(new_file(
+            FixKind::MissingTestFile,
+            test_file,
+            candidate.content,
+            format!("Create missing test file for '{}'", finding.file),
+        ));
     }
 
     // Handle missing test methods reported by test_coverage findings.
@@ -650,7 +1208,9 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
             continue;
         };
 
-        let Some(test_file) = derive_expected_test_file_path(root, &finding.file) else {
+        let Some(test_file) = extract_test_file_from_missing_test_method(&finding.description)
+            .or_else(|| derive_expected_test_file_path(root, &finding.file))
+        else {
             skipped.push(SkippedFile {
                 file: finding.file.clone(),
                 reason: format!(
@@ -678,14 +1238,17 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         if file_exists {
             fixes.push(Fix {
                 file: test_file,
-                insertions: vec![Insertion {
-                    kind: InsertionKind::MethodStub,
-                    code: test_stub,
-                    description: format!(
+                required_methods: vec![expected_test_method.clone()],
+                required_registrations: vec![],
+                insertions: vec![insertion(
+                    InsertionKind::MethodStub,
+                    FixKind::MissingTestMethod,
+                    test_stub,
+                    format!(
                         "Scaffold missing test method '{}' for '{}::{}'",
                         expected_test_method, finding.file, source_method
                     ),
-                }],
+                )],
                 applied: false,
             });
         } else if let Some(existing) = new_files.iter_mut().find(|nf| nf.file == test_file) {
@@ -694,15 +1257,18 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                 existing.content.push_str(&test_stub);
             }
         } else {
-            let mut content = generate_test_file_content(root, &test_file, &finding.file);
-            content.push('\n');
-            content.push_str(&test_stub);
-            new_files.push(NewFile {
-                file: test_file,
-                content,
-                description: format!("Create missing test file for '{}'", finding.file),
-                written: false,
-            });
+            let Some(mut candidate) = generate_test_file_candidate(root, &test_file, &finding.file)
+            else {
+                continue;
+            };
+            candidate.content.push('\n');
+            candidate.content.push_str(&test_stub);
+            new_files.push(new_file(
+                FixKind::MissingTestFile,
+                test_file,
+                candidate.content,
+                format!("Create missing test file for '{}'", finding.file),
+            ));
         }
     }
 
@@ -869,15 +1435,15 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     .get("trait_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("SharedTrait");
-                new_files.push(NewFile {
-                    file: trait_file.to_string(),
-                    content: trait_content.to_string(),
-                    description: format!(
+                new_files.push(new_file(
+                    FixKind::SharedExtraction,
+                    trait_file.to_string(),
+                    trait_content.to_string(),
+                    format!(
                         "Create trait `{}` for shared `{}` method",
                         trait_name, group.function_name
                     ),
-                    written: false,
-                });
+                ));
             }
         }
 
@@ -897,41 +1463,46 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                         rl.get("start_line").and_then(|v| v.as_u64()),
                         rl.get("end_line").and_then(|v| v.as_u64()),
                     ) {
-                        insertions.push(Insertion {
-                            kind: InsertionKind::FunctionRemoval {
+                        insertions.push(insertion(
+                            InsertionKind::FunctionRemoval {
                                 start_line: start as usize,
                                 end_line: end as usize,
                             },
-                            code: String::new(),
-                            description: format!(
+                            FixKind::FunctionRemoval,
+                            String::new(),
+                            format!(
                                 "Remove duplicate `{}` (extracted to shared trait)",
                                 group.function_name
                             ),
-                        });
+                        ));
                     }
                 }
 
                 // Import statement (namespace-level use)
                 if let Some(import) = edit.get("add_import").and_then(|v| v.as_str()) {
-                    insertions.push(Insertion {
-                        kind: InsertionKind::ImportAdd,
-                        code: import.to_string(),
-                        description: format!("Import shared trait for `{}`", group.function_name),
-                    });
+                    insertions.push(insertion(
+                        InsertionKind::ImportAdd,
+                        FixKind::SharedExtraction,
+                        import.to_string(),
+                        format!("Import shared trait for `{}`", group.function_name),
+                    ));
                 }
 
                 // Trait use statement (inside class body)
                 if let Some(use_trait) = edit.get("add_use_trait").and_then(|v| v.as_str()) {
-                    insertions.push(Insertion {
-                        kind: InsertionKind::TraitUse,
-                        code: use_trait.to_string(),
-                        description: format!("Use shared trait for `{}`", group.function_name),
-                    });
+                    insertions.push(insertion(
+                        InsertionKind::TraitUse,
+                        FixKind::SharedExtraction,
+                        use_trait.to_string(),
+                        format!("Use shared trait for `{}`", group.function_name),
+                    ));
                 }
 
                 if !insertions.is_empty() {
                     fixes.push(Fix {
                         file,
+                        required_methods: vec![],
+                        required_registrations: vec![],
                         insertions,
                         applied: false,
                     });
@@ -958,6 +1529,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         fixes,
         new_files,
         skipped,
+        chunk_results: vec![],
         total_insertions,
         files_modified,
     }
@@ -977,10 +1549,23 @@ fn extract_expected_test_path(description: &str) -> Option<String> {
 
 /// Extract expected test method from MissingTestMethod description.
 ///
-/// Example:
+/// Examples:
 /// "Method 'run' has no corresponding test (expected 'test_run')"
+/// "Method 'run' has no corresponding test in 'tests/foo_test.rs'"
 fn extract_expected_test_method(description: &str) -> Option<String> {
     let needle = "expected '";
+    let start = description.find(needle)? + needle.len();
+    let rest = &description[start..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
+/// Extract target test file from MissingTestMethod description when present.
+///
+/// Example:
+/// "Method 'run' has no corresponding test in 'tests/commands/foo_test.rs'"
+fn extract_test_file_from_missing_test_method(description: &str) -> Option<String> {
+    let needle = " in '";
     let start = description.find(needle)? + needle.len();
     let rest = &description[start..];
     let end = rest.find('\'')?;
@@ -996,7 +1581,7 @@ fn extract_source_method_name(description: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-fn test_method_exists_in_file(
+pub(crate) fn test_method_exists_in_file(
     root: &Path,
     test_file: &str,
     test_method: &str,
@@ -1016,37 +1601,12 @@ fn test_method_exists_in_file(
         .unwrap_or(false)
 }
 
-fn derive_expected_test_file_path(root: &Path, source_file: &str) -> Option<String> {
+pub(crate) fn derive_expected_test_file_path(root: &Path, source_file: &str) -> Option<String> {
     let ext = Path::new(source_file).extension()?.to_str()?;
     let manifest = crate::extension::find_extension_for_file_ext(ext, "audit")?;
     let mapping = manifest.test_mapping()?;
 
-    let source_dir = mapping
-        .source_dirs
-        .iter()
-        .find(|dir| source_file.starts_with(&format!("{}/", dir)) || source_file == dir.as_str())?;
-
-    let source_rel = source_file
-        .strip_prefix(&format!("{}/", source_dir))
-        .unwrap_or(source_file);
-
-    let rel_path = Path::new(source_rel);
-    let dir = rel_path
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let name = rel_path.file_stem()?.to_str()?.to_string();
-    let ext = rel_path.extension()?.to_str()?.to_string();
-
-    let mut path = mapping
-        .test_file_pattern
-        .replace("{dir}", &dir)
-        .replace("{name}", &name)
-        .replace("{ext}", &ext);
-
-    while path.contains("//") {
-        path = path.replace("//", "/");
-    }
+    let mut path = source_to_test_path(source_file, mapping)?;
     if path.starts_with('/') {
         path = path.trim_start_matches('/').to_string();
     }
@@ -1086,12 +1646,33 @@ fn generate_test_method_stub(
 /// Strategy:
 /// 1) Try scaffold generation from source file for richer, deterministic stubs.
 /// 2) Fall back to minimal placeholder if scaffold yields nothing useful.
-fn generate_test_file_content(root: &Path, test_file: &str, source_file: &str) -> String {
+struct TestFileCandidate {
+    content: String,
+    confidence: TestFileConfidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestFileConfidence {
+    High,
+    Placeholder,
+}
+
+fn generate_test_file_candidate(
+    root: &Path,
+    test_file: &str,
+    source_file: &str,
+) -> Option<TestFileCandidate> {
     if let Some(scaffolded) = generate_test_file_from_scaffold(root, test_file, source_file) {
-        return scaffolded;
+        return Some(TestFileCandidate {
+            content: scaffolded,
+            confidence: TestFileConfidence::High,
+        });
     }
 
-    generate_test_file_stub(test_file, source_file)
+    Some(TestFileCandidate {
+        content: generate_test_file_stub(test_file, source_file),
+        confidence: TestFileConfidence::Placeholder,
+    })
 }
 
 /// Attempt to scaffold test content from source file.
@@ -1236,7 +1817,7 @@ fn generate_simple_duplicate_fixes(
             continue;
         };
 
-        let Some(item) = items.iter().find(|i| i.name == group.function_name) else {
+        let Some(item) = find_parsed_item_by_name(&items, &group.function_name) else {
             skipped.push(SkippedFile {
                 file: remove_file.clone(),
                 reason: format!(
@@ -1257,29 +1838,33 @@ fn generate_simple_duplicate_fixes(
             ),
         };
 
-        let mut insertions = vec![Insertion {
-            kind: InsertionKind::FunctionRemoval {
+        let mut insertions = vec![insertion(
+            InsertionKind::FunctionRemoval {
                 start_line: item.start_line,
                 end_line: item.end_line,
             },
-            code: String::new(),
-            description: format!(
+            FixKind::FunctionRemoval,
+            String::new(),
+            format!(
                 "Remove duplicate `{}` (canonical copy in {})",
                 group.function_name, group.canonical_file
             ),
-        }];
+        )];
 
         // Only add the import if the file doesn't already have it
         if !content.contains(&import_stmt) {
-            insertions.push(Insertion {
-                kind: InsertionKind::ImportAdd,
-                code: import_stmt,
-                description: format!("Import `{}` from canonical location", group.function_name),
-            });
+            insertions.push(insertion(
+                InsertionKind::ImportAdd,
+                FixKind::SharedExtraction,
+                import_stmt,
+                format!("Import `{}` from canonical location", group.function_name),
+            ));
         }
 
         fixes.push(Fix {
             file: remove_file.clone(),
+            required_methods: vec![],
+            required_registrations: vec![],
             insertions,
             applied: false,
         });
@@ -1297,6 +1882,16 @@ fn merge_fixes_per_file(fixes: Vec<Fix>) -> Vec<Fix> {
 
     for fix in fixes {
         if let Some(existing) = map.get_mut(&fix.file) {
+            for method in fix.required_methods {
+                if !existing.required_methods.contains(&method) {
+                    existing.required_methods.push(method);
+                }
+            }
+            for registration in fix.required_registrations {
+                if !existing.required_registrations.contains(&registration) {
+                    existing.required_registrations.push(registration);
+                }
+            }
             existing.insertions.extend(fix.insertions);
         } else {
             order.push(fix.file.clone());
@@ -1317,6 +1912,31 @@ fn module_path_from_file(file_path: &str) -> String {
     let p = p.strip_suffix(".rs").unwrap_or(p);
     let p = p.strip_suffix("/mod").unwrap_or(p);
     p.replace('/', "::")
+}
+
+fn normalize_item_name(name: &str) -> String {
+    name.trim().to_string()
+}
+
+fn find_parsed_item_by_name<'a>(
+    items: &'a [crate::extension::ParsedItem],
+    requested_name: &str,
+) -> Option<&'a crate::extension::ParsedItem> {
+    if let Some(exact) = items.iter().find(|item| item.name == requested_name) {
+        return Some(exact);
+    }
+
+    let requested = normalize_item_name(requested_name);
+    let mut normalized_matches = items
+        .iter()
+        .filter(|item| normalize_item_name(&item.name) == requested);
+
+    let first = normalized_matches.next()?;
+    if normalized_matches.next().is_some() {
+        return None;
+    }
+
+    Some(first)
 }
 
 /// Detect the common naming suffix among conforming files.
@@ -1469,85 +2089,230 @@ fn generate_fallback_signature(method_name: &str, language: &Language) -> Method
 
 /// Apply fixes to files on disk.
 pub fn apply_fixes(fixes: &mut [Fix], root: &Path) -> usize {
-    let mut applied_count = 0;
+    apply_fixes_chunked(fixes, root, ApplyOptions { verifier: None })
+        .iter()
+        .filter(|chunk| matches!(chunk.status, ChunkStatus::Applied))
+        .map(|chunk| chunk.applied_files)
+        .sum()
+}
 
-    for fix in fixes.iter_mut() {
+/// Write new files generated by the fixer (e.g., trait files for extracted duplicates).
+pub fn apply_new_files(new_files: &mut [NewFile], root: &Path) -> usize {
+    apply_new_files_chunked(new_files, root, ApplyOptions { verifier: None })
+        .iter()
+        .filter(|chunk| matches!(chunk.status, ChunkStatus::Applied))
+        .map(|chunk| chunk.applied_files)
+        .sum()
+}
+
+pub fn apply_fixes_chunked(
+    fixes: &mut [Fix],
+    root: &Path,
+    options: ApplyOptions<'_>,
+) -> Vec<ApplyChunkResult> {
+    let mut results = Vec::new();
+
+    for (index, fix) in fixes.iter_mut().enumerate() {
         let abs_path = root.join(&fix.file);
         let content = match std::fs::read_to_string(&abs_path) {
             Ok(c) => c,
             Err(e) => {
-                log_status!("fix", "Failed to read {}: {}", fix.file, e);
+                results.push(ApplyChunkResult {
+                    chunk_id: format!("fix:{}", index + 1),
+                    files: vec![fix.file.clone()],
+                    status: ChunkStatus::Reverted,
+                    applied_files: 0,
+                    reverted_files: 0,
+                    verification: None,
+                    error: Some(format!("Failed to read {}: {}", fix.file, e)),
+                });
                 continue;
             }
         };
 
         let language = detect_language(&abs_path);
         let modified = apply_insertions_to_content(&content, &fix.insertions, &language);
+        let snapshot = FileSnapshot {
+            path: abs_path.clone(),
+            original: Some(content.clone()),
+        };
 
-        if modified != content {
-            match std::fs::write(&abs_path, &modified) {
-                Ok(_) => {
-                    fix.applied = true;
-                    applied_count += 1;
-                    log_status!(
-                        "fix",
-                        "Applied {} fix(es) to {}",
-                        fix.insertions.len(),
-                        fix.file
-                    );
+        if modified == content {
+            results.push(ApplyChunkResult {
+                chunk_id: format!("fix:{}", index + 1),
+                files: vec![fix.file.clone()],
+                status: ChunkStatus::Applied,
+                applied_files: 0,
+                reverted_files: 0,
+                verification: Some("no_op".to_string()),
+                error: None,
+            });
+            continue;
+        }
+
+        match std::fs::write(&abs_path, &modified) {
+            Ok(_) => {
+                let mut chunk = ApplyChunkResult {
+                    chunk_id: format!("fix:{}", index + 1),
+                    files: vec![fix.file.clone()],
+                    status: ChunkStatus::Applied,
+                    applied_files: 1,
+                    reverted_files: 0,
+                    verification: Some("write_ok".to_string()),
+                    error: None,
+                };
+
+                if let Some(verifier) = options.verifier {
+                    match verifier(&chunk) {
+                        Ok(verification) => {
+                            chunk.verification = Some(verification);
+                        }
+                        Err(error) => {
+                            rollback_snapshot(&snapshot);
+                            chunk.status = ChunkStatus::Reverted;
+                            chunk.reverted_files = 1;
+                            chunk.error = Some(error);
+                            fix.applied = false;
+                            results.push(chunk);
+                            continue;
+                        }
+                    }
                 }
-                Err(e) => {
-                    log_status!("fix", "Failed to write {}: {}", fix.file, e);
-                }
+
+                fix.applied = true;
+                log_status!(
+                    "fix",
+                    "Applied {} fix(es) to {}",
+                    fix.insertions.len(),
+                    fix.file
+                );
+                results.push(chunk);
+            }
+            Err(e) => {
+                results.push(ApplyChunkResult {
+                    chunk_id: format!("fix:{}", index + 1),
+                    files: vec![fix.file.clone()],
+                    status: ChunkStatus::Reverted,
+                    applied_files: 0,
+                    reverted_files: 0,
+                    verification: None,
+                    error: Some(format!("Failed to write {}: {}", fix.file, e)),
+                });
             }
         }
     }
 
-    applied_count
+    results
 }
 
-/// Write new files generated by the fixer (e.g., trait files for extracted duplicates).
-///
-/// Returns the number of files successfully created.
-pub fn apply_new_files(new_files: &mut [NewFile], root: &Path) -> usize {
-    let mut created = 0;
+pub fn apply_new_files_chunked(
+    new_files: &mut [NewFile],
+    root: &Path,
+    options: ApplyOptions<'_>,
+) -> Vec<ApplyChunkResult> {
+    let mut results = Vec::new();
 
-    for nf in new_files.iter_mut() {
+    for (index, nf) in new_files.iter_mut().enumerate() {
         let abs_path = root.join(&nf.file);
 
-        // Create parent directories if needed
         if let Some(parent) = abs_path.parent() {
             if !parent.exists() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    log_status!("fix", "Failed to create directory for {}: {}", nf.file, e);
+                    results.push(ApplyChunkResult {
+                        chunk_id: format!("new_file:{}", index + 1),
+                        files: vec![nf.file.clone()],
+                        status: ChunkStatus::Reverted,
+                        applied_files: 0,
+                        reverted_files: 0,
+                        verification: None,
+                        error: Some(format!("Failed to create directory for {}: {}", nf.file, e)),
+                    });
                     continue;
                 }
             }
         }
 
-        // Don't overwrite existing files
         if abs_path.exists() {
-            log_status!("fix", "Skipping {} — file already exists", nf.file);
+            results.push(ApplyChunkResult {
+                chunk_id: format!("new_file:{}", index + 1),
+                files: vec![nf.file.clone()],
+                status: ChunkStatus::Reverted,
+                applied_files: 0,
+                reverted_files: 0,
+                verification: None,
+                error: Some(format!("Skipping {} — file already exists", nf.file)),
+            });
             continue;
         }
 
+        let snapshot = FileSnapshot {
+            path: abs_path.clone(),
+            original: None,
+        };
+
         match std::fs::write(&abs_path, &nf.content) {
             Ok(_) => {
+                let mut chunk = ApplyChunkResult {
+                    chunk_id: format!("new_file:{}", index + 1),
+                    files: vec![nf.file.clone()],
+                    status: ChunkStatus::Applied,
+                    applied_files: 1,
+                    reverted_files: 0,
+                    verification: Some("write_ok".to_string()),
+                    error: None,
+                };
+
+                if let Some(verifier) = options.verifier {
+                    match verifier(&chunk) {
+                        Ok(verification) => {
+                            chunk.verification = Some(verification);
+                        }
+                        Err(error) => {
+                            rollback_snapshot(&snapshot);
+                            chunk.status = ChunkStatus::Reverted;
+                            chunk.reverted_files = 1;
+                            chunk.error = Some(error);
+                            nf.written = false;
+                            results.push(chunk);
+                            continue;
+                        }
+                    }
+                }
+
                 nf.written = true;
-                created += 1;
                 log_status!("fix", "Created {}", nf.file);
+                results.push(chunk);
             }
             Err(e) => {
-                log_status!("fix", "Failed to create {}: {}", nf.file, e);
+                results.push(ApplyChunkResult {
+                    chunk_id: format!("new_file:{}", index + 1),
+                    files: vec![nf.file.clone()],
+                    status: ChunkStatus::Reverted,
+                    applied_files: 0,
+                    reverted_files: 0,
+                    verification: None,
+                    error: Some(format!("Failed to create {}: {}", nf.file, e)),
+                });
             }
         }
     }
 
-    created
+    results
+}
+
+fn rollback_snapshot(snapshot: &FileSnapshot) {
+    match &snapshot.original {
+        Some(original) => {
+            let _ = std::fs::write(&snapshot.path, original);
+        }
+        None => {
+            let _ = std::fs::remove_file(&snapshot.path);
+        }
+    }
 }
 
 /// Apply insertions to file content, returning the modified content.
-fn apply_insertions_to_content(
+pub(crate) fn apply_insertions_to_content(
     content: &str,
     insertions: &[Insertion],
     language: &Language,
@@ -1855,6 +2620,11 @@ class MyAbility {
 "#;
         let insertions = vec![Insertion {
             kind: InsertionKind::ConstructorWithRegistration,
+            fix_kind: FixKind::ConstructorWithRegistration,
+            safety_tier: FixKind::ConstructorWithRegistration.safety_tier(),
+            auto_apply: false,
+            blocked_reason: None,
+            preflight: None,
             code: "\n    public function __construct() {\n        add_action('wp_abilities_api_init', [$this, 'abilities_api_init']);\n    }\n".to_string(),
             description: "Add __construct with registration".to_string(),
         }];
@@ -2040,8 +2810,15 @@ class TestClass {
 
         let mut fixes = vec![Fix {
             file: "test.php".to_string(),
+            required_methods: vec![],
+            required_registrations: vec![],
             insertions: vec![Insertion {
                 kind: InsertionKind::MethodStub,
+                fix_kind: FixKind::MethodStub,
+                safety_tier: FixKind::MethodStub.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
                 code: "\n    public function newMethod(): void {\n        throw new \\RuntimeException('Not implemented: newMethod');\n    }\n".to_string(),
                 description: "Add newMethod()".to_string(),
             }],
@@ -2387,6 +3164,11 @@ pub struct TestOutput {}
 "#;
         let insertions = vec![Insertion {
             kind: InsertionKind::ImportAdd,
+            fix_kind: FixKind::ImportAdd,
+            safety_tier: FixKind::ImportAdd.safety_tier(),
+            auto_apply: false,
+            blocked_reason: None,
+            preflight: None,
             code: "use super::CmdResult;".to_string(),
             description: "Add missing import".to_string(),
         }];
@@ -2480,6 +3262,13 @@ pub struct TestOutput {}
     }
 
     #[test]
+    fn extract_test_file_from_missing_test_method_parses_description() {
+        let desc = "Method 'run' has no corresponding test in 'tests/commands/audit_test.rs'";
+        let parsed = extract_test_file_from_missing_test_method(desc);
+        assert_eq!(parsed, Some("tests/commands/audit_test.rs".to_string()));
+    }
+
+    #[test]
     fn extract_source_method_name_parses_description() {
         let desc = "Method 'run_add' has no corresponding test (expected 'test_run_add')";
         let parsed = extract_source_method_name(desc);
@@ -2562,6 +3351,52 @@ pub struct TestOutput {}
     }
 
     #[test]
+    fn generate_fixes_skips_low_confidence_missing_test_files() {
+        use super::super::{AuditSummary, CodeAuditResult};
+
+        let dir = std::env::temp_dir().join("homeboy_fixer_low_confidence_missing_test_file");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/commands")).unwrap();
+
+        std::fs::write(dir.join("src/commands/api.rs"), "pub fn run() {}\n").unwrap();
+
+        let audit_result = CodeAuditResult {
+            component_id: "homeboy".to_string(),
+            source_path: dir.to_string_lossy().to_string(),
+            summary: AuditSummary {
+                files_scanned: 1,
+                conventions_detected: 0,
+                outliers_found: 0,
+                alignment_score: None,
+                files_skipped: 0,
+                warnings: vec![],
+            },
+            conventions: vec![],
+            findings: vec![super::super::findings::Finding {
+                convention: "test_coverage".to_string(),
+                severity: super::super::findings::Severity::Info,
+                file: "src/commands/api.rs".to_string(),
+                description:
+                    "No test file found (expected 'tests/commands/api_test.rs') and no inline tests"
+                        .to_string(),
+                suggestion: "Create test file".to_string(),
+                kind: DeviationKind::MissingTestFile,
+            }],
+            directory_conventions: vec![],
+            duplicate_groups: vec![],
+        };
+
+        let fix_result = generate_fixes(&audit_result, &dir);
+        assert!(fix_result.new_files.is_empty());
+        assert!(fix_result
+            .skipped
+            .iter()
+            .any(|item| item.reason.contains("placeholder-only")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn generate_fixes_dedupes_missing_test_file_creation() {
         use super::super::{AuditSummary, CodeAuditResult};
 
@@ -2617,8 +3452,13 @@ pub struct TestOutput {}
         )
         .unwrap();
 
-        let content =
-            generate_test_file_content(&dir, "tests/utils/example_test.rs", "src/utils/example.rs");
+        let content = generate_test_file_candidate(
+            &dir,
+            "tests/utils/example_test.rs",
+            "src/utils/example.rs",
+        )
+        .map(|candidate| candidate.content)
+        .unwrap();
 
         assert!(content.contains("fn test_tokenize()"));
         assert!(content.contains("fn test_edge_case_detected()"));
@@ -2640,8 +3480,15 @@ pub struct TestOutput {}
 
         let mut fixes = vec![Fix {
             file: "test.rs".to_string(),
+            required_methods: vec![],
+            required_registrations: vec![],
             insertions: vec![Insertion {
                 kind: InsertionKind::ImportAdd,
+                fix_kind: FixKind::ImportAdd,
+                safety_tier: FixKind::ImportAdd.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
                 code: "use super::CmdResult;".to_string(),
                 description: "Add missing import".to_string(),
             }],
@@ -2665,11 +3512,18 @@ pub struct TestOutput {}
         let fixes = vec![
             Fix {
                 file: "src/foo.rs".to_string(),
+                required_methods: vec![],
+                required_registrations: vec![],
                 insertions: vec![Insertion {
                     kind: InsertionKind::FunctionRemoval {
                         start_line: 10,
                         end_line: 20,
                     },
+                    fix_kind: FixKind::FunctionRemoval,
+                    safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                    auto_apply: false,
+                    blocked_reason: None,
+                    preflight: None,
                     code: String::new(),
                     description: "Remove fn_a".to_string(),
                 }],
@@ -2677,11 +3531,18 @@ pub struct TestOutput {}
             },
             Fix {
                 file: "src/bar.rs".to_string(),
+                required_methods: vec![],
+                required_registrations: vec![],
                 insertions: vec![Insertion {
                     kind: InsertionKind::FunctionRemoval {
                         start_line: 5,
                         end_line: 15,
                     },
+                    fix_kind: FixKind::FunctionRemoval,
+                    safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                    auto_apply: false,
+                    blocked_reason: None,
+                    preflight: None,
                     code: String::new(),
                     description: "Remove fn_b from bar".to_string(),
                 }],
@@ -2689,17 +3550,29 @@ pub struct TestOutput {}
             },
             Fix {
                 file: "src/foo.rs".to_string(),
+                required_methods: vec![],
+                required_registrations: vec![],
                 insertions: vec![
                     Insertion {
                         kind: InsertionKind::FunctionRemoval {
                             start_line: 30,
                             end_line: 40,
                         },
+                        fix_kind: FixKind::FunctionRemoval,
+                        safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                        auto_apply: false,
+                        blocked_reason: None,
+                        preflight: None,
                         code: String::new(),
                         description: "Remove fn_c".to_string(),
                     },
                     Insertion {
                         kind: InsertionKind::ImportAdd,
+                        fix_kind: FixKind::ImportAdd,
+                        safety_tier: FixKind::ImportAdd.safety_tier(),
+                        auto_apply: false,
+                        blocked_reason: None,
+                        preflight: None,
                         code: "use crate::utils::fn_c;".to_string(),
                         description: "Import fn_c".to_string(),
                     },
@@ -2727,6 +3600,23 @@ pub struct TestOutput {}
         // Encounter order preserved: foo first, bar second
         assert_eq!(merged[0].file, "src/foo.rs");
         assert_eq!(merged[1].file, "src/bar.rs");
+    }
+
+    #[test]
+    fn find_parsed_item_by_name_prefers_exact_match() {
+        let items = vec![crate::extension::ParsedItem {
+            name: "id".to_string(),
+            kind: "function".to_string(),
+            start_line: 1,
+            end_line: 3,
+            source: "fn id() {}".to_string(),
+            visibility: String::new(),
+        }];
+
+        assert_eq!(
+            find_parsed_item_by_name(&items, "id").map(|item| item.name.as_str()),
+            Some("id")
+        );
     }
 
     #[test]
@@ -2764,6 +3654,11 @@ fn last_keeper() {
                     start_line: 7,
                     end_line: 9,
                 },
+                fix_kind: FixKind::FunctionRemoval,
+                safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
                 code: String::new(),
                 description: "Remove remove_first".to_string(),
             },
@@ -2772,6 +3667,11 @@ fn last_keeper() {
                     start_line: 15,
                     end_line: 17,
                 },
+                fix_kind: FixKind::FunctionRemoval,
+                safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
                 code: String::new(),
                 description: "Remove remove_second".to_string(),
             },
@@ -2780,11 +3680,21 @@ fn last_keeper() {
                     start_line: 19,
                     end_line: 21,
                 },
+                fix_kind: FixKind::FunctionRemoval,
+                safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
                 code: String::new(),
                 description: "Remove remove_third".to_string(),
             },
             Insertion {
                 kind: InsertionKind::ImportAdd,
+                fix_kind: FixKind::ImportAdd,
+                safety_tier: FixKind::ImportAdd.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
                 code: "use crate::utils::{remove_first, remove_second, remove_third};".to_string(),
                 description: "Import removed functions".to_string(),
             },
@@ -2837,6 +3747,11 @@ class FlowAbilities extends BaseAbility {
         let trait_use = "    use HasCheckPermission;".to_string();
         let insertions = vec![Insertion {
             kind: InsertionKind::TraitUse,
+            fix_kind: FixKind::TraitUse,
+            safety_tier: FixKind::TraitUse.safety_tier(),
+            auto_apply: false,
+            blocked_reason: None,
+            preflight: None,
             code: trait_use,
             description: "Use shared trait".to_string(),
         }];
@@ -2870,16 +3785,31 @@ class FlowAbilities {
                     start_line: 5,
                     end_line: 7,
                 },
+                fix_kind: FixKind::FunctionRemoval,
+                safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
                 code: String::new(),
                 description: "Remove duplicate".to_string(),
             },
             Insertion {
                 kind: InsertionKind::ImportAdd,
+                fix_kind: FixKind::ImportAdd,
+                safety_tier: FixKind::ImportAdd.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
                 code: "use DataMachine\\Abilities\\Traits\\HasCheckPermission;".to_string(),
                 description: "Import trait".to_string(),
             },
             Insertion {
                 kind: InsertionKind::TraitUse,
+                fix_kind: FixKind::TraitUse,
+                safety_tier: FixKind::TraitUse.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
                 code: "    use HasCheckPermission;".to_string(),
                 description: "Use trait".to_string(),
             },
@@ -2910,11 +3840,449 @@ class FlowAbilities {
     fn new_file_struct() {
         let nf = NewFile {
             file: "inc/Abilities/Traits/HasCheckPermission.php".to_string(),
+            fix_kind: FixKind::SharedExtraction,
+            safety_tier: FixKind::SharedExtraction.safety_tier(),
+            auto_apply: false,
+            blocked_reason: None,
+            preflight: None,
             content: "<?php\ntrait HasCheckPermission {}".to_string(),
             description: "Create trait".to_string(),
             written: false,
         };
         assert!(!nf.written);
         assert_eq!(nf.file, "inc/Abilities/Traits/HasCheckPermission.php");
+    }
+
+    #[test]
+    fn apply_fix_policy_blocks_plan_only_writes() {
+        let mut result = FixResult {
+            fixes: vec![Fix {
+                file: "src/example.rs".to_string(),
+                required_methods: vec![],
+                required_registrations: vec![],
+                insertions: vec![Insertion {
+                    kind: InsertionKind::FunctionRemoval {
+                        start_line: 1,
+                        end_line: 2,
+                    },
+                    fix_kind: FixKind::FunctionRemoval,
+                    safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                    auto_apply: false,
+                    blocked_reason: None,
+                    preflight: None,
+                    code: String::new(),
+                    description: "Remove duplicate helper".to_string(),
+                }],
+                applied: false,
+            }],
+            new_files: vec![],
+            skipped: vec![],
+            chunk_results: vec![],
+            total_insertions: 1,
+            files_modified: 0,
+        };
+
+        let temp_root = std::env::temp_dir().join("homeboy_fixer_policy_block_test");
+        let _ = std::fs::remove_dir_all(&temp_root);
+        std::fs::create_dir_all(temp_root.join("src")).unwrap();
+        std::fs::write(temp_root.join("src/example.rs"), "pub fn existing() {}\n").unwrap();
+
+        let summary = apply_fix_policy(
+            &mut result,
+            true,
+            &FixPolicy::default(),
+            &PreflightContext { root: &temp_root },
+        );
+
+        assert_eq!(summary.blocked_insertions, 1);
+        assert!(!result.fixes[0].insertions[0].auto_apply);
+        assert!(result.fixes[0].insertions[0]
+            .blocked_reason
+            .as_ref()
+            .is_some_and(|reason| reason.contains("plan-only")));
+
+        let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn apply_fix_policy_honors_only_filter() {
+        let mut result = FixResult {
+            fixes: vec![Fix {
+                file: "src/example.rs".to_string(),
+                required_methods: vec![],
+                required_registrations: vec![],
+                insertions: vec![
+                    Insertion {
+                        kind: InsertionKind::ImportAdd,
+                        fix_kind: FixKind::ImportAdd,
+                        safety_tier: FixKind::ImportAdd.safety_tier(),
+                        auto_apply: false,
+                        blocked_reason: None,
+                        preflight: None,
+                        code: "use crate::foo;".to_string(),
+                        description: "Add import".to_string(),
+                    },
+                    Insertion {
+                        kind: InsertionKind::MethodStub,
+                        fix_kind: FixKind::MethodStub,
+                        safety_tier: FixKind::MethodStub.safety_tier(),
+                        auto_apply: false,
+                        blocked_reason: None,
+                        preflight: None,
+                        code: "fn demo() {}".to_string(),
+                        description: "Add demo".to_string(),
+                    },
+                ],
+                applied: false,
+            }],
+            new_files: vec![],
+            skipped: vec![],
+            chunk_results: vec![],
+            total_insertions: 2,
+            files_modified: 0,
+        };
+
+        let summary = apply_fix_policy(
+            &mut result,
+            false,
+            &FixPolicy {
+                only: Some(vec![FixKind::ImportAdd]),
+                exclude: vec![],
+            },
+            &PreflightContext {
+                root: Path::new("."),
+            },
+        );
+
+        assert_eq!(summary.visible_insertions, 1);
+        assert_eq!(result.fixes[0].insertions.len(), 1);
+        assert_eq!(result.fixes[0].insertions[0].fix_kind, FixKind::ImportAdd);
+    }
+
+    #[test]
+    fn auto_apply_subset_keeps_safe_items_only() {
+        let result = FixResult {
+            fixes: vec![Fix {
+                file: "src/example.rs".to_string(),
+                required_methods: vec![],
+                required_registrations: vec![],
+                insertions: vec![
+                    Insertion {
+                        kind: InsertionKind::ImportAdd,
+                        fix_kind: FixKind::ImportAdd,
+                        safety_tier: FixKind::ImportAdd.safety_tier(),
+                        auto_apply: true,
+                        blocked_reason: None,
+                        preflight: None,
+                        code: "use crate::foo;".to_string(),
+                        description: "Add import".to_string(),
+                    },
+                    Insertion {
+                        kind: InsertionKind::MethodStub,
+                        fix_kind: FixKind::MethodStub,
+                        safety_tier: FixKind::MethodStub.safety_tier(),
+                        auto_apply: false,
+                        blocked_reason: Some("Blocked".to_string()),
+                        preflight: None,
+                        code: "fn demo() {}".to_string(),
+                        description: "Add demo".to_string(),
+                    },
+                ],
+                applied: false,
+            }],
+            new_files: vec![NewFile {
+                file: "tests/example_test.rs".to_string(),
+                fix_kind: FixKind::MissingTestFile,
+                safety_tier: FixKind::MissingTestFile.safety_tier(),
+                auto_apply: true,
+                blocked_reason: None,
+                preflight: None,
+                content: "#[test]\nfn test_example() {}".to_string(),
+                description: "Create test file".to_string(),
+                written: false,
+            }],
+            skipped: vec![],
+            chunk_results: vec![],
+            total_insertions: 3,
+            files_modified: 0,
+        };
+
+        let subset = auto_apply_subset(&result);
+
+        assert_eq!(subset.fixes.len(), 1);
+        assert_eq!(subset.fixes[0].insertions.len(), 1);
+        assert_eq!(subset.fixes[0].insertions[0].fix_kind, FixKind::ImportAdd);
+        assert_eq!(subset.new_files.len(), 1);
+        assert_eq!(subset.total_insertions, 2);
+    }
+
+    #[test]
+    fn fix_level_preflight_blocks_when_required_method_missing_after_simulation() {
+        let root = std::env::temp_dir().join("homeboy_fixer_required_method_fail");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/example.rs"), "pub fn run() {}\n").unwrap();
+
+        let mut result = FixResult {
+            fixes: vec![Fix {
+                file: "src/example.rs".to_string(),
+                required_methods: vec!["helper".to_string(), "run".to_string()],
+                required_registrations: vec![],
+                insertions: vec![Insertion {
+                    kind: InsertionKind::MethodStub,
+                    fix_kind: FixKind::MethodStub,
+                    safety_tier: FixKind::MethodStub.safety_tier(),
+                    auto_apply: false,
+                    blocked_reason: None,
+                    preflight: None,
+                    code: "\npub fn validate() -> bool {\n        true\n}\n".to_string(),
+                    description: "Add validate() stub".to_string(),
+                }],
+                applied: false,
+            }],
+            new_files: vec![],
+            skipped: vec![],
+            chunk_results: vec![],
+            total_insertions: 1,
+            files_modified: 0,
+        };
+
+        let summary = apply_fix_policy(
+            &mut result,
+            true,
+            &FixPolicy::default(),
+            &PreflightContext { root: &root },
+        );
+
+        assert_eq!(summary.preflight_failures, 1);
+        assert!(!result.fixes[0].insertions[0].auto_apply);
+        assert!(result.fixes[0].insertions[0]
+            .blocked_reason
+            .as_ref()
+            .is_some_and(|reason| reason.contains("required_methods")));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fix_level_preflight_preserves_required_registration() {
+        let root = std::env::temp_dir().join("homeboy_fixer_required_registration_pass");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("inc")).unwrap();
+        std::fs::write(
+            root.join("inc/Example.php"),
+            "<?php\nclass Example {\n    public function registerAbility(): void {}\n}\n",
+        )
+        .unwrap();
+
+        let mut result = FixResult {
+            fixes: vec![Fix {
+                file: "inc/Example.php".to_string(),
+                required_methods: vec!["registerAbility".to_string()],
+                required_registrations: vec!["wp_abilities_api_init".to_string()],
+                insertions: vec![Insertion {
+                    kind: InsertionKind::ConstructorWithRegistration,
+                    fix_kind: FixKind::ConstructorWithRegistration,
+                    safety_tier: FixKind::ConstructorWithRegistration.safety_tier(),
+                    auto_apply: false,
+                    blocked_reason: None,
+                    preflight: None,
+                    code: "\n    public function __construct() {\n        add_action('wp_abilities_api_init', [$this, 'abilities_api_init']);\n    }\n".to_string(),
+                    description: "Add __construct with registration".to_string(),
+                }],
+                applied: false,
+            }],
+            new_files: vec![],
+            skipped: vec![],
+            chunk_results: vec![],
+            total_insertions: 1,
+            files_modified: 0,
+        };
+
+        let summary = apply_fix_policy(
+            &mut result,
+            true,
+            &FixPolicy::default(),
+            &PreflightContext { root: &root },
+        );
+
+        assert_eq!(summary.auto_apply_insertions, 1);
+        assert_eq!(summary.preflight_failures, 0);
+        assert!(result.fixes[0].insertions[0].auto_apply);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_fixes_chunked_rolls_back_failed_verification() {
+        let dir = std::env::temp_dir().join("homeboy_fixer_chunk_rollback_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test.rs"), "pub fn run() {}\n").unwrap();
+
+        let mut fixes = vec![Fix {
+            file: "test.rs".to_string(),
+            required_methods: vec![],
+            required_registrations: vec![],
+            insertions: vec![Insertion {
+                kind: InsertionKind::MethodStub,
+                fix_kind: FixKind::MethodStub,
+                safety_tier: FixKind::MethodStub.safety_tier(),
+                auto_apply: true,
+                blocked_reason: None,
+                preflight: None,
+                code: "\npub fn helper() {}\n".to_string(),
+                description: "Add helper()".to_string(),
+            }],
+            applied: false,
+        }];
+
+        let results = apply_fixes_chunked(
+            &mut fixes,
+            &dir,
+            ApplyOptions {
+                verifier: Some(&|_chunk| Err("verification failed".to_string())),
+            },
+        );
+
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].status, ChunkStatus::Reverted));
+        assert_eq!(results[0].reverted_files, 1);
+        assert!(!fixes[0].applied);
+
+        let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
+        assert_eq!(content, "pub fn run() {}\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_new_files_chunked_reports_applied_chunk() {
+        let dir = std::env::temp_dir().join("homeboy_new_file_chunk_apply_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut new_files = vec![NewFile {
+            file: "tests/example_test.rs".to_string(),
+            fix_kind: FixKind::MissingTestFile,
+            safety_tier: FixKind::MissingTestFile.safety_tier(),
+            auto_apply: true,
+            blocked_reason: None,
+            preflight: None,
+            content: "#[test]\nfn test_example() {}\n".to_string(),
+            description: "Create test file".to_string(),
+            written: false,
+        }];
+
+        let results =
+            apply_new_files_chunked(&mut new_files, &dir, ApplyOptions { verifier: None });
+
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].status, ChunkStatus::Applied));
+        assert_eq!(results[0].applied_files, 1);
+        assert!(new_files[0].written);
+        assert!(dir.join("tests/example_test.rs").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn safe_with_checks_method_stub_passes_preflight() {
+        let root = std::env::temp_dir().join("homeboy_fixer_preflight_method_pass");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/example.rs"), "pub fn run() {}\n").unwrap();
+
+        let mut result = FixResult {
+            fixes: vec![Fix {
+                file: "src/example.rs".to_string(),
+                required_methods: vec![],
+                required_registrations: vec![],
+                insertions: vec![Insertion {
+                    kind: InsertionKind::MethodStub,
+                    fix_kind: FixKind::MethodStub,
+                    safety_tier: FixKind::MethodStub.safety_tier(),
+                    auto_apply: false,
+                    blocked_reason: None,
+                    preflight: None,
+                    code: "\npub fn validate() -> bool {\n        true\n}\n".to_string(),
+                    description: "Add validate() stub".to_string(),
+                }],
+                applied: false,
+            }],
+            new_files: vec![],
+            skipped: vec![],
+            chunk_results: vec![],
+            total_insertions: 1,
+            files_modified: 0,
+        };
+
+        let summary = apply_fix_policy(
+            &mut result,
+            true,
+            &FixPolicy::default(),
+            &PreflightContext { root: &root },
+        );
+
+        assert_eq!(summary.auto_apply_insertions, 1);
+        assert_eq!(summary.preflight_failures, 0);
+        assert!(result.fixes[0].insertions[0].auto_apply);
+        assert!(matches!(
+            result.fixes[0].insertions[0]
+                .preflight
+                .as_ref()
+                .map(|r| r.status),
+            Some(PreflightStatus::Passed)
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn safe_with_checks_missing_test_file_fails_mapping_preflight() {
+        let root = std::env::temp_dir().join("homeboy_fixer_preflight_test_mapping_fail");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/utils")).unwrap();
+        std::fs::write(root.join("src/utils/token.rs"), "pub fn tokenize() {}\n").unwrap();
+
+        let mut result = FixResult {
+            fixes: vec![],
+            new_files: vec![NewFile {
+                file: "tests/wrong/token_test.rs".to_string(),
+                fix_kind: FixKind::MissingTestFile,
+                safety_tier: FixKind::MissingTestFile.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
+                content: "// Source: src/utils/token.rs\n#[test]\nfn test_tokenize() {}\n"
+                    .to_string(),
+                description: "Create missing test file for 'src/utils/token.rs'".to_string(),
+                written: false,
+            }],
+            skipped: vec![],
+            chunk_results: vec![],
+            total_insertions: 1,
+            files_modified: 0,
+        };
+
+        let (_, expected_path) = mapping_from_source_comment(&result.new_files[0].content).unwrap();
+        assert_eq!(expected_path, "tests/utils/token_test.rs");
+
+        let summary = apply_fix_policy(
+            &mut result,
+            true,
+            &FixPolicy::default(),
+            &PreflightContext { root: &root },
+        );
+
+        assert_eq!(summary.blocked_new_files, 1);
+        assert_eq!(summary.preflight_failures, 1);
+        assert!(!result.new_files[0].auto_apply);
+        assert!(result.new_files[0]
+            .blocked_reason
+            .as_ref()
+            .is_some_and(|reason| reason.contains("test_mapping")));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

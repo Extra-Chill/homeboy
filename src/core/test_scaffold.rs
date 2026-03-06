@@ -9,6 +9,8 @@
 //! - Grammar-based: uses extension-provided grammar.toml (preferred)
 //! - Legacy regex: hardcoded patterns as fallback
 
+use std::collections::HashSet;
+
 use regex::Regex;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -117,6 +119,68 @@ pub struct ScaffoldBatchResult {
     pub total_written: usize,
     /// Total files skipped (test already exists).
     pub total_skipped: usize,
+}
+
+fn is_low_signal_test_name(name: &str) -> bool {
+    matches!(name, "test_run" | "test_new" | "test_validate")
+}
+
+const MAX_AUTO_SCAFFOLD_STUBS: usize = 12;
+
+fn generated_test_names(classes: &[ExtractedClass], config: &ScaffoldConfig) -> Vec<String> {
+    let mut emitted = HashSet::new();
+
+    classes
+        .iter()
+        .flat_map(|class| {
+            class
+                .methods
+                .iter()
+                .filter(|method| method.name != "__construct")
+                .map(|method| {
+                    if config.language == "rust" {
+                        if class.name.is_empty() {
+                            format!("test_{}", to_snake_case(&method.name))
+                        } else {
+                            format!(
+                                "test_{}_{}",
+                                to_snake_case(&class.name),
+                                to_snake_case(&method.name)
+                            )
+                        }
+                    } else {
+                        format!("{}{}", config.test_prefix, to_snake_case(&method.name))
+                    }
+                })
+        })
+        .filter(|name| emitted.insert(name.clone()))
+        .collect()
+}
+
+fn passes_scaffold_quality_gate(test_names: &[String]) -> bool {
+    if test_names.is_empty() {
+        return false;
+    }
+
+    if test_names.len() > MAX_AUTO_SCAFFOLD_STUBS {
+        return false;
+    }
+
+    let low_signal = test_names
+        .iter()
+        .filter(|name| is_low_signal_test_name(name))
+        .count();
+    let meaningful = test_names.len().saturating_sub(low_signal);
+
+    if meaningful == 0 {
+        return false;
+    }
+
+    if test_names.len() >= 3 && low_signal > meaningful {
+        return false;
+    }
+
+    true
 }
 
 // ============================================================================
@@ -435,6 +499,7 @@ pub fn test_file_path(source_path: &Path, root: &Path) -> PathBuf {
 /// Generate PHP test file content.
 pub fn generate_php_test(classes: &[ExtractedClass], config: &ScaffoldConfig) -> String {
     let mut out = String::new();
+    let mut emitted = HashSet::new();
     out.push_str("<?php\n");
 
     for class in classes {
@@ -450,11 +515,17 @@ pub fn generate_php_test(classes: &[ExtractedClass], config: &ScaffoldConfig) ->
                 config.base_class
             ));
 
-            for method in &class.methods {
-                let test_name = to_snake_case(&method.name);
+            let test_names: Vec<String> = class
+                .methods
+                .iter()
+                .map(|method| format!("{}{}", config.test_prefix, to_snake_case(&method.name)))
+                .filter(|name| emitted.insert(name.clone()))
+                .collect();
+
+            for test_name in test_names {
                 out.push_str(&format!(
-                    "    public function {}{}() {{\n        {}\n    }}\n\n",
-                    config.test_prefix, test_name, config.incomplete_body
+                    "    public function {}() {{\n        {}\n    }}\n\n",
+                    test_name, config.incomplete_body
                 ));
             }
 
@@ -495,16 +566,18 @@ pub fn generate_php_test(classes: &[ExtractedClass], config: &ScaffoldConfig) ->
         ));
 
         // Test methods
-        for method in &class.methods {
-            // Skip constructor — tested implicitly
-            if method.name == "__construct" {
-                continue;
-            }
+        let test_names: Vec<String> = class
+            .methods
+            .iter()
+            .filter(|method| method.name != "__construct")
+            .map(|method| format!("{}{}", config.test_prefix, to_snake_case(&method.name)))
+            .filter(|name| emitted.insert(name.clone()))
+            .collect();
 
-            let test_name = to_snake_case(&method.name);
+        for test_name in test_names {
             out.push_str(&format!(
-                "    public function {}{}() {{\n        {}\n    }}\n\n",
-                config.test_prefix, test_name, config.incomplete_body
+                "    public function {}() {{\n        {}\n    }}\n\n",
+                test_name, config.incomplete_body
             ));
         }
 
@@ -517,6 +590,7 @@ pub fn generate_php_test(classes: &[ExtractedClass], config: &ScaffoldConfig) ->
 /// Generate Rust test file content.
 pub fn generate_rust_test(classes: &[ExtractedClass], _config: &ScaffoldConfig) -> String {
     let mut out = String::new();
+    let mut emitted = HashSet::new();
 
     // Module-level test block
     out.push_str("#[cfg(test)]\nmod tests {\n    use super::*;\n\n");
@@ -526,17 +600,24 @@ pub fn generate_rust_test(classes: &[ExtractedClass], _config: &ScaffoldConfig) 
             out.push_str(&format!("    // Tests for {}\n\n", class.name));
         }
 
-        for method in &class.methods {
-            let test_name = if class.name.is_empty() {
-                format!("test_{}", to_snake_case(&method.name))
-            } else {
-                format!(
-                    "test_{}_{}",
-                    to_snake_case(&class.name),
-                    to_snake_case(&method.name)
-                )
-            };
+        let test_names: Vec<String> = class
+            .methods
+            .iter()
+            .map(|method| {
+                if class.name.is_empty() {
+                    format!("test_{}", to_snake_case(&method.name))
+                } else {
+                    format!(
+                        "test_{}_{}",
+                        to_snake_case(&class.name),
+                        to_snake_case(&method.name)
+                    )
+                }
+            })
+            .filter(|name| emitted.insert(name.clone()))
+            .collect();
 
+        for test_name in test_names {
             out.push_str(&format!(
                 "    #[test]\n    fn {}() {{\n        todo!(\"implement test\");\n    }}\n\n",
                 test_name
@@ -589,10 +670,20 @@ pub fn scaffold_file(
         });
     }
 
-    let stub_count: usize = classes
-        .iter()
-        .map(|c| c.methods.iter().filter(|m| m.name != "__construct").count())
-        .sum();
+    let generated_names = generated_test_names(&classes, config);
+    let stub_count = generated_names.len();
+
+    if !passes_scaffold_quality_gate(&generated_names) {
+        return Ok(ScaffoldResult {
+            source_file: relative,
+            test_file: test_relative,
+            stub_count: 0,
+            content: String::new(),
+            written: false,
+            skipped: false,
+            classes,
+        });
+    }
 
     let generated = if config.language == "rust" {
         generate_rust_test(&classes, config)
@@ -1084,6 +1175,93 @@ fn helper_not_a_test() {}
         assert!(output.contains("fn test_config_new()"));
         assert!(output.contains("fn test_config_load()"));
         assert!(output.contains("todo!(\"implement test\")"));
+    }
+
+    #[test]
+    fn generate_rust_test_dedupes_duplicate_names() {
+        let classes = vec![
+            ExtractedClass {
+                name: "Config".to_string(),
+                namespace: String::new(),
+                kind: "struct".to_string(),
+                methods: vec![ExtractedMethod {
+                    name: "load".to_string(),
+                    visibility: "pub".to_string(),
+                    is_static: true,
+                    line: 1,
+                    params: String::new(),
+                }],
+            },
+            ExtractedClass {
+                name: "Config".to_string(),
+                namespace: String::new(),
+                kind: "struct".to_string(),
+                methods: vec![ExtractedMethod {
+                    name: "load".to_string(),
+                    visibility: "pub".to_string(),
+                    is_static: true,
+                    line: 2,
+                    params: String::new(),
+                }],
+            },
+        ];
+
+        let config = ScaffoldConfig::rust();
+        let output = generate_rust_test(&classes, &config);
+
+        assert_eq!(output.matches("fn test_config_load()").count(), 1);
+    }
+
+    #[test]
+    fn scaffold_file_skips_low_signal_single_run_stub() {
+        let dir = std::env::temp_dir().join("homeboy_test_scaffold_low_signal");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/commands")).unwrap();
+        std::fs::write(dir.join("src/commands/api.rs"), "pub fn run() {}\n").unwrap();
+
+        let result = scaffold_file(
+            &dir.join("src/commands/api.rs"),
+            &dir,
+            &ScaffoldConfig::rust(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.stub_count, 0);
+        assert!(result.content.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn passes_scaffold_quality_gate_rejects_low_signal_dominated_set() {
+        let names = vec![
+            "test_run".to_string(),
+            "test_new".to_string(),
+            "test_validate".to_string(),
+        ];
+
+        assert!(!passes_scaffold_quality_gate(&names));
+    }
+
+    #[test]
+    fn passes_scaffold_quality_gate_accepts_meaningful_mix() {
+        let names = vec![
+            "test_run".to_string(),
+            "test_component_args_load".to_string(),
+            "test_component_args_resolve".to_string(),
+        ];
+
+        assert!(passes_scaffold_quality_gate(&names));
+    }
+
+    #[test]
+    fn passes_scaffold_quality_gate_rejects_oversized_scaffold() {
+        let names: Vec<String> = (0..=MAX_AUTO_SCAFFOLD_STUBS)
+            .map(|i| format!("test_meaningful_case_{}", i))
+            .collect();
+
+        assert!(!passes_scaffold_quality_gate(&names));
     }
 
     #[test]

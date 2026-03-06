@@ -260,7 +260,7 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
     filtered
 }
 
-fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> {
+pub(crate) fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> {
     let extension_id_owned: String;
     let extension_id: &str = if let Some(ref extensions) = component.extensions {
         if extensions.contains_key("wordpress") {
