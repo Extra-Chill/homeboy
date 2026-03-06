@@ -377,8 +377,23 @@ runs:
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: bash ${{ github.action_path }}/scripts/pr/post-inline-review.sh
 
+    - name: Auto-file categorized audit issues
+      id: categorized-issues
+      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"') && contains(inputs.commands, 'audit') && steps.autofix-open-pr.outputs.created != 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RESULTS: ${{ steps.select-results.outputs.results }}
+        COMMANDS: ${{ inputs.commands }}
+        COMPONENT_NAME: ${{ inputs.component }}
+        BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
+        AUTOFIX_ATTEMPTED: ${{ steps.autofix-prepare-nonpr.outputs.committed }}
+        AUTOFIX_PR_CREATED: ${{ steps.autofix-open-pr.outputs.created }}
+      run: bash ${{ github.action_path }}/scripts/issues/auto-file-categorized-issues.sh
+
     - name: Auto-file issue on failure
-      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"') && steps.autofix-open-pr.outputs.created != 'true'
+      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"') && steps.autofix-open-pr.outputs.created != 'true' && steps.categorized-issues.outcome != 'success'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
