@@ -105,6 +105,7 @@ Digest includes:
 - tooling versions (Homeboy CLI, extension source/revision, action ref)
 - failed test count + top failed tests
 - audit summary (drift/outliers/top findings when structured output is available)
+- actionable audit details directly in the PR comment (new baseline drift + top findings), not just artifact filenames
 - links back to the full workflow run logs
 
 Auto-filed failure issues on non-PR runs also include:

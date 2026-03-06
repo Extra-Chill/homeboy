@@ -166,6 +166,28 @@ def extract_audit_digest(
     if not isinstance(conventions, list):
         conventions = []
 
+    def normalize_file_value(raw: Any, fallback: str = "unknown") -> str:
+        file_value = raw
+        if isinstance(file_value, dict):
+            file_value = file_value.get("path") or file_value.get("file")
+        return str(file_value or fallback)
+
+    def normalize_rule_value(item: dict[str, Any], fallback: str = "outlier") -> str:
+        return str(
+            item.get("rule")
+            or item.get("kind")
+            or item.get("category")
+            or item.get("type")
+            or item.get("status")
+            or fallback
+        )
+
+    def normalize_message_value(item: dict[str, Any], fallback: str = "(outlier)") -> str:
+        message = item.get("description") or item.get("message")
+        if not message:
+            message = item.get("expected_namespace") or item.get("expected_pattern") or fallback
+        return str(message)
+
     outlier_items: list[dict[str, Any]] = []
     for conv in conventions:
         if not isinstance(conv, dict):
@@ -187,11 +209,22 @@ def extract_audit_digest(
             item.setdefault("context_label", context_label)
             outlier_items.append(item)
 
-    source_items = new_items if new_items else findings
-    if not source_items and outlier_items:
-        source_items = outlier_items
     severity_counts: dict[str, int] = {}
     top_findings: list[dict[str, str]] = []
+    new_findings: list[dict[str, str]] = []
+
+    for item in new_items:
+        if not isinstance(item, dict):
+            continue
+        new_findings.append(
+            {
+                "context": str(item.get("context_label") or item.get("file") or item.get("path") or "unknown"),
+                "message": normalize_message_value(item, "(new finding)"),
+                "fingerprint": str(item.get("fingerprint") or ""),
+            }
+        )
+
+    source_items = findings + outlier_items
 
     for item in source_items:
         if not isinstance(item, dict):
@@ -199,25 +232,23 @@ def extract_audit_digest(
         severity = str(item.get("severity") or item.get("level") or "unknown").lower()
         severity_counts[severity] = severity_counts.get(severity, 0) + 1
 
-        file_value = item.get("file")
-        if isinstance(file_value, dict):
-            file_value = file_value.get("path") or file_value.get("file")
-
-        message = item.get("description") or item.get("message")
-        if not message:
-            message = item.get("expected_namespace") or item.get("expected_pattern") or "(outlier)"
-
         top_findings.append(
             {
-                "file": str(file_value or item.get("path") or item.get("context_label") or "unknown"),
-                "rule": str(item.get("rule") or item.get("category") or item.get("type") or item.get("status") or "outlier"),
-                "message": str(message),
+                "file": normalize_file_value(
+                    item.get("file") or item.get("path") or item.get("context_label"),
+                    str(item.get("context_label") or "unknown"),
+                ),
+                "rule": normalize_rule_value(item),
+                "message": normalize_message_value(item),
                 "suggested_fix": str(item.get("suggested_fix") or item.get("suggestion") or ""),
             }
         )
 
     return {
         "drift_increased": bool(baseline.get("drift_increased", False)),
+        "new_findings_count": len(new_findings),
+        "new_findings": new_findings[:100],
+        "alignment_score": summary.get("alignment_score") if isinstance(summary, dict) else None,
         "outliers_found": summary.get("outliers_found") if isinstance(summary, dict) else None,
         "parsed_outlier_items": len(outlier_items),
         "severity_counts": severity_counts,
