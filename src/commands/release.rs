@@ -6,7 +6,7 @@ use homeboy::component;
 use homeboy::deploy::{self, DeployConfig};
 use homeboy::release::{self, ReleasePlan, ReleaseRun};
 
-use super::args::{DryRunArgs, HiddenJsonArgs};
+use super::args::{DryRunArgs, HiddenJsonArgs, PositionalComponentArgs};
 use super::{CmdResult, ProjectsSummary};
 
 #[derive(Clone, ValueEnum)]
@@ -28,9 +28,8 @@ impl BumpType {
 
 #[derive(Args)]
 pub struct ReleaseArgs {
-    /// Component ID
-    #[arg(value_name = "COMPONENT")]
-    component_id: String,
+    #[command(flatten)]
+    comp: PositionalComponentArgs,
 
     /// Version bump type (patch, minor, major) — not needed with --recover
     #[arg(
@@ -99,8 +98,10 @@ pub struct ReleaseResult {
 }
 
 pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ReleaseOutput> {
+    let component_id = args.comp.id().to_string();
+
     if args.recover {
-        return run_recover(&args.component_id);
+        return run_recover(&args.comp);
     }
 
     let bump_type = args.bump_type.ok_or_else(|| {
@@ -109,16 +110,16 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
     let options = release::ReleaseOptions {
         bump_type: bump_type.as_str().to_string(),
         dry_run: args.dry_run_args.dry_run,
-        path_override: None,
+        path_override: args.comp.path.clone(),
         skip_checks: args.skip_checks,
         allow_underbump: args.allow_underbump,
     };
 
     if args.dry_run_args.dry_run {
-        let plan = release::plan(&args.component_id, &options)?;
+        let plan = release::plan(&component_id, &options)?;
 
         let deployment = if args.deploy {
-            Some(plan_deployment(&args.component_id))
+            Some(plan_deployment(&component_id))
         } else {
             None
         };
@@ -126,7 +127,7 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         Ok((
             ReleaseOutput {
                 result: ReleaseResult {
-                    component_id: args.component_id,
+                    component_id,
                     bump_type: options.bump_type,
                     dry_run: true,
                     plan: Some(plan),
@@ -137,7 +138,7 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             0,
         ))
     } else {
-        let run_result = release::run(&args.component_id, &options)?;
+        let run_result = release::run(&component_id, &options)?;
         display_release_summary(&run_result);
 
         // Exit code 3 when release succeeded but post-release hooks failed.
@@ -149,7 +150,7 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         };
 
         let (deployment, deploy_exit_code) = if args.deploy {
-            execute_deployment(&args.component_id)
+            execute_deployment(&component_id)
         } else {
             (None, 0)
         };
@@ -164,7 +165,7 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         Ok((
             ReleaseOutput {
                 result: ReleaseResult {
-                    component_id: args.component_id,
+                    component_id,
                     bump_type: options.bump_type,
                     dry_run: false,
                     plan: None,
@@ -348,8 +349,9 @@ fn execute_deployment(component_id: &str) -> (Option<DeploymentResult>, i32) {
 
 /// Recover from an interrupted release.
 /// Detects state: version files bumped but tag/push missing, and completes the release.
-fn run_recover(component_id: &str) -> CmdResult<ReleaseOutput> {
-    let component = component::load(component_id)?;
+fn run_recover(comp_args: &PositionalComponentArgs) -> CmdResult<ReleaseOutput> {
+    let component = comp_args.load()?;
+    let component_id = comp_args.id();
     let version_info = homeboy::version::read_version(Some(component_id))?;
     let current_version = &version_info.version;
     let tag_name = format!("v{}", current_version);

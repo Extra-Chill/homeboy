@@ -1,8 +1,10 @@
+use std::path::Path;
+
 use crate::changelog;
 use crate::component::{self, Component};
 use crate::core::local_files::FileSystem;
 use crate::engine::pipeline::{self, PipelineStep};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::extension::{self, ExtensionManifest, ExtensionRunner};
 use crate::git::{self, UncommittedChanges};
 use crate::utils::validation::ValidationCollector;
@@ -15,15 +17,44 @@ use super::types::{
     ReleaseSemverCommit, ReleaseSemverRecommendation,
 };
 
+/// Load a component with portable config fallback when path_override is set.
+/// In CI environments, the component may not be registered — only homeboy.json exists.
+fn load_component(component_id: &str, options: &ReleaseOptions) -> Result<Component> {
+    match component::load(component_id) {
+        Ok(mut comp) => {
+            if let Some(ref path) = options.path_override {
+                comp.local_path = path.clone();
+            }
+            Ok(comp)
+        }
+        Err(err) if matches!(err.code, ErrorCode::ComponentNotFound) => {
+            if let Some(ref path) = options.path_override {
+                if let Some(mut discovered) = component::discover_from_portable(Path::new(path)) {
+                    discovered.id = component_id.to_string();
+                    discovered.local_path = path.clone();
+                    Ok(discovered)
+                } else {
+                    Ok(Component::new(
+                        component_id.to_string(),
+                        path.clone(),
+                        String::new(),
+                        None,
+                    ))
+                }
+            } else {
+                Err(err)
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Execute a release by computing the plan and executing it.
 /// What you preview (dry-run) is what you execute.
 pub fn run(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
     let release_plan = plan(component_id, options)?;
 
-    let mut component = component::load(component_id)?;
-    if let Some(ref path) = options.path_override {
-        component.local_path = path.clone();
-    }
+    let component = load_component(component_id, options)?;
     let extensions = resolve_extensions(&component, None)?;
     let resolver = ReleaseCapabilityResolver::new(extensions.clone());
     let executor = ReleaseStepExecutor::new(component_id.to_string(), extensions);
@@ -69,10 +100,7 @@ pub fn run(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
 /// - From component's extensions that have `release.publish` action
 /// - Or explicit `release.publish` array if configured
 pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan> {
-    let mut component = component::load(component_id)?;
-    if let Some(ref path) = options.path_override {
-        component.local_path = path.clone();
-    }
+    let component = load_component(component_id, options)?;
     let extensions = resolve_extensions(&component, None)?;
 
     let mut v = ValidationCollector::new();

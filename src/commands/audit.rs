@@ -11,14 +11,14 @@ use homeboy::extension::ExtensionRunner;
 use homeboy::git;
 use homeboy::utils::autofix::{self, AutofixMode};
 
-use super::args::BaselineArgs;
+use super::args::{BaselineArgs, PositionalComponentArgs};
 use super::test_scope::{build_phpunit_filter_regex, compute_changed_test_scope};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
 pub struct AuditArgs {
-    /// Component ID or direct filesystem path to audit
-    pub component_id: String,
+    #[command(flatten)]
+    pub comp: PositionalComponentArgs,
 
     /// Only show discovered conventions (skip findings)
     #[arg(long)]
@@ -62,10 +62,6 @@ pub struct AuditArgs {
 
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
-
-    /// Override local_path for this audit run (use a workspace clone or temp checkout)
-    #[arg(long)]
-    pub path: Option<String>,
 
     /// Only audit files changed since a git ref (branch, tag, or SHA).
     /// Uses merge-base for accurate PR-scoped audits.
@@ -314,25 +310,27 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
     let only_kinds = parse_fix_kinds(&args.only, "only")?;
     let exclude_kinds = parse_fix_kinds(&args.exclude, "exclude")?;
 
-    // Resolve component ID and source path
-    let (resolved_id, resolved_path) = if Path::new(&args.component_id).is_dir() {
+    // Resolve component ID and source path.
+    // Supports: component ID with --path, registered component, or direct filesystem path.
+    let (resolved_id, resolved_path) = if Path::new(&args.comp.component).is_dir() {
+        // Direct path passed as component ID (e.g. `homeboy audit /some/path`)
         let effective = args
+            .comp
             .path
             .as_deref()
-            .unwrap_or(&args.component_id)
+            .unwrap_or(&args.comp.component)
             .to_string();
         let name = Path::new(&effective)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
         (name, effective)
-    } else if let Some(ref path) = args.path {
-        (args.component_id.clone(), path.clone())
     } else {
-        let comp = homeboy::component::load(&args.component_id)?;
+        // Standard resolution: registered → portable config → synthetic
+        let comp = args.comp.load()?;
         homeboy::component::validate_local_path(&comp)?;
         let expanded = shellexpand::tilde(&comp.local_path).to_string();
-        (args.component_id.clone(), expanded)
+        (comp.id.clone(), expanded)
     };
 
     // Run audit — scoped or full
@@ -975,7 +973,7 @@ fn build_chunk_verifier<'a>(
 mod tests {
     use super::default_audit_exit_code;
     use super::{run, AuditArgs, AuditOutput};
-    use crate::commands::args::BaselineArgs;
+    use crate::commands::args::{BaselineArgs, PositionalComponentArgs};
     use homeboy::code_audit::fixer::{FixKind, FixSafetyTier, InsertionKind};
     use homeboy::code_audit::DeviationKind;
     use homeboy::code_audit::{AuditSummary, CodeAuditResult, Finding, Severity};
@@ -1388,7 +1386,10 @@ mod tests {
         fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
 
         let args = AuditArgs {
-            component_id: root.to_string_lossy().to_string(),
+            comp: PositionalComponentArgs {
+                component: root.to_string_lossy().to_string(),
+                path: None,
+            },
             conventions: false,
             fix: true,
             write: true,
@@ -1403,7 +1404,6 @@ mod tests {
                 baseline: false,
                 ignore_baseline: true,
             },
-            path: None,
             changed_since: None,
             json_summary: false,
         };
