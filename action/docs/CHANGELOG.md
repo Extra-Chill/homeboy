@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.4.0] - 2026-03-06
+
+### Added
+- CI-driven continuous release pipeline — fully automatic version bump, changelog generation, and tagging from conventional commits
+- Rewritten README with full release documentation and examples
+
 ## [1.3.0] - 2026-03-06
 
 ### Added
