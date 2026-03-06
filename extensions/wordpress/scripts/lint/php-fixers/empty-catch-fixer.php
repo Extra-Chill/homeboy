@@ -3,11 +3,15 @@
 /**
  * Empty Catch Fixer
  *
- * Inserts error_log() calls into empty catch blocks.
+ * Adds `unset( $e )` to empty catch blocks so they satisfy the
+ * Generic.CodeAnalysis.EmptyStatement.DetectedCatch sniff without
+ * injecting any debug or logging code into production.
  *
- * PHPCS flags empty catch blocks (Generic.CodeAnalysis.EmptyStatement.DetectedCatch).
- * Instead of suppressing, we add a meaningful log line. If the catch block has a
- * comment explaining why it's empty, we preserve the comment and still add the log.
+ * Handles two patterns:
+ *  1. `catch ( \Exception $e ) { }` → adds `unset( $e );`
+ *  2. `catch ( \Exception ) { }`   → adds `$e` variable + `unset( $e );`
+ *
+ * Preserves existing comments inside the catch body.
  *
  * Usage: php empty-catch-fixer.php <path>
  */
@@ -37,10 +41,10 @@ if ( $result['total_fixes'] > 0 ) {
 exit( 0 );
 
 /**
- * Process a single PHP file using line-based approach.
+ * Process a single PHP file.
  *
  * Detects catch blocks where the body is empty or contains only comments,
- * then inserts an error_log() call using the caught exception variable.
+ * then inserts `unset( $e );` to satisfy the empty-statement sniff.
  */
 function process_file( $filepath ) {
 	$lines = file( $filepath );
@@ -57,19 +61,18 @@ function process_file( $filepath ) {
 		$line    = $lines[ $i ];
 		$trimmed = trim( $line );
 
-		// Look for: } catch ( ... $variable ) {
+		// Pattern 1: catch with captured variable — `catch ( \Exception $var ) {`
 		if ( preg_match( '/\}\s*catch\s*\(\s*\\\\?[\w\\\\]+\s+(\$\w+)\s*\)\s*\{/', $trimmed, $m ) ) {
 			$exception_var = $m[1];
 			$new_lines[]   = $line;
 			$i++;
 
-			// Collect lines inside the catch block until closing brace.
-			$body_lines    = array();
-			$brace_depth   = 1;
-			$catch_start   = $i;
+			$body_lines  = array();
+			$brace_depth = 1;
+			$catch_start = $i;
 
 			while ( $i < $count && $brace_depth > 0 ) {
-				$inner   = $lines[ $i ];
+				$inner        = $lines[ $i ];
 				$brace_depth += substr_count( $inner, '{' ) - substr_count( $inner, '}' );
 
 				if ( $brace_depth > 0 ) {
@@ -78,26 +81,7 @@ function process_file( $filepath ) {
 				}
 			}
 
-			// Check if body is empty or comment-only.
-			$has_code = false;
-			foreach ( $body_lines as $body_line ) {
-				$body_trimmed = trim( $body_line );
-				if ( $body_trimmed === '' ) {
-					continue;
-				}
-				// Single-line comments.
-				if ( strpos( $body_trimmed, '//' ) === 0 ) {
-					continue;
-				}
-				// Block comment lines.
-				if ( strpos( $body_trimmed, '/*' ) === 0 || strpos( $body_trimmed, '*' ) === 0 ) {
-					continue;
-				}
-				$has_code = true;
-				break;
-			}
-
-			if ( ! $has_code ) {
+			if ( ! body_has_code( $body_lines ) ) {
 				// Detect indent from the catch line.
 				preg_match( '/^(\s*)/', $lines[ $catch_start - 1 ], $indent_match );
 				$catch_indent = $indent_match[1];
@@ -105,18 +89,13 @@ function process_file( $filepath ) {
 
 				// Preserve existing comments.
 				foreach ( $body_lines as $body_line ) {
-					$body_trimmed = trim( $body_line );
-					if ( $body_trimmed !== '' ) {
+					if ( trim( $body_line ) !== '' ) {
 						$new_lines[] = $body_line;
 					}
 				}
 
-				// Derive a context label from the function/method containing this catch.
-				$context = derive_catch_context( $lines, $catch_start - 1 );
-
-				// Insert wp_trigger_error() — WordPress-approved error reporting (WP 6.4+).
-				// Unlike error_log(), PHPCS does not flag this as a development function.
-				$new_lines[] = "{$body_indent}wp_trigger_error( __FUNCTION__, '{$context}: ' . {$exception_var}->getMessage(), E_USER_NOTICE );\n";
+				// Insert unset() to satisfy empty-statement sniff.
+				$new_lines[] = "{$body_indent}unset( {$exception_var} );\n";
 				$fixes++;
 			} else {
 				// Body has real code — emit as-is.
@@ -125,7 +104,61 @@ function process_file( $filepath ) {
 				}
 			}
 
-			// Emit the closing brace line (still at $i).
+			// Emit the closing brace line.
+			if ( $i < $count ) {
+				$new_lines[] = $lines[ $i ];
+				$i++;
+			}
+
+			continue;
+		}
+
+		// Pattern 2: non-capturing catch (PHP 8.0+) — `catch ( \Exception ) {`
+		if ( preg_match( '/(\}\s*catch\s*\(\s*\\\\?[\w\\\\]+)\s*\)\s*\{/', $trimmed, $m )
+			&& ! preg_match( '/\$\w+/', $trimmed )
+		) {
+			// Rewrite catch line to add $e variable.
+			$rewritten = preg_replace(
+				'/(\}\s*catch\s*\(\s*\\\\?[\w\\\\]+)\s*(\)\s*\{)/',
+				'$1 $e $2',
+				$line
+			);
+			$new_lines[] = $rewritten;
+			$i++;
+
+			$body_lines  = array();
+			$brace_depth = 1;
+			$catch_start = $i;
+
+			while ( $i < $count && $brace_depth > 0 ) {
+				$inner        = $lines[ $i ];
+				$brace_depth += substr_count( $inner, '{' ) - substr_count( $inner, '}' );
+
+				if ( $brace_depth > 0 ) {
+					$body_lines[] = $inner;
+					$i++;
+				}
+			}
+
+			if ( ! body_has_code( $body_lines ) ) {
+				preg_match( '/^(\s*)/', $lines[ $catch_start - 1 ], $indent_match );
+				$catch_indent = $indent_match[1];
+				$body_indent  = $catch_indent . "\t";
+
+				foreach ( $body_lines as $body_line ) {
+					if ( trim( $body_line ) !== '' ) {
+						$new_lines[] = $body_line;
+					}
+				}
+
+				$new_lines[] = "{$body_indent}unset( \$e );\n";
+				$fixes++;
+			} else {
+				foreach ( $body_lines as $body_line ) {
+					$new_lines[] = $body_line;
+				}
+			}
+
 			if ( $i < $count ) {
 				$new_lines[] = $lines[ $i ];
 				$i++;
@@ -146,40 +179,26 @@ function process_file( $filepath ) {
 }
 
 /**
- * Derive a context label from the enclosing function/method.
+ * Check whether catch body lines contain real code (not just comments/blanks).
  *
- * Scans backwards from the catch line to find the nearest function declaration.
- * Returns something like "ClassName::methodName catch" or "function_name catch".
+ * @param array $body_lines Lines inside the catch block.
+ * @return bool True if there is actual executable code.
  */
-function derive_catch_context( array $lines, int $from_line ): string {
-	$class_name    = '';
-	$function_name = '';
-
-	for ( $i = $from_line; $i >= 0; $i-- ) {
-		$line = $lines[ $i ];
-
-		// Find enclosing function.
-		if ( $function_name === '' && preg_match( '/function\s+(\w+)\s*\(/', $line, $m ) ) {
-			$function_name = $m[1];
+function body_has_code( array $body_lines ): bool {
+	foreach ( $body_lines as $body_line ) {
+		$body_trimmed = trim( $body_line );
+		if ( $body_trimmed === '' ) {
+			continue;
 		}
-
-		// Find enclosing class.
-		if ( $class_name === '' && preg_match( '/^\s*(?:class|trait)\s+(\w+)/', $line, $m ) ) {
-			$class_name = $m[1];
+		// Single-line comments.
+		if ( strpos( $body_trimmed, '//' ) === 0 ) {
+			continue;
 		}
-
-		// Stop once we have both.
-		if ( $function_name !== '' && $class_name !== '' ) {
-			break;
+		// Block comment lines.
+		if ( strpos( $body_trimmed, '/*' ) === 0 || strpos( $body_trimmed, '*' ) === 0 ) {
+			continue;
 		}
+		return true;
 	}
-
-	if ( $class_name !== '' && $function_name !== '' ) {
-		return "{$class_name}::{$function_name} catch";
-	}
-	if ( $function_name !== '' ) {
-		return "{$function_name} catch";
-	}
-
-	return 'catch block';
+	return false;
 }

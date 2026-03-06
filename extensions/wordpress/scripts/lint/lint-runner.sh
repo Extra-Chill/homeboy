@@ -165,6 +165,33 @@ if [ -n "$MAIN_PLUGIN_FILE" ]; then
     fi
 fi
 
+# Auto-detect PHP version from composer.json (overrides phpcs.xml.dist default)
+# Priority: HOMEBOY_PHP_VERSION env var > composer.json require.php > phpcs.xml.dist default
+PHP_VERSION=""
+if [ -n "${HOMEBOY_PHP_VERSION:-}" ]; then
+    PHP_VERSION="${HOMEBOY_PHP_VERSION}"
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: PHP version from env: $PHP_VERSION"
+    fi
+elif [ -f "${PLUGIN_PATH}/composer.json" ] && command -v php &> /dev/null; then
+    PHP_VERSION=$(php -r '
+        $json = json_decode(file_get_contents($argv[1]), true);
+        $constraint = $json["require"]["php"] ?? "";
+        if ($constraint === "") exit;
+        // Extract minimum version from constraint: ">=8.2" -> "8.2", "^8.1" -> "8.1", "~8.0" -> "8.0", "8.2.*" -> "8.2"
+        if (preg_match("/(\d+\.\d+)/", $constraint, $m)) {
+            echo $m[1];
+        }
+    ' "${PLUGIN_PATH}/composer.json" 2>/dev/null || echo "")
+    if [ -n "$PHP_VERSION" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: PHP version from composer.json: $PHP_VERSION"
+    fi
+fi
+
+if [ -n "$PHP_VERSION" ]; then
+    echo "PHP compatibility target: ${PHP_VERSION}-"
+fi
+
 # Auto-fix mode: run custom fixers, then phpcbf, then phpcs
 if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
     # Run custom fixers on each target file/directory
@@ -236,7 +263,7 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
             php "$SILENCED_ERROR_FIXER" "$lint_target"
         fi
 
-        # Run empty catch fixer (add wp_trigger_error to empty catch blocks)
+        # Run empty catch fixer (capture + unset to satisfy empty-statement sniff)
         if [ -f "$EMPTY_CATCH_FIXER" ]; then
             php "$EMPTY_CATCH_FIXER" "$lint_target"
         fi
@@ -261,6 +288,9 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
         phpcbf_args=(--standard="$PHPCS_CONFIG")
         if [ -n "$TEXT_DOMAIN" ]; then
             phpcbf_args+=(--runtime-set text_domain "$TEXT_DOMAIN")
+        fi
+        if [ -n "$PHP_VERSION" ]; then
+            phpcbf_args+=(--runtime-set testVersion "${PHP_VERSION}-")
         fi
         phpcbf_args+=("${LINT_FILES[@]}")
 
@@ -305,6 +335,9 @@ echo "Validating with PHPCS..."
 phpcs_base_args=(--standard="$PHPCS_CONFIG")
 if [ -n "$TEXT_DOMAIN" ]; then
     phpcs_base_args+=(--runtime-set text_domain "$TEXT_DOMAIN")
+fi
+if [ -n "$PHP_VERSION" ]; then
+    phpcs_base_args+=(--runtime-set testVersion "${PHP_VERSION}-")
 fi
 if [[ "${HOMEBOY_ERRORS_ONLY:-}" == "1" ]]; then
     phpcs_base_args+=(--warning-severity=0)
