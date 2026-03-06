@@ -2,6 +2,13 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.2.1] - 2026-03-06
+
+### Fixed
+- fix bash brace expansion bug in generate-failure-digest.sh — ${RESULTS:-{}} appended extra } to JSON, silently breaking all PR comment failure detail sections
+- add PHPUnit testdox format failure detection to test parser
+- add JSON error patterns to test raw_excerpt extraction
+
 ## [1.2.0] - 2026-03-06
 
 ### Added
