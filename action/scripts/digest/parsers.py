@@ -4,6 +4,45 @@ import re
 from typing import Any
 
 
+def _clean_excerpt_lines(lines: list[str], limit: int = 40) -> list[str]:
+    cleaned: list[str] = []
+    blank_run = 0
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            blank_run += 1
+            if blank_run > 1:
+                continue
+            cleaned.append("")
+            continue
+        blank_run = 0
+        cleaned.append(line)
+        if len(cleaned) >= limit:
+            break
+    while cleaned and cleaned[0] == "":
+        cleaned.pop(0)
+    while cleaned and cleaned[-1] == "":
+        cleaned.pop()
+    return cleaned
+
+
+def _extract_excerpt_around_pattern(
+    log_text: str,
+    patterns: list[str],
+    before: int = 2,
+    after: int = 10,
+    limit: int = 40,
+) -> list[str]:
+    lines = log_text.splitlines()
+    for idx, raw in enumerate(lines):
+        for pattern in patterns:
+            if re.search(pattern, raw):
+                start = max(0, idx - before)
+                end = min(len(lines), idx + after + 1)
+                return _clean_excerpt_lines(lines[start:end], limit=limit)
+    return []
+
+
 def extract_test_failures(log_text: str) -> dict[str, Any]:
     lines = log_text.splitlines()
     failures: list[dict[str, str]] = []
@@ -80,9 +119,26 @@ def extract_test_failures(log_text: str) -> dict[str, Any]:
     if rust_summary:
         failed_count = max(failed_count, sum(int(x[1]) for x in rust_summary))
 
+    raw_excerpt = _extract_excerpt_around_pattern(
+        log_text,
+        [
+            r"^\d+\)\s+",
+            r"^----\s+.+\s+stdout\s+----$",
+            r"Failed asserting",
+            r"\bpanicked at\b",
+            r"\bERROR!\b",
+            r"\bFAILURES!\b",
+            r"test result:\s+FAILED",
+        ],
+        before=1,
+        after=18,
+        limit=60,
+    )
+
     return {
         "failed_tests_count": failed_count,
         "top_failed_tests": deduped[:10],
+        "raw_excerpt": raw_excerpt,
     }
 
 
@@ -92,6 +148,10 @@ def extract_lint_digest(log_text: str) -> dict[str, Any]:
     phpstan_summary = ""
     build_failed = ""
     top_violations: list[str] = []
+    error_code = ""
+    error_message = ""
+    error_field = ""
+    error_hint = ""
 
     m = re.search(r"LINT SUMMARY:\s*(.+)", log_text)
     if m:
@@ -109,6 +169,22 @@ def extract_lint_digest(log_text: str) -> dict[str, Any]:
     if m:
         build_failed = m.group(1).strip()
 
+    m = re.search(r'"code":\s*"([^"]+)"', log_text)
+    if m:
+        error_code = m.group(1).strip()
+
+    m = re.search(r'"message":\s*"([^"]+)"', log_text)
+    if m:
+        error_message = m.group(1).strip()
+
+    m = re.search(r'"field":\s*"([^"]+)"', log_text)
+    if m:
+        error_field = m.group(1).strip()
+
+    m = re.search(r'"hints":\s*\[\s*\{\s*"message":\s*"([^"]+)"', log_text, re.S)
+    if m:
+        error_hint = m.group(1).strip()
+
     lines = log_text.splitlines()
     in_top = False
     for raw in lines:
@@ -123,12 +199,34 @@ def extract_lint_digest(log_text: str) -> dict[str, Any]:
         if line.startswith(" ") or line.startswith("\t"):
             top_violations.append(line.strip())
 
+    raw_excerpt = _extract_excerpt_around_pattern(
+        log_text,
+        [
+            r'"success":\s*false',
+            r'"code":\s*"',
+            r"LINT SUMMARY:",
+            r"PHPCS SUMMARY:",
+            r"PHPSTAN SUMMARY:",
+            r"BUILD FAILED:",
+            r"PHP Fatal error:",
+            r"^error\[",
+        ],
+        before=1,
+        after=18,
+        limit=60,
+    )
+
     return {
         "lint_summary": lint_summary,
         "phpcs_summary": phpcs_summary,
         "phpstan_summary": phpstan_summary,
         "build_failed": build_failed,
+        "error_code": error_code,
+        "error_message": error_message,
+        "error_field": error_field,
+        "error_hint": error_hint,
         "top_violations": top_violations[:10],
+        "raw_excerpt": raw_excerpt,
     }
 
 
@@ -148,6 +246,7 @@ def extract_audit_digest(
             "outliers_found": None,
             "severity_counts": {},
             "top_findings": [],
+            "raw_excerpt": _extract_excerpt_around_pattern(log_text, [r'.+'], before=0, after=20, limit=40),
         }
 
     payload = payloads[-1]
@@ -244,6 +343,21 @@ def extract_audit_digest(
             }
         )
 
+    raw_excerpt = _extract_excerpt_around_pattern(
+        log_text,
+        [
+            r'"outliers_found"\s*:',
+            r'"drift_increased"\s*:',
+            r'"findings"\s*:',
+            r'"baseline_comparison"\s*:',
+            r'"success":\s*false',
+            r'"error":\s*\{',
+        ],
+        before=1,
+        after=30,
+        limit=80,
+    )
+
     return {
         "drift_increased": bool(baseline.get("drift_increased", False)),
         "new_findings_count": len(new_findings),
@@ -253,4 +367,5 @@ def extract_audit_digest(
         "parsed_outlier_items": len(outlier_items),
         "severity_counts": severity_counts,
         "top_findings": top_findings[:500],
+        "raw_excerpt": raw_excerpt,
     }

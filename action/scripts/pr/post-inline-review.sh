@@ -26,60 +26,10 @@ dismiss_existing_bot_reviews() {
   done
 }
 
-post_digest_review_fallback() {
-  if [ "${HOMEBOY_PR_COMMENT_POSTED:-false}" = "true" ]; then
-    echo "Shared PR comment already posted; skipping digest fallback review"
-    dismiss_existing_bot_reviews
-    return 0
-  fi
-
-  local digest_file="${HOMEBOY_FAILURE_DIGEST_FILE:-}"
-  if [ -z "${digest_file}" ] || [ ! -f "${digest_file}" ]; then
-    echo "No failure digest available for inline review fallback"
-    return 0
-  fi
-
-  local review_body
-  review_body=$(python3 - "$digest_file" <<'PY'
-import sys
-from pathlib import Path
-
-digest_path = Path(sys.argv[1])
-text = digest_path.read_text(encoding="utf-8", errors="replace").strip()
-
-# Keep review body bounded so GitHub payloads stay predictable.
-max_chars = 65000
-if len(text) > max_chars:
-    text = text[:max_chars] + "\n\n_Truncated for GitHub review payload size._"
-
-print("## Homeboy Failure Digest")
-print("")
-print(text)
-PY
-)
-
-  if [ -z "${review_body}" ]; then
-    echo "Failure digest fallback produced empty review body"
-    return 0
-  fi
-
-  dismiss_existing_bot_reviews
-
-  if ! gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-    --method POST \
-    --field event="COMMENT" \
-    --field body="${review_body}" > /dev/null 2>&1; then
-    echo "::warning::Could not post digest fallback review"
-    return 0
-  fi
-
-  echo "Posted fallback PR review from failure digest"
-}
-
 ANNOTATION_COUNT=$(find "${ANNOTATIONS_DIR}" -name "*.json" -type f 2>/dev/null | wc -l)
 if [ "${ANNOTATION_COUNT}" -eq 0 ]; then
   echo "No annotation files found — skipping inline review"
-  post_digest_review_fallback
+  dismiss_existing_bot_reviews
   exit 0
 fi
 
@@ -115,7 +65,7 @@ rm -f "${CHANGED_FILES_FILE}" "${RELATED_FILES_FILE}"
 
 if [ -z "${REVIEW_PAYLOAD}" ]; then
   echo "No annotations to post — skipping inline review"
-  post_digest_review_fallback
+  dismiss_existing_bot_reviews
   exit 0
 fi
 
