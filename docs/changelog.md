@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.60.0] - 2026-03-06
+
+### Added
+- add convergent autofix engine (#514)
+
+### Fixed
+- load portable extensions (baselines, extensions config) for path-based lint/test commands in CI
+- add missing source file in dedupes_missing_test_file_creation test
+- load portable extensions for path-based commands (#519)
+- repair 0.59.0 release notes
+
 ## [0.59.0] - 2026-03-06
 
 ### Added
