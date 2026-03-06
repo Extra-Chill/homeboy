@@ -1036,135 +1036,144 @@ mod tests {
 
     #[test]
     fn test_run_fix_write_applies_preflight_checked_method_stub() {
-        let root = tmp_dir("fix-write-applies-preflight-checked-method-stub");
-        fs::create_dir_all(root.join("commands")).unwrap();
-
-        fs::write(
-            root.join("commands/good_one.rs"),
-            "pub fn run() {}\npub fn helper() {}\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("commands/good_two.rs"),
-            "pub fn run() {}\npub fn helper() {}\n",
-        )
-        .unwrap();
-        fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
-
-        let args = AuditArgs {
-            component_id: root.to_string_lossy().to_string(),
-            conventions: false,
-            fix: true,
-            write: true,
-            max_iterations: 1,
-            warning_weight: 3,
-            info_weight: 1,
-            no_lint_smoke: false,
-            no_test_smoke: false,
-            only: vec![],
-            exclude: vec![],
-            baseline_args: BaselineArgs {
-                baseline: false,
-                ignore_baseline: true,
-            },
-            path: None,
-            changed_since: None,
-            json_summary: false,
+        use homeboy::code_audit::fixer::{
+            self, Fix, FixPolicy, Insertion, PreflightContext, PreflightStatus,
         };
 
-        let (output, _code) =
-            run(args, &crate::commands::GlobalArgs {}).expect("audit fix should run");
+        let root = tmp_dir("fix-write-applies-preflight-checked-method-stub");
+        fs::create_dir_all(root.join("commands")).unwrap();
+        fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
 
-        match output {
-            AuditOutput::Fix {
-                fix_result,
-                written,
-                ..
-            } => {
-                assert!(written);
-                assert_eq!(fix_result.fixes.len(), 1);
-                let insertion = &fix_result.fixes[0].insertions[0];
-                assert_eq!(insertion.fix_kind, FixKind::MethodStub);
-                assert!(matches!(insertion.kind, InsertionKind::MethodStub));
-                assert_eq!(insertion.safety_tier, FixSafetyTier::SafeWithChecks);
-                assert!(insertion.auto_apply);
-                assert!(fix_result.fixes[0].applied);
-                assert!(matches!(
-                    insertion.preflight.as_ref().map(|report| report.status),
-                    Some(homeboy::code_audit::fixer::PreflightStatus::Passed)
-                ));
+        // Construct a FixResult directly — tests the fixer logic without
+        // requiring an extension to fingerprint .rs files.
+        let mut fix_result = fixer::FixResult {
+            fixes: vec![Fix {
+                file: "commands/bad.rs".to_string(),
+                required_methods: vec!["run".to_string(), "helper".to_string()],
+                required_registrations: vec![],
+                insertions: vec![Insertion {
+                    kind: InsertionKind::MethodStub,
+                    fix_kind: FixKind::MethodStub,
+                    safety_tier: FixKind::MethodStub.safety_tier(),
+                    auto_apply: false,
+                    blocked_reason: None,
+                    preflight: None,
+                    code: "\npub fn helper() {\n    todo!(\"helper\")\n}\n".to_string(),
+                    description: "Add missing method helper()".to_string(),
+                }],
+                applied: false,
+            }],
+            new_files: vec![],
+            skipped: vec![],
+            chunk_results: vec![],
+            total_insertions: 1,
+            files_modified: 0,
+        };
 
-                let content = fs::read_to_string(root.join("commands/bad.rs")).unwrap();
-                assert!(content.contains("pub fn helper()"));
-                assert!(content.contains("todo!(\"helper\")"));
-            }
-            other => panic!(
-                "expected AuditOutput::Fix, got {:?}",
-                std::mem::discriminant(&other)
-            ),
-        }
+        // Step 1: apply_fix_policy annotates insertions
+        let summary = fixer::apply_fix_policy(
+            &mut fix_result,
+            true, // write mode
+            &FixPolicy::default(),
+            &PreflightContext { root: &root },
+        );
+
+        assert_eq!(summary.auto_apply_insertions, 1);
+        assert_eq!(summary.preflight_failures, 0);
+
+        let insertion = &fix_result.fixes[0].insertions[0];
+        assert_eq!(insertion.fix_kind, FixKind::MethodStub);
+        assert!(matches!(insertion.kind, InsertionKind::MethodStub));
+        assert_eq!(insertion.safety_tier, FixSafetyTier::SafeWithChecks);
+        assert!(insertion.auto_apply);
+        assert!(matches!(
+            insertion.preflight.as_ref().map(|report| report.status),
+            Some(PreflightStatus::Passed)
+        ));
+
+        // Step 2: apply_fixes writes to disk
+        let mut auto_subset = fixer::auto_apply_subset(&fix_result);
+        let modified = fixer::apply_fixes(&mut auto_subset.fixes, &root);
+        assert_eq!(modified, 1);
+        assert!(auto_subset.fixes[0].applied);
+
+        let content = fs::read_to_string(root.join("commands/bad.rs")).unwrap();
+        assert!(content.contains("pub fn helper()"));
+        assert!(content.contains("todo!(\"helper\")"));
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn test_run_fix_only_import_add_filters_method_stub() {
+        use homeboy::code_audit::fixer::{self, Fix, FixPolicy, Insertion, PreflightContext};
+
         let root = tmp_dir("fix-only-import-add");
         fs::create_dir_all(root.join("commands")).unwrap();
-
-        fs::write(
-            root.join("commands/good_one.rs"),
-            "use super::CmdResult;\npub fn run() -> CmdResult<()> {\n    Ok(())\n}\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("commands/good_two.rs"),
-            "use super::CmdResult;\npub fn run() -> CmdResult<()> {\n    Ok(())\n}\n",
-        )
-        .unwrap();
         fs::write(
             root.join("commands/bad.rs"),
             "pub fn run() -> CmdResult<()> {\n    Ok(())\n}\n",
         )
         .unwrap();
 
-        let args = AuditArgs {
-            component_id: root.to_string_lossy().to_string(),
-            conventions: false,
-            fix: true,
-            write: false,
-            max_iterations: 1,
-            warning_weight: 3,
-            info_weight: 1,
-            no_lint_smoke: false,
-            no_test_smoke: false,
-            only: vec!["import_add".to_string()],
-            exclude: vec![],
-            baseline_args: BaselineArgs {
-                baseline: false,
-                ignore_baseline: true,
-            },
-            path: None,
-            changed_since: None,
-            json_summary: false,
+        // Construct a FixResult with both a MethodStub and an ImportAdd.
+        // The --only import_add policy should filter out the MethodStub entirely.
+        let mut fix_result = fixer::FixResult {
+            fixes: vec![Fix {
+                file: "commands/bad.rs".to_string(),
+                required_methods: vec!["run".to_string()],
+                required_registrations: vec![],
+                insertions: vec![
+                    Insertion {
+                        kind: InsertionKind::ImportAdd,
+                        fix_kind: FixKind::ImportAdd,
+                        safety_tier: FixKind::ImportAdd.safety_tier(),
+                        auto_apply: false,
+                        blocked_reason: None,
+                        preflight: None,
+                        code: "use super::CmdResult;\n".to_string(),
+                        description: "Add missing import CmdResult".to_string(),
+                    },
+                    Insertion {
+                        kind: InsertionKind::MethodStub,
+                        fix_kind: FixKind::MethodStub,
+                        safety_tier: FixKind::MethodStub.safety_tier(),
+                        auto_apply: false,
+                        blocked_reason: None,
+                        preflight: None,
+                        code: "\npub fn helper() {\n    todo!(\"helper\")\n}\n".to_string(),
+                        description: "Add missing method helper()".to_string(),
+                    },
+                ],
+                applied: false,
+            }],
+            new_files: vec![],
+            skipped: vec![],
+            chunk_results: vec![],
+            total_insertions: 2,
+            files_modified: 0,
         };
 
-        let (output, _code) =
-            run(args, &crate::commands::GlobalArgs {}).expect("audit fix should run");
+        let policy = FixPolicy {
+            only: Some(vec![FixKind::ImportAdd]),
+            exclude: vec![],
+        };
 
-        match output {
-            AuditOutput::Fix { fix_result, .. } => {
-                assert_eq!(fix_result.fixes.len(), 1);
-                let insertion = &fix_result.fixes[0].insertions[0];
-                assert!(matches!(insertion.kind, InsertionKind::ImportAdd));
-                assert_eq!(insertion.fix_kind, FixKind::ImportAdd);
-                assert!(insertion.auto_apply);
-            }
-            other => panic!(
-                "expected AuditOutput::Fix, got {:?}",
-                std::mem::discriminant(&other)
-            ),
-        }
+        fixer::apply_fix_policy(
+            &mut fix_result,
+            false, // dry-run
+            &policy,
+            &PreflightContext { root: &root },
+        );
+
+        // Policy filters out MethodStub entirely — only ImportAdd survives
+        assert_eq!(fix_result.fixes.len(), 1);
+        assert_eq!(fix_result.fixes[0].insertions.len(), 1);
+
+        let insertion = &fix_result.fixes[0].insertions[0];
+        assert!(insertion.auto_apply);
+        assert_eq!(insertion.fix_kind, FixKind::ImportAdd);
+        assert!(matches!(insertion.kind, InsertionKind::ImportAdd));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1211,6 +1220,13 @@ mod tests {
 
     #[test]
     fn test_chunk_verifier_rejects_new_findings_in_changed_files() {
+        // This test requires a fingerprint extension for .rs files (e.g. Rust extension).
+        // Skip when no extension is available (CI without extensions installed).
+        if homeboy::extension::find_extension_for_file_ext("rs", "fingerprint").is_none() {
+            eprintln!("SKIP: no Rust fingerprint extension installed");
+            return;
+        }
+
         let root = tmp_dir("chunk-verifier-dirty");
         fs::create_dir_all(root.join("commands")).unwrap();
 
