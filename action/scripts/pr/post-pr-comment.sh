@@ -102,8 +102,8 @@ for CMD in "${CMD_ARRAY[@]}"; do
       COMMENT_BODY+="\`\`\`"$'\n'"</details>"$'\n'
     fi
 
-    if [ "${CMD}" = "audit" ]; then
-      AUDIT_MD=$(python3 "${GITHUB_ACTION_PATH}/scripts/render-audit-summary.py" "${LOG_FILE}" 2>/dev/null || true)
+    if [ "${CMD}" = "audit"; then
+      AUDIT_MD=$(python3 "${GITHUB_ACTION_PATH}/scripts/digest/render-audit-summary.py" "${LOG_FILE}" 2>/dev/null || true)
       if [ -n "${AUDIT_MD}" ]; then
         COMMENT_BODY+=$'\n'"### Audit summary"$'\n'
         COMMENT_BODY+="${AUDIT_MD}"$'\n'
