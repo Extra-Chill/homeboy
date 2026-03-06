@@ -7,6 +7,7 @@
 //! See: https://github.com/Extra-Chill/homeboy/issues/436
 
 use clap::Args;
+use std::path::Path;
 use std::path::PathBuf;
 
 use homeboy::component::{self, Component};
@@ -102,12 +103,21 @@ impl PositionalComponentArgs {
                     comp.local_path = path.clone();
                     Ok(comp)
                 }
-                Err(err) if matches!(err.code, ErrorCode::ComponentNotFound) => Ok(Component::new(
-                    self.component.clone(),
-                    path.clone(),
-                    String::new(),
-                    None,
-                )),
+                Err(err) if matches!(err.code, ErrorCode::ComponentNotFound) => {
+                    if let Some(mut discovered) = component::discover_from_portable(Path::new(path))
+                    {
+                        discovered.id = self.component.clone();
+                        discovered.local_path = path.clone();
+                        Ok(discovered)
+                    } else {
+                        Ok(Component::new(
+                            self.component.clone(),
+                            path.clone(),
+                            String::new(),
+                            None,
+                        ))
+                    }
+                }
                 Err(err) => Err(err),
             }
         } else {
@@ -150,6 +160,43 @@ mod tests {
         assert_eq!(loaded.id, "missing-component");
         assert_eq!(loaded.local_path, "/tmp/homeboy-missing-component");
         assert_eq!(loaded.remote_path, "");
+    }
+
+    #[test]
+    fn load_prefers_portable_config_when_path_contains_homeboy_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{
+  "extensions": {
+    "wordpress": {}
+  },
+  "changelog_target": "docs/CHANGELOG.md"
+}"#,
+        )
+        .unwrap();
+
+        let args = PositionalComponentArgs {
+            component: "data-machine".to_string(),
+            path: Some(dir.path().to_string_lossy().to_string()),
+        };
+
+        let loaded = args
+            .load()
+            .expect("portable config should seed synthetic component");
+
+        assert_eq!(loaded.id, "data-machine");
+        assert_eq!(loaded.local_path, dir.path().to_string_lossy());
+        assert!(loaded.extensions.is_some());
+        assert!(loaded
+            .extensions
+            .as_ref()
+            .unwrap()
+            .contains_key("wordpress"));
+        assert_eq!(
+            loaded.changelog_target.as_deref(),
+            Some("docs/CHANGELOG.md")
+        );
     }
 }
 

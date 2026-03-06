@@ -1,6 +1,9 @@
 {
   "auto_cleanup": false,
   "id": "homeboy",
+  "extensions": {
+    "rust": {}
+  },
   "baselines": {
     "audit": {
       "context_id": "homeboy",
