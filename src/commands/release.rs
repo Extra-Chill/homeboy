@@ -60,6 +60,11 @@ pub struct ReleaseArgs {
     /// Allow bump type lower than commit-derived semver recommendation
     #[arg(long)]
     allow_underbump: bool,
+
+    /// Skip publish/package steps (version bump + tag + push only).
+    /// Use when CI handles publishing after the tag is pushed.
+    #[arg(long)]
+    skip_publish: bool,
 }
 
 #[derive(Serialize)]
@@ -113,6 +118,7 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         path_override: args.comp.path.clone(),
         skip_checks: args.skip_checks,
         allow_underbump: args.allow_underbump,
+        skip_publish: args.skip_publish,
     };
 
     if args.dry_run_args.dry_run {

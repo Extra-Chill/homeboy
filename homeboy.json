@@ -590,11 +590,7 @@
   "extensions": {
     "rust": {}
   },
-  "hooks": {
-    "post:release": [
-      ". $HOME/.cargo/env && cargo publish"
-    ]
-  },
+  "hooks": {},
   "id": "homeboy",
   "version_targets": [
     {

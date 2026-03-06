@@ -159,6 +159,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 path_override: path,
                 skip_checks: false,
                 allow_underbump,
+                skip_publish: false,
             };
 
             if dry_run {

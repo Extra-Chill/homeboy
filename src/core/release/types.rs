@@ -151,4 +151,8 @@ pub struct ReleaseOptions {
     /// Allow requested bump to be lower than commit-derived recommendation.
     #[serde(default)]
     pub allow_underbump: bool,
+    /// Skip publish/package steps (version bump + tag + push only).
+    /// Use when CI handles publishing after the tag is pushed.
+    #[serde(default)]
+    pub skip_publish: bool,
 }

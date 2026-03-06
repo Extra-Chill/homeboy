@@ -658,7 +658,9 @@ fn validate_commits_vs_changelog(component: &Component, dry_run: bool) -> Result
 }
 
 fn normalize_changelog_text(value: &str) -> String {
-    value
+    // Strip trailing PR/issue references like (#123) before normalizing
+    let stripped = strip_pr_reference(value);
+    stripped
         .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { ' ' })
@@ -666,6 +668,23 @@ fn normalize_changelog_text(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Strip trailing PR/issue references like "(#123)" or "(#123, #456)" from text.
+fn strip_pr_reference(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some(pos) = trimmed.rfind('(') {
+        let after = &trimmed[pos..];
+        // Match patterns like (#123) or (#123, #456)
+        if after.ends_with(')')
+            && after[1..after.len() - 1]
+                .split(',')
+                .all(|part| part.trim().starts_with('#'))
+        {
+            return trimmed[..pos].trim().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 fn find_uncovered_commits<'a>(
@@ -684,9 +703,14 @@ fn find_uncovered_commits<'a>(
             let normalized_subject =
                 normalize_changelog_text(git::strip_conventional_prefix(&commit.subject));
 
-            !normalized_entries
-                .iter()
-                .any(|entry| !entry.is_empty() && entry.contains(&normalized_subject))
+            // Check both directions: entry contains subject OR subject contains entry.
+            // This handles cases where the manual changelog entry is a substring of the
+            // commit message or vice versa.
+            !normalized_entries.iter().any(|entry| {
+                !entry.is_empty()
+                    && (entry.contains(&normalized_subject)
+                        || normalized_subject.contains(entry.as_str()))
+            })
         })
         .cloned()
         .collect()
@@ -749,7 +773,7 @@ fn auto_generate_changelog_entries(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_uncovered_commits, normalize_changelog_text};
+    use super::{find_uncovered_commits, normalize_changelog_text, strip_pr_reference};
     use crate::git::{CommitCategory, CommitInfo};
 
     fn commit(subject: &str, category: CommitCategory) -> CommitInfo {
@@ -820,6 +844,60 @@ mod tests {
 
         let uncovered = find_uncovered_commits(&commits, &[]);
         assert!(uncovered.is_empty());
+    }
+
+    #[test]
+    fn test_strip_pr_reference() {
+        assert_eq!(strip_pr_reference("fix something (#526)"), "fix something");
+        assert_eq!(
+            strip_pr_reference("feat: add feature (#123, #456)"),
+            "feat: add feature"
+        );
+        assert_eq!(
+            strip_pr_reference("no pr reference here"),
+            "no pr reference here"
+        );
+        assert_eq!(
+            strip_pr_reference("has parens (not a pr ref)"),
+            "has parens (not a pr ref)"
+        );
+    }
+
+    #[test]
+    fn test_normalize_strips_pr_reference() {
+        assert_eq!(
+            normalize_changelog_text("fix something (#526)"),
+            normalize_changelog_text("fix something")
+        );
+    }
+
+    #[test]
+    fn test_find_uncovered_commits_deduplicates_with_pr_suffix() {
+        // Scenario: manual changelog entry without PR ref, commit has PR ref
+        let commits = vec![commit(
+            "fix: version bump dry-run no longer mutates changelog (#526)",
+            CommitCategory::Fix,
+        )];
+        let unreleased = vec!["version bump dry-run no longer mutates changelog".to_string()];
+
+        let uncovered = find_uncovered_commits(&commits, &unreleased);
+        assert!(
+            uncovered.is_empty(),
+            "Should detect commit as covered by manual entry (PR ref stripped)"
+        );
+    }
+
+    #[test]
+    fn test_find_uncovered_commits_bidirectional_match() {
+        // Entry is longer/more descriptive than the commit message
+        let commits = vec![commit("feat: enable autofix", CommitCategory::Feature)];
+        let unreleased = vec!["enable autofix on PR and release CI workflows".to_string()];
+
+        let uncovered = find_uncovered_commits(&commits, &unreleased);
+        assert!(
+            uncovered.is_empty(),
+            "Should match when commit subject is contained in the entry"
+        );
     }
 }
 
@@ -936,9 +1014,9 @@ fn build_release_steps(
         missing: vec![],
     });
 
-    // === PUBLISH STEPS (extension-derived, only if publish targets exist) ===
+    // === PUBLISH STEPS (extension-derived, skipped with --skip-publish) ===
 
-    if !publish_targets.is_empty() {
+    if !publish_targets.is_empty() && !options.skip_publish {
         // 5. Package (produces artifacts for publish steps)
         steps.push(ReleasePlanStep {
             id: "package".to_string(),
@@ -978,12 +1056,14 @@ fn build_release_steps(
             status: ReleasePlanStatus::Ready,
             missing: vec![],
         });
+    } else if options.skip_publish && !publish_targets.is_empty() {
+        log_status!("release", "Skipping publish/package steps (--skip-publish)");
     }
 
-    // === POST-RELEASE STEP (optional, runs after everything else) ===
+    // === POST-RELEASE STEP (optional, runs after everything else, skipped with --skip-publish) ===
     let post_release_hooks =
         crate::hooks::resolve_hooks(component, crate::hooks::events::POST_RELEASE);
-    if !post_release_hooks.is_empty() {
+    if !post_release_hooks.is_empty() && !options.skip_publish {
         let post_release_needs = if !publish_targets.is_empty() {
             vec!["cleanup".to_string()]
         } else {
