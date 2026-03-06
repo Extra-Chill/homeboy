@@ -128,8 +128,11 @@ done
 COMMENT_BODY+="---"$'\n'
 COMMENT_BODY+="*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1 — ${HOMEBOY_CLI_VERSION:-$(homeboy --version 2>/dev/null || echo 'homeboy')}*"
 
+COMMENT_MARKER="<!-- homeboy-action-results:${GITHUB_JOB:-homeboy} -->"
+COMMENT_BODY+=$'\n\n'"${COMMENT_MARKER}"
+
 EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-  --jq '.[] | select(.body | startswith("<!-- homeboy-action-results -->")) | .id' \
+  --jq ".[] | select(.body | contains(\"${COMMENT_MARKER}\")) | .id" \
   2>/dev/null | head -1 || true)
 
 if [ -n "${EXISTING_COMMENT_ID}" ]; then

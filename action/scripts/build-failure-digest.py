@@ -14,6 +14,9 @@ import subprocess
 from json import JSONDecoder
 from typing import Any
 
+from digest.parsers import extract_audit_digest, extract_lint_digest, extract_test_failures
+from digest.render import render_markdown
+
 
 def read_text(path: str) -> str:
     try:
@@ -52,178 +55,6 @@ def normalize_log_text(raw_text: str) -> str:
     return "\n".join(normalized_lines)
 
 
-def extract_test_failures(log_text: str) -> dict[str, Any]:
-    lines = log_text.splitlines()
-    failures: list[dict[str, str]] = []
-
-    for idx, line in enumerate(lines):
-        m = re.match(r"^\d+\)\s+(.+)$", line.strip())
-        if not m:
-            continue
-        test_name = m.group(1).strip()
-        detail = ""
-        location = ""
-        for j in range(idx + 1, min(idx + 10, len(lines))):
-            candidate = lines[j].strip()
-            if not candidate:
-                continue
-            if not detail and (
-                "Failed asserting" in candidate
-                or "is not" in candidate
-                or "Error:" in candidate
-                or "TypeError" in candidate
-                or "Exception" in candidate
-            ):
-                detail = candidate
-            loc_match = re.search(r"\b(?:in|at)\s+([^\s]+:\d+)\b", candidate)
-            if loc_match and not location:
-                location = loc_match.group(1)
-            if detail and location:
-                break
-        failures.append({"name": test_name, "detail": detail, "location": location})
-
-    for idx, line in enumerate(lines):
-        m = re.match(r"^----\s+(.+)\s+stdout\s+----$", line.strip())
-        if not m:
-            continue
-        test_name = m.group(1).strip()
-        detail = ""
-        location = ""
-        for j in range(idx + 1, min(idx + 12, len(lines))):
-            candidate = lines[j].strip()
-            if not candidate:
-                continue
-            if "panicked at" in candidate and not detail:
-                detail = candidate
-            loc_match = re.search(r"([^\s]+:\d+:\d+)", candidate)
-            if loc_match and not location:
-                location = loc_match.group(1)
-            if detail and location:
-                break
-        failures.append({"name": test_name, "detail": detail, "location": location})
-
-    deduped: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for item in failures:
-        key = f"{item.get('name','')}::{item.get('detail','')}::{item.get('location','')}"
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(item)
-
-    failed_count = len(deduped)
-    php_summary = re.search(
-        r"Tests:\s*(\d+),\s*Assertions:\s*(\d+),\s*Failures:\s*(\d+)(?:,\s*Errors:\s*(\d+))?",
-        log_text,
-    )
-    if php_summary:
-        failures_num = int(php_summary.group(3) or 0)
-        errors_num = int(php_summary.group(4) or 0)
-        failed_count = max(failed_count, failures_num + errors_num)
-
-    rust_summary = re.findall(
-        r"test result:\s+FAILED\.\s+(\d+)\s+passed;\s+(\d+)\s+failed;",
-        log_text,
-    )
-    if rust_summary:
-        failed_count = max(failed_count, sum(int(x[1]) for x in rust_summary))
-
-    return {
-        "failed_tests_count": failed_count,
-        "top_failed_tests": deduped[:10],
-    }
-
-
-def extract_audit_digest(log_text: str) -> dict[str, Any]:
-    payloads = [
-        p
-        for p in extract_json_candidates(normalize_log_text(log_text))
-        if isinstance(p.get("data"), dict)
-    ]
-    if not payloads:
-        return {
-            "drift_increased": False,
-            "outliers_found": None,
-            "severity_counts": {},
-            "top_findings": [],
-        }
-
-    payload = payloads[-1]
-    data = payload.get("data", {})
-    baseline = data.get("baseline_comparison", {}) if isinstance(data, dict) else {}
-    summary = data.get("summary", {}) if isinstance(data, dict) else {}
-    new_items = baseline.get("new_items", []) if isinstance(baseline, dict) else []
-    if not isinstance(new_items, list):
-        new_items = []
-
-    findings = data.get("findings", []) if isinstance(data, dict) else []
-    if not isinstance(findings, list):
-        findings = []
-
-    conventions = data.get("conventions", []) if isinstance(data, dict) else []
-    if not isinstance(conventions, list):
-        conventions = []
-
-    outlier_items: list[dict[str, Any]] = []
-    for conv in conventions:
-        if not isinstance(conv, dict):
-            continue
-        context_label = str(
-            conv.get("context_label")
-            or conv.get("name")
-            or conv.get("rule")
-            or conv.get("pattern")
-            or "unknown"
-        )
-        outliers = conv.get("outliers", [])
-        if not isinstance(outliers, list):
-            continue
-        for outlier in outliers:
-            if not isinstance(outlier, dict):
-                continue
-            item = dict(outlier)
-            item.setdefault("context_label", context_label)
-            outlier_items.append(item)
-
-    source_items = new_items if new_items else findings
-    if not source_items and outlier_items:
-        source_items = outlier_items
-    severity_counts: dict[str, int] = {}
-    top_findings: list[dict[str, str]] = []
-
-    for item in source_items:
-        if not isinstance(item, dict):
-            continue
-        severity = str(item.get("severity") or item.get("level") or "unknown").lower()
-        severity_counts[severity] = severity_counts.get(severity, 0) + 1
-
-        file_value = item.get("file")
-        if isinstance(file_value, dict):
-            file_value = file_value.get("path") or file_value.get("file")
-
-        message = item.get("description") or item.get("message")
-        if not message:
-            # Some outlier payloads encode details in other keys
-            message = item.get("expected_namespace") or item.get("expected_pattern") or "(outlier)"
-
-        top_findings.append(
-            {
-                "file": str(file_value or item.get("path") or item.get("context_label") or "unknown"),
-                "rule": str(item.get("rule") or item.get("category") or item.get("type") or item.get("status") or "outlier"),
-                "message": str(message),
-                "suggested_fix": str(item.get("suggested_fix") or item.get("suggestion") or ""),
-            }
-        )
-
-    return {
-        "drift_increased": bool(baseline.get("drift_increased", False)),
-        "outliers_found": summary.get("outliers_found") if isinstance(summary, dict) else None,
-        "parsed_outlier_items": len(outlier_items),
-        "severity_counts": severity_counts,
-        "top_findings": top_findings[:10],
-    }
-
-
 def parse_bool(value: str | None) -> bool:
     if value is None:
         return False
@@ -232,12 +63,8 @@ def parse_bool(value: str | None) -> bool:
 
 def derive_fixable_commands(
     commands_csv: str,
-    autofix_enabled: bool,
     autofix_commands_csv: str,
 ) -> set[str]:
-    if not autofix_enabled:
-        return set()
-
     if autofix_commands_csv.strip():
         out: set[str] = set()
         for raw in autofix_commands_csv.split(","):
@@ -264,12 +91,17 @@ def classify_autofixability(
     failed_commands = sorted(
         [str(cmd) for cmd, status in results.items() if isinstance(cmd, str) and status == "fail"]
     )
-    fixable_candidates = derive_fixable_commands(
-        commands_csv, autofix_enabled, autofix_commands_csv
-    )
+    potential_fixable_candidates = derive_fixable_commands(commands_csv, autofix_commands_csv)
+    fixable_candidates = potential_fixable_candidates if autofix_enabled else set()
 
     auto_fixable_failed: list[str] = []
+    potential_auto_fixable_failed: list[str] = []
     human_needed_failed: list[str] = []
+
+    for cmd in failed_commands:
+        normalized = cmd.strip().lower()
+        if normalized in potential_fixable_candidates:
+            potential_auto_fixable_failed.append(cmd)
 
     for cmd in failed_commands:
         normalized = cmd.strip().lower()
@@ -291,125 +123,13 @@ def classify_autofixability(
         "autofix_enabled": autofix_enabled,
         "autofix_attempted": autofix_attempted,
         "fixable_candidates": sorted(fixable_candidates),
+        "potential_fixable_candidates": sorted(potential_fixable_candidates),
         "failed_commands": failed_commands,
         "auto_fixable_failed_commands": auto_fixable_failed,
+        "potential_auto_fixable_failed_commands": potential_auto_fixable_failed,
         "human_needed_failed_commands": human_needed_failed,
         "overall": overall,
     }
-
-
-def render_markdown(
-    test_digest: dict[str, Any],
-    audit_digest: dict[str, Any],
-    autofixability: dict[str, Any],
-    run_url: str,
-    tooling: dict[str, str],
-    job_links: dict[str, str],
-) -> str:
-    lines: list[str] = []
-    lines.append("## Failure Digest")
-    lines.append("")
-
-    lines.append("### Tooling versions")
-    lines.append(f"- Homeboy CLI: **{tooling.get('homeboy_cli_version', 'unknown')}**")
-    lines.append(
-        "- Extension: "
-        f"**{tooling.get('extension_id', 'auto')}** from "
-        f"`{tooling.get('extension_source', 'auto')}`"
-    )
-    lines.append(
-        f"- Extension revision: `{tooling.get('extension_revision', 'unknown')}`"
-    )
-    lines.append(
-        "- Action: "
-        f"`{tooling.get('action_repository', 'unknown')}@{tooling.get('action_ref', 'unknown')}`"
-    )
-    lines.append("")
-
-    lines.append("### Test Failure Digest")
-    lines.append(f"- Failed tests: **{test_digest.get('failed_tests_count', 0)}**")
-    top_tests = test_digest.get("top_failed_tests", []) or []
-    if top_tests:
-        lines.append("- Top failed tests:")
-        for idx, test in enumerate(top_tests[:5], start=1):
-            name = test.get("name", "unknown")
-            detail = test.get("detail", "")
-            location = test.get("location", "")
-            parts = [f"{idx}. **{name}**"]
-            if detail:
-                parts.append(detail)
-            if location:
-                parts.append(f"`{location}`")
-            lines.append("  " + " — ".join(parts))
-    else:
-        lines.append("- No per-test failure details parsed from test log.")
-    test_job_url = job_links.get("Homeboy Build (Lint & Test)", run_url)
-    lines.append(f"- Full test log: {test_job_url}")
-    lines.append("")
-
-    lines.append("### Audit Failure Digest")
-    severity_counts = audit_digest.get("severity_counts", {}) or {}
-    if severity_counts:
-        sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(severity_counts.items()))
-        lines.append(f"- Severity counts: **{sev_text}**")
-    outliers = audit_digest.get("outliers_found")
-    if isinstance(outliers, int):
-        lines.append(f"- Outliers in current run: **{outliers}**")
-    parsed_outliers = audit_digest.get("parsed_outlier_items")
-    if isinstance(parsed_outliers, int) and parsed_outliers > 0:
-        lines.append(f"- Parsed outlier entries: **{parsed_outliers}**")
-    lines.append(f"- Drift increased: **{'yes' if audit_digest.get('drift_increased') else 'no'}**")
-
-    top_findings = audit_digest.get("top_findings", []) or []
-    if top_findings:
-        lines.append("- Top actionable findings:")
-        for idx, finding in enumerate(top_findings[:5], start=1):
-            line = (
-                f"  {idx}. **{finding.get('file','unknown')}** — "
-                f"{finding.get('rule','unknown')} — {finding.get('message','')}"
-            )
-            lines.append(line)
-    else:
-        lines.append("- No structured audit findings parsed from audit log.")
-    audit_job_url = job_links.get("Homeboy Audit", run_url)
-    lines.append(f"- Full audit log: {audit_job_url}")
-    lines.append("")
-
-    lines.append("### Autofixability classification")
-    lines.append(f"- Overall: **{autofixability.get('overall', 'unknown')}**")
-    lines.append(
-        f"- Autofix enabled: **{'yes' if autofixability.get('autofix_enabled') else 'no'}**"
-    )
-    lines.append(
-        f"- Autofix attempted this run: **{'yes' if autofixability.get('autofix_attempted') else 'no'}**"
-    )
-
-    fixable = autofixability.get("auto_fixable_failed_commands", []) or []
-    human = autofixability.get("human_needed_failed_commands", []) or []
-    if fixable:
-        lines.append("- Auto-fixable failed commands:")
-        for cmd in fixable:
-            lines.append(f"  - `{cmd}`")
-    if human:
-        lines.append("- Human-needed failed commands:")
-        for cmd in human:
-            lines.append(f"  - `{cmd}`")
-    if not fixable and not human:
-        lines.append("- No failed commands to classify.")
-    lines.append("")
-
-    lines.append("### Machine-readable artifacts")
-    lines.append("- `homeboy-test-failures.json`")
-    lines.append("- `homeboy-audit-summary.json`")
-    lines.append("- `homeboy-autofixability.json`")
-
-    if job_links:
-        lines.append("")
-        lines.append("### Failed job links")
-        for name, url in sorted(job_links.items()):
-            lines.append(f"- {name}: {url}")
-
-    return "\n".join(lines)
 
 
 def write_json(path: str, payload: dict[str, Any]) -> None:
@@ -498,14 +218,27 @@ def main() -> int:
     autofix_enabled = parse_bool(autofix_enabled_raw)
     autofix_attempted = parse_bool(autofix_attempted_raw)
 
+    lint_log = read_text(os.path.join(output_dir, "lint.log"))
     test_log = read_text(os.path.join(output_dir, "test.log"))
     audit_log = read_text(os.path.join(output_dir, "audit.log"))
+
+    lint_digest = extract_lint_digest(lint_log) if results.get("lint") == "fail" else {
+        "lint_summary": "",
+        "phpcs_summary": "",
+        "phpstan_summary": "",
+        "build_failed": "",
+        "top_violations": [],
+    }
 
     test_digest = extract_test_failures(test_log) if results.get("test") == "fail" else {
         "failed_tests_count": 0,
         "top_failed_tests": [],
     }
-    audit_digest = extract_audit_digest(audit_log) if results.get("audit") == "fail" else {
+    audit_digest = extract_audit_digest(
+        audit_log,
+        extract_json_candidates,
+        normalize_log_text,
+    ) if results.get("audit") == "fail" else {
         "drift_increased": False,
         "outliers_found": None,
         "severity_counts": {},
@@ -530,12 +263,14 @@ def main() -> int:
 
     job_links = resolve_failed_job_links(run_url)
     markdown = render_markdown(
+        lint_digest,
         test_digest,
         audit_digest,
         autofixability,
         run_url,
         tooling,
         job_links,
+        results,
     )
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(markdown)
