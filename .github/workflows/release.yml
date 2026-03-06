@@ -124,7 +124,7 @@ jobs:
       - name: cargo test
         run: cargo test
 
-      # Audit via homeboy-action (source build, auto-file issue on failure)
+      # Audit via homeboy-action (source build, auto-file issue on failure, auto-fix PR on failure)
       - uses: Extra-Chill/homeboy-action@v1
         with:
           source: '.'
@@ -132,6 +132,9 @@ jobs:
           component: homeboy
           commands: audit
           auto-issue: 'true'
+          autofix: 'true'
+          autofix-open-pr: 'true'
+          autofix-commands: 'audit --fix --write'
 
   # Build and packages all the platform-specific things
   build-local-artifacts:

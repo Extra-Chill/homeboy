@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
@@ -46,11 +46,15 @@ jobs:
   # chicken-and-egg problem of needing a released binary to audit itself.
   # Falls back to latest release binary if source build fails.
   # Runs independently of build job so PR comments are always posted.
+  # Autofix enabled: on audit failure, applies safe fixes and commits back to the PR.
   audit:
     name: Homeboy Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
 
       - uses: Extra-Chill/homeboy-action@v1
         with:
@@ -58,3 +62,6 @@ jobs:
           extension: rust
           component: homeboy
           commands: audit
+          autofix: 'true'
+          autofix-commands: 'audit --fix --write'
+          autofix-max-commits: '2'
