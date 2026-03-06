@@ -278,12 +278,14 @@ def find_test_module(content: str) -> Optional[tuple[int, int, str]]:
     """Find the #[cfg(test)] mod tests block, return (start, end, source)."""
     lines = content.split('\n')
 
-    # Look for #[cfg(test)] followed by mod tests
+    # Look for #[cfg(test)] followed specifically by mod tests / mod test.
+    # Do not treat arbitrary cfg(test) modules as the canonical test module,
+    # or we risk hiding unrelated test-only helper items from top-level parsing.
     for i in range(len(lines)):
         if '#[cfg(test)]' in lines[i]:
-            # Look ahead for mod tests or mod <name>
+            # Look ahead for the conventional test module only.
             for j in range(i + 1, min(i + 3, len(lines))):
-                if re.match(r'\s*mod\s+\w+\s*\{', lines[j]):
+                if re.match(r'\s*mod\s+tests?\s*\{', lines[j]):
                     end = find_matching_brace(lines, j)
                     return (i, end, '\n'.join(lines[i:end + 1]))
 
