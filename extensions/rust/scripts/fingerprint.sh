@@ -455,11 +455,15 @@ for fn in functions:
                 param_names.append(pname)
     if not param_names:
         continue
-    # Check if params appear in the body (excluding the signature)
+    # Check if params appear in the body (excluding the signature).
+    # Skip trait declarations (no body — line ends with ;, not {}).
     if fn.body_lines:
         full_body = '\n'.join(fn.body_lines)
         brace_pos = full_body.find('{')
-        body_only = full_body[brace_pos + 1:] if brace_pos >= 0 else full_body
+        if brace_pos < 0:
+            # No body (trait method declaration) — can't determine usage
+            continue
+        body_only = full_body[brace_pos + 1:]
         for pname in param_names:
             if pname.startswith('_'):
                 continue
