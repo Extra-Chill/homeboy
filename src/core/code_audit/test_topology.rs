@@ -165,7 +165,6 @@ fn run_topology_script(
     }
 
     let output = std::process::Command::new("sh")
-        .arg("-c")
         .arg(script_path.to_string_lossy().as_ref())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -304,5 +303,161 @@ mod tests {
         );
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, DeviationKind::ScatteredTestFile);
+    }
+
+    #[test]
+    fn test_apply_policy() {
+        let artifact = TopologyArtifact {
+            path: "src/lib.rs".to_string(),
+            kind: "source".to_string(),
+            shape: Some("inline_test".to_string()),
+        };
+        let rules = TestTopologyRules {
+            enabled: true,
+            central_test_globs: vec!["tests/**".to_string()],
+            scattered_allow: vec![],
+            inline_allow: vec![],
+            severity: None,
+        };
+        let mut findings = Vec::new();
+        apply_policy(
+            &artifact,
+            &rules.central_test_globs,
+            &rules,
+            &Severity::Warning,
+            &mut findings,
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, DeviationKind::InlineTestModule);
+    }
+
+    #[test]
+    fn test_load_rules() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{
+                "audit_rules": {
+                    "test_topology": {
+                        "enabled": true,
+                        "central_test_globs": ["tests/**"]
+                    }
+                }
+            }"#,
+        )
+        .expect("homeboy.json should be written");
+
+        let rules = load_rules(dir.path()).expect("rules should load");
+        assert!(rules.enabled);
+        assert_eq!(rules.central_test_globs, vec!["tests/**".to_string()]);
+    }
+
+    #[test]
+    fn test_walk_files() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("src dir should be created");
+        std::fs::write(src_dir.join("lib.rs"), "pub fn x(){}\n").expect("file should be written");
+
+        let files = walk_files(dir.path());
+        assert!(
+            files
+                .iter()
+                .any(|p| p.ends_with(std::path::Path::new("src/lib.rs"))),
+            "expected src/lib.rs in walked file list"
+        );
+    }
+
+    #[test]
+    fn test_run_topology_script() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let script_rel = "topology.sh";
+        let script_path = dir.path().join(script_rel);
+        std::fs::write(
+            &script_path,
+            r#"#!/bin/sh
+cat <<'JSON'
+{"artifacts":[{"path":"src/foo_test.rs","kind":"test","shape":"file"}]}
+JSON
+"#,
+        )
+        .expect("script should be written");
+
+        // Keep the command invocation test deterministic by stubbing shell execution,
+        // not filesystem permissions. `sh -c <path>` works with readable script files.
+
+        let extension = ExtensionManifest {
+            id: "test-ext".to_string(),
+            name: "Test Extension".to_string(),
+            version: "0.1.0".to_string(),
+            provides: None,
+            scripts: Some(crate::extension::ScriptsConfig {
+                topology: Some(script_rel.to_string()),
+                ..Default::default()
+            }),
+            icon: None,
+            description: None,
+            author: None,
+            homepage: None,
+            source_url: None,
+            deploy: None,
+            audit: None,
+            executable: None,
+            platform: None,
+            cli: None,
+            build: None,
+            lint: None,
+            test: None,
+            actions: vec![],
+            hooks: std::collections::HashMap::new(),
+            settings: vec![],
+            requires: None,
+            extra: std::collections::HashMap::new(),
+            extension_path: Some(dir.path().to_string_lossy().to_string()),
+        };
+
+        let artifacts = run_topology_script(
+            &extension,
+            script_rel,
+            &TopologyInput {
+                file_path: "src/lib.rs".to_string(),
+                content: "pub fn x(){}".to_string(),
+            },
+        );
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].path, "src/foo_test.rs");
+        assert_eq!(artifacts[0].kind, "test");
+    }
+
+    #[test]
+    fn test_analyze_test_topology() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{
+                "audit_rules": {
+                    "test_topology": {
+                        "enabled": true,
+                        "central_test_globs": ["tests/**"],
+                        "scattered_allow": [],
+                        "inline_allow": []
+                    }
+                }
+            }"#,
+        )
+        .expect("homeboy.json should be written");
+
+        // No installed extension topology scripts in unit-test context;
+        // analyzer should still execute and return deterministic empty findings.
+        let findings = analyze_test_topology(dir.path());
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_run() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let findings = run(dir.path());
+        assert!(findings.is_empty());
     }
 }
