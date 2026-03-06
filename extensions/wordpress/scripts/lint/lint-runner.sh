@@ -132,6 +132,7 @@ STRICT_COMPARISON_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/strict-compar
 LONELY_IF_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/lonely-if-fixer.php"
 LOOP_COUNT_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/loop-count-fixer.php"
 RESERVED_PARAM_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/reserved-param-fixer.php"
+UNUSED_PARAM_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/unused-param-fixer.php"
 PHPCS_CONFIG="${EXTENSION_PATH}/phpcs.xml.dist"
 
 # Validate tools exist
@@ -226,6 +227,12 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
         # Run reserved keyword parameter name fixer ($default -> $default_value, etc.)
         if [ -f "$RESERVED_PARAM_FIXER" ]; then
             php "$RESERVED_PARAM_FIXER" "$lint_target"
+        fi
+
+        # Run unused parameter fixer (noop references for callbacks, removal for dead params)
+        # This fixer runs PHPCS internally so needs the binary and standard paths
+        if [ -f "$UNUSED_PARAM_FIXER" ]; then
+            php "$UNUSED_PARAM_FIXER" "$lint_target" --phpcs-binary="$PHPCS_BIN" --phpcs-standard="$PHPCS_CONFIG"
         fi
     done
 
