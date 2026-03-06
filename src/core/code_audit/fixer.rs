@@ -910,6 +910,11 @@ pub(crate) fn detect_language(path: &Path) -> Language {
         .unwrap_or(Language::Unknown)
 }
 
+/// Check if a language uses inline tests (e.g., Rust `#[cfg(test)]` in the source file).
+fn is_inline_test_language(language: &Language) -> bool {
+    matches!(language, Language::Rust)
+}
+
 /// Check if a file has a __construct method.
 fn file_has_constructor(content: &str, language: &Language) -> bool {
     match language {
@@ -1176,16 +1181,6 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         let Some(candidate) = generate_test_file_candidate(root, &test_file, &finding.file) else {
             continue;
         };
-        if candidate.confidence == TestFileConfidence::Placeholder {
-            skipped.push(SkippedFile {
-                file: finding.file.clone(),
-                reason: format!(
-                    "Skipped low-confidence missing test file autofix for '{}' (placeholder-only scaffold)",
-                    test_file
-                ),
-            });
-            continue;
-        }
         new_files.push(new_file(
             FixKind::MissingTestFile,
             test_file,
@@ -1208,9 +1203,52 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
             continue;
         };
 
-        let Some(test_file) = extract_test_file_from_missing_test_method(&finding.description)
-            .or_else(|| derive_expected_test_file_path(root, &finding.file))
-        else {
+        // Try to find the test file: explicit path in description > derived from extension mapping
+        let test_file_opt = extract_test_file_from_missing_test_method(&finding.description)
+            .or_else(|| derive_expected_test_file_path(root, &finding.file));
+
+        // For inline-test languages (Rust), when no separate test file is derived,
+        // insert the test method directly into the source file's #[cfg(test)] module.
+        if test_file_opt.is_none() {
+            let source_language = detect_language(Path::new(&finding.file));
+            if is_inline_test_language(&source_language) {
+                let source_abs = root.join(&finding.file);
+                let source_content = std::fs::read_to_string(&source_abs).unwrap_or_default();
+
+                // Method already exists in the source file — nothing to do
+                if source_content.contains(&expected_test_method) {
+                    continue;
+                }
+
+                // Insert if the source file already has a test module
+                if source_content.contains("#[cfg(test)]") {
+                    let test_stub = generate_test_method_stub(
+                        &source_language,
+                        &expected_test_method,
+                        &finding.file,
+                        &source_method,
+                    );
+
+                    fixes.push(Fix {
+                        file: finding.file.clone(),
+                        required_methods: vec![expected_test_method.clone()],
+                        required_registrations: vec![],
+                        insertions: vec![insertion(
+                            InsertionKind::MethodStub,
+                            FixKind::MissingTestMethod,
+                            test_stub,
+                            format!(
+                                "Scaffold missing test method '{}' for '{}::{}' (inline)",
+                                expected_test_method, finding.file, source_method
+                            ),
+                        )],
+                        applied: false,
+                    });
+                    continue;
+                }
+            }
+
+            // Not an inline-test language or no existing test module — skip
             skipped.push(SkippedFile {
                 file: finding.file.clone(),
                 reason: format!(
@@ -1219,7 +1257,9 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                 ),
             });
             continue;
-        };
+        }
+
+        let test_file = test_file_opt.unwrap();
 
         let ext = Path::new(&test_file)
             .extension()
@@ -1646,15 +1686,10 @@ fn generate_test_method_stub(
 /// Strategy:
 /// 1) Try scaffold generation from source file for richer, deterministic stubs.
 /// 2) Fall back to minimal placeholder if scaffold yields nothing useful.
+///    Placeholders are still valid compilable test files that satisfy the
+///    `MissingTestFile` audit finding and provide an explicit place for real tests.
 struct TestFileCandidate {
     content: String,
-    confidence: TestFileConfidence,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TestFileConfidence {
-    High,
-    Placeholder,
 }
 
 fn generate_test_file_candidate(
@@ -1665,13 +1700,11 @@ fn generate_test_file_candidate(
     if let Some(scaffolded) = generate_test_file_from_scaffold(root, test_file, source_file) {
         return Some(TestFileCandidate {
             content: scaffolded,
-            confidence: TestFileConfidence::High,
         });
     }
 
     Some(TestFileCandidate {
         content: generate_test_file_stub(test_file, source_file),
-        confidence: TestFileConfidence::Placeholder,
     })
 }
 
@@ -3351,10 +3384,10 @@ pub struct TestOutput {}
     }
 
     #[test]
-    fn generate_fixes_skips_low_confidence_missing_test_files() {
+    fn generate_fixes_creates_placeholder_test_files() {
         use super::super::{AuditSummary, CodeAuditResult};
 
-        let dir = std::env::temp_dir().join("homeboy_fixer_low_confidence_missing_test_file");
+        let dir = std::env::temp_dir().join("homeboy_fixer_placeholder_test_file");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src/commands")).unwrap();
 
@@ -3387,11 +3420,91 @@ pub struct TestOutput {}
         };
 
         let fix_result = generate_fixes(&audit_result, &dir);
-        assert!(fix_result.new_files.is_empty());
-        assert!(fix_result
-            .skipped
-            .iter()
-            .any(|item| item.reason.contains("placeholder-only")));
+        // Placeholder scaffolds are now accepted — they create valid compilable test files
+        assert_eq!(fix_result.new_files.len(), 1);
+        assert_eq!(fix_result.new_files[0].file, "tests/commands/api_test.rs");
+        assert!(fix_result.new_files[0]
+            .content
+            .contains("Source: src/commands/api.rs"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_fixes_inserts_inline_test_method_for_rust() {
+        use super::super::{AuditSummary, CodeAuditResult};
+
+        let dir = std::env::temp_dir().join("homeboy_fixer_inline_test_method");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+
+        // Source file with existing inline tests — missing test for "validate"
+        std::fs::write(
+            dir.join("src/core/parser.rs"),
+            r#"pub fn parse() -> bool { true }
+pub fn validate() -> bool { true }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse() {
+        assert!(parse());
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let audit_result = CodeAuditResult {
+            component_id: "test".to_string(),
+            source_path: dir.to_string_lossy().to_string(),
+            summary: AuditSummary {
+                files_scanned: 1,
+                conventions_detected: 0,
+                outliers_found: 0,
+                alignment_score: None,
+                files_skipped: 0,
+                warnings: vec![],
+            },
+            conventions: vec![],
+            findings: vec![super::super::findings::Finding {
+                convention: "test_coverage".to_string(),
+                severity: super::super::findings::Severity::Info,
+                file: "src/core/parser.rs".to_string(),
+                description:
+                    "Method 'validate' has no corresponding test (expected 'test_validate')"
+                        .to_string(),
+                suggestion: "Add test_validate".to_string(),
+                kind: DeviationKind::MissingTestMethod,
+            }],
+            directory_conventions: vec![],
+            duplicate_groups: vec![],
+        };
+
+        let fix_result = generate_fixes(&audit_result, &dir);
+
+        // Should insert into the source file itself (inline), not a separate test file
+        assert_eq!(fix_result.fixes.len(), 1);
+        assert_eq!(fix_result.fixes[0].file, "src/core/parser.rs");
+        assert!(fix_result.fixes[0].insertions[0]
+            .description
+            .contains("(inline)"));
+        assert!(fix_result.fixes[0].insertions[0]
+            .code
+            .contains("test_validate"));
+        assert!(fix_result.fixes[0].insertions[0].code.contains("#[ignore"));
+
+        // No skips for "could not derive test file path"
+        assert!(
+            !fix_result
+                .skipped
+                .iter()
+                .any(|s| s.reason.contains("Could not derive")),
+            "Should not skip inline test methods: {:?}",
+            fix_result.skipped
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
