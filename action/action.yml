@@ -83,6 +83,18 @@ inputs:
     description: 'Optional PR label required to allow autofix (e.g. "autofix")'
     required: false
     default: ''
+  comment-key:
+    description: 'Optional shared PR comment key. Defaults to workflow + component so separate jobs aggregate into one comment.'
+    required: false
+    default: ''
+  comment-section-key:
+    description: 'Optional section key within the shared PR comment. Defaults to the single command or current job id.'
+    required: false
+    default: ''
+  comment-section-title:
+    description: 'Optional section title within the shared PR comment. Defaults to a humanized command or job id.'
+    required: false
+    default: ''
 
 outputs:
   results:
@@ -313,6 +325,9 @@ runs:
         AUTOFIX_ENABLED: ${{ inputs.autofix }}
         AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
         TEST_SCOPE_EFFECTIVE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
+        COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
+        COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key }}
+        COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title }}
       run: bash ${{ github.action_path }}/scripts/pr/post-pr-comment.sh
 
     - name: Post inline review

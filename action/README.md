@@ -76,6 +76,9 @@ If your repo has a portable extension config, you don't need to specify the exte
 | `autofix-label` | No | | Optional PR label required before autofix runs (e.g. `autofix`) |
 | `test-scope` | No | `full` | Test scope for PRs: `full` or `changed` (requires Homeboy test changed-since support) |
 | `auto-issue` | No | `false` | Auto-file issue on non-PR failures (e.g. `push` to `main`) |
+| `comment-key` | No | *(workflow + component)* | Shared PR comment key so multiple jobs can aggregate into one sticky comment |
+| `comment-section-key` | No | *(single command or job id)* | Section key within the shared PR comment |
+| `comment-section-title` | No | *(humanized section key)* | Visible heading for this action invocation inside the shared PR comment |
 
 ### Fork PR note
 
@@ -107,6 +110,15 @@ Digest includes:
 - audit summary (drift/outliers/top findings when structured output is available)
 - actionable audit details directly in the PR comment (new baseline drift + top findings), not just artifact filenames
 - links back to the full workflow run logs
+
+When multiple jobs invoke Homeboy Action on the same PR, they now **merge into one shared PR comment** by default.
+The default grouping key is **workflow + component**, so separate `lint`, `test`, and `audit` jobs can publish independent results without overwriting each other.
+
+Each invocation owns one section inside that shared comment:
+
+- default section key: the single command being run, or the job id for multi-command runs
+- section ordering is normalized so `lint`, `test`, and `audit` stay readable even if jobs finish out of order
+- duplicate legacy comments are consolidated automatically on the next update
 
 Auto-filed failure issues on non-PR runs also include:
 
@@ -167,6 +179,43 @@ Autofixability classification includes:
 
 Homeboy Action now performs a capability probe for `test-scope: changed` on PRs.
 If your installed Homeboy CLI does not support `--changed-since` for tests yet, the action automatically falls back to `full` test scope and emits a warning.
+
+### Split Jobs, Shared PR Comment
+
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          extension: rust
+          component: homeboy
+          commands: lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          extension: rust
+          component: homeboy
+          commands: test
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          extension: rust
+          component: homeboy
+          commands: audit
+```
+
+All three jobs write to the **same PR comment** automatically.
 
 ### Recommended org-wide CI profile
 
