@@ -95,10 +95,6 @@ inputs:
     description: 'Optional section title within the shared PR comment. Defaults to a humanized command or job id.'
     required: false
     default: ''
-  release-bump-type:
-    description: 'Version bump type for release: "auto" (from conventional commits), "patch", "minor", or "major"'
-    required: false
-    default: 'auto'
   release-dry-run:
     description: 'If true, preview the release without making changes'
     required: false
@@ -131,6 +127,9 @@ outputs:
   release-tag:
     description: 'The release git tag (e.g. v1.2.3)'
     value: ${{ steps.release.outputs.release-tag }}
+  release-bump-type:
+    description: 'The bump type used (patch, minor, major)'
+    value: ${{ steps.release.outputs.bump-type }}
 
 runs:
   using: 'composite'
@@ -345,8 +344,6 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        QUALITY_RESULTS: ${{ steps.select-results.outputs.results }}
-        RELEASE_BUMP_TYPE: ${{ inputs.release-bump-type }}
         RELEASE_DRY_RUN: ${{ inputs.release-dry-run }}
         RELEASE_BRANCH: ${{ inputs.release-branch }}
         RELEASE_SKIP_CHANGELOG: ${{ inputs.release-skip-changelog }}
