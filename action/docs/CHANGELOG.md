@@ -4,6 +4,17 @@ All notable changes to Homeboy Action will be documented in this file.
 
 ## Unreleased
 
+### Added
+- aggregate split CI job comments into shared PR comment with section keys
+
+### Refactored
+- organize action scripts into domain directories
+
+### Fixed
+- surface actionable audit findings in PR comments
+- centralize homeboy command path handling in CI
+- always post failure digest as review fallback
+
 ## [1.1.1] - 2026-03-05
 
 ### Fixed
