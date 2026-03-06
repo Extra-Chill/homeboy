@@ -79,8 +79,13 @@ def find_matching_brace(lines: list[str], start_line: int) -> int:
                         j += 1
                 continue
 
-            # Character literal
+            # Character literal (not lifetime annotations like `'static`)
             if chars[j] == "'":
+                if j + 1 < len(chars) and (chars[j + 1].isalnum() or chars[j + 1] == '_'):
+                    # Rust lifetime annotation — do not treat as char literal.
+                    j += 1
+                    continue
+
                 j += 1
                 while j < len(chars):
                     if chars[j] == '\\':
@@ -120,8 +125,12 @@ def parse_item_declaration(decl: str) -> Optional[tuple[str, str, str]]:
     """Parse an item declaration to extract (kind, name, visibility)."""
     vis, rest = extract_visibility(decl)
 
-    # Function (handles async fn, unsafe fn, const fn, etc.)
-    fn_match = re.search(r'\bfn\s+(\w+)', rest)
+    # Function declaration (top-level item start only).
+    # We intentionally anchor to the declaration line start so we don't
+    # mis-detect `fn` in return-position trait bounds like:
+    #   Option<std::path::PathBuf> { ... }
+    #   where `\bfn\s+` can appear inside tokens such as `PathBuf`.
+    fn_match = re.match(r'^(?:async\s+|unsafe\s+|const\s+|extern\s+)*fn\s+(\w+)', rest)
     if fn_match:
         return "function", fn_match.group(1), vis
 
