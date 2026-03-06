@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.58.1] - 2026-03-06
+
+### Fixed
+- add portable component id for action validation
+
 ## [0.58.0] - 2026-03-06
 
 ### Added
