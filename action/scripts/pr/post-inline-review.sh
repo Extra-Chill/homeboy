@@ -14,14 +14,14 @@ fi
 dismiss_existing_bot_reviews() {
   local existing_reviews
   existing_reviews=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-    --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | test("Homeboy found|Collateral damage|Homeboy Failure Digest"))) | .id] | .[]' \
+    --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | test("Homeboy found"))) | .id] | .[]' \
     2>/dev/null || true)
 
   for review_id in ${existing_reviews}; do
     echo "Dismissing previous review ${review_id}..."
     gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews/${review_id}/dismissals" \
       --method PUT \
-      --field message="Superseded by shared Homeboy PR comment" \
+      --field message="Superseded by updated Homeboy review" \
       --field event="DISMISS" > /dev/null 2>&1 || true
   done
 }
@@ -36,6 +36,9 @@ fi
 echo "Found ${ANNOTATION_COUNT} annotation file(s):"
 ls -la "${ANNOTATIONS_DIR}"/*.json 2>/dev/null || true
 
+# Only post annotations on files actually changed in the PR.
+# Collateral damage (effects on files that reference changed symbols) is
+# handled by the audit engine via --changed-since, not by the review layer.
 CHANGED_FILES_FILE=$(mktemp)
 gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
   --paginate --jq '.[].filename' > "${CHANGED_FILES_FILE}" 2>/dev/null || true
@@ -46,25 +49,14 @@ if [ ! -s "${CHANGED_FILES_FILE}" ]; then
   exit 0
 fi
 
-RELATED_FILES_FILE=$(mktemp)
-echo "Tracing symbol references from changed files..."
-python3 "${ACTION_DIR}/scripts/pr/find-related-files.py" \
-  "$(pwd)" "${CHANGED_FILES_FILE}" > "${RELATED_FILES_FILE}" || true
+# Build review payload — changed files only, no collateral damage
+REVIEW_PAYLOAD=$(python3 "${ACTION_DIR}/scripts/pr/build-review.py" \
+  "${ANNOTATIONS_DIR}" "${CHANGED_FILES_FILE}" "${PR_HEAD_SHA}" 2>/dev/null || true)
 
-RELATED_COUNT=$(wc -l < "${RELATED_FILES_FILE}" | tr -d ' ')
-echo "Found ${RELATED_COUNT} related file(s)"
-
-REVIEW_ARGS=("${ANNOTATIONS_DIR}" "${CHANGED_FILES_FILE}" "${PR_HEAD_SHA}")
-if [ -s "${RELATED_FILES_FILE}" ]; then
-  REVIEW_ARGS+=("${RELATED_FILES_FILE}")
-fi
-
-REVIEW_PAYLOAD=$(python3 "${ACTION_DIR}/scripts/pr/build-review.py" "${REVIEW_ARGS[@]}" 2>/dev/null || true)
-
-rm -f "${CHANGED_FILES_FILE}" "${RELATED_FILES_FILE}"
+rm -f "${CHANGED_FILES_FILE}"
 
 if [ -z "${REVIEW_PAYLOAD}" ]; then
-  echo "No annotations to post — skipping inline review"
+  echo "No annotations in changed files — skipping inline review"
   dismiss_existing_bot_reviews
   exit 0
 fi
