@@ -240,9 +240,31 @@ for CMD in "${CMD_ARRAY[@]}"; do
       SECTION_BODY+="- Cargo: ${CARGO_ERRORS} error(s), ${CARGO_WARNINGS} warning(s)"$'\n'
     fi
 
-    CARGO_TEST_SUMMARY=$(grep -oE "test result: .*\. [0-9]+ passed" "${LOG_FILE}" | tail -1 || true)
-    if [ -n "${CARGO_TEST_SUMMARY}" ]; then
-      SECTION_BODY+="- ${CARGO_TEST_SUMMARY}"$'\n'
+    # Aggregate all Cargo "test result:" lines (unit + integration + doc-tests).
+    # Cargo emits one line per test binary; the last is often doc-tests with
+    # 0 passed, so we aggregate instead of taking tail -1.
+    CARGO_TEST_LINES=$(grep -E "^test result:" "${LOG_FILE}" 2>/dev/null || true)
+    if [ -n "${CARGO_TEST_LINES}" ]; then
+      CARGO_TOTAL_PASSED=$(echo "${CARGO_TEST_LINES}" | grep -oP '\d+ passed' | awk '{s+=$1} END {print s+0}')
+      CARGO_TOTAL_FAILED=$(echo "${CARGO_TEST_LINES}" | grep -oP '\d+ failed' | awk '{s+=$1} END {print s+0}')
+      CARGO_TOTAL_IGNORED=$(echo "${CARGO_TEST_LINES}" | grep -oP '\d+ ignored' | awk '{s+=$1} END {print s+0}')
+      if [ "${CARGO_TOTAL_PASSED}" -gt 0 ] || [ "${CARGO_TOTAL_FAILED}" -gt 0 ]; then
+        CARGO_STATUS="ok"
+        if [ "${CARGO_TOTAL_FAILED}" -gt 0 ]; then
+          CARGO_STATUS="FAILED"
+        fi
+        SECTION_BODY+="- test result: ${CARGO_STATUS}. ${CARGO_TOTAL_PASSED} passed; ${CARGO_TOTAL_FAILED} failed; ${CARGO_TOTAL_IGNORED} ignored"$'\n'
+      fi
+    fi
+
+    # PHPUnit test results: "OK (N tests, N assertions)" or
+    # "Tests: N, Assertions: N, Failures: N, Errors: N, Skipped: N."
+    PHPUNIT_OK=$(grep -oP "OK \(\d+ tests?, \d+ assertions?\)" "${LOG_FILE}" | tail -1 || true)
+    PHPUNIT_SUMMARY=$(grep -oP "Tests: \d+.*" "${LOG_FILE}" | tail -1 || true)
+    if [ -n "${PHPUNIT_OK}" ]; then
+      SECTION_BODY+="- ${PHPUNIT_OK}"$'\n'
+    elif [ -n "${PHPUNIT_SUMMARY}" ]; then
+      SECTION_BODY+="- ${PHPUNIT_SUMMARY}"$'\n'
     fi
   fi
 
