@@ -26,7 +26,7 @@ use crate::extension::TestMappingConfig;
 /// `root` is the component root directory (for resolving test file existence).
 /// `fingerprints` are all fingerprinted source files from the audit pipeline.
 /// `config` is the extension-provided test mapping convention.
-pub fn analyze_test_coverage(
+pub(crate) fn analyze_test_coverage(
     root: &Path,
     fingerprints: &[&FileFingerprint],
     config: &TestMappingConfig,

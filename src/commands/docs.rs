@@ -221,7 +221,7 @@ pub struct GenerateFileSpec {
 // ============================================================================
 
 /// Check if this invocation should return JSON (audit, map, or generate subcommand)
-pub fn is_json_mode(args: &DocsArgs) -> bool {
+pub(crate) fn is_json_mode(args: &DocsArgs) -> bool {
     matches!(
         args.command,
         Some(DocsCommand::Audit { .. })

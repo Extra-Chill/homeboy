@@ -130,7 +130,7 @@ pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
     }
 }
 
-pub fn is_show_markdown(args: &ChangelogArgs) -> bool {
+pub(crate) fn is_show_markdown(args: &ChangelogArgs) -> bool {
     matches!(args.command, Some(ChangelogCommand::Show { .. }))
         || (args.command.is_none() && args.show_self)
 }

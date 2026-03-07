@@ -68,7 +68,7 @@ const COMMON_SOURCE_EXTENSIONS: &[&str] = &[
 
 /// Count source files that exist in the tree but aren't claimed by any extension.
 /// Used to warn when no extension provides fingerprinting for the dominant language.
-pub fn count_unclaimed_source_files(root: &Path) -> usize {
+pub(crate) fn count_unclaimed_source_files(root: &Path) -> usize {
     let skip_dirs = [
         "node_modules",
         "vendor",

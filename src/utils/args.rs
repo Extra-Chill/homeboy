@@ -6,7 +6,7 @@
 /// Normalize version bump arguments to support --patch/--minor/--major syntax.
 /// Converts `version bump <component> --patch` to `version bump <component> -- patch`.
 /// The bump type must appear last (after `--`) so other flags like `--dry-run` are parsed correctly.
-pub fn normalize_version_bump(args: Vec<String>) -> Vec<String> {
+pub(crate) fn normalize_version_bump(args: Vec<String>) -> Vec<String> {
     let is_version_bump = args.len() >= 3
         && args.get(1).map(|s| s == "version").unwrap_or(false)
         && args.get(2).map(|s| s == "bump").unwrap_or(false);
@@ -38,7 +38,7 @@ pub fn normalize_version_bump(args: Vec<String>) -> Vec<String> {
 /// Normalize version command arguments.
 /// Converts `homeboy version <component_id>` to `homeboy version show <component_id>`
 /// when the argument is not a recognized subcommand (show, set, bump, edit, merge).
-pub fn normalize_version_show(args: Vec<String>) -> Vec<String> {
+pub(crate) fn normalize_version_show(args: Vec<String>) -> Vec<String> {
     if args.len() < 3 {
         return args;
     }
@@ -70,7 +70,7 @@ pub fn normalize_version_show(args: Vec<String>) -> Vec<String> {
 
 /// Normalize version --bump flag to subcommand form.
 /// Converts `version <component> --bump <type>` to `version bump <component> <type>`.
-pub fn normalize_version_bump_flag(args: Vec<String>) -> Vec<String> {
+pub(crate) fn normalize_version_bump_flag(args: Vec<String>) -> Vec<String> {
     // Must have: homeboy version <something> --bump <type>
     if args.len() < 5 {
         return args;
@@ -127,7 +127,7 @@ pub fn normalize_version_bump_flag(args: Vec<String>) -> Vec<String> {
 
 /// Normalize changelog add --component flag to positional form.
 /// Converts `changelog add --component <value>` to `changelog add <value>`.
-pub fn normalize_changelog_component(args: Vec<String>) -> Vec<String> {
+pub(crate) fn normalize_changelog_component(args: Vec<String>) -> Vec<String> {
     let is_changelog_add = args.len() >= 4
         && args.get(1).map(|s| s == "changelog").unwrap_or(false)
         && args.get(2).map(|s| s == "add").unwrap_or(false);
@@ -175,7 +175,7 @@ pub fn normalize_changelog_component(args: Vec<String>) -> Vec<String> {
 /// Both styles work identically:
 ///   homeboy component set my-plugin --field value
 ///   homeboy component set my-plugin -- --field value
-pub fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
+pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
     // Define commands and their known flags
     let commands: &[(&str, &str, &[&str])] = &[
         // (command, subcommand, known_flags)

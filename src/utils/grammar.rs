@@ -219,22 +219,22 @@ impl StructuralContext {
     }
 
     /// Whether we're inside a block with the given label.
-    pub fn is_inside(&self, label: &str) -> bool {
+    pub(crate) fn is_inside(&self, label: &str) -> bool {
         self.block_stack.iter().any(|(l, _)| l == label)
     }
 
     /// The label of the innermost block, if any.
-    pub fn current_block_label(&self) -> Option<&str> {
+    pub(crate) fn current_block_label(&self) -> Option<&str> {
         self.block_stack.last().map(|(l, _)| l.as_str())
     }
 
     /// Push a labeled block at the current depth.
-    pub fn push_block(&mut self, label: String) {
+    pub(crate) fn push_block(&mut self, label: String) {
         self.block_stack.push((label, self.depth));
     }
 
     /// Pop blocks that have been exited (depth dropped below entry depth).
-    pub fn pop_exited_blocks(&mut self) {
+    pub(crate) fn pop_exited_blocks(&mut self) {
         while let Some((_, entry_depth)) = self.block_stack.last() {
             if self.depth <= *entry_depth {
                 self.block_stack.pop();
@@ -272,7 +272,7 @@ pub struct ContextualLine<'a> {
 /// This is the core primitive — it walks the file line-by-line, tracking
 /// brace depth and whether we're inside comments or strings. Consumers
 /// can then filter lines by depth, region, etc.
-pub fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<ContextualLine<'a>> {
+pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<ContextualLine<'a>> {
     let mut ctx = StructuralContext::new();
     let mut result = Vec::new();
     let mut in_block_comment = false;
@@ -488,7 +488,7 @@ pub fn extract(content: &str, grammar: &Grammar) -> Vec<Symbol> {
 }
 
 /// Extract symbols of a specific concept only.
-pub fn extract_concept(content: &str, grammar: &Grammar, concept: &str) -> Vec<Symbol> {
+pub(crate) fn extract_concept(content: &str, grammar: &Grammar, concept: &str) -> Vec<Symbol> {
     extract(content, grammar)
         .into_iter()
         .filter(|s| s.concept == concept)
@@ -526,7 +526,7 @@ pub fn load_grammar_json(path: &Path) -> Result<Grammar> {
 // ============================================================================
 
 /// Get all method/function names from extracted symbols.
-pub fn method_names(symbols: &[Symbol]) -> Vec<String> {
+pub(crate) fn method_names(symbols: &[Symbol]) -> Vec<String> {
     symbols
         .iter()
         .filter(|s| {
@@ -537,7 +537,7 @@ pub fn method_names(symbols: &[Symbol]) -> Vec<String> {
 }
 
 /// Get all class/struct/trait names from extracted symbols.
-pub fn type_names(symbols: &[Symbol]) -> Vec<String> {
+pub(crate) fn type_names(symbols: &[Symbol]) -> Vec<String> {
     symbols
         .iter()
         .filter(|s| {
@@ -553,7 +553,7 @@ pub fn type_names(symbols: &[Symbol]) -> Vec<String> {
 }
 
 /// Get all import paths from extracted symbols.
-pub fn import_paths(symbols: &[Symbol]) -> Vec<String> {
+pub(crate) fn import_paths(symbols: &[Symbol]) -> Vec<String> {
     symbols
         .iter()
         .filter(|s| s.concept == "import" || s.concept == "use")
@@ -570,7 +570,7 @@ pub fn namespace(symbols: &[Symbol]) -> Option<String> {
 }
 
 /// Filter symbols to only public API (visibility contains "pub" or "public").
-pub fn public_symbols(symbols: &[Symbol]) -> Vec<&Symbol> {
+pub(crate) fn public_symbols(symbols: &[Symbol]) -> Vec<&Symbol> {
     symbols
         .iter()
         .filter(|s| {
@@ -588,7 +588,7 @@ pub fn public_symbols(symbols: &[Symbol]) -> Vec<&Symbol> {
 ///
 /// Finds the opening brace on or after `start_line` (0-indexed into lines),
 /// then returns all lines until the matching closing brace.
-pub fn extract_block_body<'a>(
+pub(crate) fn extract_block_body<'a>(
     lines: &[ContextualLine<'a>],
     start_line_idx: usize,
     grammar: &Grammar,

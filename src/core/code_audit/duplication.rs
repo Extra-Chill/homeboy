@@ -78,7 +78,7 @@ fn pick_canonical(locations: &[String]) -> String {
 /// Detect duplicate groups with canonical file selection.
 ///
 /// Returns structured data the fixer uses to remove duplicates.
-pub fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<DuplicateGroup> {
+pub(crate) fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<DuplicateGroup> {
     let hash_groups = build_groups(fingerprints);
     let mut groups = Vec::new();
 
@@ -111,7 +111,7 @@ pub fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<Duplica
 /// Groups functions by their body hash. When two or more files contain a
 /// function with the same name and the same normalized body hash, a finding
 /// is emitted for each location.
-pub fn detect_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(crate) fn detect_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let hash_groups = build_groups(fingerprints);
     let mut findings = Vec::new();
 
@@ -258,7 +258,7 @@ fn count_body_lines(fp: &FileFingerprint, method_name: &str) -> usize {
 /// - Generic names (`run`, `list`, `show`, etc.)
 /// - Command/core delegation pairs (command module ↔ core module)
 /// - Trivial functions (< 3 body lines)
-pub fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let structural_groups = build_structural_groups(fingerprints);
     let exact_groups = build_groups(fingerprints);
 
@@ -377,7 +377,7 @@ const MIN_INTRA_BLOCK_LINES: usize = 5;
 /// lines. When the same window hash appears at two non-overlapping positions
 /// within one method, it means a block of code was copy-pasted (merge
 /// artifacts, copy-paste errors, etc.).
-pub fn detect_intra_method_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(crate) fn detect_intra_method_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     for fp in fingerprints {

@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 
-pub fn normalize_identifier(input: &str) -> String {
+pub(crate) fn normalize_identifier(input: &str) -> String {
     input.trim().to_lowercase()
 }
 

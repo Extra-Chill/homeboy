@@ -18,7 +18,7 @@ use super::fingerprint::FileFingerprint;
 /// 2. Dead code markers (from extension fingerprint data)
 /// 3. Unreferenced exports (cross-file: public API never imported/called)
 /// 4. Orphaned internals (single-file: private function never called internally)
-pub fn analyze_dead_code(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(crate) fn analyze_dead_code(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     // Build a global set of all internal calls and imports across all files

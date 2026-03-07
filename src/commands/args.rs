@@ -233,7 +233,7 @@ pub struct WriteModeArgs {
 #[allow(dead_code)]
 impl WriteModeArgs {
     /// Whether this is a dry run (write was NOT specified).
-    pub fn is_dry_run(&self) -> bool {
+    pub(crate) fn is_dry_run(&self) -> bool {
         !self.write
     }
 }

@@ -42,7 +42,7 @@ pub struct AuditTask {
 }
 
 /// Build an actionable task from a claim and its verification result.
-pub fn build_task(claim: Claim, result: VerifyResult) -> AuditTask {
+pub(crate) fn build_task(claim: Claim, result: VerifyResult) -> AuditTask {
     let (status, action) = match result {
         VerifyResult::Verified => (AuditTaskStatus::Verified, None),
         VerifyResult::Broken { suggestion } => (AuditTaskStatus::Broken, suggestion),

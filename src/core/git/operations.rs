@@ -116,7 +116,7 @@ pub struct BaselineInfo {
 
 /// Detect baseline for a path (public wrapper).
 /// For version-aware baseline detection, use detect_baseline_with_version().
-pub fn detect_baseline_for_path(path: &str) -> Result<BaselineInfo> {
+pub(crate) fn detect_baseline_for_path(path: &str) -> Result<BaselineInfo> {
     detect_baseline_with_version(path, None)
 }
 
@@ -487,7 +487,7 @@ pub fn commit(
 }
 
 /// Like [`commit`] but with an explicit path override for git operations.
-pub fn commit_at(
+pub(crate) fn commit_at(
     component_id: Option<&str>,
     message: Option<&str>,
     options: CommitOptions,
@@ -770,7 +770,7 @@ pub fn tag(
 }
 
 /// Like [`tag`] but with an explicit path override for git operations.
-pub fn tag_at(
+pub(crate) fn tag_at(
     component_id: Option<&str>,
     tag_name: Option<&str>,
     message: Option<&str>,

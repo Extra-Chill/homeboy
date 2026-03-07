@@ -21,11 +21,11 @@ pub fn parse_version(content: &str, pattern: &str) -> Option<String> {
 
 /// Parse all versions from content using regex pattern.
 /// Content is trimmed to handle trailing newlines in VERSION files.
-pub fn parse_versions(content: &str, pattern: &str) -> Option<Vec<String>> {
+pub(crate) fn parse_versions(content: &str, pattern: &str) -> Option<Vec<String>> {
     parser::extract_all(content, pattern)
 }
 
-pub fn replace_versions(
+pub(crate) fn replace_versions(
     content: &str,
     pattern: &str,
     new_version: &str,
@@ -80,7 +80,7 @@ pub fn increment_version(version: &str, bump_type: &str) -> Option<String> {
 
 /// Update version in a file, handling both JSON and text-based version files.
 /// Returns the number of replacements made.
-pub fn update_version_in_file(
+pub(crate) fn update_version_in_file(
     path: &str,
     pattern: &str,
     old_version: &str,
@@ -167,7 +167,10 @@ pub fn get_component_version(component: &Component) -> Option<String> {
 
 /// Read version from a local file for a component's version target.
 /// Returns None if file doesn't exist or version can't be parsed.
-pub fn read_local_version(local_path: &str, version_target: &VersionTarget) -> Option<String> {
+pub(crate) fn read_local_version(
+    local_path: &str,
+    version_target: &VersionTarget,
+) -> Option<String> {
     let path = resolve_version_file_path(local_path, &version_target.file);
     let content = local_files::local().read(Path::new(&path)).ok()?;
 
@@ -370,7 +373,7 @@ pub fn validate_changelog_for_bump(
 /// Validate and finalize changelog for a version operation.
 /// Ensures changelog is in sync with current version and has valid unreleased content.
 /// Finalizes the next section to the new version.
-pub fn validate_and_finalize_changelog(
+pub(crate) fn validate_and_finalize_changelog(
     component: &Component,
     current_version: &str,
     new_version: &str,
@@ -621,7 +624,7 @@ pub struct SetResult {
 }
 
 /// Set a component's version directly (without incrementing).
-pub fn set_component_version(component: &Component, new_version: &str) -> Result<SetResult> {
+pub(crate) fn set_component_version(component: &Component, new_version: &str) -> Result<SetResult> {
     // Validate local_path is absolute and exists before any file operations
     component::validate_local_path(component)?;
 
@@ -760,7 +763,7 @@ pub fn set_component_version(component: &Component, new_version: &str) -> Result
 
 /// Bump a component's version and finalize changelog.
 /// bump_type: "patch", "minor", or "major"
-pub fn bump_component_version(component: &Component, bump_type: &str) -> Result<BumpResult> {
+pub(crate) fn bump_component_version(component: &Component, bump_type: &str) -> Result<BumpResult> {
     // Validate local_path is absolute and exists before any file operations
     component::validate_local_path(component)?;
 

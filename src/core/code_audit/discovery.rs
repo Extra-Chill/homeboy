@@ -21,7 +21,7 @@ pub struct DiscoveryResult {
 ///
 /// Returns groups of (group_name, glob_pattern, files) for directories that
 /// contain 2+ files of the same language, plus counts of walked vs fingerprinted files.
-pub fn auto_discover_groups(root: &Path) -> DiscoveryResult {
+pub(crate) fn auto_discover_groups(root: &Path) -> DiscoveryResult {
     let mut groups: Vec<(String, String, Vec<FileFingerprint>)> = Vec::new();
 
     // Walk directories, group files by parent dir + language
@@ -96,7 +96,7 @@ pub fn auto_discover_groups(root: &Path) -> DiscoveryResult {
 /// Example: if `inc/Abilities/Flow/` and `inc/Abilities/Job/` both expect
 /// `execute`, `registerAbility`, `__construct` — that's a cross-directory
 /// convention for `inc/Abilities/`.
-pub fn discover_cross_directory(
+pub(crate) fn discover_cross_directory(
     conventions: &[super::ConventionReport],
 ) -> Vec<super::DirectoryConvention> {
     // Group conventions by their parent directory (one level up from glob)

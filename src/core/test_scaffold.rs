@@ -188,7 +188,7 @@ fn passes_scaffold_quality_gate(test_names: &[String]) -> bool {
 // ============================================================================
 
 /// Extract classes and their public methods from a PHP source file.
-pub fn extract_php(content: &str) -> Vec<ExtractedClass> {
+pub(crate) fn extract_php(content: &str) -> Vec<ExtractedClass> {
     let mut classes = Vec::new();
 
     // Match namespace
@@ -301,7 +301,7 @@ fn extract_php_functions(content: &str) -> Vec<ExtractedMethod> {
 }
 
 /// Extract public functions/methods from a Rust source file.
-pub fn extract_rust(content: &str) -> Vec<ExtractedClass> {
+pub(crate) fn extract_rust(content: &str) -> Vec<ExtractedClass> {
     let mut classes = Vec::new();
 
     // Match struct/enum/trait with impl blocks
@@ -497,7 +497,7 @@ pub fn test_file_path(source_path: &Path, root: &Path) -> PathBuf {
 }
 
 /// Generate PHP test file content.
-pub fn generate_php_test(classes: &[ExtractedClass], config: &ScaffoldConfig) -> String {
+pub(crate) fn generate_php_test(classes: &[ExtractedClass], config: &ScaffoldConfig) -> String {
     let mut out = String::new();
     let mut emitted = HashSet::new();
     out.push_str("<?php\n");

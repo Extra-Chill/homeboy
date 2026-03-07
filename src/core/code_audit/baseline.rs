@@ -82,7 +82,7 @@ pub type NewFinding = generic::NewItem;
 /// Get the baseline file path for a source directory.
 ///
 /// Now points to `homeboy.json` instead of `.homeboy/audit-baseline.json`.
-pub fn baseline_path(source_path: &Path) -> std::path::PathBuf {
+pub(crate) fn baseline_path(source_path: &Path) -> std::path::PathBuf {
     let config = BaselineConfig::new(source_path, BASELINE_KEY);
     config.json_path()
 }

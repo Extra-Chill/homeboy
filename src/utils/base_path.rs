@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 
-pub fn resolve_optional_base_path(base_path: Option<&str>) -> Option<&str> {
+pub(crate) fn resolve_optional_base_path(base_path: Option<&str>) -> Option<&str> {
     base_path.and_then(|value| (!value.trim().is_empty()).then_some(value.trim()))
 }
 
@@ -33,7 +33,7 @@ pub fn join_remote_path(base_path: Option<&str>, path: &str) -> Result<String> {
     }
 }
 
-pub fn join_remote_child(base_path: Option<&str>, dir: &str, child: &str) -> Result<String> {
+pub(crate) fn join_remote_child(base_path: Option<&str>, dir: &str, child: &str) -> Result<String> {
     let dir_path = join_remote_path(base_path, dir)?;
     let child = child.trim();
 

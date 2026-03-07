@@ -67,7 +67,7 @@ pub enum LogsCommand {
     },
 }
 
-pub fn is_interactive(args: &LogsArgs) -> bool {
+pub(crate) fn is_interactive(args: &LogsArgs) -> bool {
     matches!(&args.command, LogsCommand::Show { follow: true, .. })
 }
 
