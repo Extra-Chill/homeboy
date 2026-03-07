@@ -108,7 +108,8 @@ function process_file( $filepath ) {
 		$needs_fix = false;
 
 		// file_get_contents — but skip URL arguments (those should use wp_remote_get).
-		if ( preg_match( '/\bfile_get_contents\s*\(/', $line ) ) {
+		// Also skip if already replaced (->get_contents).
+		if ( preg_match( '/\bfile_get_contents\s*\(/', $line ) && ! preg_match( '/->get_contents\s*\(/', $line ) ) {
 			// Skip if argument is a URL string.
 			if ( preg_match( '/file_get_contents\s*\(\s*[\'"]https?:/', $line ) ) {
 				continue;
@@ -116,13 +117,13 @@ function process_file( $filepath ) {
 			$needs_fix = true;
 		}
 
-		// file_put_contents.
-		if ( preg_match( '/\bfile_put_contents\s*\(/', $line ) ) {
+		// file_put_contents — skip if already replaced (->put_contents).
+		if ( preg_match( '/\bfile_put_contents\s*\(/', $line ) && ! preg_match( '/->put_contents\s*\(/', $line ) ) {
 			$needs_fix = true;
 		}
 
-		// is_writable.
-		if ( preg_match( '/\bis_writable\s*\(/', $line ) ) {
+		// is_writable — but skip if already a method call (->is_writable).
+		if ( preg_match( '/\bis_writable\s*\(/', $line ) && ! preg_match( '/->is_writable\s*\(/', $line ) ) {
 			$needs_fix = true;
 		}
 
@@ -244,7 +245,8 @@ function process_file( $filepath ) {
 		}
 
 		// is_writable($path) → $fs->is_writable($path)
-		if ( preg_match( '/\bis_writable\s*\(/', $line ) ) {
+		// Guard against re-replacing already-fixed ->is_writable() calls.
+		if ( preg_match( '/\bis_writable\s*\(/', $line ) && ! preg_match( '/->is_writable\s*\(/', $line ) ) {
 			$line    = preg_replace(
 				'/\bis_writable\s*\(\s*(.+?)\s*\)/',
 				$fs_var . '->is_writable( $1 )',
