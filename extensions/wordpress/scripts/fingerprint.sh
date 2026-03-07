@@ -52,18 +52,22 @@ for m in re.finditer(r'^function\s+(\w+)', content, re.MULTILINE):
 seen = set()
 methods = [m for m in methods if m not in seen and not seen.add(m)]
 
-# --- Type name ---
+# --- Type name + kind ---
 # Primary class, interface, or trait in the file.
 # Anchor to start-of-line to avoid matching 'class' in comments/strings.
+# type_kind distinguishes class/interface/trait so core can skip traits
+# from interface convention expectations (#115).
 type_name = None
-for pattern in [
-    r'^(?:abstract\s+|final\s+)?class\s+(\w+)',
-    r'^interface\s+(\w+)',
-    r'^trait\s+(\w+)',
+type_kind = None
+for kind, pattern in [
+    ('class', r'^(?:abstract\s+|final\s+)?class\s+(\w+)'),
+    ('interface', r'^interface\s+(\w+)'),
+    ('trait', r'^trait\s+(\w+)'),
 ]:
     match = re.search(pattern, content, re.MULTILINE)
     if match:
         type_name = match.group(1)
+        type_kind = kind
         break
 
 # --- Extends ---
@@ -157,6 +161,50 @@ for pat in reg_patterns:
 seen = set()
 registrations = [r for r in registrations if r not in seen and not seen.add(r)]
 
+# --- Hook Callbacks (#118) ---
+# Extract functions/methods registered as WordPress hook callbacks.
+# These are externally invoked by WordPress core, not directly referenced.
+# Note: use dollar_esc for regex matching of literal PHP dollar signs.
+hook_callbacks = set()
+this_pat = dollar_esc + r'this'
+# add_action/add_filter with array( this, 'method' )
+for m in re.finditer(
+    r'(?:add_action|add_filter)\s*\([^,]+,\s*array\s*\(\s*' + this_pat + r'\s*,\s*[\x27\x22](\w+)[\x27\x22]\s*\)',
+    content
+):
+    hook_callbacks.add(m.group(1))
+# add_action/add_filter with [ this, 'method' ]
+for m in re.finditer(
+    r'(?:add_action|add_filter)\s*\([^,]+,\s*\[\s*' + this_pat + r'\s*,\s*[\x27\x22](\w+)[\x27\x22]\s*\]',
+    content
+):
+    hook_callbacks.add(m.group(1))
+# add_action/add_filter with string callback: 'function_name'
+for m in re.finditer(
+    r'(?:add_action|add_filter)\s*\([^,]+,\s*[\x27\x22](\w+)[\x27\x22]\s*[,)]',
+    content
+):
+    hook_callbacks.add(m.group(1))
+# add_action/add_filter with __CLASS__/self::class/static::class
+for m in re.finditer(
+    r'(?:add_action|add_filter)\s*\([^,]+,\s*(?:array\s*\(|[\[])\s*(?:__CLASS__|self::class|static::class)\s*,\s*[\x27\x22](\w+)[\x27\x22]',
+    content
+):
+    hook_callbacks.add(m.group(1))
+# register_activation_hook / register_deactivation_hook
+for m in re.finditer(
+    r'register_(?:activation|deactivation)_hook\s*\([^,]+,\s*[\x27\x22](\w+)[\x27\x22]',
+    content
+):
+    hook_callbacks.add(m.group(1))
+# Ability execute_callback and permission_callback arrays
+for m in re.finditer(
+    r'[\x27\x22](?:execute_callback|permission_callback)[\x27\x22]\s*=>\s*(?:array\s*\(|[\[])\s*' + this_pat + r'\s*,\s*[\x27\x22](\w+)[\x27\x22]',
+    content
+):
+    hook_callbacks.add(m.group(1))
+hook_callbacks = sorted(hook_callbacks)
+
 # --- Namespace ---
 # Match PHP namespace declaration
 ns_match = re.search(r'namespace\s+([\w\\\\]+)\s*;', content)
@@ -169,10 +217,31 @@ else:
 # Match PHP use statements (at file/namespace level, not trait use inside class)
 imports = []
 for m in re.finditer(r'^use\s+([\w\\\\]+)(?:\s+as\s+\w+)?;', content, re.MULTILINE):
-    imports.append(m.group(1))
+    fqcn = m.group(1)
+    short_name = fqcn.split('\\\\')[-1]
+    # Skip self-imports: a file defining Foo doesn't need 'use Foo' (#117)
+    if type_name and short_name == type_name:
+        continue
+    imports.append(fqcn)
 # Deduplicate
 seen = set()
 imports = [i for i in imports if i not in seen and not seen.add(i)]
+
+# Global namespace classes never need a use statement in PHP (#117).
+# Instead of hardcoding a list, we track which class names in extends/implements
+# are unqualified (no backslash = global namespace or same namespace).
+# Core can use this to skip missing_import findings for these names.
+# An unqualified name like 'WP_UnitTestCase' is auto-resolved by PHP —
+# it's either in the current namespace or the global namespace.
+uses_global_classes = []
+if extends and '\\\\' not in extends:
+    uses_global_classes.append(extends)
+for iface in implements:
+    if '\\\\' not in iface:
+        uses_global_classes.append(iface)
+# Deduplicate
+seen = set()
+uses_global_classes = [c for c in uses_global_classes if c not in seen and not seen.add(c)]
 
 # --- Method Hashes (for duplication detection) ---
 # Extract method/function bodies, normalize whitespace, hash with SHA-256.
@@ -309,11 +378,30 @@ for m in re.finditer(r'\b([a-z_]\w*)\s*\(', content):
         internal_calls.add(name)
 internal_calls = sorted(internal_calls)
 
-# --- Unused Parameters ---
+# --- Unused Parameters (#114) ---
 # For each method/function, extract parameter names and check if they appear in the body.
+# Skip contract-mandated params: hook callbacks, interface/abstract overrides,
+# ability callbacks, and REST API handlers.
 unused_parameters = []
 
+# Build set of methods that are contract-mandated (their signature is fixed
+# by the caller/interface, so unused params are expected).
+contract_mandated_methods = set(hook_callbacks)  # hook callbacks already collected
+
+# If a class extends or implements anything, its public methods may have
+# signatures fixed by the parent/interface contract. We can't resolve the
+# parent source statically, so we treat all public methods in such classes
+# as potentially contract-mandated. This avoids false positives for
+# interface implementations (DirectiveInterface, etc.) and abstract overrides.
+if extends or implements:
+    contract_mandated_methods.update(
+        m for m in methods if visibility.get(m) == 'public'
+    )
+
 def check_unused_params(fn_name, params_str, body_text):
+    # Skip entirely if this method is contract-mandated
+    if fn_name in contract_mandated_methods:
+        return
     # Parse parameter names from the signature
     param_names = []
     for pm in re.finditer(dollar_esc + r'(\w+)', params_str):
@@ -345,6 +433,9 @@ for m in re.finditer(
 # Standalone functions
 for m in re.finditer(r'^function\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*[\w\\\\|?]+)?\s*', content, re.MULTILINE):
     fn_name = m.group(1)
+    # Skip standalone functions registered as hook callbacks
+    if fn_name in contract_mandated_methods:
+        continue
     params_str = m.group(2)
     body = extract_body(content, m.end() - 1)
     if body and len(body) > 2:
@@ -383,6 +474,7 @@ for line_num, line in enumerate(lines_arr, 1):
 result = {
     'methods': methods,
     'type_name': type_name,
+    'type_kind': type_kind,
     'extends': extends,
     'implements': implements,
     'registrations': registrations,
@@ -393,10 +485,12 @@ result = {
     'visibility': visibility,
     'properties': properties,
     'hooks': hooks,
+    'hook_callbacks': hook_callbacks,
     'unused_parameters': unused_parameters,
     'dead_code_markers': dead_code_markers,
     'internal_calls': internal_calls,
     'public_api': public_api,
+    'uses_global_classes': uses_global_classes,
 }
 
 print(json.dumps(result))
