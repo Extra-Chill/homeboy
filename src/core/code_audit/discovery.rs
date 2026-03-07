@@ -5,7 +5,7 @@ use std::path::Path;
 
 use super::conventions::Language;
 use super::fingerprint::{fingerprint_file, FileFingerprint};
-use super::walker::walk_source_files;
+use super::walker::{is_test_path, walk_source_files};
 
 /// Result of auto-discovering file groups.
 pub struct DiscoveryResult {
@@ -24,8 +24,12 @@ pub struct DiscoveryResult {
 pub(crate) fn auto_discover_groups(root: &Path) -> DiscoveryResult {
     let mut groups: Vec<(String, String, Vec<FileFingerprint>)> = Vec::new();
 
-    // Walk directories, group files by parent dir + language
-    let mut dir_files: HashMap<(String, Language), Vec<FileFingerprint>> = HashMap::new();
+    // Walk directories, group files by (parent dir, language, is_test).
+    // Test files are separated from production files so conventions from
+    // production code don't get applied to test files and vice versa.
+    // This prevents false positives like test files being flagged for
+    // missing production methods (set_up, tear_down are optional hooks).
+    let mut dir_files: HashMap<(String, Language, bool), Vec<FileFingerprint>> = HashMap::new();
     let mut files_walked: usize = 0;
     let mut files_fingerprinted: usize = 0;
 
@@ -39,13 +43,14 @@ pub(crate) fn auto_discover_groups(root: &Path) -> DiscoveryResult {
                     .and_then(|p| p.strip_prefix(root).ok())
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
-                let key = (parent, fp.language.clone());
+                let file_is_test = is_test_path(&fp.relative_path);
+                let key = (parent, fp.language.clone(), file_is_test);
                 dir_files.entry(key).or_default().push(fp);
             }
         }
     }
 
-    for ((dir, _lang), fingerprints) in dir_files {
+    for ((dir, _lang, is_test), fingerprints) in dir_files {
         if fingerprints.len() < 2 {
             continue;
         }
@@ -56,8 +61,8 @@ pub(crate) fn auto_discover_groups(root: &Path) -> DiscoveryResult {
             format!("{}/*", dir)
         };
 
-        // Generate a name from the directory
-        let name = if dir.is_empty() {
+        // Generate a name from the directory, with test suffix for test groups
+        let base_name = if dir.is_empty() {
             "Root Files".to_string()
         } else {
             dir.split('/')
@@ -74,6 +79,12 @@ pub(crate) fn auto_discover_groups(root: &Path) -> DiscoveryResult {
                 })
                 .collect::<Vec<_>>()
                 .join(" ")
+        };
+
+        let name = if is_test {
+            format!("{} (Tests)", base_name)
+        } else {
+            base_name
         };
 
         groups.push((name, glob_pattern, fingerprints));

@@ -995,7 +995,7 @@ mod tests {
             dir.join("steps/AiChat.php"),
             r#"<?php
 class AiChat {
-    public function execute(array $config): array { return []; }
+    public function execute($config, $context) { return []; }
     public function register(): void {}
 }
 "#,
@@ -1006,14 +1006,14 @@ class AiChat {
             dir.join("steps/Webhook.php"),
             r#"<?php
 class Webhook {
-    public function execute(array $config): array { return []; }
+    public function execute($config, $context) { return []; }
     public function register(): void {}
 }
 "#,
         )
         .unwrap();
 
-        // One file with different signature (missing type hints)
+        // One file with structurally different signature (different param count)
         std::fs::write(
             dir.join("steps/AgentPing.php"),
             r#"<?php
@@ -1065,15 +1065,15 @@ class AgentPing {
 
         std::fs::write(
             dir.join("steps/AiChat.php"),
-            "<?php\nclass AiChat {\n    public function execute(array $config): array { return []; }\n    public function register(): void {}\n}\n",
+            "<?php\nclass AiChat {\n    public function execute($config, $context) { return []; }\n    public function register(): void {}\n}\n",
         ).unwrap();
 
         std::fs::write(
             dir.join("steps/Webhook.php"),
-            "<?php\nclass Webhook {\n    public function execute(array $config): array { return []; }\n    public function register(): void {}\n}\n",
+            "<?php\nclass Webhook {\n    public function execute($config, $context) { return []; }\n    public function register(): void {}\n}\n",
         ).unwrap();
 
-        // File already an outlier (missing register) AND has wrong execute signature
+        // File already an outlier (missing register) AND has structurally different execute (1 param vs 2)
         std::fs::write(
             dir.join("steps/Bad.php"),
             "<?php\nclass Bad {\n    public function execute($config) { return []; }\n}\n",
@@ -1196,20 +1196,20 @@ class AgentPing {
 
     #[test]
     fn signature_check_majority_wins() {
-        // 2 files have one signature, 1 file has another — the 2-file version is canonical
+        // 2 files have one signature (2 params), 1 file has another (1 param) — the 2-file version is canonical
         let dir = std::env::temp_dir().join("homeboy_sig_majority_test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("steps")).unwrap();
 
         std::fs::write(
             dir.join("steps/A.php"),
-            "<?php\nclass A {\n    public function run(string $input): bool { return true; }\n}\n",
+            "<?php\nclass A {\n    public function run($input, $context) { return true; }\n}\n",
         )
         .unwrap();
 
         std::fs::write(
             dir.join("steps/B.php"),
-            "<?php\nclass B {\n    public function run(string $input): bool { return true; }\n}\n",
+            "<?php\nclass B {\n    public function run($input, $context) { return true; }\n}\n",
         )
         .unwrap();
 
@@ -1243,6 +1243,55 @@ class AgentPing {
         assert_eq!(conv.conforming.len(), 2);
         assert_eq!(conv.outliers.len(), 1);
         assert_eq!(conv.outliers[0].file, "steps/C.php");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn return_type_difference_not_a_mismatch() {
+        // Files with and without return types should NOT produce a SignatureMismatch.
+        // This was the bug reported in #571.
+        let dir = std::env::temp_dir().join("homeboy_sig_return_type_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("api")).unwrap();
+
+        std::fs::write(
+            dir.join("api/Users.php"),
+            "<?php\nclass Users {\n    public function register(): void {}\n    public function check($request) {}\n}\n",
+        ).unwrap();
+
+        std::fs::write(
+            dir.join("api/Posts.php"),
+            "<?php\nclass Posts {\n    public function register() {}\n    public function check($request) {}\n}\n",
+        ).unwrap();
+
+        let mut conventions = vec![Convention {
+            name: "Api".to_string(),
+            glob: "api/*".to_string(),
+            expected_methods: vec!["register".to_string(), "check".to_string()],
+            expected_registrations: vec![],
+            expected_interfaces: vec![],
+            expected_namespace: None,
+            expected_imports: vec![],
+            conforming: vec!["api/Users.php".to_string(), "api/Posts.php".to_string()],
+            outliers: vec![],
+            total_files: 2,
+            confidence: 1.0,
+        }];
+
+        check_signature_consistency(&mut conventions, &dir);
+
+        let conv = &conventions[0];
+        // Both files should remain conforming — return type is not structural
+        assert_eq!(
+            conv.conforming.len(),
+            2,
+            "Return type difference should not cause mismatch"
+        );
+        assert!(
+            conv.outliers.is_empty(),
+            "No outliers expected for return type differences"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

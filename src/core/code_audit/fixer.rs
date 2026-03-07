@@ -1549,9 +1549,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         let language = detect_language(&canonical_abs);
 
         // Only use extract_shared for PHP class methods (not tests, not JS/JSX).
-        let is_test_file = group.canonical_file.contains("/tests/")
-            || group.canonical_file.contains("/Tests/")
-            || group.canonical_file.starts_with("tests/");
+        let is_test_file = super::walker::is_test_path(&group.canonical_file);
         let use_extract_shared = matches!(language, Language::Php) && !is_test_file;
 
         let ext_manifest = crate::extension::find_extension_for_file_ext(ext, "refactor");
@@ -1753,9 +1751,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         if finding.kind != DeviationKind::GodFile {
             continue;
         }
-        let is_test = finding.file.contains("/tests/")
-            || finding.file.contains("_test.")
-            || finding.file.starts_with("tests/");
+        let is_test = super::walker::is_test_path(&finding.file);
         if is_test {
             continue;
         }
