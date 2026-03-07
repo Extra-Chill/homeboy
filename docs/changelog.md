@@ -4,6 +4,10 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.71.0] - 2026-03-07
+### Added
+- add server health metrics to fleet status (#575) (fleet)
+
 ## [0.70.0] - 2026-03-07
 ### Added
 - persistent undo command for write operations (#573)
