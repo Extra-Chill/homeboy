@@ -78,6 +78,12 @@ pub struct TestMappingConfig {
     /// Files in matching directories get `Warning` severity instead of `Info`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub critical_patterns: Vec<String>,
+    /// Path patterns to exclude from test coverage checks entirely.
+    /// Files matching any pattern are skipped for both missing_test_file and
+    /// missing_test_method findings. Use for CLI wrappers, pure type definitions,
+    /// and other structurally untestable code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_test_patterns: Vec<String>,
 }
 
 fn default_test_prefix() -> String {

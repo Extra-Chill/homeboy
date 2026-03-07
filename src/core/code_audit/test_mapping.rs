@@ -122,6 +122,7 @@ mod tests {
             method_prefix: "test_".to_string(),
             critical_patterns: vec![],
             inline_tests: true,
+            skip_test_patterns: vec![],
         }
     }
 

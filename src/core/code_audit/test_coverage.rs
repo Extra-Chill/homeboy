@@ -44,6 +44,11 @@ pub(crate) fn analyze_test_coverage(
 
     // Check 1 & 2: For each source file, check for corresponding test file and methods
     for source_fp in &source_fps {
+        // Skip files matching skip_test_patterns (e.g. CLI wrappers, pure type defs)
+        if is_skipped_path(&source_fp.relative_path, config) {
+            continue;
+        }
+
         let expected_test_path = source_to_test_path(&source_fp.relative_path, config);
 
         let severity = if is_critical(&source_fp.relative_path, config) {
@@ -130,6 +135,9 @@ pub(crate) fn analyze_test_coverage(
                 if is_trivial_method(method) {
                     continue;
                 }
+                if !is_testable_visibility(method, &source_fp.visibility) {
+                    continue; // Skip private helpers — tested transitively
+                }
                 if !covered_methods.contains(method.as_str()) {
                     findings.push(Finding {
                         convention: "test_coverage".to_string(),
@@ -184,6 +192,9 @@ pub(crate) fn analyze_test_coverage(
                 for method in &source_fp.methods {
                     if is_trivial_method(method) {
                         continue;
+                    }
+                    if !is_testable_visibility(method, &source_fp.visibility) {
+                        continue; // Skip private helpers — tested transitively
                     }
                     if !covered_methods.contains(method.as_str()) {
                         findings.push(Finding {
@@ -309,6 +320,7 @@ fn is_critical(path: &str, config: &TestMappingConfig) -> bool {
 /// Trivial methods that don't warrant individual test coverage findings.
 fn is_trivial_method(name: &str) -> bool {
     let trivial = [
+        // Rust core trait methods
         "new",
         "default",
         "from",
@@ -319,6 +331,24 @@ fn is_trivial_method(name: &str) -> bool {
         "eq",
         "hash",
         "drop",
+        // Rust common conversions
+        "as_str",
+        "as_ref",
+        "as_mut",
+        "to_string",
+        "to_str",
+        "to_owned",
+        // Rust common accessors
+        "is_empty",
+        "len",
+        "iter",
+        // Serde
+        "serialize",
+        "deserialize",
+        // Builder pattern
+        "build",
+        "builder",
+        // PHP magic methods
         "__construct",
         "__destruct",
         "__toString",
@@ -326,7 +356,36 @@ fn is_trivial_method(name: &str) -> bool {
         "get_instance",
         "getInstance",
     ];
-    trivial.contains(&name)
+    if trivial.contains(&name) {
+        return true;
+    }
+    // Prefix-based rules: simple getters/accessors/predicates
+    if name.starts_with("get_") || name.starts_with("is_") || name.starts_with("has_") {
+        return true;
+    }
+    false
+}
+
+/// Check if a method should be flagged based on its visibility.
+/// Only public and pub(crate) methods warrant test coverage findings —
+/// private helpers get tested transitively through their public callers.
+fn is_testable_visibility(method: &str, visibility: &HashMap<String, String>) -> bool {
+    match visibility.get(method).map(|s| s.as_str()) {
+        Some("public") | Some("pub(crate)") | Some("pub(super)") => true,
+        Some("private") => false,
+        // If visibility is unknown (not in the map), assume testable
+        None => true,
+        Some(_) => true,
+    }
+}
+
+/// Check if a source file should be excluded from test coverage checks
+/// based on the skip_patterns config.
+fn is_skipped_path(path: &str, config: &TestMappingConfig) -> bool {
+    config
+        .skip_test_patterns
+        .iter()
+        .any(|pattern| path.contains(pattern))
 }
 
 // ============================================================================
@@ -348,6 +407,7 @@ mod tests {
             method_prefix: "test_".to_string(),
             inline_tests: false,
             critical_patterns: vec!["core/".to_string()],
+            skip_test_patterns: vec![],
         }
     }
 
@@ -359,6 +419,7 @@ mod tests {
             method_prefix: "test_".to_string(),
             inline_tests: true,
             critical_patterns: vec!["core/".to_string()],
+            skip_test_patterns: vec![],
         }
     }
 
@@ -629,6 +690,7 @@ mod tests {
             method_prefix: "test_".to_string(),
             inline_tests: false,
             critical_patterns: vec!["Abilities/".to_string()],
+            skip_test_patterns: vec![],
         };
 
         assert_eq!(
@@ -666,6 +728,110 @@ mod tests {
         let findings = analyze_test_coverage(&dir, &[&source], &config);
 
         assert!(findings.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn private_methods_not_flagged() {
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_visibility");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+
+        let mut source = make_fp(
+            "src/core/engine.rs",
+            vec!["run", "helper_fn", "internal_parse", "test_run"],
+        );
+        // run is public, helper_fn and internal_parse are private
+        source
+            .visibility
+            .insert("run".to_string(), "public".to_string());
+        source
+            .visibility
+            .insert("helper_fn".to_string(), "private".to_string());
+        source
+            .visibility
+            .insert("internal_parse".to_string(), "private".to_string());
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        // Only "run" should be covered (by test_run), private methods skipped entirely.
+        // No findings expected since run has test_run.
+        let missing_methods: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == DeviationKind::MissingTestMethod)
+            .collect();
+        assert!(
+            missing_methods.is_empty(),
+            "Private methods should not be flagged: {:?}",
+            missing_methods
+                .iter()
+                .map(|f| &f.description)
+                .collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skip_test_patterns_excludes_files() {
+        let mut config = make_rust_config();
+        config.skip_test_patterns = vec!["commands/".to_string()];
+
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_skip_patterns");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/commands")).unwrap();
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+
+        let cmd_source = make_fp("src/commands/deploy.rs", vec!["run_deploy"]);
+        let core_source = make_fp("src/core/deploy.rs", vec!["execute_deploy"]);
+
+        let findings = analyze_test_coverage(&dir, &[&cmd_source, &core_source], &config);
+
+        // commands/deploy.rs should be skipped, core/deploy.rs should NOT
+        let flagged_files: Vec<&str> = findings.iter().map(|f| f.file.as_str()).collect();
+        assert!(
+            !flagged_files.contains(&"src/commands/deploy.rs"),
+            "commands/ should be skipped"
+        );
+        assert!(
+            flagged_files.contains(&"src/core/deploy.rs"),
+            "core/ should NOT be skipped"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trivial_getters_not_flagged() {
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_getters");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        // File with only getter/accessor methods
+        let source = make_fp(
+            "src/config.rs",
+            vec!["get_name", "is_enabled", "has_value", "as_str", "len"],
+        );
+        let test = make_fp("tests/config_test.rs", vec![]);
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        let missing_methods: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == DeviationKind::MissingTestMethod)
+            .collect();
+        assert!(
+            missing_methods.is_empty(),
+            "Trivial getters should not be flagged: {:?}",
+            missing_methods
+                .iter()
+                .map(|f| &f.description)
+                .collect::<Vec<_>>()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
