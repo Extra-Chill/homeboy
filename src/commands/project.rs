@@ -1,9 +1,13 @@
 use clap::{Args, Subcommand, ValueEnum};
+use homeboy::log_status;
 use serde::Serialize;
 
 use homeboy::component::{self, Component};
+use homeboy::deploy::{self, DeployConfig};
+use homeboy::health::{self, ServerHealth};
 use homeboy::project::{self, Project};
 use homeboy::server;
+use homeboy::version;
 use homeboy::EntityCrudOutput;
 
 use super::CmdResult;
@@ -84,6 +88,15 @@ enum ProjectCommand {
     Delete {
         /// Project ID
         project_id: String,
+    },
+    /// Show live server health and component versions for a project
+    Status {
+        /// Project ID
+        project_id: String,
+
+        /// Show only server health metrics, skip component versions
+        #[arg(long)]
+        health_only: bool,
     },
 }
 
@@ -230,6 +243,20 @@ pub struct ProjectExtra {
     pub deploy_ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_blockers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<ServerHealth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_versions: Option<Vec<ProjectComponentVersion>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectComponentVersion {
+    pub component_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Where the version was resolved from: "live" (SSH) or "cached" (local file)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_source: Option<String>,
 }
 
 pub type ProjectOutput = EntityCrudOutput<Project, ProjectExtra>;
@@ -314,6 +341,10 @@ pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         ProjectCommand::Components { command } => components(command),
         ProjectCommand::Pin { command } => pin(command),
         ProjectCommand::Delete { project_id } => delete(&project_id),
+        ProjectCommand::Status {
+            project_id,
+            health_only,
+        } => status(&project_id, health_only),
     }
 }
 
@@ -781,6 +812,85 @@ fn pin_remove(project_id: &str, path: &str, pin_type: ProjectPinType) -> CmdResu
                         r#type: type_string.to_string(),
                     }),
                 }),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        0,
+    ))
+}
+
+fn status(project_id: &str, health_only: bool) -> CmdResult<ProjectOutput> {
+    let proj = project::load(project_id)?;
+
+    log_status!("project", "Checking '{}'...", project_id);
+
+    // Collect health metrics via the shared core primitive
+    let project_health = health::collect_project_health(&proj);
+
+    let component_versions = if health_only {
+        None
+    } else {
+        // Collect live component versions via deploy check infrastructure
+        let config = DeployConfig {
+            component_ids: vec![],
+            all: true,
+            outdated: false,
+            dry_run: false,
+            check: true,
+            force: false,
+            skip_build: true,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: true,
+            head: true,
+        };
+
+        match deploy::run(project_id, &config) {
+            Ok(result) => Some(
+                result
+                    .results
+                    .iter()
+                    .map(|r| ProjectComponentVersion {
+                        component_id: r.id.clone(),
+                        version: r.remote_version.clone(),
+                        version_source: Some("live".to_string()),
+                    })
+                    .collect(),
+            ),
+            Err(e) => {
+                // SSH failed for versions — fall back to cached
+                log_status!(
+                    "project",
+                    "Warning: could not reach server — falling back to cached versions: {}",
+                    e
+                );
+                Some(
+                    proj.component_ids
+                        .iter()
+                        .map(|cid| {
+                            let comp_version = component::load(cid)
+                                .ok()
+                                .and_then(|comp| version::get_component_version(&comp));
+                            ProjectComponentVersion {
+                                component_id: cid.clone(),
+                                version: comp_version,
+                                version_source: Some("cached".to_string()),
+                            }
+                        })
+                        .collect(),
+                )
+            }
+        }
+    };
+
+    Ok((
+        ProjectOutput {
+            command: "project.status".to_string(),
+            id: Some(project_id.to_string()),
+            extra: ProjectExtra {
+                health: project_health,
+                component_versions,
                 ..Default::default()
             },
             ..Default::default()

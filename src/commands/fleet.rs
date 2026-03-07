@@ -5,6 +5,7 @@ use serde::Serialize;
 use homeboy::component;
 use homeboy::deploy::{self, DeployConfig};
 use homeboy::fleet::{self, Fleet};
+use homeboy::health::{self, ServerHealth};
 use homeboy::project::{self, Project};
 use homeboy::version;
 use homeboy::EntityCrudOutput;
@@ -78,7 +79,7 @@ enum FleetCommand {
         /// Fleet ID
         id: String,
     },
-    /// Show live component versions across a fleet (via SSH)
+    /// Show live component versions and server health across a fleet (via SSH)
     Status {
         /// Fleet ID
         id: String,
@@ -86,6 +87,10 @@ enum FleetCommand {
         /// Use locally cached versions instead of live SSH check
         #[arg(long)]
         cached: bool,
+
+        /// Show only server health metrics, skip component versions
+        #[arg(long)]
+        health_only: bool,
     },
     /// Check component drift across a fleet (compares local vs remote)
     Check {
@@ -217,6 +222,8 @@ pub struct FleetProjectStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
     pub components: Vec<FleetComponentStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<ServerHealth>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -244,7 +251,11 @@ pub fn run(args: FleetArgs, _global: &super::GlobalArgs) -> CmdResult<FleetOutpu
         FleetCommand::Remove { id, project } => remove(&id, &project),
         FleetCommand::Projects { id } => projects(&id),
         FleetCommand::Components { id } => components(&id),
-        FleetCommand::Status { id, cached } => status(&id, cached),
+        FleetCommand::Status {
+            id,
+            cached,
+            health_only,
+        } => status(&id, cached, health_only),
         FleetCommand::Check { id, outdated } => check(&id, outdated),
         FleetCommand::Exec {
             id,
@@ -430,12 +441,12 @@ fn components(id: &str) -> CmdResult<FleetOutput> {
     ))
 }
 
-fn status(id: &str, cached: bool) -> CmdResult<FleetOutput> {
+fn status(id: &str, cached: bool, health_only: bool) -> CmdResult<FleetOutput> {
     let fl = fleet::load(id)?;
     let mut project_statuses = Vec::new();
 
     if cached {
-        // Cached mode: read versions from local files (old behavior)
+        // Cached mode: read versions from local files (no SSH, no health)
         for project_id in &fl.project_ids {
             let proj = match project::load(project_id) {
                 Ok(p) => p,
@@ -460,17 +471,32 @@ fn status(id: &str, cached: bool) -> CmdResult<FleetOutput> {
                 project_id: project_id.clone(),
                 server_id: proj.server_id.clone(),
                 components: component_statuses,
+                health: None,
             });
         }
     } else {
-        // Live mode (default): SSH into each server to get actual deployed versions
+        // Live mode (default): SSH into each server for versions and health
         for project_id in &fl.project_ids {
             let proj = match project::load(project_id) {
                 Ok(p) => p,
                 Err(_) => continue,
             };
 
-            log_status!("fleet", "Checking versions on '{}'...", project_id);
+            log_status!("fleet", "Checking '{}'...", project_id);
+
+            // Collect health metrics via direct SSH
+            let health = health::collect_project_health(&proj);
+
+            if health_only {
+                // Skip component version check
+                project_statuses.push(FleetProjectStatus {
+                    project_id: project_id.clone(),
+                    server_id: proj.server_id.clone(),
+                    components: vec![],
+                    health,
+                });
+                continue;
+            }
 
             // Use the deploy check infrastructure to get remote versions via SSH
             let config = DeployConfig {
@@ -502,10 +528,11 @@ fn status(id: &str, cached: bool) -> CmdResult<FleetOutput> {
                         project_id: project_id.clone(),
                         server_id: proj.server_id.clone(),
                         components: component_statuses,
+                        health,
                     });
                 }
                 Err(e) => {
-                    // SSH failed — fall back to cached versions with indicator
+                    // SSH failed for versions — fall back to cached, but keep whatever health we got
                     log_status!(
                         "fleet",
                         "Warning: could not reach '{}' — falling back to cached versions: {}",
@@ -531,6 +558,7 @@ fn status(id: &str, cached: bool) -> CmdResult<FleetOutput> {
                         project_id: project_id.clone(),
                         server_id: proj.server_id.clone(),
                         components: component_statuses,
+                        health,
                     });
                 }
             }

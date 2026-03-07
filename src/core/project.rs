@@ -59,6 +59,11 @@ pub struct Project {
     /// Example: `{"data-machine": {"extract_command": "...", "remote_owner": "opencode:opencode"}}`
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub component_overrides: HashMap<String, serde_json::Value>,
+
+    /// Service names to check in fleet health status (e.g. ["kimaki", "php8.4-fpm", "nginx"]).
+    /// These are checked via `systemctl is-active <name>` on the remote server.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
 }
 
 impl ConfigEntity for Project {

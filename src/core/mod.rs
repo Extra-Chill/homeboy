@@ -20,6 +20,7 @@ pub mod extension_update_check;
 pub mod files;
 pub mod fleet;
 pub mod git;
+pub mod health;
 pub mod hooks;
 pub mod lint_baseline;
 pub mod logs;
