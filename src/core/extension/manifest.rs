@@ -198,6 +198,12 @@ pub struct ScriptsConfig {
     /// Receives `{file_path, content}` on stdin and outputs `{artifacts:[...]}` on stdout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topology: Option<String>,
+    /// Script that extracts cross-reference data for test drift fixing.
+    /// Receives JSON commands on stdin, outputs structured extraction results on stdout.
+    /// Commands: `extract_hook_registrations`, `extract_hook_definitions`,
+    /// `extract_mock_expectations`, `extract_method_calls`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crossref: Option<String>,
 }
 
 /// Unified extension manifest decomposed into capability groups.
@@ -448,6 +454,11 @@ impl ExtensionManifest {
     /// Get the topology script path (relative to extension dir), if configured.
     pub fn topology_script(&self) -> Option<&str> {
         self.scripts.as_ref().and_then(|s| s.topology.as_deref())
+    }
+
+    /// Get the crossref script path (relative to extension dir), if configured.
+    pub fn crossref_script(&self) -> Option<&str> {
+        self.scripts.as_ref().and_then(|s| s.crossref.as_deref())
     }
 }
 

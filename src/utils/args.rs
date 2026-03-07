@@ -261,6 +261,7 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
                 "--ratchet",
                 "--analyze",
                 "--drift",
+                "--crossref",
                 "--scaffold",
                 "--scaffold-file",
                 "--write",

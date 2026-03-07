@@ -377,6 +377,118 @@ pub struct RewrittenImport {
     pub changed: bool,
 }
 
+// ============================================================================
+// Cross-Reference Script Protocol
+// ============================================================================
+
+/// Run a extension's crossref script with a command.
+///
+/// Same pattern as `run_refactor_script`: JSON command on stdin, JSON on stdout.
+///
+/// Supported commands:
+/// - `extract_hook_registrations`: Find hook/event registrations in test files
+/// - `extract_hook_definitions`: Find hook/event definitions in production files
+/// - `extract_mock_expectations`: Find mock method expectations in test files
+/// - `extract_method_calls`: Find method calls in production files
+pub fn run_crossref_script(
+    extension: &ExtensionManifest,
+    command: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let extension_path = extension.extension_path.as_deref()?;
+    let script_rel = extension.crossref_script()?;
+    let script_path = std::path::Path::new(extension_path).join(script_rel);
+
+    if !script_path.exists() {
+        return None;
+    }
+
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script_path.to_string_lossy().as_ref())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                let _ = stdin.write_all(command.to_string().as_bytes());
+            }
+            child.wait_with_output().ok()
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            crate::log_status!("crossref", "Extension script error: {}", stderr.trim());
+        }
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&stdout).ok()
+}
+
+/// A hook/event registration found in a file (test or production).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HookReference {
+    /// Hook/event name (e.g., "chubes_ai_request", "add_attachment").
+    pub name: String,
+    /// File path where the reference was found.
+    pub file: String,
+    /// Line number (1-indexed).
+    pub line: usize,
+    /// Number of arguments expected/passed.
+    #[serde(default)]
+    pub args_count: Option<usize>,
+    /// Kind of reference: "registration" (test subscribes) or "definition" (production fires).
+    pub kind: String,
+}
+
+/// A mock method expectation found in a test file.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MockExpectation {
+    /// Class being mocked.
+    pub class: String,
+    /// Method name expected.
+    pub method: String,
+    /// File path.
+    pub file: String,
+    /// Line number (1-indexed).
+    pub line: usize,
+}
+
+/// A method call found in production code.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MethodCall {
+    /// Class or object the method is called on.
+    pub class: String,
+    /// Method name.
+    pub method: String,
+    /// File path.
+    pub file: String,
+    /// Line number (1-indexed).
+    pub line: usize,
+}
+
+/// Combined cross-reference extraction result from a single file.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CrossRefExtraction {
+    /// Hook registrations found (add_filter, add_action, subscribe, etc.)
+    #[serde(default)]
+    pub hook_registrations: Vec<HookReference>,
+    /// Hook definitions found (apply_filters, do_action, emit, etc.)
+    #[serde(default)]
+    pub hook_definitions: Vec<HookReference>,
+    /// Mock expectations found ($mock->method(), expects(), etc.)
+    #[serde(default)]
+    pub mock_expectations: Vec<MockExpectation>,
+    /// Method calls found ($obj->method(), Class::method(), etc.)
+    #[serde(default)]
+    pub method_calls: Vec<MethodCall>,
+}
+
 pub fn extension_path(id: &str) -> PathBuf {
     paths::extension(id).unwrap_or_else(|_| PathBuf::from(id))
 }

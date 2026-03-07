@@ -7,6 +7,7 @@ use homeboy::extension::{self, ExtensionRunner};
 use homeboy::refactor::{self, TransformSet};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
+use homeboy::test_crossref::{self, CrossRefOptions, CrossRefReport};
 use homeboy::test_drift::{self, DriftOptions, DriftReport};
 use homeboy::test_scaffold::{self, ScaffoldConfig};
 use homeboy::utils::autofix::{self, AutofixMode};
@@ -55,6 +56,10 @@ pub struct TestArgs {
     /// Detect test drift — cross-reference production changes with test files
     #[arg(long)]
     drift: bool,
+
+    /// Run static cross-reference analysis (find stale hooks, mock mismatches)
+    #[arg(long)]
+    crossref: bool,
 
     /// Generate test stubs for untested source files
     #[arg(long)]
@@ -112,6 +117,8 @@ pub struct TestOutput {
     scaffold: Option<ScaffoldOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_fix_drift: Option<AutoFixDriftOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    crossref: Option<CrossRefReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_scope: Option<TestScopeOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,6 +208,7 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
     // Homeboy-owned boolean flags that should never reach the extension runner
     const HOMEBOY_FLAGS: &[&str] = &[
         "--analyze",
+        "--crossref",
         "--drift",
         "--scaffold",
         "--write",
@@ -315,9 +323,21 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
     // Drift detection mode — skip running tests, analyze git changes instead
     if args.drift {
         if args.fix {
-            return run_auto_fix_drift(args.comp.id(), &component, &args.since, args.write, true);
+            return run_auto_fix_drift(
+                args.comp.id(),
+                &component,
+                &args.since,
+                args.write,
+                true,
+                args.crossref,
+            );
         }
         return run_drift(args.comp.id(), &component, &args.since);
+    }
+
+    // Cross-reference mode — static analysis of test/production alignment
+    if args.crossref {
+        return run_crossref(args.comp.id(), &component, args.fix, args.write);
     }
 
     // Compute optional PR/impact-scoped test selection
@@ -403,6 +423,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
                     drift: None,
                     scaffold: None,
                     auto_fix_drift: None,
+                    crossref: None,
                     test_scope: Some(scope.clone()),
                     summary: if args.json_summary {
                         Some(build_test_summary(None, None, 0))
@@ -629,6 +650,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
             drift: None,
             scaffold: None,
             auto_fix_drift: None,
+            crossref: None,
             test_scope: changed_scope,
             summary,
         },
@@ -640,7 +662,8 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
 ///
 /// This mode does NOT run tests. It inspects git changes since `since`, generates
 /// find/replace transform rules for auto-fixable drift types, and applies them to
-/// test files. Triggered by `homeboy test --drift --fix`.
+/// test files. When `include_crossref` is true, also runs static cross-reference
+/// analysis and merges those rules. Triggered by `homeboy test --drift --fix`.
 /// Use with `--write` to persist changes; default is dry-run.
 fn run_auto_fix_drift(
     component_id: &str,
@@ -648,6 +671,7 @@ fn run_auto_fix_drift(
     since: &str,
     write: bool,
     include_report: bool,
+    include_crossref: bool,
 ) -> CmdResult<TestOutput> {
     let source_path = {
         let expanded = shellexpand::tilde(&component.local_path);
@@ -668,8 +692,55 @@ fn run_auto_fix_drift(
         if write { "write" } else { "dry-run" }
     );
 
+    // Phase 1: Git-diff-based drift detection
     let drift_report = test_drift::detect_drift(component_id, &opts)?;
-    let rules = test_drift::generate_transform_rules(&drift_report);
+    let mut rules = test_drift::generate_transform_rules(&drift_report);
+
+    // Phase 2: Static cross-reference analysis (if requested)
+    let crossref_report = if include_crossref {
+        let crossref_opts = if source_path.join("Cargo.toml").exists() {
+            CrossRefOptions::rust(&source_path)
+        } else {
+            CrossRefOptions::php(&source_path)
+        };
+
+        // Try to load extension manifest for language-specific extraction
+        let ext = try_load_crossref_extension(component);
+
+        homeboy::log_status!("crossref", "Running static cross-reference analysis...");
+        let report =
+            test_crossref::analyze(component_id, &crossref_opts, ext.as_ref());
+
+        if !report.mismatches.is_empty() {
+            homeboy::log_status!(
+                "crossref",
+                "{} mismatch{} found ({} hook, {} mock, {} auto-fixable)",
+                report.mismatches.len(),
+                if report.mismatches.len() == 1 { "" } else { "es" },
+                report.hook_mismatches,
+                report.mock_mismatches,
+                report.total_auto_fixable,
+            );
+        }
+
+        // Merge crossref rules with drift rules
+        let crossref_rules = test_crossref::generate_transform_rules(&report);
+        let crossref_count = crossref_rules.len();
+        rules.extend(crossref_rules);
+
+        if crossref_count > 0 {
+            homeboy::log_status!(
+                "crossref",
+                "Generated {} additional fix rule{} from cross-reference",
+                crossref_count,
+                if crossref_count == 1 { "" } else { "s" },
+            );
+        }
+
+        Some(report)
+    } else {
+        None
+    };
 
     let output = if rules.is_empty() {
         homeboy::log_status!("test", "No auto-fixable drift detected. Nothing to apply.");
@@ -766,6 +837,7 @@ fn run_auto_fix_drift(
                 rerun_recommended: outcome.rerun_recommended,
                 ..output
             }),
+            crossref: crossref_report,
             test_scope: None,
             summary: None,
         },
@@ -912,6 +984,170 @@ fn run_drift(component_id: &str, component: &Component, since: &str) -> CmdResul
             drift: Some(report),
             scaffold: None,
             auto_fix_drift: None,
+            crossref: None,
+            test_scope: None,
+            summary: None,
+        },
+        exit_code,
+    ))
+}
+
+/// Try to load the extension manifest for cross-reference scripts.
+///
+/// Non-fatal — returns None if extension isn't available.
+fn try_load_crossref_extension(
+    component: &Component,
+) -> Option<extension::ExtensionManifest> {
+    let ext_id = if let Some(ref exts) = component.extensions {
+        if exts.contains_key("wordpress") {
+            "wordpress".to_string()
+        } else if exts.contains_key("rust") {
+            "rust".to_string()
+        } else {
+            exts.keys().next()?.to_string()
+        }
+    } else {
+        auto_detect_extension(component)?
+    };
+
+    extension::load_extension(&ext_id).ok()
+}
+
+/// Run standalone cross-reference analysis.
+///
+/// Scans test files and production files to find mismatches (stale hook names,
+/// wrong mock methods, etc.) without requiring git history.
+/// With `--fix --write`, applies auto-fixable corrections.
+fn run_crossref(
+    component_id: &str,
+    component: &Component,
+    fix: bool,
+    write: bool,
+) -> CmdResult<TestOutput> {
+    let source_path = {
+        let expanded = shellexpand::tilde(&component.local_path);
+        std::path::PathBuf::from(expanded.as_ref())
+    };
+
+    let crossref_opts = if source_path.join("Cargo.toml").exists() {
+        CrossRefOptions::rust(&source_path)
+    } else {
+        CrossRefOptions::php(&source_path)
+    };
+
+    let ext = try_load_crossref_extension(component);
+
+    homeboy::log_status!(
+        "crossref",
+        "Scanning {} for test/production mismatches...",
+        component_id
+    );
+
+    let report = test_crossref::analyze(component_id, &crossref_opts, ext.as_ref());
+
+    // Report findings
+    if report.mismatches.is_empty() {
+        homeboy::log_status!("crossref", "No mismatches found. Tests and production are aligned.");
+    } else {
+        homeboy::log_status!(
+            "crossref",
+            "{} mismatch{} found ({} hook, {} mock)",
+            report.mismatches.len(),
+            if report.mismatches.len() == 1 { "" } else { "es" },
+            report.hook_mismatches,
+            report.mock_mismatches,
+        );
+
+        for m in report.mismatches.iter().take(20) {
+            let fixable = if m.auto_fixable { " [auto-fixable]" } else { "" };
+            homeboy::log_status!(
+                "  mismatch",
+                "{}:{} — {}{}",
+                m.test_file,
+                m.test_line,
+                m.description,
+                fixable,
+            );
+        }
+
+        if report.mismatches.len() > 20 {
+            homeboy::log_status!(
+                "info",
+                "... and {} more (use --json for full list)",
+                report.mismatches.len() - 20
+            );
+        }
+
+        if report.total_auto_fixable > 0 && !fix {
+            homeboy::log_status!(
+                "hint",
+                "{} auto-fixable. Run: homeboy test {} --crossref --fix [--write]",
+                report.total_auto_fixable,
+                component_id,
+            );
+        }
+    }
+
+    // Apply fixes if requested
+    let auto_fix_output = if fix && report.total_auto_fixable > 0 {
+        let rules = test_crossref::generate_transform_rules(&report);
+
+        if rules.is_empty() {
+            None
+        } else {
+            let set = TransformSet {
+                description: format!("Cross-reference fixes for {}", component_id),
+                rules,
+            };
+
+            let result = refactor::apply_transforms(
+                &source_path,
+                "test_crossref_fix",
+                &set,
+                write,
+                None,
+            )?;
+
+            homeboy::log_status!(
+                "crossref",
+                "Applied {} replacement{} across {} file{} ({})",
+                result.total_replacements,
+                if result.total_replacements == 1 { "" } else { "s" },
+                result.total_files,
+                if result.total_files == 1 { "" } else { "s" },
+                if write { "written" } else { "dry-run" },
+            );
+
+            Some(AutoFixDriftOutput {
+                since: "n/a".to_string(),
+                auto_fixable_changes: report.total_auto_fixable,
+                generated_rules: set.rules.len(),
+                replacements: result.total_replacements,
+                files_modified: result.total_files,
+                written: write,
+                rerun_recommended: write && result.total_replacements > 0,
+            })
+        }
+    } else {
+        None
+    };
+
+    let exit_code = if report.mismatches.is_empty() { 0 } else { 1 };
+
+    Ok((
+        TestOutput {
+            status: "crossref".to_string(),
+            component: component_id.to_string(),
+            exit_code,
+            test_counts: None,
+            coverage: None,
+            baseline_comparison: None,
+            analysis: None,
+            hints: None,
+            drift: None,
+            scaffold: None,
+            auto_fix_drift: auto_fix_output,
+            crossref: Some(report),
             test_scope: None,
             summary: None,
         },
@@ -1009,6 +1245,7 @@ fn run_scaffold(
                 drift: None,
                 scaffold: Some(scaffold_output),
                 auto_fix_drift: None,
+                crossref: None,
                 test_scope: None,
                 summary: None,
             },
@@ -1099,6 +1336,7 @@ fn run_scaffold(
                 drift: None,
                 scaffold: Some(scaffold_output),
                 auto_fix_drift: None,
+                crossref: None,
                 test_scope: None,
                 summary: None,
             },
