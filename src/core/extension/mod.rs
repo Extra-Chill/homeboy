@@ -3,6 +3,7 @@ mod lifecycle;
 mod manifest;
 mod runner;
 mod runner_contract;
+mod runtime_helper;
 mod scope;
 pub mod version;
 
@@ -11,6 +12,7 @@ pub mod exec_context;
 // Re-export runner types
 pub use runner::{ExtensionRunner, RunnerOutput};
 pub use runner_contract::RunnerStepFilter;
+pub use runtime_helper::RUNNER_STEPS_ENV;
 
 // Re-export manifest types
 pub use manifest::{

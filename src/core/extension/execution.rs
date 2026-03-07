@@ -12,6 +12,7 @@ use super::exec_context;
 use super::load_extension;
 use super::manifest::{ActionConfig, ActionType, ExtensionManifest, HttpMethod, RuntimeConfig};
 use super::runner_contract::RunnerStepFilter;
+use super::runtime_helper;
 use super::scope::ExtensionScope;
 
 /// Result of executing a extension.
@@ -624,6 +625,13 @@ pub fn build_exec_env(
         env.push((exec_context::EXTENSION_PATH.to_string(), mp.to_string()));
     }
 
+    if let Ok(helper_path) = runtime_helper::ensure_runner_steps_helper() {
+        env.push((
+            runtime_helper::RUNNER_STEPS_ENV.to_string(),
+            helper_path.to_string_lossy().to_string(),
+        ));
+    }
+
     if let Some(pbp) = project_base_path {
         env.push((exec_context::PROJECT_PATH.to_string(), pbp.to_string()));
     }
@@ -818,5 +826,39 @@ fn interpolate_payload_value(
             Ok(serde_json::Value::Object(result))
         }
         _ => Ok(value.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_exec_env_includes_runtime_runner_helper_path() {
+        let env = build_exec_env("rust", None, None, "{}", Some("/tmp/ext"), None, None, None);
+
+        let helper = env
+            .iter()
+            .find(|(k, _)| k == runtime_helper::RUNNER_STEPS_ENV)
+            .map(|(_, v)| v.clone());
+
+        assert!(helper.is_some());
+        assert!(helper.unwrap().ends_with("runner-steps.sh"));
+    }
+
+    #[test]
+    fn build_exec_env_preserves_step_filter_contract() {
+        let filter = RunnerStepFilter {
+            step: Some("lint,test".to_string()),
+            skip: Some("lint".to_string()),
+        };
+
+        let mut env = build_exec_env("rust", None, None, "{}", Some("/tmp/ext"), None, None, None);
+        env.extend(filter.to_env_pairs());
+
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "HOMEBOY_STEP" && v == "lint,test"));
+        assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "lint"));
     }
 }
