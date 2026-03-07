@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.66.0] - 2026-03-07
+### Added
+- grammar-driven parse_items in core + pre-write validation + god file threshold (#551)
+### Fixed
+- strip generated code from --fix JSON output by default (#549) (audit)
+
 ## [0.65.1] - 2026-03-07
 ### Fixed
 - ExtensionRunner falls back to portable config when component not registered (#550)
