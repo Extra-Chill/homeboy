@@ -23,7 +23,17 @@
 - SQLite test backend + bundle WP-CLI for test environment
 - downgrade doctrine/instantiator for PHP 8.2 compat
 
-## [Next]
+## [2.7.0] - 2026-03-07
+
+### Added
+- WP alternatives + WP Filesystem fixers (#108)
+- add 4 PHPCS auto-fixers for silenced errors, empty catches, readdir loops, and commented code (#103)
+- add WordPress-aware unused parameter fixer (#102)
+- add 4 new auto-fixers for PHPCS violations (#101)
+- support generic npm build scripts (#99)
+
+### Changed
+- split monolithic refactor.py into package (#109)
 
 - feat: language grammar files for structural regex engine
 - feat: test output parsers for baseline ratchet and failure analysis
@@ -38,6 +48,24 @@
 - fix: SQLite driver — strip ON UPDATE CURRENT_TIMESTAMP, implement DESCRIBE/SHOW TABLES/SHOW INDEX
 - fix: SQLite test backend + bundle WP-CLI for test environment
 - fix: downgrade doctrine/instantiator for PHP 8.2 compat
+- share runner step filtering (#98)
+- split PHPUnit failure parsing into modular parsers
+
+### Fixed
+- skip comment lines in WP filesystem fixer
+- prevent WP filesystem fixer from re-replacing already-fixed calls
+- improve bodyless trait method detection for unused parameter analysis (#107)
+- skip unused parameter detection for trait method declarations (#106)
+- eliminate unused_parameter false positives from type path segments (#105)
+- empty-catch fixer uses unset() + auto-detect PHP version from composer.json (#104)
+- expand yoda and short-ternary fixers to cover real-world patterns (#100)
+- narrow cfg(test) module detection
+- handle rust lifetimes in boundary parsing
+- avoid duplicate failure output replay in rust runner (#93)
+- reinstall npm deps when expected local bin is missing (#92)
+- fix(wordpress-tests): align mysql default database with CI service (#89)
+- fix(wordpress-tests): default MySQL host to TCP for CI reliability (#88)
+- avoid replaying full PHPUnit output on failure
 
 ## [2.5.0]
 - WordPress extension with WP-CLI integration
