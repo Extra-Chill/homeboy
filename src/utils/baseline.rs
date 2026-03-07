@@ -311,6 +311,33 @@ pub fn compare<M: Serialize>(
     }
 }
 
+/// Load a baseline from a git ref's `homeboy.json` (e.g., `origin/main`).
+///
+/// Uses `git show <ref>:homeboy.json` to read the baseline as it existed
+/// at a specific commit without checking out that ref. Returns `None` if:
+/// - `homeboy.json` doesn't exist at that ref
+/// - No `baselines.<key>` entry exists
+/// - The ref or file is invalid
+///
+/// This is the core primitive for differential CI: compare current findings
+/// against the base ref's state to detect only newly introduced issues.
+pub fn load_from_git_ref<M: for<'de> Deserialize<'de> + Serialize>(
+    source_path: &str,
+    git_ref: &str,
+    key: &str,
+) -> Option<Baseline<M>> {
+    // Read homeboy.json from the git ref
+    let git_spec = format!("{}:{}", git_ref, HOMEBOY_JSON);
+    let content = crate::utils::command::run_in_optional(source_path, "git", &["show", &git_spec])?;
+
+    // Parse JSON
+    let root: Value = serde_json::from_str(&content).ok()?;
+
+    // Extract baseline
+    let value = root.get(BASELINES_KEY)?.get(key)?;
+    serde_json::from_value::<Baseline<M>>(value.clone()).ok()
+}
+
 // ============================================================================
 // JSON helpers
 // ============================================================================
@@ -834,5 +861,41 @@ mod tests {
         let config = BaselineConfig::new(dir.path(), "audit");
         let result = load::<()>(&config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_from_git_ref_returns_none_for_nonexistent_ref() {
+        // Non-git directory should return None (not panic)
+        let dir = TempDir::new().unwrap();
+        let result = load_from_git_ref::<()>(dir.path().to_str().unwrap(), "origin/main", "audit");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_from_git_ref_returns_none_for_missing_baseline_key() {
+        // Git repo with homeboy.json but no baselines key should return None
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        // Create a git repo with a homeboy.json that has no baselines
+        let _ = crate::utils::command::run_in(path, "git", &["init"], "git init");
+        let _ = crate::utils::command::run_in(
+            path,
+            "git",
+            &["config", "user.email", "test@test.com"],
+            "git config email",
+        );
+        let _ = crate::utils::command::run_in(
+            path,
+            "git",
+            &["config", "user.name", "Test"],
+            "git config name",
+        );
+        std::fs::write(dir.path().join("homeboy.json"), r#"{"id": "test"}"#).unwrap();
+        let _ = crate::utils::command::run_in(path, "git", &["add", "."], "git add");
+        let _ = crate::utils::command::run_in(path, "git", &["commit", "-m", "init"], "git commit");
+
+        let result = load_from_git_ref::<()>(path, "HEAD", "audit");
+        assert!(result.is_none());
     }
 }

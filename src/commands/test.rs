@@ -515,7 +515,24 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
 
     if !args.baseline_args.baseline && !args.baseline_args.ignore_baseline {
         if let Some(ref counts) = test_counts {
-            if let Some(existing_baseline) = test_baseline::load_baseline(&source_path) {
+            // Try explicit baseline first, then differential from git ref
+            let resolved_baseline = test_baseline::load_baseline(&source_path).or_else(|| {
+                args.changed_since.as_ref().and_then(|git_ref| {
+                    let bl = test_baseline::load_baseline_from_ref(
+                        &source_path.to_string_lossy(),
+                        git_ref,
+                    );
+                    if bl.is_some() {
+                        eprintln!(
+                            "[test] Using baseline from {} for differential comparison",
+                            git_ref
+                        );
+                    }
+                    bl
+                })
+            });
+
+            if let Some(existing_baseline) = resolved_baseline {
                 let comparison = test_baseline::compare(counts, &existing_baseline);
 
                 if comparison.regression {
@@ -535,6 +552,11 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
                         let _ = test_baseline::save_baseline(&source_path, args.comp.id(), counts);
                         eprintln!("[test] Baseline ratcheted forward");
                     }
+                } else {
+                    eprintln!(
+                        "[test] No regression: passed {} (same), failed {} (same)",
+                        counts.passed, counts.failed,
+                    );
                 }
 
                 baseline_comparison = Some(comparison);

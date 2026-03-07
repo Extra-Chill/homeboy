@@ -611,7 +611,46 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
         }
     }
 
-    // No baseline — standard output
+    // No explicit baseline — try differential comparison from git ref
+    if let Some(ref git_ref) = args.changed_since {
+        if let Some(ref_baseline) = baseline::load_baseline_from_ref(&result.source_path, git_ref) {
+            let comparison = baseline::compare(&result, &ref_baseline);
+            let exit_code = if comparison.drift_increased { 1 } else { 0 };
+
+            if comparison.drift_increased {
+                eprintln!(
+                    "[audit] {} new finding(s) introduced by this change",
+                    comparison.new_items.len()
+                );
+            } else if !result.findings.is_empty() {
+                eprintln!(
+                    "[audit] {} finding(s) in changed files — all pre-existing (0 introduced)",
+                    result.findings.len()
+                );
+            }
+
+            let summary = if args.json_summary {
+                Some(build_audit_summary(&result, exit_code))
+            } else {
+                None
+            };
+
+            return Ok((
+                if args.json_summary {
+                    AuditOutput::Summary(build_audit_summary(&result, exit_code))
+                } else {
+                    AuditOutput::Compared {
+                        result,
+                        baseline_comparison: comparison,
+                        summary,
+                    }
+                },
+                exit_code,
+            ));
+        }
+    }
+
+    // No baseline at all — standard output
     let exit_code = default_audit_exit_code(&result, args.changed_since.is_some());
     if args.json_summary {
         Ok((

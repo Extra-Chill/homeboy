@@ -104,6 +104,14 @@ pub fn load_baseline(source_path: &Path) -> Option<TestBaseline> {
     generic::load::<TestCounts>(&config).ok().flatten()
 }
 
+/// Load a test baseline from a git ref (e.g., `origin/main`).
+///
+/// Uses `git show <ref>:homeboy.json` to read the baseline without checkout.
+/// Returns `None` if the ref doesn't have a test baseline.
+pub fn load_baseline_from_ref(source_path: &str, git_ref: &str) -> Option<TestBaseline> {
+    generic::load_from_git_ref::<TestCounts>(source_path, git_ref, BASELINE_KEY)
+}
+
 /// Compare current test counts against a saved baseline.
 ///
 /// The ratchet rule:
