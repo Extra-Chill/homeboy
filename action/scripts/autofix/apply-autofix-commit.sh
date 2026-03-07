@@ -82,6 +82,18 @@ for FIX_CMD in "${FIX_ARRAY[@]}"; do
   fi
 done
 
+# Update baseline so it stays current when this commit merges to main.
+# Full (unscoped) audit ensures the baseline reflects the entire codebase,
+# not just changed files. Tolerate failure — baseline update is best-effort.
+echo "Updating audit baseline..."
+set +e
+homeboy audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
+BASELINE_EXIT=$?
+set -e
+if [ "${BASELINE_EXIT}" -ne 0 ]; then
+  echo "Baseline update exited non-zero (${BASELINE_EXIT}), continuing"
+fi
+
 if git diff --quiet && git diff --cached --quiet; then
   echo "No autofix changes detected"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
