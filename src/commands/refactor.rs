@@ -438,6 +438,28 @@ fn run_rename(
                 result.warnings.len()
             );
         }
+
+        // Capture undo snapshot before writes
+        let affected_files: Vec<String> = result
+            .edits
+            .iter()
+            .map(|e| e.file.clone())
+            .chain(result.file_renames.iter().map(|r| r.from.clone()))
+            .collect();
+        if !affected_files.is_empty() {
+            let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor rename");
+            for file in &affected_files {
+                snap.capture_file(file);
+            }
+            // New files from renames
+            for rename in &result.file_renames {
+                snap.capture_file(&rename.to);
+            }
+            if let Err(e) = snap.save() {
+                homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
+            }
+        }
+
         refactor::apply_renames(&mut result, &root)?;
     }
 
@@ -650,6 +672,16 @@ fn run_move(
 ) -> CmdResult<RefactorOutput> {
     let root = refactor::move_items::resolve_root(component_id, path)?;
 
+    // Capture undo snapshot before write operations
+    if write {
+        let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor move");
+        snap.capture_file(from);
+        snap.capture_file(to);
+        if let Err(e) = snap.save() {
+            homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
+        }
+    }
+
     let item_refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
     let result = refactor::move_items(&item_refs, from, to, &root, write)?;
 
@@ -856,6 +888,17 @@ fn run_propagate(
 
     // Step 5: Apply edits if --write
     let applied = if write && !all_edits.is_empty() {
+        // Capture undo snapshot before writes
+        let affected_files: std::collections::HashSet<&str> =
+            all_edits.iter().map(|e| e.file.as_str()).collect();
+        let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor propagate");
+        for file in &affected_files {
+            snap.capture_file(file);
+        }
+        if let Err(e) = snap.save() {
+            homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
+        }
+
         apply_propagate_edits(&all_edits, &root)?;
         true
     } else {
@@ -1179,6 +1222,30 @@ fn run_transform(
         homeboy::log_status!("info", "{}", set.description);
     }
 
+    // Capture undo snapshot before writes
+    if write {
+        // Dry-run first to discover affected files
+        if let Ok(preview) = refactor::apply_transforms(&root, &set_name, &set, false, rule_filter)
+        {
+            let affected_files: Vec<String> = preview
+                .rules
+                .iter()
+                .flat_map(|r| r.matches.iter().map(|m| m.file.clone()))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            if !affected_files.is_empty() {
+                let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor transform");
+                for file in &affected_files {
+                    snap.capture_file(file);
+                }
+                if let Err(e) = snap.save() {
+                    homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
+                }
+            }
+        }
+    }
+
     // Apply transforms
     let result = refactor::apply_transforms(&root, &set_name, &set, write, rule_filter)?;
 
@@ -1255,6 +1322,18 @@ fn run_decompose(
 ) -> CmdResult<RefactorOutput> {
     let root = refactor::move_items::resolve_root(component_id, path)?;
     let plan = refactor::build_plan(file, &root, strategy, audit_safe)?;
+
+    // Capture undo snapshot before writes
+    if write {
+        let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor decompose");
+        snap.capture_file(file);
+        for group in &plan.groups {
+            snap.capture_file(&group.suggested_target);
+        }
+        if let Err(e) = snap.save() {
+            homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
+        }
+    }
 
     let move_results = refactor::apply_plan(&plan, &root, write)?;
     let groups_applied = move_results

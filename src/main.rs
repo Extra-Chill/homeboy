@@ -23,7 +23,7 @@ mod tty;
 use commands::{
     api, audit, auth, build, changelog, changes, cleanup, cli, component, config, db, deploy,
     extension, file, fleet, git, init, lint, logs, project, refactor, release, server, ssh, status,
-    test, transfer, upgrade, version,
+    test, transfer, undo, upgrade, version,
 };
 use homeboy::extension::load_all_extensions;
 use homeboy::utils::args;
@@ -99,6 +99,8 @@ enum Commands {
     Audit(audit::AuditArgs),
     /// Structural refactoring (rename terms across codebase)
     Refactor(refactor::RefactorArgs),
+    /// Undo the last write operation (audit fix, refactor, etc.)
+    Undo(undo::UndoArgs),
     /// Authenticate with a project's API
     Auth(auth::AuthArgs),
     /// Make API requests to a project

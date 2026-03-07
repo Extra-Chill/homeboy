@@ -917,6 +917,18 @@ fn run_fix_iteration(
                 .map(|file| file.file.clone()),
         )
         .collect();
+
+    // Capture undo snapshot before any writes
+    if !changed_files.is_empty() {
+        let mut snap = homeboy::undo::UndoSnapshot::new(root, "audit fix");
+        for file in &changed_files {
+            snap.capture_file(file);
+        }
+        if let Err(e) = snap.save() {
+            homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
+        }
+    }
+
     let smoke_verifier = build_smoke_verifier(
         &audit_result.component_id,
         &audit_result.source_path,

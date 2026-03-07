@@ -293,6 +293,7 @@ pub mod supports;
 pub mod test;
 pub mod test_scope;
 pub mod transfer;
+pub mod undo;
 pub mod upgrade;
 pub mod version;
 
@@ -354,6 +355,7 @@ pub(crate) fn run_json(
         crate::Commands::Release(args) => dispatch!(args, global, release),
         crate::Commands::Audit(args) => dispatch!(args, global, audit),
         crate::Commands::Refactor(args) => dispatch!(args, global, refactor),
+        crate::Commands::Undo(args) => dispatch!(args, global, undo),
         crate::Commands::Auth(args) => dispatch!(args, global, auth),
         crate::Commands::Api(args) => dispatch!(args, global, api),
         crate::Commands::Upgrade(args) | crate::Commands::Update(args) => {

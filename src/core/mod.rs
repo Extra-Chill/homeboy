@@ -34,6 +34,7 @@ pub mod test_analyze;
 pub mod test_baseline;
 pub mod test_drift;
 pub mod test_scaffold;
+pub mod undo;
 pub mod update_check;
 pub mod upgrade;
 pub mod version;
