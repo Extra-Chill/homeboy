@@ -48,9 +48,16 @@ pub fn build_findings(results: &[CheckResult]) -> Vec<Finding> {
 
         for outlier in &result.outliers {
             for deviation in &outlier.deviations {
+                let severity =
+                    if outlier.noisy || matches!(deviation.kind, DeviationKind::NamingMismatch) {
+                        Severity::Info
+                    } else {
+                        severity.clone()
+                    };
+
                 findings.push(Finding {
                     convention: result.convention_name.clone(),
-                    severity: severity.clone(),
+                    severity,
                     file: outlier.file.clone(),
                     description: deviation.description.clone(),
                     suggestion: deviation.suggestion.clone(),
@@ -96,6 +103,7 @@ mod tests {
             total_count: 3,
             outliers: vec![Outlier {
                 file: "agent-ping.php".to_string(),
+                noisy: false,
                 deviations: vec![Deviation {
                     kind: DeviationKind::MissingMethod,
                     description: "Missing method: validate".to_string(),
@@ -124,6 +132,7 @@ mod tests {
             outliers: vec![
                 Outlier {
                     file: "a.php".to_string(),
+                    noisy: false,
                     deviations: vec![Deviation {
                         kind: DeviationKind::MissingMethod,
                         description: "Missing".to_string(),
@@ -132,6 +141,7 @@ mod tests {
                 },
                 Outlier {
                     file: "b.php".to_string(),
+                    noisy: false,
                     deviations: vec![Deviation {
                         kind: DeviationKind::MissingMethod,
                         description: "Missing".to_string(),
@@ -146,5 +156,31 @@ mod tests {
             findings.is_empty(),
             "Fragmented conventions should not produce findings"
         );
+    }
+
+    #[test]
+    fn naming_mismatch_is_downgraded_to_info() {
+        let results = vec![CheckResult {
+            convention_name: "Abilities".to_string(),
+            status: CheckStatus::Drift,
+            conforming_count: 2,
+            total_count: 3,
+            outliers: vec![Outlier {
+                file: "abilities/helpers.php".to_string(),
+                noisy: true,
+                deviations: vec![Deviation {
+                    kind: DeviationKind::NamingMismatch,
+                    description:
+                        "Helper-like name does not match convention suffix 'Ability': Helpers"
+                            .to_string(),
+                    suggestion: "Treat this as a utility/helper or rename it".to_string(),
+                }],
+            }],
+        }];
+
+        let findings = build_findings(&results);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert_eq!(findings[0].kind, DeviationKind::NamingMismatch);
     }
 }

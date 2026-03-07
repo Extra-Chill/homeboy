@@ -97,6 +97,7 @@ mod tests {
             conforming: vec!["a.rs".to_string(), "b.rs".to_string()],
             outliers: vec![Outlier {
                 file: "c.rs".to_string(),
+                noisy: false,
                 deviations: vec![Deviation {
                     kind: DeviationKind::MissingMethod,
                     description: "Missing method: run".to_string(),
@@ -126,6 +127,7 @@ mod tests {
             outliers: vec![
                 Outlier {
                     file: "b.rs".to_string(),
+                    noisy: false,
                     deviations: vec![Deviation {
                         kind: DeviationKind::MissingMethod,
                         description: "Missing".to_string(),
@@ -134,6 +136,7 @@ mod tests {
                 },
                 Outlier {
                     file: "c.rs".to_string(),
+                    noisy: false,
                     deviations: vec![Deviation {
                         kind: DeviationKind::MissingMethod,
                         description: "Missing".to_string(),

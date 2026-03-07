@@ -9,6 +9,7 @@ use std::path::Path;
 
 use super::fingerprint::FileFingerprint;
 use super::import_matching::has_import;
+use super::naming::{detect_naming_suffix, suffix_matches};
 use super::signatures::{compute_signature_skeleton, tokenize_signature};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -65,6 +66,9 @@ pub struct Convention {
 pub struct Outlier {
     /// Relative file path.
     pub file: String,
+    /// Whether this outlier appears to be helper/utility drift rather than a real member.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub noisy: bool,
     /// What's missing or different.
     pub deviations: Vec<Deviation>,
 }
@@ -232,15 +236,49 @@ pub fn discover_conventions(
         .map(|(name, _)| name.clone())
         .collect();
 
+    let naming_suffix = detect_naming_suffix(
+        &fingerprints
+            .iter()
+            .filter_map(|fp| fp.type_name.clone())
+            .collect::<Vec<_>>(),
+    );
+
     // Classify files
     let mut conforming = Vec::new();
     let mut outliers = Vec::new();
 
     for fp in fingerprints {
+        let helper_like = naming_suffix.as_ref().is_some_and(|suffix| {
+            fp.type_name
+                .as_deref()
+                .is_some_and(|name| !suffix_matches(name, suffix))
+        });
+
         let mut deviations = Vec::new();
+
+        if helper_like {
+            let suffix = naming_suffix.as_deref().unwrap_or("member");
+            deviations.push(Deviation {
+                kind: DeviationKind::NamingMismatch,
+                description: format!(
+                    "Helper-like name does not match convention suffix '{}': {}",
+                    suffix,
+                    fp.type_name
+                        .clone()
+                        .unwrap_or_else(|| fp.relative_path.clone())
+                ),
+                suggestion: format!(
+                    "Treat this as a utility/helper or rename it to match the '{}' convention",
+                    suffix
+                ),
+            });
+        }
 
         // Check missing methods
         for expected in &expected_methods {
+            if helper_like {
+                continue;
+            }
             if !fp.methods.contains(expected) {
                 deviations.push(Deviation {
                     kind: DeviationKind::MissingMethod,
@@ -255,6 +293,9 @@ pub fn discover_conventions(
 
         // Check missing registrations
         for expected in &expected_registrations {
+            if helper_like {
+                continue;
+            }
             if !fp.registrations.contains(expected) {
                 deviations.push(Deviation {
                     kind: DeviationKind::MissingRegistration,
@@ -269,6 +310,9 @@ pub fn discover_conventions(
 
         // Check missing interfaces/traits
         for expected in &expected_interfaces {
+            if helper_like {
+                continue;
+            }
             if !fp.implements.contains(expected) {
                 deviations.push(Deviation {
                     kind: DeviationKind::MissingInterface,
@@ -327,6 +371,7 @@ pub fn discover_conventions(
         } else {
             outliers.push(Outlier {
                 file: fp.relative_path.clone(),
+                noisy: helper_like,
                 deviations,
             });
         }
@@ -529,6 +574,7 @@ pub fn check_signature_consistency(conventions: &mut [Convention], root: &Path) 
                 moved_files.push(file.clone());
                 conv.outliers.push(Outlier {
                     file: file.clone(),
+                    noisy: false,
                     deviations: devs,
                 });
             }
@@ -767,15 +813,97 @@ mod tests {
             .expected_interfaces
             .contains(&"AbilityInterface".to_string()));
 
-        // helpers.php should be an outlier due to missing interface
+        // helpers.php should be a noisy outlier due to naming mismatch
         assert_eq!(convention.outliers.len(), 1);
         assert_eq!(convention.outliers[0].file, "abilities/helpers.php");
-        assert!(convention.outliers[0].deviations.iter().any(|d| matches!(
-            d.kind,
-            DeviationKind::MissingInterface
-        ) && d
-            .description
-            .contains("AbilityInterface")));
+        assert!(
+            convention.outliers[0].noisy,
+            "Helper-like file should be marked noisy"
+        );
+        assert!(convention.outliers[0]
+            .deviations
+            .iter()
+            .any(|d| matches!(d.kind, DeviationKind::NamingMismatch)));
+    }
+
+    #[test]
+    fn helper_like_outlier_collapses_to_naming_mismatch() {
+        let fingerprints = vec![
+            FileFingerprint {
+                relative_path: "abilities/CreateAbility.php".to_string(),
+                language: Language::Php,
+                methods: vec!["execute".to_string(), "register".to_string()],
+                registrations: vec![],
+                type_name: Some("CreateAbility".to_string()),
+                implements: vec![],
+                namespace: None,
+                imports: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
+                unused_parameters: vec![],
+                dead_code_markers: vec![],
+                internal_calls: vec![],
+                public_api: vec![],
+            },
+            FileFingerprint {
+                relative_path: "abilities/UpdateAbility.php".to_string(),
+                language: Language::Php,
+                methods: vec!["execute".to_string(), "register".to_string()],
+                registrations: vec![],
+                type_name: Some("UpdateAbility".to_string()),
+                implements: vec![],
+                namespace: None,
+                imports: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
+                unused_parameters: vec![],
+                dead_code_markers: vec![],
+                internal_calls: vec![],
+                public_api: vec![],
+            },
+            FileFingerprint {
+                relative_path: "abilities/FlowHelpers.php".to_string(),
+                language: Language::Php,
+                methods: vec!["formatFlow".to_string()],
+                registrations: vec![],
+                type_name: Some("FlowHelpers".to_string()),
+                implements: vec![],
+                namespace: None,
+                imports: vec![],
+                content: String::new(),
+                method_hashes: std::collections::HashMap::new(),
+                structural_hashes: std::collections::HashMap::new(),
+                extends: None,
+                visibility: std::collections::HashMap::new(),
+                properties: vec![],
+                hooks: vec![],
+                unused_parameters: vec![],
+                dead_code_markers: vec![],
+                internal_calls: vec![],
+                public_api: vec![],
+            },
+        ];
+
+        let convention =
+            discover_conventions("Abilities", "abilities/*.php", &fingerprints).unwrap();
+
+        assert_eq!(convention.outliers.len(), 1);
+        assert!(convention.outliers[0].noisy);
+        assert_eq!(convention.outliers[0].deviations.len(), 1);
+        assert!(matches!(
+            convention.outliers[0].deviations[0].kind,
+            DeviationKind::NamingMismatch
+        ));
     }
 
     #[test]
@@ -966,6 +1094,7 @@ class AgentPing {
             ],
             outliers: vec![Outlier {
                 file: "steps/Bad.php".to_string(),
+                noisy: false,
                 deviations: vec![Deviation {
                     kind: DeviationKind::MissingMethod,
                     description: "Missing method: register".to_string(),

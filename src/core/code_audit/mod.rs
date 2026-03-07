@@ -23,6 +23,7 @@ pub mod fingerprint;
 pub mod fixer;
 pub(crate) mod import_matching;
 mod layer_ownership;
+mod naming;
 pub(crate) mod preflight;
 mod signatures;
 mod structural;

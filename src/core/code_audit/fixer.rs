@@ -14,6 +14,7 @@ use std::str::FromStr;
 use regex::Regex;
 
 use super::conventions::{DeviationKind, Language};
+use super::naming::{detect_naming_suffix, suffix_matches};
 use super::preflight;
 use super::test_mapping::source_to_test_path;
 use super::{duplication, CodeAuditResult};
@@ -1004,7 +1005,16 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         }
 
         // Filter 2: Detect naming pattern from conforming files
-        let naming_suffix = detect_naming_suffix(&conv_report.conforming);
+        let conforming_names: Vec<String> = conv_report
+            .conforming
+            .iter()
+            .filter_map(|f| {
+                Path::new(f)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+            })
+            .collect();
+        let naming_suffix = detect_naming_suffix(&conforming_names);
 
         // Build signature map from conforming files
         let sig_map = build_signature_map(&conv_report.conforming, root);
@@ -2123,134 +2133,6 @@ fn find_parsed_item_by_name<'a>(
     Some(first)
 }
 
-/// Detect the common naming suffix among conforming files.
-///
-/// If 4 out of 5 conforming files end in "Ability.php", returns Some("Ability").
-/// If no clear pattern, returns None.
-fn detect_naming_suffix(conforming: &[String]) -> Option<String> {
-    if conforming.len() < 2 {
-        return None;
-    }
-
-    // Extract file stems (without extension)
-    let stems: Vec<String> = conforming
-        .iter()
-        .filter_map(|f| {
-            Path::new(f)
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-        })
-        .collect();
-
-    if stems.len() < 2 {
-        return None;
-    }
-
-    // Try common suffixes by checking the longest common suffix among all stems
-    // Start from the end of each stem and find the shared suffix
-    let mut suffix_counts: HashMap<String, usize> = HashMap::new();
-
-    for stem in &stems {
-        // Extract suffix: last uppercase-start word (e.g., "Ability" from "FlowAbility")
-        if let Some(suffix) = extract_class_suffix(stem) {
-            *suffix_counts.entry(suffix).or_insert(0) += 1;
-        }
-    }
-
-    // Find suffix that appears in ≥ 60% of conforming files
-    let threshold = (stems.len() as f32 * 0.6).ceil() as usize;
-    suffix_counts
-        .into_iter()
-        .filter(|(_, count)| *count >= threshold)
-        .max_by_key(|(_, count)| *count)
-        .map(|(suffix, _)| suffix)
-}
-
-/// Extract the class-style suffix from a PascalCase name.
-///
-/// "FlowAbility" → "Ability"
-/// "CreateFlowAbility" → "Ability"
-/// "FlowHelpers" → "Helpers"
-/// "step_a" → None (not PascalCase)
-fn extract_class_suffix(name: &str) -> Option<String> {
-    // Find the last uppercase letter that starts a "word"
-    let chars: Vec<char> = name.chars().collect();
-    let mut last_upper_start = None;
-
-    for (i, ch) in chars.iter().enumerate() {
-        if ch.is_uppercase() && i > 0 {
-            last_upper_start = Some(i);
-        }
-    }
-
-    last_upper_start.map(|i| chars[i..].iter().collect())
-}
-
-/// Check if a file stem matches a naming suffix, with plural tolerance.
-///
-/// "GitHubAbilities" matches suffix "Ability" (plural of Ability = Abilities)
-/// "CreateFlowAbility" matches suffix "Ability" (exact)
-/// "FlowHelpers" does NOT match suffix "Ability"
-fn suffix_matches(file_stem: &str, suffix: &str) -> bool {
-    if file_stem.ends_with(suffix) {
-        return true;
-    }
-
-    // Try plural forms: Ability/Abilities, Test/Tests, Provider/Providers
-    let plural_suffix = pluralize(suffix);
-    if file_stem.ends_with(&plural_suffix) {
-        return true;
-    }
-
-    // Try singular: if suffix is already plural, check if file matches singular
-    if let Some(singular) = singularize(suffix) {
-        if file_stem.ends_with(&singular) {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Simple English pluralization for class suffixes.
-fn pluralize(word: &str) -> String {
-    if word.ends_with('y')
-        && !word.ends_with("ey")
-        && !word.ends_with("ay")
-        && !word.ends_with("oy")
-    {
-        // Ability → Abilities, Entity → Entities
-        format!("{}ies", &word[..word.len() - 1])
-    } else if word.ends_with('s')
-        || word.ends_with('x')
-        || word.ends_with("ch")
-        || word.ends_with("sh")
-    {
-        format!("{}es", word)
-    } else {
-        format!("{}s", word)
-    }
-}
-
-/// Simple English singularization for class suffixes.
-fn singularize(word: &str) -> Option<String> {
-    if word.ends_with("ies") && word.len() > 3 {
-        // Abilities → Ability
-        Some(format!("{}y", &word[..word.len() - 3]))
-    } else if word.ends_with("ses")
-        || word.ends_with("xes")
-        || word.ends_with("ches")
-        || word.ends_with("shes")
-    {
-        Some(word[..word.len() - 2].to_string())
-    } else if word.ends_with('s') && !word.ends_with("ss") && word.len() > 1 {
-        // Tests → Test, Providers → Provider
-        Some(word[..word.len() - 1].to_string())
-    } else {
-        None
-    }
-}
-
 /// Generate a fallback signature when no conforming file has the method.
 fn generate_fallback_signature(method_name: &str, language: &Language) -> MethodSignature {
     let signature = match language {
@@ -2878,6 +2760,7 @@ fn insert_before_closing_brace(content: &str, code: &str, _language: &Language) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::code_audit::naming::{extract_class_suffix, pluralize, singularize};
 
     #[test]
     fn extract_php_signature_with_types() {
@@ -3107,6 +2990,7 @@ class BadAbility {
                 conforming: vec!["abilities/GoodAbility.php".to_string()],
                 outliers: vec![Outlier {
                     file: "abilities/BadAbility.php".to_string(),
+                    noisy: false,
                     deviations: vec![
                         Deviation {
                             kind: DeviationKind::MissingMethod,
@@ -3223,23 +3107,38 @@ class TestClass {
 
     #[test]
     fn detect_naming_suffix_from_ability_files() {
-        let conforming = vec![
-            "inc/Abilities/Flow/CreateFlowAbility.php".to_string(),
-            "inc/Abilities/Flow/UpdateFlowAbility.php".to_string(),
-            "inc/Abilities/Flow/DeleteFlowAbility.php".to_string(),
-            "inc/Abilities/Flow/GetFlowsAbility.php".to_string(),
-        ];
+        // Production code extracts file_stem() before calling detect_naming_suffix
+        let conforming: Vec<String> = vec![
+            "inc/Abilities/Flow/CreateFlowAbility.php",
+            "inc/Abilities/Flow/UpdateFlowAbility.php",
+            "inc/Abilities/Flow/DeleteFlowAbility.php",
+            "inc/Abilities/Flow/GetFlowsAbility.php",
+        ]
+        .into_iter()
+        .filter_map(|f| {
+            std::path::Path::new(f)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+        })
+        .collect();
         let suffix = detect_naming_suffix(&conforming);
         assert_eq!(suffix, Some("Ability".to_string()));
     }
 
     #[test]
     fn detect_naming_suffix_returns_none_for_diverse_names() {
-        let conforming = vec![
-            "inc/Core/FileStorage.php".to_string(),
-            "inc/Core/AgentMemory.php".to_string(),
-            "inc/Core/Workspace.php".to_string(),
-        ];
+        let conforming: Vec<String> = vec![
+            "inc/Core/FileStorage.php",
+            "inc/Core/AgentMemory.php",
+            "inc/Core/Workspace.php",
+        ]
+        .into_iter()
+        .filter_map(|f| {
+            std::path::Path::new(f)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+        })
+        .collect();
         let suffix = detect_naming_suffix(&conforming);
         // No common suffix — each has different ending
         assert!(suffix.is_none() || suffix == Some("Memory".to_string()).or(None));
@@ -3389,6 +3288,7 @@ class {} {{
                 ],
                 outliers: vec![Outlier {
                     file: "abilities/FlowHelpers.php".to_string(),
+                    noisy: true,
                     deviations: vec![
                         Deviation {
                             kind: DeviationKind::MissingMethod,
@@ -3462,6 +3362,7 @@ class {} {{
                 outliers: vec![
                     Outlier {
                         file: "jobs/JobsStatus.php".to_string(),
+                        noisy: false,
                         deviations: vec![Deviation {
                             kind: DeviationKind::MissingMethod,
                             description: "Missing method: get_job".to_string(),
@@ -3470,6 +3371,7 @@ class {} {{
                     },
                     Outlier {
                         file: "jobs/JobsOps.php".to_string(),
+                        noisy: false,
                         deviations: vec![Deviation {
                             kind: DeviationKind::MissingMethod,
                             description: "Missing method: get_job".to_string(),
@@ -3606,6 +3508,7 @@ pub struct TestOutput {}
                 conforming: vec!["commands/good.rs".to_string()],
                 outliers: vec![Outlier {
                     file: "commands/bad.rs".to_string(),
+                    noisy: false,
                     deviations: vec![Deviation {
                         kind: DeviationKind::MissingImport,
                         description: "Missing import: super::CmdResult".to_string(),
