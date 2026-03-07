@@ -123,6 +123,14 @@ pub fn compare(result: &CodeAuditResult, baseline: &AuditBaseline) -> BaselineCo
     generic::compare(&items, baseline)
 }
 
+/// Load an audit baseline from a git ref (e.g., `origin/main`).
+///
+/// Uses `git show <ref>:homeboy.json` to read the baseline without checkout.
+/// Returns `None` if the ref doesn't have a baseline.
+pub fn load_baseline_from_ref(source_path: &str, git_ref: &str) -> Option<AuditBaseline> {
+    generic::load_from_git_ref::<AuditBaselineMetadata>(source_path, git_ref, BASELINE_KEY)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
