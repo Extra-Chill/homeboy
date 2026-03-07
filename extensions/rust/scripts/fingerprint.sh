@@ -247,14 +247,19 @@ for fn in functions:
 
 # --- Test Methods ---
 # Functions inside #[cfg(test)] or with #[test] attribute.
-# Included in the methods list with their test_ prefix so test_coverage
-# can see them.
+# Included in the methods list with the test_ prefix so test_coverage
+# can identify them. Functions that already start with test_ keep their
+# name; others get prefixed (e.g. 'dedup_works' -> 'test_dedup_works').
 test_methods = []
 for fn in functions:
-    if fn.is_test and fn.name not in seen:
-        methods.append(fn.name)
-        seen.add(fn.name)
-        test_methods.append(fn.name)
+    if fn.is_test:
+        # Normalize: ensure test methods always carry the test_ prefix
+        # so test_coverage.rs can distinguish them from source methods.
+        prefixed = fn.name if fn.name.startswith('test_') else f'test_{fn.name}'
+        if prefixed not in seen:
+            methods.append(prefixed)
+            seen.add(prefixed)
+            test_methods.append(prefixed)
 
 # --- Type name ---
 # Primary struct or enum in the file (first pub struct/enum, or first struct/enum)

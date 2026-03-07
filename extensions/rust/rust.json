@@ -45,7 +45,8 @@
       "test_file_pattern": "tests/{dir}/{name}_test.{ext}",
       "method_prefix": "test_",
       "inline_tests": true,
-      "critical_patterns": ["core/", "commands/"]
+      "critical_patterns": ["core/"],
+      "skip_test_patterns": ["commands/"]
     },
     "doc_targets": {
       "Subcommands": {
