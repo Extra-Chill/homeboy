@@ -22,7 +22,7 @@ if [ "${PR_HEAD_REPO}" != "${GITHUB_REPOSITORY}" ]; then
   exit 0
 fi
 
-if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ] || [ "${GITHUB_ACTOR:-}" = "homeboy-ci-bot[bot]" ]; then
+if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ] || [ "${GITHUB_ACTOR:-}" = "homeboy-ci[bot]" ]; then
   echo "Skipping autofix: workflow actor is ${GITHUB_ACTOR} (bot loop guard)"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
   exit 0
@@ -107,8 +107,8 @@ if git diff --cached --quiet; then
   exit 0
 fi
 
-git config user.name "homeboy-ci-bot[bot]"
-git config user.email "266378653+homeboy-ci-bot[bot]@users.noreply.github.com"
+git config user.name "homeboy-ci[bot]"
+git config user.email "266378653+homeboy-ci[bot]@users.noreply.github.com"
 git commit -m "chore(ci): apply homeboy autofixes"
 
 # Use GitHub App token for push if available — pushes from a GitHub App

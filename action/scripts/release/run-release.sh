@@ -154,8 +154,8 @@ echo ""
 
 # --- Step 4: Configure git identity ---
 
-git config user.name "homeboy-ci-bot[bot]"
-git config user.email "266378653+homeboy-ci-bot[bot]@users.noreply.github.com"
+git config user.name "homeboy-ci[bot]"
+git config user.email "266378653+homeboy-ci[bot]@users.noreply.github.com"
 
 # --- Step 5: Generate changelog from conventional commits ---
 
