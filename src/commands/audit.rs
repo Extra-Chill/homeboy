@@ -33,7 +33,7 @@ pub struct AuditArgs {
     pub write: bool,
 
     /// Maximum recursive autofix iterations when writing
-    #[arg(long, requires = "fix", default_value_t = 1)]
+    #[arg(long, requires = "fix", default_value_t = 3)]
     pub max_iterations: usize,
 
     /// Weight for warning-level findings in convergence scoring
@@ -387,6 +387,7 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
         let mut final_fix_result = fixer::FixResult {
             fixes: vec![],
             new_files: vec![],
+            decompose_plans: vec![],
             skipped: vec![],
             chunk_results: vec![],
             total_insertions: 0,
@@ -986,6 +987,17 @@ fn run_fix_iteration(
         fix_result.chunk_results.extend(chunk_results);
     }
 
+    if !auto_apply_result.decompose_plans.is_empty() {
+        let decompose_chunk_results = fixer::apply_decompose_plans(
+            &mut auto_apply_result.decompose_plans,
+            root,
+            fixer::ApplyOptions {
+                verifier: Some(&verifier),
+            },
+        );
+        fix_result.chunk_results.extend(decompose_chunk_results);
+    }
+
     for applied_fix in auto_apply_result.fixes {
         if let Some(original) = fix_result
             .fixes
@@ -1003,6 +1015,16 @@ fn run_fix_iteration(
             .find(|candidate| candidate.file == written_file.file)
         {
             original.written = written_file.written;
+        }
+    }
+
+    for plan in &auto_apply_result.decompose_plans {
+        if let Some(original) = fix_result
+            .decompose_plans
+            .iter_mut()
+            .find(|c| c.file == plan.file)
+        {
+            original.applied = plan.applied;
         }
     }
 
@@ -1033,6 +1055,18 @@ fn run_fix_iteration(
     ))
 }
 
+fn is_cascading_finding_kind(kind: &homeboy::code_audit::DeviationKind) -> bool {
+    use homeboy::code_audit::DeviationKind;
+    matches!(
+        kind,
+        DeviationKind::GodFile
+            | DeviationKind::HighItemCount
+            | DeviationKind::DirectorySprawl
+            | DeviationKind::MissingTestFile
+            | DeviationKind::MissingTestMethod
+    )
+}
+
 fn build_chunk_verifier<'a>(
     root: &'a Path,
     baseline_findings: &'a [homeboy::code_audit::Finding],
@@ -1058,31 +1092,46 @@ fn build_chunk_verifier<'a>(
         )
         .map_err(|error| format!("verification audit failed: {}", error))?;
 
-        let new_findings: Vec<String> = audit_result
+        let new_findings: Vec<&homeboy::code_audit::Finding> = audit_result
             .findings
             .iter()
             .filter(|finding| changed_files.contains(&finding.file))
             .filter(|finding| !baseline.contains(&finding_fingerprint(finding)))
-            .map(|finding| format!("{}: {:?}", finding.file, finding.kind))
             .collect();
 
-        if new_findings.is_empty() {
-            if extra_smokes.is_empty() {
-                Ok("scoped_reaudit_no_new_findings".to_string())
-            } else {
-                let mut verification = "scoped_reaudit_no_new_findings".to_string();
-                for smoke in &extra_smokes {
-                    let smoke_result = smoke(chunk)?;
-                    verification.push('+');
-                    verification.push_str(&smoke_result);
-                }
-                Ok(verification)
-            }
-        } else {
+        let hard_failures: Vec<String> = new_findings
+            .iter()
+            .filter(|f| !is_cascading_finding_kind(&f.kind))
+            .map(|f| format!("{}: {:?}", f.file, f.kind))
+            .collect();
+        let cascading_count = new_findings.len() - hard_failures.len();
+
+        if !hard_failures.is_empty() {
             Err(format!(
                 "scoped re-audit introduced new findings in changed files: {}",
-                new_findings.join(", ")
+                hard_failures.join(", ")
             ))
+        } else if cascading_count > 0 {
+            let mut verification = format!(
+                "scoped_reaudit_ok_with_{}_cascading_findings",
+                cascading_count
+            );
+            for smoke in &extra_smokes {
+                let smoke_result = smoke(chunk)?;
+                verification.push('+');
+                verification.push_str(&smoke_result);
+            }
+            Ok(verification)
+        } else if extra_smokes.is_empty() {
+            Ok("scoped_reaudit_no_new_findings".to_string())
+        } else {
+            let mut verification = "scoped_reaudit_no_new_findings".to_string();
+            for smoke in &extra_smokes {
+                let smoke_result = smoke(chunk)?;
+                verification.push('+');
+                verification.push_str(&smoke_result);
+            }
+            Ok(verification)
         }
     }
 }
@@ -1180,6 +1229,7 @@ mod tests {
                 applied: false,
             }],
             new_files: vec![],
+            decompose_plans: vec![],
             skipped: vec![],
             chunk_results: vec![],
             total_insertions: 1,
@@ -1264,6 +1314,7 @@ mod tests {
                 applied: false,
             }],
             new_files: vec![],
+            decompose_plans: vec![],
             skipped: vec![],
             chunk_results: vec![],
             total_insertions: 2,

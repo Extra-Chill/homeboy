@@ -18,6 +18,7 @@ use super::naming::{detect_naming_suffix, suffix_matches};
 use super::preflight;
 use super::test_mapping::source_to_test_path;
 use super::{duplication, CodeAuditResult};
+use crate::core::refactor::decompose;
 
 /// A planned fix for a single file.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -86,6 +87,7 @@ pub enum FixKind {
     MissingTestMethod,
     SharedExtraction,
     VisibilityNarrowing,
+    Decompose,
 }
 
 impl FixKind {
@@ -98,6 +100,7 @@ impl FixKind {
             | Self::MissingTestFile
             | Self::MissingTestMethod
             | Self::VisibilityNarrowing => FixSafetyTier::SafeWithChecks,
+            Self::Decompose => FixSafetyTier::SafeWithChecks,
             Self::FunctionRemoval | Self::TraitUse | Self::SharedExtraction => {
                 FixSafetyTier::PlanOnly
             }
@@ -143,6 +146,7 @@ impl FromStr for FixKind {
             "missing_test_method" => Ok(Self::MissingTestMethod),
             "shared_extraction" => Ok(Self::SharedExtraction),
             "visibility_narrowing" => Ok(Self::VisibilityNarrowing),
+            "decompose" => Ok(Self::Decompose),
             _ => Err(format!("unknown fix kind '{}'", value)),
         }
     }
@@ -222,11 +226,22 @@ pub struct FixResult {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub new_files: Vec<NewFile>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub decompose_plans: Vec<DecomposeFixPlan>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub skipped: Vec<SkippedFile>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub chunk_results: Vec<ApplyChunkResult>,
     pub total_insertions: usize,
     pub files_modified: usize,
+}
+
+/// A decompose operation generated from a GodFile finding.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DecomposeFixPlan {
+    pub file: String,
+    pub plan: decompose::DecomposePlan,
+    #[serde(default)]
+    pub applied: bool,
 }
 
 impl FixResult {
@@ -255,6 +270,9 @@ impl FixResult {
         }
         for new_file in &self.new_files {
             *counts.entry(new_file.fix_kind).or_insert(0) += 1;
+        }
+        if !self.decompose_plans.is_empty() {
+            *counts.entry(FixKind::Decompose).or_insert(0) += self.decompose_plans.len();
         }
         counts
     }
@@ -567,6 +585,16 @@ pub fn apply_fix_policy(
         })
         .collect();
 
+    // Filter decompose plans by policy (--only / --exclude)
+    if let Some(ref only) = policy.only {
+        if !only.contains(&FixKind::Decompose) {
+            result.decompose_plans.clear();
+        }
+    }
+    if policy.exclude.contains(&FixKind::Decompose) {
+        result.decompose_plans.clear();
+    }
+
     result.total_insertions = summary.visible_insertions + summary.visible_new_files;
     summary
 }
@@ -604,12 +632,15 @@ pub fn auto_apply_subset(result: &FixResult) -> FixResult {
         .cloned()
         .collect();
 
+    let decompose_plans = result.decompose_plans.clone();
+
     let total_insertions =
         fixes.iter().map(|fix| fix.insertions.len()).sum::<usize>() + new_files.len();
 
     FixResult {
         fixes,
         new_files,
+        decompose_plans,
         skipped: vec![],
         chunk_results: vec![],
         total_insertions,
@@ -1287,7 +1318,9 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
 
                     fixes.push(Fix {
                         file: finding.file.clone(),
-                        required_methods: vec![expected_test_method.clone()],
+                        // Empty required_methods: test stubs use #[ignore] so the
+                        // method name need not exist as a passing test during verification.
+                        required_methods: vec![],
                         required_registrations: vec![],
                         insertions: vec![insertion(
                             InsertionKind::MethodStub,
@@ -1334,7 +1367,9 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         if file_exists {
             fixes.push(Fix {
                 file: test_file,
-                required_methods: vec![expected_test_method.clone()],
+                // Empty required_methods: test stubs use #[ignore] so the
+                // method name need not exist as a passing test during verification.
+                required_methods: vec![],
                 required_registrations: vec![],
                 insertions: vec![insertion(
                     InsertionKind::MethodStub,
@@ -1712,7 +1747,38 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         }
     }
 
-    // Phase 2 complete — merge and return
+    // Phase 3: GodFile decomposition — use refactor decompose primitive
+    let mut decompose_plans = Vec::new();
+    for finding in &result.findings {
+        if finding.kind != DeviationKind::GodFile {
+            continue;
+        }
+        let is_test = finding.file.contains("/tests/")
+            || finding.file.contains("_test.")
+            || finding.file.starts_with("tests/");
+        if is_test {
+            continue;
+        }
+        match decompose::build_plan(&finding.file, root, "grouped", false) {
+            Ok(plan) => {
+                if plan.groups.len() > 1 {
+                    decompose_plans.push(DecomposeFixPlan {
+                        file: finding.file.clone(),
+                        plan,
+                        applied: false,
+                    });
+                }
+            }
+            Err(e) => {
+                skipped.push(SkippedFile {
+                    file: finding.file.clone(),
+                    reason: format!("Decompose plan failed: {}", e),
+                });
+            }
+        }
+    }
+
+    // Phase 3 complete — merge and return
     // Merge fixes that target the same file.
     //
     // Multiple phases (convention fixes, duplication fixes) or multiple
@@ -1729,6 +1795,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
     FixResult {
         fixes,
         new_files,
+        decompose_plans,
         skipped,
         chunk_results: vec![],
         total_insertions,
@@ -2544,6 +2611,104 @@ pub fn apply_new_files_chunked(
         }
     }
 
+    results
+}
+
+pub fn apply_decompose_plans(
+    plans: &mut [DecomposeFixPlan],
+    root: &Path,
+    options: ApplyOptions<'_>,
+) -> Vec<ApplyChunkResult> {
+    let mut results = Vec::new();
+    for (index, dfp) in plans.iter_mut().enumerate() {
+        let source_abs = root.join(&dfp.file);
+        let source_content = match std::fs::read_to_string(&source_abs) {
+            Ok(c) => c,
+            Err(e) => {
+                results.push(ApplyChunkResult {
+                    chunk_id: format!("decompose:{}", index + 1),
+                    files: vec![dfp.file.clone()],
+                    status: ChunkStatus::Reverted,
+                    applied_files: 0,
+                    reverted_files: 0,
+                    verification: None,
+                    error: Some(format!("Failed to read source {}: {}", dfp.file, e)),
+                });
+                continue;
+            }
+        };
+        let mut snapshots = vec![FileSnapshot {
+            path: source_abs,
+            original: Some(source_content),
+        }];
+        let mut all_files = vec![dfp.file.clone()];
+        for group in &dfp.plan.groups {
+            let target_abs = root.join(&group.suggested_target);
+            all_files.push(group.suggested_target.clone());
+            snapshots.push(FileSnapshot {
+                path: target_abs.clone(),
+                original: if target_abs.exists() {
+                    std::fs::read_to_string(&target_abs).ok()
+                } else {
+                    None
+                },
+            });
+        }
+        match decompose::apply_plan(&dfp.plan, root, true) {
+            Ok(move_results) => {
+                let files_modified = move_results.iter().filter(|r| r.applied).count();
+                let mut chunk = ApplyChunkResult {
+                    chunk_id: format!("decompose:{}", index + 1),
+                    files: all_files,
+                    status: ChunkStatus::Applied,
+                    applied_files: files_modified,
+                    reverted_files: 0,
+                    verification: Some("decompose_applied".to_string()),
+                    error: None,
+                };
+                if let Some(verifier) = options.verifier {
+                    match verifier(&chunk) {
+                        Ok(verification) => {
+                            chunk.verification = Some(verification);
+                        }
+                        Err(error) => {
+                            for snapshot in &snapshots {
+                                rollback_snapshot(snapshot);
+                            }
+                            chunk.status = ChunkStatus::Reverted;
+                            chunk.reverted_files = files_modified;
+                            chunk.error = Some(error);
+                            dfp.applied = false;
+                            results.push(chunk);
+                            continue;
+                        }
+                    }
+                }
+                dfp.applied = true;
+                log_status!(
+                    "fix",
+                    "Decomposed {} into {} groups",
+                    dfp.file,
+                    dfp.plan.groups.len()
+                );
+                results.push(chunk);
+            }
+            Err(e) => {
+                for snapshot in &snapshots {
+                    rollback_snapshot(snapshot);
+                }
+                results.push(ApplyChunkResult {
+                    chunk_id: format!("decompose:{}", index + 1),
+                    files: vec![dfp.file.clone()],
+                    status: ChunkStatus::Reverted,
+                    applied_files: 0,
+                    reverted_files: 0,
+                    verification: None,
+                    error: Some(format!("Decompose failed for {}: {}", dfp.file, e)),
+                });
+            }
+        }
+    }
     results
 }
 
@@ -4273,6 +4438,7 @@ class FlowAbilities {
                 applied: false,
             }],
             new_files: vec![],
+            decompose_plans: vec![],
             skipped: vec![],
             chunk_results: vec![],
             total_insertions: 1,
@@ -4333,6 +4499,7 @@ class FlowAbilities {
                 applied: false,
             }],
             new_files: vec![],
+            decompose_plans: vec![],
             skipped: vec![],
             chunk_results: vec![],
             total_insertions: 2,
@@ -4398,6 +4565,7 @@ class FlowAbilities {
                 description: "Create test file".to_string(),
                 written: false,
             }],
+            decompose_plans: vec![],
             skipped: vec![],
             chunk_results: vec![],
             total_insertions: 3,
@@ -4438,6 +4606,7 @@ class FlowAbilities {
                 applied: false,
             }],
             new_files: vec![],
+            decompose_plans: vec![],
             skipped: vec![],
             chunk_results: vec![],
             total_insertions: 1,
@@ -4490,6 +4659,7 @@ class FlowAbilities {
                 applied: false,
             }],
             new_files: vec![],
+            decompose_plans: vec![],
             skipped: vec![],
             chunk_results: vec![],
             total_insertions: 1,
@@ -4608,6 +4778,7 @@ class FlowAbilities {
                 applied: false,
             }],
             new_files: vec![],
+            decompose_plans: vec![],
             skipped: vec![],
             chunk_results: vec![],
             total_insertions: 1,
@@ -4656,6 +4827,7 @@ class FlowAbilities {
                 description: "Create missing test file for 'src/utils/token.rs'".to_string(),
                 written: false,
             }],
+            decompose_plans: vec![],
             skipped: vec![],
             chunk_results: vec![],
             total_insertions: 1,

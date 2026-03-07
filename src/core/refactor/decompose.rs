@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::test_scaffold::load_extension_grammar;
 use crate::extension::{self, ParsedItem};
@@ -11,7 +11,7 @@ use crate::Result;
 use super::move_items::MoveOptions;
 use super::MoveResult;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecomposePlan {
     pub file: String,
     pub strategy: String,
@@ -24,7 +24,7 @@ pub struct DecomposePlan {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecomposeAuditImpact {
     pub estimated_new_files: usize,
     pub estimated_new_test_files: usize,
@@ -34,7 +34,7 @@ pub struct DecomposeAuditImpact {
     pub likely_findings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecomposeGroup {
     pub name: String,
     pub suggested_target: String,
