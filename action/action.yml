@@ -99,10 +99,6 @@ inputs:
     description: 'Optional section title within the shared PR comment. Defaults to a humanized command or job id.'
     required: false
     default: ''
-  inline-review:
-    description: 'Post inline review comments on PR changed files (default: true). Set to false in multi-job workflows to avoid duplicate reviews.'
-    required: false
-    default: 'true'
   release-dry-run:
     description: 'If true, preview the release without making changes'
     required: false
@@ -377,15 +373,6 @@ runs:
         COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key }}
         COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title }}
       run: bash ${{ github.action_path }}/scripts/pr/post-pr-comment.sh
-
-    - name: Post inline review
-      if: always() && github.event_name == 'pull_request' && inputs.inline-review == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: bash ${{ github.action_path }}/scripts/pr/post-inline-review.sh
 
     - name: Auto-file categorized audit issues
       id: categorized-issues

@@ -332,7 +332,7 @@ Use two workflows:
 
 ### Fork PR Note
 
-On fork-based pull requests, GitHub may provide a restricted `GITHUB_TOKEN` that cannot write PR comments or inline reviews. Homeboy Action treats those publish steps as best-effort — lint/test/audit execution still runs and determines job pass/fail.
+On fork-based pull requests, GitHub may provide a restricted `GITHUB_TOKEN` that cannot write PR comments. Homeboy Action treats the PR comment step as best-effort — lint/test/audit execution still runs and determines job pass/fail.
 
 ## Failure Digest
 
