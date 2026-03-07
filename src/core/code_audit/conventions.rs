@@ -1297,55 +1297,6 @@ class AgentPing {
     }
 
     #[test]
-    fn type_hint_difference_not_a_mismatch() {
-        // Files with typed vs untyped params should NOT produce a SignatureMismatch.
-        let dir = std::env::temp_dir().join("homeboy_sig_type_hint_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("api")).unwrap();
-
-        std::fs::write(
-            dir.join("api/Typed.php"),
-            "<?php\nclass Typed {\n    public function check(WP_REST_Request $request) {}\n}\n",
-        )
-        .unwrap();
-
-        std::fs::write(
-            dir.join("api/Untyped.php"),
-            "<?php\nclass Untyped {\n    public function check($request) {}\n}\n",
-        )
-        .unwrap();
-
-        let mut conventions = vec![Convention {
-            name: "Api".to_string(),
-            glob: "api/*".to_string(),
-            expected_methods: vec!["check".to_string()],
-            expected_registrations: vec![],
-            expected_interfaces: vec![],
-            expected_namespace: None,
-            expected_imports: vec![],
-            conforming: vec!["api/Typed.php".to_string(), "api/Untyped.php".to_string()],
-            outliers: vec![],
-            total_files: 2,
-            confidence: 1.0,
-        }];
-
-        check_signature_consistency(&mut conventions, &dir);
-
-        let conv = &conventions[0];
-        assert_eq!(
-            conv.conforming.len(),
-            2,
-            "Type hint difference should not cause mismatch"
-        );
-        assert!(
-            conv.outliers.is_empty(),
-            "No outliers expected for type hint differences"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn namespace_mismatch_detected_in_convention() {
         let fingerprints = vec![
             FileFingerprint {

@@ -40,13 +40,6 @@ pub(crate) fn normalize_signature(sig: &str) -> String {
     // Rust: "fn foo() -> Result<T>" → "fn foo()"
     let normalized = strip_return_type(&normalized);
 
-    // Strip PHP parameter type hints — typed and untyped parameters should
-    // be structurally equivalent. "WP_REST_Request $request" → "$request"
-    let normalized = Regex::new(r"(?:\??\w[\w\\]*\s+)(\$\w+)")
-        .unwrap()
-        .replace_all(&normalized, "$1")
-        .to_string();
-
     normalized
 }
 
@@ -207,19 +200,6 @@ mod tests {
             "Token count should match regardless of return type: {:?} vs {:?}",
             with_return,
             without_return
-        );
-    }
-
-    #[test]
-    fn php_type_hints_stripped() {
-        let typed = tokenize_signature("public function check(WP_REST_Request $request)");
-        let untyped = tokenize_signature("public function check($request)");
-        assert_eq!(
-            typed.len(),
-            untyped.len(),
-            "Token count should match regardless of type hints: {:?} vs {:?}",
-            typed,
-            untyped
         );
     }
 
