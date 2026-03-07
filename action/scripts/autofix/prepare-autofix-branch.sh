@@ -102,8 +102,8 @@ if git diff --cached --quiet; then
   exit 0
 fi
 
-git config user.name "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+git config user.name "homeboy-ci-bot[bot]"
+git config user.email "266378653+homeboy-ci-bot[bot]@users.noreply.github.com"
 git commit -m "chore(ci): apply homeboy autofixes"
 
 # Use GitHub App token for push if available — pushes from a GitHub App

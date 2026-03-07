@@ -14,7 +14,7 @@ fi
 dismiss_existing_bot_reviews() {
   local existing_reviews
   existing_reviews=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-    --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | test("Homeboy found"))) | .id] | .[]' \
+    --jq '[.[] | select((.user.login == "github-actions[bot]" or .user.login == "homeboy-ci-bot[bot]") and (.body | test("Homeboy found"))) | .id] | .[]' \
     2>/dev/null || true)
 
   for review_id in ${existing_reviews}; do
