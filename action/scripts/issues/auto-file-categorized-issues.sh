@@ -240,13 +240,7 @@ AUTOFIXEOF
 *Filed automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action). This issue updates on each CI run until resolved.*
 FOOTEREOF
 
-    # Try with labels first, fall back without if label doesn't exist
-    gh api "repos/${REPO}/issues" \
-      --method POST \
-      --field title="${ISSUE_TITLE}" \
-      -F body=@"${BODY_FILE}" \
-      --field "labels[]=audit" \
-      --field "labels[]=audit:${KIND}" > /dev/null 2>&1 || \
+    # Try with audit label, fall back to no labels if it doesn't exist
     gh api "repos/${REPO}/issues" \
       --method POST \
       --field title="${ISSUE_TITLE}" \
