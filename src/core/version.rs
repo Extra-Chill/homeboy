@@ -1113,9 +1113,166 @@ fn walk_source_files(dir: &Path, extensions: &[String], callback: &mut impl FnMu
     }
 }
 
+// ── Version Undo ──
+
+/// Result of undoing a version bump.
+#[derive(Debug, Clone, Serialize)]
+pub struct UndoResult {
+    /// The version that was undone (e.g., "0.66.0").
+    pub version: String,
+    /// Tag name that was removed (e.g., "v0.66.0").
+    pub tag_name: String,
+    /// Whether the release commit had been pushed to remote.
+    pub was_pushed: bool,
+    /// Whether the local tag was deleted.
+    pub tag_deleted_local: bool,
+    /// Whether the remote tag was deleted.
+    pub tag_deleted_remote: bool,
+    /// How the commit was undone: "reset" (unpushed) or "revert" (pushed).
+    pub undo_method: String,
+    /// Whether this was a dry run.
+    pub dry_run: bool,
+}
+
+/// Release commit prefix used by the release pipeline.
+const RELEASE_COMMIT_PREFIX: &str = "release: v";
+
+/// Parse a version from a release commit message.
+/// Returns `Some("X.Y.Z")` for messages like "release: vX.Y.Z".
+fn parse_release_version(message: &str) -> Option<String> {
+    message
+        .strip_prefix(RELEASE_COMMIT_PREFIX)
+        .map(|v| v.trim().to_string())
+}
+
+/// Undo a version bump.
+///
+/// Checks that HEAD is a release commit, then:
+/// - If not pushed: `git reset --soft HEAD~1` + unstage + delete local tag
+/// - If pushed: `git revert HEAD` + delete local/remote tag
+pub fn undo_version_bump(component_id: &str, dry_run: bool) -> Result<UndoResult> {
+    use crate::git;
+
+    let component = component::load(component_id)?;
+    component::validate_local_path(&component)?;
+    let path = &component.local_path;
+
+    // 1. Verify HEAD is a release commit
+    let head_message = git::get_head_message(path)?;
+    let version = parse_release_version(&head_message).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "version.undo",
+            &format!(
+                "HEAD commit is not a release commit.\n  \
+                 Expected: \"{RELEASE_COMMIT_PREFIX}X.Y.Z\"\n  \
+                 Found:    \"{}\"",
+                head_message
+            ),
+            None,
+            None,
+        )
+    })?;
+
+    let tag_name = format!("v{}", version);
+
+    // 2. Check push status (fetch first to get accurate state)
+    let _ = git::fetch_and_get_behind_count(path);
+    let was_pushed = git::is_head_pushed(path)?;
+
+    // 3. Check tag existence
+    let tag_local = git::tag_exists_locally(path, &tag_name)?;
+    let tag_remote = git::tag_exists_on_remote(path, &tag_name)?;
+
+    if dry_run {
+        let method = if was_pushed { "revert" } else { "reset" };
+        log_status!("version", "Would undo release v{}", version);
+        log_status!("version", "  Commit pushed: {}", was_pushed);
+        log_status!("version", "  Undo method: {}", method);
+        if tag_local {
+            log_status!("version", "  Would delete local tag: {}", tag_name);
+        }
+        if tag_remote {
+            log_status!("version", "  Would delete remote tag: {}", tag_name);
+        }
+
+        return Ok(UndoResult {
+            version,
+            tag_name,
+            was_pushed,
+            tag_deleted_local: tag_local,
+            tag_deleted_remote: tag_remote,
+            undo_method: method.to_string(),
+            dry_run: true,
+        });
+    }
+
+    // 4. Delete tags
+    if tag_local {
+        git::delete_local_tag(path, &tag_name)?;
+        log_status!("version", "Deleted local tag: {}", tag_name);
+    }
+    if tag_remote {
+        git::delete_remote_tag(path, &tag_name)?;
+        log_status!("version", "Deleted remote tag: {}", tag_name);
+    }
+
+    // 5. Undo the commit
+    let undo_method = if was_pushed {
+        // Already pushed — create a revert commit
+        crate::utils::command::run_in(
+            path,
+            "git",
+            &["revert", "--no-edit", "HEAD"],
+            "revert release commit",
+        )?;
+        log_status!("version", "Created revert commit for release v{}", version);
+        "revert"
+    } else {
+        // Not pushed — soft reset and unstage
+        git::reset_soft(path, 1)?;
+        git::reset_staging(path)?;
+        log_status!(
+            "version",
+            "Reset release commit (changes left in working tree)"
+        );
+        "reset"
+    };
+
+    log_status!("version", "Undone release v{}", version);
+
+    Ok(UndoResult {
+        version,
+        tag_name,
+        was_pushed,
+        tag_deleted_local: tag_local,
+        tag_deleted_remote: tag_remote,
+        undo_method: undo_method.to_string(),
+        dry_run: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_release_version_valid() {
+        assert_eq!(
+            parse_release_version("release: v0.66.0"),
+            Some("0.66.0".to_string())
+        );
+        assert_eq!(
+            parse_release_version("release: v1.0.0"),
+            Some("1.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_release_version_invalid() {
+        assert_eq!(parse_release_version("feat: add something"), None);
+        assert_eq!(parse_release_version("Release: v1.0.0"), None); // wrong case
+        assert_eq!(parse_release_version("chore: bump version"), None);
+    }
 
     #[test]
     fn since_tag_regex_matches_placeholders() {

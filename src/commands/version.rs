@@ -3,7 +3,9 @@ use serde::Serialize;
 
 use homeboy::component;
 use homeboy::release::{self, ReleasePlan, ReleaseRun};
-use homeboy::version::{read_component_version, read_version, VersionTargetInfo};
+use homeboy::version::{
+    read_component_version, read_version, undo_version_bump, UndoResult, VersionTargetInfo,
+};
 
 use super::release::BumpType;
 
@@ -15,6 +17,7 @@ use super::CmdResult;
 pub enum VersionOutput {
     Show(VersionShowOutput),
     Bump(VersionBumpOutput),
+    Undo(VersionUndoOutput),
 }
 
 #[derive(Args)]
@@ -67,6 +70,15 @@ enum VersionCommand {
         #[arg(long)]
         allow_underbump: bool,
     },
+    /// Undo the last version bump (reset or revert the release commit)
+    Undo {
+        /// Component ID
+        component_id: String,
+
+        /// Preview what will happen without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -89,6 +101,14 @@ pub struct VersionBumpOutput {
     plan: Option<ReleasePlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     run: Option<ReleaseRun>,
+}
+
+#[derive(Serialize)]
+pub struct VersionUndoOutput {
+    command: String,
+    component_id: String,
+    #[serde(flatten)]
+    result: UndoResult,
 }
 
 pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<VersionOutput> {
@@ -198,6 +218,20 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                     exit_code,
                 ))
             }
+        }
+        VersionCommand::Undo {
+            component_id,
+            dry_run,
+        } => {
+            let result = undo_version_bump(&component_id, dry_run)?;
+            Ok((
+                VersionOutput::Undo(VersionUndoOutput {
+                    command: "version.undo".to_string(),
+                    component_id,
+                    result,
+                }),
+                0,
+            ))
         }
     }
 }
