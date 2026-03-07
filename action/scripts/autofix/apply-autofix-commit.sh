@@ -22,8 +22,8 @@ if [ "${PR_HEAD_REPO}" != "${GITHUB_REPOSITORY}" ]; then
   exit 0
 fi
 
-if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ]; then
-  echo "Skipping autofix: workflow actor is github-actions[bot]"
+if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ] || [ "${GITHUB_ACTOR:-}" = "homeboy-ci-bot[bot]" ]; then
+  echo "Skipping autofix: workflow actor is ${GITHUB_ACTOR} (bot loop guard)"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
   exit 0
 fi
@@ -110,6 +110,17 @@ fi
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git commit -m "chore(ci): apply homeboy autofixes"
-git push origin "HEAD:${GITHUB_HEAD_REF}"
+
+# Use GitHub App token for push if available — pushes from a GitHub App
+# trigger workflow re-runs, while GITHUB_TOKEN pushes do not.
+if [ -n "${APP_TOKEN:-}" ]; then
+  echo "Pushing with GitHub App token (will trigger CI re-run)"
+  git -c "http.https://github.com/.extraheader=" \
+    push "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+    "HEAD:${GITHUB_HEAD_REF}"
+else
+  echo "Pushing with default token (will NOT trigger CI re-run)"
+  git push origin "HEAD:${GITHUB_HEAD_REF}"
+fi
 
 echo "committed=true" >> "${GITHUB_OUTPUT}"

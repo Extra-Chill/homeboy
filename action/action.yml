@@ -83,6 +83,10 @@ inputs:
     description: 'Optional PR label required to allow autofix (e.g. "autofix")'
     required: false
     default: ''
+  app-token:
+    description: 'GitHub App token for autofix pushes. Pushes from a GitHub App trigger workflow re-runs (GITHUB_TOKEN pushes do not). Generate with actions/create-github-app-token.'
+    required: false
+    default: ''
   comment-key:
     description: 'Optional shared PR comment key. Defaults to workflow + component so separate jobs aggregate into one comment.'
     required: false
@@ -276,6 +280,7 @@ runs:
         AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
         PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
         PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        APP_TOKEN: ${{ inputs.app-token }}
       run: bash ${{ github.action_path }}/scripts/autofix/apply-autofix-commit.sh
 
     - name: Prepare non-PR autofix branch
@@ -288,6 +293,7 @@ runs:
         EXTRA_ARGS: ${{ inputs.args }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
         AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
+        APP_TOKEN: ${{ inputs.app-token }}
       run: bash ${{ github.action_path }}/scripts/autofix/prepare-autofix-branch.sh
 
     - name: Re-run Homeboy commands after autofix
