@@ -348,6 +348,48 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
             php "$PHPCS_IGNORE_FIXER" "$lint_target" --phpcs-binary="$PHPCS_BIN" --phpcs-standard="$PHPCS_CONFIG"
         done
     fi
+
+    # Post-fix syntax validation — catch any fixer that produced broken PHP
+    # This is a safety net: if any fixer introduces a syntax error, we catch it
+    # here before PHPCS validation (which would report confusing errors)
+    echo "Verifying PHP syntax after auto-fix..."
+    syntax_errors=0
+    syntax_error_files=()
+    for lint_target in "${LINT_FILES[@]}"; do
+        if [ -d "$lint_target" ]; then
+            # Walk directory for PHP files
+            while IFS= read -r -d '' php_file; do
+                if ! php -l "$php_file" > /dev/null 2>&1; then
+                    syntax_errors=$((syntax_errors + 1))
+                    syntax_error_files+=("$php_file")
+                fi
+            done < <(find "$lint_target" -name '*.php' -not -path '*/vendor/*' -not -path '*/node_modules/*' -print0)
+        elif [ -f "$lint_target" ]; then
+            if ! php -l "$lint_target" > /dev/null 2>&1; then
+                syntax_errors=$((syntax_errors + 1))
+                syntax_error_files+=("$lint_target")
+            fi
+        fi
+    done
+
+    if [ "$syntax_errors" -gt 0 ]; then
+        echo ""
+        echo "============================================"
+        echo "CRITICAL: Auto-fix introduced $syntax_errors PHP syntax error(s)!"
+        echo "============================================"
+        echo ""
+        echo "The following files have syntax errors after auto-fix:"
+        for errfile in "${syntax_error_files[@]}"; do
+            echo "  - $errfile"
+            php -l "$errfile" 2>&1 | grep -v "^$" | sed 's/^/    /'
+        done
+        echo ""
+        echo "This indicates a fixer bug. Do NOT commit these changes."
+        echo "Report this to the homeboy-extensions maintainer."
+        echo ""
+        exit 1
+    fi
+    echo "Syntax OK — all PHP files pass php -l"
 fi
 
 # Validation
