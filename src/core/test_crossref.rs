@@ -661,6 +661,51 @@ fn check_hook_mismatch(
         });
     }
 
+    // Prefix-stripping: if a test hook uses a prefix like "pre_" for interception,
+    // try matching the base name (without prefix) against production hooks.
+    // Common in frameworks where interceptor hooks wrap the real hook.
+    // e.g., test registers "pre_datamachine_ai_request" → base "datamachine_ai_request"
+    //        → production has "chubes_ai_request" → suggest the base hook directly.
+    let interceptor_prefixes = ["pre_", "before_", "after_", "on_"];
+    for prefix in &interceptor_prefixes {
+        if let Some(base_name) = registration.name.strip_prefix(prefix) {
+            // Check if base name exactly matches a production hook
+            if prod_hooks.contains_key(base_name) {
+                return Some(CrossRefMismatch {
+                    mismatch_type: MismatchType::HookRenamed,
+                    test_file: registration.file.clone(),
+                    test_line: registration.line,
+                    test_symbol: registration.name.clone(),
+                    production_symbol: Some(base_name.to_string()),
+                    production_file: prod_hooks
+                        .get(base_name)
+                        .and_then(|refs| refs.first().map(|r| r.file.clone())),
+                    description: format!(
+                        "Hook '{}' uses interceptor prefix '{}', production has '{}'",
+                        registration.name, prefix, base_name
+                    ),
+                    auto_fixable: true,
+                });
+            }
+            // Check if base name has a similar match in production
+            if let Some((best_name, best_file)) = find_similar_hook(base_name, prod_hooks) {
+                return Some(CrossRefMismatch {
+                    mismatch_type: MismatchType::HookRenamed,
+                    test_file: registration.file.clone(),
+                    test_line: registration.line,
+                    test_symbol: registration.name.clone(),
+                    production_symbol: Some(best_name.clone()),
+                    production_file: Some(best_file),
+                    description: format!(
+                        "Hook '{}' (base: '{}') similar to production hook '{}'",
+                        registration.name, base_name, best_name
+                    ),
+                    auto_fixable: true,
+                });
+            }
+        }
+    }
+
     // No match and no similar name — genuinely missing
     Some(CrossRefMismatch {
         mismatch_type: MismatchType::HookNotFound,
@@ -725,12 +770,18 @@ fn check_mock_mismatch(
 // ============================================================================
 
 /// Find the most similar hook name in the production index.
-/// Uses common-substring and edit-distance heuristics.
+///
+/// Uses a composite score: LCS ratio + suffix bonus. For hook names that follow
+/// `{namespace}_{feature}` patterns (e.g., `datamachine_ai_request`), shared
+/// suffixes indicate functional similarity and are weighted more heavily than
+/// prefix matches alone. This prevents namespace-matching false positives like
+/// `pre_datamachine_directives` beating `pre_chubes_ai_request` when the test
+/// hook is `pre_datamachine_ai_request`.
 fn find_similar_hook(name: &str, index: &HookIndex) -> Option<(String, String)> {
     let mut best: Option<(String, String, f64)> = None;
 
     for (prod_name, refs) in index {
-        let score = similarity_score(name, prod_name);
+        let score = hook_similarity_score(name, prod_name);
         if score > 0.75 {
             let file = refs.first().map(|r| r.file.clone()).unwrap_or_default();
             if best.as_ref().is_none_or(|(_, _, s)| score > *s) {
@@ -740,6 +791,54 @@ fn find_similar_hook(name: &str, index: &HookIndex) -> Option<(String, String)> 
     }
 
     best.map(|(name, file, _)| (name, file))
+}
+
+/// Compute hook-specific similarity score with suffix weighting.
+///
+/// For underscore-delimited hook names, splits into segments and computes:
+/// - Base LCS ratio (0.0-1.0)
+/// - Suffix bonus: shared trailing segments add weight because they indicate
+///   functional similarity (e.g., `_ai_request` suffix means "AI request hook")
+///
+/// This ensures `pre_datamachine_ai_request` matches `pre_chubes_ai_request`
+/// (same function, different namespace) over `pre_datamachine_directives`
+/// (same namespace, different function).
+fn hook_similarity_score(a: &str, b: &str) -> f64 {
+    let base = similarity_score(a, b);
+
+    // Split on underscores and compare trailing segments.
+    let a_parts: Vec<&str> = a.split('_').collect();
+    let b_parts: Vec<&str> = b.split('_').collect();
+
+    // Count shared trailing segments.
+    let mut shared_suffix = 0;
+    let min_len = a_parts.len().min(b_parts.len());
+    for i in 0..min_len {
+        let a_idx = a_parts.len() - 1 - i;
+        let b_idx = b_parts.len() - 1 - i;
+        if a_parts[a_idx] == b_parts[b_idx] {
+            shared_suffix += 1;
+        } else {
+            break;
+        }
+    }
+
+    if min_len > 1 {
+        if shared_suffix > 0 {
+            // Suffix bonus: shared trailing segments indicate functional similarity.
+            // Scale bonus by both the count and significance of shared segments.
+            let suffix_ratio = shared_suffix as f64 / min_len as f64;
+            let bonus = suffix_ratio * 0.3;
+            (base + bonus).min(1.0)
+        } else {
+            // Suffix penalty: names that share ZERO trailing segments are likely
+            // different features in the same namespace. Apply a small penalty
+            // to prefer functional matches over namespace matches.
+            (base - 0.05).max(0.0)
+        }
+    } else {
+        base
+    }
 }
 
 /// Find the most similar method name in the production index.
@@ -939,6 +1038,37 @@ mod tests {
     }
 
     #[test]
+    fn hook_similarity_suffix_weighting() {
+        // "pre_datamachine_ai_request" vs "pre_chubes_ai_request" — same function,
+        // different namespace. Should score HIGHER than prefix-matching alternative.
+        let suffix_match = hook_similarity_score(
+            "pre_datamachine_ai_request",
+            "pre_chubes_ai_request",
+        );
+        // "pre_datamachine_ai_request" vs "pre_datamachine_directives" — same namespace,
+        // different function. Without suffix weighting, this scores higher on LCS.
+        let prefix_match = hook_similarity_score(
+            "pre_datamachine_ai_request",
+            "pre_datamachine_directives",
+        );
+        // Suffix match should win: shared "_ai_request" suffix indicates same feature.
+        assert!(
+            suffix_match > prefix_match,
+            "suffix_match ({suffix_match:.3}) should beat prefix_match ({prefix_match:.3})"
+        );
+        // Both should be above threshold to be considered candidates.
+        assert!(suffix_match > 0.75);
+    }
+
+    #[test]
+    fn hook_similarity_rejects_different_functions() {
+        // "chubes_ai_request" vs "chubes_ai_models" — different function suffix
+        let score = hook_similarity_score("chubes_ai_request", "chubes_ai_models");
+        // Should still be below threshold (different features)
+        assert!(score < 0.75);
+    }
+
+    #[test]
     fn hook_mismatch_exact_match_no_error() {
         let mut index = HookIndex::new();
         index.insert(
@@ -1009,6 +1139,54 @@ mod tests {
         assert_eq!(
             mismatch.production_symbol,
             Some("datamachine_ai_request_v2".to_string())
+        );
+        assert!(mismatch.auto_fixable);
+    }
+
+    #[test]
+    fn hook_prefix_stripping_finds_base_match() {
+        // Test registers "pre_datamachine_ai_request" — no production hook matches
+        // directly, but after stripping "pre_", "datamachine_ai_request" is similar
+        // to production hook "chubes_ai_request" (via suffix-weighted similarity).
+        let mut index = HookIndex::new();
+        index.insert(
+            "chubes_ai_request".to_string(),
+            vec![HookReference {
+                name: "chubes_ai_request".to_string(),
+                file: "inc/AI/RequestBuilder.php".to_string(),
+                line: 94,
+                args_count: Some(6),
+                kind: "definition".to_string(),
+            }],
+        );
+        index.insert(
+            "datamachine_directives".to_string(),
+            vec![HookReference {
+                name: "datamachine_directives".to_string(),
+                file: "inc/AI/RequestBuilder.php".to_string(),
+                line: 57,
+                args_count: None,
+                kind: "definition".to_string(),
+            }],
+        );
+
+        let reg = HookReference {
+            name: "pre_datamachine_ai_request".to_string(),
+            file: "tests/AltTextTaskTest.php".to_string(),
+            line: 139,
+            args_count: Some(7),
+            kind: "registration".to_string(),
+        };
+
+        let result = check_hook_mismatch(&reg, &index);
+        assert!(result.is_some());
+        let mismatch = result.unwrap();
+        assert_eq!(mismatch.mismatch_type, MismatchType::HookRenamed);
+        // Should suggest the base hook (without pre_), matched by suffix similarity
+        assert_eq!(
+            mismatch.production_symbol,
+            Some("chubes_ai_request".to_string()),
+            "Should match via prefix stripping + suffix similarity, not namespace similarity"
         );
         assert!(mismatch.auto_fixable);
     }
