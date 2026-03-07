@@ -9,37 +9,35 @@ permissions:
   pull-requests: write
 
 jobs:
-  # ── Rust build + test (native cargo) ──
-  # Fast feedback: fmt, clippy, test run directly without installing homeboy.
-  build:
-    name: Build & Test
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          fetch-depth: 0
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: Extra-Chill/homeboy-action@v1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          source: '.'
+          extension: rust
+          component: homeboy
+          commands: lint
 
-      - name: cargo fmt --check
-        run: cargo fmt --check
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -W clippy::all
-
-      - name: cargo test
-        run: cargo test
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          source: '.'
+          extension: rust
+          component: homeboy
+          commands: test
 
   # ── Homeboy audit (dogfooding via homeboy-action) ──
   # Uses source build mode to compile from the PR branch, avoiding the
