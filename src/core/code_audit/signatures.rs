@@ -40,7 +40,146 @@ pub(crate) fn normalize_signature(sig: &str) -> String {
     // Rust: "fn foo() -> Result<T>" → "fn foo()"
     let normalized = strip_return_type(&normalized);
 
+    // Strip parameter type annotations — only arity and parameter names matter
+    // for structural comparison.  This is language-agnostic: for each comma-
+    // separated parameter, keep only the last identifier (the parameter name).
+    // PHP:  "function execute(array $config)" → "function execute($config)"
+    // PHP:  "function handle(WP_REST_Request $request)" → "function handle($request)"
+    // Rust: "fn run(args: RunArgs)" → "fn run(args)"
+    // Already-untyped params pass through unchanged.
+    let normalized = strip_param_types(&normalized);
+
     normalized
+}
+
+/// Strip parameter type annotations from a signature string.
+///
+/// Finds the parameter list (content between `(` and matching `)`) and
+/// reduces each comma-separated parameter to just its name — the last
+/// identifier-like token. This is language-agnostic:
+///
+/// - PHP prefix types:  `array $config` → `$config`
+/// - PHP class types:   `WP_REST_Request $request` → `$request`
+/// - Rust postfix types: `args: RunArgs` → `args`
+/// - Rust references:    `config: &Config` → `config`
+/// - Variadic/spread:    `...$args` → `...$args` (preserved)
+/// - No-type params:     `$request` → `$request` (unchanged)
+///
+/// Returns the full signature with parameter types stripped.
+fn strip_param_types(sig: &str) -> String {
+    // Find the parameter list boundaries
+    let open = match sig.find('(') {
+        Some(pos) => pos,
+        None => return sig.to_string(),
+    };
+
+    // Find matching close paren (handle nested parens for default values)
+    let after_open = &sig[open + 1..];
+    let mut depth = 1;
+    let mut close_offset = None;
+    for (i, ch) in after_open.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close_offset = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let close_offset = match close_offset {
+        Some(o) => o,
+        None => return sig.to_string(),
+    };
+
+    let params_str = &after_open[..close_offset];
+
+    // Empty parameter list — nothing to strip
+    if params_str.trim().is_empty() {
+        return sig.to_string();
+    }
+
+    // Split by comma, extract just the parameter name from each
+    let normalized_params: Vec<String> = params_str
+        .split(',')
+        .map(|param| {
+            let param = param.trim();
+            if param.is_empty() {
+                return String::new();
+            }
+            // The parameter name is the last identifier-like token.
+            // Identifiers can contain word chars plus $ (PHP) and & (reference).
+            // Walk backward to find it.
+            extract_param_name(param)
+        })
+        .collect();
+
+    let prefix = &sig[..=open];
+    let suffix = &sig[open + 1 + close_offset..];
+    format!("{}{}{}", prefix, normalized_params.join(", "), suffix)
+}
+
+/// Extract just the parameter name from a parameter declaration.
+///
+/// Handles multiple language patterns generically:
+/// - `array $config` → `$config` (PHP prefix type)
+/// - `?WP_REST_Request $request` → `$request` (PHP nullable type)
+/// - `args: RunArgs` → `args` (Rust postfix type)
+/// - `args: &'a RunArgs` → `args` (Rust reference + lifetime)
+/// - `$request` → `$request` (no type, PHP)
+/// - `self` / `&self` / `&mut self` → `&self` (Rust self param, normalized)
+/// - `...int $values` → `...$values` (PHP variadic)
+fn extract_param_name(param: &str) -> String {
+    let trimmed = param.trim();
+
+    // Rust self parameter — normalize all variants to &self
+    if trimmed == "self" || trimmed == "&self" || trimmed == "&mut self" || trimmed == "mut self" {
+        return "&self".to_string();
+    }
+
+    // Split into tokens on whitespace
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+
+    if tokens.is_empty() {
+        return String::new();
+    }
+
+    // For Rust postfix type syntax (name: Type), the name is before the colon.
+    // Check if any token contains ':' or if ':' appears standalone.
+    if let Some(colon_pos) = tokens.iter().position(|t| *t == ":" || t.ends_with(':')) {
+        // Everything before the colon is the parameter name (possibly with & or mut)
+        if colon_pos > 0 {
+            // Take the token just before ':' — that's the name
+            let name_token = if tokens[colon_pos].ends_with(':') {
+                // Token like "args:" — strip the colon
+                &tokens[colon_pos][..tokens[colon_pos].len() - 1]
+            } else {
+                tokens[colon_pos - 1]
+            };
+            return name_token.to_string();
+        }
+    }
+
+    // For PHP prefix type syntax (Type $name) or just ($name),
+    // the parameter name is the last token.
+    // Also handles variadics: `...Type $name` or `...$name`
+    let last = tokens.last().unwrap();
+
+    // If the last token starts with $ or is a bare identifier, that's the name
+    // Preserve spread operator if present on the name
+    if tokens.len() > 1 {
+        // Check if there's a spread operator earlier
+        let has_spread = tokens.iter().any(|t| t.starts_with("..."));
+        if has_spread && !last.starts_with("...") {
+            return format!("...{}", last);
+        }
+    }
+
+    last.to_string()
 }
 
 /// Strip return type declaration from a signature string.
@@ -220,5 +359,142 @@ mod tests {
     fn tokenize_preserves_function_name() {
         let tokens = tokenize_signature("pub fn do_stuff(x: i32)");
         assert!(tokens.contains(&"do_stuff".to_string()));
+    }
+
+    // --- Parameter type stripping tests ---
+
+    #[test]
+    fn php_prefix_type_stripped() {
+        let sig = "public function execute(array $config)";
+        let normalized = normalize_signature(sig);
+        assert!(
+            !normalized.contains("array"),
+            "PHP type hint should be stripped: {}",
+            normalized
+        );
+        assert!(
+            normalized.contains("$config"),
+            "Param name preserved: {}",
+            normalized
+        );
+    }
+
+    #[test]
+    fn php_class_type_stripped() {
+        let sig = "public function handle(WP_REST_Request $request)";
+        let normalized = normalize_signature(sig);
+        assert!(
+            !normalized.contains("WP_REST_Request"),
+            "PHP class type should be stripped: {}",
+            normalized
+        );
+        assert!(
+            normalized.contains("$request"),
+            "Param name preserved: {}",
+            normalized
+        );
+    }
+
+    #[test]
+    fn php_typed_and_untyped_same_tokens() {
+        let typed = tokenize_signature("public function execute(array $config)");
+        let untyped = tokenize_signature("public function execute($config)");
+        assert_eq!(
+            typed.len(),
+            untyped.len(),
+            "Token count should match regardless of type hints: {:?} vs {:?}",
+            typed,
+            untyped
+        );
+    }
+
+    #[test]
+    fn php_class_typed_and_untyped_same_tokens() {
+        let typed = tokenize_signature("public function handle(WP_REST_Request $request)");
+        let untyped = tokenize_signature("public function handle($request)");
+        assert_eq!(
+            typed.len(),
+            untyped.len(),
+            "Token count should match: {:?} vs {:?}",
+            typed,
+            untyped
+        );
+    }
+
+    #[test]
+    fn php_multiple_params_types_stripped() {
+        let typed =
+            tokenize_signature("public function execute(array $config, WP_REST_Request $request)");
+        let untyped = tokenize_signature("public function execute($config, $request)");
+        assert_eq!(
+            typed.len(),
+            untyped.len(),
+            "Token count should match with multiple params: {:?} vs {:?}",
+            typed,
+            untyped
+        );
+    }
+
+    #[test]
+    fn rust_postfix_type_stripped() {
+        let typed = tokenize_signature("pub fn run(args: RunArgs)");
+        let untyped = tokenize_signature("pub fn run(args)");
+        assert_eq!(
+            typed.len(),
+            untyped.len(),
+            "Rust type annotation should be stripped: {:?} vs {:?}",
+            typed,
+            untyped
+        );
+    }
+
+    #[test]
+    fn rust_self_param_normalized() {
+        let with_self = tokenize_signature("pub fn run(&self, args: RunArgs)");
+        let with_mut_self = tokenize_signature("pub fn run(&mut self, args: RunArgs)");
+        assert_eq!(
+            with_self.len(),
+            with_mut_self.len(),
+            "&self and &mut self should normalize the same: {:?} vs {:?}",
+            with_self,
+            with_mut_self
+        );
+    }
+
+    #[test]
+    fn empty_params_unchanged() {
+        let sig = "public function register()";
+        let normalized = normalize_signature(sig);
+        assert!(
+            normalized.contains("()"),
+            "Empty params should stay empty: {}",
+            normalized
+        );
+    }
+
+    #[test]
+    fn php_nullable_type_stripped() {
+        let typed = tokenize_signature("public function get(?string $name)");
+        let untyped = tokenize_signature("public function get($name)");
+        assert_eq!(
+            typed.len(),
+            untyped.len(),
+            "Nullable type should be stripped: {:?} vs {:?}",
+            typed,
+            untyped
+        );
+    }
+
+    #[test]
+    fn skeleton_matches_with_type_differences() {
+        let sigs = vec![
+            tokenize_signature("public function execute(array $config)"),
+            tokenize_signature("public function execute($config)"),
+        ];
+        let skeleton = compute_signature_skeleton(&sigs);
+        assert!(
+            skeleton.is_some(),
+            "Skeleton should compute despite type hint differences"
+        );
     }
 }
