@@ -456,12 +456,27 @@ for fn in functions:
     if not param_names:
         continue
     # Check if params appear in the body (excluding the signature).
-    # Skip trait declarations (no body — line ends with ;, not {}).
+    # Skip trait declarations (no body — the fn declaration line ends with ;).
     if fn.body_lines:
+        # Detect trait method declarations: check the lines from the fn
+        # declaration through where params close. If any of these lines
+        # ends with ';', it's a bodyless declaration.
+        fn_decl_line = fn.body_lines[0] if fn.body_lines else ''
+        # For single-line trait decls like: fn foo(&self, x: T) -> bool;
+        # The semicolon may be on the fn line or on a continuation line
+        # (for multi-line signatures). Check the first few lines.
+        is_bodyless = False
+        for check_line in fn.body_lines[:3]:
+            stripped = check_line.strip()
+            if stripped.endswith(';') and '{' not in stripped:
+                is_bodyless = True
+                break
+        if is_bodyless:
+            continue
         full_body = '\n'.join(fn.body_lines)
         brace_pos = full_body.find('{')
         if brace_pos < 0:
-            # No body (trait method declaration) — can't determine usage
+            # No body brace found — can't determine usage
             continue
         body_only = full_body[brace_pos + 1:]
         for pname in param_names:
