@@ -82,6 +82,7 @@ pub enum FixKind {
     MissingTestFile,
     MissingTestMethod,
     SharedExtraction,
+    VisibilityNarrowing,
 }
 
 impl FixKind {
@@ -92,7 +93,8 @@ impl FixKind {
             | Self::RegistrationStub
             | Self::ConstructorWithRegistration
             | Self::MissingTestFile
-            | Self::MissingTestMethod => FixSafetyTier::SafeWithChecks,
+            | Self::MissingTestMethod
+            | Self::VisibilityNarrowing => FixSafetyTier::SafeWithChecks,
             Self::FunctionRemoval | Self::TraitUse | Self::SharedExtraction => {
                 FixSafetyTier::PlanOnly
             }
@@ -137,6 +139,7 @@ impl FromStr for FixKind {
             "missing_test_file" => Ok(Self::MissingTestFile),
             "missing_test_method" => Ok(Self::MissingTestMethod),
             "shared_extraction" => Ok(Self::SharedExtraction),
+            "visibility_narrowing" => Ok(Self::VisibilityNarrowing),
             _ => Err(format!("unknown fix kind '{}'", value)),
         }
     }
@@ -161,6 +164,16 @@ pub enum InsertionKind {
     /// Language-agnostic: for Rust this could be a trait impl, for JS a mixin.
     /// The code is inserted after the class/struct opening brace.
     TraitUse,
+    /// Replace visibility qualifier on a specific line.
+    /// `line` is 1-indexed. `from` is the old text, `to` is the replacement.
+    VisibilityChange {
+        /// 1-indexed line number where the change should be applied.
+        line: usize,
+        /// Text to find on that line (e.g., "pub fn").
+        from: String,
+        /// Replacement text (e.g., "pub(crate) fn").
+        to: String,
+    },
 }
 
 /// A file that was skipped by the fixer with a reason.
@@ -1312,6 +1325,111 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         }
     }
 
+    // Phase 1b: Visibility narrowing for unreferenced exports.
+    // Change `pub fn` → `pub(crate) fn` for functions not referenced by other files.
+    // Safety: skip functions that are re-exported via `pub use` in parent mod.rs files.
+    for finding in &result.findings {
+        if finding.kind != DeviationKind::UnreferencedExport {
+            continue;
+        }
+
+        let Some(fn_name) = extract_function_name_from_unreferenced(&finding.description) else {
+            continue;
+        };
+
+        let abs_path = root.join(&finding.file);
+        let language = detect_language(&abs_path);
+
+        // Only Rust for now — PHP and JS have different visibility models
+        if !matches!(language, Language::Rust) {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&abs_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Skip if already narrowed (pub(crate) or pub(super)) — no fix needed
+        if content.contains(&format!("pub(crate) fn {}", fn_name))
+            || content.contains(&format!("pub(super) fn {}", fn_name))
+        {
+            continue;
+        }
+
+        // Safety check: skip if function is re-exported via `pub use` in parent mod.rs
+        // or referenced by binary crate sources
+        if is_reexported(&finding.file, &fn_name, root) {
+            skipped.push(SkippedFile {
+                file: finding.file.clone(),
+                reason: format!(
+                    "Function '{}' is re-exported or used by binary crate — cannot narrow visibility",
+                    fn_name
+                ),
+            });
+            continue;
+        }
+
+        // Find the line containing `pub fn <name>` or `pub async fn <name>`
+        let target_patterns = [
+            format!("pub fn {}(", fn_name),
+            format!("pub fn {}<", fn_name),
+            format!("pub async fn {}(", fn_name),
+            format!("pub async fn {}<", fn_name),
+        ];
+
+        let mut found_line = None;
+        for (i, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if target_patterns
+                .iter()
+                .any(|pat| trimmed.contains(pat.as_str()))
+            {
+                found_line = Some(i + 1); // 1-indexed
+                break;
+            }
+        }
+
+        let Some(line_num) = found_line else {
+            skipped.push(SkippedFile {
+                file: finding.file.clone(),
+                reason: format!("Could not locate `pub fn {}` declaration in file", fn_name),
+            });
+            continue;
+        };
+
+        // Determine the exact replacement: `pub fn` → `pub(crate) fn` or `pub async fn` → `pub(crate) async fn`
+        let line_content = content.lines().nth(line_num - 1).unwrap_or("");
+        let (from, to) = if line_content.contains(&format!("pub async fn {}", fn_name)) {
+            (
+                "pub async fn".to_string(),
+                "pub(crate) async fn".to_string(),
+            )
+        } else {
+            ("pub fn".to_string(), "pub(crate) fn".to_string())
+        };
+
+        fixes.push(Fix {
+            file: finding.file.clone(),
+            required_methods: vec![],
+            required_registrations: vec![],
+            insertions: vec![insertion(
+                InsertionKind::VisibilityChange {
+                    line: line_num,
+                    from: from.clone(),
+                    to: to.clone(),
+                },
+                FixKind::VisibilityNarrowing,
+                format!("{} → {}", from, to),
+                format!(
+                    "Narrow visibility of '{}': {} → {} (unreferenced export)",
+                    fn_name, from, to
+                ),
+            )],
+            applied: false,
+        });
+    }
+
     // Phase 2: Duplication fixes — extract shared code via extension protocol
 
     /// Minimum number of files (including canonical) before extracting to shared code.
@@ -2117,6 +2235,187 @@ fn generate_fallback_signature(method_name: &str, language: &Language) -> Method
 }
 
 // ============================================================================
+// Unreferenced Export Helpers
+// ============================================================================
+
+/// Extract function name from an unreferenced export finding description.
+///
+/// Example: "Public function 'compute' is not referenced by any other file" → "compute"
+fn extract_function_name_from_unreferenced(description: &str) -> Option<String> {
+    let needle = "Public function '";
+    let start = description.find(needle)? + needle.len();
+    let rest = &description[start..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
+/// Check if a function is referenced outside the lib crate — either re-exported
+/// via `pub use` in parent mod.rs files, or imported by binary crate sources
+/// (main.rs, commands/, docs/, etc.).
+///
+/// This prevents narrowing visibility for functions that the binary crate
+/// depends on, which would cause E0603 compile errors.
+fn is_reexported(file_path: &str, fn_name: &str, root: &Path) -> bool {
+    let source_path = Path::new(file_path);
+
+    // Check 1: `pub use` re-exports in parent mod.rs / lib.rs files.
+    // Uses block-aware parsing to handle multi-line `pub use module::{...};` blocks.
+    let mut current = source_path.parent();
+    while let Some(dir) = current {
+        for filename in &["mod.rs", "lib.rs"] {
+            let check_path = root.join(dir).join(filename);
+            if check_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&check_path) {
+                    if has_pub_use_of(&content, fn_name) {
+                        return true;
+                    }
+                }
+            }
+        }
+        current = dir.parent();
+    }
+
+    // Check 2: Binary crate sources that import this function directly.
+    // In a Rust workspace, `main.rs` and its `mod` tree (commands/, docs/, etc.)
+    // are separate from lib.rs. They import from the lib as an external crate,
+    // so `pub(crate)` items are invisible to them.
+    if is_used_by_binary_crate(fn_name, root) {
+        return true;
+    }
+
+    false
+}
+
+/// Check if file content contains a `pub use` statement that references a function.
+///
+/// Handles both single-line and multi-line `pub use` blocks:
+/// - `pub use module::{foo, bar};`
+/// - `pub use module::{`
+///      `foo, bar,`
+///   `};`
+fn has_pub_use_of(content: &str, fn_name: &str) -> bool {
+    let mut in_pub_use_block = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if in_pub_use_block {
+            // Inside a multi-line `pub use { ... };` block
+            if trimmed.contains(fn_name) {
+                return true;
+            }
+            if trimmed.contains("};") || trimmed == "}" {
+                in_pub_use_block = false;
+            }
+        } else if trimmed.starts_with("pub use") {
+            if trimmed.contains(fn_name) {
+                return true;
+            }
+            // Multi-line: `pub use module::{` without closing `};` on the same line
+            if trimmed.contains('{') && !trimmed.contains('}') {
+                in_pub_use_block = true;
+            }
+        }
+    }
+    false
+}
+
+/// Scan binary crate sources (main.rs and its module tree) for references
+/// to a function name. Returns true if any binary source file imports or
+/// references the function.
+fn is_used_by_binary_crate(fn_name: &str, root: &Path) -> bool {
+    let src = root.join("src");
+
+    // main.rs is the binary entry point
+    let main_rs = src.join("main.rs");
+    if main_rs.exists() {
+        if let Ok(content) = std::fs::read_to_string(&main_rs) {
+            if content.contains(fn_name) {
+                return true;
+            }
+        }
+    }
+
+    // Binary crate modules: typically `src/commands/` and `src/docs/` in homeboy.
+    // Detect binary modules: any `mod X;` declared in main.rs that is NOT also
+    // declared in lib.rs.
+    let lib_rs = src.join("lib.rs");
+    let lib_mods = if lib_rs.exists() {
+        std::fs::read_to_string(&lib_rs)
+            .ok()
+            .map(|c| extract_mod_names(&c))
+            .unwrap_or_default()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let main_mods = if main_rs.exists() {
+        std::fs::read_to_string(&main_rs)
+            .ok()
+            .map(|c| extract_mod_names(&c))
+            .unwrap_or_default()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    // Binary-only modules: declared in main.rs but NOT in lib.rs
+    let bin_only_mods: Vec<&String> = main_mods.difference(&lib_mods).collect();
+
+    for mod_name in bin_only_mods {
+        let mod_dir = src.join(mod_name);
+        if mod_dir.is_dir() {
+            if scan_dir_for_reference(&mod_dir, fn_name) {
+                return true;
+            }
+        }
+        // Also check single-file module: src/<mod_name>.rs
+        let mod_file = src.join(format!("{}.rs", mod_name));
+        if mod_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&mod_file) {
+                if content.contains(fn_name) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Extract `mod X;` declarations from a Rust source file.
+fn extract_mod_names(content: &str) -> std::collections::HashSet<String> {
+    let mut mods = std::collections::HashSet::new();
+    let re = Regex::new(r"(?m)^\s*(?:pub\s+)?mod\s+(\w+)\s*;").unwrap();
+    for cap in re.captures_iter(content) {
+        mods.insert(cap[1].to_string());
+    }
+    mods
+}
+
+/// Recursively scan a directory for any .rs file containing the given function name.
+fn scan_dir_for_reference(dir: &Path, fn_name: &str) -> bool {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if scan_dir_for_reference(&path, fn_name) {
+                return true;
+            }
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if content.contains(fn_name) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+// ============================================================================
 // File Modification
 // ============================================================================
 
@@ -2359,6 +2658,7 @@ pub(crate) fn apply_insertions_to_content(
     let mut import_adds = Vec::new();
     let mut trait_uses = Vec::new();
     let mut removals: Vec<(usize, usize)> = Vec::new();
+    let mut visibility_changes: Vec<(usize, &str, &str)> = Vec::new();
 
     for insertion in insertions {
         match &insertion.kind {
@@ -2373,6 +2673,24 @@ pub(crate) fn apply_insertions_to_content(
             } => {
                 removals.push((*start_line, *end_line));
             }
+            InsertionKind::VisibilityChange { line, from, to } => {
+                visibility_changes.push((*line, from.as_str(), to.as_str()));
+            }
+        }
+    }
+
+    // Apply visibility changes first (line-level text replacements, no line shifts)
+    if !visibility_changes.is_empty() {
+        let mut lines: Vec<String> = result.lines().map(String::from).collect();
+        for (line_num, from, to) in &visibility_changes {
+            let idx = line_num.saturating_sub(1); // 1-indexed → 0-indexed
+            if idx < lines.len() {
+                lines[idx] = lines[idx].replacen(from, to, 1);
+            }
+        }
+        result = lines.join("\n");
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
         }
     }
 
@@ -4404,5 +4722,188 @@ class FlowAbilities {
             .is_some_and(|reason| reason.contains("test_mapping")));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ====================================================================
+    // Unreferenced export / visibility narrowing tests
+    // ====================================================================
+
+    #[test]
+    fn extract_function_name_from_unreferenced_description() {
+        let desc = "Public function 'compute' is not referenced by any other file";
+        assert_eq!(
+            extract_function_name_from_unreferenced(desc),
+            Some("compute".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_function_name_returns_none_for_unrelated() {
+        let desc = "Missing method: validate";
+        assert_eq!(extract_function_name_from_unreferenced(desc), None);
+    }
+
+    #[test]
+    fn visibility_change_replaces_pub_fn() {
+        let content = "use std::path::Path;\n\npub fn compute(x: i32) -> i32 {\n    x + 1\n}\n";
+        let insertions = vec![Insertion {
+            kind: InsertionKind::VisibilityChange {
+                line: 3,
+                from: "pub fn".to_string(),
+                to: "pub(crate) fn".to_string(),
+            },
+            fix_kind: FixKind::VisibilityNarrowing,
+            safety_tier: FixSafetyTier::SafeWithChecks,
+            auto_apply: false,
+            blocked_reason: None,
+            preflight: None,
+            code: "pub fn → pub(crate) fn".to_string(),
+            description: "Narrow visibility".to_string(),
+        }];
+
+        let result = apply_insertions_to_content(content, &insertions, &Language::Rust);
+        assert!(result.contains("pub(crate) fn compute"));
+        assert!(!result.contains("pub fn compute"));
+    }
+
+    #[test]
+    fn visibility_change_handles_async_fn() {
+        let content = "pub async fn fetch(url: &str) -> String {\n    todo!()\n}\n";
+        let insertions = vec![Insertion {
+            kind: InsertionKind::VisibilityChange {
+                line: 1,
+                from: "pub async fn".to_string(),
+                to: "pub(crate) async fn".to_string(),
+            },
+            fix_kind: FixKind::VisibilityNarrowing,
+            safety_tier: FixSafetyTier::SafeWithChecks,
+            auto_apply: false,
+            blocked_reason: None,
+            preflight: None,
+            code: "pub async fn → pub(crate) async fn".to_string(),
+            description: "Narrow visibility".to_string(),
+        }];
+
+        let result = apply_insertions_to_content(content, &insertions, &Language::Rust);
+        assert!(result.contains("pub(crate) async fn fetch"));
+    }
+
+    #[test]
+    fn visibility_change_preserves_other_lines() {
+        let content = "pub fn keep_this() {}\n\npub fn narrow_this() {}\n\npub fn keep_that() {}\n";
+        let insertions = vec![Insertion {
+            kind: InsertionKind::VisibilityChange {
+                line: 3,
+                from: "pub fn".to_string(),
+                to: "pub(crate) fn".to_string(),
+            },
+            fix_kind: FixKind::VisibilityNarrowing,
+            safety_tier: FixSafetyTier::SafeWithChecks,
+            auto_apply: false,
+            blocked_reason: None,
+            preflight: None,
+            code: String::new(),
+            description: String::new(),
+        }];
+
+        let result = apply_insertions_to_content(content, &insertions, &Language::Rust);
+        assert!(result.contains("pub fn keep_this"));
+        assert!(result.contains("pub(crate) fn narrow_this"));
+        assert!(result.contains("pub fn keep_that"));
+    }
+
+    #[test]
+    fn is_reexported_detects_pub_use() {
+        let root = std::env::temp_dir().join("homeboy_test_reexport");
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src").join("core").join("release");
+        std::fs::create_dir_all(&src).unwrap();
+
+        // Create a mod.rs with a pub use re-export
+        std::fs::write(
+            src.join("mod.rs"),
+            "pub use utils::{extract_latest_notes, parse_release_artifacts};\n",
+        )
+        .unwrap();
+
+        // Create the source file
+        std::fs::write(
+            src.join("utils.rs"),
+            "pub fn parse_release_artifacts() {}\npub fn helper() {}\n",
+        )
+        .unwrap();
+
+        // parse_release_artifacts is re-exported
+        assert!(is_reexported(
+            "src/core/release/utils.rs",
+            "parse_release_artifacts",
+            &root
+        ));
+
+        // helper is NOT re-exported
+        assert!(!is_reexported("src/core/release/utils.rs", "helper", &root));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn is_reexported_detects_multiline_pub_use() {
+        let root = std::env::temp_dir().join("homeboy_test_reexport_multiline");
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src").join("core").join("extension");
+        std::fs::create_dir_all(&src).unwrap();
+
+        // Create a mod.rs with a MULTI-LINE pub use re-export
+        std::fs::write(
+            src.join("mod.rs"),
+            "pub use lifecycle::{\n    check_update_available, derive_id_from_url, install, is_git_url,\n};\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            src.join("lifecycle.rs"),
+            "pub fn derive_id_from_url() {}\npub fn is_git_url() -> bool { false }\npub fn internal_helper() {}\n",
+        )
+        .unwrap();
+
+        // derive_id_from_url is re-exported (multi-line block)
+        assert!(is_reexported(
+            "src/core/extension/lifecycle.rs",
+            "derive_id_from_url",
+            &root
+        ));
+
+        // is_git_url is also re-exported
+        assert!(is_reexported(
+            "src/core/extension/lifecycle.rs",
+            "is_git_url",
+            &root
+        ));
+
+        // internal_helper is NOT re-exported
+        assert!(!is_reexported(
+            "src/core/extension/lifecycle.rs",
+            "internal_helper",
+            &root
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn has_pub_use_of_single_line() {
+        let content = "pub use utils::{compute, transform};\n";
+        assert!(has_pub_use_of(content, "compute"));
+        assert!(has_pub_use_of(content, "transform"));
+        assert!(!has_pub_use_of(content, "missing"));
+    }
+
+    #[test]
+    fn has_pub_use_of_multi_line() {
+        let content =
+            "pub use lifecycle::{\n    check_update, derive_id,\n    install, uninstall,\n};\n";
+        assert!(has_pub_use_of(content, "derive_id"));
+        assert!(has_pub_use_of(content, "install"));
+        assert!(!has_pub_use_of(content, "missing"));
     }
 }
