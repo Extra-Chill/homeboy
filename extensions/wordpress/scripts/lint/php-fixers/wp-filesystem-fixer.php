@@ -97,6 +97,13 @@ function process_file( $filepath ) {
 	// First pass: identify lines that need fixing and their enclosing methods.
 	$target_lines = array();
 	foreach ( $lines as $idx => $line ) {
+		$trimmed = ltrim( $line );
+
+		// Skip comment lines (docblocks, single-line comments).
+		if ( str_starts_with( $trimmed, '*' ) || str_starts_with( $trimmed, '//' ) || str_starts_with( $trimmed, '/*' ) || str_starts_with( $trimmed, '#' ) ) {
+			continue;
+		}
+
 		// Skip lines already suppressed.
 		if ( false !== strpos( $line, 'phpcs:ignore' ) ) {
 			continue;
