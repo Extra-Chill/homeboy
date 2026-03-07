@@ -72,6 +72,10 @@ pub struct AuditArgs {
     /// Include compact machine-readable summary for CI wrappers
     #[arg(long)]
     pub json_summary: bool,
+
+    /// Include full generated code in --fix JSON output (omitted by default to reduce size)
+    #[arg(long, requires = "fix")]
+    pub preview: bool,
 }
 
 #[derive(Serialize)]
@@ -495,6 +499,14 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
             0
         };
 
+        // Print human-readable summary to stderr
+        log_fix_summary(&final_fix_result, &final_policy_summary, written);
+
+        // Strip generated code from JSON output unless --preview is set
+        if !args.preview {
+            final_fix_result.strip_code();
+        }
+
         return Ok((
             AuditOutput::Fix {
                 component_id: current_result.component_id,
@@ -636,6 +648,47 @@ fn build_fix_hints(written: bool, summary: &fixer::PolicySummary) -> Vec<String>
     }
 
     hints
+}
+
+fn log_fix_summary(result: &fixer::FixResult, policy: &fixer::PolicySummary, written: bool) {
+    let kind_counts = result.fix_kind_counts();
+    let total_insertions = result.total_insertions;
+    let total_new_files = result.new_files.len();
+    let total_skipped = result.skipped.len();
+
+    if total_insertions == 0 && total_new_files == 0 {
+        homeboy::log_status!("fix", "No fixes to apply");
+        return;
+    }
+
+    let mode = if written { "Applied" } else { "Would apply" };
+    homeboy::log_status!(
+        "fix",
+        "{mode} {total_insertions} insertion(s) across {} file(s), {} new file(s)",
+        result.files_modified,
+        total_new_files
+    );
+
+    for (kind, count) in &kind_counts {
+        homeboy::log_status!("fix", "  {kind:?}: {count}");
+    }
+
+    if total_skipped > 0 {
+        homeboy::log_status!("fix", "Skipped: {total_skipped} file(s)");
+    }
+
+    if policy.has_blocked_items() {
+        homeboy::log_status!(
+            "fix",
+            "Blocked: {} insertion(s), {} new file(s) (safe_with_checks or plan_only)",
+            policy.blocked_insertions,
+            policy.blocked_new_files
+        );
+    }
+
+    if policy.preflight_failures > 0 {
+        homeboy::log_status!("fix", "Preflight failures: {}", policy.preflight_failures);
+    }
 }
 
 fn finding_fingerprint(finding: &homeboy::code_audit::Finding) -> String {
@@ -1406,6 +1459,7 @@ mod tests {
             },
             changed_since: None,
             json_summary: false,
+            preview: false,
         };
 
         let (output, _code) =

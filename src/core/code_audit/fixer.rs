@@ -70,7 +70,9 @@ pub enum FixSafetyTier {
 
 impl FixSafetyTier {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FixKind {
     MethodStub,
@@ -224,6 +226,37 @@ pub struct FixResult {
     pub chunk_results: Vec<ApplyChunkResult>,
     pub total_insertions: usize,
     pub files_modified: usize,
+}
+
+impl FixResult {
+    /// Strip generated code from insertions and new files, replacing with byte-count placeholders.
+    /// This dramatically reduces JSON output size (200KB+ → ~5KB) while preserving all metadata.
+    pub fn strip_code(&mut self) {
+        for fix in &mut self.fixes {
+            for insertion in &mut fix.insertions {
+                let len = insertion.code.len();
+                insertion.code = format!("[{len} bytes]");
+            }
+        }
+        for new_file in &mut self.new_files {
+            let len = new_file.content.len();
+            new_file.content = format!("[{len} bytes]");
+        }
+    }
+
+    /// Compute a breakdown of fix kinds and their counts.
+    pub fn fix_kind_counts(&self) -> std::collections::BTreeMap<FixKind, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for fix in &self.fixes {
+            for insertion in &fix.insertions {
+                *counts.entry(insertion.fix_kind).or_insert(0) += 1;
+            }
+        }
+        for new_file in &self.new_files {
+            *counts.entry(new_file.fix_kind).or_insert(0) += 1;
+        }
+        counts
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
