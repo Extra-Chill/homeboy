@@ -189,19 +189,116 @@ export WP_PHPUNIT__TESTS_CONFIG="$WP_TESTS_CONFIG_PATH"
 # Resolve "auto" database type: try MySQL first, fall back to SQLite
 MYSQL_AUTO_CREATED=""
 if [ "$DATABASE_TYPE" = "auto" ]; then
-    if command -v mysql &>/dev/null && mysql -h 127.0.0.1 -u root -e "SELECT 1" &>/dev/null; then
-        DATABASE_TYPE="mysql"
-        # Use TCP host by default in CI/local automation. "localhost" can
-        # trigger socket mode and fail in containerized environments.
-        MYSQL_HOST="127.0.0.1"
-        MYSQL_DATABASE="homeboy_wptests"
-        MYSQL_USER="root"
-        MYSQL_PASSWORD=""
-        # Auto-create the test database
-        mysql -h "$MYSQL_HOST" -u "$MYSQL_USER" -e "CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null
-        MYSQL_AUTO_CREATED="1"
+    # Step 1: Find wp-config.php to read DB credentials from a live WP install.
+    # Search strategy (in order):
+    #   a) Walk up from plugin directory (works when plugin is deployed inside WP)
+    #   b) Walk up from project path (works when project IS the WP site)
+    #   c) Use wp-cli to locate a WP install (works on any machine with wp-cli)
+    WP_CONFIG_PATH=""
+    for _start_dir in "${PLUGIN_PATH}" "${HOMEBOY_PROJECT_PATH:-}"; do
+        [ -z "$_start_dir" ] && continue
+        _search_dir="$_start_dir"
+        for _i in 1 2 3 4 5; do
+            _search_dir="$(dirname "$_search_dir")"
+            if [ -f "${_search_dir}/wp-config.php" ]; then
+                WP_CONFIG_PATH="${_search_dir}/wp-config.php"
+                break 2
+            fi
+        done
+    done
+
+    # Fallback: ask wp-cli for a WP install path
+    if [ -z "$WP_CONFIG_PATH" ] && command -v wp &>/dev/null; then
+        _wp_path=$(wp --allow-root --path=/var/www eval "echo ABSPATH;" 2>/dev/null || true)
+        # wp-cli with no --path tries CWD which may not be a WP install.
+        # Try common paths if eval failed.
+        if [ -z "$_wp_path" ]; then
+            for _wp_dir in /var/www/*/wp-config.php /srv/*/wp-config.php /home/*/public_html/wp-config.php; do
+                if [ -f "$_wp_dir" ]; then
+                    WP_CONFIG_PATH="$_wp_dir"
+                    break
+                fi
+            done
+        elif [ -f "${_wp_path}wp-config.php" ]; then
+            WP_CONFIG_PATH="${_wp_path}wp-config.php"
+        fi
+    fi
+
+    # Last resort: scan common WordPress locations
+    if [ -z "$WP_CONFIG_PATH" ]; then
+        for _wp_dir in /var/www/*/wp-config.php /srv/*/wp-config.php; do
+            if [ -f "$_wp_dir" ]; then
+                WP_CONFIG_PATH="$_wp_dir"
+                break
+            fi
+        done
+    fi
+
+    # Step 2: Extract DB credentials from wp-config.php if found.
+    if [ -n "$WP_CONFIG_PATH" ]; then
+        # Use grep to extract define() values — avoids PHP quoting hell in bash.
+        _extract_wp_define() {
+            grep -oP "define\s*\(\s*['\"]$1['\"]\s*,\s*['\"]\\K[^'\"]*" "$WP_CONFIG_PATH" 2>/dev/null | head -1
+        }
+        WP_DB_HOST=$(_extract_wp_define DB_HOST)
+        WP_DB_USER=$(_extract_wp_define DB_USER)
+        WP_DB_PASSWORD=$(_extract_wp_define DB_PASSWORD)
+        WP_DB_NAME=$(_extract_wp_define DB_NAME)
+
         if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-            echo "DEBUG: Auto-detected MySQL (root@${MYSQL_HOST})"
+            echo "DEBUG: Found wp-config.php at $WP_CONFIG_PATH"
+            echo "DEBUG: DB_HOST=${WP_DB_HOST:-NOT_FOUND}, DB_USER=${WP_DB_USER:-NOT_FOUND}, DB_NAME=${WP_DB_NAME:-NOT_FOUND}"
+        fi
+    fi
+
+    # Step 3: Try MySQL connection. Prefer wp-config.php credentials, then
+    # fall back to root@127.0.0.1, then SQLite.
+    MYSQL_CONNECTED=""
+    if command -v mysql &>/dev/null; then
+        # Try wp-config.php credentials first (the live WP site's DB)
+        if [ -n "${WP_DB_HOST:-}" ] && [ -n "${WP_DB_USER:-}" ]; then
+            _mysql_auth=(-h "$WP_DB_HOST" -u "$WP_DB_USER")
+            [ -n "${WP_DB_PASSWORD:-}" ] && _mysql_auth+=(-p"$WP_DB_PASSWORD")
+            if mysql "${_mysql_auth[@]}" -e "SELECT 1" &>/dev/null; then
+                DATABASE_TYPE="mysql"
+                MYSQL_HOST="$WP_DB_HOST"
+                MYSQL_USER="$WP_DB_USER"
+                MYSQL_PASSWORD="${WP_DB_PASSWORD:-}"
+                MYSQL_DATABASE="homeboy_wptests"
+                MYSQL_CONNECTED="wp-config"
+            fi
+        fi
+
+        # Fall back to root@127.0.0.1 with no password (CI environments)
+        if [ -z "$MYSQL_CONNECTED" ]; then
+            if mysql -h 127.0.0.1 -u root -e "SELECT 1" &>/dev/null; then
+                DATABASE_TYPE="mysql"
+                MYSQL_HOST="127.0.0.1"
+                MYSQL_USER="root"
+                MYSQL_PASSWORD=""
+                MYSQL_DATABASE="homeboy_wptests"
+                MYSQL_CONNECTED="root-nopass"
+            fi
+        fi
+    fi
+
+    if [ -n "$MYSQL_CONNECTED" ]; then
+        # Try to create a dedicated test database; if the user lacks CREATE
+        # privileges, fall back to the live WP database (tests use their own
+        # table prefix so this is safe).
+        _mysql_create=(-h "$MYSQL_HOST" -u "$MYSQL_USER")
+        [ -n "${MYSQL_PASSWORD:-}" ] && _mysql_create+=(-p"$MYSQL_PASSWORD")
+        if mysql "${_mysql_create[@]}" -e "CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null; then
+            MYSQL_AUTO_CREATED="1"
+        else
+            # Can't create DB — reuse the live WP database name
+            MYSQL_DATABASE="${WP_DB_NAME:-wordpress}"
+            if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+                echo "DEBUG: Cannot CREATE DATABASE — reusing WP database '${MYSQL_DATABASE}'"
+            fi
+        fi
+        if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+            echo "DEBUG: Auto-detected MySQL via ${MYSQL_CONNECTED} (${MYSQL_USER}@${MYSQL_HOST}, db=${MYSQL_DATABASE})"
         fi
     elif php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);' 2>/dev/null; then
         DATABASE_TYPE="sqlite"
@@ -487,7 +584,9 @@ if [ $phpunit_exit -ne 0 ]; then
     rm -f "$PHPUNIT_TMPFILE"
     # Clean up auto-created test database
     if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
-        mysql -u root -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
+        _mysql_cleanup=(-h "$MYSQL_HOST" -u "$MYSQL_USER")
+        [ -n "${MYSQL_PASSWORD:-}" ] && _mysql_cleanup+=(-p"$MYSQL_PASSWORD")
+        mysql "${_mysql_cleanup[@]}" -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
     fi
     exit $phpunit_exit
 fi
@@ -569,7 +668,9 @@ if [ -n "${COVERAGE_CLOVER:-}" ] && [ -f "$COVERAGE_CLOVER" ]; then
                 rm -f "$COVERAGE_CLOVER"
                 # Clean up auto-created test database
                 if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
-                    mysql -u root -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
+                    _mysql_cleanup=(-h "$MYSQL_HOST" -u "$MYSQL_USER")
+                    [ -n "${MYSQL_PASSWORD:-}" ] && _mysql_cleanup+=(-p"$MYSQL_PASSWORD")
+                    mysql "${_mysql_cleanup[@]}" -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
                 fi
                 exit 1
             fi
@@ -583,5 +684,7 @@ fi
 
 # Clean up auto-created test database
 if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
-    mysql -u root -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
+    _mysql_cleanup=(-h "$MYSQL_HOST" -u "$MYSQL_USER")
+    [ -n "${MYSQL_PASSWORD:-}" ] && _mysql_cleanup+=(-p"$MYSQL_PASSWORD")
+    mysql "${_mysql_cleanup[@]}" -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
 fi
