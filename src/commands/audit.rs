@@ -362,7 +362,7 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
                 0,
             ));
         }
-        code_audit::audit_path_scoped(&resolved_id, &resolved_path, &changed)?
+        code_audit::audit_path_scoped(&resolved_id, &resolved_path, &changed, Some(git_ref))?
     } else {
         code_audit::audit_path_with_id(&resolved_id, &resolved_path)?
     };
@@ -1039,6 +1039,7 @@ fn build_chunk_verifier<'a>(
             "audit-fix-verify",
             &root.to_string_lossy(),
             &changed_files,
+            None, // verifier doesn't need impact tracing
         )
         .map_err(|error| format!("verification audit failed: {}", error))?;
 
@@ -1299,6 +1300,7 @@ mod tests {
                 "audit-fix-verify",
                 &root.to_string_lossy(),
                 &["commands/good_one.rs".to_string()],
+                None,
             )
             .unwrap();
             let verifier = super::build_chunk_verifier(&root, &baseline.findings, vec![]);
@@ -1350,6 +1352,7 @@ mod tests {
             "audit-fix-verify",
             &root.to_string_lossy(),
             &["commands/target.rs".to_string()],
+            None,
         )
         .unwrap();
 
@@ -1396,6 +1399,7 @@ mod tests {
             "audit-fix-verify",
             &root.to_string_lossy(),
             &["commands/good_one.rs".to_string()],
+            None,
         )
         .unwrap();
 
@@ -1444,6 +1448,7 @@ mod tests {
             "audit-fix-verify",
             &root.to_string_lossy(),
             &["commands/good_one.rs".to_string()],
+            None,
         )
         .unwrap();
 

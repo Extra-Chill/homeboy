@@ -21,6 +21,7 @@ mod duplication;
 mod findings;
 pub mod fingerprint;
 pub mod fixer;
+pub(crate) mod impact;
 pub(crate) mod import_matching;
 mod layer_ownership;
 mod naming;
@@ -170,27 +171,34 @@ pub fn audit_path(path: &str) -> Result<CodeAuditResult> {
 /// Core audit logic shared by both entry points.
 /// Also available for callers that have a component ID and an overridden path.
 pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAuditResult> {
-    audit_internal(component_id, source_path, None)
+    audit_internal(component_id, source_path, None, None)
 }
 
 /// Audit only specific files within a component path.
 ///
 /// Used for PR-scoped audits (`--changed-since`) where only changed files
-/// should be checked. Uses the same conventions and checks as a full audit
-/// but limits file walking to the provided filter.
+/// should be checked. Conventions are discovered from the full codebase,
+/// but findings are scoped to changed files + their affected call sites.
+///
+/// When `git_ref` is provided, the engine diffs fingerprints of changed files
+/// against their base-ref versions to detect symbol changes (renames, removals,
+/// signature changes), then fans out to find all files that reference those
+/// changed symbols. This catches breakage at call sites, not just in changed files.
 pub fn audit_path_scoped(
     component_id: &str,
     source_path: &str,
     file_filter: &[String],
+    git_ref: Option<&str>,
 ) -> Result<CodeAuditResult> {
-    audit_internal(component_id, source_path, Some(file_filter))
+    audit_internal(component_id, source_path, Some(file_filter), git_ref)
 }
 
-/// Internal audit implementation supporting optional file scoping.
+/// Internal audit implementation supporting optional file scoping and impact tracing.
 fn audit_internal(
     component_id: &str,
     source_path: &str,
     file_filter: Option<&[String]>,
+    git_ref: Option<&str>,
 ) -> Result<CodeAuditResult> {
     let root = Path::new(source_path);
 
@@ -400,17 +408,55 @@ fn audit_internal(
         all_findings.extend(topology_findings);
     }
 
-    // Phase 4j: Scope filtering — when auditing changed files only, remove
-    // findings for files that weren't changed. Conventions are still discovered
-    // from the full codebase so drift detection is accurate.
+    // Phase 4j: Impact-scoped filtering — when auditing changed files only,
+    // expand scope to include call sites affected by symbol changes, then
+    // filter findings to that expanded scope.
+    //
+    // With git_ref: diff fingerprints against base ref, find affected call sites,
+    //   report findings in changed files + affected files.
+    // Without git_ref: fall back to simple filename filter (changed files only).
     if let Some(filter) = file_filter {
         let before = all_findings.len();
-        all_findings.retain(|f| filter.iter().any(|changed| f.file.contains(changed)));
+
+        let scope_files: std::collections::HashSet<String> = if let Some(ref_str) = git_ref {
+            let (expanded_scope, affected) =
+                impact::expand_scope(source_path, ref_str, filter, &all_fingerprints);
+
+            if !affected.is_empty() {
+                log_status!(
+                    "audit",
+                    "Impact: {} affected call-site file(s) added to scope",
+                    affected.len()
+                );
+                for af in &affected {
+                    let reason_strs: Vec<String> =
+                        af.reasons.iter().map(|r| r.to_string()).collect();
+                    log_status!(
+                        "audit",
+                        "  {} → {} ({})",
+                        af.source_file,
+                        af.file,
+                        reason_strs.join(", ")
+                    );
+                }
+            }
+
+            expanded_scope
+        } else {
+            // No git ref — simple filename filter (legacy behavior)
+            filter.iter().cloned().collect()
+        };
+
+        all_findings.retain(|f| {
+            scope_files
+                .iter()
+                .any(|scope| f.file.contains(scope.as_str()))
+        });
         let filtered_out = before - all_findings.len();
         if filtered_out > 0 {
             log_status!(
                 "audit",
-                "Scoped: filtered {} finding(s) from unchanged files ({} remaining)",
+                "Scoped: filtered {} finding(s) from out-of-scope files ({} remaining)",
                 filtered_out,
                 all_findings.len()
             );
