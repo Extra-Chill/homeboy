@@ -44,6 +44,8 @@ pub struct DeployConfig {
     pub expected_version: Option<String>,
     /// Skip auto-pulling latest changes before deploy
     pub no_pull: bool,
+    /// Deploy from current branch HEAD instead of latest tag
+    pub head: bool,
 }
 
 /// Reason why a component was selected for deployment.
@@ -115,6 +117,9 @@ pub struct ComponentDeployResult {
     pub deploy_exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release_state: Option<ReleaseState>,
+    /// The git ref (tag or branch) that was built and deployed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployed_ref: Option<String>,
 }
 
 impl ComponentDeployResult {
@@ -133,6 +138,7 @@ impl ComponentDeployResult {
             build_exit_code: None,
             deploy_exit_code: None,
             release_state: None,
+            deployed_ref: None,
         }
     }
 
@@ -188,6 +194,11 @@ impl ComponentDeployResult {
 
     fn with_release_state(mut self, state: ReleaseState) -> Self {
         self.release_state = Some(state);
+        self
+    }
+
+    fn with_deployed_ref(mut self, git_ref: String) -> Self {
+        self.deployed_ref = Some(git_ref);
         self
     }
 }

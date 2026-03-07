@@ -130,6 +130,14 @@ fn deploy_components(
         check_uncommitted_changes(&components)?;
     }
 
+    // Checkout latest tag for each component (unless --head)
+    // This ensures only released, tagged code reaches production.
+    let tag_checkouts = if !config.head && !config.skip_build {
+        checkout_latest_tags(&components)?
+    } else {
+        Vec::new()
+    };
+
     // Verify expected version if --version was specified
     if let Some(ref expected) = config.expected_version {
         verify_expected_version(&components, expected)?;
@@ -143,7 +151,7 @@ fn deploy_components(
     for component in &components {
         // Apply per-project overrides (e.g. different extract_command or remote_owner)
         let component = apply_component_overrides(component, project);
-        let result = execute_component_deploy(
+        let mut result = execute_component_deploy(
             &component,
             config,
             ctx,
@@ -152,12 +160,32 @@ fn deploy_components(
             local_versions.get(&component.id).cloned(),
             remote_versions.get(&component.id).cloned(),
         );
+
+        // Record which git ref was deployed
+        if let Some(checkout) = tag_checkouts.iter().find(|c| c.component_id == component.id) {
+            result = result.with_deployed_ref(checkout.tag.clone());
+        } else if config.head {
+            // Deploying from HEAD — record the current branch
+            if let Some(branch) = crate::utils::command::run_in_optional(
+                &component.local_path,
+                "git",
+                &["rev-parse", "--abbrev-ref", "HEAD"],
+            ) {
+                result = result.with_deployed_ref(format!("{} (HEAD)", branch));
+            }
+        }
+
         if result.status == "deployed" {
             succeeded += 1;
         } else {
             failed += 1;
         }
         results.push(result);
+    }
+
+    // Restore original branches after deployment
+    if !tag_checkouts.is_empty() {
+        restore_branches(&tag_checkouts);
     }
 
     Ok(DeployOrchestrationResult {
@@ -315,6 +343,133 @@ fn sync_components(components: &[Component]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Record of a tag checkout for later branch restoration.
+struct TagCheckout {
+    component_id: String,
+    tag: String,
+    original_ref: String,
+    local_path: String,
+}
+
+/// Checkout the latest version tag for each component before building.
+///
+/// For each component, finds the latest semver tag, saves the current
+/// branch/ref, and checks out the tag. Returns a list of checkouts
+/// so branches can be restored after deployment.
+///
+/// Components without tags are skipped with a warning — they deploy
+/// from HEAD as before (the pre-tag-checkout behavior).
+fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
+    let mut checkouts = Vec::new();
+
+    for component in components {
+        let path = &component.local_path;
+
+        // Get the latest tag
+        let tag = match git::get_latest_tag(path) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                log_status!(
+                    "deploy",
+                    "Warning: '{}' has no version tags — deploying from HEAD (use --head to suppress this warning)",
+                    component.id
+                );
+                continue;
+            }
+            Err(_) => {
+                log_status!(
+                    "deploy",
+                    "Warning: could not read tags for '{}' — deploying from HEAD",
+                    component.id
+                );
+                continue;
+            }
+        };
+
+        // Save the current ref (branch name or commit hash for detached HEAD)
+        let original_ref = crate::utils::command::run_in_optional(
+            path,
+            "git",
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+        )
+        .unwrap_or_else(|| "main".to_string());
+
+        // If already on this tag's commit, skip checkout
+        let tag_commit = crate::utils::command::run_in_optional(path, "git", &["rev-parse", &tag]);
+        let head_commit = crate::utils::command::run_in_optional(path, "git", &["rev-parse", "HEAD"]);
+        if tag_commit.is_some() && tag_commit == head_commit {
+            log_status!("deploy", "'{}' is already at tag {} — no checkout needed", component.id, tag);
+            checkouts.push(TagCheckout {
+                component_id: component.id.clone(),
+                tag: tag.clone(),
+                original_ref,
+                local_path: path.clone(),
+            });
+            continue;
+        }
+
+        // Checkout the tag
+        log_status!("deploy", "'{}' checking out tag {} for deploy...", component.id, tag);
+        match crate::utils::command::run_in(path, "git", &["checkout", &tag], "git checkout tag") {
+            Ok(_) => {
+                checkouts.push(TagCheckout {
+                    component_id: component.id.clone(),
+                    tag: tag.clone(),
+                    original_ref,
+                    local_path: path.clone(),
+                });
+            }
+            Err(e) => {
+                return Err(Error::git_command_failed(format!(
+                    "Failed to checkout tag {} for '{}': {}",
+                    tag, component.id, e
+                )));
+            }
+        }
+    }
+
+    Ok(checkouts)
+}
+
+/// Restore original branches after deployment.
+///
+/// Best-effort: logs warnings on failure but does not abort.
+/// The deployment already completed — failing to restore a branch
+/// is inconvenient but not destructive.
+fn restore_branches(checkouts: &[TagCheckout]) {
+    for checkout in checkouts {
+        // Don't restore if original was detached HEAD (already on a tag/commit)
+        if checkout.original_ref == "HEAD" {
+            continue;
+        }
+        let restore = crate::utils::command::run_in(
+            &checkout.local_path,
+            "git",
+            &["checkout", &checkout.original_ref],
+            "git checkout restore",
+        );
+        match restore {
+            Ok(_) => {
+                log_status!(
+                    "deploy",
+                    "'{}' restored to {}",
+                    checkout.component_id,
+                    checkout.original_ref
+                );
+            }
+            Err(e) => {
+                log_status!(
+                    "deploy",
+                    "Warning: could not restore '{}' to {}: {}",
+                    checkout.component_id,
+                    checkout.original_ref,
+                    e
+                );
+            }
+        }
+    }
 }
 
 /// Verify that component versions match the expected version.

@@ -293,6 +293,7 @@ fn execute_deployment(component_id: &str) -> (Option<DeploymentResult>, i32) {
             keep_deps: false,
             expected_version: None, // Release already validated version
             no_pull: true,          // Release already pushed, no need to pull
+            head: true,             // Release just tagged — deploy from current state
         };
 
         match deploy::run(project_id, &config) {

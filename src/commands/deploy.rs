@@ -63,6 +63,9 @@ pub struct DeployArgs {
     /// Skip auto-pulling latest changes before deploy
     #[arg(long)]
     pub no_pull: bool,
+    /// Deploy from current branch HEAD instead of the latest tag
+    #[arg(long)]
+    pub head: bool,
 }
 
 #[derive(Serialize)]
@@ -265,6 +268,7 @@ pub fn run(
         keep_deps: args.keep_deps,
         expected_version: args.version.clone(),
         no_pull: args.no_pull,
+        head: args.head,
     };
 
     let result = deploy::run(&project_id, &config).map_err(|e| {
@@ -409,6 +413,7 @@ fn run_multi_project(args: &DeployArgs, project_ids: &[String]) -> CmdResult<Dep
             keep_deps: args.keep_deps,
             expected_version: args.version.clone(),
             no_pull: args.no_pull || !first_project, // Only pull on first project
+            head: args.head,
         };
 
         match deploy::run(project_id, &config) {

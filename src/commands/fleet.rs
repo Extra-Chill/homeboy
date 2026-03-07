@@ -78,10 +78,14 @@ enum FleetCommand {
         /// Fleet ID
         id: String,
     },
-    /// Show component versions across a fleet (local only)
+    /// Show live component versions across a fleet (via SSH)
     Status {
         /// Fleet ID
         id: String,
+
+        /// Use locally cached versions instead of live SSH check
+        #[arg(long)]
+        cached: bool,
     },
     /// Check component drift across a fleet (compares local vs remote)
     Check {
@@ -220,6 +224,9 @@ pub struct FleetComponentStatus {
     pub component_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Where the version was resolved from: "live" (SSH) or "cached" (local file)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_source: Option<String>,
 }
 
 pub fn run(args: FleetArgs, _global: &super::GlobalArgs) -> CmdResult<FleetOutput> {
@@ -237,7 +244,7 @@ pub fn run(args: FleetArgs, _global: &super::GlobalArgs) -> CmdResult<FleetOutpu
         FleetCommand::Remove { id, project } => remove(&id, &project),
         FleetCommand::Projects { id } => projects(&id),
         FleetCommand::Components { id } => components(&id),
-        FleetCommand::Status { id } => status(&id),
+        FleetCommand::Status { id, cached } => status(&id, cached),
         FleetCommand::Check { id, outdated } => check(&id, outdated),
         FleetCommand::Exec {
             id,
@@ -423,34 +430,111 @@ fn components(id: &str) -> CmdResult<FleetOutput> {
     ))
 }
 
-fn status(id: &str) -> CmdResult<FleetOutput> {
+fn status(id: &str, cached: bool) -> CmdResult<FleetOutput> {
     let fl = fleet::load(id)?;
     let mut project_statuses = Vec::new();
 
-    for project_id in &fl.project_ids {
-        let proj = match project::load(project_id) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        let mut component_statuses = Vec::new();
-        for component_id in &proj.component_ids {
-            let comp_version = match component::load(component_id) {
-                Ok(comp) => version::get_component_version(&comp),
-                Err(_) => None,
+    if cached {
+        // Cached mode: read versions from local files (old behavior)
+        for project_id in &fl.project_ids {
+            let proj = match project::load(project_id) {
+                Ok(p) => p,
+                Err(_) => continue,
             };
 
-            component_statuses.push(FleetComponentStatus {
-                component_id: component_id.clone(),
-                version: comp_version,
+            let mut component_statuses = Vec::new();
+            for component_id in &proj.component_ids {
+                let comp_version = match component::load(component_id) {
+                    Ok(comp) => version::get_component_version(&comp),
+                    Err(_) => None,
+                };
+
+                component_statuses.push(FleetComponentStatus {
+                    component_id: component_id.clone(),
+                    version: comp_version,
+                    version_source: Some("cached".to_string()),
+                });
+            }
+
+            project_statuses.push(FleetProjectStatus {
+                project_id: project_id.clone(),
+                server_id: proj.server_id.clone(),
+                components: component_statuses,
             });
         }
+    } else {
+        // Live mode (default): SSH into each server to get actual deployed versions
+        for project_id in &fl.project_ids {
+            let proj = match project::load(project_id) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
 
-        project_statuses.push(FleetProjectStatus {
-            project_id: project_id.clone(),
-            server_id: proj.server_id.clone(),
-            components: component_statuses,
-        });
+            log_status!("fleet", "Checking versions on '{}'...", project_id);
+
+            // Use the deploy check infrastructure to get remote versions via SSH
+            let config = DeployConfig {
+                component_ids: vec![],
+                all: true,
+                outdated: false,
+                dry_run: false,
+                check: true,
+                force: false,
+                skip_build: true,
+                keep_deps: false,
+                expected_version: None,
+                no_pull: true,
+                head: true,
+            };
+
+            match deploy::run(project_id, &config) {
+                Ok(result) => {
+                    let mut component_statuses = Vec::new();
+                    for comp_result in &result.results {
+                        component_statuses.push(FleetComponentStatus {
+                            component_id: comp_result.id.clone(),
+                            version: comp_result.remote_version.clone(),
+                            version_source: Some("live".to_string()),
+                        });
+                    }
+
+                    project_statuses.push(FleetProjectStatus {
+                        project_id: project_id.clone(),
+                        server_id: proj.server_id.clone(),
+                        components: component_statuses,
+                    });
+                }
+                Err(e) => {
+                    // SSH failed — fall back to cached versions with indicator
+                    log_status!(
+                        "fleet",
+                        "Warning: could not reach '{}' — falling back to cached versions: {}",
+                        project_id,
+                        e
+                    );
+
+                    let mut component_statuses = Vec::new();
+                    for component_id in &proj.component_ids {
+                        let comp_version = match component::load(component_id) {
+                            Ok(comp) => version::get_component_version(&comp),
+                            Err(_) => None,
+                        };
+
+                        component_statuses.push(FleetComponentStatus {
+                            component_id: component_id.clone(),
+                            version: comp_version,
+                            version_source: Some("cached".to_string()),
+                        });
+                    }
+
+                    project_statuses.push(FleetProjectStatus {
+                        project_id: project_id.clone(),
+                        server_id: proj.server_id.clone(),
+                        components: component_statuses,
+                    });
+                }
+            }
+        }
     }
 
     Ok((
@@ -490,6 +574,7 @@ fn check(id: &str, only_outdated: bool) -> CmdResult<FleetOutput> {
             keep_deps: false,
             expected_version: None,
             no_pull: true, // Fleet checks are read-only
+            head: true,    // Fleet checks don't build — skip tag checkout
         };
 
         match deploy::run(project_id, &config) {
