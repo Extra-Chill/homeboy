@@ -179,25 +179,29 @@ while IFS= read -r KIND; do
   BODY_FILE=$(mktemp)
 
   if [ -n "${EXISTING_NUMBER}" ]; then
-    # Update existing issue with a comment
-    cat > "${BODY_FILE}" <<COMMENTEOF
-### Updated: ${COUNT} findings ($(date -u +%Y-%m-%d))
+    # Update existing issue body + title (no comments — body is the source of truth)
+    cat > "${BODY_FILE}" <<UPDATEEOF
+## Audit: ${KIND_LABEL}
 
-**Run:** ${RUN_URL}
-**Homeboy:** \`${HOMEBOY_CLI_VERSION}\`
+**Component:** \`${COMP_ID}\`
+**Count:** ${COUNT} findings
+**Last run:** ${RUN_URL}
+**Updated:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Homeboy:** \`${HOMEBOY_CLI_VERSION}\` | Action: \`${HOMEBOY_ACTION_REPOSITORY}@${HOMEBOY_ACTION_REF}\`
+
+### Findings
 
 ${FINDINGS_TABLE}
 ${TRUNCATED_NOTE}
-COMMENTEOF
 
-    # Update the title to reflect current count
+---
+*Updated automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action) on each CI run until resolved.*
+UPDATEEOF
+
     gh api "repos/${REPO}/issues/${EXISTING_NUMBER}" \
       --method PATCH \
-      --field title="${ISSUE_TITLE}" > /dev/null 2>&1 || true
-
-    gh api "repos/${REPO}/issues/${EXISTING_NUMBER}/comments" \
-      --method POST \
-      -F body=@"${BODY_FILE}" > /dev/null 2>&1
+      --field title="${ISSUE_TITLE}" \
+      -F body=@"${BODY_FILE}" > /dev/null 2>&1 || true
 
     ISSUES_UPDATED=$((ISSUES_UPDATED + 1))
     echo "  Updated issue #${EXISTING_NUMBER}: ${ISSUE_TITLE}"
