@@ -112,7 +112,7 @@ inputs:
     required: false
     default: 'main'
   release-skip-changelog:
-    description: 'If true, skip auto-generating changelog entries from conventional commits'
+    description: 'Deprecated: changelog generation is now handled by homeboy core. This input is ignored.'
     required: false
     default: 'false'
 
@@ -357,7 +357,6 @@ runs:
         GH_TOKEN: ${{ github.token }}
         RELEASE_DRY_RUN: ${{ inputs.release-dry-run }}
         RELEASE_BRANCH: ${{ inputs.release-branch }}
-        RELEASE_SKIP_CHANGELOG: ${{ inputs.release-skip-changelog }}
         COMPONENT_NAME: ${{ inputs.component }}
       run: bash ${{ github.action_path }}/scripts/release/run-release.sh
 
