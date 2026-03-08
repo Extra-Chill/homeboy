@@ -82,24 +82,24 @@ for FIX_CMD in "${FIX_ARRAY[@]}"; do
   fi
 done
 
-# Update baseline for changed files so it stays current when this commit merges.
-# Uses --changed-since to scope the update to PR files only, preventing
-# CI/local environment parity from causing baseline churn on untouched files.
-# Falls back to full baseline if HOMEBOY_CHANGED_SINCE is not set.
-echo "Updating audit baseline..."
-set +e
-BASELINE_CMD="homeboy audit ${COMP_ID} --baseline --path ${WORKSPACE}"
-if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-  BASELINE_CMD="${BASELINE_CMD} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-  echo "Scoped baseline update (--changed-since ${HOMEBOY_CHANGED_SINCE})"
+# Skip baseline update on PR branches. The baseline lives in homeboy.json which
+# is shared across all branches — updating it on PR autofix commits creates
+# serial merge conflicts (every PR's autofix touches homeboy.json, and merging
+# one invalidates all others). Baselines should only be updated on main.
+# PR CI already uses --changed-since for scoped checks, so the baseline
+# doesn't need to reflect PR-specific state.
+if [ -z "${PR_NUMBER:-}" ]; then
+  echo "Updating audit baseline (non-PR context)..."
+  set +e
+  BASELINE_CMD="homeboy audit ${COMP_ID} --baseline --path ${WORKSPACE}"
+  eval "${BASELINE_CMD}"
+  BASELINE_EXIT=$?
+  set -e
+  if [ "${BASELINE_EXIT}" -ne 0 ]; then
+    echo "Baseline update exited non-zero (${BASELINE_EXIT}), continuing"
+  fi
 else
-  echo "Full baseline update (no --changed-since available)"
-fi
-eval "${BASELINE_CMD}"
-BASELINE_EXIT=$?
-set -e
-if [ "${BASELINE_EXIT}" -ne 0 ]; then
-  echo "Baseline update exited non-zero (${BASELINE_EXIT}), continuing"
+  echo "Skipping baseline update on PR branch (avoids homeboy.json merge conflicts)"
 fi
 
 if git diff --quiet && git diff --cached --quiet; then
