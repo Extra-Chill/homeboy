@@ -114,7 +114,7 @@ impl ReleaseStepExecutor {
                 )),
                 Some(vec![
                     format!("Delete stale tag: git tag -d {}", tag_name),
-                    format!("Then retry: homeboy release {} <bump>", self.component_id),
+                    format!("Then retry: homeboy release {}", self.component_id),
                 ]),
             ));
         }

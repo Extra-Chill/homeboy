@@ -590,7 +590,7 @@ fn validate_code_quality(component: &Component) -> Result<()> {
         None,
         Some(vec![
             "Fix the issues above before releasing".to_string(),
-            "To bypass: homeboy release <component> <bump> --skip-checks".to_string(),
+            "To bypass: homeboy release <component> --skip-checks".to_string(),
         ]),
     ))
 }

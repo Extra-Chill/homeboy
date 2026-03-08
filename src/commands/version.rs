@@ -164,7 +164,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             None,
         )
         .with_hint("homeboy version bump <component> patch".to_string())
-        .with_hint("homeboy release <component> patch".to_string())
+        .with_hint("homeboy release <component>".to_string())
         .with_hint("See: https://github.com/Extra-Chill/homeboy/issues/259".to_string())),
         VersionCommand::Bump {
             component_id,
