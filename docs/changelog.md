@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.72.0] - 2026-03-08
+### Added
+- enable autofix on all CI jobs + release autofix PRs
+- auto-detect bump type from conventional commits
+- auto-ratchet baseline after audit --fix --write resolves findings
+### Fixed
+- decompose rollback now covers caller files, unify snapshot systems
+- repair broken imports from squash merge of feat/auto-release
+- separate test files from convention groups and normalize signatures
+
 ## [0.71.1] - 2026-03-07
 ### Fixed
 - improve test coverage precision with visibility filtering and skip patterns (#577) (audit)
