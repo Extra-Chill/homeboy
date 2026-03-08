@@ -173,13 +173,29 @@ pub struct NewItem {
 ///
 /// Reads the existing `homeboy.json` (or creates one), sets
 /// `baselines.<key>` to the new baseline, and writes it back.
-pub fn save<M: Serialize>(
+/// Skips the write if the fingerprints haven't changed (avoids
+/// timestamp-only diffs that create noise in CI autofix).
+pub fn save<M: Serialize + for<'de> Deserialize<'de>>(
     config: &BaselineConfig,
     context_id: &str,
     items: &[impl Fingerprintable],
     metadata: M,
 ) -> Result<PathBuf> {
-    let known_fingerprints: Vec<String> = items.iter().map(|i| i.fingerprint()).collect();
+    let mut known_fingerprints: Vec<String> = items.iter().map(|i| i.fingerprint()).collect();
+    known_fingerprints.sort();
+
+    // Skip write if fingerprints are unchanged — avoids timestamp-only diffs.
+    // Only check when there are actual fingerprints (test baselines use empty
+    // fingerprints with metadata-only counts, so they always need to write).
+    if !known_fingerprints.is_empty() {
+        if let Ok(Some(existing)) = load::<M>(config) {
+            let mut existing_sorted = existing.known_fingerprints.clone();
+            existing_sorted.sort();
+            if existing_sorted == known_fingerprints {
+                return Ok(config.json_path());
+            }
+        }
+    }
 
     let baseline = Baseline {
         created_at: utc_now_iso8601(),
@@ -264,6 +280,9 @@ pub fn save_scoped<M: Serialize + for<'de> Deserialize<'de> + Clone>(
     // Build a set of scoped file paths for fast lookup
     let scope_set: HashSet<&str> = scope.iter().map(|s| s.as_str()).collect();
 
+    // Snapshot existing fingerprints before consuming them
+    let existing_fingerprints_snapshot = existing.known_fingerprints.clone();
+
     // Keep fingerprints that are outside the scope
     let mut merged_fingerprints: Vec<String> = existing
         .known_fingerprints
@@ -283,6 +302,13 @@ pub fn save_scoped<M: Serialize + for<'de> Deserialize<'de> + Clone>(
     // Sort for deterministic output
     merged_fingerprints.sort();
     merged_fingerprints.dedup();
+
+    // Skip write if fingerprints are unchanged — avoids timestamp-only diffs
+    let mut existing_sorted = existing_fingerprints_snapshot.clone();
+    existing_sorted.sort();
+    if existing_sorted == merged_fingerprints {
+        return Ok(json_path);
+    }
 
     let baseline = Baseline {
         created_at: utc_now_iso8601(),
