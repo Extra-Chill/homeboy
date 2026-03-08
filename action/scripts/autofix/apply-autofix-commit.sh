@@ -82,12 +82,20 @@ for FIX_CMD in "${FIX_ARRAY[@]}"; do
   fi
 done
 
-# Update baseline so it stays current when this commit merges to main.
-# Full (unscoped) audit ensures the baseline reflects the entire codebase,
-# not just changed files. Tolerate failure — baseline update is best-effort.
+# Update baseline for changed files so it stays current when this commit merges.
+# Uses --changed-since to scope the update to PR files only, preventing
+# CI/local environment parity from causing baseline churn on untouched files.
+# Falls back to full baseline if HOMEBOY_CHANGED_SINCE is not set.
 echo "Updating audit baseline..."
 set +e
-homeboy audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
+BASELINE_CMD="homeboy audit ${COMP_ID} --baseline --path ${WORKSPACE}"
+if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+  BASELINE_CMD="${BASELINE_CMD} --changed-since ${HOMEBOY_CHANGED_SINCE}"
+  echo "Scoped baseline update (--changed-since ${HOMEBOY_CHANGED_SINCE})"
+else
+  echo "Full baseline update (no --changed-since available)"
+fi
+eval "${BASELINE_CMD}"
 BASELINE_EXIT=$?
 set -e
 if [ "${BASELINE_EXIT}" -ne 0 ]; then
