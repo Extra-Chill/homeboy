@@ -1171,10 +1171,12 @@ mod tests {
 
     #[test]
     fn colocate_types_multiple_types() {
-        let items = [item("Foo", "struct"),
+        let items = [
+            item("Foo", "struct"),
             item("Foo", "impl"),
             item("Bar", "enum"),
-            item("Display for Foo", "impl")];
+            item("Display for Foo", "impl"),
+        ];
         let refs: Vec<&ParsedItem> = items.iter().collect();
         let groups = colocate_types(&refs);
 
