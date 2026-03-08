@@ -140,7 +140,7 @@ mod tests {
     use super::*;
     use crate::code_audit::conventions::Language;
     use crate::code_audit::fingerprint::FileFingerprint;
-    use std::collections::HashMap;
+    
 
     fn make_fp(path: &str, lang: Language, content: &str) -> FileFingerprint {
         FileFingerprint {

@@ -567,7 +567,7 @@ mod tests {
         // doThing and doStuff share "do" + similar length — may or may not match
         // depending on threshold. The key test is that the function runs.
         assert!(renames.len() + truly_removed.len() == 1);
-        assert!(truly_added.len() >= 1);
+        assert!(!truly_added.is_empty());
     }
 
     #[test]
@@ -885,7 +885,7 @@ mod tests {
     fn test_expand_scope_no_diffs_returns_changed_only() {
         // When diff_changed_files returns nothing (e.g. no git ref),
         // expand_scope should fall back to just the changed files
-        let changed = vec!["Foo.php".to_string()];
+        let changed = ["Foo.php".to_string()];
         let foo = make_fingerprint("Foo.php", vec!["run"], vec![], vec![], None, None, vec![]);
         let all_fps: Vec<&FileFingerprint> = vec![&foo];
 

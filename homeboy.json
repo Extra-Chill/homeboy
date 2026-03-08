@@ -3,14 +3,12 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-03-08T04:43:41Z",
-      "item_count": 926,
+      "created_at": "2026-03-08T07:04:22Z",
+      "item_count": 927,
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "Commands::src/commands/docs.rs::MissingImport",
-        "Commands::src/commands/version.rs::NamingMismatch",
         "Commands::src/commands/auth.rs::NamespaceMismatch",
-        "Commands::src/commands/server.rs::NamingMismatch",
         "Commands::src/commands/args.rs::MissingMethod",
         "structural::src/commands::DirectorySprawl",
         "structural::src/commands/audit.rs::GodFile",
@@ -64,6 +62,7 @@
         "structural::src/core/refactor/rename.rs::HighItemCount",
         "structural::src/core/refactor/transform.rs::HighItemCount",
         "structural::src/core/release/pipeline.rs::GodFile",
+        "structural::src/core/release/pipeline.rs::HighItemCount",
         "structural::src/core/test_analyze.rs::HighItemCount",
         "structural::src/core/test_drift.rs::GodFile",
         "structural::src/core/test_drift.rs::HighItemCount",
@@ -194,6 +193,7 @@
         "near-duplication::src/core/extension_update_check.rs::NearDuplicate",
         "near-duplication::src/core/extension_update_check.rs::NearDuplicate",
         "near-duplication::src/core/fleet.rs::NearDuplicate",
+        "near-duplication::src/core/lint_baseline.rs::NearDuplicate",
         "near-duplication::src/core/project.rs::NearDuplicate",
         "near-duplication::src/core/refactor/add.rs::NearDuplicate",
         "near-duplication::src/core/refactor/move_items.rs::NearDuplicate",
@@ -881,9 +881,10 @@
         "dead_code::src/commands/file.rs::UnreferencedExport",
         "dead_code::src/commands/logs.rs::UnreferencedExport",
         "dead_code::src/commands/release.rs::UnreferencedExport",
+        "dead_code::src/commands/test_scope.rs::DeadCodeMarker",
+        "dead_code::src/commands/test_scope.rs::DeadCodeMarker",
         "dead_code::src/core/build.rs::UnreferencedExport",
         "dead_code::src/core/changelog/sections.rs::UnreferencedExport",
-        "dead_code::src/core/code_audit/baseline.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/dead_code.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/discovery.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/discovery.rs::UnreferencedExport",
@@ -898,6 +899,7 @@
         "dead_code::src/core/code_audit/signatures.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/structural.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/test_coverage.rs::UnreferencedExport",
+        "dead_code::src/core/code_audit/test_mapping.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/walker.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/walker.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/walker.rs::UnreferencedExport",
@@ -907,7 +909,6 @@
         "dead_code::src/core/files.rs::UnreferencedExport",
         "dead_code::src/core/git/operations.rs::UnreferencedExport",
         "dead_code::src/core/git/operations.rs::UnreferencedExport",
-        "dead_code::src/core/git/primitives.rs::UnreferencedExport",
         "dead_code::src/core/hooks.rs::UnreferencedExport",
         "dead_code::src/core/local_files.rs::OrphanedInternal",
         "dead_code::src/core/refactor/rename.rs::UnreferencedExport",
@@ -934,15 +935,13 @@
         "dead_code::src/utils/token.rs::UnreferencedExport"
       ],
       "metadata": {
-        "alignment_score": 0.8684210777282715,
+        "alignment_score": 0.9210526347160339,
         "known_outliers": [
           "src/commands/docs.rs",
-          "src/commands/version.rs",
           "src/commands/auth.rs",
-          "src/commands/server.rs",
           "src/commands/args.rs"
         ],
-        "outliers_count": 5
+        "outliers_count": 3
       }
     }
   },
