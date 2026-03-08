@@ -139,11 +139,29 @@ def find_struct_instantiations(content: str, struct_name: str) -> list[dict]:
         # Extract field names present in this instantiation
         block = '\n'.join(lines[i:end_line + 1])
         fields_present = set()
+
+        # Match explicit field assignments: `field_name: value`
         for fm in re.finditer(r'(\w+)\s*:', block):
             field_name = fm.group(1)
             # Skip the struct name itself and common keywords
             if field_name != struct_name and field_name not in ('pub', 'crate', 'self', 'super'):
                 fields_present.add(field_name)
+
+        # Match Rust shorthand field init: bare identifier followed by comma,
+        # closing brace, or newline (e.g., `content,` or `language,`)
+        # Process inner lines (skip the struct opener and closer)
+        for j in range(i + 1, end_line):
+            stripped = lines[j].strip()
+            # Skip comments and empty lines
+            if not stripped or stripped.startswith('//'):
+                continue
+            # A shorthand field is a bare identifier (possibly with trailing comma)
+            # that has no colon (not `field: value`)
+            shorthand_match = re.match(r'^(\w+)\s*,?\s*$', stripped)
+            if shorthand_match and ':' not in stripped:
+                field_name = shorthand_match.group(1)
+                if field_name not in ('pub', 'crate', 'self', 'super', struct_name):
+                    fields_present.add(field_name)
 
         # Detect indentation of fields inside the struct
         field_indent = '            '  # default 12 spaces
