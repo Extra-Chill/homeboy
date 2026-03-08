@@ -125,10 +125,6 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         validate_commits_vs_changelog(&component, options.dry_run),
         "commits",
     );
-    v.capture(
-        validate_bump_guardrail(semver_recommendation.as_ref(), options.allow_underbump),
-        "semver_bump",
-    );
     v.capture(validate_changelog(&component), "changelog");
     let version_info = v.capture(version::read_version(Some(component_id)), "version");
 
@@ -240,52 +236,6 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         warnings,
         hints,
     })
-}
-
-/// Enforce semver floor from commits since latest tag.
-///
-/// Blocks under-bumps by default (e.g., requesting patch when commits include feat).
-fn validate_bump_guardrail(
-    recommendation: Option<&ReleaseSemverRecommendation>,
-    allow_underbump: bool,
-) -> Result<()> {
-    let Some(rec) = recommendation else {
-        return Ok(());
-    };
-
-    if !rec.is_underbump || allow_underbump {
-        return Ok(());
-    }
-
-    let latest_label = rec
-        .latest_tag
-        .clone()
-        .unwrap_or_else(|| "initial commit".to_string());
-
-    let mut hints = vec![
-        format!(
-            "Requested '{}' but commits since {} require at least '{}'",
-            rec.requested_bump,
-            latest_label,
-            rec.recommended_bump.as_deref().unwrap_or("patch")
-        ),
-        "Trigger commits:".to_string(),
-    ];
-
-    for trigger in rec.reasons.iter().take(5) {
-        hints.push(format!("  - {}", trigger));
-    }
-    hints.push(
-        "Use the recommended bump (or higher), or pass --allow-underbump to override intentionally"
-            .to_string(),
-    );
-
-    Err(Error::validation_invalid_argument(
-        "bump_type",
-        "Requested bump is lower than semver recommendation",
-        None,
-        Some(hints),
-    ))
 }
 
 fn build_semver_recommendation(
@@ -590,7 +540,7 @@ fn validate_code_quality(component: &Component) -> Result<()> {
         None,
         Some(vec![
             "Fix the issues above before releasing".to_string(),
-            "To bypass: homeboy release <component> <bump> --skip-checks".to_string(),
+            "To bypass: homeboy release <component> --skip-checks".to_string(),
         ]),
     ))
 }

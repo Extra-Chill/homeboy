@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::test_scaffold::load_extension_grammar;
+use crate::core::test_scaffold::helpers::load_extension_grammar;
 use crate::extension::{self, ParsedItem};
 use crate::utils::grammar_items;
 use crate::Result;

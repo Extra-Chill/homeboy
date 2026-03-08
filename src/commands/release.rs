@@ -1,43 +1,19 @@
-use clap::{Args, ValueEnum};
+use clap::Args;
 use homeboy::log_status;
 use serde::Serialize;
 
 use homeboy::component;
 use homeboy::deploy::{self, DeployConfig};
+use homeboy::git;
 use homeboy::release::{self, ReleasePlan, ReleaseRun};
 
 use super::args::{DryRunArgs, HiddenJsonArgs, PositionalComponentArgs};
 use super::{CmdResult, ProjectsSummary};
 
-#[derive(Clone, ValueEnum)]
-pub enum BumpType {
-    Patch,
-    Minor,
-    Major,
-}
-
-impl BumpType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            BumpType::Patch => "patch",
-            BumpType::Minor => "minor",
-            BumpType::Major => "major",
-        }
-    }
-}
-
 #[derive(Args)]
 pub struct ReleaseArgs {
     #[command(flatten)]
     comp: PositionalComponentArgs,
-
-    /// Version bump type (patch, minor, major) — not needed with --recover
-    #[arg(
-        value_name = "BUMP_TYPE",
-        ignore_case = true,
-        required_unless_present = "recover"
-    )]
-    bump_type: Option<BumpType>,
 
     #[command(flatten)]
     dry_run_args: DryRunArgs,
@@ -50,16 +26,17 @@ pub struct ReleaseArgs {
     deploy: bool,
 
     /// Recover from an interrupted release (tag + push current version)
-    #[arg(long, conflicts_with = "bump_type")]
+    #[arg(long)]
     recover: bool,
 
     /// Skip pre-release lint and test checks
     #[arg(long)]
     skip_checks: bool,
 
-    /// Allow bump type lower than commit-derived semver recommendation
+    /// Allow a major version bump. Required when commits contain breaking changes.
+    /// Without this flag, homeboy will warn and exit instead of releasing a major bump.
     #[arg(long)]
-    allow_underbump: bool,
+    major: bool,
 
     /// Skip publish/package steps (version bump + tag + push only).
     /// Use when CI handles publishing after the tag is pushed.
@@ -94,6 +71,14 @@ pub struct ReleaseResult {
     pub component_id: String,
     pub bump_type: String,
     pub dry_run: bool,
+    /// Number of releasable commits that drove the bump decision
+    pub releasable_commits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<ReleasePlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,20 +94,87 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         return run_recover(&args.comp);
     }
 
-    let bump_type = args.bump_type.ok_or_else(|| {
-        homeboy::Error::validation_missing_argument(vec!["bump_type".to_string()])
-    })?;
+    // Resolve bump type from conventional commits
+    let component = args.comp.load()?;
+    let (bump_type, releasable_count) = match resolve_bump(&component.local_path)? {
+        Some(result) => result,
+        None => {
+            log_status!(
+                "release",
+                "No releasable commits since last tag — nothing to release"
+            );
+            return Ok((
+                ReleaseOutput {
+                    result: ReleaseResult {
+                        component_id,
+                        bump_type: "none".to_string(),
+                        dry_run: args.dry_run_args.dry_run,
+                        releasable_commits: 0,
+                        new_version: None,
+                        tag: None,
+                        skipped_reason: Some("no-releasable-commits".to_string()),
+                        plan: None,
+                        run: None,
+                        deployment: None,
+                    },
+                },
+                0,
+            ));
+        }
+    };
+
+    // Safety gate: major bumps require --major flag
+    if bump_type == "major" && !args.major {
+        log_status!(
+            "release",
+            "Commits require a major version bump (breaking changes detected)"
+        );
+        log_status!(
+            "release",
+            "Re-run with --major to confirm: homeboy release {} --major",
+            component_id
+        );
+        return Ok((
+            ReleaseOutput {
+                result: ReleaseResult {
+                    component_id,
+                    bump_type: "major".to_string(),
+                    dry_run: args.dry_run_args.dry_run,
+                    releasable_commits: releasable_count,
+                    new_version: None,
+                    tag: None,
+                    skipped_reason: Some("major-requires-flag".to_string()),
+                    plan: None,
+                    run: None,
+                    deployment: None,
+                },
+            },
+            0,
+        ));
+    }
+
+    log_status!(
+        "release",
+        "Detected {} bump from {} releasable commit{}",
+        bump_type,
+        releasable_count,
+        if releasable_count == 1 { "" } else { "s" }
+    );
+
     let options = release::ReleaseOptions {
-        bump_type: bump_type.as_str().to_string(),
+        bump_type: bump_type.clone(),
         dry_run: args.dry_run_args.dry_run,
         path_override: args.comp.path.clone(),
         skip_checks: args.skip_checks,
-        allow_underbump: args.allow_underbump,
         skip_publish: args.skip_publish,
     };
 
     if args.dry_run_args.dry_run {
         let plan = release::plan(&component_id, &options)?;
+
+        // Extract new version from plan steps
+        let new_version = extract_new_version_from_plan(&plan);
+        let tag = new_version.as_ref().map(|v| format!("v{}", v));
 
         let deployment = if args.deploy {
             Some(plan_deployment(&component_id))
@@ -134,8 +186,12 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             ReleaseOutput {
                 result: ReleaseResult {
                     component_id,
-                    bump_type: options.bump_type,
+                    bump_type,
                     dry_run: true,
+                    releasable_commits: releasable_count,
+                    new_version,
+                    tag,
+                    skipped_reason: None,
                     plan: Some(plan),
                     run: None,
                     deployment,
@@ -146,6 +202,10 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
     } else {
         let run_result = release::run(&component_id, &options)?;
         display_release_summary(&run_result);
+
+        // Extract version from run result steps
+        let new_version = extract_new_version_from_run(&run_result);
+        let tag = new_version.as_ref().map(|v| format!("v{}", v));
 
         // Exit code 3 when release succeeded but post-release hooks failed.
         // Distinct from 1 (release failure) so callers can distinguish.
@@ -172,8 +232,12 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             ReleaseOutput {
                 result: ReleaseResult {
                     component_id,
-                    bump_type: options.bump_type,
+                    bump_type,
                     dry_run: false,
+                    releasable_commits: releasable_count,
+                    new_version,
+                    tag,
+                    skipped_reason: None,
                     plan: None,
                     run: Some(run_result),
                     deployment,
@@ -182,6 +246,54 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             exit_code,
         ))
     }
+}
+
+/// Resolve the bump type from conventional commits since the last tag.
+///
+/// Returns `Some((bump_type, releasable_count))` if there are releasable commits,
+/// or `None` if all commits are docs/chore/merge (nothing to release).
+fn resolve_bump(local_path: &str) -> homeboy::error::Result<Option<(String, usize)>> {
+    let latest_tag = git::get_latest_tag(local_path)?;
+    let commits = git::get_commits_since_tag(local_path, latest_tag.as_deref())?;
+
+    if commits.is_empty() {
+        return Ok(None);
+    }
+
+    let recommended = git::recommended_bump_from_commits(&commits);
+
+    match recommended {
+        Some(bump) => {
+            let releasable = commits
+                .iter()
+                .filter(|c| c.category.to_changelog_entry_type().is_some())
+                .count();
+            Ok(Some((bump.as_str().to_string(), releasable)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Extract new version from a release plan's version step config.
+fn extract_new_version_from_plan(plan: &ReleasePlan) -> Option<String> {
+    plan.steps
+        .iter()
+        .find(|s| s.step_type == "version")
+        .and_then(|s| s.config.get("to"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// Extract new version from a release run's version step data.
+fn extract_new_version_from_run(run: &ReleaseRun) -> Option<String> {
+    run.result
+        .steps
+        .iter()
+        .find(|s| s.step_type == "version")
+        .and_then(|s| s.data.as_ref())
+        .and_then(|d| d.get("new_version").or_else(|| d.get("to")))
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 /// Displays release success summary to stderr.
@@ -446,6 +558,10 @@ fn run_recover(comp_args: &PositionalComponentArgs) -> CmdResult<ReleaseOutput> 
                 component_id: component_id.to_string(),
                 bump_type: "recover".to_string(),
                 dry_run: false,
+                releasable_commits: 0,
+                new_version: None,
+                tag: None,
+                skipped_reason: None,
                 plan: None,
                 run: None,
                 deployment: None,

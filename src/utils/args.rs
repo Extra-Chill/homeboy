@@ -3,38 +3,6 @@
 //! Transforms CLI arguments before clap parsing to support intuitive syntax
 //! that would otherwise require special handling.
 
-/// Normalize version bump arguments to support --patch/--minor/--major syntax.
-/// Converts `version bump <component> --patch` to `version bump <component> -- patch`.
-/// The bump type must appear last (after `--`) so other flags like `--dry-run` are parsed correctly.
-pub(crate) fn normalize_version_bump(args: Vec<String>) -> Vec<String> {
-    let is_version_bump = args.len() >= 3
-        && args.get(1).map(|s| s == "version").unwrap_or(false)
-        && args.get(2).map(|s| s == "bump").unwrap_or(false);
-
-    if !is_version_bump {
-        return args;
-    }
-
-    let bump_flags = ["--patch", "--minor", "--major"];
-    let mut result = Vec::new();
-    let mut found_bump_type: Option<String> = None;
-
-    for arg in args {
-        if bump_flags.contains(&arg.as_str()) && found_bump_type.is_none() {
-            found_bump_type = Some(arg.trim_start_matches('-').to_string());
-        } else {
-            result.push(arg);
-        }
-    }
-
-    if let Some(bump_type) = found_bump_type {
-        result.push("--".to_string());
-        result.push(bump_type);
-    }
-
-    result
-}
-
 /// Normalize version command arguments.
 /// Converts `homeboy version <component_id>` to `homeboy version show <component_id>`
 /// when the argument is not a recognized subcommand (show, set, bump, edit, merge).
@@ -48,9 +16,7 @@ pub(crate) fn normalize_version_show(args: Vec<String>) -> Vec<String> {
         return args;
     }
 
-    let known_subcommands = [
-        "show", "set", "bump", "edit", "merge", "--help", "-h", "help",
-    ];
+    let known_subcommands = ["show", "--help", "-h", "help"];
     let second_arg = args.get(2).map(|s| s.as_str()).unwrap_or("");
 
     // If it's already a known subcommand or a flag, pass through unchanged
@@ -64,63 +30,6 @@ pub(crate) fn normalize_version_show(args: Vec<String>) -> Vec<String> {
     result.push(args[1].clone()); // version
     result.push("show".to_string()); // insert "show"
     result.extend(args[2..].iter().cloned()); // component_id and remaining args
-
-    result
-}
-
-/// Normalize version --bump flag to subcommand form.
-/// Converts `version <component> --bump <type>` to `version bump <component> <type>`.
-pub(crate) fn normalize_version_bump_flag(args: Vec<String>) -> Vec<String> {
-    // Must have: homeboy version <something> --bump <type>
-    if args.len() < 5 {
-        return args;
-    }
-
-    let is_version_cmd = args.get(1).map(|s| s == "version").unwrap_or(false);
-    if !is_version_cmd {
-        return args;
-    }
-
-    // Already has subcommand (bump, show, set, etc.)
-    let known_subcommands = ["bump", "show", "set", "edit", "merge"];
-    if args
-        .get(2)
-        .map(|s| known_subcommands.contains(&s.as_str()))
-        .unwrap_or(false)
-    {
-        return args;
-    }
-
-    // Look for --bump flag
-    let bump_pos = args.iter().position(|s| s == "--bump");
-    let Some(bump_pos) = bump_pos else {
-        return args;
-    };
-
-    // Need a value after --bump
-    let Some(bump_type) = args.get(bump_pos + 1) else {
-        return args;
-    };
-
-    // Build normalized args: homeboy version bump <component> <type> [other flags]
-    let mut result = vec![
-        args[0].clone(),    // homeboy
-        args[1].clone(),    // version
-        "bump".to_string(), // insert subcommand
-    ];
-
-    // Add args between "version" and "--bump" (the component)
-    for arg in &args[2..bump_pos] {
-        result.push(arg.clone());
-    }
-
-    // Add bump type
-    result.push(bump_type.clone());
-
-    // Add remaining args after bump type
-    for arg in &args[bump_pos + 2..] {
-        result.push(arg.clone());
-    }
 
     result
 }
@@ -364,8 +273,6 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
 
 /// Apply all argument normalizations in sequence.
 pub fn normalize(args: Vec<String>) -> Vec<String> {
-    let args = normalize_version_bump(args);
-    let args = normalize_version_bump_flag(args); // Must run before normalize_version_show
     let args = normalize_version_show(args);
     let args = normalize_changelog_component(args);
     normalize_trailing_flags(args)
@@ -557,22 +464,6 @@ mod tests {
     }
 
     #[test]
-    fn test_version_bump_normalization() {
-        let args = vec![
-            "homeboy".into(),
-            "version".into(),
-            "bump".into(),
-            "my-plugin".into(),
-            "--patch".into(),
-        ];
-        let result = normalize_version_bump(args);
-        assert_eq!(
-            result,
-            vec!["homeboy", "version", "bump", "my-plugin", "--", "patch"]
-        );
-    }
-
-    #[test]
     fn test_version_show_normalization() {
         let args = vec!["homeboy".into(), "version".into(), "my-plugin".into()];
         let result = normalize_version_show(args);
@@ -584,7 +475,7 @@ mod tests {
         let args = vec![
             "homeboy".into(),
             "version".into(),
-            "bump".into(),
+            "show".into(),
             "my-plugin".into(),
         ];
         let result = normalize_version_show(args.clone());
@@ -605,59 +496,6 @@ mod tests {
         let result = normalize(args);
         assert_eq!(result[4], "--");
         assert_eq!(result[5], "--build_command");
-    }
-
-    #[test]
-    fn test_version_bump_flag_to_subcommand() {
-        let args = vec![
-            "homeboy".into(),
-            "version".into(),
-            "data-machine".into(),
-            "--bump".into(),
-            "patch".into(),
-        ];
-        let result = normalize_version_bump_flag(args);
-        assert_eq!(
-            result,
-            vec!["homeboy", "version", "bump", "data-machine", "patch"]
-        );
-    }
-
-    #[test]
-    fn test_version_bump_flag_with_extra_flags() {
-        let args = vec![
-            "homeboy".into(),
-            "version".into(),
-            "data-machine".into(),
-            "--bump".into(),
-            "minor".into(),
-            "--dry-run".into(),
-        ];
-        let result = normalize_version_bump_flag(args);
-        assert_eq!(
-            result,
-            vec![
-                "homeboy",
-                "version",
-                "bump",
-                "data-machine",
-                "minor",
-                "--dry-run"
-            ]
-        );
-    }
-
-    #[test]
-    fn test_version_bump_subcommand_unchanged() {
-        let args = vec![
-            "homeboy".into(),
-            "version".into(),
-            "bump".into(),
-            "data-machine".into(),
-            "patch".into(),
-        ];
-        let result = normalize_version_bump_flag(args.clone());
-        assert_eq!(result, args);
     }
 
     #[test]
