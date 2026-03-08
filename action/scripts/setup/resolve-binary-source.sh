@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-if [ -n "${HAS_SOURCE_INPUT}" ] && [ "${SOURCE_BUILT:-}" = "true" ]; then
+if [ -n "${HAS_BINARY_PATH_INPUT:-}" ]; then
+  echo "binary-source=prebuilt" >> "${GITHUB_OUTPUT}"
+elif [ -n "${HAS_SOURCE_INPUT}" ] && [ "${SOURCE_BUILT:-}" = "true" ]; then
   echo "binary-source=source" >> "${GITHUB_OUTPUT}"
 elif [ -n "${HAS_SOURCE_INPUT}" ]; then
   echo "binary-source=fallback" >> "${GITHUB_OUTPUT}"

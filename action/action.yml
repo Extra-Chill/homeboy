@@ -12,7 +12,11 @@ inputs:
     required: false
     default: 'latest'
   source:
-    description: 'Path to build homeboy from source (e.g. "."). Falls back to release binary on build failure.'
+    description: 'Path to build homeboy from source (e.g. "."). Falls back to release binary on build failure. Ignored when binary-path is set.'
+    required: false
+    default: ''
+  binary-path:
+    description: 'Path to a pre-built homeboy binary. Skips source build and release download. Use with build-once CI patterns where a prior job uploads the binary as an artifact.'
     required: false
     default: ''
   rust-toolchain:
@@ -157,14 +161,28 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
+    - name: Install pre-built binary
+      id: install-prebuilt
+      if: inputs.binary-path != ''
+      shell: bash
+      run: |
+        BINARY="${{ inputs.binary-path }}"
+        if [ ! -f "${BINARY}" ]; then
+          echo "::error::binary-path '${BINARY}' does not exist"
+          exit 1
+        fi
+        chmod +x "${BINARY}"
+        sudo cp "${BINARY}" /usr/local/bin/homeboy
+        echo "Installed pre-built binary: $(homeboy --version)"
+
     - name: Install Rust toolchain (source build)
-      if: inputs.source != ''
+      if: inputs.binary-path == '' && inputs.source != ''
       uses: dtolnay/rust-toolchain@master
       with:
         toolchain: ${{ inputs.rust-toolchain }}
 
     - name: Cache cargo (source build)
-      if: inputs.source != ''
+      if: inputs.binary-path == '' && inputs.source != ''
       uses: actions/cache@v4
       with:
         path: |
@@ -176,7 +194,7 @@ runs:
 
     - name: Build from source
       id: source-build
-      if: inputs.source != ''
+      if: inputs.binary-path == '' && inputs.source != ''
       shell: bash
       env:
         SOURCE_PATH: ${{ inputs.source }}
@@ -184,7 +202,7 @@ runs:
 
     - name: Resolve Homeboy version
       id: resolve-version
-      if: inputs.source == '' || steps.source-build.outputs.built != 'true'
+      if: inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true')
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -193,7 +211,7 @@ runs:
 
     - name: Cache Homeboy
       id: cache-homeboy
-      if: inputs.source == '' || steps.source-build.outputs.built != 'true'
+      if: inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true')
       uses: actions/cache@v4
       with:
         path: |
@@ -202,7 +220,7 @@ runs:
         key: homeboy-${{ steps.resolve-version.outputs.resolved-version }}-${{ inputs.extension }}-${{ runner.os }}-${{ runner.arch }}
 
     - name: Install Homeboy
-      if: (inputs.source == '' || steps.source-build.outputs.built != 'true') && steps.cache-homeboy.outputs.cache-hit != 'true'
+      if: inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true') && steps.cache-homeboy.outputs.cache-hit != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -213,12 +231,13 @@ runs:
       id: resolve-binary
       shell: bash
       env:
+        HAS_BINARY_PATH_INPUT: ${{ inputs.binary-path }}
         HAS_SOURCE_INPUT: ${{ inputs.source }}
         SOURCE_BUILT: ${{ steps.source-build.outputs.built }}
       run: bash ${{ github.action_path }}/scripts/setup/resolve-binary-source.sh
 
     - name: Install extension
-      if: inputs.extension != '' && (steps.cache-homeboy.outputs.cache-hit != 'true' || steps.source-build.outputs.built == 'true')
+      if: inputs.extension != '' && (inputs.binary-path != '' || steps.cache-homeboy.outputs.cache-hit != 'true' || steps.source-build.outputs.built == 'true')
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
