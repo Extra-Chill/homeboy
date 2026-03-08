@@ -35,24 +35,48 @@ HOMEBOY_EXTENSION_ID="${HOMEBOY_EXTENSION_ID:-auto}"
 HOMEBOY_ACTION_REF="${HOMEBOY_ACTION_REF:-unknown}"
 HOMEBOY_ACTION_REPOSITORY="${HOMEBOY_ACTION_REPOSITORY:-unknown}"
 
+AUDIT_JSON="${OUTPUT_DIR}/audit.json"
 AUDIT_LOG="${OUTPUT_DIR}/audit.log"
 
-# --- Step 1: Extract audit JSON from log ---
+# --- Step 1: Read audit findings from structured JSON ---
 
-if [ ! -f "${AUDIT_LOG}" ]; then
-  echo "No audit log found at ${AUDIT_LOG} — falling back to generic issue filing"
-  exit 1
+# Prefer the pre-extracted .json file (produced by run-homeboy-commands.sh).
+# Fall back to scraping the .log file for backward compatibility.
+if [ -f "${AUDIT_JSON}" ] && [ -s "${AUDIT_JSON}" ]; then
+  FINDINGS_JSON=$(python3 -c "
+import json, sys
+payload = json.load(open(sys.argv[1]))
+data = payload.get('data', {})
+findings = data.get('findings', [])
+summary = data.get('summary', {})
+component = data.get('component_id', '')
+groups = {}
+for f in findings:
+    kind = f.get('kind', 'unknown')
+    groups.setdefault(kind, []).append(f)
+print(json.dumps({
+    'groups': {k: v for k, v in sorted(groups.items(), key=lambda x: -len(x[1]))},
+    'summary': summary,
+    'component_id': component,
+    'total_findings': len(findings)
+}))
+" "${AUDIT_JSON}" 2>/dev/null) || {
+    echo "Failed to read audit.json — falling back to log scraping"
+    FINDINGS_JSON=""
+  }
 fi
 
-# Extract the audit JSON payload from the log. The log contains the full
-# homeboy JSON output ({"success":true,"data":{...}}) mixed with stderr.
-# Use python to reliably extract it.
-FINDINGS_JSON=$(AUDIT_LOG_PATH="${AUDIT_LOG}" python3 -c "
-import json, os, sys
+# Fall back to log scraping if JSON file is missing or failed
+if [ -z "${FINDINGS_JSON:-}" ]; then
+  if [ ! -f "${AUDIT_LOG}" ]; then
+    echo "No audit log found at ${AUDIT_LOG} — falling back to generic issue filing"
+    exit 1
+  fi
 
-text = open(os.environ['AUDIT_LOG_PATH'], 'r', errors='replace').read()
+  FINDINGS_JSON=$(python3 -c "
+import json, sys
 
-# Strip GitHub Actions timestamp prefixes
+text = open(sys.argv[1], 'r', errors='replace').read()
 lines = []
 for line in text.splitlines():
     if 'Z ' in line:
@@ -61,7 +85,6 @@ for line in text.splitlines():
         lines.append(line)
 text = '\n'.join(lines)
 
-# Find the audit JSON payload
 decoder = json.JSONDecoder()
 i = 0
 payload = None
@@ -86,25 +109,21 @@ if not payload:
 findings = payload.get('data', {}).get('findings', [])
 summary = payload.get('data', {}).get('summary', {})
 component = payload.get('data', {}).get('component_id', '')
-
-# Group findings by kind
 groups = {}
 for f in findings:
     kind = f.get('kind', 'unknown')
-    if kind not in groups:
-        groups[kind] = []
-    groups[kind].append(f)
-
+    groups.setdefault(kind, []).append(f)
 print(json.dumps({
     'groups': {k: v for k, v in sorted(groups.items(), key=lambda x: -len(x[1]))},
     'summary': summary,
     'component_id': component,
     'total_findings': len(findings)
 }))
-" 2>/dev/null) || {
-  echo "Failed to parse audit findings from log — falling back to generic issue filing"
-  exit 1
-}
+" "${AUDIT_LOG}" 2>/dev/null) || {
+    echo "Failed to parse audit findings from log — falling back to generic issue filing"
+    exit 1
+  }
+fi
 
 TOTAL_FINDINGS=$(echo "${FINDINGS_JSON}" | jq -r '.total_findings')
 COMPONENT_FROM_AUDIT=$(echo "${FINDINGS_JSON}" | jq -r '.component_id // empty')

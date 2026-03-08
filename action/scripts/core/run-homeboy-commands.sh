@@ -50,6 +50,35 @@ for CMD in "${CMD_ARRAY[@]}"; do
   set -e
   echo "::endgroup::"
 
+  # Extract structured JSON from the log output.
+  # Homeboy commands embed JSON objects in their text output. The first
+  # top-level JSON object with a "success" key is the output envelope.
+  # Extract it into a .json file so downstream scripts can read structured
+  # data instead of scraping logs with regex.
+  python3 -c "
+import json, sys
+text = open(sys.argv[1]).read()
+# Strip GitHub Actions timestamp prefixes if present
+lines = []
+for line in text.split('\n'):
+    if ' Z ' in line:
+        line = line.split(' Z ', 1)[-1]
+    lines.append(line)
+text = '\n'.join(lines)
+decoder = json.JSONDecoder()
+for i, c in enumerate(text):
+    if c == '{':
+        try:
+            obj, _ = decoder.raw_decode(text, i)
+            if isinstance(obj, dict) and 'success' in obj:
+                json.dump(obj, open(sys.argv[2], 'w'), indent=2)
+                sys.exit(0)
+        except (json.JSONDecodeError, ValueError):
+            pass
+# No JSON envelope found — write a minimal status-only file
+json.dump({'success': sys.argv[3] == '0', 'data': {}}, open(sys.argv[2], 'w'))
+" "${HOMEBOY_OUTPUT_DIR}/${CMD}.log" "${HOMEBOY_OUTPUT_DIR}/${CMD}.json" "${CMD_EXIT}" 2>/dev/null || true
+
   if [ "${CMD_EXIT}" -eq 0 ]; then
     echo "::notice::homeboy ${CMD}: PASSED"
     RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${CMD}" '. + {($cmd): "pass"}')

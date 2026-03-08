@@ -136,6 +136,148 @@ def classify_autofixability(
     }
 
 
+def read_json(path: str) -> dict[str, Any] | None:
+    """Read a JSON file, returning None if missing or invalid."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def build_lint_digest_from_json(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build lint digest from structured JSON output."""
+    data = payload.get("data", {})
+    error = payload.get("error", {})
+
+    return {
+        "lint_summary": str(data.get("summary", "")),
+        "phpcs_summary": str(data.get("phpcs_summary", "")),
+        "phpstan_summary": str(data.get("phpstan_summary", "")),
+        "build_failed": str(data.get("build_failed", "")),
+        "error_code": str(error.get("code", "")),
+        "error_message": str(error.get("message", "")),
+        "error_field": str(error.get("details", {}).get("field", "")),
+        "error_hint": "",
+        "top_violations": [str(v) for v in data.get("top_violations", [])][:10],
+        "raw_excerpt": [],
+    }
+
+
+def build_test_digest_from_json(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build test digest from structured JSON output."""
+    data = payload.get("data", {})
+    test_counts = data.get("test_counts", {})
+    failed_tests = data.get("failed_tests", [])
+
+    top_failed = []
+    for t in failed_tests[:10]:
+        if isinstance(t, dict):
+            top_failed.append({
+                "name": str(t.get("name", "")),
+                "detail": str(t.get("detail", t.get("message", ""))),
+                "location": str(t.get("location", t.get("file", ""))),
+            })
+        else:
+            top_failed.append({"name": str(t), "detail": "", "location": ""})
+
+    failed_count = int(test_counts.get("failed", 0)) + int(test_counts.get("errors", 0))
+    if not failed_count:
+        failed_count = len(top_failed)
+
+    return {
+        "failed_tests_count": failed_count,
+        "top_failed_tests": top_failed,
+        "raw_excerpt": [],
+    }
+
+
+def build_audit_digest_from_json(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build audit digest from structured JSON output.
+
+    The JSON envelope has the same structure that extract_audit_digest()
+    scraped from logs — baseline_comparison, summary, findings, conventions.
+    """
+    data = payload.get("data", {})
+    baseline = data.get("baseline_comparison", {}) if isinstance(data, dict) else {}
+    summary = data.get("summary", {}) if isinstance(data, dict) else {}
+    new_items = baseline.get("new_items", []) if isinstance(baseline, dict) else []
+    if not isinstance(new_items, list):
+        new_items = []
+
+    findings = data.get("findings", []) if isinstance(data, dict) else []
+    if not isinstance(findings, list):
+        findings = []
+
+    conventions = data.get("conventions", []) if isinstance(data, dict) else []
+    if not isinstance(conventions, list):
+        conventions = []
+
+    outlier_items: list[dict[str, Any]] = []
+    for conv in conventions:
+        if not isinstance(conv, dict):
+            continue
+        context_label = str(
+            conv.get("context_label")
+            or conv.get("name")
+            or conv.get("rule")
+            or conv.get("pattern")
+            or "unknown"
+        )
+        outliers = conv.get("outliers", [])
+        if not isinstance(outliers, list):
+            continue
+        for outlier in outliers:
+            if not isinstance(outlier, dict):
+                continue
+            item = dict(outlier)
+            item.setdefault("context_label", context_label)
+            outlier_items.append(item)
+
+    severity_counts: dict[str, int] = {}
+    top_findings: list[dict[str, str]] = []
+    new_findings: list[dict[str, str]] = []
+
+    for item in new_items:
+        if not isinstance(item, dict):
+            continue
+        new_findings.append({
+            "context": str(item.get("context_label") or item.get("file") or "unknown"),
+            "message": str(item.get("description") or item.get("message") or "(new finding)"),
+            "fingerprint": str(item.get("fingerprint") or ""),
+        })
+
+    def normalize_file(raw: Any) -> str:
+        if isinstance(raw, dict):
+            return str(raw.get("path") or raw.get("file") or "unknown")
+        return str(raw or "unknown")
+
+    for item in findings + outlier_items:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or item.get("level") or "unknown").lower()
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        top_findings.append({
+            "file": normalize_file(item.get("file") or item.get("path") or item.get("context_label")),
+            "rule": str(item.get("rule") or item.get("kind") or item.get("category") or "outlier"),
+            "message": str(item.get("description") or item.get("message") or "(outlier)"),
+            "suggested_fix": str(item.get("suggested_fix") or item.get("suggestion") or ""),
+        })
+
+    return {
+        "drift_increased": bool(baseline.get("drift_increased", False)),
+        "new_findings_count": len(new_findings),
+        "new_findings": new_findings[:100],
+        "alignment_score": summary.get("alignment_score") if isinstance(summary, dict) else None,
+        "outliers_found": summary.get("outliers_found") if isinstance(summary, dict) else None,
+        "parsed_outlier_items": len(outlier_items),
+        "severity_counts": severity_counts,
+        "top_findings": top_findings[:500],
+        "raw_excerpt": [],
+    }
+
+
 def write_json(path: str, payload: dict[str, Any]) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
@@ -226,28 +368,53 @@ def main() -> int:
     test_log = read_text(os.path.join(output_dir, "test.log"))
     audit_log = read_text(os.path.join(output_dir, "audit.log"))
 
-    lint_digest = extract_lint_digest(lint_log) if results.get("lint") == "fail" else {
-        "lint_summary": "",
-        "phpcs_summary": "",
-        "phpstan_summary": "",
-        "build_failed": "",
-        "top_violations": [],
-    }
+    # Structured JSON files extracted from homeboy output by run-homeboy-commands.sh.
+    # These are preferred over log scraping — only fall back to parsers when missing.
+    lint_json = read_json(os.path.join(output_dir, "lint.json"))
+    test_json = read_json(os.path.join(output_dir, "test.json"))
+    audit_json = read_json(os.path.join(output_dir, "audit.json"))
 
-    test_digest = extract_test_failures(test_log) if results.get("test") == "fail" else {
-        "failed_tests_count": 0,
-        "top_failed_tests": [],
-    }
-    audit_digest = extract_audit_digest(
-        audit_log,
-        extract_json_candidates,
-        normalize_log_text,
-    ) if results.get("audit") == "fail" else {
-        "drift_increased": False,
-        "outliers_found": None,
-        "severity_counts": {},
-        "top_findings": [],
-    }
+    if results.get("lint") == "fail":
+        if lint_json and lint_json.get("data"):
+            lint_digest = build_lint_digest_from_json(lint_json)
+        else:
+            lint_digest = extract_lint_digest(lint_log)
+    else:
+        lint_digest = {
+            "lint_summary": "",
+            "phpcs_summary": "",
+            "phpstan_summary": "",
+            "build_failed": "",
+            "top_violations": [],
+        }
+
+    if results.get("test") == "fail":
+        if test_json and test_json.get("data"):
+            test_digest = build_test_digest_from_json(test_json)
+        else:
+            test_digest = extract_test_failures(test_log)
+    else:
+        test_digest = {
+            "failed_tests_count": 0,
+            "top_failed_tests": [],
+        }
+
+    if results.get("audit") == "fail":
+        if audit_json and audit_json.get("data"):
+            audit_digest = build_audit_digest_from_json(audit_json)
+        else:
+            audit_digest = extract_audit_digest(
+                audit_log,
+                extract_json_candidates,
+                normalize_log_text,
+            )
+    else:
+        audit_digest = {
+            "drift_increased": False,
+            "outliers_found": None,
+            "severity_counts": {},
+            "top_findings": [],
+        }
     autofixability = classify_autofixability(
         results,
         commands_csv,
