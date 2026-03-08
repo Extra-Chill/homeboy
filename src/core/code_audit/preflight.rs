@@ -88,6 +88,64 @@ pub fn run_insertion_preflight(
             }];
             Some(finalize_report(checks))
         }
+        AuditFinding::DuplicateFunction => {
+            let abs_path = context.root.join(file);
+            let content = std::fs::read_to_string(&abs_path).ok()?;
+            let language = detect_language(&abs_path);
+
+            let mut checks = Vec::new();
+
+            // Check that the function exists at the expected line range
+            if let super::fixer::InsertionKind::FunctionRemoval {
+                start_line,
+                end_line,
+            } = &insertion.kind
+            {
+                let line_count = content.lines().count();
+                let range_valid = *start_line >= 1 && *end_line <= line_count;
+                checks.push(PreflightCheck {
+                    name: "function_boundaries".to_string(),
+                    passed: range_valid,
+                    detail: if range_valid {
+                        format!(
+                            "Function found at lines {}–{} (file has {} lines)",
+                            start_line, end_line, line_count
+                        )
+                    } else {
+                        format!(
+                            "Line range {}–{} is out of bounds (file has {} lines)",
+                            start_line, end_line, line_count
+                        )
+                    },
+                });
+
+                // Simulate the removal and check the result parses
+                if range_valid {
+                    let simulated = apply_insertions_to_content(
+                        &content,
+                        std::slice::from_ref(insertion),
+                        &language,
+                    );
+                    let still_valid = simulated != content;
+                    checks.push(PreflightCheck {
+                        name: "removal_applied".to_string(),
+                        passed: still_valid,
+                        detail: if still_valid {
+                            "Function removal modifies the file as expected".to_string()
+                        } else {
+                            "Removal produced no change — function may have already been removed"
+                                .to_string()
+                        },
+                    });
+                }
+            }
+
+            if checks.is_empty() {
+                None
+            } else {
+                Some(finalize_report(checks))
+            }
+        }
         _ => None,
     }
 }

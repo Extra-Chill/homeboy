@@ -133,7 +133,8 @@ impl InsertionKind {
             | Self::RegistrationStub
             | Self::ConstructorWithRegistration
             | Self::VisibilityChange { .. } => FixSafetyTier::SafeWithChecks,
-            Self::FunctionRemoval { .. } | Self::TraitUse => FixSafetyTier::PlanOnly,
+            Self::FunctionRemoval { .. } => FixSafetyTier::SafeWithChecks,
+            Self::TraitUse => FixSafetyTier::PlanOnly,
         }
     }
 }
@@ -828,7 +829,10 @@ fn generate_import_statement(import_path: &str, language: &Language) -> String {
 fn insert_import(content: &str, import_line: &str, language: &Language) -> String {
     let lines: Vec<&str> = content.lines().collect();
 
-    // Find the last import/use line
+    // Find the last top-level import/use line.
+    // For Rust, stop scanning when we hit a definition keyword at column 0
+    // (fn, struct, enum, impl, mod, trait, const, static, type) to avoid
+    // matching `use super::*;` inside test modules or impl blocks.
     let import_prefix = match language {
         Language::Rust => "use ",
         Language::Php => "use ",
@@ -836,9 +840,30 @@ fn insert_import(content: &str, import_line: &str, language: &Language) -> Strin
         Language::Unknown => "use ",
     };
 
+    let rust_definition_starts = [
+        "fn ", "pub fn ", "pub(crate) fn ", "pub(super) fn ",
+        "struct ", "pub struct ", "pub(crate) struct ",
+        "enum ", "pub enum ", "pub(crate) enum ",
+        "impl ", "impl<",
+        "mod ", "pub mod ", "pub(crate) mod ",
+        "trait ", "pub trait ", "pub(crate) trait ",
+        "const ", "pub const ", "pub(crate) const ",
+        "static ", "pub static ", "pub(crate) static ",
+        "type ", "pub type ", "pub(crate) type ",
+        "#[cfg(test)]",
+    ];
+
     let mut last_import_idx = None;
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
+
+        // For Rust, stop at the first top-level definition
+        if *language == Language::Rust
+            && rust_definition_starts.iter().any(|prefix| trimmed.starts_with(prefix))
+        {
+            break;
+        }
+
         if trimmed.starts_with(import_prefix)
             || (trimmed.starts_with("use ") && *language == Language::Rust)
         {
@@ -1490,13 +1515,14 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
     for group in &result.duplicate_groups {
         let group_size = 1 + group.remove_from.len(); // canonical + duplicates
 
-        // Skip small groups — not worth extracting to shared code
-        if group_size < MIN_EXTRACT_GROUP_SIZE {
+        // Skip constructors and test lifecycle methods
+        if SKIP_EXTRACT_NAMES.contains(&group.function_name.as_str()) {
             continue;
         }
 
-        // Skip constructors and test lifecycle methods
-        if SKIP_EXTRACT_NAMES.contains(&group.function_name.as_str()) {
+        // Small groups (2-3 files): use simple remove+import (no trait extraction)
+        if group_size < MIN_EXTRACT_GROUP_SIZE {
+            generate_simple_duplicate_fixes(group, root, &mut fixes, &mut skipped);
             continue;
         }
 
@@ -1971,9 +1997,10 @@ fn generate_test_file_stub(test_file: &str, source_file: &str) -> String {
 
 /// Fallback duplicate fix for languages without `extract_shared` support.
 ///
-/// Uses `parse_items` to find function boundaries, removes the duplicate,
-/// and adds a simple import statement. This works for Rust (standalone fns)
-/// but is less ideal for OOP languages where the function is a class method.
+/// Uses grammar-based `parse_items` (with extension script fallback) to find
+/// function boundaries, removes the duplicate, and adds a simple import
+/// statement. This works for Rust (standalone fns) but is less ideal for
+/// OOP languages where the function is a class method.
 fn generate_simple_duplicate_fixes(
     group: &duplication::DuplicateGroup,
     root: &Path,
@@ -1984,7 +2011,6 @@ fn generate_simple_duplicate_fixes(
         let abs_path = root.join(remove_file.as_str());
         let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-        let ext_manifest = crate::extension::find_extension_for_file_ext(ext, "refactor");
         let content = match std::fs::read_to_string(&abs_path) {
             Ok(c) => c,
             Err(_) => {
@@ -1999,35 +2025,14 @@ fn generate_simple_duplicate_fixes(
             }
         };
 
-        let Some(manifest) = ext_manifest else {
+        // Try grammar-based parse first, then extension script
+        let items = parse_items_for_dedup(ext, &content, remove_file);
+
+        let Some(items) = items else {
             skipped.push(SkippedFile {
                 file: remove_file.clone(),
                 reason: format!(
-                    "No refactor extension for .{} files — cannot locate `{}` boundaries",
-                    ext, group.function_name
-                ),
-            });
-            continue;
-        };
-
-        // Call parse_items to find the function boundaries
-        let parse_cmd = serde_json::json!({
-            "command": "parse_items",
-            "file_path": remove_file,
-            "content": content,
-            "items": [group.function_name],
-        });
-
-        let parsed: Option<Vec<crate::extension::ParsedItem>> =
-            crate::extension::run_refactor_script(&manifest, &parse_cmd)
-                .and_then(|v| v.get("items").cloned())
-                .and_then(|v| serde_json::from_value(v).ok());
-
-        let Some(items) = parsed else {
-            skipped.push(SkippedFile {
-                file: remove_file.clone(),
-                reason: format!(
-                    "Extension could not parse `{}` boundaries in {}",
+                    "Cannot locate `{}` boundaries in {} — no grammar or extension available",
                     group.function_name, remove_file
                 ),
             });
@@ -2086,6 +2091,42 @@ fn generate_simple_duplicate_fixes(
             applied: false,
         });
     }
+}
+
+/// Parse items using grammar engine first, extension script as fallback.
+///
+/// This ensures `generate_simple_duplicate_fixes` works even when no
+/// extension is installed, as long as a grammar.toml exists for the language.
+fn parse_items_for_dedup(
+    file_ext: &str,
+    content: &str,
+    file_path: &str,
+) -> Option<Vec<crate::extension::ParsedItem>> {
+    // Try grammar engine first (no subprocess, faster)
+    if let Some(grammar) = super::core_fingerprint::load_grammar_for_ext(file_ext) {
+        let items = crate::utils::grammar_items::parse_items(content, &grammar);
+        if !items.is_empty() {
+            return Some(
+                items
+                    .into_iter()
+                    .map(crate::extension::ParsedItem::from)
+                    .collect(),
+            );
+        }
+    }
+
+    // Fall back to extension script
+    let manifest = crate::extension::find_extension_for_file_ext(file_ext, "refactor")?;
+    let parse_cmd = serde_json::json!({
+        "command": "parse_items",
+        "file_path": file_path,
+        "content": content,
+        "items": [],
+    });
+
+    crate::extension::run_refactor_script(&manifest, &parse_cmd)
+        .and_then(|v| v.get("items").cloned())
+        .and_then(|v| serde_json::from_value(v).ok())
 }
 
 /// Merge multiple `Fix` objects that target the same file into one.
@@ -3554,6 +3595,46 @@ pub struct Output {}
     }
 
     #[test]
+    fn insert_import_before_definitions_not_in_test_module() {
+        let content = r#"use std::path::Path;
+use crate::utils;
+
+pub fn real_function() {}
+
+fn helper() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_something() {}
+}
+"#;
+        let result = insert_import(
+            content,
+            "use crate::core::something::new_dep;",
+            &Language::Rust,
+        );
+        // Import should be placed after the top-level imports, not inside the test module
+        let new_import_pos = result.find("use crate::core::something::new_dep;").unwrap();
+        let fn_pos = result.find("pub fn real_function()").unwrap();
+        let test_mod_pos = result.find("#[cfg(test)]").unwrap();
+        assert!(
+            new_import_pos < fn_pos,
+            "New import ({}) should be before first function definition ({})",
+            new_import_pos,
+            fn_pos,
+        );
+        assert!(
+            new_import_pos < test_mod_pos,
+            "New import ({}) should be before test module ({})",
+            new_import_pos,
+            test_mod_pos,
+        );
+    }
+
+    #[test]
     fn apply_import_add_insertion() {
         let content = r#"use serde::Serialize;
 
@@ -4369,17 +4450,14 @@ class FlowAbilities {
                 required_methods: vec![],
                 required_registrations: vec![],
                 insertions: vec![Insertion {
-                    kind: InsertionKind::FunctionRemoval {
-                        start_line: 1,
-                        end_line: 2,
-                    },
+                    kind: InsertionKind::TraitUse,
                     finding: AuditFinding::DuplicateFunction,
                     safety_tier: FixSafetyTier::PlanOnly,
                     auto_apply: false,
                     blocked_reason: None,
                     preflight: None,
-                    code: String::new(),
-                    description: "Remove duplicate helper".to_string(),
+                    code: "use SomeTrait;".to_string(),
+                    description: "Insert trait use (plan-only)".to_string(),
                 }],
                 applied: false,
             }],
