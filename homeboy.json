@@ -3,8 +3,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-03-08T04:02:40Z",
-      "item_count": 255,
+      "created_at": "2026-03-08T04:16:08Z",
+      "item_count": 254,
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "Commands::src/commands/docs.rs::MissingImport",
@@ -216,7 +216,6 @@
         "dead_code::src/core/code_audit/duplication.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/duplication.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/duplication.rs::UnreferencedExport",
-        "dead_code::src/core/code_audit/fingerprint.rs::DeadCodeMarker",
         "dead_code::src/core/code_audit/impact.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/impact.rs::UnreferencedExport",
         "dead_code::src/core/code_audit/impact.rs::UnreferencedExport",
