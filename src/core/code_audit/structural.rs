@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::conventions::DeviationKind;
+use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 
 /// Thresholds for structural findings.
@@ -95,7 +95,7 @@ pub fn analyze_structure(root: &Path) -> Vec<Finding> {
                         line_count, GOD_FILE_LINE_THRESHOLD
                     ),
                     suggestion,
-                    kind: DeviationKind::GodFile,
+                    kind: AuditFinding::GodFile,
                 });
             }
 
@@ -111,7 +111,7 @@ pub fn analyze_structure(root: &Path) -> Vec<Finding> {
                         item_count, HIGH_ITEM_COUNT_THRESHOLD
                     ),
                     suggestion: "Group related items and extract into focused modules".to_string(),
-                    kind: DeviationKind::HighItemCount,
+                    kind: AuditFinding::HighItemCount,
                 });
             }
         }
@@ -134,7 +134,7 @@ pub fn analyze_structure(root: &Path) -> Vec<Finding> {
             suggestion:
                 "Directory sprawl detected — group related files into focused subdirectories"
                     .to_string(),
-            kind: DeviationKind::DirectorySprawl,
+            kind: AuditFinding::DirectorySprawl,
         });
     }
 
@@ -411,7 +411,7 @@ export default function main() {}
         let findings = analyze_structure(&dir);
         let god_findings: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::GodFile)
+            .filter(|f| f.kind == AuditFinding::GodFile)
             .collect();
 
         assert_eq!(god_findings.len(), 1, "Should flag big.rs as god file");

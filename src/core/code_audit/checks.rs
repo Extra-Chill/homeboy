@@ -62,7 +62,7 @@ pub fn check_conventions(conventions: &[Convention]) -> Vec<CheckResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::{Deviation, DeviationKind};
+    use crate::code_audit::conventions::{AuditFinding, Deviation};
 
     #[test]
     fn clean_convention_produces_clean_status() {
@@ -99,7 +99,7 @@ mod tests {
                 file: "c.rs".to_string(),
                 noisy: false,
                 deviations: vec![Deviation {
-                    kind: DeviationKind::MissingMethod,
+                    kind: AuditFinding::MissingMethod,
                     description: "Missing method: run".to_string(),
                     suggestion: "Add run()".to_string(),
                 }],
@@ -129,7 +129,7 @@ mod tests {
                     file: "b.rs".to_string(),
                     noisy: false,
                     deviations: vec![Deviation {
-                        kind: DeviationKind::MissingMethod,
+                        kind: AuditFinding::MissingMethod,
                         description: "Missing".to_string(),
                         suggestion: "Fix".to_string(),
                     }],
@@ -138,7 +138,7 @@ mod tests {
                     file: "c.rs".to_string(),
                     noisy: false,
                     deviations: vec![Deviation {
-                        kind: DeviationKind::MissingMethod,
+                        kind: AuditFinding::MissingMethod,
                         description: "Missing".to_string(),
                         suggestion: "Fix".to_string(),
                     }],

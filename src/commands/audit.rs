@@ -1,15 +1,13 @@
 use clap::Args;
-use serde::Serialize;
-use std::collections::HashSet;
-use std::path::Path;
-use std::path::PathBuf;
-use std::str::FromStr;
-
 use homeboy::code_audit::{self, baseline, fixer, CodeAuditResult};
 use homeboy::component::{self, Component};
 use homeboy::extension::ExtensionRunner;
 use homeboy::git;
 use homeboy::utils::autofix::{self, AutofixMode};
+use serde::Serialize;
+use std::collections::HashSet;
+use std::path::Path;
+use std::path::PathBuf;
 
 use super::args::{BaselineArgs, PositionalComponentArgs};
 use super::test_scope::{build_phpunit_filter_regex, compute_changed_test_scope};
@@ -245,21 +243,16 @@ fn score_delta(
         - weighted_finding_score_with(after, scoring) as isize
 }
 
-fn parse_fix_kinds(values: &[String], flag: &str) -> homeboy::Result<Vec<fixer::FixKind>> {
+fn parse_finding_kinds(
+    values: &[String],
+    flag: &str,
+) -> homeboy::Result<Vec<homeboy::code_audit::AuditFinding>> {
+    use std::str::FromStr;
     values
         .iter()
         .map(|value| {
-            fixer::FixKind::from_str(value).map_err(|_| {
-                homeboy::Error::validation_invalid_argument(
-                    flag,
-                    format!(
-                        "Unknown fix kind '{}'. Valid kinds: method_stub, registration_stub, constructor_with_registration, import_add, function_removal, trait_use, missing_test_file, missing_test_method, shared_extraction",
-                        value
-                    ),
-                    None,
-                    None,
-                )
-            })
+            homeboy::code_audit::AuditFinding::from_str(value)
+                .map_err(|msg| homeboy::Error::validation_invalid_argument(flag, msg, None, None))
         })
         .collect()
 }
@@ -325,8 +318,8 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
         lint_smoke: !args.no_lint_smoke,
         test_smoke: !args.no_test_smoke,
     };
-    let only_kinds = parse_fix_kinds(&args.only, "only")?;
-    let exclude_kinds = parse_fix_kinds(&args.exclude, "exclude")?;
+    let only_kinds = parse_finding_kinds(&args.only, "only")?;
+    let exclude_kinds = parse_finding_kinds(&args.exclude, "exclude")?;
 
     // Resolve component ID and source path.
     // Supports: component ID with --path, registered component, or direct filesystem path.
@@ -798,7 +791,7 @@ fn build_fix_hints(written: bool, summary: &fixer::PolicySummary) -> Vec<String>
 }
 
 fn log_fix_summary(result: &fixer::FixResult, policy: &fixer::PolicySummary, written: bool) {
-    let kind_counts = result.fix_kind_counts();
+    let kind_counts = result.finding_counts();
     let total_insertions = result.total_insertions;
     let total_new_files = result.new_files.len();
     let total_skipped = result.skipped.len();
@@ -975,8 +968,8 @@ fn build_test_smoke_verifier<'a>(
 
 fn run_fix_iteration(
     audit_result: &CodeAuditResult,
-    only_kinds: &[fixer::FixKind],
-    exclude_kinds: &[fixer::FixKind],
+    only_kinds: &[homeboy::code_audit::AuditFinding],
+    exclude_kinds: &[homeboy::code_audit::AuditFinding],
     scoring: ConvergenceScoring,
     verification: VerificationToggles,
 ) -> homeboy::Result<(
@@ -1158,15 +1151,15 @@ fn run_fix_iteration(
     ))
 }
 
-fn is_cascading_finding_kind(kind: &homeboy::code_audit::DeviationKind) -> bool {
-    use homeboy::code_audit::DeviationKind;
+fn is_cascading_finding_kind(kind: &homeboy::code_audit::AuditFinding) -> bool {
+    use homeboy::code_audit::AuditFinding;
     matches!(
         kind,
-        DeviationKind::GodFile
-            | DeviationKind::HighItemCount
-            | DeviationKind::DirectorySprawl
-            | DeviationKind::MissingTestFile
-            | DeviationKind::MissingTestMethod
+        AuditFinding::GodFile
+            | AuditFinding::HighItemCount
+            | AuditFinding::DirectorySprawl
+            | AuditFinding::MissingTestFile
+            | AuditFinding::MissingTestMethod
     )
 }
 
@@ -1244,8 +1237,8 @@ mod tests {
     use super::default_audit_exit_code;
     use super::{run, AuditArgs, AuditOutput};
     use crate::commands::args::{BaselineArgs, PositionalComponentArgs};
-    use homeboy::code_audit::fixer::{FixKind, FixSafetyTier, InsertionKind};
-    use homeboy::code_audit::DeviationKind;
+    use homeboy::code_audit::fixer::{FixSafetyTier, InsertionKind};
+    use homeboy::code_audit::AuditFinding;
     use homeboy::code_audit::{AuditSummary, CodeAuditResult, Finding, Severity};
     use std::fs;
     use std::path::PathBuf;
@@ -1280,7 +1273,7 @@ mod tests {
                     severity: Severity::Warning,
                     description: "desc".to_string(),
                     suggestion: "suggest".to_string(),
-                    kind: DeviationKind::MissingMethod,
+                    kind: AuditFinding::MissingMethod,
                 })
                 .collect(),
             duplicate_groups: vec![],
@@ -1321,8 +1314,8 @@ mod tests {
                 required_registrations: vec![],
                 insertions: vec![Insertion {
                     kind: InsertionKind::MethodStub,
-                    fix_kind: FixKind::MethodStub,
-                    safety_tier: FixKind::MethodStub.safety_tier(),
+                    finding: AuditFinding::MissingMethod,
+                    safety_tier: InsertionKind::MethodStub.safety_tier(),
                     auto_apply: false,
                     blocked_reason: None,
                     preflight: None,
@@ -1351,7 +1344,7 @@ mod tests {
         assert_eq!(summary.preflight_failures, 0);
 
         let insertion = &fix_result.fixes[0].insertions[0];
-        assert_eq!(insertion.fix_kind, FixKind::MethodStub);
+        assert_eq!(insertion.finding, AuditFinding::MissingMethod);
         assert!(matches!(insertion.kind, InsertionKind::MethodStub));
         assert_eq!(insertion.safety_tier, FixSafetyTier::SafeWithChecks);
         assert!(insertion.auto_apply);
@@ -1395,8 +1388,8 @@ mod tests {
                 insertions: vec![
                     Insertion {
                         kind: InsertionKind::ImportAdd,
-                        fix_kind: FixKind::ImportAdd,
-                        safety_tier: FixKind::ImportAdd.safety_tier(),
+                        finding: AuditFinding::MissingImport,
+                        safety_tier: InsertionKind::ImportAdd.safety_tier(),
                         auto_apply: false,
                         blocked_reason: None,
                         preflight: None,
@@ -1405,8 +1398,8 @@ mod tests {
                     },
                     Insertion {
                         kind: InsertionKind::MethodStub,
-                        fix_kind: FixKind::MethodStub,
-                        safety_tier: FixKind::MethodStub.safety_tier(),
+                        finding: AuditFinding::MissingMethod,
+                        safety_tier: InsertionKind::MethodStub.safety_tier(),
                         auto_apply: false,
                         blocked_reason: None,
                         preflight: None,
@@ -1425,7 +1418,7 @@ mod tests {
         };
 
         let policy = FixPolicy {
-            only: Some(vec![FixKind::ImportAdd]),
+            only: Some(vec![AuditFinding::MissingImport]),
             exclude: vec![],
         };
 
@@ -1442,7 +1435,7 @@ mod tests {
 
         let insertion = &fix_result.fixes[0].insertions[0];
         assert!(insertion.auto_apply);
-        assert_eq!(insertion.fix_kind, FixKind::ImportAdd);
+        assert_eq!(insertion.finding, AuditFinding::MissingImport);
         assert!(matches!(insertion.kind, InsertionKind::ImportAdd));
 
         let _ = fs::remove_dir_all(root);
@@ -1674,7 +1667,7 @@ mod tests {
             info_weight: 1,
             no_lint_smoke: false,
             no_test_smoke: false,
-            only: vec!["function_removal".to_string()],
+            only: vec!["duplicate_function".to_string()],
             exclude: vec![],
             baseline_args: BaselineArgs {
                 baseline: false,
@@ -1725,7 +1718,7 @@ mod tests {
                     file: "src/a.rs".to_string(),
                     description: "Warning finding".to_string(),
                     suggestion: "Fix it".to_string(),
-                    kind: homeboy::code_audit::DeviationKind::MissingMethod,
+                    kind: homeboy::code_audit::AuditFinding::MissingMethod,
                 },
                 homeboy::code_audit::Finding {
                     convention: "Test".to_string(),
@@ -1733,7 +1726,7 @@ mod tests {
                     file: "src/b.rs".to_string(),
                     description: "Info finding".to_string(),
                     suggestion: "Investigate".to_string(),
-                    kind: homeboy::code_audit::DeviationKind::MissingImport,
+                    kind: homeboy::code_audit::AuditFinding::MissingImport,
                 },
             ],
             duplicate_groups: vec![],
@@ -1776,7 +1769,7 @@ mod tests {
                 file: "src/a.rs".to_string(),
                 description: "Warning finding".to_string(),
                 suggestion: "Fix it".to_string(),
-                kind: homeboy::code_audit::DeviationKind::MissingMethod,
+                kind: homeboy::code_audit::AuditFinding::MissingMethod,
             }],
             duplicate_groups: vec![],
         };
@@ -1809,7 +1802,7 @@ mod tests {
                     file: "src/a.rs".to_string(),
                     description: "Warning finding".to_string(),
                     suggestion: "Fix it".to_string(),
-                    kind: homeboy::code_audit::DeviationKind::MissingMethod,
+                    kind: homeboy::code_audit::AuditFinding::MissingMethod,
                 },
                 homeboy::code_audit::Finding {
                     convention: "Test".to_string(),
@@ -1817,7 +1810,7 @@ mod tests {
                     file: "src/b.rs".to_string(),
                     description: "Info finding".to_string(),
                     suggestion: "Investigate".to_string(),
-                    kind: homeboy::code_audit::DeviationKind::MissingImport,
+                    kind: homeboy::code_audit::AuditFinding::MissingImport,
                 },
             ],
             duplicate_groups: vec![],
@@ -1830,7 +1823,7 @@ mod tests {
                 file: "src/b.rs".to_string(),
                 description: "Info finding".to_string(),
                 suggestion: "Investigate".to_string(),
-                kind: homeboy::code_audit::DeviationKind::MissingImport,
+                kind: homeboy::code_audit::AuditFinding::MissingImport,
             }],
             ..before.clone()
         };

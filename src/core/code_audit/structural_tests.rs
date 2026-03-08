@@ -14,7 +14,7 @@ fn high_item_count_detected() {
     let findings = analyze_structure(&dir);
     let item_findings: Vec<_> = findings
         .iter()
-        .filter(|f| f.kind == DeviationKind::HighItemCount)
+        .filter(|f| f.kind == AuditFinding::HighItemCount)
         .collect();
 
     assert_eq!(item_findings.len(), 1);
@@ -36,7 +36,7 @@ fn directory_sprawl_detected() {
     let findings = analyze_structure(&dir);
     let sprawl: Vec<_> = findings
         .iter()
-        .filter(|f| f.kind == DeviationKind::DirectorySprawl)
+        .filter(|f| f.kind == AuditFinding::DirectorySprawl)
         .collect();
 
     assert_eq!(sprawl.len(), 1);

@@ -1,6 +1,6 @@
 //! Comment hygiene detection — identify stale/legacy comment markers.
 
-use super::conventions::{DeviationKind, Language};
+use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 
@@ -36,7 +36,7 @@ fn analyze_comment_hygiene(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                     suggestion:
                         "Resolve or remove marker comments, or convert to a tracked issue reference"
                             .to_string(),
-                    kind: DeviationKind::TodoMarker,
+                    kind: AuditFinding::TodoMarker,
                 });
             }
 
@@ -53,7 +53,7 @@ fn analyze_comment_hygiene(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                     suggestion:
                         "Validate the comment is still accurate; remove or update stale implementation notes"
                             .to_string(),
-                    kind: DeviationKind::LegacyComment,
+                    kind: AuditFinding::LegacyComment,
                 });
             }
         }
@@ -159,10 +159,10 @@ mod tests {
         );
 
         let findings = analyze_comment_hygiene(&[&fp]);
-        assert!(findings.iter().any(|f| f.kind == DeviationKind::TodoMarker));
+        assert!(findings.iter().any(|f| f.kind == AuditFinding::TodoMarker));
         assert!(findings
             .iter()
-            .any(|f| f.kind == DeviationKind::LegacyComment));
+            .any(|f| f.kind == AuditFinding::LegacyComment));
     }
 
     #[test]

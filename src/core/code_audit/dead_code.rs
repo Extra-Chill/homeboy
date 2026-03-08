@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use super::conventions::DeviationKind;
+use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 
@@ -49,7 +49,7 @@ pub(crate) fn analyze_dead_code(fingerprints: &[&FileFingerprint]) -> Vec<Findin
                 suggestion:
                     "Remove the parameter or prefix with underscore to indicate intentional disuse"
                         .to_string(),
-                kind: DeviationKind::UnusedParameter,
+                kind: AuditFinding::UnusedParameter,
             });
         }
 
@@ -66,7 +66,7 @@ pub(crate) fn analyze_dead_code(fingerprints: &[&FileFingerprint]) -> Vec<Findin
                 suggestion:
                     "Remove the dead code instead of suppressing the warning, or document why it must stay"
                         .to_string(),
-                kind: DeviationKind::DeadCodeMarker,
+                kind: AuditFinding::DeadCodeMarker,
             });
         }
 
@@ -112,7 +112,7 @@ pub(crate) fn analyze_dead_code(fingerprints: &[&FileFingerprint]) -> Vec<Findin
                     suggestion:
                         "Consider making it private/pub(crate), removing it, or verifying it's used externally"
                             .to_string(),
-                    kind: DeviationKind::UnreferencedExport,
+                    kind: AuditFinding::UnreferencedExport,
                 });
             }
         }
@@ -142,7 +142,7 @@ pub(crate) fn analyze_dead_code(fingerprints: &[&FileFingerprint]) -> Vec<Findin
                     ),
                     suggestion: "Remove the dead function or make it public if used externally"
                         .to_string(),
-                    kind: DeviationKind::OrphanedInternal,
+                    kind: AuditFinding::OrphanedInternal,
                 });
             }
         }
@@ -274,7 +274,7 @@ mod tests {
 
         let findings = analyze_dead_code(&[&fp]);
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, DeviationKind::UnusedParameter);
+        assert_eq!(findings[0].kind, AuditFinding::UnusedParameter);
         assert!(findings[0].description.contains("ctx"));
         assert!(findings[0].description.contains("process"));
     }
@@ -290,7 +290,7 @@ mod tests {
 
         let findings = analyze_dead_code(&[&fp]);
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, DeviationKind::DeadCodeMarker);
+        assert_eq!(findings[0].kind, AuditFinding::DeadCodeMarker);
         assert_eq!(findings[0].severity, Severity::Info);
     }
 
@@ -315,7 +315,7 @@ mod tests {
         let findings = analyze_dead_code(&[&fp1, &fp2]);
         let unreferenced: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::UnreferencedExport)
+            .filter(|f| f.kind == AuditFinding::UnreferencedExport)
             .collect();
         assert_eq!(unreferenced.len(), 2); // compute and transform both unreferenced
     }
@@ -340,7 +340,7 @@ mod tests {
         let findings = analyze_dead_code(&[&fp1, &fp2]);
         let unreferenced: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::UnreferencedExport)
+            .filter(|f| f.kind == AuditFinding::UnreferencedExport)
             .collect();
         // Only "transform" is unreferenced (nobody calls it), "compute" is called by bar
         assert_eq!(unreferenced.len(), 1);
@@ -360,7 +360,7 @@ mod tests {
         let findings = analyze_dead_code(&[&fp]);
         let orphaned: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::OrphanedInternal)
+            .filter(|f| f.kind == AuditFinding::OrphanedInternal)
             .collect();
         assert_eq!(orphaned.len(), 1);
         assert!(orphaned[0].description.contains("dead_helper"));
@@ -379,7 +379,7 @@ mod tests {
         let findings = analyze_dead_code(&[&fp]);
         let orphaned: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::OrphanedInternal)
+            .filter(|f| f.kind == AuditFinding::OrphanedInternal)
             .collect();
         assert!(orphaned.is_empty());
     }
@@ -397,7 +397,7 @@ mod tests {
         let findings = analyze_dead_code(&[&fp]);
         let unreferenced: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::UnreferencedExport)
+            .filter(|f| f.kind == AuditFinding::UnreferencedExport)
             .collect();
         assert!(
             unreferenced.is_empty(),

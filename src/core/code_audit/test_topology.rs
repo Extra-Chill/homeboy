@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use super::conventions::DeviationKind;
+use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use crate::extension::{self, ExtensionManifest};
 
@@ -132,7 +132,7 @@ fn apply_policy(
             file: path.clone(),
             description: "Test artifact is outside centralized test directories".to_string(),
             suggestion: "Move test artifact under central_test_globs (default tests/**) or allowlist it in audit_rules.test_topology.scattered_allow".to_string(),
-            kind: DeviationKind::ScatteredTestFile,
+            kind: AuditFinding::ScatteredTestFile,
         });
     }
 
@@ -146,7 +146,7 @@ fn apply_policy(
             file: path.clone(),
             description: "Source file contains inline tests outside allowlist".to_string(),
             suggestion: "Prefer isolated tests under central_test_globs; if inline tests are intentional, add this file to audit_rules.test_topology.inline_allow".to_string(),
-            kind: DeviationKind::InlineTestModule,
+            kind: AuditFinding::InlineTestModule,
         });
     }
 }
@@ -302,7 +302,7 @@ mod tests {
             &mut findings,
         );
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, DeviationKind::ScatteredTestFile);
+        assert_eq!(findings[0].kind, AuditFinding::ScatteredTestFile);
     }
 
     #[test]
@@ -328,7 +328,7 @@ mod tests {
             &mut findings,
         );
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, DeviationKind::InlineTestModule);
+        assert_eq!(findings[0].kind, AuditFinding::InlineTestModule);
     }
 
     #[test]

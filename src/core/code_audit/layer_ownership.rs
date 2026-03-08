@@ -8,7 +8,7 @@ use std::path::Path;
 
 use glob_match::glob_match;
 
-use super::conventions::DeviationKind;
+use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -89,7 +89,7 @@ fn analyze_layer_ownership(root: &Path) -> Vec<Finding> {
                             "Move this responsibility to the owning layer for rule '{}'",
                             rule.name
                         ),
-                        kind: DeviationKind::LayerOwnershipViolation,
+                        kind: AuditFinding::LayerOwnershipViolation,
                     });
                 }
             }
@@ -223,7 +223,7 @@ mod tests {
         let findings = analyze_layer_ownership(dir.path());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].convention, "layer_ownership");
-        assert_eq!(findings[0].kind, DeviationKind::LayerOwnershipViolation);
+        assert_eq!(findings[0].kind, AuditFinding::LayerOwnershipViolation);
     }
 
     #[test]

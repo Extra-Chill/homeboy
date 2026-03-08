@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use super::conventions::DeviationKind;
+use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 
@@ -140,7 +140,7 @@ pub(crate) fn detect_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Findin
                 file: file.clone(),
                 description: format!("Duplicate function `{}` — also in {}", method_name, also_in),
                 suggestion: suggestion.clone(),
-                kind: DeviationKind::DuplicateFunction,
+                kind: AuditFinding::DuplicateFunction,
             });
         }
     }
@@ -349,7 +349,7 @@ pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<F
                     method_name, also_in
                 ),
                 suggestion: suggestion.clone(),
-                kind: DeviationKind::NearDuplicate,
+                kind: AuditFinding::NearDuplicate,
             });
         }
     }
@@ -505,7 +505,7 @@ pub(crate) fn detect_intra_method_duplicates(fingerprints: &[&FileFingerprint]) 
                              Remove the duplicate or extract shared logic.",
                             method_name, match_len
                         ),
-                        kind: DeviationKind::IntraMethodDuplicate,
+                        kind: AuditFinding::IntraMethodDuplicate,
                     });
                     reported = true;
                     break;
@@ -904,7 +904,7 @@ pub(crate) fn detect_parallel_implementations(fingerprints: &[&FileFingerprint])
                         a.method, b.method, b.file, shared_preview, extra
                     ),
                     suggestion: suggestion.clone(),
-                    kind: DeviationKind::ParallelImplementation,
+                    kind: AuditFinding::ParallelImplementation,
                 });
 
                 // Emit finding for file B
@@ -917,7 +917,7 @@ pub(crate) fn detect_parallel_implementations(fingerprints: &[&FileFingerprint])
                         b.method, a.method, a.file, shared_preview, extra
                     ),
                     suggestion,
-                    kind: DeviationKind::ParallelImplementation,
+                    kind: AuditFinding::ParallelImplementation,
                 });
             }
         }
@@ -980,7 +980,7 @@ mod tests {
         assert_eq!(findings.len(), 2, "Should emit one finding per location");
         assert!(findings
             .iter()
-            .all(|f| f.kind == DeviationKind::DuplicateFunction));
+            .all(|f| f.kind == AuditFinding::DuplicateFunction));
         assert!(findings.iter().any(|f| f.file == "src/utils/io.rs"));
         assert!(findings.iter().any(|f| f.file == "src/utils/validation.rs"));
         assert!(findings[0].description.contains("is_zero"));
@@ -1144,7 +1144,7 @@ mod tests {
         assert_eq!(findings.len(), 2, "Should flag both locations");
         assert!(findings
             .iter()
-            .all(|f| f.kind == DeviationKind::NearDuplicate));
+            .all(|f| f.kind == AuditFinding::NearDuplicate));
         assert!(findings[0].description.contains("cache_path"));
         assert_eq!(findings[0].severity, Severity::Info);
     }
@@ -1301,7 +1301,7 @@ mod tests {
             !findings.is_empty(),
             "Should detect duplicated block within handle_update"
         );
-        assert!(findings[0].kind == DeviationKind::IntraMethodDuplicate);
+        assert!(findings[0].kind == AuditFinding::IntraMethodDuplicate);
         assert!(findings[0].description.contains("handle_update"));
     }
 
@@ -1408,7 +1408,7 @@ mod tests {
         assert_eq!(findings.len(), 2, "Should emit one finding per file");
         assert!(findings
             .iter()
-            .all(|f| f.kind == DeviationKind::ParallelImplementation));
+            .all(|f| f.kind == AuditFinding::ParallelImplementation));
         assert!(findings.iter().any(|f| f.file == "src/deploy.rs"));
         assert!(findings.iter().any(|f| f.file == "src/upgrade.rs"));
     }

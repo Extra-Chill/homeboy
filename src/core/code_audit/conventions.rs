@@ -78,16 +78,18 @@ pub struct Outlier {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Deviation {
     /// What kind of deviation.
-    pub kind: DeviationKind,
+    pub kind: AuditFinding,
     /// Human-readable description.
     pub description: String,
     /// Suggested fix.
     pub suggestion: String,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
-pub enum DeviationKind {
+pub enum AuditFinding {
     MissingMethod,
     ExtraMethod,
     MissingRegistration,
@@ -137,6 +139,58 @@ pub enum DeviationKind {
     /// they invoke a parallel sequence of helpers, suggesting the shared
     /// workflow should be abstracted into a single parameterized function.
     ParallelImplementation,
+}
+
+impl AuditFinding {
+    /// All known variant names in snake_case, for CLI help and error messages.
+    pub fn all_names() -> &'static [&'static str] {
+        &[
+            "missing_method",
+            "extra_method",
+            "missing_registration",
+            "different_registration",
+            "missing_interface",
+            "naming_mismatch",
+            "signature_mismatch",
+            "namespace_mismatch",
+            "missing_import",
+            "god_file",
+            "high_item_count",
+            "directory_sprawl",
+            "duplicate_function",
+            "near_duplicate",
+            "unused_parameter",
+            "dead_code_marker",
+            "unreferenced_export",
+            "orphaned_internal",
+            "missing_test_file",
+            "missing_test_method",
+            "orphaned_test",
+            "todo_marker",
+            "legacy_comment",
+            "layer_ownership_violation",
+            "inline_test_module",
+            "scattered_test_file",
+            "intra_method_duplicate",
+            "parallel_implementation",
+        ]
+    }
+}
+
+impl std::str::FromStr for AuditFinding {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+        let json = format!("\"{}\"", normalized);
+        serde_json::from_str(&json).map_err(|_| {
+            format!(
+                "unknown finding kind '{}'. Valid kinds: {}",
+                value,
+                Self::all_names().join(", ")
+            )
+        })
+    }
 }
 
 // ============================================================================
@@ -276,7 +330,7 @@ pub fn discover_conventions(
         if helper_like {
             let suffix = naming_suffix.as_deref().unwrap_or("member");
             deviations.push(Deviation {
-                kind: DeviationKind::NamingMismatch,
+                kind: AuditFinding::NamingMismatch,
                 description: format!(
                     "Helper-like name does not match convention suffix '{}': {}",
                     suffix,
@@ -298,7 +352,7 @@ pub fn discover_conventions(
             }
             if !fp.methods.contains(expected) {
                 deviations.push(Deviation {
-                    kind: DeviationKind::MissingMethod,
+                    kind: AuditFinding::MissingMethod,
                     description: format!("Missing method: {}", expected),
                     suggestion: format!(
                         "Add {}() to match the convention in {}",
@@ -315,7 +369,7 @@ pub fn discover_conventions(
             }
             if !fp.registrations.contains(expected) {
                 deviations.push(Deviation {
-                    kind: DeviationKind::MissingRegistration,
+                    kind: AuditFinding::MissingRegistration,
                     description: format!("Missing registration: {}", expected),
                     suggestion: format!(
                         "Add {} call to match the convention in {}",
@@ -332,7 +386,7 @@ pub fn discover_conventions(
             }
             if !fp.implements.contains(expected) {
                 deviations.push(Deviation {
-                    kind: DeviationKind::MissingInterface,
+                    kind: AuditFinding::MissingInterface,
                     description: format!("Missing interface: {}", expected),
                     suggestion: format!(
                         "Implement {} to match the convention in {}",
@@ -347,7 +401,7 @@ pub fn discover_conventions(
             if let Some(actual_ns) = &fp.namespace {
                 if actual_ns != expected_ns {
                     deviations.push(Deviation {
-                        kind: DeviationKind::NamespaceMismatch,
+                        kind: AuditFinding::NamespaceMismatch,
                         description: format!(
                             "Namespace mismatch: expected `{}`, found `{}`",
                             expected_ns, actual_ns
@@ -359,7 +413,7 @@ pub fn discover_conventions(
             // Missing namespace when others have one is also a deviation
             if fp.namespace.is_none() {
                 deviations.push(Deviation {
-                    kind: DeviationKind::NamespaceMismatch,
+                    kind: AuditFinding::NamespaceMismatch,
                     description: format!(
                         "Missing namespace declaration (expected `{}`)",
                         expected_ns
@@ -373,7 +427,7 @@ pub fn discover_conventions(
         for expected_imp in &expected_imports {
             if !has_import(expected_imp, &fp.imports, &fp.content) {
                 deviations.push(Deviation {
-                    kind: DeviationKind::MissingImport,
+                    kind: AuditFinding::MissingImport,
                     description: format!("Missing import: {}", expected_imp),
                     suggestion: format!(
                         "Add `use {};` to match the convention in {}",
@@ -520,7 +574,7 @@ pub fn check_signature_consistency(conventions: &mut [Convention], root: &Path) 
                                 .entry(file.clone())
                                 .or_default()
                                 .push(Deviation {
-                                    kind: DeviationKind::SignatureMismatch,
+                                    kind: AuditFinding::SignatureMismatch,
                                     description: format!(
                                         "Signature mismatch for {}: expected structure `{}`, found `{}`",
                                         method, canonical_sig, sig
@@ -564,7 +618,7 @@ pub fn check_signature_consistency(conventions: &mut [Convention], root: &Path) 
                                 .entry(file.clone())
                                 .or_default()
                                 .push(Deviation {
-                                    kind: DeviationKind::SignatureMismatch,
+                                    kind: AuditFinding::SignatureMismatch,
                                     description: format!(
                                         "Signature mismatch for {}: different structure — expected {} tokens, found {}. Example: `{}`",
                                         method, majority_len, tokenized[i].len(), sig
@@ -743,7 +797,7 @@ mod tests {
         assert!(convention.outliers[0]
             .deviations
             .iter()
-            .any(|d| matches!(d.kind, DeviationKind::NamingMismatch)));
+            .any(|d| matches!(d.kind, AuditFinding::NamingMismatch)));
     }
 
     #[test]
@@ -780,7 +834,7 @@ mod tests {
         assert_eq!(convention.outliers[0].deviations.len(), 1);
         assert!(matches!(
             convention.outliers[0].deviations[0].kind,
-            DeviationKind::NamingMismatch
+            AuditFinding::NamingMismatch
         ));
     }
 
@@ -886,7 +940,7 @@ class AgentPing {
         assert_eq!(conv.outliers.len(), 1);
         assert_eq!(conv.outliers[0].file, "steps/AgentPing.php");
         assert!(conv.outliers[0].deviations.iter().any(|d| {
-            d.kind == DeviationKind::SignatureMismatch && d.description.contains("execute")
+            d.kind == AuditFinding::SignatureMismatch && d.description.contains("execute")
         }));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -931,7 +985,7 @@ class AgentPing {
                 file: "steps/Bad.php".to_string(),
                 noisy: false,
                 deviations: vec![Deviation {
-                    kind: DeviationKind::MissingMethod,
+                    kind: AuditFinding::MissingMethod,
                     description: "Missing method: register".to_string(),
                     suggestion: "Add register()".to_string(),
                 }],
@@ -950,11 +1004,11 @@ class AgentPing {
         assert!(conv.outliers[0]
             .deviations
             .iter()
-            .any(|d| d.kind == DeviationKind::MissingMethod));
+            .any(|d| d.kind == AuditFinding::MissingMethod));
         assert!(conv.outliers[0]
             .deviations
             .iter()
-            .any(|d| d.kind == DeviationKind::SignatureMismatch));
+            .any(|d| d.kind == AuditFinding::SignatureMismatch));
     }
 
     #[test]
@@ -1172,7 +1226,7 @@ class AgentPing {
         assert!(convention.outliers[0]
             .deviations
             .iter()
-            .any(|d| { d.kind == DeviationKind::NamespaceMismatch }));
+            .any(|d| { d.kind == AuditFinding::NamespaceMismatch }));
     }
 
     #[test]
@@ -1211,7 +1265,7 @@ class AgentPing {
         assert!(convention.outliers[0]
             .deviations
             .iter()
-            .any(|d| { d.kind == DeviationKind::MissingImport }));
+            .any(|d| { d.kind == AuditFinding::MissingImport }));
     }
 
     #[test]
@@ -1248,8 +1302,7 @@ class AgentPing {
         );
         assert_eq!(convention.outliers.len(), 1);
         assert!(convention.outliers[0].deviations.iter().any(|d| {
-            d.kind == DeviationKind::NamespaceMismatch
-                && d.description.contains("Missing namespace")
+            d.kind == AuditFinding::NamespaceMismatch && d.description.contains("Missing namespace")
         }));
     }
 
@@ -1344,7 +1397,7 @@ class AgentPing {
         assert!(convention.outliers[0]
             .deviations
             .iter()
-            .any(|d| matches!(d.kind, DeviationKind::NamingMismatch)));
+            .any(|d| matches!(d.kind, AuditFinding::NamingMismatch)));
     }
 
     #[test]

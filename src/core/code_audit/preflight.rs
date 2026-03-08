@@ -1,9 +1,9 @@
-use super::conventions::Language;
+use super::conventions::{AuditFinding, Language};
 use super::fixer::{
     apply_insertions_to_content, derive_expected_test_file_path, detect_language,
     extract_expected_test_method_from_fix_description, extract_signatures,
     extract_source_file_from_test_stub, first_failed_detail, mapping_from_source_comment,
-    test_method_exists_in_file, Fix, FixKind, FixSafetyTier, Insertion, NewFile, PreflightCheck,
+    test_method_exists_in_file, Fix, FixSafetyTier, Insertion, NewFile, PreflightCheck,
     PreflightContext, PreflightReport, PreflightStatus,
 };
 
@@ -12,8 +12,8 @@ pub fn run_insertion_preflight(
     insertion: &Insertion,
     context: &PreflightContext<'_>,
 ) -> Option<PreflightReport> {
-    match insertion.fix_kind {
-        FixKind::MethodStub | FixKind::RegistrationStub | FixKind::ConstructorWithRegistration => {
+    match insertion.finding {
+        AuditFinding::MissingMethod | AuditFinding::MissingRegistration => {
             let abs_path = context.root.join(file);
             let content = std::fs::read_to_string(&abs_path).ok()?;
             let language = detect_language(&abs_path);
@@ -26,7 +26,7 @@ pub fn run_insertion_preflight(
             ];
             Some(finalize_report(checks))
         }
-        FixKind::MissingTestMethod => {
+        AuditFinding::MissingTestMethod => {
             let source_file = extract_source_file_from_test_stub(&insertion.description)?;
             let expected_test_method =
                 extract_expected_test_method_from_fix_description(&insertion.description)?;
@@ -66,6 +66,26 @@ pub fn run_insertion_preflight(
                 },
             ];
 
+            Some(finalize_report(checks))
+        }
+        AuditFinding::UnreferencedExport => {
+            let abs_path = context.root.join(file);
+            let content = std::fs::read_to_string(&abs_path).ok()?;
+            let language = detect_language(&abs_path);
+            let simulated =
+                apply_insertions_to_content(&content, std::slice::from_ref(insertion), &language);
+
+            // Verify the visibility change actually applied
+            let changed = simulated != content;
+            let checks = vec![PreflightCheck {
+                name: "visibility_changed".to_string(),
+                passed: changed,
+                detail: if changed {
+                    "visibility qualifier was narrowed successfully".to_string()
+                } else {
+                    "visibility qualifier was not found or already narrowed".to_string()
+                },
+            }];
             Some(finalize_report(checks))
         }
         _ => None,
@@ -140,8 +160,8 @@ pub fn run_new_file_preflight(
     new_file: &NewFile,
     context: &PreflightContext<'_>,
 ) -> Option<PreflightReport> {
-    match new_file.fix_kind {
-        FixKind::MissingTestFile => {
+    match new_file.finding {
+        AuditFinding::MissingTestFile => {
             let (_source_file, expected_test_path) =
                 mapping_from_source_comment(&new_file.content)?;
             let abs = context.root.join(&new_file.file);
@@ -207,10 +227,9 @@ fn collision_check(content: &str, insertion: &Insertion) -> PreflightCheck {
 }
 
 fn syntax_shape_check(content: &str, insertion: &Insertion, language: &Language) -> PreflightCheck {
-    let detail_prefix = match insertion.fix_kind {
-        FixKind::MethodStub => "generated method stub",
-        FixKind::RegistrationStub => "generated registration update",
-        FixKind::ConstructorWithRegistration => "generated constructor",
+    let detail_prefix = match insertion.finding {
+        AuditFinding::MissingMethod => "generated method stub",
+        AuditFinding::MissingRegistration => "generated registration/constructor",
         _ => "generated content",
     };
 

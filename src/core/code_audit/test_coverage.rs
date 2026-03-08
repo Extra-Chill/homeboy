@@ -15,7 +15,7 @@ use std::path::Path;
 
 use regex::Regex;
 
-use super::conventions::DeviationKind;
+use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::test_mapping::{partition_fingerprints, source_to_test_path, test_to_source_path};
@@ -96,7 +96,7 @@ pub(crate) fn analyze_test_coverage(
                             "Add tests in '{}' or add #[cfg(test)] inline tests",
                             test_path
                         ),
-                        kind: DeviationKind::MissingTestFile,
+                        kind: AuditFinding::MissingTestFile,
                     });
                 }
                 continue; // No tests at all — skip method-level checks
@@ -151,7 +151,7 @@ pub(crate) fn analyze_test_coverage(
                             "Add a test method '{}{}' for '{}'",
                             config.method_prefix, method, method
                         ),
-                        kind: DeviationKind::MissingTestMethod,
+                        kind: AuditFinding::MissingTestMethod,
                     });
                 }
             }
@@ -165,7 +165,7 @@ pub(crate) fn analyze_test_coverage(
                         file: source_fp.relative_path.clone(),
                         description: format!("No test file found (expected '{}')", test_path),
                         suggestion: format!("Create test file '{}'", test_path),
-                        kind: DeviationKind::MissingTestFile,
+                        kind: AuditFinding::MissingTestFile,
                     });
                 }
                 continue; // No test file — skip method-level checks
@@ -209,7 +209,7 @@ pub(crate) fn analyze_test_coverage(
                                 "Add test method '{}{}' to '{}'",
                                 config.method_prefix, method, test_file_label
                             ),
-                            kind: DeviationKind::MissingTestMethod,
+                            kind: AuditFinding::MissingTestMethod,
                         });
                     }
                 }
@@ -240,7 +240,7 @@ pub(crate) fn analyze_test_coverage(
                         source_path
                     ),
                     suggestion: "Remove the orphaned test or create the source file".to_string(),
-                    kind: DeviationKind::OrphanedTest,
+                    kind: AuditFinding::OrphanedTest,
                 });
             }
         }
@@ -470,7 +470,7 @@ mod tests {
         let findings = analyze_test_coverage(&dir, &[&source], &config);
 
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, DeviationKind::MissingTestFile);
+        assert_eq!(findings[0].kind, AuditFinding::MissingTestFile);
         assert_eq!(findings[0].severity, Severity::Warning); // core/ is critical
         assert!(findings[0].description.contains("audit_test.rs"));
 
@@ -492,7 +492,7 @@ mod tests {
 
         let missing_methods: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::MissingTestMethod)
+            .filter(|f| f.kind == AuditFinding::MissingTestMethod)
             .collect();
         assert_eq!(missing_methods.len(), 1);
         assert!(missing_methods[0].description.contains("transform"));
@@ -515,7 +515,7 @@ mod tests {
 
         let orphaned: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::OrphanedTest)
+            .filter(|f| f.kind == AuditFinding::OrphanedTest)
             .collect();
         assert_eq!(orphaned.len(), 1);
         assert!(orphaned[0].description.contains("old_module"));
@@ -542,8 +542,7 @@ mod tests {
         let missing: Vec<&Finding> = findings
             .iter()
             .filter(|f| {
-                f.kind == DeviationKind::MissingTestFile
-                    || f.kind == DeviationKind::MissingTestMethod
+                f.kind == AuditFinding::MissingTestFile || f.kind == AuditFinding::MissingTestMethod
             })
             .collect();
         assert!(missing.is_empty(), "Inline tests should satisfy coverage");
@@ -568,7 +567,7 @@ mod tests {
 
         let missing_methods: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::MissingTestMethod)
+            .filter(|f| f.kind == AuditFinding::MissingTestMethod)
             .collect();
         // "stop" and "reset" should be missing tests
         assert_eq!(missing_methods.len(), 2);
@@ -597,7 +596,7 @@ mod tests {
 
         let missing_methods: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::MissingTestMethod)
+            .filter(|f| f.kind == AuditFinding::MissingTestMethod)
             .collect();
         assert!(
             missing_methods.is_empty(),
@@ -642,8 +641,7 @@ mod tests {
         let coverage_findings: Vec<&Finding> = findings
             .iter()
             .filter(|f| {
-                f.kind == DeviationKind::MissingTestFile
-                    || f.kind == DeviationKind::MissingTestMethod
+                f.kind == AuditFinding::MissingTestFile || f.kind == AuditFinding::MissingTestMethod
             })
             .collect();
         assert!(
@@ -733,7 +731,7 @@ mod tests {
         // No findings expected since run has test_run.
         let missing_methods: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::MissingTestMethod)
+            .filter(|f| f.kind == AuditFinding::MissingTestMethod)
             .collect();
         assert!(
             missing_methods.is_empty(),
@@ -795,7 +793,7 @@ mod tests {
 
         let missing_methods: Vec<&Finding> = findings
             .iter()
-            .filter(|f| f.kind == DeviationKind::MissingTestMethod)
+            .filter(|f| f.kind == AuditFinding::MissingTestMethod)
             .collect();
         assert!(
             missing_methods.is_empty(),
