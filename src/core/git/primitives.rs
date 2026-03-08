@@ -39,12 +39,6 @@ pub fn is_workdir_clean(path: &Path) -> bool {
     }
 }
 
-/// Get the root directory of a git repository containing the given path.
-/// Returns None if the path is not within a git repository.
-pub(crate) fn get_git_root(path: &str) -> Option<String> {
-    command::run_in_optional(path, "git", &["rev-parse", "--show-toplevel"])
-}
-
 /// List all git-tracked markdown files in a directory.
 /// Uses `git ls-files` to respect .gitignore and only include tracked/staged files.
 /// Returns relative paths from the repository root.

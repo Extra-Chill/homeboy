@@ -32,6 +32,7 @@ pub struct SymbolDiff {
     /// Exports that existed in the base but are gone in current.
     pub removed_exports: Vec<String>,
     /// Exports that exist in current but not in base (new API).
+    #[allow(dead_code)] // Symmetric with removed_exports; used for impact reporting.
     pub added_exports: Vec<String>,
     /// Exports that exist in both but with a likely rename (fuzzy matched).
     pub renamed_exports: Vec<(String, String)>, // (old_name, new_name)
@@ -40,6 +41,7 @@ pub struct SymbolDiff {
     /// Hooks that were removed or renamed.
     pub removed_hooks: Vec<String>,
     /// Hooks that were added.
+    #[allow(dead_code)] // Symmetric with removed_hooks; used for impact reporting.
     pub added_hooks: Vec<String>,
 }
 
@@ -287,10 +289,8 @@ fn match_renames(
                 continue;
             }
             let score = similarity(old, new);
-            if score > 0.5 {
-                if best_match.map_or(true, |(_, best_score)| score > best_score) {
-                    best_match = Some((i, score));
-                }
+            if score > 0.5 && best_match.is_none_or(|(_, best_score)| score > best_score) {
+                best_match = Some((i, score));
             }
         }
 
@@ -466,7 +466,7 @@ pub fn find_affected_files(
 ///   3. Filter findings to changed files + affected files
 ///
 /// Returns the expanded file set and a list of affected files for logging.
-pub fn expand_scope<'a>(
+pub fn expand_scope(
     source_path: &str,
     git_ref: &str,
     changed_files: &[String],

@@ -507,7 +507,7 @@ fn cluster_by_name_segments<'a>(names: &[&'a str]) -> Vec<(String, Vec<&'a str>)
     let mut prefix_counts: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
     for name in names {
         for prefix in name_prefixes(name) {
-            if !is_stop_word(&prefix.split('_').next().unwrap_or("")) {
+            if !is_stop_word(prefix.split('_').next().unwrap_or("")) {
                 prefix_counts.entry(prefix).or_default().push(name);
             }
         }
@@ -965,6 +965,7 @@ fn merge_small_groups_protected(
 }
 
 /// Merge groups with fewer than MERGE_THRESHOLD items into the nearest relative.
+#[cfg(test)]
 fn merge_small_groups(buckets: BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
     merge_small_groups_protected(buckets, &HashSet::new())
 }

@@ -381,6 +381,7 @@ pub struct PropagateEdit {
     pub description: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_rename(
     from: &str,
     to: &str,

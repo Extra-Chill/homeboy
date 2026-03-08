@@ -47,9 +47,8 @@ pub(crate) fn normalize_signature(sig: &str) -> String {
     // PHP:  "function handle(WP_REST_Request $request)" → "function handle($request)"
     // Rust: "fn run(args: RunArgs)" → "fn run(args)"
     // Already-untyped params pass through unchanged.
-    let normalized = strip_param_types(&normalized);
 
-    normalized
+    strip_param_types(&normalized)
 }
 
 /// Strip parameter type annotations from a signature string.

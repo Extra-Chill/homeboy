@@ -209,6 +209,7 @@ fn find_prefix_start(lines: &[&str], decl_line: usize) -> usize {
 }
 
 /// Find the end line of an item using grammar-aware brace matching.
+#[allow(clippy::needless_range_loop)]
 fn find_item_end(lines: &[&str], decl_line: usize, kind: &str, grammar: &Grammar) -> usize {
     // For const, static, type_alias — scan for semicolon
     if kind == "const" || kind == "static" || kind == "type_alias" {
@@ -252,6 +253,7 @@ fn find_item_end(lines: &[&str], decl_line: usize, kind: &str, grammar: &Grammar
 /// and character/lifetime literals correctly.
 ///
 /// This is the core replacement for the extension `find_matching_brace`.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn find_matching_brace(lines: &[&str], start_line: usize, grammar: &Grammar) -> usize {
     let open = grammar.blocks.open.chars().next().unwrap_or('{');
     let close = grammar.blocks.close.chars().next().unwrap_or('}');
@@ -317,7 +319,7 @@ pub(crate) fn find_matching_brace(lines: &[&str], start_line: usize, grammar: &G
                     // Found r#"... — skip until matching "###
                     k += 1; // skip opening quote
                     let closing: String = std::iter::once('"')
-                        .chain(std::iter::repeat('#').take(hashes))
+                        .chain(std::iter::repeat_n('#', hashes))
                         .collect();
                     let closing_chars: Vec<char> = closing.chars().collect();
                     'raw_scan: while k < chars.len() {
@@ -505,7 +507,7 @@ pub fn validate_brace_balance(source: &str, grammar: &Grammar) -> bool {
                 if k < chars.len() && chars[k] == '"' && hashes > 0 {
                     k += 1; // skip opening quote
                     let closing: String = std::iter::once('"')
-                        .chain(std::iter::repeat('#').take(hashes))
+                        .chain(std::iter::repeat_n('#', hashes))
                         .collect();
                     let closing_chars: Vec<char> = closing.chars().collect();
                     let mut found_on_line = false;

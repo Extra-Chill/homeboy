@@ -896,8 +896,8 @@ pub fn extract_with_grammar(content: &str, grammar_def: &grammar::Grammar) -> Ve
                         visibility: vis.to_string(),
                         is_static: m
                             .get("modifiers")
-                            .map_or(false, |mods| mods.contains("static"))
-                            || m.get("params").map_or(false, |p| !p.contains("self")),
+                            .is_some_and(|mods| mods.contains("static"))
+                            || m.get("params").is_some_and(|p| !p.contains("self")),
                         line: m.line,
                         params: m.get("params").unwrap_or("").to_string(),
                     }

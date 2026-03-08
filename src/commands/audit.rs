@@ -1033,8 +1033,7 @@ fn run_fix_iteration(
         &changed_files,
     )
     .filter(|_| verification.test_smoke);
-    let mut extra_smokes: Vec<&dyn Fn(&fixer::ApplyChunkResult) -> Result<String, String>> =
-        Vec::new();
+    let mut extra_smokes: Vec<fixer::ChunkVerifier> = Vec::new();
     if let Some(verifier) = smoke_verifier.as_ref() {
         extra_smokes.push(verifier);
     }
@@ -1174,7 +1173,7 @@ fn is_cascading_finding_kind(kind: &homeboy::code_audit::DeviationKind) -> bool 
 fn build_chunk_verifier<'a>(
     root: &'a Path,
     baseline_findings: &'a [homeboy::code_audit::Finding],
-    extra_smokes: Vec<&'a dyn Fn(&fixer::ApplyChunkResult) -> Result<String, String>>,
+    extra_smokes: Vec<fixer::ChunkVerifier<'a>>,
 ) -> impl Fn(&fixer::ApplyChunkResult) -> Result<String, String> + 'a {
     move |chunk| {
         let changed_files = chunk.files.clone();

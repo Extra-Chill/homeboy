@@ -52,7 +52,7 @@ impl SemverBump {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "patch" => Some(SemverBump::Patch),
             "minor" => Some(SemverBump::Minor),

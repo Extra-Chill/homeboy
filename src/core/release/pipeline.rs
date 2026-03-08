@@ -242,7 +242,7 @@ fn build_semver_recommendation(
     component: &Component,
     requested_bump: &str,
 ) -> Result<Option<ReleaseSemverRecommendation>> {
-    let requested = git::SemverBump::from_str(requested_bump).ok_or_else(|| {
+    let requested = git::SemverBump::parse(requested_bump).ok_or_else(|| {
         Error::validation_invalid_argument(
             "bump_type",
             format!("Invalid bump type: {}", requested_bump),
@@ -641,8 +641,8 @@ fn strip_pr_reference(value: &str) -> String {
     trimmed.to_string()
 }
 
-fn find_uncovered_commits<'a>(
-    commits: &'a [git::CommitInfo],
+fn find_uncovered_commits(
+    commits: &[git::CommitInfo],
     unreleased_entries: &[String],
 ) -> Vec<git::CommitInfo> {
     let normalized_entries: Vec<String> = unreleased_entries

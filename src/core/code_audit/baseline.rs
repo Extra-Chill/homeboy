@@ -79,14 +79,6 @@ pub type NewFinding = generic::NewItem;
 // Backward-compatible public API
 // ============================================================================
 
-/// Get the baseline file path for a source directory.
-///
-/// Now points to `homeboy.json` instead of `.homeboy/audit-baseline.json`.
-pub(crate) fn baseline_path(source_path: &Path) -> std::path::PathBuf {
-    let config = BaselineConfig::new(source_path, BASELINE_KEY);
-    config.json_path()
-}
-
 /// Save the current audit result as a baseline.
 pub fn save_baseline(result: &CodeAuditResult) -> Result<std::path::PathBuf, String> {
     let source = Path::new(&result.source_path);

@@ -20,6 +20,9 @@ use super::test_mapping::source_to_test_path;
 use super::{duplication, CodeAuditResult};
 use crate::core::refactor::decompose;
 
+/// Callback that verifies an applied chunk, returning Ok(message) or Err(reason).
+pub type ChunkVerifier<'a> = &'a dyn Fn(&ApplyChunkResult) -> Result<String, String>;
+
 /// A planned fix for a single file.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Fix {
@@ -302,7 +305,7 @@ pub enum ChunkStatus {
 
 #[derive(Clone)]
 pub struct ApplyOptions<'a> {
-    pub verifier: Option<&'a dyn Fn(&ApplyChunkResult) -> Result<String, String>>,
+    pub verifier: Option<ChunkVerifier<'a>>,
 }
 
 use crate::core::undo::InMemoryRollback;
@@ -2265,7 +2268,7 @@ fn is_reexported(file_path: &str, fn_name: &str, root: &Path) -> bool {
 /// Handles both single-line and multi-line `pub use` blocks:
 /// - `pub use module::{foo, bar};`
 /// - `pub use module::{`
-///      `foo, bar,`
+///   `foo, bar,`
 ///   `};`
 fn has_pub_use_of(content: &str, fn_name: &str) -> bool {
     let mut in_pub_use_block = false;
@@ -2336,10 +2339,8 @@ fn is_used_by_binary_crate(fn_name: &str, root: &Path) -> bool {
 
     for mod_name in bin_only_mods {
         let mod_dir = src.join(mod_name);
-        if mod_dir.is_dir() {
-            if scan_dir_for_reference(&mod_dir, fn_name) {
-                return true;
-            }
+        if mod_dir.is_dir() && scan_dir_for_reference(&mod_dir, fn_name) {
+            return true;
         }
         // Also check single-file module: src/<mod_name>.rs
         let mod_file = src.join(format!("{}.rs", mod_name));
@@ -2611,7 +2612,7 @@ pub fn apply_decompose_plans(
     let mut results = Vec::new();
     for (index, dfp) in plans.iter_mut().enumerate() {
         let source_abs = root.join(&dfp.file);
-        let source_content = match std::fs::read_to_string(&source_abs) {
+        let _source_content = match std::fs::read_to_string(&source_abs) {
             Ok(c) => c,
             Err(e) => {
                 results.push(ApplyChunkResult {

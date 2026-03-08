@@ -916,7 +916,7 @@ pub(crate) fn detect_parallel_implementations(fingerprints: &[&FileFingerprint])
                         "Parallel implementation: `{}` has similar call pattern to `{}` in {} — shared calls: {}{}",
                         b.method, a.method, a.file, shared_preview, extra
                     ),
-                    suggestion: suggestion,
+                    suggestion,
                     kind: DeviationKind::ParallelImplementation,
                 });
             }

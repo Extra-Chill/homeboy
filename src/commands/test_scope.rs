@@ -18,11 +18,13 @@ pub struct TestScopeArgs {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 pub struct TestScopeCommandOutput {
     pub status: String,
     pub changed_since: String,
 }
 
+#[allow(dead_code)]
 pub fn run(args: TestScopeArgs, _global: &GlobalArgs) -> CmdResult<TestScopeCommandOutput> {
     Ok((
         TestScopeCommandOutput {
