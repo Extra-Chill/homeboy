@@ -513,11 +513,9 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
                 if !comparison.resolved_fingerprints.is_empty() {
                     // Findings were eliminated — save updated baseline
                     let save_result = if let Some(ref git_ref) = args.changed_since {
-                        let changed = git::get_files_changed_since(
-                            &current_result.source_path,
-                            git_ref,
-                        )
-                        .unwrap_or_default();
+                        let changed =
+                            git::get_files_changed_since(&current_result.source_path, git_ref)
+                                .unwrap_or_default();
                         baseline::save_baseline_scoped(&current_result, &changed)
                     } else {
                         baseline::save_baseline(&current_result)
@@ -613,7 +611,11 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
             // Scoped baseline: only update fingerprints for changed files
             let changed = git::get_files_changed_since(&resolved_path, git_ref)?;
             if changed.is_empty() {
-                homeboy::log_status!("baseline", "No files changed since {} — baseline unchanged", git_ref);
+                homeboy::log_status!(
+                    "baseline",
+                    "No files changed since {} — baseline unchanged",
+                    git_ref
+                );
             } else {
                 homeboy::log_status!(
                     "baseline",
@@ -625,8 +627,7 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
                 .map_err(homeboy::Error::internal_unexpected)?
         } else {
             // Full baseline: replace everything
-            baseline::save_baseline(&result)
-                .map_err(homeboy::Error::internal_unexpected)?
+            baseline::save_baseline(&result).map_err(homeboy::Error::internal_unexpected)?
         };
 
         let baseline_data =

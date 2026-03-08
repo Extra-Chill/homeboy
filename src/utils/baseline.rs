@@ -1038,9 +1038,15 @@ mod tests {
         let loaded = load::<()>(&config).unwrap().unwrap();
         // a.rs replaced (1 finding), b.rs + c.rs preserved (2 findings) = 3 total
         assert_eq!(loaded.item_count, 3);
-        assert!(loaded.known_fingerprints.contains(&"lint::a.rs".to_string()));
-        assert!(loaded.known_fingerprints.contains(&"lint::b.rs".to_string()));
-        assert!(loaded.known_fingerprints.contains(&"lint::c.rs".to_string()));
+        assert!(loaded
+            .known_fingerprints
+            .contains(&"lint::a.rs".to_string()));
+        assert!(loaded
+            .known_fingerprints
+            .contains(&"lint::b.rs".to_string()));
+        assert!(loaded
+            .known_fingerprints
+            .contains(&"lint::c.rs".to_string()));
     }
 
     #[test]
@@ -1071,8 +1077,12 @@ mod tests {
         let loaded = load::<()>(&config).unwrap().unwrap();
         // a.rs findings removed, b.rs preserved
         assert_eq!(loaded.item_count, 1);
-        assert!(!loaded.known_fingerprints.contains(&"lint::a.rs".to_string()));
-        assert!(loaded.known_fingerprints.contains(&"lint::b.rs".to_string()));
+        assert!(!loaded
+            .known_fingerprints
+            .contains(&"lint::a.rs".to_string()));
+        assert!(loaded
+            .known_fingerprints
+            .contains(&"lint::b.rs".to_string()));
     }
 
     #[test]
@@ -1099,8 +1109,12 @@ mod tests {
 
         let loaded = load::<()>(&config).unwrap().unwrap();
         assert_eq!(loaded.item_count, 2);
-        assert!(loaded.known_fingerprints.contains(&"lint::a.rs".to_string()));
-        assert!(loaded.known_fingerprints.contains(&"lint::b.rs".to_string()));
+        assert!(loaded
+            .known_fingerprints
+            .contains(&"lint::a.rs".to_string()));
+        assert!(loaded
+            .known_fingerprints
+            .contains(&"lint::b.rs".to_string()));
     }
 
     #[test]
@@ -1139,9 +1153,7 @@ mod tests {
 
         // Scoped update with b.rs in scope but also including a.rs item
         // (shouldn't create duplicates)
-        let scoped_items = vec![
-            item("lint", "b.rs", "new finding"),
-        ];
+        let scoped_items = vec![item("lint", "b.rs", "new finding")];
         let scope = vec!["b.rs".to_string()];
         save_scoped(
             &config,
