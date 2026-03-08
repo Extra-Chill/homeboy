@@ -1,6 +1,7 @@
 # Build artifacts
 /target/
 dist-manifest.json
+.homeboy-bin/
 
 # Dependencies
 /node_modules/
