@@ -3,12 +3,12 @@ use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-include!("upgrade/types.inc");
-include!("upgrade/constants.inc");
-include!("upgrade/helpers.inc");
-include!("upgrade/planning.inc");
-include!("upgrade/execution.inc");
-include!("upgrade/validation.inc");
+include!("upgrade/types.rs");
+include!("upgrade/constants.rs");
+include!("upgrade/helpers.rs");
+include!("upgrade/planning.rs");
+include!("upgrade/execution.rs");
+include!("upgrade/validation.rs");
 
 impl InstallMethod {
     pub fn as_str(&self) -> &'static str {

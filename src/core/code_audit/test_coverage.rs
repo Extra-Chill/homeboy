@@ -466,16 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn include_fragment_is_source_but_has_no_direct_test_path() {
-        let config = make_config();
-        assert!(is_source_file("src/core/deploy/types.inc", &config));
-        assert_eq!(
-            source_to_test_path("src/core/deploy/types.inc", &config),
-            None
-        );
-    }
-
-    #[test]
     fn test_to_source_path_basic() {
         let config = make_config();
         assert_eq!(
