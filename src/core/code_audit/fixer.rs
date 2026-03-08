@@ -3041,7 +3041,7 @@ class MyAbility {
         // we should get ONE constructor with the registration inside,
         // not two separate insertions.
         use super::super::checks::CheckStatus;
-        use super::super::conventions::{Deviation, AuditFinding, Outlier};
+        use super::super::conventions::{AuditFinding, Deviation, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_merge_test");
@@ -3330,7 +3330,7 @@ class TestClass {
     #[test]
     fn skip_helper_files_in_ability_directory() {
         use super::super::checks::CheckStatus;
-        use super::super::conventions::{Deviation, AuditFinding, Outlier};
+        use super::super::conventions::{AuditFinding, Deviation, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_skip_helper_test");
@@ -3443,7 +3443,7 @@ class {} {{
     #[test]
     fn skip_fragmented_conventions() {
         use super::super::checks::CheckStatus;
-        use super::super::conventions::{Deviation, AuditFinding, Outlier};
+        use super::super::conventions::{AuditFinding, Deviation, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_skip_frag_test");
@@ -3579,7 +3579,7 @@ pub struct TestOutput {}
     #[test]
     fn generate_fixes_handles_missing_import() {
         use super::super::checks::CheckStatus;
-        use super::super::conventions::{Deviation, AuditFinding, Outlier};
+        use super::super::conventions::{AuditFinding, Deviation, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_import_test");
@@ -4466,7 +4466,10 @@ class FlowAbilities {
 
         assert_eq!(summary.visible_insertions, 1);
         assert_eq!(result.fixes[0].insertions.len(), 1);
-        assert_eq!(result.fixes[0].insertions[0].finding, AuditFinding::MissingImport);
+        assert_eq!(
+            result.fixes[0].insertions[0].finding,
+            AuditFinding::MissingImport
+        );
     }
 
     #[test]
@@ -4522,7 +4525,10 @@ class FlowAbilities {
 
         assert_eq!(subset.fixes.len(), 1);
         assert_eq!(subset.fixes[0].insertions.len(), 1);
-        assert_eq!(subset.fixes[0].insertions[0].finding, AuditFinding::MissingImport);
+        assert_eq!(
+            subset.fixes[0].insertions[0].finding,
+            AuditFinding::MissingImport
+        );
         assert_eq!(subset.new_files.len(), 1);
         assert_eq!(subset.total_insertions, 2);
     }

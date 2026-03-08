@@ -41,7 +41,7 @@ use std::path::Path;
 use self::layer_ownership::run as run_layer_ownership;
 
 pub use checks::{CheckResult, CheckStatus};
-pub use conventions::{Convention, Deviation, AuditFinding, Language, Outlier};
+pub use conventions::{AuditFinding, Convention, Deviation, Language, Outlier};
 pub use findings::{Finding, Severity};
 pub use fingerprint::FileFingerprint;
 

@@ -62,7 +62,7 @@ pub fn check_conventions(conventions: &[Convention]) -> Vec<CheckResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::{Deviation, AuditFinding};
+    use crate::code_audit::conventions::{AuditFinding, Deviation};
 
     #[test]
     fn clean_convention_produces_clean_status() {

@@ -175,7 +175,6 @@ impl AuditFinding {
             "parallel_implementation",
         ]
     }
-
 }
 
 impl std::str::FromStr for AuditFinding {
@@ -1303,8 +1302,7 @@ class AgentPing {
         );
         assert_eq!(convention.outliers.len(), 1);
         assert!(convention.outliers[0].deviations.iter().any(|d| {
-            d.kind == AuditFinding::NamespaceMismatch
-                && d.description.contains("Missing namespace")
+            d.kind == AuditFinding::NamespaceMismatch && d.description.contains("Missing namespace")
         }));
     }
 

@@ -542,8 +542,7 @@ mod tests {
         let missing: Vec<&Finding> = findings
             .iter()
             .filter(|f| {
-                f.kind == AuditFinding::MissingTestFile
-                    || f.kind == AuditFinding::MissingTestMethod
+                f.kind == AuditFinding::MissingTestFile || f.kind == AuditFinding::MissingTestMethod
             })
             .collect();
         assert!(missing.is_empty(), "Inline tests should satisfy coverage");
@@ -642,8 +641,7 @@ mod tests {
         let coverage_findings: Vec<&Finding> = findings
             .iter()
             .filter(|f| {
-                f.kind == AuditFinding::MissingTestFile
-                    || f.kind == AuditFinding::MissingTestMethod
+                f.kind == AuditFinding::MissingTestFile || f.kind == AuditFinding::MissingTestMethod
             })
             .collect();
         assert!(

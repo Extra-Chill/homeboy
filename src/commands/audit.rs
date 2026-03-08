@@ -1,13 +1,13 @@
 use clap::Args;
-use serde::Serialize;
-use std::collections::HashSet;
-use std::path::Path;
-use std::path::PathBuf;
 use homeboy::code_audit::{self, baseline, fixer, CodeAuditResult};
 use homeboy::component::{self, Component};
 use homeboy::extension::ExtensionRunner;
 use homeboy::git;
 use homeboy::utils::autofix::{self, AutofixMode};
+use serde::Serialize;
+use std::collections::HashSet;
+use std::path::Path;
+use std::path::PathBuf;
 
 use super::args::{BaselineArgs, PositionalComponentArgs};
 use super::test_scope::{build_phpunit_filter_regex, compute_changed_test_scope};
@@ -251,9 +251,8 @@ fn parse_finding_kinds(
     values
         .iter()
         .map(|value| {
-            homeboy::code_audit::AuditFinding::from_str(value).map_err(|msg| {
-                homeboy::Error::validation_invalid_argument(flag, msg, None, None)
-            })
+            homeboy::code_audit::AuditFinding::from_str(value)
+                .map_err(|msg| homeboy::Error::validation_invalid_argument(flag, msg, None, None))
         })
         .collect()
 }
