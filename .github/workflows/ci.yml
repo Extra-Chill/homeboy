@@ -1,8 +1,9 @@
 # PR quality pipeline.
 #
-# Strict serial pipeline: lint+fix → test+fix → audit+fix
-# Each stage fixes what it can and commits back. If anything was fixed,
-# the App token push triggers a full re-run to verify the fixes.
+# Build once, then strict serial pipeline: lint+fix → test+fix → audit+fix
+# A single build job compiles homeboy from source and shares the binary
+# via artifact. Each stage downloads it instead of rebuilding.
+# If fixes are committed, the App token push triggers a full re-run.
 # Scoped to changed files only (--changed-since / lint-changed-only).
 
 name: CI
@@ -16,17 +17,58 @@ permissions:
   pull-requests: write
 
 jobs:
+  # ── Stage 0: Build once ──
+  # Compile homeboy from source once and share the binary with all
+  # subsequent stages. Eliminates 3× redundant cargo builds.
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ci-
+
+      - name: Build homeboy
+        run: cargo build --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: homeboy-binary
+          path: target/release/homeboy
+          retention-days: 1
+
   # ── Stage 1: Lint + Fix ──
   # Runs cargo fmt and clippy. Autofixes formatting and clippy warnings.
   # If fixes are committed, App token push triggers re-run of all stages.
   lint:
     name: Lint
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
 
       - name: Generate GitHub App token
         id: app-token
@@ -38,7 +80,7 @@ jobs:
 
       - uses: Extra-Chill/homeboy-action@v1
         with:
-          source: '.'
+          binary-path: .homeboy-bin/homeboy
           extension: rust
           component: homeboy
           commands: lint
@@ -52,13 +94,19 @@ jobs:
   # commits and triggers re-run.
   test:
     name: Test
-    needs: [lint]
+    needs: [build, lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
 
       - name: Generate GitHub App token
         id: app-token
@@ -70,7 +118,7 @@ jobs:
 
       - uses: Extra-Chill/homeboy-action@v1
         with:
-          source: '.'
+          binary-path: .homeboy-bin/homeboy
           extension: rust
           component: homeboy
           commands: test
@@ -82,16 +130,21 @@ jobs:
   # ── Stage 3: Audit + Fix ──
   # Runs after test passes. Autofix mode "always" — grinds down the
   # baseline on every PR, not just failures.
-  # Uses source build so the audit binary matches the PR code.
   audit:
     name: Audit
-    needs: [test]
+    needs: [build, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
 
       - name: Generate GitHub App token
         id: app-token
@@ -103,7 +156,7 @@ jobs:
 
       - uses: Extra-Chill/homeboy-action@v1
         with:
-          source: '.'
+          binary-path: .homeboy-bin/homeboy
           extension: rust
           component: homeboy
           commands: audit

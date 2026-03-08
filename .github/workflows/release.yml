@@ -28,11 +28,11 @@ on:
         type: boolean
         default: false
 
-# Only one release at a time. Newer run cancels older pending run,
-# picking up all accumulated commits since last tag.
-concurrency:
-  group: release
-  cancel-in-progress: true
+# No concurrency group — let overlapping runs race. The check job exits
+# in seconds when there are no releasable commits (the common case when
+# an in-flight release already tagged HEAD). The failure cache prevents
+# retrying the same broken SHA. This avoids both canceling in-flight
+# releases (wastes work) and queuing idle runners (wastes capacity).
 
 jobs:
   # ── Step 1: Check for releasable commits ──
@@ -122,19 +122,61 @@ jobs:
             echo "::notice::${COUNT} releasable commits → ${BUMP} bump"
           fi
 
-  # ── Step 2: Quality gate (lint + fix whole codebase) ──
+  # ── Step 2: Build once ──
+  # Compile homeboy from source once and share the binary with all
+  # quality gate jobs. Eliminates 3× redundant cargo builds.
+  gate-build:
+    name: Build
+    needs: check
+    if: needs.check.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-gate-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-gate-
+
+      - name: Build homeboy
+        run: cargo build --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: homeboy-binary
+          path: target/release/homeboy
+          retention-days: 1
+
+  # ── Step 3: Quality gate (lint + fix whole codebase) ──
   # Unlike PR CI (scoped to changed files), release quality gate runs
   # unscoped — fixes the entire codebase before releasing.
   # Serial pipeline: lint+fix → test+fix → audit+fix → release.
   gate-lint:
     name: Lint + Fix
-    needs: check
+    needs:
+      - check
+      - gate-build
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
 
       - name: Generate GitHub App token
         id: app-token
@@ -146,7 +188,7 @@ jobs:
 
       - uses: Extra-Chill/homeboy-action@v1
         with:
-          source: '.'
+          binary-path: .homeboy-bin/homeboy
           extension: rust
           component: homeboy
           commands: lint
@@ -160,6 +202,7 @@ jobs:
     name: Test + Fix
     needs:
       - check
+      - gate-build
       - gate-lint
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
@@ -167,6 +210,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
 
       - name: Generate GitHub App token
         id: app-token
@@ -178,7 +227,7 @@ jobs:
 
       - uses: Extra-Chill/homeboy-action@v1
         with:
-          source: '.'
+          binary-path: .homeboy-bin/homeboy
           extension: rust
           component: homeboy
           commands: test
@@ -192,6 +241,7 @@ jobs:
     name: Audit + Fix
     needs:
       - check
+      - gate-build
       - gate-test
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
@@ -199,6 +249,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
 
       - name: Generate GitHub App token
         id: app-token
@@ -210,7 +266,7 @@ jobs:
 
       - uses: Extra-Chill/homeboy-action@v1
         with:
-          source: '.'
+          binary-path: .homeboy-bin/homeboy
           extension: rust
           component: homeboy
           commands: audit
@@ -227,6 +283,7 @@ jobs:
     name: Prepare Release
     needs:
       - check
+      - gate-build
       - gate-lint
       - gate-test
       - gate-audit
@@ -593,11 +650,12 @@ jobs:
     name: Record failure
     needs:
       - check
+      - gate-build
       - gate-lint
       - gate-test
       - gate-audit
       - prepare
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && (needs.gate-lint.result == 'failure' || needs.gate-test.result == 'failure' || needs.gate-audit.result == 'failure' || needs.prepare.result == 'failure') }}
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && (needs.gate-build.result == 'failure' || needs.gate-lint.result == 'failure' || needs.gate-test.result == 'failure' || needs.gate-audit.result == 'failure' || needs.prepare.result == 'failure') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
