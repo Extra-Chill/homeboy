@@ -250,10 +250,7 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
             php "$LOOP_COUNT_FIXER" "$lint_target"
         fi
 
-        # Run reserved keyword parameter name fixer ($default -> $default_value, etc.)
-        if [ -f "$RESERVED_PARAM_FIXER" ]; then
-            php "$RESERVED_PARAM_FIXER" "$lint_target"
-        fi
+        # Reserved param fixer runs OUTSIDE this loop (needs cross-file manifest)
 
         # Run unused parameter fixer (noop references for callbacks, removal for dead params)
         # This fixer runs PHPCS internally so needs the binary and standard paths
@@ -292,6 +289,15 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
             php "$WP_FILESYSTEM_FIXER" "$lint_target"
         fi
     done
+
+    # Run reserved keyword parameter name fixer ($default -> $default_value, etc.)
+    # MUST run on full plugin path (not per-file) because its two-pass architecture
+    # builds a rename manifest in Pass 1 (declarations) and applies it to call sites
+    # in Pass 2 (named arguments). Per-file invocation loses the manifest between
+    # processes, leaving call sites with stale parameter names.
+    if [ -f "$RESERVED_PARAM_FIXER" ]; then
+        php "$RESERVED_PARAM_FIXER" "$PLUGIN_PATH"
+    fi
 
     # Run phpcbf for remaining auto-fixable issues
     if [ -f "$PHPCBF_BIN" ]; then
