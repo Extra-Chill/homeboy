@@ -2,11 +2,6 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
-## [Next]
-
-### Removed
-- Inline review annotations — PR comment already shows all findings with file and line context, inline annotations were redundant noise
-
 ## [1.4.0] - 2026-03-06
 
 ### Added
