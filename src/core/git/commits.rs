@@ -92,7 +92,7 @@ impl CommitCategory {
 
 /// Parse a commit subject into a category based on conventional commit format.
 /// Falls back to Other if no pattern matches - this is fine, commits still get included.
-pub fn parse_conventional_commit(subject: &str) -> CommitCategory {
+pub(crate) fn parse_conventional_commit(subject: &str) -> CommitCategory {
     let lower = subject.to_lowercase();
 
     // Detect merge commits first - they should be filtered out
@@ -258,7 +258,7 @@ pub struct CommitCounts {
 }
 
 /// Get the list of files changed by a specific commit.
-pub fn get_commit_files(path: &str, commit_hash: &str) -> Result<Vec<String>> {
+pub(crate) fn get_commit_files(path: &str, commit_hash: &str) -> Result<Vec<String>> {
     let stdout = command::run_in(
         path,
         "git",
@@ -303,7 +303,7 @@ fn is_docs_file(file_path: &str) -> bool {
 /// Uses belt-and-suspenders approach:
 /// 1. Fast path: commits with `docs:` prefix (CommitCategory::Docs) are docs-only
 /// 2. Fallback: check all changed files match docs patterns
-pub fn is_docs_only_commit(path: &str, commit: &CommitInfo) -> bool {
+pub(crate) fn is_docs_only_commit(path: &str, commit: &CommitInfo) -> bool {
     // Fast path: conventional commit prefix
     if commit.category == CommitCategory::Docs {
         return true;

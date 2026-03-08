@@ -38,7 +38,7 @@ const SKIP_DIRS: &[&str] = &[
 /// Run structural analysis on all source files under a root directory.
 ///
 /// Returns findings for files that exceed structural thresholds.
-pub fn analyze_structure(root: &Path) -> Vec<Finding> {
+pub(crate) fn analyze_structure(root: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     let mut dir_source_counts: HashMap<String, usize> = HashMap::new();

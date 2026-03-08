@@ -23,7 +23,7 @@ pub fn partition_fingerprints<'a>(
 }
 
 /// Check if a file path is within one of the configured source directories.
-pub fn is_source_file(path: &str, config: &TestMappingConfig) -> bool {
+pub(crate) fn is_source_file(path: &str, config: &TestMappingConfig) -> bool {
     config.source_dirs.iter().any(|dir| path.starts_with(dir))
 }
 

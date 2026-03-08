@@ -35,7 +35,7 @@ pub struct ConfigIssue {
 }
 
 /// Run all config health checks on a component. Returns a list of issues found.
-pub fn check_config(component: &Component) -> Vec<ConfigIssue> {
+pub(crate) fn check_config(component: &Component) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
 
     check_local_path(component, &mut issues);
