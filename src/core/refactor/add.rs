@@ -106,8 +106,8 @@ pub fn add_import(
             required_registrations: vec![],
             insertions: vec![Insertion {
                 kind: InsertionKind::ImportAdd,
-                fix_kind: fixer::FixKind::ImportAdd,
-                safety_tier: fixer::FixKind::ImportAdd.safety_tier(),
+                finding: crate::code_audit::AuditFinding::MissingImport,
+                safety_tier: InsertionKind::ImportAdd.safety_tier(),
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,

@@ -1,7 +1,7 @@
 //! Convert check results into actionable findings for the report.
 
 use super::checks::{CheckResult, CheckStatus};
-use super::conventions::DeviationKind;
+use super::conventions::AuditFinding;
 
 /// An actionable finding from the code audit.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -17,7 +17,7 @@ pub struct Finding {
     /// Suggested action.
     pub suggestion: String,
     /// The kind of deviation.
-    pub kind: DeviationKind,
+    pub kind: AuditFinding,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -49,7 +49,7 @@ pub fn build_findings(results: &[CheckResult]) -> Vec<Finding> {
         for outlier in &result.outliers {
             for deviation in &outlier.deviations {
                 let severity =
-                    if outlier.noisy || matches!(deviation.kind, DeviationKind::NamingMismatch) {
+                    if outlier.noisy || matches!(deviation.kind, AuditFinding::NamingMismatch) {
                         Severity::Info
                     } else {
                         severity.clone()
@@ -105,7 +105,7 @@ mod tests {
                 file: "agent-ping.php".to_string(),
                 noisy: false,
                 deviations: vec![Deviation {
-                    kind: DeviationKind::MissingMethod,
+                    kind: AuditFinding::MissingMethod,
                     description: "Missing method: validate".to_string(),
                     suggestion: "Add validate()".to_string(),
                 }],
@@ -134,7 +134,7 @@ mod tests {
                     file: "a.php".to_string(),
                     noisy: false,
                     deviations: vec![Deviation {
-                        kind: DeviationKind::MissingMethod,
+                        kind: AuditFinding::MissingMethod,
                         description: "Missing".to_string(),
                         suggestion: "Fix".to_string(),
                     }],
@@ -143,7 +143,7 @@ mod tests {
                     file: "b.php".to_string(),
                     noisy: false,
                     deviations: vec![Deviation {
-                        kind: DeviationKind::MissingMethod,
+                        kind: AuditFinding::MissingMethod,
                         description: "Missing".to_string(),
                         suggestion: "Fix".to_string(),
                     }],
@@ -169,7 +169,7 @@ mod tests {
                 file: "abilities/helpers.php".to_string(),
                 noisy: true,
                 deviations: vec![Deviation {
-                    kind: DeviationKind::NamingMismatch,
+                    kind: AuditFinding::NamingMismatch,
                     description:
                         "Helper-like name does not match convention suffix 'Ability': Helpers"
                             .to_string(),
@@ -181,6 +181,6 @@ mod tests {
         let findings = build_findings(&results);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Info);
-        assert_eq!(findings[0].kind, DeviationKind::NamingMismatch);
+        assert_eq!(findings[0].kind, AuditFinding::NamingMismatch);
     }
 }

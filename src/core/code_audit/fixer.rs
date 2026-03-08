@@ -9,11 +9,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::str::FromStr;
 
 use regex::Regex;
 
-use super::conventions::{DeviationKind, Language};
+use super::conventions::{AuditFinding, Language};
 use super::naming::{detect_naming_suffix, suffix_matches};
 use super::preflight;
 use super::test_mapping::source_to_test_path;
@@ -44,10 +43,10 @@ pub struct Fix {
 /// A single insertion into a file.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Insertion {
-    /// What kind of fix.
+    /// What kind of fix (mechanical action).
     pub kind: InsertionKind,
-    /// Normalized fix kind for selection/filtering.
-    pub fix_kind: FixKind,
+    /// The audit finding this insertion addresses.
+    pub finding: AuditFinding,
     /// Safety contract for this insertion.
     pub safety_tier: FixSafetyTier,
     /// Whether this fix is eligible for auto-apply under the current policy.
@@ -73,44 +72,6 @@ pub enum FixSafetyTier {
     PlanOnly,
 }
 
-impl FixSafetyTier {}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum FixKind {
-    MethodStub,
-    RegistrationStub,
-    ConstructorWithRegistration,
-    ImportAdd,
-    FunctionRemoval,
-    TraitUse,
-    MissingTestFile,
-    MissingTestMethod,
-    SharedExtraction,
-    VisibilityNarrowing,
-    Decompose,
-}
-
-impl FixKind {
-    pub fn safety_tier(self) -> FixSafetyTier {
-        match self {
-            Self::ImportAdd => FixSafetyTier::SafeAuto,
-            Self::MethodStub
-            | Self::RegistrationStub
-            | Self::ConstructorWithRegistration
-            | Self::MissingTestFile
-            | Self::MissingTestMethod
-            | Self::VisibilityNarrowing => FixSafetyTier::SafeWithChecks,
-            Self::Decompose => FixSafetyTier::SafeWithChecks,
-            Self::FunctionRemoval | Self::TraitUse | Self::SharedExtraction => {
-                FixSafetyTier::PlanOnly
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PreflightReport {
     pub status: PreflightStatus,
@@ -131,28 +92,6 @@ pub struct PreflightCheck {
     pub name: String,
     pub passed: bool,
     pub detail: String,
-}
-
-impl FromStr for FixKind {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
-        match normalized.as_str() {
-            "method_stub" => Ok(Self::MethodStub),
-            "registration_stub" => Ok(Self::RegistrationStub),
-            "constructor_with_registration" => Ok(Self::ConstructorWithRegistration),
-            "import_add" => Ok(Self::ImportAdd),
-            "function_removal" => Ok(Self::FunctionRemoval),
-            "trait_use" => Ok(Self::TraitUse),
-            "missing_test_file" => Ok(Self::MissingTestFile),
-            "missing_test_method" => Ok(Self::MissingTestMethod),
-            "shared_extraction" => Ok(Self::SharedExtraction),
-            "visibility_narrowing" => Ok(Self::VisibilityNarrowing),
-            "decompose" => Ok(Self::Decompose),
-            _ => Err(format!("unknown fix kind '{}'", value)),
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -186,6 +125,19 @@ pub enum InsertionKind {
     },
 }
 
+impl InsertionKind {
+    pub fn safety_tier(&self) -> FixSafetyTier {
+        match self {
+            Self::ImportAdd => FixSafetyTier::SafeAuto,
+            Self::MethodStub
+            | Self::RegistrationStub
+            | Self::ConstructorWithRegistration
+            | Self::VisibilityChange { .. } => FixSafetyTier::SafeWithChecks,
+            Self::FunctionRemoval { .. } | Self::TraitUse => FixSafetyTier::PlanOnly,
+        }
+    }
+}
+
 /// A file that was skipped by the fixer with a reason.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkippedFile {
@@ -200,8 +152,8 @@ pub struct SkippedFile {
 pub struct NewFile {
     /// Relative path for the new file.
     pub file: String,
-    /// Normalized fix kind for selection/filtering.
-    pub fix_kind: FixKind,
+    /// The audit finding this new file addresses.
+    pub finding: AuditFinding,
     /// Safety contract for this file creation.
     pub safety_tier: FixSafetyTier,
     /// Whether this file is eligible for auto-apply under the current policy.
@@ -263,19 +215,19 @@ impl FixResult {
         }
     }
 
-    /// Compute a breakdown of fix kinds and their counts.
-    pub fn fix_kind_counts(&self) -> std::collections::BTreeMap<FixKind, usize> {
+    /// Compute a breakdown of finding types and their fix counts.
+    pub fn finding_counts(&self) -> std::collections::BTreeMap<AuditFinding, usize> {
         let mut counts = std::collections::BTreeMap::new();
         for fix in &self.fixes {
             for insertion in &fix.insertions {
-                *counts.entry(insertion.fix_kind).or_insert(0) += 1;
+                *counts.entry(insertion.finding.clone()).or_insert(0) += 1;
             }
         }
         for new_file in &self.new_files {
-            *counts.entry(new_file.fix_kind).or_insert(0) += 1;
+            *counts.entry(new_file.finding.clone()).or_insert(0) += 1;
         }
         if !self.decompose_plans.is_empty() {
-            *counts.entry(FixKind::Decompose).or_insert(0) += self.decompose_plans.len();
+            *counts.entry(AuditFinding::GodFile).or_insert(0) += self.decompose_plans.len();
         }
         counts
     }
@@ -312,8 +264,8 @@ use crate::core::undo::InMemoryRollback;
 
 #[derive(Debug, Clone, Default)]
 pub struct FixPolicy {
-    pub only: Option<Vec<FixKind>>,
-    pub exclude: Vec<FixKind>,
+    pub only: Option<Vec<AuditFinding>>,
+    pub exclude: Vec<AuditFinding>,
 }
 
 #[derive(Debug, Clone)]
@@ -344,14 +296,14 @@ fn is_zero_usize(value: &usize) -> bool {
 
 fn insertion(
     kind: InsertionKind,
-    fix_kind: FixKind,
+    finding: AuditFinding,
     code: String,
     description: String,
 ) -> Insertion {
     Insertion {
+        safety_tier: kind.safety_tier(),
         kind,
-        fix_kind,
-        safety_tier: fix_kind.safety_tier(),
+        finding,
         auto_apply: false,
         blocked_reason: None,
         preflight: None,
@@ -360,11 +312,17 @@ fn insertion(
     }
 }
 
-fn new_file(fix_kind: FixKind, file: String, content: String, description: String) -> NewFile {
+fn new_file(
+    finding: AuditFinding,
+    safety_tier: FixSafetyTier,
+    file: String,
+    content: String,
+    description: String,
+) -> NewFile {
     NewFile {
         file,
-        fix_kind,
-        safety_tier: fix_kind.safety_tier(),
+        finding,
+        safety_tier,
         auto_apply: false,
         blocked_reason: None,
         preflight: None,
@@ -374,13 +332,13 @@ fn new_file(fix_kind: FixKind, file: String, content: String, description: Strin
     }
 }
 
-fn fix_kind_allowed(fix_kind: FixKind, policy: &FixPolicy) -> bool {
+fn finding_allowed(finding: &AuditFinding, policy: &FixPolicy) -> bool {
     let included = policy
         .only
         .as_ref()
-        .is_none_or(|only| only.contains(&fix_kind));
+        .is_none_or(|only| only.contains(finding));
 
-    included && !policy.exclude.contains(&fix_kind)
+    included && !policy.exclude.contains(finding)
 }
 
 fn annotate_insertion_for_policy(
@@ -390,7 +348,7 @@ fn annotate_insertion_for_policy(
     policy: &FixPolicy,
     context: &PreflightContext<'_>,
 ) -> bool {
-    if !fix_kind_allowed(insertion.fix_kind, policy) {
+    if !finding_allowed(&insertion.finding, policy) {
         return false;
     }
 
@@ -438,7 +396,7 @@ fn annotate_new_file_for_policy(
     policy: &FixPolicy,
     context: &PreflightContext<'_>,
 ) -> bool {
-    if !fix_kind_allowed(new_file.fix_kind, policy) {
+    if !finding_allowed(&new_file.finding, policy) {
         return false;
     }
 
@@ -586,11 +544,11 @@ pub fn apply_fix_policy(
 
     // Filter decompose plans by policy (--only / --exclude)
     if let Some(ref only) = policy.only {
-        if !only.contains(&FixKind::Decompose) {
+        if !only.contains(&AuditFinding::GodFile) {
             result.decompose_plans.clear();
         }
     }
-    if policy.exclude.contains(&FixKind::Decompose) {
+    if policy.exclude.contains(&AuditFinding::GodFile) {
         result.decompose_plans.clear();
     }
 
@@ -1082,7 +1040,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
 
             for deviation in &outlier.deviations {
                 match deviation.kind {
-                    DeviationKind::MissingMethod => {
+                    AuditFinding::MissingMethod => {
                         let method_name = deviation
                             .description
                             .strip_prefix("Missing method: ")
@@ -1102,25 +1060,25 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                             missing_methods.push(method_name);
                         }
                     }
-                    DeviationKind::MissingRegistration => {
+                    AuditFinding::MissingRegistration => {
                         let hook_name = deviation
                             .description
                             .strip_prefix("Missing registration: ")
                             .unwrap_or(&deviation.description);
                         missing_registrations.push(hook_name);
                     }
-                    DeviationKind::MissingImport => {
+                    AuditFinding::MissingImport => {
                         let import_path = deviation
                             .description
                             .strip_prefix("Missing import: ")
                             .unwrap_or(&deviation.description);
                         missing_imports.push(import_path);
                     }
-                    DeviationKind::DirectorySprawl => {
+                    AuditFinding::DirectorySprawl => {
                         // Structural concern across directories; no safe automatic
                         // in-file patching yet. Leave for dedicated refactor planning.
                     }
-                    DeviationKind::TodoMarker | DeviationKind::LegacyComment => {
+                    AuditFinding::TodoMarker | AuditFinding::LegacyComment => {
                         // Comment hygiene requires human judgement; do not auto-edit.
                     }
                     _ => {}
@@ -1134,7 +1092,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                 let use_stmt = generate_import_statement(import_path, &language);
                 insertions.push(insertion(
                     InsertionKind::ImportAdd,
-                    FixKind::ImportAdd,
+                    AuditFinding::MissingImport,
                     use_stmt,
                     format!("Add missing import: {}", import_path),
                 ));
@@ -1147,7 +1105,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     for hook_name in &missing_registrations {
                         insertions.push(insertion(
                             InsertionKind::RegistrationStub,
-                            FixKind::RegistrationStub,
+                            AuditFinding::MissingRegistration,
                             generate_registration_stub(hook_name),
                             format!("Add {} registration in __construct()", hook_name),
                         ));
@@ -1165,7 +1123,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     );
                     insertions.push(insertion(
                         InsertionKind::ConstructorWithRegistration,
-                        FixKind::ConstructorWithRegistration,
+                        AuditFinding::MissingRegistration,
                         construct_code,
                         format!(
                             "Add __construct() with {} registration(s)",
@@ -1188,7 +1146,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                 if let Some(sig) = sig_map.get(constructor_name) {
                     insertions.push(insertion(
                         InsertionKind::MethodStub,
-                        FixKind::MethodStub,
+                        AuditFinding::MissingMethod,
                         generate_method_stub(sig),
                         format!(
                             "Add {}() stub to match {} convention",
@@ -1199,7 +1157,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     let fallback_sig = generate_fallback_signature(constructor_name, &language);
                     insertions.push(insertion(
                         InsertionKind::MethodStub,
-                        FixKind::MethodStub,
+                        AuditFinding::MissingMethod,
                         generate_method_stub(&fallback_sig),
                         format!(
                             "Add {}() stub to match {} convention (signature inferred)",
@@ -1214,7 +1172,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                 if let Some(sig) = sig_map.get(*method_name) {
                     insertions.push(insertion(
                         InsertionKind::MethodStub,
-                        FixKind::MethodStub,
+                        AuditFinding::MissingMethod,
                         generate_method_stub(sig),
                         format!(
                             "Add {}() stub to match {} convention",
@@ -1225,7 +1183,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     let fallback_sig = generate_fallback_signature(method_name, &language);
                     insertions.push(insertion(
                         InsertionKind::MethodStub,
-                        FixKind::MethodStub,
+                        AuditFinding::MissingMethod,
                         generate_method_stub(&fallback_sig),
                         format!(
                             "Add {}() stub to match {} convention (signature inferred)",
@@ -1251,7 +1209,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
     // These are mechanical and safe to scaffold.
     let mut new_files: Vec<NewFile> = Vec::new();
     for finding in &result.findings {
-        if finding.kind != DeviationKind::MissingTestFile {
+        if finding.kind != AuditFinding::MissingTestFile {
             continue;
         }
 
@@ -1268,7 +1226,8 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
             continue;
         };
         new_files.push(new_file(
-            FixKind::MissingTestFile,
+            AuditFinding::MissingTestFile,
+            FixSafetyTier::SafeWithChecks,
             test_file,
             candidate.content,
             format!("Create missing test file for '{}'", finding.file),
@@ -1278,7 +1237,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
     // Handle missing test methods reported by test_coverage findings.
     // For deterministic safety, scaffold ignored stub tests instead of fake-pass assertions.
     for finding in &result.findings {
-        if finding.kind != DeviationKind::MissingTestMethod {
+        if finding.kind != AuditFinding::MissingTestMethod {
             continue;
         }
 
@@ -1323,7 +1282,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                         required_registrations: vec![],
                         insertions: vec![insertion(
                             InsertionKind::MethodStub,
-                            FixKind::MissingTestMethod,
+                            AuditFinding::MissingTestMethod,
                             test_stub,
                             format!(
                                 "Scaffold missing test method '{}' for '{}::{}' (inline)",
@@ -1372,7 +1331,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                 required_registrations: vec![],
                 insertions: vec![insertion(
                     InsertionKind::MethodStub,
-                    FixKind::MissingTestMethod,
+                    AuditFinding::MissingTestMethod,
                     test_stub,
                     format!(
                         "Scaffold missing test method '{}' for '{}::{}'",
@@ -1394,7 +1353,8 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
             candidate.content.push('\n');
             candidate.content.push_str(&test_stub);
             new_files.push(new_file(
-                FixKind::MissingTestFile,
+                AuditFinding::MissingTestFile,
+                FixSafetyTier::SafeWithChecks,
                 test_file,
                 candidate.content,
                 format!("Create missing test file for '{}'", finding.file),
@@ -1406,7 +1366,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
     // Change `pub fn` → `pub(crate) fn` for functions not referenced by other files.
     // Safety: skip functions that are re-exported via `pub use` in parent mod.rs files.
     for finding in &result.findings {
-        if finding.kind != DeviationKind::UnreferencedExport {
+        if finding.kind != AuditFinding::UnreferencedExport {
             continue;
         }
 
@@ -1496,7 +1456,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     from: from.clone(),
                     to: to.clone(),
                 },
-                FixKind::VisibilityNarrowing,
+                AuditFinding::UnreferencedExport,
                 format!("{} → {}", from, to),
                 format!(
                     "Narrow visibility of '{}': {} → {} (unreferenced export)",
@@ -1669,7 +1629,8 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     .and_then(|v| v.as_str())
                     .unwrap_or("SharedTrait");
                 new_files.push(new_file(
-                    FixKind::SharedExtraction,
+                    AuditFinding::DuplicateFunction,
+                    FixSafetyTier::PlanOnly,
                     trait_file.to_string(),
                     trait_content.to_string(),
                     format!(
@@ -1701,7 +1662,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                                 start_line: start as usize,
                                 end_line: end as usize,
                             },
-                            FixKind::FunctionRemoval,
+                            AuditFinding::DuplicateFunction,
                             String::new(),
                             format!(
                                 "Remove duplicate `{}` (extracted to shared trait)",
@@ -1715,7 +1676,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                 if let Some(import) = edit.get("add_import").and_then(|v| v.as_str()) {
                     insertions.push(insertion(
                         InsertionKind::ImportAdd,
-                        FixKind::SharedExtraction,
+                        AuditFinding::DuplicateFunction,
                         import.to_string(),
                         format!("Import shared trait for `{}`", group.function_name),
                     ));
@@ -1725,7 +1686,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                 if let Some(use_trait) = edit.get("add_use_trait").and_then(|v| v.as_str()) {
                     insertions.push(insertion(
                         InsertionKind::TraitUse,
-                        FixKind::SharedExtraction,
+                        AuditFinding::DuplicateFunction,
                         use_trait.to_string(),
                         format!("Use shared trait for `{}`", group.function_name),
                     ));
@@ -1747,7 +1708,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
     // Phase 3: GodFile decomposition — use refactor decompose primitive
     let mut decompose_plans = Vec::new();
     for finding in &result.findings {
-        if finding.kind != DeviationKind::GodFile {
+        if finding.kind != AuditFinding::GodFile {
             continue;
         }
         let is_test = super::walker::is_test_path(&finding.file);
@@ -2099,7 +2060,7 @@ fn generate_simple_duplicate_fixes(
                 start_line: item.start_line,
                 end_line: item.end_line,
             },
-            FixKind::FunctionRemoval,
+            AuditFinding::DuplicateFunction,
             String::new(),
             format!(
                 "Remove duplicate `{}` (canonical copy in {})",
@@ -2111,7 +2072,7 @@ fn generate_simple_duplicate_fixes(
         if !content.contains(&import_stmt) {
             insertions.push(insertion(
                 InsertionKind::ImportAdd,
-                FixKind::SharedExtraction,
+                AuditFinding::DuplicateFunction,
                 import_stmt,
                 format!("Import `{}` from canonical location", group.function_name),
             ));
@@ -3037,8 +2998,8 @@ class MyAbility {
 "#;
         let insertions = vec![Insertion {
             kind: InsertionKind::ConstructorWithRegistration,
-            fix_kind: FixKind::ConstructorWithRegistration,
-            safety_tier: FixKind::ConstructorWithRegistration.safety_tier(),
+            finding: AuditFinding::MissingRegistration,
+            safety_tier: InsertionKind::RegistrationStub.safety_tier(),
             auto_apply: false,
             blocked_reason: None,
             preflight: None,
@@ -3080,7 +3041,7 @@ class MyAbility {
         // we should get ONE constructor with the registration inside,
         // not two separate insertions.
         use super::super::checks::CheckStatus;
-        use super::super::conventions::{Deviation, DeviationKind, Outlier};
+        use super::super::conventions::{Deviation, AuditFinding, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_merge_test");
@@ -3143,17 +3104,17 @@ class BadAbility {
                     noisy: false,
                     deviations: vec![
                         Deviation {
-                            kind: DeviationKind::MissingMethod,
+                            kind: AuditFinding::MissingMethod,
                             description: "Missing method: __construct".to_string(),
                             suggestion: "Add __construct()".to_string(),
                         },
                         Deviation {
-                            kind: DeviationKind::MissingMethod,
+                            kind: AuditFinding::MissingMethod,
                             description: "Missing method: registerAbility".to_string(),
                             suggestion: "Add registerAbility()".to_string(),
                         },
                         Deviation {
-                            kind: DeviationKind::MissingRegistration,
+                            kind: AuditFinding::MissingRegistration,
                             description: "Missing registration: wp_abilities_api_init".to_string(),
                             suggestion: "Add wp_abilities_api_init".to_string(),
                         },
@@ -3232,8 +3193,8 @@ class TestClass {
             required_registrations: vec![],
             insertions: vec![Insertion {
                 kind: InsertionKind::MethodStub,
-                fix_kind: FixKind::MethodStub,
-                safety_tier: FixKind::MethodStub.safety_tier(),
+                finding: AuditFinding::MissingMethod,
+                safety_tier: InsertionKind::MethodStub.safety_tier(),
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,
@@ -3369,7 +3330,7 @@ class TestClass {
     #[test]
     fn skip_helper_files_in_ability_directory() {
         use super::super::checks::CheckStatus;
-        use super::super::conventions::{Deviation, DeviationKind, Outlier};
+        use super::super::conventions::{Deviation, AuditFinding, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_skip_helper_test");
@@ -3441,17 +3402,17 @@ class {} {{
                     noisy: true,
                     deviations: vec![
                         Deviation {
-                            kind: DeviationKind::MissingMethod,
+                            kind: AuditFinding::MissingMethod,
                             description: "Missing method: execute".to_string(),
                             suggestion: "Add execute()".to_string(),
                         },
                         Deviation {
-                            kind: DeviationKind::MissingMethod,
+                            kind: AuditFinding::MissingMethod,
                             description: "Missing method: registerAbility".to_string(),
                             suggestion: "Add registerAbility()".to_string(),
                         },
                         Deviation {
-                            kind: DeviationKind::MissingRegistration,
+                            kind: AuditFinding::MissingRegistration,
                             description: "Missing registration: wp_abilities_api_init".to_string(),
                             suggestion: "Add wp_abilities_api_init".to_string(),
                         },
@@ -3482,7 +3443,7 @@ class {} {{
     #[test]
     fn skip_fragmented_conventions() {
         use super::super::checks::CheckStatus;
-        use super::super::conventions::{Deviation, DeviationKind, Outlier};
+        use super::super::conventions::{Deviation, AuditFinding, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_skip_frag_test");
@@ -3514,7 +3475,7 @@ class {} {{
                         file: "jobs/JobsStatus.php".to_string(),
                         noisy: false,
                         deviations: vec![Deviation {
-                            kind: DeviationKind::MissingMethod,
+                            kind: AuditFinding::MissingMethod,
                             description: "Missing method: get_job".to_string(),
                             suggestion: "Add get_job()".to_string(),
                         }],
@@ -3523,7 +3484,7 @@ class {} {{
                         file: "jobs/JobsOps.php".to_string(),
                         noisy: false,
                         deviations: vec![Deviation {
-                            kind: DeviationKind::MissingMethod,
+                            kind: AuditFinding::MissingMethod,
                             description: "Missing method: get_job".to_string(),
                             suggestion: "Add get_job()".to_string(),
                         }],
@@ -3600,8 +3561,8 @@ pub struct TestOutput {}
 "#;
         let insertions = vec![Insertion {
             kind: InsertionKind::ImportAdd,
-            fix_kind: FixKind::ImportAdd,
-            safety_tier: FixKind::ImportAdd.safety_tier(),
+            finding: AuditFinding::MissingImport,
+            safety_tier: InsertionKind::ImportAdd.safety_tier(),
             auto_apply: false,
             blocked_reason: None,
             preflight: None,
@@ -3618,7 +3579,7 @@ pub struct TestOutput {}
     #[test]
     fn generate_fixes_handles_missing_import() {
         use super::super::checks::CheckStatus;
-        use super::super::conventions::{Deviation, DeviationKind, Outlier};
+        use super::super::conventions::{Deviation, AuditFinding, Outlier};
         use super::super::{AuditSummary, CodeAuditResult, ConventionReport};
 
         let dir = std::env::temp_dir().join("homeboy_fixer_import_test");
@@ -3660,7 +3621,7 @@ pub struct TestOutput {}
                     file: "commands/bad.rs".to_string(),
                     noisy: false,
                     deviations: vec![Deviation {
-                        kind: DeviationKind::MissingImport,
+                        kind: AuditFinding::MissingImport,
                         description: "Missing import: super::CmdResult".to_string(),
                         suggestion: "Add use super::CmdResult;".to_string(),
                     }],
@@ -3766,7 +3727,7 @@ pub struct TestOutput {}
                 suggestion:
                     "Add tests in 'tests/utils/token_test.rs' or add #[cfg(test)] inline tests"
                         .to_string(),
-                kind: DeviationKind::MissingTestFile,
+                kind: AuditFinding::MissingTestFile,
             }],
             directory_conventions: vec![],
             duplicate_groups: vec![],
@@ -3817,7 +3778,7 @@ pub struct TestOutput {}
                     "No test file found (expected 'tests/commands/api_test.rs') and no inline tests"
                         .to_string(),
                 suggestion: "Create test file".to_string(),
-                kind: DeviationKind::MissingTestFile,
+                kind: AuditFinding::MissingTestFile,
             }],
             directory_conventions: vec![],
             duplicate_groups: vec![],
@@ -3881,7 +3842,7 @@ mod tests {
                     "Method 'validate' has no corresponding test (expected 'test_validate')"
                         .to_string(),
                 suggestion: "Add test_validate".to_string(),
-                kind: DeviationKind::MissingTestMethod,
+                kind: AuditFinding::MissingTestMethod,
             }],
             directory_conventions: vec![],
             duplicate_groups: vec![],
@@ -3959,7 +3920,7 @@ mod tests {
                 "No test file found (expected 'tests/utils/slugify_test.rs') and no inline tests"
                     .to_string(),
             suggestion: "Create test file".to_string(),
-            kind: DeviationKind::MissingTestFile,
+            kind: AuditFinding::MissingTestFile,
         };
 
         let audit_result = CodeAuditResult {
@@ -4031,8 +3992,8 @@ mod tests {
             required_registrations: vec![],
             insertions: vec![Insertion {
                 kind: InsertionKind::ImportAdd,
-                fix_kind: FixKind::ImportAdd,
-                safety_tier: FixKind::ImportAdd.safety_tier(),
+                finding: AuditFinding::MissingImport,
+                safety_tier: InsertionKind::ImportAdd.safety_tier(),
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,
@@ -4066,8 +4027,8 @@ mod tests {
                         start_line: 10,
                         end_line: 20,
                     },
-                    fix_kind: FixKind::FunctionRemoval,
-                    safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                    finding: AuditFinding::DuplicateFunction,
+                    safety_tier: FixSafetyTier::PlanOnly,
                     auto_apply: false,
                     blocked_reason: None,
                     preflight: None,
@@ -4085,8 +4046,8 @@ mod tests {
                         start_line: 5,
                         end_line: 15,
                     },
-                    fix_kind: FixKind::FunctionRemoval,
-                    safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                    finding: AuditFinding::DuplicateFunction,
+                    safety_tier: FixSafetyTier::PlanOnly,
                     auto_apply: false,
                     blocked_reason: None,
                     preflight: None,
@@ -4105,8 +4066,8 @@ mod tests {
                             start_line: 30,
                             end_line: 40,
                         },
-                        fix_kind: FixKind::FunctionRemoval,
-                        safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                        finding: AuditFinding::DuplicateFunction,
+                        safety_tier: FixSafetyTier::PlanOnly,
                         auto_apply: false,
                         blocked_reason: None,
                         preflight: None,
@@ -4115,8 +4076,8 @@ mod tests {
                     },
                     Insertion {
                         kind: InsertionKind::ImportAdd,
-                        fix_kind: FixKind::ImportAdd,
-                        safety_tier: FixKind::ImportAdd.safety_tier(),
+                        finding: AuditFinding::MissingImport,
+                        safety_tier: InsertionKind::ImportAdd.safety_tier(),
                         auto_apply: false,
                         blocked_reason: None,
                         preflight: None,
@@ -4201,8 +4162,8 @@ fn last_keeper() {
                     start_line: 7,
                     end_line: 9,
                 },
-                fix_kind: FixKind::FunctionRemoval,
-                safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                finding: AuditFinding::DuplicateFunction,
+                safety_tier: FixSafetyTier::PlanOnly,
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,
@@ -4214,8 +4175,8 @@ fn last_keeper() {
                     start_line: 15,
                     end_line: 17,
                 },
-                fix_kind: FixKind::FunctionRemoval,
-                safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                finding: AuditFinding::DuplicateFunction,
+                safety_tier: FixSafetyTier::PlanOnly,
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,
@@ -4227,8 +4188,8 @@ fn last_keeper() {
                     start_line: 19,
                     end_line: 21,
                 },
-                fix_kind: FixKind::FunctionRemoval,
-                safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                finding: AuditFinding::DuplicateFunction,
+                safety_tier: FixSafetyTier::PlanOnly,
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,
@@ -4237,8 +4198,8 @@ fn last_keeper() {
             },
             Insertion {
                 kind: InsertionKind::ImportAdd,
-                fix_kind: FixKind::ImportAdd,
-                safety_tier: FixKind::ImportAdd.safety_tier(),
+                finding: AuditFinding::MissingImport,
+                safety_tier: InsertionKind::ImportAdd.safety_tier(),
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,
@@ -4294,8 +4255,8 @@ class FlowAbilities extends BaseAbility {
         let trait_use = "    use HasCheckPermission;".to_string();
         let insertions = vec![Insertion {
             kind: InsertionKind::TraitUse,
-            fix_kind: FixKind::TraitUse,
-            safety_tier: FixKind::TraitUse.safety_tier(),
+            finding: AuditFinding::DuplicateFunction,
+            safety_tier: FixSafetyTier::PlanOnly,
             auto_apply: false,
             blocked_reason: None,
             preflight: None,
@@ -4332,8 +4293,8 @@ class FlowAbilities {
                     start_line: 5,
                     end_line: 7,
                 },
-                fix_kind: FixKind::FunctionRemoval,
-                safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                finding: AuditFinding::DuplicateFunction,
+                safety_tier: FixSafetyTier::PlanOnly,
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,
@@ -4342,8 +4303,8 @@ class FlowAbilities {
             },
             Insertion {
                 kind: InsertionKind::ImportAdd,
-                fix_kind: FixKind::ImportAdd,
-                safety_tier: FixKind::ImportAdd.safety_tier(),
+                finding: AuditFinding::MissingImport,
+                safety_tier: InsertionKind::ImportAdd.safety_tier(),
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,
@@ -4352,8 +4313,8 @@ class FlowAbilities {
             },
             Insertion {
                 kind: InsertionKind::TraitUse,
-                fix_kind: FixKind::TraitUse,
-                safety_tier: FixKind::TraitUse.safety_tier(),
+                finding: AuditFinding::DuplicateFunction,
+                safety_tier: FixSafetyTier::PlanOnly,
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,
@@ -4387,8 +4348,8 @@ class FlowAbilities {
     fn new_file_struct() {
         let nf = NewFile {
             file: "inc/Abilities/Traits/HasCheckPermission.php".to_string(),
-            fix_kind: FixKind::SharedExtraction,
-            safety_tier: FixKind::SharedExtraction.safety_tier(),
+            finding: AuditFinding::DuplicateFunction,
+            safety_tier: FixSafetyTier::PlanOnly,
             auto_apply: false,
             blocked_reason: None,
             preflight: None,
@@ -4412,8 +4373,8 @@ class FlowAbilities {
                         start_line: 1,
                         end_line: 2,
                     },
-                    fix_kind: FixKind::FunctionRemoval,
-                    safety_tier: FixKind::FunctionRemoval.safety_tier(),
+                    finding: AuditFinding::DuplicateFunction,
+                    safety_tier: FixSafetyTier::PlanOnly,
                     auto_apply: false,
                     blocked_reason: None,
                     preflight: None,
@@ -4462,8 +4423,8 @@ class FlowAbilities {
                 insertions: vec![
                     Insertion {
                         kind: InsertionKind::ImportAdd,
-                        fix_kind: FixKind::ImportAdd,
-                        safety_tier: FixKind::ImportAdd.safety_tier(),
+                        finding: AuditFinding::MissingImport,
+                        safety_tier: InsertionKind::ImportAdd.safety_tier(),
                         auto_apply: false,
                         blocked_reason: None,
                         preflight: None,
@@ -4472,8 +4433,8 @@ class FlowAbilities {
                     },
                     Insertion {
                         kind: InsertionKind::MethodStub,
-                        fix_kind: FixKind::MethodStub,
-                        safety_tier: FixKind::MethodStub.safety_tier(),
+                        finding: AuditFinding::MissingMethod,
+                        safety_tier: InsertionKind::MethodStub.safety_tier(),
                         auto_apply: false,
                         blocked_reason: None,
                         preflight: None,
@@ -4495,7 +4456,7 @@ class FlowAbilities {
             &mut result,
             false,
             &FixPolicy {
-                only: Some(vec![FixKind::ImportAdd]),
+                only: Some(vec![AuditFinding::MissingImport]),
                 exclude: vec![],
             },
             &PreflightContext {
@@ -4505,7 +4466,7 @@ class FlowAbilities {
 
         assert_eq!(summary.visible_insertions, 1);
         assert_eq!(result.fixes[0].insertions.len(), 1);
-        assert_eq!(result.fixes[0].insertions[0].fix_kind, FixKind::ImportAdd);
+        assert_eq!(result.fixes[0].insertions[0].finding, AuditFinding::MissingImport);
     }
 
     #[test]
@@ -4518,8 +4479,8 @@ class FlowAbilities {
                 insertions: vec![
                     Insertion {
                         kind: InsertionKind::ImportAdd,
-                        fix_kind: FixKind::ImportAdd,
-                        safety_tier: FixKind::ImportAdd.safety_tier(),
+                        finding: AuditFinding::MissingImport,
+                        safety_tier: InsertionKind::ImportAdd.safety_tier(),
                         auto_apply: true,
                         blocked_reason: None,
                         preflight: None,
@@ -4528,8 +4489,8 @@ class FlowAbilities {
                     },
                     Insertion {
                         kind: InsertionKind::MethodStub,
-                        fix_kind: FixKind::MethodStub,
-                        safety_tier: FixKind::MethodStub.safety_tier(),
+                        finding: AuditFinding::MissingMethod,
+                        safety_tier: InsertionKind::MethodStub.safety_tier(),
                         auto_apply: false,
                         blocked_reason: Some("Blocked".to_string()),
                         preflight: None,
@@ -4541,8 +4502,8 @@ class FlowAbilities {
             }],
             new_files: vec![NewFile {
                 file: "tests/example_test.rs".to_string(),
-                fix_kind: FixKind::MissingTestFile,
-                safety_tier: FixKind::MissingTestFile.safety_tier(),
+                finding: AuditFinding::MissingTestFile,
+                safety_tier: FixSafetyTier::SafeWithChecks,
                 auto_apply: true,
                 blocked_reason: None,
                 preflight: None,
@@ -4561,7 +4522,7 @@ class FlowAbilities {
 
         assert_eq!(subset.fixes.len(), 1);
         assert_eq!(subset.fixes[0].insertions.len(), 1);
-        assert_eq!(subset.fixes[0].insertions[0].fix_kind, FixKind::ImportAdd);
+        assert_eq!(subset.fixes[0].insertions[0].finding, AuditFinding::MissingImport);
         assert_eq!(subset.new_files.len(), 1);
         assert_eq!(subset.total_insertions, 2);
     }
@@ -4580,8 +4541,8 @@ class FlowAbilities {
                 required_registrations: vec![],
                 insertions: vec![Insertion {
                     kind: InsertionKind::MethodStub,
-                    fix_kind: FixKind::MethodStub,
-                    safety_tier: FixKind::MethodStub.safety_tier(),
+                    finding: AuditFinding::MissingMethod,
+                    safety_tier: InsertionKind::MethodStub.safety_tier(),
                     auto_apply: false,
                     blocked_reason: None,
                     preflight: None,
@@ -4633,8 +4594,8 @@ class FlowAbilities {
                 required_registrations: vec!["wp_abilities_api_init".to_string()],
                 insertions: vec![Insertion {
                     kind: InsertionKind::ConstructorWithRegistration,
-                    fix_kind: FixKind::ConstructorWithRegistration,
-                    safety_tier: FixKind::ConstructorWithRegistration.safety_tier(),
+                    finding: AuditFinding::MissingRegistration,
+                    safety_tier: InsertionKind::RegistrationStub.safety_tier(),
                     auto_apply: false,
                     blocked_reason: None,
                     preflight: None,
@@ -4678,8 +4639,8 @@ class FlowAbilities {
             required_registrations: vec![],
             insertions: vec![Insertion {
                 kind: InsertionKind::MethodStub,
-                fix_kind: FixKind::MethodStub,
-                safety_tier: FixKind::MethodStub.safety_tier(),
+                finding: AuditFinding::MissingMethod,
+                safety_tier: InsertionKind::MethodStub.safety_tier(),
                 auto_apply: true,
                 blocked_reason: None,
                 preflight: None,
@@ -4716,8 +4677,8 @@ class FlowAbilities {
 
         let mut new_files = vec![NewFile {
             file: "tests/example_test.rs".to_string(),
-            fix_kind: FixKind::MissingTestFile,
-            safety_tier: FixKind::MissingTestFile.safety_tier(),
+            finding: AuditFinding::MissingTestFile,
+            safety_tier: FixSafetyTier::SafeWithChecks,
             auto_apply: true,
             blocked_reason: None,
             preflight: None,
@@ -4752,8 +4713,8 @@ class FlowAbilities {
                 required_registrations: vec![],
                 insertions: vec![Insertion {
                     kind: InsertionKind::MethodStub,
-                    fix_kind: FixKind::MethodStub,
-                    safety_tier: FixKind::MethodStub.safety_tier(),
+                    finding: AuditFinding::MissingMethod,
+                    safety_tier: InsertionKind::MethodStub.safety_tier(),
                     auto_apply: false,
                     blocked_reason: None,
                     preflight: None,
@@ -4802,8 +4763,8 @@ class FlowAbilities {
             fixes: vec![],
             new_files: vec![NewFile {
                 file: "tests/wrong/token_test.rs".to_string(),
-                fix_kind: FixKind::MissingTestFile,
-                safety_tier: FixKind::MissingTestFile.safety_tier(),
+                finding: AuditFinding::MissingTestFile,
+                safety_tier: FixSafetyTier::SafeWithChecks,
                 auto_apply: false,
                 blocked_reason: None,
                 preflight: None,
@@ -4868,7 +4829,7 @@ class FlowAbilities {
                 from: "pub fn".to_string(),
                 to: "pub(crate) fn".to_string(),
             },
-            fix_kind: FixKind::VisibilityNarrowing,
+            finding: AuditFinding::UnreferencedExport,
             safety_tier: FixSafetyTier::SafeWithChecks,
             auto_apply: false,
             blocked_reason: None,
@@ -4891,7 +4852,7 @@ class FlowAbilities {
                 from: "pub async fn".to_string(),
                 to: "pub(crate) async fn".to_string(),
             },
-            fix_kind: FixKind::VisibilityNarrowing,
+            finding: AuditFinding::UnreferencedExport,
             safety_tier: FixSafetyTier::SafeWithChecks,
             auto_apply: false,
             blocked_reason: None,
@@ -4913,7 +4874,7 @@ class FlowAbilities {
                 from: "pub fn".to_string(),
                 to: "pub(crate) fn".to_string(),
             },
-            fix_kind: FixKind::VisibilityNarrowing,
+            finding: AuditFinding::UnreferencedExport,
             safety_tier: FixSafetyTier::SafeWithChecks,
             auto_apply: false,
             blocked_reason: None,

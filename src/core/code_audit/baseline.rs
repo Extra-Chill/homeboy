@@ -182,7 +182,7 @@ pub fn load_baseline_from_ref(source_path: &str, git_ref: &str) -> Option<AuditB
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::DeviationKind;
+    use crate::code_audit::conventions::AuditFinding;
     use crate::code_audit::findings::{Finding, Severity};
     use crate::code_audit::{AuditSummary, CodeAuditResult};
 
@@ -193,7 +193,7 @@ mod tests {
             file: file.to_string(),
             description: description.to_string(),
             suggestion: String::new(),
-            kind: DeviationKind::MissingMethod,
+            kind: AuditFinding::MissingMethod,
         }
     }
 
@@ -468,7 +468,7 @@ mod tests {
             file: "deploy.rs".to_string(),
             description: "File has 2484 lines (threshold: 1000)".to_string(),
             suggestion: String::new(),
-            kind: DeviationKind::GodFile,
+            kind: AuditFinding::GodFile,
         };
         let f2 = Finding {
             convention: "structural".to_string(),
@@ -476,7 +476,7 @@ mod tests {
             file: "deploy.rs".to_string(),
             description: "File has 2645 lines (threshold: 1000)".to_string(),
             suggestion: String::new(),
-            kind: DeviationKind::GodFile,
+            kind: AuditFinding::GodFile,
         };
         assert_eq!(
             AuditFinding(&f1).fingerprint(),
