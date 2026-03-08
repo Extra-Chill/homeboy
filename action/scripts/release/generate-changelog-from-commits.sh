@@ -110,12 +110,11 @@ while IFS= read -r line; do
       continue
     fi
 
-    # Build the entry message (include scope if present)
-    if [ -n "${SCOPE}" ]; then
-      ENTRY="${MESSAGE} (${SCOPE})"
-    else
-      ENTRY="${MESSAGE}"
-    fi
+    # Clean the message for changelog: strip trailing PR/issue refs like (#123)
+    CLEAN_MSG="$(echo "${MESSAGE}" | sed -E 's/ *\(#[0-9]+\) *$//')"
+
+    # Use the cleaned message as-is (scope is for categorization, not display)
+    ENTRY="${CLEAN_MSG}"
 
     # Accumulate entries by type
     if [ -z "${TYPE_ENTRIES[${CHANGELOG_TYPE}]:-}" ]; then
