@@ -55,11 +55,10 @@ pub struct FileFingerprint {
 
 /// Extract a structural fingerprint from a source file.
 ///
-/// Dispatches to an installed extension extension that handles the file's extension
-/// and has a fingerprint script configured. No extension = no fingerprint.
+/// Tries the grammar-driven core engine first (no subprocess, faster, testable).
+/// Falls back to the extension fingerprint script if no grammar is available
+/// or the core engine can't handle the file.
 pub fn fingerprint_file(path: &Path, root: &Path) -> Option<FileFingerprint> {
-    use crate::extension;
-
     let ext = path.extension()?.to_str()?;
     let content = std::fs::read_to_string(path).ok()?;
     let relative_path = path
@@ -68,13 +67,36 @@ pub fn fingerprint_file(path: &Path, root: &Path) -> Option<FileFingerprint> {
         .to_string_lossy()
         .to_string();
 
+    // Try core grammar engine first
+    if let Some(grammar) = super::core_fingerprint::load_grammar_for_ext(ext) {
+        if let Some(fp) = super::core_fingerprint::fingerprint_from_grammar(
+            &content,
+            &grammar,
+            &relative_path,
+        ) {
+            return Some(fp);
+        }
+    }
+
+    // Fall back to extension fingerprint script
+    fingerprint_via_extension(ext, &content, &relative_path)
+}
+
+/// Fingerprint using the extension script protocol (legacy path).
+fn fingerprint_via_extension(
+    ext: &str,
+    content: &str,
+    relative_path: &str,
+) -> Option<FileFingerprint> {
+    use crate::extension;
+
     let matched_extension = extension::find_extension_for_file_ext(ext, "fingerprint")?;
-    let output = extension::run_fingerprint_script(&matched_extension, &relative_path, &content)?;
+    let output = extension::run_fingerprint_script(&matched_extension, relative_path, content)?;
 
     let language = Language::from_extension(ext);
 
     Some(FileFingerprint {
-        relative_path,
+        relative_path: relative_path.to_string(),
         language,
         methods: output.methods,
         registrations: output.registrations,
@@ -84,7 +106,7 @@ pub fn fingerprint_file(path: &Path, root: &Path) -> Option<FileFingerprint> {
         implements: output.implements,
         namespace: output.namespace,
         imports: output.imports,
-        content,
+        content: content.to_string(),
         method_hashes: output.method_hashes,
         structural_hashes: output.structural_hashes,
         visibility: output.visibility,

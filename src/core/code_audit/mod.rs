@@ -15,6 +15,7 @@ pub mod baseline;
 mod checks;
 mod comment_hygiene;
 pub(crate) mod conventions;
+pub(crate) mod core_fingerprint;
 mod dead_code;
 mod discovery;
 mod duplication;
