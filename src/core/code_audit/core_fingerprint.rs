@@ -1515,11 +1515,11 @@ mod tests {
     fn test_unused_param_detection() {
         let grammar = rust_grammar();
         let content = r#"
-pub fn uses_both(a: i32, b: i32) -> i32 {
+pub(crate) fn uses_both(a: i32, b: i32) -> i32 {
     a + b
 }
 
-pub fn ignores_second(a: i32, b: i32) -> i32 {
+pub(crate) fn ignores_second(a: i32, b: i32) -> i32 {
     a * 2
 }
 "#;
