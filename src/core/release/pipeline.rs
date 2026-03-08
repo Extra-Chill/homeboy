@@ -120,12 +120,22 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     // validation paths share a single source of truth.
     let semver_recommendation = build_semver_recommendation(&component, &options.bump_type)?;
 
-    // === Stage 1: Independent validations ===
-    v.capture(
-        validate_commits_vs_changelog(&component, options.dry_run),
-        "commits",
-    );
-    v.capture(validate_changelog(&component), "changelog");
+    // === Stage 1: Auto-generate changelog entries from conventional commits ===
+    // This must run BEFORE changelog validation so entries exist when validated.
+    // Returns true when entries were auto-generated (real run) or would be (dry-run).
+    // When auto-generation handles the changelog, skip downstream changelog
+    // validations — they would false-fail in dry-run (entries not on disk yet)
+    // and are redundant in real runs (entries just written).
+    let will_auto_generate = v
+        .capture(
+            validate_commits_vs_changelog(&component, options.dry_run),
+            "commits",
+        )
+        .unwrap_or(false);
+
+    if !will_auto_generate {
+        v.capture(validate_changelog(&component), "changelog");
+    }
     let version_info = v.capture(version::read_version(Some(component_id)), "version");
 
     // === Stage 2: Version-dependent validations ===
@@ -145,11 +155,13 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         None
     };
 
-    if let (Some(ref info), Some(ref new_ver)) = (&version_info, &new_version) {
-        v.capture(
-            version::validate_changelog_for_bump(&component, &info.version, new_ver),
-            "changelog_sync",
-        );
+    if !will_auto_generate {
+        if let (Some(ref info), Some(ref new_ver)) = (&version_info, &new_version) {
+            v.capture(
+                version::validate_changelog_for_bump(&component, &info.version, new_ver),
+                "changelog_sync",
+            );
+        }
     }
 
     // === Stage 3: Working tree check ===
@@ -546,9 +558,10 @@ fn validate_code_quality(component: &Component) -> Result<()> {
 }
 
 /// Validate that commits since the last tag have corresponding changelog entries.
-/// Returns Ok(()) if validation passes, or Err if commits exist without entries.
+/// Returns Ok(true) if changelog entries were auto-generated (or would be in dry-run),
+/// Ok(false) if all entries already existed, or Err on failure.
 /// When `dry_run` is true, reports what would be generated without writing to disk.
-fn validate_commits_vs_changelog(component: &Component, dry_run: bool) -> Result<()> {
+fn validate_commits_vs_changelog(component: &Component, dry_run: bool) -> Result<bool> {
     // Get latest tag
     let latest_tag = git::get_latest_tag(&component.local_path)?;
 
@@ -557,7 +570,7 @@ fn validate_commits_vs_changelog(component: &Component, dry_run: bool) -> Result
 
     // If no commits, nothing to validate
     if commits.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     // Read unreleased changelog entries
@@ -571,7 +584,7 @@ fn validate_commits_vs_changelog(component: &Component, dry_run: bool) -> Result
 
     // If all relevant commits are represented, validation passes.
     if missing_commits.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     // Check if changelog is already finalized ahead of the latest tag
@@ -585,7 +598,7 @@ fn validate_commits_vs_changelog(component: &Component, dry_run: bool) -> Result
         ) {
             // If changelog version is newer than tag, it's already finalized for pending changes
             if cl_ver > tag_ver {
-                return Ok(());
+                return Ok(false);
             }
         }
     }
@@ -603,12 +616,12 @@ fn validate_commits_vs_changelog(component: &Component, dry_run: bool) -> Result
                 count
             );
         }
-        return Ok(());
+        return Ok(true);
     }
 
     // Auto-generate changelog entries only for uncovered commits.
     auto_generate_changelog_entries(component, &missing_commits)?;
-    Ok(())
+    Ok(true)
 }
 
 fn normalize_changelog_text(value: &str) -> String {
