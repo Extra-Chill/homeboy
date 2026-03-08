@@ -148,9 +148,6 @@ pub struct ReleaseOptions {
     /// Skip lint/test code quality checks before release.
     #[serde(default)]
     pub skip_checks: bool,
-    /// Allow requested bump to be lower than commit-derived recommendation.
-    #[serde(default)]
-    pub allow_underbump: bool,
     /// Skip publish/package steps (version bump + tag + push only).
     /// Use when CI handles publishing after the tag is pushed.
     #[serde(default)]

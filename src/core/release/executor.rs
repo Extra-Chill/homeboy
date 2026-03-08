@@ -66,7 +66,8 @@ impl ReleaseStepExecutor {
             .get("bump")
             .and_then(|v| v.as_str())
             .unwrap_or("patch");
-        let result = version::bump_version(Some(&self.component_id), bump_type)?;
+        let component = component::load(&self.component_id)?;
+        let result = version::bump_component_version(&component, bump_type)?;
         let data = serde_json::to_value(&result)
             .map_err(|e| Error::internal_json(e.to_string(), Some("version output".to_string())))?;
         self.store_version_context(&result.new_version)?;

@@ -558,12 +558,12 @@ fn build_actionable_next_steps(
         let count = status.needs_version_bump.len();
         if count == 1 {
             next_steps.push(format!(
-                "1 component has unreleased commits: `{}`. Bump with `homeboy version bump {}`.",
+                "1 component has unreleased commits: `{}`. Release with `homeboy release {}`.",
                 status.needs_version_bump[0], status.needs_version_bump[0]
             ));
         } else {
             next_steps.push(format!(
-                "{} components have unreleased commits. Bump with `homeboy version bump <id>`.",
+                "{} components have unreleased commits. Release with `homeboy release <id>`.",
                 count
             ));
         }
@@ -613,7 +613,7 @@ fn build_actionable_next_steps(
     if context_output.managed && !components.is_empty() {
         let comp_id = &components[0].component.id;
         next_steps.push(format!(
-            "You're in {}. Common: `homeboy build`, `homeboy deploy`, `homeboy version bump`.",
+            "You're in {}. Common: `homeboy build`, `homeboy deploy`, `homeboy release`.",
             comp_id
         ));
     }

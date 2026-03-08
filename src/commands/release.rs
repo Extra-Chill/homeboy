@@ -1,4 +1,4 @@
-use clap::{Args, ValueEnum};
+use clap::Args;
 use homeboy::log_status;
 use serde::Serialize;
 
@@ -9,25 +9,6 @@ use homeboy::release::{self, ReleasePlan, ReleaseRun};
 
 use super::args::{DryRunArgs, HiddenJsonArgs, PositionalComponentArgs};
 use super::{CmdResult, ProjectsSummary};
-
-/// Bump type enum — used by `version bump` (explicit) and retained for serialization.
-/// The `release` command auto-detects from commits and never exposes this to users.
-#[derive(Clone, ValueEnum)]
-pub enum BumpType {
-    Patch,
-    Minor,
-    Major,
-}
-
-impl BumpType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            BumpType::Patch => "patch",
-            BumpType::Minor => "minor",
-            BumpType::Major => "major",
-        }
-    }
-}
 
 #[derive(Args)]
 pub struct ReleaseArgs {
@@ -185,7 +166,6 @@ pub fn run(args: ReleaseArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         dry_run: args.dry_run_args.dry_run,
         path_override: args.comp.path.clone(),
         skip_checks: args.skip_checks,
-        allow_underbump: false,
         skip_publish: args.skip_publish,
     };
 
