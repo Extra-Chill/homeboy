@@ -2129,6 +2129,77 @@ fn parse_items_for_dedup(
         .and_then(|v| serde_json::from_value(v).ok())
 }
 
+/// After a FunctionRemoval fix for DuplicateFunction is applied, rewrite
+/// callers across the codebase to import from the canonical location.
+///
+/// This uses the symbol_graph core primitive to trace all files that import
+/// the removed function from the old module and rewrite them to import from
+/// the canonical module instead.
+fn rewrite_callers_after_dedup(fix: &Fix, root: &Path) {
+    use crate::core::symbol_graph;
+
+    for insertion in &fix.insertions {
+        // Only process FunctionRemoval insertions for DuplicateFunction
+        if !matches!(insertion.kind, InsertionKind::FunctionRemoval { .. }) {
+            continue;
+        }
+        if insertion.finding != AuditFinding::DuplicateFunction {
+            continue;
+        }
+
+        // Extract function name and canonical file from the description.
+        // Description format: "Remove duplicate `foo` (canonical copy in src/bar.rs)"
+        let Some(fn_name) = insertion
+            .description
+            .split('`')
+            .nth(1)
+        else {
+            continue;
+        };
+        let Some(canonical_file) = insertion
+            .description
+            .split("canonical copy in ")
+            .nth(1)
+            .map(|s| s.trim_end_matches(')'))
+        else {
+            continue;
+        };
+
+        let old_module = symbol_graph::module_path_from_file(&fix.file);
+        let new_module = symbol_graph::module_path_from_file(canonical_file);
+
+        if old_module == new_module {
+            continue;
+        }
+
+        // Determine file extensions to scan
+        let ext = Path::new(&fix.file)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("rs");
+
+        let result = symbol_graph::rewrite_imports(
+            fn_name,
+            &old_module,
+            &new_module,
+            root,
+            &[ext],
+            true, // write to disk
+        );
+
+        if !result.rewrites.is_empty() {
+            log_status!(
+                "fix",
+                "Rewrote {} caller import(s) for `{}`: {} → {}",
+                result.rewrites.len(),
+                fn_name,
+                old_module,
+                new_module
+            );
+        }
+    }
+}
+
 /// Merge multiple `Fix` objects that target the same file into one.
 ///
 /// Preserves insertion order within each original `Fix`, appending later
@@ -2163,13 +2234,11 @@ fn merge_fixes_per_file(fixes: Vec<Fix>) -> Vec<Fix> {
 
 /// Convert a relative file path to a Rust module path.
 ///
-/// `src/core/update_check.rs` → `core::update_check`
-/// `src/utils/mod.rs` → `utils`
-fn module_path_from_file(file_path: &str) -> String {
-    let p = file_path.strip_prefix("src/").unwrap_or(file_path);
-    let p = p.strip_suffix(".rs").unwrap_or(p);
-    let p = p.strip_suffix("/mod").unwrap_or(p);
-    p.replace('/', "::")
+/// Delegates to `symbol_graph::module_path_from_file` — the canonical
+/// implementation. This wrapper exists for backward compatibility with
+/// callers that import it from `fixer`.
+pub(crate) fn module_path_from_file(file_path: &str) -> String {
+    crate::core::symbol_graph::module_path_from_file(file_path)
 }
 
 fn normalize_item_name(name: &str) -> String {
@@ -2488,6 +2557,12 @@ pub fn apply_fixes_chunked(
                 }
 
                 fix.applied = true;
+
+                // After successful FunctionRemoval for DuplicateFunction,
+                // rewrite callers across the codebase to import from the
+                // canonical location instead of the file we just removed from.
+                rewrite_callers_after_dedup(fix, root);
+
                 log_status!(
                     "fix",
                     "Applied {} fix(es) to {}",

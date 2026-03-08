@@ -31,6 +31,7 @@ pub mod release;
 
 pub mod server;
 pub mod ssh;
+pub mod symbol_graph;
 pub mod test_analyze;
 pub mod test_baseline;
 pub mod test_drift;
