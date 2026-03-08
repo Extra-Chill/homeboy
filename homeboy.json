@@ -3,8 +3,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-03-08T02:31:39Z",
-      "item_count": 254,
+      "created_at": "2026-03-08T03:00:17Z",
+      "item_count": 256,
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "Commands::src/commands/docs.rs::MissingImport",
@@ -64,6 +64,7 @@
         "structural::src/core/refactor/rename.rs::HighItemCount",
         "structural::src/core/refactor/transform.rs::HighItemCount",
         "structural::src/core/release/pipeline.rs::GodFile",
+        "structural::src/core/release/pipeline.rs::HighItemCount",
         "structural::src/core/test_analyze.rs::HighItemCount",
         "structural::src/core/test_drift.rs::GodFile",
         "structural::src/core/test_drift.rs::HighItemCount",
@@ -185,6 +186,7 @@
         "near-duplication::src/core/extension_update_check.rs::NearDuplicate",
         "near-duplication::src/core/extension_update_check.rs::NearDuplicate",
         "near-duplication::src/core/fleet.rs::NearDuplicate",
+        "near-duplication::src/core/lint_baseline.rs::NearDuplicate",
         "near-duplication::src/core/project.rs::NearDuplicate",
         "near-duplication::src/core/refactor/add.rs::NearDuplicate",
         "near-duplication::src/core/refactor/move_items.rs::NearDuplicate",

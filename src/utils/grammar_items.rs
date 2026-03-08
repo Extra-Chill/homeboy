@@ -308,7 +308,7 @@ pub(crate) fn find_matching_brace(lines: &[&str], start_line: usize, grammar: &G
                     // Found r#"... — skip until matching "###
                     k += 1; // skip opening quote
                     let closing: String = std::iter::once('"')
-                        .chain(std::iter::repeat('#').take(hashes))
+                        .chain(std::iter::repeat_n('#', hashes))
                         .collect();
                     let closing_chars: Vec<char> = closing.chars().collect();
                     'raw_scan: while k < chars.len() {
@@ -348,14 +348,13 @@ pub(crate) fn find_matching_brace(lines: &[&str], start_line: usize, grammar: &G
             if quote_chars.contains(&chars[j]) {
                 let quote = chars[j];
                 // In Rust, single quote is for char literals and lifetimes
-                if quote == '\'' {
-                    if j + 1 < chars.len()
+                if quote == '\''
+                    && j + 1 < chars.len()
                         && (chars[j + 1].is_alphanumeric() || chars[j + 1] == '_')
                     {
                         j += 1;
                         continue;
                     }
-                }
                 j += 1;
                 while j < chars.len() {
                     if chars[j] == escape_char {
