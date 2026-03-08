@@ -64,9 +64,13 @@ inputs:
     required: false
     default: 'false'
   autofix:
-    description: 'If true, attempt safe autofixes on PR failures, commit, push, and re-run commands'
+    description: 'If true, attempt safe autofixes, commit, push, and re-run commands'
     required: false
     default: 'false'
+  autofix-mode:
+    description: 'When to run autofix: "on-failure" (only when commands fail) or "always" (every run, for baseline auto-ratchet)'
+    required: false
+    default: 'on-failure'
   autofix-open-pr:
     description: 'If true, non-PR failures can open an autofix PR when rerun passes after fixes'
     required: false
@@ -265,7 +269,7 @@ runs:
 
     - name: Apply autofix commit
       id: autofix-commit
-      if: always() && github.event_name == 'pull_request' && inputs.autofix == 'true' && steps.run-commands.outputs.results != '' && contains(steps.run-commands.outputs.results, '"fail"')
+      if: always() && github.event_name == 'pull_request' && inputs.autofix == 'true' && steps.run-commands.outputs.results != '' && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
       shell: bash
       env:
         COMMANDS: ${{ inputs.commands }}
@@ -274,6 +278,7 @@ runs:
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
         AUTOFIX_LABEL: ${{ inputs.autofix-label }}
         AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
+        AUTOFIX_MODE: ${{ inputs.autofix-mode }}
         PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
         PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         APP_TOKEN: ${{ inputs.app-token }}
@@ -281,7 +286,7 @@ runs:
 
     - name: Prepare non-PR autofix branch
       id: autofix-prepare-nonpr
-      if: always() && github.event_name != 'pull_request' && inputs.autofix == 'true' && inputs.autofix-open-pr == 'true' && steps.run-commands.outputs.results != '' && contains(steps.run-commands.outputs.results, '"fail"')
+      if: always() && github.event_name != 'pull_request' && inputs.autofix == 'true' && inputs.autofix-open-pr == 'true' && steps.run-commands.outputs.results != '' && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
       shell: bash
       env:
         COMMANDS: ${{ inputs.commands }}
