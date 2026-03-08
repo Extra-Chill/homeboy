@@ -334,6 +334,7 @@ runs:
       if: github.event_name != 'pull_request' && steps.autofix-prepare-nonpr.outputs.committed == 'true' && steps.rerun-commands.outputs.results != '' && !contains(steps.rerun-commands.outputs.results, '"fail"')
       shell: bash
       env:
+        GH_TOKEN: ${{ inputs.app-token || github.token }}
         COMPONENT_NAME: ${{ inputs.component }}
         AUTOFIX_BRANCH: ${{ steps.autofix-prepare-nonpr.outputs.autofix-branch }}
         RESULTS: ${{ steps.rerun-commands.outputs.results }}
@@ -373,7 +374,7 @@ runs:
       if: contains(inputs.commands, 'release') && github.event_name != 'pull_request'
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ inputs.app-token || github.token }}
         RELEASE_DRY_RUN: ${{ inputs.release-dry-run }}
         RELEASE_BRANCH: ${{ inputs.release-branch }}
         COMPONENT_NAME: ${{ inputs.component }}
@@ -383,7 +384,7 @@ runs:
       if: always() && github.event_name == 'pull_request'
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ inputs.app-token || github.token }}
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         RESULTS: ${{ steps.select-results.outputs.results }}
@@ -403,7 +404,7 @@ runs:
       continue-on-error: true
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ inputs.app-token || github.token }}
         RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
@@ -416,7 +417,7 @@ runs:
       if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"') && steps.autofix-open-pr.outputs.created != 'true' && steps.categorized-issues.outcome != 'success'
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ inputs.app-token || github.token }}
         RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
