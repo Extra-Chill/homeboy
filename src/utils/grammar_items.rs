@@ -317,7 +317,7 @@ pub(crate) fn find_matching_brace(lines: &[&str], start_line: usize, grammar: &G
                     // Found r#"... — skip until matching "###
                     k += 1; // skip opening quote
                     let closing: String = std::iter::once('"')
-                        .chain(std::iter::repeat('#').take(hashes))
+                        .chain(std::iter::repeat_n('#', hashes))
                         .collect();
                     let closing_chars: Vec<char> = closing.chars().collect();
                     'raw_scan: while k < chars.len() {
@@ -505,7 +505,7 @@ pub fn validate_brace_balance(source: &str, grammar: &Grammar) -> bool {
                 if k < chars.len() && chars[k] == '"' && hashes > 0 {
                     k += 1; // skip opening quote
                     let closing: String = std::iter::once('"')
-                        .chain(std::iter::repeat('#').take(hashes))
+                        .chain(std::iter::repeat_n('#', hashes))
                         .collect();
                     let closing_chars: Vec<char> = closing.chars().collect();
                     let mut found_on_line = false;

@@ -396,7 +396,7 @@ fn is_skipped_path(path: &str, config: &TestMappingConfig) -> bool {
 mod tests {
     use super::*;
     use crate::code_audit::conventions::Language;
-    use crate::code_audit::test_mapping::is_source_file;
+    
     use std::collections::HashMap;
 
     fn make_config() -> TestMappingConfig {

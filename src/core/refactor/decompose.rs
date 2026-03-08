@@ -507,7 +507,7 @@ fn cluster_by_name_segments<'a>(names: &[&'a str]) -> Vec<(String, Vec<&'a str>)
     let mut prefix_counts: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
     for name in names {
         for prefix in name_prefixes(name) {
-            if !is_stop_word(&prefix.split('_').next().unwrap_or("")) {
+            if !is_stop_word(prefix.split('_').next().unwrap_or("")) {
                 prefix_counts.entry(prefix).or_default().push(name);
             }
         }
@@ -1159,7 +1159,7 @@ mod tests {
 
     #[test]
     fn colocate_types_single_type() {
-        let items = vec![item("Foo", "struct"), item("Foo", "impl")];
+        let items = [item("Foo", "struct"), item("Foo", "impl")];
         let refs: Vec<&ParsedItem> = items.iter().collect();
         let groups = colocate_types(&refs);
 
@@ -1170,12 +1170,10 @@ mod tests {
 
     #[test]
     fn colocate_types_multiple_types() {
-        let items = vec![
-            item("Foo", "struct"),
+        let items = [item("Foo", "struct"),
             item("Foo", "impl"),
             item("Bar", "enum"),
-            item("Display for Foo", "impl"),
-        ];
+            item("Display for Foo", "impl")];
         let refs: Vec<&ParsedItem> = items.iter().collect();
         let groups = colocate_types(&refs);
 

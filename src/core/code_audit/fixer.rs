@@ -2336,11 +2336,10 @@ fn is_used_by_binary_crate(fn_name: &str, root: &Path) -> bool {
 
     for mod_name in bin_only_mods {
         let mod_dir = src.join(mod_name);
-        if mod_dir.is_dir() {
-            if scan_dir_for_reference(&mod_dir, fn_name) {
+        if mod_dir.is_dir()
+            && scan_dir_for_reference(&mod_dir, fn_name) {
                 return true;
             }
-        }
         // Also check single-file module: src/<mod_name>.rs
         let mod_file = src.join(format!("{}.rs", mod_name));
         if mod_file.exists() {
@@ -2611,7 +2610,7 @@ pub fn apply_decompose_plans(
     let mut results = Vec::new();
     for (index, dfp) in plans.iter_mut().enumerate() {
         let source_abs = root.join(&dfp.file);
-        let source_content = match std::fs::read_to_string(&source_abs) {
+        let _source_content = match std::fs::read_to_string(&source_abs) {
             Ok(c) => c,
             Err(e) => {
                 results.push(ApplyChunkResult {
