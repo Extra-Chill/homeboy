@@ -31,7 +31,7 @@ impl Fingerprintable for LintFingerprint<'_> {
     }
 
     fn description(&self) -> String {
-        format!("{}", self.0.message)
+        self.0.message.to_string()
     }
 
     fn context_label(&self) -> String {
@@ -87,10 +87,7 @@ pub fn save_baseline(
 
 pub fn load_baseline(source_path: &Path) -> Option<LintBaseline> {
     let config = BaselineConfig::new(source_path, BASELINE_KEY);
-    match generic::load::<LintBaselineMetadata>(&config) {
-        Ok(value) => value,
-        Err(_) => None,
-    }
+    generic::load::<LintBaselineMetadata>(&config).unwrap_or_default()
 }
 
 pub fn compare(findings: &[LintFinding], baseline: &LintBaseline) -> BaselineComparison {
