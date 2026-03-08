@@ -9,6 +9,7 @@ set -euo pipefail
 #   HOMEBOY_COMPONENT_PATH  — path to the Rust project
 #   HOMEBOY_AUTO_FIX        — if "1", run cargo fmt (fix mode) instead of --check
 #   HOMEBOY_SUMMARY_MODE    — if "1", show compact output
+#   HOMEBOY_CHANGED_SINCE   — git ref to scope fmt check to changed files only
 #   HOMEBOY_LINT_GLOB       — file glob (currently unused for Rust — cargo operates on crates)
 #   HOMEBOY_LINT_FILE       — single file (currently unused for Rust)
 #   HOMEBOY_ERRORS_ONLY     — if "1", only show errors (suppresses warnings in clippy)
@@ -85,12 +86,41 @@ if should_run_step "fmt"; then
             exit 1
         fi
     else
-        echo ""
-        echo "Running cargo fmt --check..."
-        set +e
-        FMT_OUTPUT=$(cargo fmt --manifest-path "${PROJECT_PATH}/Cargo.toml" --check 2>&1)
-        FMT_EXIT=$?
-        set -e
+        # Determine whether to scope fmt to changed files only.
+        # When HOMEBOY_CHANGED_SINCE is set (CI), only check files the PR
+        # actually changed — don't fail on pre-existing formatting debt.
+        SCOPED_FMT=0
+        CHANGED_RS_FILES=()
+        if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            mapfile -t CHANGED_RS_FILES < <(
+                git -C "${PROJECT_PATH}" diff --name-only --diff-filter=ACMR \
+                    "${HOMEBOY_CHANGED_SINCE}" -- '*.rs' 2>/dev/null || true
+            )
+            if [ ${#CHANGED_RS_FILES[@]} -gt 0 ]; then
+                SCOPED_FMT=1
+            fi
+        fi
+
+        if [ "$SCOPED_FMT" = "1" ]; then
+            echo ""
+            echo "Running rustfmt --check on ${#CHANGED_RS_FILES[@]} changed files..."
+            set +e
+            # Build absolute paths for rustfmt
+            FMT_TARGETS=()
+            for f in "${CHANGED_RS_FILES[@]}"; do
+                FMT_TARGETS+=("${PROJECT_PATH}/${f}")
+            done
+            FMT_OUTPUT=$(rustfmt --check --edition 2021 "${FMT_TARGETS[@]}" 2>&1)
+            FMT_EXIT=$?
+            set -e
+        else
+            echo ""
+            echo "Running cargo fmt --check..."
+            set +e
+            FMT_OUTPUT=$(cargo fmt --manifest-path "${PROJECT_PATH}/Cargo.toml" --check 2>&1)
+            FMT_EXIT=$?
+            set -e
+        fi
 
         if [ $FMT_EXIT -eq 0 ]; then
             echo "cargo fmt: passed"
