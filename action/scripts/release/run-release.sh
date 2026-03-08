@@ -48,6 +48,13 @@ if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
   exit 0
 fi
 
+# --- Step 2b: Sync with remote ---
+# The quality gate runs in separate jobs that may push autofix commits
+# or new PRs may merge while the pipeline is in flight. Pull to ensure
+# we release from the actual HEAD of the branch.
+
+git pull --ff-only origin "${RELEASE_BRANCH}" 2>/dev/null || true
+
 # --- Step 3: Check for releasable commits via homeboy ---
 
 DRY_RUN_FLAGS="--dry-run --skip-checks --skip-publish"
