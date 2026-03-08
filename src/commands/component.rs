@@ -435,6 +435,47 @@ fn set(
         }
     }
 
+    // Validate: reject build_command when component has an extension.
+    // Extensions own the build lifecycle; a component-level build_command
+    // creates ambiguity about which build path runs.
+    if let Some(id) = args.id.as_deref() {
+        let has_build_command = merged
+            .get("build_command")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+
+        if has_build_command {
+            // Check if the component already has extensions
+            let existing_has_extension = component::load(id)
+                .ok()
+                .and_then(|c| c.extensions)
+                .is_some_and(|ext| !ext.is_empty());
+
+            // Also check if extensions are being set in this same command
+            let setting_extension = merged
+                .get("extensions")
+                .and_then(|v| v.as_object())
+                .is_some_and(|ext| !ext.is_empty());
+
+            if existing_has_extension || setting_extension {
+                return Err(homeboy::Error::validation_invalid_argument(
+                    "build_command",
+                    format!(
+                        "Component '{}' uses an extension which owns the build lifecycle. \
+                         Setting build_command creates ambiguous build paths.",
+                        id
+                    ),
+                    None,
+                    None,
+                )
+                .with_hint(format!(
+                    "Remove the extension first: homeboy component set {} --replace extensions",
+                    id
+                )));
+            }
+        }
+    }
+
     let (json_string, replace_fields) = super::finalize_set_spec(&merged, &args.replace)?;
 
     match component::merge(args.id.as_deref(), &json_string, &replace_fields)? {

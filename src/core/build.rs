@@ -38,16 +38,15 @@ impl ResolvedBuildCommand {
 }
 
 /// Resolve build command for a component using the following priority:
-/// 1. Explicit component.build_command (always wins)
-/// 2. Extension's bundled script (extension.build.extension_script)
-/// 3. Local script matching extension's script_names pattern
+/// 1. Extension's bundled script (extension.build.extension_script)
+/// 2. Local script matching extension's script_names pattern
+/// 3. Explicit component.build_command (fallback when no extension provides build)
+///
+/// Extensions own the build lifecycle for their component type.
+/// If a component has both an extension with build support AND a build_command,
+/// the extension wins and a warning is emitted.
 pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBuildCommand> {
-    // 1. Explicit component override takes precedence
-    if let Some(cmd) = &component.build_command {
-        return Ok(ResolvedBuildCommand::ComponentDefined(cmd.clone()));
-    }
-
-    // 2. Check extension for bundled script or local script patterns
+    // 1. Check extension for bundled script or local script patterns (takes priority)
     if let Some(extensions) = &component.extensions {
         for extension_id in extensions.keys() {
             if let Ok(extension) = extension::load_extension(extension_id) {
@@ -102,6 +101,25 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
                 }
             }
         }
+    }
+
+    // 2. Fallback: explicit component.build_command (only when no extension provides build)
+    if let Some(cmd) = &component.build_command {
+        if extension::extension_provides_build(component) {
+            // Extension provides build but no scripts found — warn about build_command being ignored
+            log_status!(
+                "build",
+                "Warning: component '{}' has both an extension with build support AND a build_command. \
+                 The extension owns the build lifecycle; build_command is ignored.",
+                component.id
+            );
+            log_status!(
+                "hint",
+                "Remove build_command: homeboy component set {} --replace build_command",
+                component.id
+            );
+        }
+        return Ok(ResolvedBuildCommand::ComponentDefined(cmd.clone()));
     }
 
     // Check if any extension provides build (makes build_command optional)
