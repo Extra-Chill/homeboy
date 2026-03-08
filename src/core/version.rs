@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use crate::extension::{load_all_extensions, ExtensionManifest};
 use crate::hooks::{self, HookFailureMode};
 use crate::local_files::{self, FileSystem};
-use crate::utils::{self, io, parser, validation};
+use crate::utils::{self, io, parser};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;

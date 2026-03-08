@@ -266,7 +266,9 @@ pub fn discover_conventions(
                 fp.type_name.as_deref().into_iter().collect()
             };
             !names_to_check.is_empty()
-                && names_to_check.iter().all(|name| !suffix_matches(name, suffix))
+                && names_to_check
+                    .iter()
+                    .all(|name| !suffix_matches(name, suffix))
         });
 
         let mut deviations = Vec::new();
@@ -1287,16 +1289,12 @@ class AgentPing {
                 // Primary type is VersionOutput (first pub type in file)
                 type_name: Some("VersionOutput".to_string()),
                 // But file also contains VersionArgs
-                type_names: vec![
-                    "VersionOutput".to_string(),
-                    "VersionArgs".to_string(),
-                ],
+                type_names: vec!["VersionOutput".to_string(), "VersionArgs".to_string()],
                 ..Default::default()
             },
         ];
 
-        let convention =
-            discover_conventions("Commands", "commands/*.rs", &fingerprints).unwrap();
+        let convention = discover_conventions("Commands", "commands/*.rs", &fingerprints).unwrap();
 
         // version.rs should NOT be an outlier because it has VersionArgs in type_names
         assert_eq!(
@@ -1338,8 +1336,7 @@ class AgentPing {
             },
         ];
 
-        let convention =
-            discover_conventions("Commands", "commands/*.rs", &fingerprints).unwrap();
+        let convention = discover_conventions("Commands", "commands/*.rs", &fingerprints).unwrap();
 
         // utils.rs should be an outlier — no type in type_names matches the Args convention
         assert_eq!(convention.outliers.len(), 1);
@@ -1378,8 +1375,7 @@ class AgentPing {
             },
         ];
 
-        let convention =
-            discover_conventions("Commands", "commands/*.rs", &fingerprints).unwrap();
+        let convention = discover_conventions("Commands", "commands/*.rs", &fingerprints).unwrap();
 
         // utils.rs should be flagged via fallback to type_name
         assert_eq!(convention.outliers.len(), 1);

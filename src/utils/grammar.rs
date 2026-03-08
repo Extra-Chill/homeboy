@@ -303,12 +303,11 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
         } else {
             // Check for block comment start
             for (open, close) in &grammar.comments.block {
-                if trimmed.starts_with(open.as_str()) {
-                    if !trimmed.contains(close.as_str()) || trimmed.ends_with(open.as_str()) {
+                if trimmed.starts_with(open.as_str())
+                    && (!trimmed.contains(close.as_str()) || trimmed.ends_with(open.as_str())) {
                         in_block_comment = true;
                         block_comment_end = close.clone();
                     }
-                }
             }
             if in_block_comment {
                 Region::BlockComment
@@ -466,7 +465,7 @@ pub fn extract(content: &str, grammar: &Grammar) -> Vec<Symbol> {
 
                 // Check require_capture filter
                 if let Some(ref required) = pattern.require_capture {
-                    if capture_map.get(required).map_or(true, |v| v.is_empty()) {
+                    if capture_map.get(required).is_none_or(|v| v.is_empty()) {
                         continue;
                     }
                 }
@@ -575,7 +574,7 @@ pub(crate) fn public_symbols(symbols: &[Symbol]) -> Vec<&Symbol> {
         .iter()
         .filter(|s| {
             s.visibility()
-                .map_or(true, |v| v.contains("pub") || v == "public")
+                .is_none_or(|v| v.contains("pub") || v == "public")
         })
         .collect()
 }
