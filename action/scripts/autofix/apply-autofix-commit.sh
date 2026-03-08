@@ -9,7 +9,16 @@ if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then
   AUTOFIX_MAX_COMMITS=2
 fi
 
-AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep '^chore(ci): apply homeboy autofixes$' | wc -l | xargs)
+# Count autofix commits on this branch only (not full repo history).
+# HOMEBOY_CHANGED_SINCE holds the merge base ref when set by the action.
+# Fall back to origin/main..HEAD if not set, then full log as last resort.
+if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+  AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep '^chore(ci): apply homeboy autofixes$' "${HOMEBOY_CHANGED_SINCE}..HEAD" 2>/dev/null | wc -l | xargs)
+elif [ -n "${GITHUB_BASE_REF:-}" ]; then
+  AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep '^chore(ci): apply homeboy autofixes$' "origin/${GITHUB_BASE_REF}..HEAD" 2>/dev/null | wc -l | xargs)
+else
+  AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep '^chore(ci): apply homeboy autofixes$' | wc -l | xargs)
+fi
 if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
   echo "Skipping autofix: reached max autofix commits (${AUTOFIX_COMMIT_COUNT}/${AUTOFIX_MAX_COMMITS})"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
