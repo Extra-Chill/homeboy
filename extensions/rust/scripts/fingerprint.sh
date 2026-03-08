@@ -510,6 +510,7 @@ for line_num, line in enumerate(lines, 1):
 result = {
     'methods': methods,
     'type_name': type_name,
+    'type_names': pub_types,
     'extends': extends,
     'implements': implements,
     'registrations': registrations,

@@ -59,6 +59,7 @@ methods = [m for m in methods if m not in seen and not seen.add(m)]
 # from interface convention expectations (#115).
 type_name = None
 type_kind = None
+type_names = []
 for kind, pattern in [
     ('class', r'^(?:abstract\s+|final\s+)?class\s+(\w+)'),
     ('interface', r'^interface\s+(\w+)'),
@@ -69,6 +70,14 @@ for kind, pattern in [
         type_name = match.group(1)
         type_kind = kind
         break
+
+# Collect all class/interface/trait names in the file
+for pattern in [
+    r'^(?:abstract\s+|final\s+)?class\s+(\w+)',
+    r'^interface\s+(\w+)',
+    r'^trait\s+(\w+)',
+]:
+    type_names.extend(m.group(1) for m in re.finditer(pattern, content, re.MULTILINE))
 
 # --- Extends ---
 # Extract the parent class separately (anchored to actual declaration)
@@ -474,6 +483,7 @@ for line_num, line in enumerate(lines_arr, 1):
 result = {
     'methods': methods,
     'type_name': type_name,
+    'type_names': type_names,
     'type_kind': type_kind,
     'extends': extends,
     'implements': implements,
