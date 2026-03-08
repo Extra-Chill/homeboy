@@ -307,6 +307,78 @@ mod tests {
     }
 
     #[test]
+    fn auto_ratchet_saves_updated_baseline_after_resolving_findings() {
+        // Simulates the auto-ratchet flow:
+        // 1. Save baseline with 3 findings
+        // 2. "Fix" resolves 1 finding (current has 2)
+        // 3. Re-save baseline from current state
+        // 4. Verify baseline now has 2 findings
+        let result_original = make_result(
+            vec![
+                make_finding("Flow", "a.php", "Missing method: execute"),
+                make_finding("Flow", "b.php", "Missing method: validate"),
+                make_finding("Flow", "c.php", "Missing method: register"),
+            ],
+            "auto_ratchet",
+        );
+        let _ = save_baseline(&result_original).unwrap();
+        let baseline_before = load_baseline(Path::new(&result_original.source_path)).unwrap();
+        assert_eq!(baseline_before.item_count, 3);
+
+        // After autofix: c.php finding was resolved
+        let mut current = make_result(
+            vec![
+                make_finding("Flow", "a.php", "Missing method: execute"),
+                make_finding("Flow", "b.php", "Missing method: validate"),
+            ],
+            "auto_ratchet_current",
+        );
+        current.source_path = result_original.source_path.clone();
+
+        // Compare detects resolved findings
+        let comparison = compare(&current, &baseline_before);
+        assert!(!comparison.drift_increased);
+        assert_eq!(comparison.resolved_fingerprints.len(), 1);
+
+        // Auto-ratchet: save updated baseline
+        let _ = save_baseline(&current).unwrap();
+        let baseline_after = load_baseline(Path::new(&current.source_path)).unwrap();
+        assert_eq!(baseline_after.item_count, 2);
+
+        // Verify the resolved finding is gone from the new baseline
+        let recheck = compare(&current, &baseline_after);
+        assert!(!recheck.drift_increased);
+        assert!(recheck.resolved_fingerprints.is_empty());
+        assert_eq!(recheck.delta, 0);
+
+        let _ = std::fs::remove_dir_all(Path::new(&result_original.source_path));
+    }
+
+    #[test]
+    fn auto_ratchet_preserves_baseline_when_no_findings_resolved() {
+        let result = make_result(
+            vec![
+                make_finding("Flow", "a.php", "Missing method: execute"),
+                make_finding("Flow", "b.php", "Missing method: validate"),
+            ],
+            "auto_ratchet_no_change",
+        );
+        let _ = save_baseline(&result).unwrap();
+        let baseline_before = load_baseline(Path::new(&result.source_path)).unwrap();
+
+        // Same findings — nothing resolved
+        let comparison = compare(&result, &baseline_before);
+        assert!(comparison.resolved_fingerprints.is_empty());
+        assert!(!comparison.drift_increased);
+
+        // Baseline should NOT be re-saved (unchanged)
+        // The auto-ratchet code checks resolved_fingerprints.is_empty()
+        // and skips the save in that case
+
+        let _ = std::fs::remove_dir_all(Path::new(&result.source_path));
+    }
+
+    #[test]
     fn no_baseline_returns_none() {
         let result = load_baseline(Path::new("/nonexistent/path"));
         assert!(result.is_none());

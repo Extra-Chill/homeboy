@@ -44,7 +44,8 @@ jobs:
   # chicken-and-egg problem of needing a released binary to audit itself.
   # Falls back to latest release binary if source build fails.
   # Runs independently of build job so PR comments are always posted.
-  # Autofix enabled: on audit failure, applies safe fixes and commits back to the PR.
+  # Autofix mode "always": runs autofix on every PR (not just failures),
+  # so the baseline auto-ratchets as the factory eliminates fixable findings.
   # App token: autofix pushes use the GitHub App token so CI re-triggers on the new commit.
   audit:
     name: Homeboy Audit
@@ -70,6 +71,7 @@ jobs:
           component: homeboy
           commands: audit
           autofix: 'true'
+          autofix-mode: 'always'
           autofix-commands: 'audit --fix --write'
           autofix-max-commits: '2'
           app-token: ${{ steps.app-token.outputs.token || '' }}

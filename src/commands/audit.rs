@@ -125,6 +125,8 @@ pub enum AuditOutput {
         written: bool,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         hints: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ratchet_summary: Option<AutoRatchetSummary>,
     },
 
     #[serde(rename = "audit.baseline")]
@@ -148,6 +150,18 @@ pub enum AuditOutput {
 
     #[serde(rename = "audit.summary")]
     Summary(AuditSummaryOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct AutoRatchetSummary {
+    /// Number of findings resolved by autofix.
+    pub resolved_count: usize,
+    /// Baseline finding count before auto-ratchet.
+    pub previous_count: usize,
+    /// Current finding count after auto-ratchet.
+    pub current_count: usize,
+    /// Whether the baseline file was successfully updated.
+    pub baseline_updated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -483,6 +497,52 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
             final_fix_result = fix_result;
         }
 
+        // Auto-ratchet: if --fix --write applied changes and a baseline exists,
+        // automatically update the baseline to remove resolved findings.
+        // This makes the baseline self-dissolving — it shrinks on every CI run
+        // as autofix eliminates fixable findings.
+        let mut ratchet_summary = None;
+        if written && !args.baseline_args.ignore_baseline {
+            if let Some(existing_baseline) =
+                baseline::load_baseline(Path::new(&current_result.source_path))
+            {
+                let comparison = baseline::compare(&current_result, &existing_baseline);
+                if !comparison.resolved_fingerprints.is_empty() {
+                    // Findings were eliminated — save updated baseline
+                    match baseline::save_baseline(&current_result) {
+                        Ok(_path) => {
+                            homeboy::log_status!(
+                                "ratchet",
+                                "Auto-updated baseline: {} finding(s) resolved ({} → {})",
+                                comparison.resolved_fingerprints.len(),
+                                existing_baseline.item_count,
+                                current_result.findings.len()
+                            );
+                            ratchet_summary = Some(AutoRatchetSummary {
+                                resolved_count: comparison.resolved_fingerprints.len(),
+                                previous_count: existing_baseline.item_count,
+                                current_count: current_result.findings.len(),
+                                baseline_updated: true,
+                            });
+                        }
+                        Err(e) => {
+                            homeboy::log_status!(
+                                "ratchet",
+                                "Warning: failed to auto-update baseline: {}",
+                                e
+                            );
+                        }
+                    }
+                } else if comparison.new_items.is_empty() {
+                    homeboy::log_status!(
+                        "ratchet",
+                        "No findings resolved — baseline unchanged ({} findings)",
+                        existing_baseline.item_count
+                    );
+                }
+            }
+        }
+
         let outcome = autofix::standard_outcome(
             if written {
                 AutofixMode::Write
@@ -528,6 +588,7 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
                 iterations,
                 written,
                 hints: outcome.hints,
+                ratchet_summary,
             },
             exit_code,
         ));
