@@ -3,7 +3,7 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-03-08T14:31:52Z",
+      "created_at": "2026-03-08T15:22:55Z",
       "item_count": 929,
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
