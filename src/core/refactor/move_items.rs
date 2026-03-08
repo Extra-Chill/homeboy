@@ -33,6 +33,10 @@ pub struct MoveResult {
     pub file_created: bool,
     /// Number of import references updated across the codebase.
     pub imports_updated: usize,
+    /// Absolute paths of caller files whose imports were rewritten.
+    /// Used by decompose rollback to restore these files if the move is reverted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caller_files_modified: Vec<PathBuf>,
     /// Related tests that were moved alongside items.
     pub tests_moved: Vec<MovedItem>,
     /// Whether changes were written to disk.
@@ -690,6 +694,10 @@ pub fn move_items_with_options(
         to_file: to.to_string(),
         file_created,
         imports_updated,
+        caller_files_modified: caller_rewrites
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect(),
         tests_moved,
         applied: write,
         warnings,

@@ -305,11 +305,7 @@ pub struct ApplyOptions<'a> {
     pub verifier: Option<&'a dyn Fn(&ApplyChunkResult) -> Result<String, String>>,
 }
 
-#[derive(Debug, Clone)]
-struct FileSnapshot {
-    path: std::path::PathBuf,
-    original: Option<String>,
-}
+use crate::core::undo::InMemoryRollback;
 
 #[derive(Debug, Clone, Default)]
 pub struct FixPolicy {
@@ -2442,10 +2438,6 @@ pub fn apply_fixes_chunked(
 
         let language = detect_language(&abs_path);
         let modified = apply_insertions_to_content(&content, &fix.insertions, &language);
-        let snapshot = FileSnapshot {
-            path: abs_path.clone(),
-            original: Some(content.clone()),
-        };
 
         if modified == content {
             results.push(ApplyChunkResult {
@@ -2459,6 +2451,9 @@ pub fn apply_fixes_chunked(
             });
             continue;
         }
+
+        let mut rollback = InMemoryRollback::new();
+        rollback.capture(&abs_path);
 
         match std::fs::write(&abs_path, &modified) {
             Ok(_) => {
@@ -2478,7 +2473,7 @@ pub fn apply_fixes_chunked(
                             chunk.verification = Some(verification);
                         }
                         Err(error) => {
-                            rollback_snapshot(&snapshot);
+                            rollback.restore_all();
                             chunk.status = ChunkStatus::Reverted;
                             chunk.reverted_files = 1;
                             chunk.error = Some(error);
@@ -2555,10 +2550,8 @@ pub fn apply_new_files_chunked(
             continue;
         }
 
-        let snapshot = FileSnapshot {
-            path: abs_path.clone(),
-            original: None,
-        };
+        let mut rollback = InMemoryRollback::new();
+        rollback.capture(&abs_path);
 
         match std::fs::write(&abs_path, &nf.content) {
             Ok(_) => {
@@ -2578,7 +2571,7 @@ pub fn apply_new_files_chunked(
                             chunk.verification = Some(verification);
                         }
                         Err(error) => {
-                            rollback_snapshot(&snapshot);
+                            rollback.restore_all();
                             chunk.status = ChunkStatus::Reverted;
                             chunk.reverted_files = 1;
                             chunk.error = Some(error);
@@ -2633,23 +2626,33 @@ pub fn apply_decompose_plans(
                 continue;
             }
         };
-        let mut snapshots = vec![FileSnapshot {
-            path: source_abs,
-            original: Some(source_content),
-        }];
+        let mut rollback = InMemoryRollback::new();
+        rollback.capture(&source_abs);
         let mut all_files = vec![dfp.file.clone()];
         for group in &dfp.plan.groups {
             let target_abs = root.join(&group.suggested_target);
             all_files.push(group.suggested_target.clone());
-            snapshots.push(FileSnapshot {
-                path: target_abs.clone(),
-                original: if target_abs.exists() {
-                    std::fs::read_to_string(&target_abs).ok()
-                } else {
-                    None
-                },
-            });
+            rollback.capture(&target_abs);
         }
+
+        // Dry-run first to discover caller files that rewrite_caller_imports
+        // will modify. We must snapshot these BEFORE the real write so rollback
+        // restores them too. Without this, a reverted decompose leaks broken
+        // import rewrites into caller files across the codebase.
+        if let Ok(dry_run_results) = decompose::apply_plan(&dfp.plan, root, false) {
+            for mr in &dry_run_results {
+                for caller_path in &mr.caller_files_modified {
+                    let rel = caller_path
+                        .strip_prefix(root)
+                        .unwrap_or(caller_path)
+                        .to_string_lossy()
+                        .to_string();
+                    all_files.push(rel);
+                    rollback.capture(caller_path);
+                }
+            }
+        }
+
         match decompose::apply_plan(&dfp.plan, root, true) {
             Ok(move_results) => {
                 let files_modified = move_results.iter().filter(|r| r.applied).count();
@@ -2668,9 +2671,7 @@ pub fn apply_decompose_plans(
                             chunk.verification = Some(verification);
                         }
                         Err(error) => {
-                            for snapshot in &snapshots {
-                                rollback_snapshot(snapshot);
-                            }
+                            rollback.restore_all();
                             chunk.status = ChunkStatus::Reverted;
                             chunk.reverted_files = files_modified;
                             chunk.error = Some(error);
@@ -2690,9 +2691,7 @@ pub fn apply_decompose_plans(
                 results.push(chunk);
             }
             Err(e) => {
-                for snapshot in &snapshots {
-                    rollback_snapshot(snapshot);
-                }
+                rollback.restore_all();
                 results.push(ApplyChunkResult {
                     chunk_id: format!("decompose:{}", index + 1),
                     files: vec![dfp.file.clone()],
@@ -2706,17 +2705,6 @@ pub fn apply_decompose_plans(
         }
     }
     results
-}
-
-fn rollback_snapshot(snapshot: &FileSnapshot) {
-    match &snapshot.original {
-        Some(original) => {
-            let _ = std::fs::write(&snapshot.path, original);
-        }
-        None => {
-            let _ = std::fs::remove_file(&snapshot.path);
-        }
-    }
 }
 
 /// Apply insertions to file content, returning the modified content.
