@@ -6,7 +6,7 @@ use std::path::Path;
 use super::conventions::Language;
 
 /// A structural fingerprint extracted from a single source file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FileFingerprint {
     /// Path relative to component root.
     pub relative_path: String,
@@ -18,6 +18,8 @@ pub struct FileFingerprint {
     pub registrations: Vec<String>,
     /// Class or struct name if found.
     pub type_name: Option<String>,
+    /// All public type names found in the file.
+    pub type_names: Vec<String>,
     /// Parent class name (e.g., "WC_Abstract_Order").
     pub extends: Option<String>,
     /// Interfaces or traits implemented.
@@ -77,6 +79,7 @@ pub fn fingerprint_file(path: &Path, root: &Path) -> Option<FileFingerprint> {
         methods: output.methods,
         registrations: output.registrations,
         type_name: output.type_name,
+        type_names: output.type_names,
         extends: output.extends,
         implements: output.implements,
         namespace: output.namespace,

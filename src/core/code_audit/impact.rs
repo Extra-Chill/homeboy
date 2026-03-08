@@ -141,6 +141,7 @@ pub fn fingerprint_from_git_ref(
         methods: output.methods,
         registrations: output.registrations,
         type_name: output.type_name,
+        type_names: output.type_names,
         extends: output.extends,
         implements: output.implements,
         namespace: output.namespace,
@@ -515,17 +516,9 @@ mod tests {
             relative_path: path.to_string(),
             language: Language::Php,
             methods: public_api.iter().map(|s| s.to_string()).collect(),
-            registrations: vec![],
             type_name: type_name.map(|s| s.to_string()),
             extends: extends.map(|s| s.to_string()),
-            implements: vec![],
-            namespace: None,
             imports: imports.iter().map(|s| s.to_string()).collect(),
-            content: String::new(),
-            method_hashes: HashMap::new(),
-            structural_hashes: HashMap::new(),
-            visibility: HashMap::new(),
-            properties: vec![],
             hooks: hooks
                 .iter()
                 .map(|(t, n)| crate::extension::HookRef {
@@ -533,10 +526,9 @@ mod tests {
                     name: n.to_string(),
                 })
                 .collect(),
-            unused_parameters: vec![],
-            dead_code_markers: vec![],
             internal_calls: internal_calls.iter().map(|s| s.to_string()).collect(),
             public_api: public_api.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         }
     }
 

@@ -12,13 +12,14 @@ use super::import_matching::has_import;
 use super::naming::{detect_naming_suffix, suffix_matches};
 use super::signatures::{compute_signature_skeleton, tokenize_signature};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
     Php,
     Rust,
     JavaScript,
     TypeScript,
+    #[default]
     Unknown,
 }
 
@@ -240,22 +241,32 @@ pub fn discover_conventions(
         .map(|(name, _)| name.clone())
         .collect();
 
-    let naming_suffix = detect_naming_suffix(
-        &fingerprints
-            .iter()
-            .filter_map(|fp| fp.type_name.clone())
-            .collect::<Vec<_>>(),
-    );
+    // Use primary type_name (one per file) for suffix detection so multi-type
+    // files don't dilute the convention signal. The full type_names list is only
+    // used below for the per-file conformance check.
+    let primary_type_names: Vec<String> = fingerprints
+        .iter()
+        .filter_map(|fp| fp.type_name.clone())
+        .collect();
+
+    let naming_suffix = detect_naming_suffix(&primary_type_names);
 
     // Classify files
     let mut conforming = Vec::new();
     let mut outliers = Vec::new();
 
     for fp in fingerprints {
+        // A file is "helper-like" only if NONE of its types match the convention suffix.
+        // This prevents false positives where the primary type_name doesn't match but
+        // the file contains another type that does (e.g., VersionOutput + VersionArgs).
         let helper_like = naming_suffix.as_ref().is_some_and(|suffix| {
-            fp.type_name
-                .as_deref()
-                .is_some_and(|name| !suffix_matches(name, suffix))
+            let names_to_check: Vec<&str> = if !fp.type_names.is_empty() {
+                fp.type_names.iter().map(|s| s.as_str()).collect()
+            } else {
+                fp.type_name.as_deref().into_iter().collect()
+            };
+            !names_to_check.is_empty()
+                && names_to_check.iter().all(|name| !suffix_matches(name, suffix))
         });
 
         let mut deviations = Vec::new();
@@ -624,22 +635,8 @@ mod tests {
                     "validate".to_string(),
                     "execute".to_string(),
                 ],
-                registrations: vec![],
                 type_name: Some("AiChat".to_string()),
-                implements: vec![],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "steps/webhook.php".to_string(),
@@ -649,43 +646,15 @@ mod tests {
                     "validate".to_string(),
                     "execute".to_string(),
                 ],
-                registrations: vec![],
                 type_name: Some("Webhook".to_string()),
-                implements: vec![],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "steps/agent-ping.php".to_string(),
                 language: Language::Php,
                 methods: vec!["register".to_string(), "execute".to_string()],
-                registrations: vec![],
                 type_name: Some("AgentPing".to_string()),
-                implements: vec![],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
         ];
 
@@ -711,22 +680,7 @@ mod tests {
             relative_path: "single.php".to_string(),
             language: Language::Php,
             methods: vec!["run".to_string()],
-            registrations: vec![],
-            type_name: None,
-            implements: vec![],
-            namespace: None,
-            imports: vec![],
-            content: String::new(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            extends: None,
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
-            unused_parameters: vec![],
-            dead_code_markers: vec![],
-            internal_calls: vec![],
-            public_api: vec![],
+            ..Default::default()
         }];
 
         assert!(discover_conventions("Single", "*.php", &fingerprints).is_none());
@@ -748,64 +702,24 @@ mod tests {
                 relative_path: "abilities/create.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string(), "register".to_string()],
-                registrations: vec![],
                 type_name: Some("CreateAbility".to_string()),
                 implements: vec!["AbilityInterface".to_string()],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "abilities/update.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string(), "register".to_string()],
-                registrations: vec![],
                 type_name: Some("UpdateAbility".to_string()),
                 implements: vec!["AbilityInterface".to_string()],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "abilities/helpers.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string(), "register".to_string()],
-                registrations: vec![],
                 type_name: Some("Helpers".to_string()),
-                implements: vec![], // Missing interface
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
         ];
 
@@ -837,64 +751,22 @@ mod tests {
                 relative_path: "abilities/CreateAbility.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string(), "register".to_string()],
-                registrations: vec![],
                 type_name: Some("CreateAbility".to_string()),
-                implements: vec![],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "abilities/UpdateAbility.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string(), "register".to_string()],
-                registrations: vec![],
                 type_name: Some("UpdateAbility".to_string()),
-                implements: vec![],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "abilities/FlowHelpers.php".to_string(),
                 language: Language::Php,
                 methods: vec!["formatFlow".to_string()],
-                registrations: vec![],
                 type_name: Some("FlowHelpers".to_string()),
-                implements: vec![],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
         ];
 
@@ -917,64 +789,21 @@ mod tests {
                 relative_path: "a.php".to_string(),
                 language: Language::Php,
                 methods: vec!["run".to_string()],
-                registrations: vec![],
-                type_name: None,
                 implements: vec!["FooInterface".to_string()],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "b.php".to_string(),
                 language: Language::Php,
                 methods: vec!["run".to_string()],
-                registrations: vec![],
-                type_name: None,
                 implements: vec!["BarInterface".to_string()],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "c.php".to_string(),
                 language: Language::Php,
                 methods: vec!["run".to_string()],
-                registrations: vec![],
-                type_name: None,
-                implements: vec![],
-                namespace: None,
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
         ];
 
@@ -1307,64 +1136,25 @@ class AgentPing {
                 relative_path: "abilities/CreateFlow.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
-                registrations: vec![],
                 type_name: Some("CreateFlow".to_string()),
-                implements: vec![],
                 namespace: Some("DataMachine\\Abilities\\Flow".to_string()),
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "abilities/UpdateFlow.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
-                registrations: vec![],
                 type_name: Some("UpdateFlow".to_string()),
-                implements: vec![],
                 namespace: Some("DataMachine\\Abilities\\Flow".to_string()),
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "abilities/DeleteFlow.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
-                registrations: vec![],
                 type_name: Some("DeleteFlow".to_string()),
-                implements: vec![],
                 namespace: Some("DataMachine\\Flow".to_string()), // WRONG namespace
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
         ];
 
@@ -1390,65 +1180,23 @@ class AgentPing {
                 relative_path: "abilities/A.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
-                registrations: vec![],
-                type_name: None,
-                implements: vec![],
-                namespace: None,
                 imports: vec!["DataMachine\\Core\\Base".to_string()],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "abilities/B.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
-                registrations: vec![],
-                type_name: None,
-                implements: vec![],
-                namespace: None,
                 imports: vec!["DataMachine\\Core\\Base".to_string()],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "abilities/C.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
-                registrations: vec![],
-                type_name: None,
-                implements: vec![],
-                namespace: None,
-                imports: vec![],
                 // File uses Base but doesn't import it
                 content: "class C extends Base {\n    public function execute() {}\n}".to_string(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
         ];
 
@@ -1471,64 +1219,22 @@ class AgentPing {
                 relative_path: "steps/A.php".to_string(),
                 language: Language::Php,
                 methods: vec!["run".to_string()],
-                registrations: vec![],
-                type_name: None,
-                implements: vec![],
                 namespace: Some("App\\Steps".to_string()),
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "steps/B.php".to_string(),
                 language: Language::Php,
                 methods: vec!["run".to_string()],
-                registrations: vec![],
-                type_name: None,
-                implements: vec![],
                 namespace: Some("App\\Steps".to_string()),
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                ..Default::default()
             },
             FileFingerprint {
                 relative_path: "steps/C.php".to_string(),
                 language: Language::Php,
                 methods: vec!["run".to_string()],
-                registrations: vec![],
-                type_name: None,
-                implements: vec![],
-                namespace: None, // Missing namespace entirely
-                imports: vec![],
-                content: String::new(),
-                method_hashes: std::collections::HashMap::new(),
-                structural_hashes: std::collections::HashMap::new(),
-                extends: None,
-                visibility: std::collections::HashMap::new(),
-                properties: vec![],
-                hooks: vec![],
-                unused_parameters: vec![],
-                dead_code_markers: vec![],
-                internal_calls: vec![],
-                public_api: vec![],
+                // Missing namespace entirely
+                ..Default::default()
             },
         ];
 
@@ -1548,4 +1254,135 @@ class AgentPing {
     // ========================================================================
     // has_import tests
     // ========================================================================
+
+    // ========================================================================
+    // type_names tests (issue #554)
+    // ========================================================================
+
+    #[test]
+    fn no_naming_mismatch_when_type_names_includes_matching_type() {
+        // Reproduces issue #554: version.rs has type_name=VersionOutput (first pub type)
+        // but also has VersionArgs which matches the convention. Should NOT flag.
+        let fingerprints = vec![
+            FileFingerprint {
+                relative_path: "commands/deploy.rs".to_string(),
+                language: Language::Rust,
+                methods: vec!["run".to_string()],
+                type_name: Some("DeployArgs".to_string()),
+                type_names: vec!["DeployArgs".to_string()],
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "commands/lint.rs".to_string(),
+                language: Language::Rust,
+                methods: vec!["run".to_string()],
+                type_name: Some("LintArgs".to_string()),
+                type_names: vec!["LintArgs".to_string()],
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "commands/version.rs".to_string(),
+                language: Language::Rust,
+                methods: vec!["run".to_string()],
+                // Primary type is VersionOutput (first pub type in file)
+                type_name: Some("VersionOutput".to_string()),
+                // But file also contains VersionArgs
+                type_names: vec![
+                    "VersionOutput".to_string(),
+                    "VersionArgs".to_string(),
+                ],
+                ..Default::default()
+            },
+        ];
+
+        let convention =
+            discover_conventions("Commands", "commands/*.rs", &fingerprints).unwrap();
+
+        // version.rs should NOT be an outlier because it has VersionArgs in type_names
+        assert_eq!(
+            convention.outliers.len(),
+            0,
+            "File with matching type in type_names should not be flagged"
+        );
+        assert_eq!(convention.conforming.len(), 3);
+    }
+
+    #[test]
+    fn naming_mismatch_when_no_type_names_match() {
+        // When type_names is populated but none match the convention, still flag it
+        let fingerprints = vec![
+            FileFingerprint {
+                relative_path: "commands/deploy.rs".to_string(),
+                language: Language::Rust,
+                methods: vec!["run".to_string()],
+                type_name: Some("DeployArgs".to_string()),
+                type_names: vec!["DeployArgs".to_string()],
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "commands/lint.rs".to_string(),
+                language: Language::Rust,
+                methods: vec!["run".to_string()],
+                type_name: Some("LintArgs".to_string()),
+                type_names: vec!["LintArgs".to_string()],
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "commands/utils.rs".to_string(),
+                language: Language::Rust,
+                methods: vec!["run".to_string()],
+                type_name: Some("HelperUtils".to_string()),
+                // No type matches Args convention
+                type_names: vec!["HelperUtils".to_string(), "FormatConfig".to_string()],
+                ..Default::default()
+            },
+        ];
+
+        let convention =
+            discover_conventions("Commands", "commands/*.rs", &fingerprints).unwrap();
+
+        // utils.rs should be an outlier — no type in type_names matches the Args convention
+        assert_eq!(convention.outliers.len(), 1);
+        assert_eq!(convention.outliers[0].file, "commands/utils.rs");
+        assert!(convention.outliers[0]
+            .deviations
+            .iter()
+            .any(|d| matches!(d.kind, DeviationKind::NamingMismatch)));
+    }
+
+    #[test]
+    fn type_names_fallback_to_type_name_when_empty() {
+        // When type_names is not populated (legacy extensions), fall back to type_name
+        let fingerprints = vec![
+            FileFingerprint {
+                relative_path: "commands/deploy.rs".to_string(),
+                language: Language::Rust,
+                methods: vec!["run".to_string()],
+                type_name: Some("DeployArgs".to_string()),
+                // type_names empty — simulates old extension
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "commands/lint.rs".to_string(),
+                language: Language::Rust,
+                methods: vec!["run".to_string()],
+                type_name: Some("LintArgs".to_string()),
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "commands/utils.rs".to_string(),
+                language: Language::Rust,
+                methods: vec!["run".to_string()],
+                type_name: Some("HelperUtils".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let convention =
+            discover_conventions("Commands", "commands/*.rs", &fingerprints).unwrap();
+
+        // utils.rs should be flagged via fallback to type_name
+        assert_eq!(convention.outliers.len(), 1);
+        assert_eq!(convention.outliers[0].file, "commands/utils.rs");
+    }
 }

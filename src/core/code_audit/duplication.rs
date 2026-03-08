@@ -954,13 +954,6 @@ mod tests {
             relative_path: path.to_string(),
             language: Language::Rust,
             methods: methods.iter().map(|s| s.to_string()).collect(),
-            registrations: vec![],
-            type_name: None,
-            extends: None,
-            implements: vec![],
-            namespace: None,
-            imports: vec![],
-            content: String::new(),
             method_hashes: hashes
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -969,13 +962,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
-            unused_parameters: vec![],
-            dead_code_markers: vec![],
-            internal_calls: vec![],
-            public_api: vec![],
+            ..Default::default()
         }
     }
 
@@ -1398,22 +1385,8 @@ mod tests {
             relative_path: path.to_string(),
             language: Language::Rust,
             methods: methods.iter().map(|s| s.to_string()).collect(),
-            registrations: vec![],
-            type_name: None,
-            extends: None,
-            implements: vec![],
-            namespace: None,
-            imports: vec![],
             content: content.to_string(),
-            method_hashes: std::collections::HashMap::new(),
-            structural_hashes: std::collections::HashMap::new(),
-            visibility: std::collections::HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
-            unused_parameters: vec![],
-            dead_code_markers: vec![],
-            internal_calls: vec![],
-            public_api: vec![],
+            ..Default::default()
         }
     }
 

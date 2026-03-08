@@ -428,22 +428,7 @@ mod tests {
             relative_path: path.to_string(),
             language: Language::Rust,
             methods: methods.into_iter().map(String::from).collect(),
-            registrations: vec![],
-            type_name: None,
-            extends: None,
-            implements: vec![],
-            namespace: None,
-            imports: vec![],
-            content: String::new(),
-            method_hashes: HashMap::new(),
-            structural_hashes: HashMap::new(),
-            visibility: HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
-            unused_parameters: vec![],
-            dead_code_markers: vec![],
-            internal_calls: vec![],
-            public_api: vec![],
+            ..Default::default()
         }
     }
 

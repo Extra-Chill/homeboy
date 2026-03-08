@@ -146,23 +146,8 @@ mod tests {
         FileFingerprint {
             relative_path: path.to_string(),
             language: lang,
-            methods: vec![],
-            registrations: vec![],
-            type_name: None,
-            extends: None,
-            implements: vec![],
-            namespace: None,
-            imports: vec![],
             content: content.to_string(),
-            method_hashes: HashMap::new(),
-            structural_hashes: HashMap::new(),
-            visibility: HashMap::new(),
-            properties: vec![],
-            hooks: vec![],
-            unused_parameters: vec![],
-            dead_code_markers: vec![],
-            internal_calls: vec![],
-            public_api: vec![],
+            ..Default::default()
         }
     }
 

@@ -199,6 +199,12 @@ pub struct FingerprintOutput {
     pub methods: Vec<String>,
     #[serde(default)]
     pub type_name: Option<String>,
+    /// All public type names found in the file (struct/class/enum names).
+    /// Used for convention checks where the primary `type_name` may not
+    /// be the convention-conforming type (e.g., a file with both
+    /// `VersionOutput` and `VersionArgs` should not flag as a mismatch).
+    #[serde(default)]
+    pub type_names: Vec<String>,
     /// Parent class name (e.g., "WC_Abstract_Order").
     /// Separated from `implements` for clear hierarchy tracking.
     #[serde(default)]
