@@ -1,4 +1,4 @@
-use crate::component;
+use crate::component::Component;
 use crate::core::local_files::FileSystem;
 use crate::engine::pipeline::{
     PipelineRunStatus, PipelineStep, PipelineStepExecutor, PipelineStepResult,
@@ -13,14 +13,20 @@ use super::utils::extract_latest_notes;
 
 pub(crate) struct ReleaseStepExecutor {
     component_id: String,
+    component: Component,
     extensions: Vec<ExtensionManifest>,
     pub(crate) context: std::sync::Mutex<ReleaseContext>,
 }
 
 impl ReleaseStepExecutor {
-    pub fn new(component_id: String, extensions: Vec<ExtensionManifest>) -> Self {
+    pub fn new(
+        component_id: String,
+        component: Component,
+        extensions: Vec<ExtensionManifest>,
+    ) -> Self {
         Self {
             component_id,
+            component,
             extensions,
             context: std::sync::Mutex::new(ReleaseContext::default()),
         }
@@ -66,7 +72,7 @@ impl ReleaseStepExecutor {
             .get("bump")
             .and_then(|v| v.as_str())
             .unwrap_or("patch");
-        let component = component::load(&self.component_id)?;
+        let component = &self.component;
 
         // Extract auto-generated changelog entries from step config (if any).
         // These were computed during plan() from conventional commits and embedded
@@ -77,7 +83,7 @@ impl ReleaseStepExecutor {
             .and_then(super::pipeline::changelog_entries_from_json);
 
         let result =
-            version::bump_component_version(&component, bump_type, changelog_entries.as_ref())?;
+            version::bump_component_version(component, bump_type, changelog_entries.as_ref())?;
         let data = serde_json::to_value(&result)
             .map_err(|e| Error::internal_json(e.to_string(), Some("version output".to_string())))?;
         self.store_version_context(&result.new_version)?;
@@ -92,7 +98,7 @@ impl ReleaseStepExecutor {
 
     fn run_git_tag(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
         let tag_name = self.get_release_tag(step)?;
-        let component = component::load(&self.component_id)?;
+        let component = &self.component;
 
         if crate::git::tag_exists_locally(&component.local_path, &tag_name).unwrap_or(false) {
             let tag_commit = crate::git::get_tag_commit(&component.local_path, &tag_name)?;
@@ -137,7 +143,12 @@ impl ReleaseStepExecutor {
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("Release {}", tag_name));
 
-        let output = crate::git::tag(Some(&self.component_id), Some(&tag_name), Some(&message))?;
+        let output = crate::git::tag_at(
+            Some(&self.component_id),
+            Some(&tag_name),
+            Some(&message),
+            Some(&self.component.local_path),
+        )?;
         let data = serde_json::to_value(&output)
             .map_err(|e| Error::internal_json(e.to_string(), Some("git tag output".to_string())))?;
 
@@ -193,7 +204,11 @@ impl ReleaseStepExecutor {
             .get("tags")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let output = crate::git::push(Some(&self.component_id), tags)?;
+        let output = crate::git::push_at(
+            Some(&self.component_id),
+            tags,
+            Some(&self.component.local_path),
+        )?;
         let data = serde_json::to_value(output).map_err(|e| {
             Error::internal_json(e.to_string(), Some("git push output".to_string()))
         })?;
@@ -305,7 +320,8 @@ impl ReleaseStepExecutor {
     }
 
     fn run_git_commit(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
-        let status_output = crate::git::status(Some(&self.component_id))?;
+        let status_output =
+            crate::git::status_at(Some(&self.component_id), Some(&self.component.local_path))?;
         let is_clean = status_output.stdout.trim().is_empty();
 
         if is_clean {
@@ -338,7 +354,12 @@ impl ReleaseStepExecutor {
             amend: should_amend,
         };
 
-        let output = crate::git::commit(Some(&self.component_id), Some(&message), options)?;
+        let output = crate::git::commit_at(
+            Some(&self.component_id),
+            Some(&message),
+            options,
+            Some(&self.component.local_path),
+        )?;
         let mut data = serde_json::to_value(&output).map_err(|e| {
             Error::internal_json(e.to_string(), Some("git commit output".to_string()))
         })?;
@@ -412,8 +433,7 @@ impl ReleaseStepExecutor {
     }
 
     fn run_cleanup(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
-        let component = component::load(&self.component_id)?;
-        let distrib_path = format!("{}/target/distrib", component.local_path);
+        let distrib_path = format!("{}/target/distrib", self.component.local_path);
 
         let mut removed = false;
         if std::path::Path::new(&distrib_path).exists() {
@@ -442,7 +462,6 @@ impl ReleaseStepExecutor {
     }
 
     fn run_post_release(&self, step: &PipelineStep) -> Result<PipelineStepResult> {
-        let component = component::load(&self.component_id)?;
         let commands: Vec<String> = step
             .config
             .get("commands")
@@ -456,7 +475,7 @@ impl ReleaseStepExecutor {
 
         let hook_result = crate::hooks::run_commands(
             &commands,
-            &component.local_path,
+            &self.component.local_path,
             crate::hooks::events::POST_RELEASE,
             crate::hooks::HookFailureMode::NonFatal,
         )?;
@@ -518,10 +537,8 @@ impl ReleaseStepExecutor {
     }
 
     fn should_amend_release_commit(&self) -> Result<bool> {
-        let component = component::load(&self.component_id)?;
-
         let log_output = crate::git::execute_git_for_release(
-            &component.local_path,
+            &self.component.local_path,
             &["log", "-1", "--format=%s"],
         )
         .map_err(|e| Error::internal_io(e.to_string(), Some("git log".to_string())))?;
@@ -537,7 +554,7 @@ impl ReleaseStepExecutor {
         }
 
         let status_output =
-            crate::git::execute_git_for_release(&component.local_path, &["status", "-sb"])
+            crate::git::execute_git_for_release(&self.component.local_path, &["status", "-sb"])
                 .map_err(|e| Error::internal_io(e.to_string(), Some("git status".to_string())))?;
         if !status_output.status.success() {
             return Ok(false);
@@ -549,7 +566,6 @@ impl ReleaseStepExecutor {
     }
 
     pub(crate) fn build_release_payload(&self, step: &PipelineStep) -> Result<serde_json::Value> {
-        let component = component::load(&self.component_id)?;
         let context = self.context.lock().map_err(|_| {
             Error::internal_unexpected("Failed to lock release context".to_string())
         })?;
@@ -576,7 +592,7 @@ impl ReleaseStepExecutor {
                 "tag": tag,
                 "notes": notes,
                 "component_id": self.component_id,
-                "local_path": component.local_path,
+                "local_path": self.component.local_path,
                 "artifacts": artifacts
             }
         });
@@ -641,8 +657,7 @@ impl ReleaseStepExecutor {
     }
 
     fn load_release_notes(&self) -> Result<String> {
-        let component = component::load(&self.component_id)?;
-        let changelog_path = changelog::resolve_changelog_path(&component)?;
+        let changelog_path = changelog::resolve_changelog_path(&self.component)?;
         let changelog_content = crate::core::local_files::local().read(&changelog_path)?;
         let notes = validation::require(
             extract_latest_notes(&changelog_content),

@@ -471,7 +471,7 @@ fn execute_deployment(component_id: &str) -> (Option<DeploymentResult>, i32) {
 fn run_recover(comp_args: &PositionalComponentArgs) -> CmdResult<ReleaseOutput> {
     let component = comp_args.load()?;
     let component_id = comp_args.id();
-    let version_info = homeboy::version::read_version(Some(component_id))?;
+    let version_info = homeboy::version::read_component_version(&component)?;
     let current_version = &version_info.version;
     let tag_name = format!("v{}", current_version);
 

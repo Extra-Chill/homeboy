@@ -58,7 +58,7 @@ pub fn run(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
     let component = load_component(component_id, options)?;
     let extensions = resolve_extensions(&component, None)?;
     let resolver = ReleaseCapabilityResolver::new(extensions.clone());
-    let executor = ReleaseStepExecutor::new(component_id.to_string(), extensions);
+    let executor = ReleaseStepExecutor::new(component_id.to_string(), component, extensions);
 
     let pipeline_steps: Vec<PipelineStep> = release_plan
         .steps
@@ -136,7 +136,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     if !will_auto_generate {
         v.capture(validate_changelog(&component), "changelog");
     }
-    let version_info = v.capture(version::read_version(Some(component_id)), "version");
+    let version_info = v.capture(version::read_component_version(&component), "version");
 
     // === Stage 2: Version-dependent validations ===
     let new_version = if let Some(ref info) = version_info {

@@ -405,7 +405,15 @@ fn resolve_changelog_info(
 
 /// Get git status for a component.
 pub fn status(component_id: Option<&str>) -> Result<GitOutput> {
-    let (id, path) = resolve_target(component_id, None)?;
+    status_at(component_id, None)
+}
+
+/// Like [`status`] but with an explicit path override for git operations.
+pub fn status_at(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+) -> Result<GitOutput> {
+    let (id, path) = resolve_target(component_id, path_override)?;
     let output = execute_git(&path, &["status", "--porcelain=v1"])
         .map_err(|e| Error::git_command_failed(e.to_string()))?;
     Ok(GitOutput::from_output(id, path, "status", output))
@@ -487,7 +495,7 @@ pub fn commit(
 }
 
 /// Like [`commit`] but with an explicit path override for git operations.
-pub(crate) fn commit_at(
+pub fn commit_at(
     component_id: Option<&str>,
     message: Option<&str>,
     options: CommitOptions,
@@ -711,7 +719,16 @@ pub fn commit_from_json(id: Option<&str>, json_spec: &str) -> Result<CommitJsonO
 
 /// Push local commits for a component.
 pub fn push(component_id: Option<&str>, tags: bool) -> Result<GitOutput> {
-    let (id, path) = resolve_target(component_id, None)?;
+    push_at(component_id, tags, None)
+}
+
+/// Like [`push`] but with an explicit path override for git operations.
+pub fn push_at(
+    component_id: Option<&str>,
+    tags: bool,
+    path_override: Option<&str>,
+) -> Result<GitOutput> {
+    let (id, path) = resolve_target(component_id, path_override)?;
     let args: Vec<&str> = if tags {
         vec!["push", "--follow-tags"]
     } else {
@@ -770,7 +787,7 @@ pub fn tag(
 }
 
 /// Like [`tag`] but with an explicit path override for git operations.
-pub(crate) fn tag_at(
+pub fn tag_at(
     component_id: Option<&str>,
     tag_name: Option<&str>,
     message: Option<&str>,
