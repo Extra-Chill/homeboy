@@ -340,23 +340,31 @@ pub(crate) fn find_matching_brace(lines: &[&str], start_line: usize, grammar: &G
                 }
             }
 
+            // Char literal: 'x', '\\', '\''
+            if chars[j] == '\'' {
+                let start = j;
+                j += 1;
+                if j < chars.len() && chars[j] == escape_char {
+                    j += 2; // escaped char: '\x'
+                } else if j < chars.len() {
+                    j += 1; // normal char: 'x'
+                }
+                if j < chars.len() && chars[j] == '\'' {
+                    j += 1; // closing quote
+                } else {
+                    // Not a valid char literal (lifetime or other) — skip the quote
+                    j = start + 1;
+                }
+                continue;
+            }
+
             // Regular string literal
             if quote_chars.contains(&chars[j]) {
-                let quote = chars[j];
-                // In Rust, single quote is for char literals and lifetimes
-                if quote == '\'' {
-                    if j + 1 < chars.len()
-                        && (chars[j + 1].is_alphanumeric() || chars[j + 1] == '_')
-                    {
-                        j += 1;
-                        continue;
-                    }
-                }
                 j += 1;
                 while j < chars.len() {
                     if chars[j] == escape_char {
                         j += 2;
-                    } else if chars[j] == quote {
+                    } else if chars[j] == '"' {
                         j += 1;
                         break;
                     } else {
