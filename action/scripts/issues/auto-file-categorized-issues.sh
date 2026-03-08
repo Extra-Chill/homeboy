@@ -131,8 +131,73 @@ if [ -n "${COMPONENT_FROM_AUDIT}" ]; then
   COMP_ID="${COMPONENT_FROM_AUDIT}"
 fi
 
+# --- Step 1b: Close resolved issues ---
+#
+# If a category has zero findings now but has an open issue, close it.
+# This runs even when TOTAL_FINDINGS is 0 (all categories resolved).
+
+EXISTING_ISSUES_FOR_CLOSE=$(gh api "repos/${REPO}/issues?state=open&labels=audit&per_page=100" \
+  --jq '[.[] | {number: .number, title: .title}]' 2>/dev/null || echo "[]")
+
+# Extract current finding kinds (empty if no findings)
+CURRENT_KINDS=""
+if [ "${TOTAL_FINDINGS}" != "0" ] && [ "${TOTAL_FINDINGS}" != "null" ]; then
+  CURRENT_KINDS=$(echo "${FINDINGS_JSON}" | jq -r '.groups | keys[]' 2>/dev/null || true)
+fi
+
+ISSUES_CLOSED=0
+
+# Check each existing audit issue — if its category is no longer in findings, close it
+while IFS= read -r ISSUE_LINE; do
+  [ -z "${ISSUE_LINE}" ] && continue
+
+  ISSUE_NUM=$(echo "${ISSUE_LINE}" | jq -r '.number')
+  ISSUE_TITLE=$(echo "${ISSUE_LINE}" | jq -r '.title')
+
+  # Extract the kind from the issue title: "audit: {kind_label} in {component} ({count})"
+  # Match our component only
+  if ! echo "${ISSUE_TITLE}" | grep -q "in ${COMP_ID}"; then
+    continue
+  fi
+
+  # Extract kind_label: everything between "audit: " and " in {component}"
+  KIND_LABEL=$(echo "${ISSUE_TITLE}" | sed -n "s/^audit: \(.*\) in ${COMP_ID}.*/\1/p")
+  [ -z "${KIND_LABEL}" ] && continue
+
+  # Convert kind_label back to kind (spaces → underscores)
+  KIND_KEY=$(echo "${KIND_LABEL}" | tr ' ' '_')
+
+  # Check if this kind still has findings
+  if echo "${CURRENT_KINDS}" | grep -qx "${KIND_KEY}" 2>/dev/null; then
+    continue  # Still has findings — will be updated below
+  fi
+
+  # No findings for this category — close the issue
+  CLOSE_COMMENT="All **${KIND_LABEL}** findings have been resolved. Closing automatically.
+
+Resolved by the [code factory pipeline](${RUN_URL}). If findings reappear, a new issue will be filed."
+
+  gh api "repos/${REPO}/issues/${ISSUE_NUM}/comments" \
+    --method POST \
+    --field body="${CLOSE_COMMENT}" > /dev/null 2>&1 || true
+
+  gh api "repos/${REPO}/issues/${ISSUE_NUM}" \
+    --method PATCH \
+    --field state="closed" \
+    --field state_reason="completed" > /dev/null 2>&1 || true
+
+  ISSUES_CLOSED=$((ISSUES_CLOSED + 1))
+  echo "  Closed issue #${ISSUE_NUM}: ${ISSUE_TITLE} (zero findings remaining)"
+done <<< "$(echo "${EXISTING_ISSUES_FOR_CLOSE}" | jq -c '.[]')"
+
 if [ "${TOTAL_FINDINGS}" = "0" ] || [ "${TOTAL_FINDINGS}" = "null" ]; then
-  echo "No audit findings to file issues for"
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  No audit findings to file issues for"
+  if [ "${ISSUES_CLOSED}" -gt 0 ]; then
+    echo "  Issues closed: ${ISSUES_CLOSED}"
+  fi
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   exit 0
 fi
 
@@ -285,4 +350,5 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Issues created: ${ISSUES_CREATED}"
 echo "  Issues updated: ${ISSUES_UPDATED}"
+echo "  Issues closed:  ${ISSUES_CLOSED}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
