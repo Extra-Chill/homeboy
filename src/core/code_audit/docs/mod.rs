@@ -57,22 +57,18 @@ pub fn detect_doc_drift(root: &Path, ignore_patterns: &[String]) -> Vec<Finding>
         let claims = claims::extract_claims(&content, &finding_file, ignore_patterns);
 
         for claim in claims {
-            let result =
-                verify::verify_claim(&claim, root, &docs_path, None);
+            let result = verify::verify_claim(&claim, root, &docs_path, None);
 
             match result {
                 verify::VerifyResult::Broken { suggestion } => {
                     let suggestion_text = suggestion.unwrap_or_default();
-                    let (kind, description) =
-                        classify_broken(&claim, &suggestion_text);
+                    let (kind, description) = classify_broken(&claim, &suggestion_text);
 
                     findings.push(Finding {
                         convention: "docs".to_string(),
                         severity: match claim.confidence {
                             ClaimConfidence::Real => Severity::Warning,
-                            ClaimConfidence::Example | ClaimConfidence::Unclear => {
-                                Severity::Info
-                            }
+                            ClaimConfidence::Example | ClaimConfidence::Unclear => Severity::Info,
                         },
                         file: finding_file.clone(),
                         description,
@@ -80,8 +76,8 @@ pub fn detect_doc_drift(root: &Path, ignore_patterns: &[String]) -> Vec<Finding>
                         kind,
                     });
                 }
-                verify::VerifyResult::Verified
-                | verify::VerifyResult::NeedsVerification { .. } => {}
+                verify::VerifyResult::Verified | verify::VerifyResult::NeedsVerification { .. } => {
+                }
             }
         }
     }
@@ -97,10 +93,7 @@ pub fn detect_doc_drift(root: &Path, ignore_patterns: &[String]) -> Vec<Finding>
 }
 
 /// Classify a broken reference as stale (moved target) or truly broken.
-fn classify_broken(
-    claim: &claims::Claim,
-    suggestion: &str,
-) -> (AuditFinding, String) {
+fn classify_broken(claim: &claims::Claim, suggestion: &str) -> (AuditFinding, String) {
     let s = suggestion.to_lowercase();
 
     if s.contains("did you mean")
@@ -241,7 +234,10 @@ mod tests {
         let findings = detect_doc_drift(dir.path(), &[]);
 
         for f in &findings {
-            assert_eq!(f.convention, "docs", "All doc findings should have convention 'docs'");
+            assert_eq!(
+                f.convention, "docs",
+                "All doc findings should have convention 'docs'"
+            );
         }
     }
 

@@ -1521,11 +1521,7 @@ mod tests {
         );
 
         // After "fix": target.rs has a function. The verifier re-audits.
-        fs::write(
-            root.join("src/target.rs"),
-            "pub fn placeholder() {}\n",
-        )
-        .unwrap();
+        fs::write(root.join("src/target.rs"), "pub fn placeholder() {}\n").unwrap();
 
         let result = {
             let verifier = super::build_chunk_verifier(&root, &baseline.findings, vec![]);
@@ -1589,20 +1585,30 @@ mod tests {
         let same_fp = super::finding_fingerprint(&same_finding);
         let new_fp = super::finding_fingerprint(&new_finding);
 
-        assert_eq!(baseline_fp, same_fp, "Identical findings should have same fingerprint");
-        assert_ne!(baseline_fp, new_fp, "Different findings should have different fingerprints");
+        assert_eq!(
+            baseline_fp, same_fp,
+            "Identical findings should have same fingerprint"
+        );
+        assert_ne!(
+            baseline_fp, new_fp,
+            "Different findings should have different fingerprints"
+        );
 
         // Simulate the verifier's filtering: new findings not in baseline.
         let baseline_set: std::collections::HashSet<String> =
             vec![baseline_fp].into_iter().collect();
 
-        let post_findings = vec![&same_finding, &new_finding];
+        let post_findings = [&same_finding, &new_finding];
         let new_findings: Vec<_> = post_findings
             .iter()
             .filter(|f| !baseline_set.contains(&super::finding_fingerprint(f)))
             .collect();
 
-        assert_eq!(new_findings.len(), 1, "Should detect exactly one new finding");
+        assert_eq!(
+            new_findings.len(),
+            1,
+            "Should detect exactly one new finding"
+        );
         assert_eq!(new_findings[0].kind, AuditFinding::DuplicateFunction);
     }
 

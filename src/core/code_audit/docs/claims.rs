@@ -390,6 +390,70 @@ fn is_domain_like(path: &str) -> bool {
         .any(|ext| lower.contains(&format!("{ext}/")) || lower.ends_with(ext))
 }
 
+// ============================================================================
+// Doc file discovery
+// ============================================================================
+
+/// Find all markdown files in a docs directory, recursively.
+///
+/// Returns paths relative to `docs_path`. Optionally excludes a changelog file.
+pub fn find_doc_files(docs_path: &std::path::Path, exclude_changelog: Option<&str>) -> Vec<String> {
+    let mut docs = Vec::new();
+
+    if !docs_path.exists() {
+        return docs;
+    }
+
+    let changelog_filename = exclude_changelog
+        .and_then(|p| std::path::Path::new(p).file_name())
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_lowercase());
+
+    fn scan_docs(
+        dir: &std::path::Path,
+        prefix: &str,
+        docs: &mut Vec<String>,
+        changelog_filename: &Option<String>,
+    ) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+
+                if name.starts_with('.') {
+                    continue;
+                }
+
+                if path.is_file() && name.ends_with(".md") {
+                    if let Some(changelog) = changelog_filename {
+                        if name.to_lowercase() == *changelog {
+                            continue;
+                        }
+                    }
+
+                    let relative = if prefix.is_empty() {
+                        name
+                    } else {
+                        format!("{}/{}", prefix, name)
+                    };
+                    docs.push(relative);
+                } else if path.is_dir() {
+                    let new_prefix = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}/{}", prefix, name)
+                    };
+                    scan_docs(&path, &new_prefix, docs, changelog_filename);
+                }
+            }
+        }
+    }
+
+    scan_docs(docs_path, "", &mut docs, &changelog_filename);
+    docs.sort();
+    docs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,7 +801,7 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
         let content3 = "**Example:** `projects/extrachill.json`";
         let claims3 = extract_claims(content3, "test.md", &[]);
 
-         if let Some(claim) = claims3.iter().find(|c| c.claim_type == ClaimType::FilePath) {
+        if let Some(claim) = claims3.iter().find(|c| c.claim_type == ClaimType::FilePath) {
             assert_eq!(
                 claim.confidence,
                 ClaimConfidence::Example,
@@ -745,68 +809,4 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
             );
         }
     }
-}
-
-// ============================================================================
-// Doc file discovery
-// ============================================================================
-
-/// Find all markdown files in a docs directory, recursively.
-///
-/// Returns paths relative to `docs_path`. Optionally excludes a changelog file.
-pub fn find_doc_files(docs_path: &std::path::Path, exclude_changelog: Option<&str>) -> Vec<String> {
-    let mut docs = Vec::new();
-
-    if !docs_path.exists() {
-        return docs;
-    }
-
-    let changelog_filename = exclude_changelog
-        .and_then(|p| std::path::Path::new(p).file_name())
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_lowercase());
-
-    fn scan_docs(
-        dir: &std::path::Path,
-        prefix: &str,
-        docs: &mut Vec<String>,
-        changelog_filename: &Option<String>,
-    ) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-
-                if name.starts_with('.') {
-                    continue;
-                }
-
-                if path.is_file() && name.ends_with(".md") {
-                    if let Some(changelog) = changelog_filename {
-                        if name.to_lowercase() == *changelog {
-                            continue;
-                        }
-                    }
-
-                    let relative = if prefix.is_empty() {
-                        name
-                    } else {
-                        format!("{}/{}", prefix, name)
-                    };
-                    docs.push(relative);
-                } else if path.is_dir() {
-                    let new_prefix = if prefix.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{}/{}", prefix, name)
-                    };
-                    scan_docs(&path, &new_prefix, docs, changelog_filename);
-                }
-            }
-        }
-    }
-
-    scan_docs(docs_path, "", &mut docs, &changelog_filename);
-    docs.sort();
-    docs
 }
