@@ -24,6 +24,37 @@ resolve_workspace() {
   pwd
 }
 
+# Sort commands into canonical order: audit → lint → test.
+# Audit is most likely to induce changes (structural fixes), lint fixes style
+# on the resulting code, test validates the final state. Non-standard commands
+# (release, custom extension commands) are preserved at the end in their
+# original relative order.
+canonicalize_commands() {
+  local commands="$1"
+  local audit="" lint="" test="" others=()
+  local cmd
+
+  IFS=',' read -ra CMD_ARRAY <<< "${commands}"
+  for cmd in "${CMD_ARRAY[@]}"; do
+    cmd=$(echo "${cmd}" | xargs)
+    case "${cmd}" in
+      audit)   audit="audit" ;;
+      lint)    lint="lint" ;;
+      test)    test="test" ;;
+      *)       others+=("${cmd}") ;;
+    esac
+  done
+
+  local result=()
+  [ -n "${audit}" ] && result+=("${audit}")
+  [ -n "${lint}" ]  && result+=("${lint}")
+  [ -n "${test}" ]  && result+=("${test}")
+  result+=("${others[@]+"${others[@]}"}")
+
+  local IFS=','
+  printf '%s\n' "${result[*]}"
+}
+
 has_lint_command() {
   local commands="$1"
   local cmd

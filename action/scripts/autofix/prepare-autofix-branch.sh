@@ -34,16 +34,23 @@ WORKSPACE="$(resolve_workspace)"
 if [ -n "${AUTOFIX_COMMANDS:-}" ]; then
   IFS=',' read -ra FIX_ARRAY <<< "${AUTOFIX_COMMANDS}"
 else
-  FIX_ARRAY=()
+  # Derive fix commands from the command list, but enforce canonical order:
+  # audit → lint → test. Audit produces structural changes (missing files,
+  # baselines), lint fixes style on the resulting code, test stubs come last.
+  HAS_AUDIT=false HAS_LINT=false HAS_TEST=false
   IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
   for CMD in "${CMD_ARRAY[@]}"; do
     CMD=$(echo "${CMD}" | xargs)
     case "${CMD}" in
-      lint) FIX_ARRAY+=("lint --fix") ;;
-      test) FIX_ARRAY+=("test --fix") ;;
-      audit) FIX_ARRAY+=("audit --fix --write") ;;
+      audit) HAS_AUDIT=true ;;
+      lint)  HAS_LINT=true ;;
+      test)  HAS_TEST=true ;;
     esac
   done
+  FIX_ARRAY=()
+  [ "${HAS_AUDIT}" = true ] && FIX_ARRAY+=("audit --fix --write")
+  [ "${HAS_LINT}" = true ]  && FIX_ARRAY+=("lint --fix")
+  [ "${HAS_TEST}" = true ]  && FIX_ARRAY+=("test --fix")
 fi
 
 if [ ${#FIX_ARRAY[@]} -eq 0 ]; then
