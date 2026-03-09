@@ -172,6 +172,15 @@ if is_fork; then
   SECTION_BODY+="> :lock: Fork PR — autofix disabled, read-only checks"$'\n\n'
 fi
 
+# Only show test-specific fallback note when commands include test.
+if [[ ",${COMMANDS}," == *",test,"* ]] || [[ "${COMMANDS}" == "test" ]]; then
+  if [ "$(scope_context)" = "pr" ] && [ "${SCOPE_MODE:-full}" = "full" ]; then
+    SECTION_BODY+="> :information_source: PR test scope fell back to **full** (CLI compatibility or explicit override)"$'\n\n'
+  elif [ "${TEST_SCOPE_EFFECTIVE:-}" = "changed" ]; then
+    SECTION_BODY+="> :zap: PR test scope: **changed** (files affected by this PR)"$'\n\n'
+  fi
+fi
+
 IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
 
 for CMD in "${CMD_ARRAY[@]}"; do
