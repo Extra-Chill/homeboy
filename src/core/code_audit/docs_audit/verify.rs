@@ -298,10 +298,7 @@ fn find_similar_file(root: &Path, missing_path: &str) -> Option<String> {
         let missing_parts: Vec<&str> = missing_path.split('/').collect();
         matches.sort_by_key(|m| {
             let parts: Vec<&str> = m.split('/').collect();
-            let shared = missing_parts
-                .iter()
-                .filter(|p| parts.contains(p))
-                .count();
+            let shared = missing_parts.iter().filter(|p| parts.contains(p)).count();
             -(shared as i32)
         });
         return Some(matches.into_iter().next().unwrap());
@@ -326,10 +323,7 @@ fn find_similar_dir(root: &Path, missing_path: &str) -> Option<String> {
         let missing_parts: Vec<&str> = clean.split('/').collect();
         matches.sort_by_key(|m| {
             let parts: Vec<&str> = m.split('/').collect();
-            let shared = missing_parts
-                .iter()
-                .filter(|p| parts.contains(p))
-                .count();
+            let shared = missing_parts.iter().filter(|p| parts.contains(p)).count();
             -(shared as i32)
         });
         return Some(format!("{}/", matches.into_iter().next().unwrap()));

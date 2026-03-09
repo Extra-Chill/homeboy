@@ -630,7 +630,12 @@ fn detect_doc_drift(root: &Path, component_id: &str) -> Vec<Finding> {
             match result {
                 docs_audit::VerifyResult::Broken { suggestion } => {
                     let suggestion_text = suggestion.unwrap_or_default();
-                    let (kind, description) = classify_broken_doc_ref(&claim.claim_type, &claim.value, claim.line, &suggestion_text);
+                    let (kind, description) = classify_broken_doc_ref(
+                        &claim.claim_type,
+                        &claim.value,
+                        claim.line,
+                        &suggestion_text,
+                    );
 
                     findings.push(Finding {
                         convention: "docs".to_string(),
