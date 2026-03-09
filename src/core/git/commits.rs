@@ -381,7 +381,7 @@ pub fn strip_conventional_prefix(subject: &str) -> &str {
         // Check if it looks like a conventional commit prefix
         if prefix
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '(' || c == ')' || c == '!')
+            .all(|c| c.is_alphanumeric() || c == '(' || c == ')' || c == '!' || c == '#')
         {
             return &subject[pos + 2..];
         }
@@ -446,6 +446,22 @@ mod tests {
         assert_eq!(
             strip_conventional_prefix("Regular commit"),
             "Regular commit"
+        );
+    }
+
+    #[test]
+    fn strip_conventional_prefix_handles_issue_number_scope() {
+        assert_eq!(
+            strip_conventional_prefix("feat(#741): delete AgentType class"),
+            "delete AgentType class"
+        );
+        assert_eq!(
+            strip_conventional_prefix("fix(#730): queue-add uses unified check-duplicate"),
+            "queue-add uses unified check-duplicate"
+        );
+        assert_eq!(
+            strip_conventional_prefix("feat(#123): add new feature"),
+            "add new feature"
         );
     }
 

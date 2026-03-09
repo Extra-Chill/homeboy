@@ -709,11 +709,11 @@ fn group_commits_for_changelog(
 
     for commit in commits {
         if let Some(entry_type) = commit.category.to_changelog_entry_type() {
-            let message = git::strip_conventional_prefix(&commit.subject);
+            let message = strip_pr_reference(git::strip_conventional_prefix(&commit.subject));
             entries_by_type
                 .entry(entry_type.to_string())
                 .or_default()
-                .push(message.to_string());
+                .push(message);
         }
     }
 
@@ -729,7 +729,7 @@ fn group_commits_for_changelog(
                         | git::CommitCategory::Merge
                 )
             })
-            .map(|c| git::strip_conventional_prefix(&c.subject).to_string())
+            .map(|c| strip_pr_reference(git::strip_conventional_prefix(&c.subject)))
             .unwrap_or_else(|| "Internal improvements".to_string());
 
         entries_by_type.insert("changed".to_string(), vec![fallback]);
@@ -1123,6 +1123,58 @@ mod tests {
         assert!(
             uncovered.is_empty(),
             "Should match when commit subject is contained in the entry"
+        );
+    }
+
+    #[test]
+    fn test_group_commits_strips_conventional_prefix_with_issue_scope() {
+        use super::group_commits_for_changelog;
+
+        let commits = vec![
+            commit(
+                "feat(#741): delete AgentType class — replace with string literals",
+                CommitCategory::Feature,
+            ),
+            commit(
+                "fix(#730): queue-add uses unified check-duplicate",
+                CommitCategory::Fix,
+            ),
+        ];
+
+        let entries = group_commits_for_changelog(&commits);
+        let added = &entries["added"];
+        let fixed = &entries["fixed"];
+
+        assert_eq!(
+            added[0],
+            "delete AgentType class — replace with string literals"
+        );
+        assert_eq!(fixed[0], "queue-add uses unified check-duplicate");
+    }
+
+    #[test]
+    fn test_group_commits_strips_pr_references() {
+        use super::group_commits_for_changelog;
+
+        let commits = vec![
+            commit(
+                "feat: agent-first scoping — Phase 1 schema (#738)",
+                CommitCategory::Feature,
+            ),
+            commit(
+                "fix: rename $class param — fixes bootstrap crash (#711)",
+                CommitCategory::Fix,
+            ),
+        ];
+
+        let entries = group_commits_for_changelog(&commits);
+        let added = &entries["added"];
+        let fixed = &entries["fixed"];
+
+        assert_eq!(added[0], "agent-first scoping — Phase 1 schema");
+        assert_eq!(
+            fixed[0],
+            "rename $class param — fixes bootstrap crash"
         );
     }
 }
