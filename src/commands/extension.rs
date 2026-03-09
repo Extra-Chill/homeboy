@@ -207,6 +207,8 @@ pub enum ExtensionOutput {
         source: String,
         path: String,
         linked: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_revision: Option<String>,
     },
     #[serde(rename = "extension.update")]
     Update {
@@ -285,6 +287,8 @@ pub struct ExtensionEntry {
     pub linked: bool,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_display_name: Option<String>,
@@ -321,6 +325,8 @@ pub struct ExtensionDetail {
     pub ready_detail: Option<String>,
     pub linked: bool,
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli: Option<CliDetail>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -401,6 +407,8 @@ fn list(project: Option<String>) -> CmdResult<ExtensionOutput> {
                 .and_then(|r| r.ready_check.as_ref())
                 .map(|_| true);
 
+            let source_revision = homeboy::extension::read_source_revision(&extension.id);
+
             ExtensionEntry {
                 id: extension.id.clone(),
                 name: extension.name.clone(),
@@ -423,6 +431,7 @@ fn list(project: Option<String>) -> CmdResult<ExtensionOutput> {
                 configured: true,
                 linked,
                 path: extension.extension_path.clone().unwrap_or_default(),
+                source_revision,
                 cli_tool,
                 cli_display_name,
                 actions,
@@ -480,6 +489,8 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
         components: r.components.clone(),
     });
 
+    let source_revision = homeboy::extension::read_source_revision(&extension.id);
+
     let detail = ExtensionDetail {
         id: extension.id.clone(),
         name: extension.name.clone(),
@@ -500,6 +511,7 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
         ready_detail: ready_status.detail,
         linked,
         path: extension.extension_path.clone().unwrap_or_default(),
+        source_revision,
         cli,
         actions,
         inputs: extension.inputs().to_vec(),
@@ -564,6 +576,7 @@ fn install_extension(source: &str, id: Option<String>) -> CmdResult<ExtensionOut
             source: result.url,
             path: result.path.to_string_lossy().to_string(),
             linked,
+            source_revision: result.source_revision,
         },
         0,
     ))

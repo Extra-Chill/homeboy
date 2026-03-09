@@ -16,6 +16,7 @@ pub struct InstallResult {
     pub extension_id: String,
     pub url: String,
     pub path: PathBuf,
+    pub source_revision: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +117,10 @@ fn install_from_url(url: &str, id_override: Option<&str>) -> Result<InstallResul
 
     git::clone_repo(url, &temp_dir)?;
 
+    // Capture source revision before resolve_cloned_extension may discard .git
+    // (monorepo installs extract only the subdirectory, losing git history).
+    let source_revision = get_short_head_revision(&temp_dir);
+
     // Determine what was cloned and install accordingly.
     let result = resolve_cloned_extension(&temp_dir, &extension_id, &extension_dir, url);
 
@@ -125,6 +130,11 @@ fn install_from_url(url: &str, id_override: Option<&str>) -> Result<InstallResul
     }
 
     let extension_id = result?;
+
+    // Write source revision so it survives even when .git is discarded.
+    if let Some(ref rev) = source_revision {
+        let _ = std::fs::write(extension_dir.join(".source-revision"), rev);
+    }
 
     // Auto-run setup if extension defines a setup_command
     // Setup is best-effort: install succeeds even if setup fails
@@ -141,6 +151,7 @@ fn install_from_url(url: &str, id_override: Option<&str>) -> Result<InstallResul
         extension_id,
         url: url.to_string(),
         path: extension_dir,
+        source_revision,
     })
 }
 
@@ -350,10 +361,14 @@ fn install_from_path(source_path: &str, id_override: Option<&str>) -> Result<Ins
     std::os::windows::fs::symlink_dir(&source, &extension_dir)
         .map_err(|e| Error::internal_io(e.to_string(), Some("create symlink".to_string())))?;
 
+    // For linked (local) extensions, read revision from the source dir if it's a git repo
+    let source_revision = get_short_head_revision(&source);
+
     Ok(InstallResult {
         extension_id,
         url: source.to_string_lossy().to_string(),
         path: extension_dir,
+        source_revision,
     })
 }
 
@@ -401,6 +416,11 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
     })?;
 
     git::pull_repo(&extension_dir)?;
+
+    // Update .source-revision after pull so it stays current
+    if let Some(rev) = get_short_head_revision(&extension_dir) {
+        let _ = std::fs::write(extension_dir.join(".source-revision"), &rev);
+    }
 
     // Auto-run setup if extension defines a setup_command
     // Setup is best-effort: update succeeds even if setup fails
@@ -501,4 +521,48 @@ pub struct UpdateAvailable {
     pub extension_id: String,
     pub installed_version: String,
     pub behind_count: usize,
+}
+
+/// Get the short HEAD revision from a git directory.
+/// Returns None if the directory is not a git repo or the command fails.
+fn get_short_head_revision(dir: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let rev = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if rev.is_empty() {
+        None
+    } else {
+        Some(rev)
+    }
+}
+
+/// Read the source revision for an installed extension.
+/// Checks (in order): .git directory (git rev-parse), then .source-revision file.
+pub fn read_source_revision(extension_id: &str) -> Option<String> {
+    let extension_dir = paths::extension(extension_id).ok()?;
+    if !extension_dir.exists() {
+        return None;
+    }
+
+    // Try .git first (single-extension repos and linked extensions)
+    if let Some(rev) = get_short_head_revision(&extension_dir) {
+        return Some(rev);
+    }
+
+    // Fall back to .source-revision file (monorepo installs)
+    let rev_file = extension_dir.join(".source-revision");
+    std::fs::read_to_string(&rev_file)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }

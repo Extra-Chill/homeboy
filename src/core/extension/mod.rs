@@ -40,8 +40,8 @@ pub use scope::ExtensionScope;
 
 // Re-export lifecycle types and functions
 pub use lifecycle::{
-    check_update_available, derive_id_from_url, install, is_git_url, slugify_id, uninstall, update,
-    InstallResult, UpdateAvailable, UpdateResult,
+    check_update_available, derive_id_from_url, install, is_git_url, read_source_revision,
+    slugify_id, uninstall, update, InstallResult, UpdateAvailable, UpdateResult,
 };
 
 // Extension loader functions
