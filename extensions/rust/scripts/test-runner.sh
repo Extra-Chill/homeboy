@@ -215,6 +215,36 @@ TEST_ARGS=(
     --manifest-path "${PROJECT_PATH}/Cargo.toml"
 )
 
+# Scoped test selection: if HOMEBOY_CHANGED_TEST_FILES is set, derive
+# cargo test filter from the changed test file paths.
+# Cargo test accepts positional test name patterns after --.
+# We extract module paths from file paths (e.g., src/commands/audit.rs → commands::audit).
+SCOPE_FILTER_ARGS=()
+if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
+    while IFS= read -r test_file; do
+        [ -z "$test_file" ] && continue
+        # Convert file path to Rust module path for cargo test filtering
+        # e.g., src/commands/audit.rs → commands::audit
+        #        src/utils/baseline.rs → utils::baseline
+        #        tests/integration.rs  → integration
+        module_path="${test_file#src/}"          # strip leading src/
+        module_path="${module_path#tests/}"      # strip leading tests/
+        module_path="${module_path%.rs}"          # strip .rs extension
+        module_path="${module_path%/mod}"         # strip /mod suffix
+        module_path="${module_path//\//::\:}"     # replace / with ::
+        if [ -n "$module_path" ]; then
+            SCOPE_FILTER_ARGS+=("$module_path")
+        fi
+    done <<< "${HOMEBOY_CHANGED_TEST_FILES}"
+
+    if [ ${#SCOPE_FILTER_ARGS[@]} -gt 0 ]; then
+        # Join module paths with | for regex-style OR matching
+        FILTER=$(IFS='|'; echo "${SCOPE_FILTER_ARGS[*]}")
+        TEST_ARGS+=(-- "$FILTER")
+        echo "Scoped to changed files: ${FILTER}"
+    fi
+fi
+
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: cargo ${TEST_ARGS[*]} $*"
 fi
