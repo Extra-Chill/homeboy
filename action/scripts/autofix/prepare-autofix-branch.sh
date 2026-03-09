@@ -102,6 +102,18 @@ if git diff --cached --quiet; then
   exit 0
 fi
 
+# Capture autofix summary: file count and which fix commands ran
+AUTOFIX_FILE_COUNT=$(git diff --cached --name-only | wc -l | xargs)
+AUTOFIX_FIX_TYPES=""
+for FIX_CMD in "${FIX_ARRAY[@]}"; do
+  FIX_CMD=$(echo "${FIX_CMD}" | xargs)
+  BASE=$(echo "${FIX_CMD}" | awk '{print $1}')
+  if [ -n "${AUTOFIX_FIX_TYPES}" ]; then
+    AUTOFIX_FIX_TYPES+=", "
+  fi
+  AUTOFIX_FIX_TYPES+="${BASE}"
+done
+
 git config user.name "homeboy-ci[bot]"
 git config user.email "266378653+homeboy-ci[bot]@users.noreply.github.com"
 git commit -m "chore(ci): apply homeboy autofixes"
@@ -120,3 +132,5 @@ fi
 
 echo "committed=true" >> "${GITHUB_OUTPUT}"
 echo "autofix-branch=${AUTOFIX_BRANCH}" >> "${GITHUB_OUTPUT}"
+echo "autofix-file-count=${AUTOFIX_FILE_COUNT}" >> "${GITHUB_OUTPUT}"
+echo "autofix-fix-types=${AUTOFIX_FIX_TYPES}" >> "${GITHUB_OUTPUT}"

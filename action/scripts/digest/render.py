@@ -60,22 +60,6 @@ def render_markdown(
     lines.append("## Failure Digest")
     lines.append("")
 
-    lines.append("### Tooling versions")
-    lines.append(f"- Homeboy CLI: **{tooling.get('homeboy_cli_version', 'unknown')}**")
-    lines.append(
-        "- Extension: "
-        f"**{tooling.get('extension_id', 'auto')}** from "
-        f"`{tooling.get('extension_source', 'auto')}`"
-    )
-    lines.append(
-        f"- Extension revision: `{tooling.get('extension_revision', 'unknown')}`"
-    )
-    lines.append(
-        "- Action: "
-        f"`{tooling.get('action_repository', 'unknown')}@{tooling.get('action_ref', 'unknown')}`"
-    )
-    lines.append("")
-
     if "lint" in results:
         lines.append("### Lint Failure Digest")
         if lint_digest.get("lint_summary"):
