@@ -417,12 +417,10 @@ mod tests {
         let content = "The tools are in `src/core/code_audit/docs_audit/` directory.";
         let claims = extract_claims(content, "test.md", &[]);
 
-        assert!(
-            claims
-                .iter()
-                .any(|c| c.claim_type == ClaimType::DirectoryPath
-                    && c.value == "src/core/code_audit/docs_audit/")
-        );
+        assert!(claims
+            .iter()
+            .any(|c| c.claim_type == ClaimType::DirectoryPath
+                && c.value == "src/core/code_audit/docs_audit/"));
     }
 
     #[test]

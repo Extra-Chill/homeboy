@@ -5,8 +5,8 @@ use std::fs;
 use std::path::Path;
 
 use crate::docs;
-use homeboy::component;
 use homeboy::code_audit::docs_audit::{self, AuditResult, DetectedFeature};
+use homeboy::component;
 use homeboy::extension;
 
 use super::CmdResult;
