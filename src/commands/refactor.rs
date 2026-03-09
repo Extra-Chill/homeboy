@@ -326,6 +326,8 @@ pub enum RefactorOutput {
         applied: bool,
         merge_strategy: String,
         stages: Vec<CiStageSummary>,
+        plan_totals: CiPlanTotals,
+        overlaps: Vec<CiStageOverlap>,
         files_modified: usize,
         changed_files: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -445,6 +447,21 @@ pub struct CiStageSummary {
     pub warnings: Vec<String>,
 }
 
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct CiStageOverlap {
+    pub file: String,
+    pub earlier_stage: String,
+    pub later_stage: String,
+    pub resolution: String,
+}
+
+#[derive(Serialize)]
+pub struct CiPlanTotals {
+    pub stages_with_proposals: usize,
+    pub total_fixes_proposed: usize,
+    pub total_files_selected: usize,
+}
+
 #[derive(Default)]
 struct FixAccumulator {
     fixes: Vec<autofix::FixApplied>,
@@ -496,6 +513,7 @@ fn run_ci(
         "Deterministic merge order: audit structural fixes → lint fixes → test fixes".to_string(),
     );
 
+    let plan_mode = true;
     let working_root = clone_tree(&root)?;
 
     let audit_stage = plan_audit_stage(
@@ -505,7 +523,7 @@ fn run_ci(
         only,
         exclude,
         Some(working_root.path()),
-        write,
+        plan_mode,
     )?;
     accumulator.extend(audit_stage.fix_results.clone());
     planned_stages.push(audit_stage.summary);
@@ -515,7 +533,7 @@ fn run_ci(
         &working_root,
         settings,
         scoped_changed_files.as_deref(),
-        write,
+        plan_mode,
     )?;
     accumulator.extend(lint_stage.fix_results.clone());
     planned_stages.push(lint_stage.summary);
@@ -525,7 +543,7 @@ fn run_ci(
         &working_root,
         settings,
         scoped_test_files.as_deref(),
-        write,
+        plan_mode,
     )?;
     accumulator.extend(test_stage.fix_results.clone());
     planned_stages.push(test_stage.summary);
@@ -537,7 +555,17 @@ fn run_ci(
         }
     }
 
+    let overlaps = analyze_stage_overlaps(&planned_stages);
+    if !overlaps.is_empty() {
+        warnings.push(format!(
+            "{} staged file overlap(s) resolved by precedence order {}",
+            overlaps.len(),
+            "audit→lint→test"
+        ));
+    }
+
     let changed_files: Vec<String> = final_changed_files.into_iter().collect();
+    let plan_totals = summarize_plan_totals(&planned_stages, changed_files.len());
 
     let files_modified = changed_files.len();
     let applied = write && files_modified > 0;
@@ -563,6 +591,10 @@ fn run_ci(
         copy_changed_files(working_root.path(), &root, &changed_files)?;
     }
 
+    for stage in &mut planned_stages {
+        stage.applied = write && stage.files_modified > 0;
+    }
+
     if files_modified == 0 {
         warnings.push("No automated fixes accumulated across audit/lint/test".to_string());
     }
@@ -574,7 +606,9 @@ fn run_ci(
             format!("Re-run checks: homeboy test {}", comp.component),
         ]
     } else if files_modified > 0 {
-        vec!["Dry-run only. Re-run with --write to apply the accumulated refactor plan.".to_string()]
+        vec![
+            "Plan only. Sandbox passes were used to accumulate fix proposals without touching the real tree. Re-run with --write to apply them.".to_string(),
+        ]
     } else {
         Vec::new()
     };
@@ -589,6 +623,8 @@ fn run_ci(
             applied,
             merge_strategy: "sequential_sandbox_merge(audit→lint→test)".to_string(),
             stages: planned_stages,
+            plan_totals,
+            overlaps,
             files_modified,
             changed_files,
             fix_summary: accumulator.summary(),
@@ -680,7 +716,7 @@ fn plan_audit_stage(
             files_modified: changed_files.len(),
             detected_findings: Some(result.findings.len()),
             changed_files,
-            fix_summary: if write && policy_summary.visible_insertions + policy_summary.visible_new_files > 0 {
+            fix_summary: if policy_summary.visible_insertions + policy_summary.visible_new_files > 0 {
                 Some(autofix::summarize_audit_fix_result(&fix_result))
             } else {
                 None
@@ -696,7 +732,7 @@ fn run_lint_stage(
     sandbox: &SandboxDir,
     settings: &[(String, String)],
     changed_files: Option<&[String]>,
-    write: bool,
+    plan_mode: bool,
 ) -> homeboy::Result<PlannedStage> {
     let mut sandbox_component = component.clone();
     sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
@@ -710,7 +746,8 @@ fn run_lint_stage(
             .unwrap_or(0)
     ));
     let fix_results_file = autofix::fix_results_temp_path();
-    let before_fix = if write {
+    let fix_plan_file = autofix::fix_plan_temp_path();
+    let before_fix = if plan_mode {
         Some(autofix::changed_file_set(&sandbox_component.local_path)?)
     } else {
         None
@@ -737,13 +774,14 @@ fn run_lint_stage(
     let _output = extension::ExtensionRunner::new(&sandbox_component.id, &script_path)
         .component(sandbox_component.clone())
         .settings(settings)
-        .env_if(write, "HOMEBOY_AUTO_FIX", "1")
+        .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1")
         .env_opt("HOMEBOY_LINT_GLOB", &effective_glob)
         .env("HOMEBOY_LINT_FINDINGS_FILE", &findings_file.to_string_lossy())
-        .env_if(write, "HOMEBOY_FIX_RESULTS_FILE", &fix_results_file.to_string_lossy())
+        .env_if(plan_mode, "HOMEBOY_FIX_PLAN_FILE", &fix_plan_file.to_string_lossy())
+        .env_if(plan_mode, "HOMEBOY_FIX_RESULTS_FILE", &fix_results_file.to_string_lossy())
         .run()?;
 
-    let changed_files = if write {
+    let changed_files = if plan_mode {
         let after_fix = autofix::changed_file_set(&sandbox_component.local_path)?;
         before_fix
             .as_ref()
@@ -753,17 +791,23 @@ fn run_lint_stage(
         Vec::new()
     };
 
-    let fix_results = autofix::parse_fix_results_file(&fix_results_file);
+    let planned_fix_results = autofix::parse_fix_plan_file(&fix_plan_file);
+    let fix_results = if planned_fix_results.is_empty() {
+        autofix::parse_fix_results_file(&fix_results_file)
+    } else {
+        planned_fix_results
+    };
     let fixes_proposed = fix_results.len();
     let lint_findings = homeboy::lint_baseline::parse_findings_file(&findings_file).unwrap_or_default();
     let _ = std::fs::remove_file(&fix_results_file);
+    let _ = std::fs::remove_file(&fix_plan_file);
     let _ = std::fs::remove_file(&findings_file);
 
     Ok(PlannedStage {
         summary: CiStageSummary {
             stage: "lint".to_string(),
             planned: true,
-            applied: write && !changed_files.is_empty(),
+            applied: plan_mode && !changed_files.is_empty(),
             fixes_proposed,
             files_modified: changed_files.len(),
             detected_findings: Some(lint_findings.len()),
@@ -784,14 +828,15 @@ fn run_test_stage(
     sandbox: &SandboxDir,
     settings: &[(String, String)],
     changed_test_files: Option<&[String]>,
-    write: bool,
+    plan_mode: bool,
 ) -> homeboy::Result<PlannedStage> {
     let mut sandbox_component = component.clone();
     sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
     let script_path = super::test::resolve_test_script(&sandbox_component)?;
     let results_file = std::env::temp_dir().join(format!("homeboy-test-results-{}.json", std::process::id()));
     let fix_results_file = autofix::fix_results_temp_path();
-    let before_fix = if write {
+    let fix_plan_file = autofix::fix_plan_temp_path();
+    let before_fix = if plan_mode {
         Some(autofix::changed_file_set(&sandbox_component.local_path)?)
     } else {
         None
@@ -801,8 +846,9 @@ fn run_test_stage(
         .component(sandbox_component.clone())
         .settings(settings)
         .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy())
-        .env_if(write, "HOMEBOY_FIX_RESULTS_FILE", &fix_results_file.to_string_lossy())
-        .env_if(write, "HOMEBOY_AUTO_FIX", "1");
+        .env_if(plan_mode, "HOMEBOY_FIX_PLAN_FILE", &fix_plan_file.to_string_lossy())
+        .env_if(plan_mode, "HOMEBOY_FIX_RESULTS_FILE", &fix_results_file.to_string_lossy())
+        .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1");
 
     if let Some(changed_test_files) = changed_test_files {
         if !changed_test_files.is_empty() {
@@ -812,7 +858,7 @@ fn run_test_stage(
 
     let _output = runner.run()?;
 
-    let changed_files = if write {
+    let changed_files = if plan_mode {
         let after_fix = autofix::changed_file_set(&sandbox_component.local_path)?;
         before_fix
             .as_ref()
@@ -822,16 +868,22 @@ fn run_test_stage(
         Vec::new()
     };
 
-    let fix_results = autofix::parse_fix_results_file(&fix_results_file);
+    let planned_fix_results = autofix::parse_fix_plan_file(&fix_plan_file);
+    let fix_results = if planned_fix_results.is_empty() {
+        autofix::parse_fix_results_file(&fix_results_file)
+    } else {
+        planned_fix_results
+    };
     let fixes_proposed = fix_results.len();
     let _ = std::fs::remove_file(&fix_results_file);
+    let _ = std::fs::remove_file(&fix_plan_file);
     let _ = std::fs::remove_file(&results_file);
 
     Ok(PlannedStage {
         summary: CiStageSummary {
             stage: "test".to_string(),
             planned: true,
-            applied: write && !changed_files.is_empty(),
+            applied: plan_mode && !changed_files.is_empty(),
             fixes_proposed,
             files_modified: changed_files.len(),
             detected_findings: None,
@@ -971,6 +1023,194 @@ fn parse_audit_findings(values: &[String]) -> homeboy::Result<Vec<homeboy::code_
             })
         })
         .collect()
+}
+
+fn analyze_stage_overlaps(stages: &[CiStageSummary]) -> Vec<CiStageOverlap> {
+    let mut overlaps = Vec::new();
+
+    for (later_index, later_stage) in stages.iter().enumerate() {
+        if later_stage.changed_files.is_empty() {
+            continue;
+        }
+
+        let later_files: BTreeSet<&str> = later_stage.changed_files.iter().map(String::as_str).collect();
+
+        for earlier_stage in stages.iter().take(later_index) {
+            if earlier_stage.changed_files.is_empty() {
+                continue;
+            }
+
+            for file in earlier_stage.changed_files.iter().map(String::as_str) {
+                if later_files.contains(file) {
+                    overlaps.push(CiStageOverlap {
+                        file: file.to_string(),
+                        earlier_stage: earlier_stage.stage.clone(),
+                        later_stage: later_stage.stage.clone(),
+                        resolution: format!(
+                            "{} pass ran after {} in sandbox sequence",
+                            later_stage.stage, earlier_stage.stage
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    overlaps.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then(a.earlier_stage.cmp(&b.earlier_stage))
+            .then(a.later_stage.cmp(&b.later_stage))
+    });
+
+    overlaps
+}
+
+fn summarize_plan_totals(stages: &[CiStageSummary], total_files_selected: usize) -> CiPlanTotals {
+    CiPlanTotals {
+        stages_with_proposals: stages.iter().filter(|stage| stage.fixes_proposed > 0).count(),
+        total_fixes_proposed: stages.iter().map(|stage| stage.fixes_proposed).sum(),
+        total_files_selected,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn analyze_stage_overlaps_reports_later_stage_precedence() {
+        let stages = vec![
+            CiStageSummary {
+                stage: "audit".to_string(),
+                planned: true,
+                applied: true,
+                fixes_proposed: 1,
+                files_modified: 1,
+                detected_findings: Some(1),
+                changed_files: vec!["src/lib.rs".to_string()],
+                fix_summary: None,
+                warnings: Vec::new(),
+            },
+            CiStageSummary {
+                stage: "lint".to_string(),
+                planned: true,
+                applied: true,
+                fixes_proposed: 1,
+                files_modified: 2,
+                detected_findings: Some(2),
+                changed_files: vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
+                fix_summary: None,
+                warnings: Vec::new(),
+            },
+            CiStageSummary {
+                stage: "test".to_string(),
+                planned: true,
+                applied: true,
+                fixes_proposed: 1,
+                files_modified: 1,
+                detected_findings: None,
+                changed_files: vec!["src/main.rs".to_string()],
+                fix_summary: None,
+                warnings: Vec::new(),
+            },
+        ];
+
+        let overlaps = analyze_stage_overlaps(&stages);
+
+        assert_eq!(
+            overlaps,
+            vec![
+                CiStageOverlap {
+                    file: "src/lib.rs".to_string(),
+                    earlier_stage: "audit".to_string(),
+                    later_stage: "lint".to_string(),
+                    resolution: "lint pass ran after audit in sandbox sequence".to_string(),
+                },
+                CiStageOverlap {
+                    file: "src/main.rs".to_string(),
+                    earlier_stage: "lint".to_string(),
+                    later_stage: "test".to_string(),
+                    resolution: "test pass ran after lint in sandbox sequence".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn analyze_stage_overlaps_ignores_disjoint_files() {
+        let stages = vec![
+            CiStageSummary {
+                stage: "audit".to_string(),
+                planned: true,
+                applied: true,
+                fixes_proposed: 1,
+                files_modified: 1,
+                detected_findings: Some(1),
+                changed_files: vec!["src/lib.rs".to_string()],
+                fix_summary: None,
+                warnings: Vec::new(),
+            },
+            CiStageSummary {
+                stage: "lint".to_string(),
+                planned: true,
+                applied: true,
+                fixes_proposed: 1,
+                files_modified: 1,
+                detected_findings: Some(1),
+                changed_files: vec!["src/main.rs".to_string()],
+                fix_summary: None,
+                warnings: Vec::new(),
+            },
+        ];
+
+        assert!(analyze_stage_overlaps(&stages).is_empty());
+    }
+
+    #[test]
+    fn summarize_plan_totals_counts_stage_and_fix_totals() {
+        let stages = vec![
+            CiStageSummary {
+                stage: "audit".to_string(),
+                planned: true,
+                applied: false,
+                fixes_proposed: 2,
+                files_modified: 1,
+                detected_findings: Some(2),
+                changed_files: vec!["src/lib.rs".to_string()],
+                fix_summary: None,
+                warnings: Vec::new(),
+            },
+            CiStageSummary {
+                stage: "lint".to_string(),
+                planned: true,
+                applied: false,
+                fixes_proposed: 0,
+                files_modified: 0,
+                detected_findings: Some(1),
+                changed_files: Vec::new(),
+                fix_summary: None,
+                warnings: Vec::new(),
+            },
+            CiStageSummary {
+                stage: "test".to_string(),
+                planned: true,
+                applied: false,
+                fixes_proposed: 3,
+                files_modified: 2,
+                detected_findings: None,
+                changed_files: vec!["tests/foo.rs".to_string(), "tests/bar.rs".to_string()],
+                fix_summary: None,
+                warnings: Vec::new(),
+            },
+        ];
+
+        let totals = summarize_plan_totals(&stages, 3);
+
+        assert_eq!(totals.stages_with_proposals, 2);
+        assert_eq!(totals.total_fixes_proposed, 5);
+        assert_eq!(totals.total_files_selected, 3);
+    }
 }
 
 #[derive(Serialize)]
