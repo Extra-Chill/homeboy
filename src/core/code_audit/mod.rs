@@ -12,6 +12,7 @@
 //! 6. Analyzing structural complexity (god files, high item counts)
 
 pub mod baseline;
+pub mod docs_audit;
 mod checks;
 mod comment_hygiene;
 pub(crate) mod conventions;

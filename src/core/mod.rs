@@ -12,7 +12,6 @@ pub mod component;
 pub mod context;
 pub mod db;
 pub mod deploy;
-pub mod docs_audit;
 pub mod engine;
 pub mod error;
 pub mod extension;

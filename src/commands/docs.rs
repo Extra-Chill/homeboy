@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::docs;
 use homeboy::component;
-use homeboy::docs_audit::{self, AuditResult, DetectedFeature};
+use homeboy::code_audit::docs_audit::{self, AuditResult, DetectedFeature};
 use homeboy::extension;
 
 use super::CmdResult;
@@ -183,7 +183,7 @@ pub enum DocsOutput {
     AuditCompared {
         #[serde(flatten)]
         result: AuditResult,
-        baseline_comparison: homeboy::docs_audit::baseline::BaselineComparison,
+        baseline_comparison: homeboy::code_audit::docs_audit::baseline::BaselineComparison,
     },
 
     #[serde(rename = "docs.map")]
