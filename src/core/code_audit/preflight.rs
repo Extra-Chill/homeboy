@@ -291,7 +291,9 @@ pub fn run_new_file_preflight(
                     } else {
                         format!(
                             "parent directory {} does not exist",
-                            abs.parent().map(|p| p.display().to_string()).unwrap_or_default()
+                            abs.parent()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default()
                         )
                     },
                 },
