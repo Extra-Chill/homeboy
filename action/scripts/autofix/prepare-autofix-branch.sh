@@ -9,7 +9,7 @@ if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then
   AUTOFIX_MAX_COMMITS=2
 fi
 
-AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep '^chore(ci): apply homeboy autofixes$' | wc -l | xargs)
+AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" | wc -l | xargs)
 if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
   echo "Skipping non-PR autofix: reached max autofix commits (${AUTOFIX_COMMIT_COUNT}/${AUTOFIX_MAX_COMMITS})"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
@@ -121,9 +121,11 @@ for FIX_CMD in "${FIX_ARRAY[@]}"; do
   AUTOFIX_FIX_TYPES+="${BASE}"
 done
 
+COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}")"
+
 git config user.name "homeboy-ci[bot]"
 git config user.email "266378653+homeboy-ci[bot]@users.noreply.github.com"
-git commit -m "chore(ci): apply homeboy autofixes"
+git commit -m "${COMMIT_MSG}"
 
 # Use GitHub App token for push if available — pushes from a GitHub App
 # trigger workflow re-runs, while GITHUB_TOKEN pushes do not.

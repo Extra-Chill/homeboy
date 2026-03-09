@@ -2,6 +2,29 @@
 
 set -euo pipefail
 
+# Prefix used for all autofix commits. Loop guards grep for this prefix,
+# so the subject line can vary after it (e.g. fix types, file count).
+AUTOFIX_COMMIT_PREFIX="chore(ci): homeboy autofix"
+
+# Build an informative autofix commit message.
+# Subject: chore(ci): homeboy autofix — audit, lint (7 files)
+# Body: list of changed files for traceability.
+build_autofix_commit_message() {
+  local fix_types="$1"
+  local file_count="$2"
+
+  local subject="${AUTOFIX_COMMIT_PREFIX}"
+  if [ -n "${fix_types}" ]; then
+    subject="${subject} — ${fix_types}"
+  fi
+  subject="${subject} (${file_count} files)"
+
+  local body
+  body="$(git diff --cached --name-only | sort)"
+
+  printf '%s\n\n%s\n' "${subject}" "${body}"
+}
+
 resolve_component_id() {
   if [ -n "${COMPONENT_NAME:-}" ]; then
     printf '%s\n' "${COMPONENT_NAME}"
