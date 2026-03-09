@@ -17,7 +17,9 @@ HOMEBOY_ANNOTATIONS_DIR=$(mktemp -d)
 echo "HOMEBOY_ANNOTATIONS_DIR=${HOMEBOY_ANNOTATIONS_DIR}" >> "${GITHUB_ENV}"
 export HOMEBOY_ANNOTATIONS_DIR
 
-IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
+# Enforce canonical order: audit → lint → test
+ORDERED_COMMANDS="$(canonicalize_commands "${COMMANDS}")"
+IFS=',' read -ra CMD_ARRAY <<< "${ORDERED_COMMANDS}"
 HAS_LINT_COMMAND="$(has_lint_command "${COMMANDS}")"
 
 for CMD in "${CMD_ARRAY[@]}"; do

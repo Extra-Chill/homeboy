@@ -32,7 +32,7 @@ inputs:
     required: false
     default: 'https://github.com/Extra-Chill/homeboy-extensions'
   commands:
-    description: 'Comma-separated list of commands to run (e.g. "lint,test", "lint,test,audit")'
+    description: 'Comma-separated list of commands to run (e.g. "audit,lint,test"). Commands are automatically ordered: audit → lint → test, regardless of input order.'
     required: false
     default: 'lint,test'
   component:
