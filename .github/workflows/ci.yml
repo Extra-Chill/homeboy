@@ -4,7 +4,11 @@
 # A single build job compiles homeboy from source and shares the binary
 # via artifact. Each stage downloads it instead of rebuilding.
 # If fixes are committed, the App token push triggers a full re-run.
-# Scoped to changed files only (--changed-since / lint-changed-only).
+# Scoped to changed files only (--changed-since via scope module).
+#
+# Fork PRs: CI runs read-only checks (no autofix, no baseline writes).
+# The checkout uses the PR head SHA which works for both same-repo and fork PRs.
+# Secrets (App token) are unavailable for forks — continue-on-error handles this.
 
 name: CI
 
@@ -26,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -52,9 +56,10 @@ jobs:
           retention-days: 1
 
   # ── Stage 1: Audit + Fix ──
-  # Runs first — most likely to induce changes. Autofix mode "always"
-  # grinds down the baseline on every PR, not just failures.
-  # If fixes are committed, App token push triggers re-run of all stages.
+  # Runs first — most likely to induce changes. Autofix applies code fixes
+  # via --fix --write but does NOT ratchet the baseline (no --ratchet).
+  # Baseline ratchet only happens on main to avoid homeboy.json conflicts.
+  # Fork PRs: autofix skipped (action detects fork via SCOPE_IS_FORK).
   audit:
     name: Audit
     needs: [build]
@@ -62,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Download homeboy binary
@@ -85,8 +90,8 @@ jobs:
           extension: rust
           component: homeboy
           commands: audit
-          autofix: 'true'
-          autofix-mode: 'always'
+          autofix: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
+          autofix-mode: 'on-failure'
           autofix-commands: 'audit --fix --write'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
@@ -95,6 +100,7 @@ jobs:
   # Runs after audit passes. Cargo fmt and clippy. Autofixes formatting
   # and clippy warnings. If fixes are committed, App token push triggers
   # re-run of all stages.
+  # Fork PRs: autofix skipped.
   lint:
     name: Lint
     needs: [build, audit]
@@ -102,7 +108,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Download homeboy binary
@@ -125,7 +131,7 @@ jobs:
           extension: rust
           component: homeboy
           commands: lint
-          autofix: 'true'
+          autofix: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
           autofix-mode: 'on-failure'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
@@ -133,6 +139,7 @@ jobs:
   # ── Stage 3: Test + Fix ──
   # Runs after lint passes. If tests fail and fixes are available,
   # commits and triggers re-run.
+  # Fork PRs: autofix skipped.
   test:
     name: Test
     needs: [build, lint]
@@ -140,7 +147,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Download homeboy binary
@@ -163,7 +170,7 @@ jobs:
           extension: rust
           component: homeboy
           commands: test
-          autofix: 'true'
+          autofix: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
           autofix-mode: 'on-failure'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}

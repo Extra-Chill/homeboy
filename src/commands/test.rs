@@ -12,7 +12,7 @@ use homeboy::test_scaffold::{self, ScaffoldConfig};
 use homeboy::utils::autofix::{self, AutofixMode, FixResultsSummary};
 
 use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
-use super::test_scope::{build_phpunit_filter_regex, compute_changed_test_scope, TestScopeOutput};
+use super::test_scope::{compute_changed_test_scope, TestScopeOutput};
 use super::{CmdResult, GlobalArgs};
 
 mod parsing;
@@ -396,7 +396,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
         runner = runner.env("HOMEBOY_COVERAGE_MIN", &format!("{}", min));
     }
 
-    let mut passthrough_args = filter_homeboy_flags(&args.args);
+    let passthrough_args = filter_homeboy_flags(&args.args);
 
     if let Some(ref scope) = changed_scope {
         if scope.selected_files.is_empty() {
@@ -439,8 +439,14 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
             ));
         }
 
-        let filter_regex = build_phpunit_filter_regex(&scope.selected_files);
-        passthrough_args.push(format!("--filter={}", filter_regex));
+        // Pass changed test files to the extension via env var.
+        // The extension's test runner decides how to scope (e.g., PHPUnit
+        // uses --filter, Cargo uses positional test names, Jest uses
+        // --testPathPattern). Core does not generate runner-specific args.
+        runner = runner.env(
+            "HOMEBOY_CHANGED_TEST_FILES",
+            &scope.selected_files.join("\n"),
+        );
 
         homeboy::log_status!(
             "test",

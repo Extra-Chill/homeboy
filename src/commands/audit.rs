@@ -58,6 +58,12 @@ pub struct AuditArgs {
     #[arg(long = "exclude", value_name = "kind")]
     pub exclude: Vec<String>,
 
+    /// Update baseline when findings are resolved (ratchet forward).
+    /// Without this flag, --fix --write applies code fixes but does not
+    /// touch the baseline in homeboy.json.
+    #[arg(long)]
+    pub ratchet: bool,
+
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
 
@@ -499,15 +505,17 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
             final_fix_result = fix_result;
         }
 
-        // Auto-ratchet: if --fix --write applied changes and a baseline exists,
-        // automatically update the baseline to remove resolved findings.
-        // This makes the baseline self-dissolving — it shrinks on every CI run
-        // as autofix eliminates fixable findings.
+        // Ratchet: if --ratchet is set and --fix --write applied changes,
+        // update the baseline to remove resolved findings.
+        // This makes the baseline shrink as autofix eliminates fixable findings.
+        //
+        // Ratchet is opt-in to avoid homeboy.json merge conflicts in CI:
+        // only main/release workflows should pass --ratchet, never PR branches.
         //
         // When --changed-since is active, use scoped baseline update to avoid
         // touching fingerprints for files outside the change set.
         let mut ratchet_summary = None;
-        if written && !args.baseline_args.ignore_baseline {
+        if args.ratchet && written && !args.baseline_args.ignore_baseline {
             if let Some(existing_baseline) =
                 baseline::load_baseline(Path::new(&current_result.source_path))
             {
@@ -1753,6 +1761,7 @@ mod tests {
             conventions: false,
             fix: true,
             write: true,
+            ratchet: false,
             max_iterations: 3,
             warning_weight: 3,
             info_weight: 1,

@@ -56,6 +56,7 @@ const SUPPORT_MATRIX: &[(&str, &[&str])] = &[
             "--conventions",
             "--fix",
             "--write",
+            "--ratchet",
             "--baseline",
             "--ignore-baseline",
             "--path",
