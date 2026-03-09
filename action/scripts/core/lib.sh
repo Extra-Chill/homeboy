@@ -51,23 +51,23 @@ resolve_workspace() {
   pwd
 }
 
-# Sort commands into canonical order: audit → lint → test.
-# Audit is most likely to induce changes (structural fixes), lint fixes style
-# on the resulting code, test validates the final state. Non-standard commands
-# (release, custom extension commands) are preserved at the end in their
-# original relative order.
+# Sort commands into canonical order: audit → lint → test → refactor.
+# Audit/lint/test are read-first quality gates. Refactor is the single
+# write/mutation phase when used.
 canonicalize_commands() {
   local commands="$1"
-  local audit="" lint="" test="" others=()
-  local cmd
+  local audit="" lint="" test="" refactor="" others=()
+  local cmd base_cmd
 
   IFS=',' read -ra CMD_ARRAY <<< "${commands}"
   for cmd in "${CMD_ARRAY[@]}"; do
     cmd=$(echo "${cmd}" | xargs)
-    case "${cmd}" in
+    base_cmd=$(printf '%s' "${cmd}" | awk '{print $1}')
+    case "${base_cmd}" in
       audit)   audit="audit" ;;
       lint)    lint="lint" ;;
       test)    test="test" ;;
+      refactor) refactor="${cmd}" ;;
       *)       others+=("${cmd}") ;;
     esac
   done
@@ -76,6 +76,7 @@ canonicalize_commands() {
   [ -n "${audit}" ] && result+=("${audit}")
   [ -n "${lint}" ]  && result+=("${lint}")
   [ -n "${test}" ]  && result+=("${test}")
+  [ -n "${refactor}" ]  && result+=("${refactor}")
   result+=("${others[@]+"${others[@]}"}")
 
   local IFS=','
