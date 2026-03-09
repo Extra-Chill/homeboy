@@ -36,6 +36,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(version = VERSION)]
 #[command(about = "CLI tool for development and deployment automation")]
 struct Cli {
+    /// Write structured JSON output to a file (in addition to stdout).
+    /// The file contains only the JSON envelope — no log text, no timestamps.
+    #[arg(long, global = true, value_name = "PATH")]
+    output: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -260,6 +265,10 @@ fn main() -> std::process::ExitCode {
 
     let global = GlobalArgs {};
 
+    // Extract --output early so it's available for all code paths (including
+    // extension CLI commands which exit before Cli::from_arg_matches).
+    let output_file: Option<String> = matches.get_one::<String>("output").cloned();
+
     if let Some(extension_cmd) = try_parse_extension_cli_command(&matches, &extension_info) {
         let cli_args = cli::CliArgs {
             tool: extension_cmd.tool,
@@ -269,6 +278,9 @@ fn main() -> std::process::ExitCode {
         let result = cli::run(cli_args, &global);
 
         let (json_result, exit_code) = output::map_cmd_result_to_json(result);
+        if let Some(ref path) = output_file {
+            output::write_json_to_file(&json_result, path);
+        }
         output::print_json_result(json_result).ok();
         return std::process::ExitCode::from(exit_code_to_u8(exit_code));
     }
@@ -361,6 +373,13 @@ fn main() -> std::process::ExitCode {
     }
 
     let (json_result, exit_code) = commands::run_json(cli.command, &global);
+
+    // Write JSON to --output file if specified (before printing to stdout).
+    // The file always gets written, even on failure, so consumers can read
+    // structured error data instead of scraping log output.
+    if let Some(ref path) = output_file {
+        output::write_json_to_file(&json_result, path);
+    }
 
     match mode {
         ResponseMode::Json => {

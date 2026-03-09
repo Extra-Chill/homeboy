@@ -91,7 +91,10 @@ pub struct AuditSummaryOutput {
 #[derive(Serialize)]
 pub struct AuditSummaryFinding {
     file: String,
-    category: String,
+    /// Convention this finding belongs to (matches Finding.convention).
+    convention: String,
+    kind: homeboy::code_audit::AuditFinding,
+    severity: homeboy::code_audit::Severity,
     description: String,
     suggestion: String,
 }
@@ -283,7 +286,9 @@ fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSummary
         .take(20)
         .map(|f| AuditSummaryFinding {
             file: f.file.clone(),
-            category: f.convention.clone(),
+            convention: f.convention.clone(),
+            kind: f.kind.clone(),
+            severity: f.severity.clone(),
             description: f.description.clone(),
             suggestion: f.suggestion.clone(),
         })
