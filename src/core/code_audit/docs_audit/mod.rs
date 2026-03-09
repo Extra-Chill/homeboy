@@ -7,9 +7,9 @@
 //! 4. Build an alignment report focused on actionable items
 
 pub mod baseline;
-mod claims;
+pub(crate) mod claims;
 mod tasks;
-mod verify;
+pub(crate) mod verify;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -326,7 +326,7 @@ pub fn audit_component(
 /// Excludes the changelog file since changelogs contain historical references
 /// to file paths that may no longer exist. Uses `changelog_target` from the
 /// component config if set, otherwise defaults to excluding `CHANGELOG.md`.
-fn find_doc_files(docs_path: &Path, exclude_changelog: Option<&str>) -> Vec<String> {
+pub(crate) fn find_doc_files(docs_path: &Path, exclude_changelog: Option<&str>) -> Vec<String> {
     let mut docs = Vec::new();
 
     if !docs_path.exists() {
@@ -1010,7 +1010,7 @@ fn collect_source_files(base: &Path, dir: &Path, files: &mut Vec<String>) {
 }
 
 /// Collect audit ignore patterns from all linked extensions.
-fn collect_extension_ignore_patterns(comp: &component::Component) -> Vec<String> {
+pub(crate) fn collect_extension_ignore_patterns(comp: &component::Component) -> Vec<String> {
     let mut patterns = Vec::new();
     if let Some(ref extensions) = comp.extensions {
         for extension_id in extensions.keys() {

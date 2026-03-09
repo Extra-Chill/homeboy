@@ -123,12 +123,21 @@ pub enum InsertionKind {
         /// Replacement text (e.g., "pub(crate) fn").
         to: String,
     },
+    /// Replace a stale path reference in a documentation file.
+    DocReferenceUpdate {
+        /// 1-indexed line number where the reference appears.
+        line: usize,
+        /// The old path text to find (e.g., "src/old/config.rs").
+        old_ref: String,
+        /// The new path text to replace with (e.g., "src/new/config.rs").
+        new_ref: String,
+    },
 }
 
 impl InsertionKind {
     pub fn safety_tier(&self) -> FixSafetyTier {
         match self {
-            Self::ImportAdd => FixSafetyTier::SafeAuto,
+            Self::ImportAdd | Self::DocReferenceUpdate { .. } => FixSafetyTier::SafeAuto,
             Self::MethodStub
             | Self::RegistrationStub
             | Self::ConstructorWithRegistration
@@ -1780,7 +1789,47 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         }
     }
 
-    // Phase 3 complete — merge and return
+    // Phase 4: Stale doc reference fixes — update moved paths in documentation.
+    for finding in &result.findings {
+        if finding.kind != AuditFinding::StaleDocReference {
+            continue;
+        }
+
+        let Some(new_path) = extract_suggested_path(&finding.suggestion) else {
+            continue;
+        };
+
+        let Some(old_path) = extract_stale_ref_path(&finding.description) else {
+            continue;
+        };
+
+        let line_num = extract_line_number(&finding.description).unwrap_or(0);
+        if line_num == 0 {
+            continue;
+        }
+
+        fixes.push(Fix {
+            file: finding.file.clone(),
+            required_methods: vec![],
+            required_registrations: vec![],
+            insertions: vec![insertion(
+                InsertionKind::DocReferenceUpdate {
+                    line: line_num,
+                    old_ref: old_path.clone(),
+                    new_ref: new_path.clone(),
+                },
+                AuditFinding::StaleDocReference,
+                format!("{} → {}", old_path, new_path),
+                format!(
+                    "Update stale reference: `{}` → `{}` (line {})",
+                    old_path, new_path, line_num
+                ),
+            )],
+            applied: false,
+        });
+    }
+
+    // All phases complete — merge and return
     // Merge fixes that target the same file.
     //
     // Multiple phases (convention fixes, duplication fixes) or multiple
@@ -2313,6 +2362,36 @@ fn extract_function_name_from_unreferenced(description: &str) -> Option<String> 
     Some(rest[..end].to_string())
 }
 
+/// Extract the suggested new path from a StaleDocReference suggestion.
+///
+/// Example: "Did you mean `src/new/config.rs`? File 'src/old/config.rs' no longer exists."
+/// Returns: Some("src/new/config.rs")
+fn extract_suggested_path(suggestion: &str) -> Option<String> {
+    let start = suggestion.find("Did you mean `")? + "Did you mean `".len();
+    let rest = &suggestion[start..];
+    let end = rest.find('`')?;
+    Some(rest[..end].to_string())
+}
+
+/// Extract the old reference path from a StaleDocReference description.
+///
+/// Example: "Stale file reference `src/old/config.rs` (line 5) — target has moved"
+/// Returns: Some("src/old/config.rs")
+fn extract_stale_ref_path(description: &str) -> Option<String> {
+    let start = description.find('`')? + 1;
+    let rest = &description[start..];
+    let end = rest.find('`')?;
+    Some(rest[..end].to_string())
+}
+
+/// Extract a line number from a description containing "(line N)".
+fn extract_line_number(description: &str) -> Option<usize> {
+    let start = description.find("(line ")? + "(line ".len();
+    let rest = &description[start..];
+    let end = rest.find(')')?;
+    rest[..end].parse().ok()
+}
+
 /// Check if a function is referenced outside the lib crate — either re-exported
 /// via `pub use` in parent mod.rs files, or imported by binary crate sources
 /// (main.rs, commands/, docs/, etc.).
@@ -2817,6 +2896,7 @@ pub(crate) fn apply_insertions_to_content(
     let mut trait_uses = Vec::new();
     let mut removals: Vec<(usize, usize)> = Vec::new();
     let mut visibility_changes: Vec<(usize, &str, &str)> = Vec::new();
+    let mut doc_ref_updates: Vec<(usize, &str, &str)> = Vec::new();
 
     for insertion in insertions {
         match &insertion.kind {
@@ -2834,6 +2914,13 @@ pub(crate) fn apply_insertions_to_content(
             InsertionKind::VisibilityChange { line, from, to } => {
                 visibility_changes.push((*line, from.as_str(), to.as_str()));
             }
+            InsertionKind::DocReferenceUpdate {
+                line,
+                old_ref,
+                new_ref,
+            } => {
+                doc_ref_updates.push((*line, old_ref.as_str(), new_ref.as_str()));
+            }
         }
     }
 
@@ -2844,6 +2931,21 @@ pub(crate) fn apply_insertions_to_content(
             let idx = line_num.saturating_sub(1); // 1-indexed → 0-indexed
             if idx < lines.len() {
                 lines[idx] = lines[idx].replacen(from, to, 1);
+            }
+        }
+        result = lines.join("\n");
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
+
+    // Apply doc reference updates (line-level text replacements, no line shifts)
+    if !doc_ref_updates.is_empty() {
+        let mut lines: Vec<String> = result.lines().map(String::from).collect();
+        for (line_num, old_ref, new_ref) in &doc_ref_updates {
+            let idx = line_num.saturating_sub(1);
+            if idx < lines.len() {
+                lines[idx] = lines[idx].replacen(old_ref, new_ref, 1);
             }
         }
         result = lines.join("\n");
