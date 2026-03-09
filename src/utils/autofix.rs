@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(summary.fixes_applied, 3);
         assert_eq!(summary.files_modified, 2); // a.php and b.php
         assert_eq!(summary.rules.len(), 2); // phpcbf and yoda
-        // BTreeMap ordering: phpcbf before yoda
+                                            // BTreeMap ordering: phpcbf before yoda
         assert_eq!(summary.rules[0].rule, "phpcbf");
         assert_eq!(summary.rules[0].count, 2);
         assert_eq!(summary.rules[1].rule, "yoda");
@@ -250,7 +250,12 @@ mod tests {
 
     #[test]
     fn standard_outcome_write_with_fixes() {
-        let outcome = standard_outcome(AutofixMode::Write, 3, Some("homeboy lint foo".into()), vec![]);
+        let outcome = standard_outcome(
+            AutofixMode::Write,
+            3,
+            Some("homeboy lint foo".into()),
+            vec![],
+        );
         assert_eq!(outcome.status, "auto_fixed");
         assert!(outcome.rerun_recommended);
     }
