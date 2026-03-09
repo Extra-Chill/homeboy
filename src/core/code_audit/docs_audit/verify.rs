@@ -93,6 +93,16 @@ fn verify_file_path(
         }
     }
 
+    // File not found — try to find a similar file (same name, different location)
+    if let Some(similar) = find_similar_file(source_path, stripped_path) {
+        return VerifyResult::Broken {
+            suggestion: Some(format!(
+                "Did you mean `{}`? File '{}' no longer exists at the documented path.",
+                similar, path
+            )),
+        };
+    }
+
     VerifyResult::Broken {
         suggestion: Some(format!(
             "File '{}' no longer exists. Update or remove this reference from documentation.",
@@ -138,6 +148,16 @@ fn verify_directory_path(
         if candidate.is_dir() {
             return VerifyResult::Verified;
         }
+    }
+
+    // Directory not found — try to find a similar directory
+    if let Some(similar) = find_similar_dir(source_path, stripped_path) {
+        return VerifyResult::Broken {
+            suggestion: Some(format!(
+                "Did you mean `{}`? Directory '{}' no longer exists at the documented path.",
+                similar, path
+            )),
+        };
     }
 
     VerifyResult::Broken {
@@ -244,6 +264,130 @@ fn verify_code_example(_claim: &Claim) -> VerifyResult {
     // We can't know if the syntax is still valid without understanding the API
     VerifyResult::NeedsVerification {
         hint: "Code example may be stale. Compare against current implementation and update documentation if it no longer matches.".to_string(),
+    }
+}
+
+// ============================================================================
+// Fuzzy path matching — find files/dirs that moved
+// ============================================================================
+
+/// Search the source tree for a file with the same name as the missing reference.
+///
+/// If `src/old_dir/config.rs` is missing but `src/new_dir/config.rs` exists,
+/// returns `Some("src/new_dir/config.rs")`.
+fn find_similar_file(root: &Path, missing_path: &str) -> Option<String> {
+    let target_name = Path::new(missing_path).file_name()?.to_str()?;
+
+    // Don't fuzzy-match very generic filenames
+    if matches!(
+        target_name,
+        "mod.rs" | "lib.rs" | "main.rs" | "index.js" | "index.ts" | "index.php" | "__init__.py"
+    ) {
+        return None;
+    }
+
+    let mut matches = Vec::new();
+    collect_files_named(root, root, target_name, &mut matches);
+
+    if matches.len() == 1 {
+        return Some(matches.into_iter().next().unwrap());
+    }
+
+    if matches.len() > 1 {
+        // Multiple matches — pick the one most similar to the original path
+        let missing_parts: Vec<&str> = missing_path.split('/').collect();
+        matches.sort_by_key(|m| {
+            let parts: Vec<&str> = m.split('/').collect();
+            let shared = missing_parts.iter().filter(|p| parts.contains(p)).count();
+            -(shared as i32)
+        });
+        return Some(matches.into_iter().next().unwrap());
+    }
+
+    None
+}
+
+/// Search the source tree for a directory with the same name.
+fn find_similar_dir(root: &Path, missing_path: &str) -> Option<String> {
+    let clean = missing_path.trim_end_matches('/');
+    let target_name = Path::new(clean).file_name()?.to_str()?;
+
+    let mut matches = Vec::new();
+    collect_dirs_named(root, root, target_name, &mut matches);
+
+    if matches.len() == 1 {
+        return Some(format!("{}/", matches.into_iter().next().unwrap()));
+    }
+
+    if matches.len() > 1 {
+        let missing_parts: Vec<&str> = clean.split('/').collect();
+        matches.sort_by_key(|m| {
+            let parts: Vec<&str> = m.split('/').collect();
+            let shared = missing_parts.iter().filter(|p| parts.contains(p)).count();
+            -(shared as i32)
+        });
+        return Some(format!("{}/", matches.into_iter().next().unwrap()));
+    }
+
+    None
+}
+
+/// Recursively collect files matching a target filename.
+fn collect_files_named(root: &Path, dir: &Path, target: &str, results: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if name.starts_with('.')
+            || matches!(
+                name.as_str(),
+                "node_modules" | "vendor" | "target" | "__pycache__" | ".git"
+            )
+        {
+            continue;
+        }
+
+        if path.is_dir() {
+            collect_files_named(root, &path, target, results);
+        } else if path.is_file() && name == target {
+            if let Ok(rel) = path.strip_prefix(root) {
+                results.push(rel.to_string_lossy().to_string());
+            }
+        }
+    }
+}
+
+/// Recursively collect directories matching a target name.
+fn collect_dirs_named(root: &Path, dir: &Path, target: &str, results: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if name.starts_with('.')
+            || matches!(
+                name.as_str(),
+                "node_modules" | "vendor" | "target" | "__pycache__" | ".git"
+            )
+        {
+            continue;
+        }
+
+        if path.is_dir() {
+            if name == target {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    results.push(rel.to_string_lossy().to_string());
+                }
+            }
+            collect_dirs_named(root, &path, target, results);
+        }
     }
 }
 

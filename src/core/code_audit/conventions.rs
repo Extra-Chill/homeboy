@@ -139,6 +139,12 @@ pub enum AuditFinding {
     /// they invoke a parallel sequence of helpers, suggesting the shared
     /// workflow should be abstracted into a single parameterized function.
     ParallelImplementation,
+    /// Documentation references a file, directory, or class that no longer exists.
+    BrokenDocReference,
+    /// Source feature (struct, trait, function, hook) has no mention in any docs.
+    UndocumentedFeature,
+    /// Documentation exists but references stale paths that have moved.
+    StaleDocReference,
 }
 
 impl AuditFinding {
@@ -173,6 +179,9 @@ impl AuditFinding {
             "scattered_test_file",
             "intra_method_duplicate",
             "parallel_implementation",
+            "broken_doc_reference",
+            "undocumented_feature",
+            "stale_doc_reference",
         ]
     }
 }

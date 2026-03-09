@@ -104,7 +104,7 @@ pub fn compare(result: &AuditResult, baseline: &DocsBaseline) -> BaselineCompari
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::docs_audit::{AlignmentSummary, ClaimConfidence};
+    use crate::code_audit::docs_audit::{AlignmentSummary, ClaimConfidence};
 
     fn make_broken_ref(doc: &str, claim: &str) -> BrokenReference {
         BrokenReference {
