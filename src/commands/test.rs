@@ -1,15 +1,17 @@
 use clap::Args;
 use serde::Serialize;
+use std::collections::HashSet;
 
 use homeboy::component::Component;
 use homeboy::error::Error;
 use homeboy::extension::{self, ExtensionRunner};
+use homeboy::git;
 use homeboy::refactor::{self, TransformSet};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
 use homeboy::test_drift::{self, DriftOptions, DriftReport};
 use homeboy::test_scaffold::{self, ScaffoldConfig};
-use homeboy::utils::autofix::{self, AutofixMode};
+use homeboy::utils::autofix::{self, AutofixMode, FixResultsSummary};
 
 use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::test_scope::{build_phpunit_filter_regex, compute_changed_test_scope, TestScopeOutput};
@@ -105,6 +107,8 @@ pub struct TestOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     analysis: Option<TestAnalysis>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    autofix: Option<TestAutofixOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     hints: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     drift: Option<DriftReport>,
@@ -116,6 +120,16 @@ pub struct TestOutput {
     test_scope: Option<TestScopeOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<TestSummaryOutput>,
+}
+
+#[derive(Serialize)]
+pub struct TestAutofixOutput {
+    files_modified: usize,
+    rerun_recommended: bool,
+    /// Structured summary of what the extension fixed (populated when the
+    /// extension writes to `HOMEBOY_FIX_RESULTS_FILE`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix_summary: Option<FixResultsSummary>,
 }
 
 #[derive(Serialize)]
@@ -351,6 +365,13 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
         None
     };
 
+    let fix_results_file = autofix::fix_results_temp_path();
+    let before_fix_files = if args.fix {
+        Some(changed_file_set(&component.local_path)?)
+    } else {
+        None
+    };
+
     let mut runner = ExtensionRunner::new(args.comp.id(), &script_path)
         .component(component.clone())
         .path_override(args.comp.path.clone())
@@ -358,7 +379,12 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
         .env_if(args.skip_lint, "HOMEBOY_SKIP_LINT", "1")
         .env_if(args.fix, "HOMEBOY_AUTO_FIX", "1")
         .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1")
-        .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy());
+        .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy())
+        .env_if(
+            args.fix,
+            "HOMEBOY_FIX_RESULTS_FILE",
+            &fix_results_file.to_string_lossy(),
+        );
 
     if let Some(ref file) = coverage_file {
         runner = runner.env("HOMEBOY_COVERAGE_FILE", &file.to_string_lossy());
@@ -399,6 +425,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
                     coverage: None,
                     baseline_comparison: None,
                     analysis: None,
+                    autofix: None,
                     hints,
                     drift: None,
                     scaffold: None,
@@ -433,6 +460,32 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
 
     // Clean up test results temp file
     let _ = std::fs::remove_file(&results_file);
+
+    // Read structured fix results from extension sidecar (if written).
+    let test_autofix = if args.fix {
+        let after_fix_files = changed_file_set(&component.local_path)?;
+        let files_modified = before_fix_files
+            .as_ref()
+            .map(|before| count_newly_changed(before, &after_fix_files))
+            .unwrap_or(0);
+
+        let fix_results = autofix::parse_fix_results_file(&fix_results_file);
+        let _ = std::fs::remove_file(&fix_results_file);
+
+        let fix_summary = if fix_results.is_empty() {
+            None
+        } else {
+            Some(autofix::summarize_fix_results(&fix_results))
+        };
+
+        Some(TestAutofixOutput {
+            files_modified,
+            rerun_recommended: files_modified > 0,
+            fix_summary,
+        })
+    } else {
+        None
+    };
 
     // Determine actual test status: when parsed results show 0 failures,
     // treat as passed even if the runner script exited non-zero (e.g., lint
@@ -668,6 +721,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
             coverage,
             baseline_comparison,
             analysis,
+            autofix: test_autofix,
             hints,
             drift: None,
             scaffold: None,
@@ -798,6 +852,7 @@ fn run_auto_fix_drift(
             coverage: None,
             baseline_comparison: None,
             analysis: None,
+            autofix: None,
             hints: Some(outcome.hints),
             drift: if include_report {
                 Some(drift_report)
@@ -951,6 +1006,7 @@ fn run_drift(component_id: &str, component: &Component, since: &str) -> CmdResul
             coverage: None,
             baseline_comparison: None,
             analysis: None,
+            autofix: None,
             hints: None,
             drift: Some(report),
             scaffold: None,
@@ -1048,6 +1104,7 @@ fn run_scaffold(
                 coverage: None,
                 baseline_comparison: None,
                 analysis: None,
+                autofix: None,
                 hints: None,
                 drift: None,
                 scaffold: Some(scaffold_output),
@@ -1138,6 +1195,7 @@ fn run_scaffold(
                 coverage: None,
                 baseline_comparison: None,
                 analysis: None,
+                autofix: None,
                 hints: None,
                 drift: None,
                 scaffold: Some(scaffold_output),
@@ -1148,6 +1206,36 @@ fn run_scaffold(
             0,
         ))
     }
+}
+
+#[cfg(test)]
+fn changed_file_set(local_path: &str) -> homeboy::Result<HashSet<String>> {
+    let path = std::path::Path::new(local_path);
+    if path.exists() {
+        Ok(HashSet::new())
+    } else {
+        git::get_uncommitted_changes(local_path).map(|changes| {
+            let mut files = HashSet::new();
+            files.extend(changes.staged);
+            files.extend(changes.unstaged);
+            files.extend(changes.untracked);
+            files
+        })
+    }
+}
+
+#[cfg(not(test))]
+fn changed_file_set(local_path: &str) -> homeboy::Result<HashSet<String>> {
+    let uncommitted = git::get_uncommitted_changes(local_path)?;
+    let mut files = HashSet::new();
+    files.extend(uncommitted.staged);
+    files.extend(uncommitted.unstaged);
+    files.extend(uncommitted.untracked);
+    Ok(files)
+}
+
+fn count_newly_changed(before: &HashSet<String>, after: &HashSet<String>) -> usize {
+    after.difference(before).count()
 }
 
 #[cfg(test)]

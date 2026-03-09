@@ -3,7 +3,7 @@ use homeboy::code_audit::{self, baseline, fixer, CodeAuditResult};
 use homeboy::component::{self, Component};
 use homeboy::extension::ExtensionRunner;
 use homeboy::git;
-use homeboy::utils::autofix::{self, AutofixMode};
+use homeboy::utils::autofix::{self, AutofixMode, FixResultsSummary};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
@@ -117,6 +117,10 @@ pub enum AuditOutput {
         status: String,
         #[serde(flatten)]
         fix_result: fixer::FixResult,
+        /// Universal fix summary bridged from the Rust-native FixResult.
+        /// Same structure as lint --fix and test --fix output.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fix_summary: Option<FixResultsSummary>,
         policy_summary: AuditFixPolicySummary,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         iterations: Vec<AuditFixIterationSummary>,
@@ -567,6 +571,13 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
         // Print human-readable summary to stderr
         log_fix_summary(&final_fix_result, &final_policy_summary, written);
 
+        // Bridge to universal fix summary (before strip_code mutates the data).
+        let fix_summary = if written && final_fix_result.files_modified > 0 {
+            Some(autofix::summarize_audit_fix_result(&final_fix_result))
+        } else {
+            None
+        };
+
         // Strip generated code from JSON output unless --preview is set
         if !args.preview {
             final_fix_result.strip_code();
@@ -578,6 +589,7 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
                 source_path: current_result.source_path,
                 status: outcome.status,
                 fix_result: final_fix_result,
+                fix_summary,
                 policy_summary: AuditFixPolicySummary {
                     selected_only: args.only,
                     excluded: args.exclude,

@@ -153,6 +153,53 @@ pub fn summarize_fix_results(fixes: &[FixApplied]) -> FixResultsSummary {
     }
 }
 
+/// Bridge a Rust-native `code_audit::fixer::FixResult` into the universal
+/// `FixResultsSummary` format. This lets audit --fix output the same summary
+/// structure as lint --fix and test --fix (which use extension sidecars).
+pub fn summarize_audit_fix_result(
+    fix_result: &crate::code_audit::fixer::FixResult,
+) -> FixResultsSummary {
+    use std::collections::{BTreeMap, HashSet};
+
+    let mut files = HashSet::new();
+    let mut rule_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut total_fixes = 0usize;
+
+    for fix in &fix_result.fixes {
+        if !fix.applied {
+            continue;
+        }
+        files.insert(fix.file.clone());
+        for insertion in &fix.insertions {
+            if insertion.auto_apply {
+                let rule = format!("{:?}", insertion.finding).to_lowercase();
+                *rule_counts.entry(rule).or_insert(0) += 1;
+                total_fixes += 1;
+            }
+        }
+    }
+
+    for new_file in &fix_result.new_files {
+        if new_file.written {
+            files.insert(new_file.file.clone());
+            let rule = format!("{:?}", new_file.finding).to_lowercase();
+            *rule_counts.entry(rule).or_insert(0) += 1;
+            total_fixes += 1;
+        }
+    }
+
+    let rules = rule_counts
+        .into_iter()
+        .map(|(rule, count)| RuleFixCount { rule, count })
+        .collect();
+
+    FixResultsSummary {
+        fixes_applied: total_fixes,
+        files_modified: files.len(),
+        rules,
+    }
+}
+
 /// Generate a unique temp file path for fix results sidecar.
 pub fn fix_results_temp_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
