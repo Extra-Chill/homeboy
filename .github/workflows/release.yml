@@ -194,15 +194,10 @@ jobs:
           component: homeboy
           commands: audit
           auto-issue: 'true'
-          autofix: 'true'
-          autofix-mode: 'always'
-          autofix-open-pr: 'true'
-          autofix-commands: 'audit --fix --write'
-          autofix-max-commits: '3'
-          app-token: ${{ steps.app-token.outputs.token || '' }}
+          autofix: 'false'
 
   gate-lint:
-    name: Lint + Fix
+    name: Lint
     needs:
       - check
       - gate-build
@@ -234,14 +229,10 @@ jobs:
           extension: rust
           component: homeboy
           commands: lint
-          autofix: 'true'
-          autofix-mode: 'on-failure'
-          autofix-open-pr: 'true'
-          autofix-max-commits: '3'
-          app-token: ${{ steps.app-token.outputs.token || '' }}
+          autofix: 'false'
 
   gate-test:
-    name: Test + Fix
+    name: Test
     needs:
       - check
       - gate-build
@@ -273,9 +264,47 @@ jobs:
           extension: rust
           component: homeboy
           commands: test
+          autofix: 'false'
+
+  gate-refactor:
+    name: Refactor
+    needs:
+      - check
+      - gate-build
+      - gate-audit
+      - gate-lint
+      - gate-test
+    if: needs.check.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          binary-path: .homeboy-bin/homeboy
+          extension: rust
+          component: homeboy
+          commands: 'refactor ci'
           autofix: 'true'
-          autofix-mode: 'on-failure'
+          autofix-mode: 'always'
           autofix-open-pr: 'true'
+          autofix-commands: 'refactor ci --write'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
@@ -287,6 +316,7 @@ jobs:
       - gate-build
       - gate-lint
       - gate-test
+      - gate-refactor
       - gate-audit
     runs-on: ubuntu-latest
     outputs:

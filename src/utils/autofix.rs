@@ -10,6 +10,9 @@
 //! a JSON array of [`FixApplied`] entries. After execution, the command reads
 //! the file with [`parse_fix_results_file`] and includes the structured data in
 //! its output.
+//!
+//! Planning uses the same shape via `HOMEBOY_FIX_PLAN_FILE` so callers can
+//! inspect proposed fixes without mutating the real working tree.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -130,6 +133,14 @@ pub fn parse_fix_results_file(path: &Path) -> Vec<FixApplied> {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
+/// Read and parse the extension fix plan sidecar file.
+///
+/// The plan format intentionally matches [`FixApplied`] so fix planners and
+/// applied fix summaries can share the same transport shape.
+pub fn parse_fix_plan_file(path: &Path) -> Vec<FixApplied> {
+    parse_fix_results_file(path)
+}
+
 /// Summarize a list of fix results into aggregate counts.
 pub fn summarize_fix_results(fixes: &[FixApplied]) -> FixResultsSummary {
     use std::collections::{BTreeMap, HashSet};
@@ -205,6 +216,18 @@ pub fn summarize_audit_fix_result(
 pub fn fix_results_temp_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "homeboy-fix-results-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ))
+}
+
+/// Generate a unique temp file path for fix plan sidecar.
+pub fn fix_plan_temp_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "homeboy-fix-plan-{}-{}.json",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

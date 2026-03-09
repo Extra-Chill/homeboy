@@ -1,9 +1,10 @@
 # PR quality pipeline.
 #
-# Build once, then strict serial pipeline: audit+fix → lint+fix → test+fix
+# Build once, then strict serial pipeline: audit → lint → test → refactor
 # A single build job compiles homeboy from source and shares the binary
 # via artifact. Each stage downloads it instead of rebuilding.
-# If fixes are committed, the App token push triggers a full re-run.
+# The single refactor phase owns automated writes. If fixes are committed,
+# the App token push triggers a full re-run.
 # Scoped to changed files only (--changed-since via scope module).
 #
 # Fork PRs: CI runs read-only checks (no autofix, no baseline writes).
@@ -55,11 +56,8 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
-  # ── Stage 1: Audit + Fix ──
-  # Runs first — most likely to induce changes. Autofix applies code fixes
-  # via --fix --write but does NOT ratchet the baseline (no --ratchet).
-  # Baseline ratchet only happens on main to avoid homeboy.json conflicts.
-  # Fork PRs: autofix skipped (action detects fork via SCOPE_IS_FORK).
+  # ── Stage 1: Audit ──
+  # Read-only architectural checks.
   audit:
     name: Audit
     needs: [build]
@@ -90,17 +88,10 @@ jobs:
           extension: rust
           component: homeboy
           commands: audit
-          autofix: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
-          autofix-mode: 'on-failure'
-          autofix-commands: 'audit --fix --write'
-          autofix-max-commits: '3'
-          app-token: ${{ steps.app-token.outputs.token || '' }}
+          autofix: 'false'
 
-  # ── Stage 2: Lint + Fix ──
-  # Runs after audit passes. Cargo fmt and clippy. Autofixes formatting
-  # and clippy warnings. If fixes are committed, App token push triggers
-  # re-run of all stages.
-  # Fork PRs: autofix skipped.
+  # ── Stage 2: Lint ──
+  # Read-only linting after audit passes.
   lint:
     name: Lint
     needs: [build, audit]
@@ -131,15 +122,10 @@ jobs:
           extension: rust
           component: homeboy
           commands: lint
-          autofix: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
-          autofix-mode: 'on-failure'
-          autofix-max-commits: '3'
-          app-token: ${{ steps.app-token.outputs.token || '' }}
+          autofix: 'false'
 
-  # ── Stage 3: Test + Fix ──
-  # Runs after lint passes. If tests fail and fixes are available,
-  # commits and triggers re-run.
-  # Fork PRs: autofix skipped.
+  # ── Stage 3: Test ──
+  # Read-only tests after lint passes.
   test:
     name: Test
     needs: [build, lint]
@@ -170,7 +156,42 @@ jobs:
           extension: rust
           component: homeboy
           commands: test
+          autofix: 'false'
+
+  # ── Stage 4: Refactor ──
+  # Single end-of-pipeline mutation phase.
+  refactor:
+    name: Refactor
+    needs: [build, audit, lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          binary-path: .homeboy-bin/homeboy
+          extension: rust
+          component: homeboy
+          commands: 'refactor ci'
           autofix: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
           autofix-mode: 'on-failure'
+          autofix-commands: 'refactor ci --write'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
