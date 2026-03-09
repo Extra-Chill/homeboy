@@ -596,13 +596,20 @@ fn validate_commits_vs_changelog(
 
     let missing_commits = find_uncovered_commits(&commits, &unreleased_entries);
 
-    // If all relevant commits are represented, validation passes.
+    // If all relevant commits are already represented in the changelog, no new
+    // entries needed. Return an empty map (not None) so will_auto_generate stays
+    // true — this prevents changelog_sync from running and failing when there's
+    // no ## Unreleased section (fully automated changelogs never have one).
     if missing_commits.is_empty() {
-        return Ok(None);
+        return Ok(Some(std::collections::HashMap::new()));
     }
 
-    // Check if changelog is already finalized ahead of the latest tag
-    // This handles cases where the changelog was manually finalized
+    // Check if changelog is already finalized ahead of the latest tag.
+    // This handles fully automated changelogs where entries are generated from
+    // commits and finalized into a versioned section — no ## Unreleased section
+    // ever exists on disk. Return an empty entries map so will_auto_generate is
+    // true, which skips changelog_sync validation (it would fail looking for a
+    // non-existent ## Unreleased section).
     let latest_changelog_version = changelog::get_latest_finalized_version(&changelog_content);
     if let (Some(latest_tag), Some(changelog_ver_str)) = (&latest_tag, latest_changelog_version) {
         let tag_version = latest_tag.trim_start_matches('v');
@@ -610,9 +617,14 @@ fn validate_commits_vs_changelog(
             semver::Version::parse(tag_version),
             semver::Version::parse(&changelog_ver_str),
         ) {
-            // If changelog version is newer than tag, it's already finalized for pending changes
             if cl_ver > tag_ver {
-                return Ok(None);
+                log_status!(
+                    "release",
+                    "Changelog already finalized at {} (ahead of tag {})",
+                    changelog_ver_str,
+                    latest_tag
+                );
+                return Ok(Some(std::collections::HashMap::new()));
             }
         }
     }
