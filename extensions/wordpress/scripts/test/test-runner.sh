@@ -5,6 +5,12 @@ FAILED_STEP=""
 FAILURE_OUTPUT=""
 FAILURE_REPLAY_MODE="full"
 
+# Track infrastructure fixes for HOMEBOY_FIX_RESULTS_FILE sidecar.
+# Each entry: {"file": "...", "rule": "...", "action": "..."}
+# Lint fixes are written directly by lint-runner.sh; test-runner.sh
+# appends infrastructure fixes (removed files, removed packages).
+TEST_FIX_ENTRIES=()
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
 # shellcheck source=../lib/runner-steps.sh
@@ -441,6 +447,7 @@ if [ -f "$LOCAL_BOOTSTRAP" ]; then
         echo "  → Auto-fix: Removing $LOCAL_BOOTSTRAP"
         rm -f "$LOCAL_BOOTSTRAP"
         echo "  ✓ Removed"
+        TEST_FIX_ENTRIES+=("{\"file\": \"tests/bootstrap.php\", \"rule\": \"test-infra-cleanup\", \"action\": \"remove\"}")
     else
         echo "  Consider removing: $LOCAL_BOOTSTRAP"
     fi
@@ -456,6 +463,7 @@ if [ -f "$LOCAL_PHPUNIT_XML" ]; then
         echo "  → Auto-fix: Removing $LOCAL_PHPUNIT_XML"
         rm -f "$LOCAL_PHPUNIT_XML"
         echo "  ✓ Removed"
+        TEST_FIX_ENTRIES+=("{\"file\": \"tests/phpunit.xml\", \"rule\": \"test-infra-cleanup\", \"action\": \"remove\"}")
     else
         echo "  Consider removing: $LOCAL_PHPUNIT_XML"
     fi
@@ -470,6 +478,7 @@ if [ -f "$LOCAL_PHPUNIT_XML_ROOT" ]; then
         echo "  → Auto-fix: Removing $LOCAL_PHPUNIT_XML_ROOT"
         rm -f "$LOCAL_PHPUNIT_XML_ROOT"
         echo "  ✓ Removed"
+        TEST_FIX_ENTRIES+=("{\"file\": \"phpunit.xml\", \"rule\": \"test-infra-cleanup\", \"action\": \"remove\"}")
     else
         echo "  Consider removing: $LOCAL_PHPUNIT_XML_ROOT"
     fi
@@ -484,6 +493,7 @@ if [ -f "$LOCAL_PHPUNIT_XML_DIST_ROOT" ]; then
         echo "  → Auto-fix: Removing $LOCAL_PHPUNIT_XML_DIST_ROOT"
         rm -f "$LOCAL_PHPUNIT_XML_DIST_ROOT"
         echo "  ✓ Removed"
+        TEST_FIX_ENTRIES+=("{\"file\": \"phpunit.xml.dist\", \"rule\": \"test-infra-cleanup\", \"action\": \"remove\"}")
     else
         echo "  Consider removing: $LOCAL_PHPUNIT_XML_DIST_ROOT"
     fi
@@ -502,6 +512,7 @@ if [ -f "$LOCAL_PHPUNIT_BIN" ]; then
         echo "  → Auto-fix: Removing local phpunit from require-dev and vendor..."
         (cd "$PLUGIN_PATH" && composer remove --dev phpunit/phpunit 2>/dev/null || true)
         echo "  ✓ Removed"
+        TEST_FIX_ENTRIES+=("{\"file\": \"composer.json\", \"rule\": \"test-infra-cleanup\", \"action\": \"remove-phpunit-dep\"}")
     else
         echo "  Fix: composer remove --dev phpunit/phpunit (in $PLUGIN_PATH)"
         echo "  Or run: homeboy test ${COMPONENT_ID:-} --fix"
@@ -519,6 +530,7 @@ if [ ! -f "$LOCAL_PHPUNIT_BIN" ] && [ -f "${PLUGIN_PATH}/composer.json" ]; then
             echo "  → Auto-fix: Removing phpunit from require-dev..."
             (cd "$PLUGIN_PATH" && composer remove --dev phpunit/phpunit 2>/dev/null || true)
             echo "  ✓ Removed"
+            TEST_FIX_ENTRIES+=("{\"file\": \"composer.json\", \"rule\": \"test-infra-cleanup\", \"action\": \"remove-phpunit-dep\"}")
         else
             echo "  Fix: composer remove --dev phpunit/phpunit (in $PLUGIN_PATH)"
             echo "  Or run: homeboy test ${COMPONENT_ID:-} --fix"
@@ -720,4 +732,34 @@ if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
     _mysql_cleanup=(-h "$MYSQL_HOST" -u "$MYSQL_USER")
     [ -n "${MYSQL_PASSWORD:-}" ] && _mysql_cleanup+=(-p"$MYSQL_PASSWORD")
     mysql "${_mysql_cleanup[@]}" -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
+fi
+
+# Write test infrastructure fix results to HOMEBOY_FIX_RESULTS_FILE sidecar.
+# lint-runner.sh may have already written lint fixes to this file; we merge
+# test-runner's infrastructure fixes (removed files, removed deps) into it.
+if [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ] && [ ${#TEST_FIX_ENTRIES[@]} -gt 0 ]; then
+    if [ -f "${HOMEBOY_FIX_RESULTS_FILE}" ] && [ -s "${HOMEBOY_FIX_RESULTS_FILE}" ]; then
+        # Merge: read existing array, append our entries, write back
+        EXISTING=$(cat "${HOMEBOY_FIX_RESULTS_FILE}")
+        MERGED="${EXISTING%]}"  # strip trailing ]
+        for ENTRY in "${TEST_FIX_ENTRIES[@]}"; do
+            MERGED+=", ${ENTRY}"
+        done
+        MERGED+="]"
+        echo "${MERGED}" > "${HOMEBOY_FIX_RESULTS_FILE}"
+    else
+        # No existing file — write fresh array
+        JSON="["
+        FIRST=1
+        for ENTRY in "${TEST_FIX_ENTRIES[@]}"; do
+            if [ $FIRST -eq 1 ]; then
+                JSON+="${ENTRY}"
+                FIRST=0
+            else
+                JSON+=", ${ENTRY}"
+            fi
+        done
+        JSON+="]"
+        echo "${JSON}" > "${HOMEBOY_FIX_RESULTS_FILE}"
+    fi
 fi
