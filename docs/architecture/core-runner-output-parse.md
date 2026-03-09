@@ -7,7 +7,7 @@ This document defines the core primitives introduced for:
 
 ## Runner contract (core)
 
-`core/extension/runner_contract.rs`
+`src/core/extension/runner_contract.rs`
 
 - `RunnerStepFilter { step, skip }`
 - `should_run(step_name)` for deterministic include/skip semantics
@@ -20,7 +20,7 @@ stable while moving behavior to a reusable core primitive.
 
 ## Output parse primitive (core)
 
-`utils/output_parse.rs`
+`src/utils/output_parse.rs`
 
 Generic parser with declarative rule spec:
 
@@ -40,8 +40,8 @@ Expressions support `+` and `-` over numeric literals and parsed field names.
 
 ## Initial wiring
 
-- `commands/test/parsing.rs` now uses `output_parse` for text fallback parsing in
+- `src/commands/test/parsing.rs` now uses `output_parse` for text fallback parsing in
   `parse_test_results_text()`.
-- `commands/test.rs` falls back from sidecar JSON to parsed stdout via this primitive.
+- `src/commands/test.rs` falls back from sidecar JSON to parsed stdout via this primitive.
 
 This keeps extension contracts minimal while centralizing normalization/policy in core.

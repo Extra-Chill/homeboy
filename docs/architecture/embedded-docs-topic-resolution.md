@@ -12,8 +12,8 @@ Extension docs use the same key format as embedded docs (relative path within th
 
 Embedded documentation keys are derived from markdown file paths:
 
-- Root: `homeboy/docs/`
-- Key: relative path from `homeboy/docs/`, with OS separators normalized to `/`
+- Root: `docs/`
+- Key: relative path from `docs/`, with OS separators normalized to `/`
 - Key: `.md` extension removed
 
 Examples:

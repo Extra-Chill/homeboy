@@ -1605,7 +1605,7 @@ All notable changes to Homeboy CLI are documented in this file.
 
 ### New Features
 - **Embedded docs**: Embed `homeboy/docs/**/*.md` into the CLI binary at build time, so `homeboy docs` works in Homebrew/releases.
-- **Docs source of truth**: Keep CLI documentation under `homeboy/docs/` and embed it into the CLI binary.
+- **Docs source of truth**: Keep CLI documentation under `docs/` and embed it into the CLI binary.
 
 - **Docs topic listing**: `available_topics` is now generated dynamically from embedded keys (newline-separated).
 

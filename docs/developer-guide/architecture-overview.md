@@ -192,7 +192,7 @@ Audit pipeline phases:
 
 ### Docs Audit
 
-**Location:** `src/core/docs_audit/`
+**Location:** `src/core/code_audit/docs_audit/`
 
 Documentation verification:
 - Extracts claims (file paths, directory paths) from markdown docs
