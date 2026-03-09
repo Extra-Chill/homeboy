@@ -66,7 +66,7 @@ inputs:
   test-scope:
     description: 'Deprecated: use "scope" input instead. Kept for backward compatibility.'
     required: false
-    default: 'full'
+    default: 'changed'
   auto-issue:
     description: 'Automatically file a GitHub issue on non-PR failures (default: false)'
     required: false
