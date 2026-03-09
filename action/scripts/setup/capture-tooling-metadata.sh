@@ -16,17 +16,7 @@ EXTENSION_REVISION="unknown"
 if [ -n "${EXTENSION_ID:-}" ]; then
   EXT_DIR="${HOME}/.config/homeboy/extensions/${EXTENSION_ID}"
   if [ -d "${EXT_DIR}/.git" ]; then
-    # Single-extension repo: .git preserved in extension dir
     EXTENSION_REVISION="$(git -C "${EXT_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
-  elif [ -n "${HOMEBOY_EXTENSION_SOURCE_REVISION:-}" ] && [ "${HOMEBOY_EXTENSION_SOURCE_REVISION}" != "unknown" ]; then
-    # Monorepo: .git was discarded during install, use pre-captured source revision
-    EXTENSION_REVISION="${HOMEBOY_EXTENSION_SOURCE_REVISION}"
-  elif [ -n "${EXTENSION_SOURCE:-}" ]; then
-    # Fallback (e.g. cache hit skipped install): query the source repo directly
-    EXTENSION_REVISION="$(git ls-remote "${EXTENSION_SOURCE}" HEAD 2>/dev/null | cut -f1 | head -c 7 || echo 'unknown')"
-    if [ -z "${EXTENSION_REVISION}" ]; then
-      EXTENSION_REVISION="unknown"
-    fi
   fi
 fi
 
