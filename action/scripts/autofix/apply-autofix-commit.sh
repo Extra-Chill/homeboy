@@ -65,6 +65,7 @@ else
     case "${CMD}" in
       lint) FIX_ARRAY+=("lint --fix") ;;
       test) FIX_ARRAY+=("test --fix") ;;
+      audit) FIX_ARRAY+=("audit --fix --write") ;;
     esac
   done
 fi
