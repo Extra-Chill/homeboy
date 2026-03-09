@@ -55,12 +55,16 @@ inputs:
     description: 'Node.js version to set up (skipped if empty — use with actions/setup-node separately)'
     required: false
     default: ''
+  scope:
+    description: 'Execution scope: "changed" (default for PRs — scope to affected files) or "full" (entire codebase). Non-PR events always use full regardless of this setting.'
+    required: false
+    default: 'changed'
   lint-changed-only:
-    description: 'Only lint files changed in the PR (default: true for PRs, ignored for non-PR events)'
+    description: 'Deprecated: use "scope" input instead. Kept for backward compatibility.'
     required: false
     default: 'true'
   test-scope:
-    description: 'Test execution scope: "full" or "changed" (PRs only for changed). Default: full'
+    description: 'Deprecated: use "scope" input instead. Kept for backward compatibility.'
     required: false
     default: 'full'
   auto-issue:
@@ -127,9 +131,15 @@ outputs:
   binary-source:
     description: 'How the binary was obtained: "source", "fallback", or "release"'
     value: ${{ steps.resolve-binary.outputs.binary-source }}
+  scope-effective:
+    description: 'Effective execution scope: "changed" or "full"'
+    value: ${{ steps.resolve-scope.outputs.scope-mode }}
+  scope-is-fork:
+    description: 'Whether the PR is from a fork (true/false)'
+    value: ${{ steps.resolve-scope.outputs.scope-is-fork }}
   test-scope-effective:
-    description: 'Effective test scope used by the action (full or changed)'
-    value: ${{ steps.resolve-test-scope.outputs.effective-test-scope }}
+    description: 'Deprecated: use scope-effective instead. Effective test scope used by the action (full or changed)'
+    value: ${{ steps.resolve-scope.outputs.scope-mode }}
   released:
     description: 'Whether a release was created (true/false)'
     value: ${{ steps.release.outputs.released }}
@@ -258,21 +268,14 @@ runs:
       shell: bash
       run: bash ${{ github.action_path }}/scripts/setup/verify-portable-config.sh
 
-    - name: Determine PR base ref
-      id: changed-files
-      if: github.event_name == 'pull_request' && (inputs.lint-changed-only == 'true' || inputs.test-scope == 'changed')
+    - name: Resolve execution scope
+      id: resolve-scope
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      run: bash ${{ github.action_path }}/scripts/pr/determine-pr-base-ref.sh
-
-    - name: Resolve effective test scope
-      id: resolve-test-scope
-      if: github.event_name == 'pull_request'
-      shell: bash
-      env:
-        TEST_SCOPE: ${{ inputs.test-scope }}
-      run: bash ${{ github.action_path }}/scripts/setup/resolve-test-scope.sh
+        SCOPE_INPUT: ${{ inputs.scope }}
+        PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      run: bash ${{ github.action_path }}/scripts/scope/resolve.sh
 
     - name: Run Homeboy commands
       id: run-commands
@@ -282,7 +285,6 @@ runs:
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
-        TEST_SCOPE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
         RUN_GROUP_PREFIX: homeboy
       run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
 
@@ -325,7 +327,6 @@ runs:
         COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
-        TEST_SCOPE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
         RUN_GROUP_PREFIX: homeboy rerun
       run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
 
@@ -396,7 +397,6 @@ runs:
         AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
         AUTOFIX_FILE_COUNT: ${{ steps.autofix-commit.outputs.autofix-file-count }}
         AUTOFIX_FIX_TYPES: ${{ steps.autofix-commit.outputs.autofix-fix-types }}
-        TEST_SCOPE_EFFECTIVE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
         COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
         COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key }}
         COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title }}

@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+# Source scope module for flag generation
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../scope/flags.sh"
+
 # Prefix used for all autofix commits. Loop guards grep for this prefix,
 # so the subject line can vary after it (e.g. fix types, file count).
 AUTOFIX_COMMIT_PREFIX="chore(ci): homeboy autofix"
@@ -99,23 +103,9 @@ build_run_command() {
   local workspace="$3"
   local full_cmd="homeboy ${cmd} ${component_id} --path ${workspace}"
 
-  case "${cmd}" in
-    audit)
-      if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-        full_cmd="${full_cmd} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-      fi
-      ;;
-    lint)
-      if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-        full_cmd="${full_cmd} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-      fi
-      ;;
-    test)
-      if [ "${TEST_SCOPE:-full}" = "changed" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-        full_cmd="${full_cmd} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-      fi
-      ;;
-  esac
+  local scope
+  scope="$(scope_flags_for "${cmd}")"
+  [ -n "${scope}" ] && full_cmd="${full_cmd} ${scope}"
 
   if [ -n "${EXTRA_ARGS:-}" ]; then
     full_cmd="${full_cmd} ${EXTRA_ARGS}"
@@ -130,18 +120,9 @@ build_autofix_command() {
   local workspace="$3"
   local full_cmd="homeboy ${fix_cmd} ${component_id} --path ${workspace}"
 
-  case "${fix_cmd}" in
-    lint*)
-      if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-        full_cmd="${full_cmd} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-      fi
-      ;;
-    audit*)
-      if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-        full_cmd="${full_cmd} --changed-since ${HOMEBOY_CHANGED_SINCE}"
-      fi
-      ;;
-  esac
+  local scope
+  scope="$(scope_flags_for "${fix_cmd}")"
+  [ -n "${scope}" ] && full_cmd="${full_cmd} ${scope}"
 
   if [ -n "${EXTRA_ARGS:-}" ]; then
     full_cmd="${full_cmd} ${EXTRA_ARGS}"

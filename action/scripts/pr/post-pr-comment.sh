@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# Source scope module for scope queries
+source "${GITHUB_ACTION_PATH}/scripts/scope/context.sh"
+
 render_audit_summary_from_log() {
   local log_file="$1"
   python3 "${GITHUB_ACTION_PATH}/scripts/digest/render-audit-summary.py" "${log_file}" 2>/dev/null || true
@@ -159,10 +162,14 @@ fi
 
 AUDIT_SUMMARY_JSON="${OUTPUT_DIR}/homeboy-audit-summary.json"
 
-if [ "${TEST_SCOPE_EFFECTIVE:-}" = "full" ] && [ "${HOMEBOY_CHANGED_SINCE:-}" != "" ]; then
-  SECTION_BODY+="> :information_source: PR test scope resolved to **full** for compatibility with installed Homeboy CLI"$'\n\n'
-elif [ "${TEST_SCOPE_EFFECTIVE:-}" = "changed" ]; then
-  SECTION_BODY+="> :zap: PR test scope resolved to **changed**"$'\n\n'
+if is_scoped; then
+  SECTION_BODY+="> :zap: Scope: **changed files only**"$'\n\n'
+elif [ "$(scope_context)" = "pr" ] && [ "${SCOPE_MODE:-full}" = "full" ]; then
+  SECTION_BODY+="> :information_source: Scope resolved to **full** (CLI compatibility or explicit override)"$'\n\n'
+fi
+
+if is_fork; then
+  SECTION_BODY+="> :lock: Fork PR — autofix disabled, read-only checks"$'\n\n'
 fi
 
 IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
@@ -179,12 +186,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
     ICON="x"
   fi
 
-  SCOPE_NOTE=""
-  if [ "${CMD}" = "lint" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-    SCOPE_NOTE=" _(changed files only)_"
-  elif [ "${CMD}" = "audit" ] && [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-    SCOPE_NOTE=" _(changed files only)_"
-  fi
+  SCOPE_NOTE="$(scope_note_for "${CMD}")"
 
   SECTION_BODY+=":${ICON}: **${CMD}**${SCOPE_NOTE}"$'\n'
 
