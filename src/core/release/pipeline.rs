@@ -386,21 +386,20 @@ fn validate_changelog(component: &Component) -> Result<()> {
     Ok(())
 }
 
-/// Check if local branch is behind remote (after fetching).
-/// Returns Err with actionable hints if behind, Ok(()) if up to date.
+/// Fetch from remote and fast-forward if behind.
+///
+/// Ensures the release commit is created on top of the actual remote HEAD,
+/// preventing detached release tags when PRs merge during a CI quality gate.
+/// Returns Err if the branch has diverged and can't be fast-forwarded.
 fn validate_remote_sync(component: &Component) -> Result<()> {
-    let behind = git::fetch_and_get_behind_count(&component.local_path)?;
+    let synced = git::fetch_and_fast_forward(&component.local_path)?;
 
-    if let Some(n) = behind {
-        return Err(Error::validation_invalid_argument(
-            "remote_sync",
-            format!("Local branch is {} commit(s) behind remote", n),
-            None,
-            Some(vec![
-                "Pull remote changes before releasing to avoid push conflicts".to_string(),
-                "Run: git pull --rebase".to_string(),
-            ]),
-        ));
+    if let Some(n) = synced {
+        log_status!(
+            "release",
+            "Fast-forwarded {} commit(s) from remote before release",
+            n
+        );
     }
 
     Ok(())

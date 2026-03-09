@@ -874,6 +874,41 @@ pub fn fetch_and_get_behind_count(path: &str) -> Result<Option<u32>> {
     }
 }
 
+/// Fetch from remote and fast-forward if behind.
+///
+/// Returns Ok(Some(n)) with the number of commits fast-forwarded, or Ok(None) if
+/// already up-to-date. Errors if the fast-forward fails (diverged histories).
+pub fn fetch_and_fast_forward(path: &str) -> Result<Option<u32>> {
+    let behind = fetch_and_get_behind_count(path)?;
+
+    match behind {
+        None => Ok(None),
+        Some(n) => {
+            // Attempt fast-forward pull
+            let output = execute_git(path, &["pull", "--ff-only"])
+                .map_err(|e| Error::git_command_failed(e.to_string()))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(Error::validation_invalid_argument(
+                    "remote_sync",
+                    format!(
+                        "Branch has diverged from remote — fast-forward failed: {}",
+                        stderr.trim()
+                    ),
+                    None,
+                    Some(vec![
+                        "Resolve the divergence manually before releasing".to_string(),
+                        "Run: git pull --rebase".to_string(),
+                    ]),
+                ));
+            }
+
+            Ok(Some(n))
+        }
+    }
+}
+
 /// Get all changes for a component.
 pub fn changes(
     component_id: Option<&str>,
