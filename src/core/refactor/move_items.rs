@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::symbol_graph::module_path_from_file;
 use crate::core::test_scaffold::load_extension_grammar;
 use crate::extension::{
     self, AdjustedItem, ExtensionManifest, ParsedItem, RelatedTests, ResolvedImports,
@@ -735,12 +736,44 @@ pub fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> Result<Pa
     }
 }
 
-/// Convert a file path to a module path (e.g., "src/core/code_audit/conventions.rs" → "core::code_audit::conventions").
-fn module_path_from_file(file_path: &str) -> String {
-    let p = file_path.strip_prefix("src/").unwrap_or(file_path);
-    let p = p.strip_suffix(".rs").unwrap_or(p);
-    let p = p.strip_suffix("/mod").unwrap_or(p);
-    p.replace('/', "::")
+/// Walk source files recursively, skipping common non-source directories.
+fn walk_source_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    walk_recursive(root, root, &mut files);
+    files
+}
+
+/// Directories to always skip at any depth.
+const ALWAYS_SKIP_DIRS: &[&str] = &["node_modules", "vendor", ".git", ".svn", ".hg"];
+
+/// Directories to skip only at root level.
+const ROOT_ONLY_SKIP_DIRS: &[&str] = &["build", "dist", "target", "cache", "tmp"];
+
+fn walk_recursive(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let is_root = dir == root;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if ALWAYS_SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            if is_root && ROOT_ONLY_SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            walk_recursive(&path, root, files);
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
 }
 
 // ============================================================================

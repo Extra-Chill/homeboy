@@ -3,6 +3,7 @@
 //! Provides fuzzy matching against known entities (components, projects, servers, extensions)
 //! and generates helpful hints when users mistype command syntax.
 
+use super::token::levenshtein;
 use crate::{component, extension, project, server};
 
 /// Types of entities that can be suggested.
@@ -119,45 +120,6 @@ fn find_match_in_list(input_lower: &str, ids: &[String]) -> Option<(String, bool
     None
 }
 
-/// Simple Levenshtein distance implementation.
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
-    let a_len = a_chars.len();
-    let b_len = b_chars.len();
-
-    if a_len == 0 {
-        return b_len;
-    }
-    if b_len == 0 {
-        return a_len;
-    }
-
-    let mut matrix = vec![vec![0usize; b_len + 1]; a_len + 1];
-
-    for (i, row) in matrix.iter_mut().enumerate().take(a_len + 1) {
-        row[0] = i;
-    }
-    for (j, item) in matrix[0].iter_mut().enumerate().take(b_len + 1) {
-        *item = j;
-    }
-
-    for i in 1..=a_len {
-        for j in 1..=b_len {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] {
-                0
-            } else {
-                1
-            };
-            matrix[i][j] = (matrix[i - 1][j] + 1)
-                .min(matrix[i][j - 1] + 1)
-                .min(matrix[i - 1][j - 1] + cost);
-        }
-    }
-
-    matrix[a_len][b_len]
-}
-
 /// Generate hint messages for a matched entity based on the parent command context.
 pub fn generate_entity_hints(
     entity_match: &EntityMatch,
@@ -233,24 +195,6 @@ pub fn generate_entity_hints(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_levenshtein_empty() {
-        assert_eq!(levenshtein("", ""), 0);
-        assert_eq!(levenshtein("abc", ""), 3);
-        assert_eq!(levenshtein("", "abc"), 3);
-    }
-
-    #[test]
-    fn test_levenshtein_equal() {
-        assert_eq!(levenshtein("hello", "hello"), 0);
-    }
-
-    #[test]
-    fn test_levenshtein_distance() {
-        assert_eq!(levenshtein("kitten", "sitting"), 3);
-        assert_eq!(levenshtein("flaw", "lawn"), 2);
-    }
 
     #[test]
     fn test_find_match_in_list_exact() {
