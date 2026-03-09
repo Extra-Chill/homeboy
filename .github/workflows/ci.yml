@@ -1,6 +1,6 @@
 # PR quality pipeline.
 #
-# Build once, then strict serial pipeline: lint+fix → test+fix → audit+fix
+# Build once, then strict serial pipeline: audit+fix → lint+fix → test+fix
 # A single build job compiles homeboy from source and shares the binary
 # via artifact. Each stage downloads it instead of rebuilding.
 # If fixes are committed, the App token push triggers a full re-run.
@@ -51,12 +51,53 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
-  # ── Stage 1: Lint + Fix ──
-  # Runs cargo fmt and clippy. Autofixes formatting and clippy warnings.
+  # ── Stage 1: Audit + Fix ──
+  # Runs first — most likely to induce changes. Autofix mode "always"
+  # grinds down the baseline on every PR, not just failures.
   # If fixes are committed, App token push triggers re-run of all stages.
+  audit:
+    name: Audit
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          binary-path: .homeboy-bin/homeboy
+          extension: rust
+          component: homeboy
+          commands: audit
+          autofix: 'true'
+          autofix-mode: 'always'
+          autofix-commands: 'audit --fix --write'
+          autofix-max-commits: '3'
+          app-token: ${{ steps.app-token.outputs.token || '' }}
+
+  # ── Stage 2: Lint + Fix ──
+  # Runs after audit passes. Cargo fmt and clippy. Autofixes formatting
+  # and clippy warnings. If fixes are committed, App token push triggers
+  # re-run of all stages.
   lint:
     name: Lint
-    needs: [build]
+    needs: [build, audit]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +130,7 @@ jobs:
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
-  # ── Stage 2: Test + Fix ──
+  # ── Stage 3: Test + Fix ──
   # Runs after lint passes. If tests fail and fixes are available,
   # commits and triggers re-run.
   test:
@@ -124,44 +165,5 @@ jobs:
           commands: test
           autofix: 'true'
           autofix-mode: 'on-failure'
-          autofix-max-commits: '3'
-          app-token: ${{ steps.app-token.outputs.token || '' }}
-
-  # ── Stage 3: Audit + Fix ──
-  # Runs after test passes. Autofix mode "always" — grinds down the
-  # baseline on every PR, not just failures.
-  audit:
-    name: Audit
-    needs: [build, test]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref }}
-          fetch-depth: 0
-
-      - name: Download homeboy binary
-        uses: actions/download-artifact@v4
-        with:
-          name: homeboy-binary
-          path: .homeboy-bin
-
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        continue-on-error: true
-        with:
-          app-id: ${{ secrets.HOMEBOY_APP_ID }}
-          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
-
-      - uses: Extra-Chill/homeboy-action@v1
-        with:
-          binary-path: .homeboy-bin/homeboy
-          extension: rust
-          component: homeboy
-          commands: audit
-          autofix: 'true'
-          autofix-mode: 'always'
-          autofix-commands: 'audit --fix --write'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}

@@ -156,15 +156,57 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
-  # ── Step 3: Quality gate (lint + fix whole codebase) ──
+  # ── Step 3: Quality gate (audit + fix whole codebase) ──
   # Unlike PR CI (scoped to changed files), release quality gate runs
   # unscoped — fixes the entire codebase before releasing.
-  # Serial pipeline: lint+fix → test+fix → audit+fix → release.
+  # Serial pipeline: audit+fix → lint+fix → test+fix → release.
+  # Audit runs first — most likely to induce changes (autofix-mode: always).
+  gate-audit:
+    name: Audit + Fix
+    needs:
+      - check
+      - gate-build
+    if: needs.check.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          binary-path: .homeboy-bin/homeboy
+          extension: rust
+          component: homeboy
+          commands: audit
+          auto-issue: 'true'
+          autofix: 'true'
+          autofix-mode: 'always'
+          autofix-open-pr: 'true'
+          autofix-commands: 'audit --fix --write'
+          autofix-max-commits: '3'
+          app-token: ${{ steps.app-token.outputs.token || '' }}
+
   gate-lint:
     name: Lint + Fix
     needs:
       - check
       - gate-build
+      - gate-audit
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -234,47 +276,6 @@ jobs:
           autofix: 'true'
           autofix-mode: 'on-failure'
           autofix-open-pr: 'true'
-          autofix-max-commits: '3'
-          app-token: ${{ steps.app-token.outputs.token || '' }}
-
-  gate-audit:
-    name: Audit + Fix
-    needs:
-      - check
-      - gate-build
-      - gate-test
-    if: needs.check.outputs.should-release == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download homeboy binary
-        uses: actions/download-artifact@v4
-        with:
-          name: homeboy-binary
-          path: .homeboy-bin
-
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        continue-on-error: true
-        with:
-          app-id: ${{ secrets.HOMEBOY_APP_ID }}
-          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
-
-      - uses: Extra-Chill/homeboy-action@v1
-        with:
-          binary-path: .homeboy-bin/homeboy
-          extension: rust
-          component: homeboy
-          commands: audit
-          auto-issue: 'true'
-          autofix: 'true'
-          autofix-mode: 'always'
-          autofix-open-pr: 'true'
-          autofix-commands: 'audit --fix --write'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
