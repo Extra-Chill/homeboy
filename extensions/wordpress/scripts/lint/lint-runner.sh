@@ -333,6 +333,11 @@ print(json.dumps(results))
         run_fixer "phpcs-ignore" "$PHPCS_IGNORE_FIXER" "$lint_target" --phpcs-binary="$PHPCS_BIN" --phpcs-standard="$PHPCS_CONFIG"
     done
 
+    # Write fix plan sidecar for planning flows (same shape as fix results)
+    if [ -n "${HOMEBOY_FIX_PLAN_FILE:-}" ]; then
+        echo "$FIX_RESULTS_JSON" > "${HOMEBOY_FIX_PLAN_FILE}"
+    fi
+
     # Write fix results sidecar for homeboy to consume
     if [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ]; then
         echo "$FIX_RESULTS_JSON" > "${HOMEBOY_FIX_RESULTS_FILE}"
