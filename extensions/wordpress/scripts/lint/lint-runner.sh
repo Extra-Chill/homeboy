@@ -197,97 +197,72 @@ fi
 
 # Auto-fix mode: run custom fixers, then phpcbf, then phpcs
 if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
+    # --- Fix results sidecar ---
+    # Track what each fixer does so homeboy can report structured fix output.
+    # Each fixer prints "NAME fixer: Fixed N thing(s) in N file(s)" on success.
+    # We capture that and build a JSON array for HOMEBOY_FIX_RESULTS_FILE.
+    FIX_RESULTS_JSON="[]"
+
+    # Run a fixer and capture its results for the sidecar.
+    # Usage: run_fixer <rule_name> <fixer_binary> [args...]
+    run_fixer() {
+        local rule="$1"; shift
+        local fixer_bin="$1"; shift
+
+        if [ ! -f "$fixer_bin" ]; then
+            return 0
+        fi
+
+        local fixer_output
+        set +e
+        fixer_output=$(php "$fixer_bin" "$@" 2>&1)
+        local fixer_exit=$?
+        set -e
+        echo "$fixer_output"
+
+        # Parse "Fixed N thing(s) in N file(s)" from output
+        local fix_count
+        fix_count=$(echo "$fixer_output" | grep -oE 'Fixed [0-9]+' | head -1 | grep -oE '[0-9]+' || echo "0")
+        local file_count
+        file_count=$(echo "$fixer_output" | grep -oE 'in [0-9]+ file' | head -1 | grep -oE '[0-9]+' || echo "0")
+
+        if [ "$fix_count" != "0" ] && [ "$fix_count" -gt 0 ] 2>/dev/null; then
+            # Append one entry per fix (rule-level granularity, not per-file)
+            FIX_RESULTS_JSON=$(python3 -c "
+import json, sys
+results = json.loads(sys.argv[1])
+results.append({'file': '(multiple)' if int(sys.argv[3]) > 1 else '(single)', 'rule': sys.argv[2], 'action': 'rewrite'})
+print(json.dumps(results))
+" "$FIX_RESULTS_JSON" "$rule" "$file_count" 2>/dev/null || echo "$FIX_RESULTS_JSON")
+        fi
+
+        return $fixer_exit
+    }
+
     # Run custom fixers on each target file/directory
     for lint_target in "${LINT_FILES[@]}"; do
-        # Run Yoda condition fixer (handles cases phpcbf can't fix)
-        if [ -f "$YODA_FIXER" ]; then
-            php "$YODA_FIXER" "$lint_target"
-        fi
-
-        # Run in_array strict fixer (add true as third param)
-        if [ -f "$IN_ARRAY_FIXER" ]; then
-            php "$IN_ARRAY_FIXER" "$lint_target"
-        fi
-
-        # Run short ternary fixer (expand ?: to ? : for simple vars)
-        if [ -f "$SHORT_TERNARY_FIXER" ]; then
-            php "$SHORT_TERNARY_FIXER" "$lint_target"
-        fi
-
-        # Run escape i18n fixer (_e -> esc_html_e)
-        if [ -f "$ESCAPE_I18N_FIXER" ]; then
-            php "$ESCAPE_I18N_FIXER" "$lint_target"
-        fi
-
-        # Run echo translate fixer (echo __() -> echo esc_html__())
-        if [ -f "$ECHO_TRANSLATE_FIXER" ]; then
-            php "$ECHO_TRANSLATE_FIXER" "$lint_target"
-        fi
-
-        # Run safe redirect fixer (wp_redirect -> wp_safe_redirect)
-        if [ -f "$SAFE_REDIRECT_FIXER" ]; then
-            php "$SAFE_REDIRECT_FIXER" "$lint_target"
-        fi
-
-        # Run wp_die translate fixer (wp_die(__()) -> wp_die(esc_html__()))
-        if [ -f "$WP_DIE_TRANSLATE_FIXER" ]; then
-            php "$WP_DIE_TRANSLATE_FIXER" "$lint_target"
-        fi
-
-        # Run strict comparison fixer (== -> ===, != -> !==)
-        # WPCS marks StrictComparisons as phpcs-only, so phpcbf won't fix these
-        if [ -f "$STRICT_COMPARISON_FIXER" ]; then
-            php "$STRICT_COMPARISON_FIXER" "$lint_target"
-        fi
-
-        # Run lonely if fixer (else { if -> elseif)
-        if [ -f "$LONELY_IF_FIXER" ]; then
-            php "$LONELY_IF_FIXER" "$lint_target"
-        fi
-
-        # Run loop count hoister (count() in for condition -> variable)
-        if [ -f "$LOOP_COUNT_FIXER" ]; then
-            php "$LOOP_COUNT_FIXER" "$lint_target"
-        fi
+        run_fixer "yoda-condition" "$YODA_FIXER" "$lint_target"
+        run_fixer "in-array-strict" "$IN_ARRAY_FIXER" "$lint_target"
+        run_fixer "short-ternary" "$SHORT_TERNARY_FIXER" "$lint_target"
+        run_fixer "escape-i18n" "$ESCAPE_I18N_FIXER" "$lint_target"
+        run_fixer "echo-translate" "$ECHO_TRANSLATE_FIXER" "$lint_target"
+        run_fixer "safe-redirect" "$SAFE_REDIRECT_FIXER" "$lint_target"
+        run_fixer "wp-die-translate" "$WP_DIE_TRANSLATE_FIXER" "$lint_target"
+        run_fixer "strict-comparison" "$STRICT_COMPARISON_FIXER" "$lint_target"
+        run_fixer "lonely-if" "$LONELY_IF_FIXER" "$lint_target"
+        run_fixer "loop-count" "$LOOP_COUNT_FIXER" "$lint_target"
 
         # Reserved param fixer runs OUTSIDE this loop (needs cross-file manifest)
 
-        # Run unused parameter fixer (noop references for callbacks, removal for dead params)
-        # This fixer runs PHPCS internally so needs the binary and standard paths
-        if [ -f "$UNUSED_PARAM_FIXER" ]; then
-            php "$UNUSED_PARAM_FIXER" "$lint_target" --phpcs-binary="$PHPCS_BIN" --phpcs-standard="$PHPCS_CONFIG"
-        fi
+        # Unused parameter fixer needs extra args
+        run_fixer "unused-param" "$UNUSED_PARAM_FIXER" "$lint_target" --phpcs-binary="$PHPCS_BIN" --phpcs-standard="$PHPCS_CONFIG"
 
-        # Run silenced error fixer (@unlink -> file_exists guard, @file -> is_readable guard)
-        if [ -f "$SILENCED_ERROR_FIXER" ]; then
-            php "$SILENCED_ERROR_FIXER" "$lint_target"
-        fi
-
-        # Run empty catch fixer (capture + unset to satisfy empty-statement sniff)
-        if [ -f "$EMPTY_CATCH_FIXER" ]; then
-            php "$EMPTY_CATCH_FIXER" "$lint_target"
-        fi
-
-        # Run readdir fixer (readdir loops -> scandir + array_diff)
-        if [ -f "$READDIR_FIXER" ]; then
-            php "$READDIR_FIXER" "$lint_target"
-        fi
-
-        # Run commented code fixer (reword false-positive comments)
-        # This fixer runs PHPCS internally to find CommentedOutCode violations
-        if [ -f "$COMMENTED_CODE_FIXER" ]; then
-            php "$COMMENTED_CODE_FIXER" "$lint_target"
-        fi
-
-        # Run WP alternatives fixer (strip_tags → wp_strip_all_tags, unlink → wp_delete_file)
-        if [ -f "$WP_ALTERNATIVES_FIXER" ]; then
-            php "$WP_ALTERNATIVES_FIXER" "$lint_target"
-        fi
-
-        # Run WP Filesystem fixer (file_get_contents → $fs->get_contents, file_put_contents → $fs->put_contents)
-        if [ -f "$WP_FILESYSTEM_FIXER" ]; then
-            php "$WP_FILESYSTEM_FIXER" "$lint_target"
-        fi
+        run_fixer "silenced-error" "$SILENCED_ERROR_FIXER" "$lint_target"
+        run_fixer "empty-catch" "$EMPTY_CATCH_FIXER" "$lint_target"
+        run_fixer "readdir" "$READDIR_FIXER" "$lint_target"
+        run_fixer "commented-code" "$COMMENTED_CODE_FIXER" "$lint_target"
+        run_fixer "wp-alternatives" "$WP_ALTERNATIVES_FIXER" "$lint_target"
+        run_fixer "wp-filesystem" "$WP_FILESYSTEM_FIXER" "$lint_target"
     done
 
     # Run reserved keyword parameter name fixer ($default -> $default_value, etc.)
@@ -295,9 +270,7 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
     # builds a rename manifest in Pass 1 (declarations) and applies it to call sites
     # in Pass 2 (named arguments). Per-file invocation loses the manifest between
     # processes, leaving call sites with stale parameter names.
-    if [ -f "$RESERVED_PARAM_FIXER" ]; then
-        php "$RESERVED_PARAM_FIXER" "$PLUGIN_PATH"
-    fi
+    run_fixer "reserved-param" "$RESERVED_PARAM_FIXER" "$PLUGIN_PATH"
 
     # Run phpcbf for remaining auto-fixable issues
     if [ -f "$PHPCBF_BIN" ]; then
@@ -328,6 +301,13 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
         echo ""
         if [ "$fixed_count" != "0" ]; then
             echo "PHPCBF fixed $fixed_count errors"
+            # Record phpcbf fixes in sidecar
+            FIX_RESULTS_JSON=$(python3 -c "
+import json, sys
+results = json.loads(sys.argv[1])
+results.append({'file': '(multiple)', 'rule': 'phpcbf', 'action': 'format'})
+print(json.dumps(results))
+" "$FIX_RESULTS_JSON" 2>/dev/null || echo "$FIX_RESULTS_JSON")
         fi
 
         if [ "$PHPCBF_EXIT" -eq 2 ]; then
@@ -349,10 +329,13 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
     # Run phpcs:ignore fixer LAST — adds ignore comments for known false positives
     # (PreparedSQL table names, base64_encode for auth, mt_srand, ValidHookName)
     # This must run after all real-code fixers and phpcbf
-    if [ -f "$PHPCS_IGNORE_FIXER" ]; then
-        for lint_target in "${LINT_FILES[@]}"; do
-            php "$PHPCS_IGNORE_FIXER" "$lint_target" --phpcs-binary="$PHPCS_BIN" --phpcs-standard="$PHPCS_CONFIG"
-        done
+    for lint_target in "${LINT_FILES[@]}"; do
+        run_fixer "phpcs-ignore" "$PHPCS_IGNORE_FIXER" "$lint_target" --phpcs-binary="$PHPCS_BIN" --phpcs-standard="$PHPCS_CONFIG"
+    done
+
+    # Write fix results sidecar for homeboy to consume
+    if [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ]; then
+        echo "$FIX_RESULTS_JSON" > "${HOMEBOY_FIX_RESULTS_FILE}"
     fi
 
     # Post-fix syntax validation — catch any fixer that produced broken PHP
