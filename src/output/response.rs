@@ -155,3 +155,35 @@ pub fn print_json_result(result: Result<serde_json::Value>) -> Result<()> {
         Err(err) => print_response(&CliResponse::<()>::from_error(&err)),
     }
 }
+
+/// Write the JSON output envelope to a file. Best-effort — failures are
+/// logged to stderr but don't affect the command's exit code.
+pub fn write_json_to_file(result: &Result<serde_json::Value>, path: &str) {
+    let response = match result {
+        Ok(data) => CliResponse {
+            success: true,
+            data: Some(data.clone()),
+            error: None,
+        },
+        Err(err) => {
+            let error_response = CliResponse::<()>::from_error(err);
+            CliResponse {
+                success: false,
+                data: None,
+                error: error_response.error,
+            }
+        }
+    };
+
+    let json = match serde_json::to_string_pretty(&response) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("Warning: failed to serialize JSON for --output: {}", e);
+            return;
+        }
+    };
+
+    if let Err(e) = std::fs::write(path, json) {
+        eprintln!("Warning: failed to write --output file '{}': {}", path, e);
+    }
+}
