@@ -757,19 +757,25 @@ if [ "${MYSQL_AUTO_CREATED:-}" = "1" ]; then
     mysql "${_mysql_cleanup[@]}" -e "DROP DATABASE IF EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null || true
 fi
 
-# Write test infrastructure fix results to HOMEBOY_FIX_RESULTS_FILE sidecar.
-# lint-runner.sh may have already written lint fixes to this file; we merge
-# test-runner's infrastructure fixes (removed files, removed deps) into it.
-if [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ] && [ ${#TEST_FIX_ENTRIES[@]} -gt 0 ]; then
-    if [ -f "${HOMEBOY_FIX_RESULTS_FILE}" ] && [ -s "${HOMEBOY_FIX_RESULTS_FILE}" ]; then
+# Write test infrastructure fix plan/results sidecars.
+# lint-runner.sh may have already written lint fixes to these files; we merge
+# test-runner's infrastructure fixes (removed files, removed deps) into them.
+write_or_merge_fix_sidecar() {
+    local target_file="$1"
+
+    if [ -z "${target_file:-}" ] || [ ${#TEST_FIX_ENTRIES[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    if [ -f "${target_file}" ] && [ -s "${target_file}" ]; then
         # Merge: read existing array, append our entries, write back
-        EXISTING=$(cat "${HOMEBOY_FIX_RESULTS_FILE}")
+        EXISTING=$(cat "${target_file}")
         MERGED="${EXISTING%]}"  # strip trailing ]
         for ENTRY in "${TEST_FIX_ENTRIES[@]}"; do
             MERGED+=", ${ENTRY}"
         done
         MERGED+="]"
-        echo "${MERGED}" > "${HOMEBOY_FIX_RESULTS_FILE}"
+        echo "${MERGED}" > "${target_file}"
     else
         # No existing file — write fresh array
         JSON="["
@@ -783,6 +789,9 @@ if [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ] && [ ${#TEST_FIX_ENTRIES[@]} -gt 0 ]; 
             fi
         done
         JSON+="]"
-        echo "${JSON}" > "${HOMEBOY_FIX_RESULTS_FILE}"
+        echo "${JSON}" > "${target_file}"
     fi
-fi
+}
+
+write_or_merge_fix_sidecar "${HOMEBOY_FIX_PLAN_FILE:-}"
+write_or_merge_fix_sidecar "${HOMEBOY_FIX_RESULTS_FILE:-}"
