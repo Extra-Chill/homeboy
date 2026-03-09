@@ -565,6 +565,29 @@ phpunit_args=(
     "${TEST_DIR}"
 )
 
+# Scoped test selection: if HOMEBOY_CHANGED_TEST_FILES is set, build a
+# PHPUnit --filter regex from the changed test file basenames.
+# e.g., tests/Unit/Foo/BarBazTest.php → BarBazTest
+if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
+    FILTER_CLASSES=()
+    while IFS= read -r test_file; do
+        [ -z "$test_file" ] && continue
+        # Only PHP files
+        [[ "$test_file" != *.php ]] && continue
+        # Extract basename without extension (e.g., BarBazTest)
+        class_name="$(basename "$test_file" .php)"
+        [ -n "$class_name" ] && FILTER_CLASSES+=("$class_name")
+    done <<< "${HOMEBOY_CHANGED_TEST_FILES}"
+
+    if [ ${#FILTER_CLASSES[@]} -gt 0 ]; then
+        # Deduplicate and sort
+        UNIQUE_CLASSES=($(printf '%s\n' "${FILTER_CLASSES[@]}" | sort -u))
+        FILTER_REGEX=$(IFS='|'; echo "(${UNIQUE_CLASSES[*]})")
+        phpunit_args+=(--filter "$FILTER_REGEX")
+        echo "Scoped to changed test files: ${FILTER_REGEX}"
+    fi
+fi
+
 # Coverage collection (opt-in via HOMEBOY_COVERAGE=1)
 COVERAGE_CLOVER=""
 if [ "${HOMEBOY_COVERAGE:-}" = "1" ]; then
