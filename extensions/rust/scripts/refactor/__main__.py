@@ -14,6 +14,7 @@ from .imports import resolve_imports
 from .visibility import adjust_visibility
 from .rewrite import rewrite_caller_imports
 from .struct_fields import propagate_struct_fields
+from .module_index import generate_module_index
 
 
 def handle_parse_items(data: dict) -> dict:
@@ -59,6 +60,13 @@ def handle_propagate_struct_fields(data: dict) -> dict:
     return propagate_struct_fields(data)
 
 
+def handle_generate_module_index(data: dict) -> dict:
+    return generate_module_index(
+        data.get("submodules", []),
+        data.get("remaining_content", ""),
+    )
+
+
 COMMANDS = {
     "parse_items": handle_parse_items,
     "resolve_imports": handle_resolve_imports,
@@ -66,6 +74,7 @@ COMMANDS = {
     "adjust_visibility": handle_adjust_visibility,
     "rewrite_caller_imports": handle_rewrite_caller_imports,
     "propagate_struct_fields": handle_propagate_struct_fields,
+    "generate_module_index": handle_generate_module_index,
 }
 
 
