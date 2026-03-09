@@ -134,7 +134,7 @@ impl InsertionKind {
             | Self::ConstructorWithRegistration
             | Self::VisibilityChange { .. } => FixSafetyTier::SafeWithChecks,
             Self::FunctionRemoval { .. } => FixSafetyTier::SafeWithChecks,
-            Self::TraitUse => FixSafetyTier::PlanOnly,
+            Self::TraitUse => FixSafetyTier::SafeWithChecks,
         }
     }
 }
@@ -1676,7 +1676,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     .unwrap_or("SharedTrait");
                 new_files.push(new_file(
                     AuditFinding::DuplicateFunction,
-                    FixSafetyTier::PlanOnly,
+                    FixSafetyTier::SafeWithChecks,
                     trait_file.to_string(),
                     trait_content.to_string(),
                     format!(

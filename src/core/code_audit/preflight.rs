@@ -95,6 +95,42 @@ pub fn run_insertion_preflight(
 
             let mut checks = Vec::new();
 
+            // TraitUse: verify the class exists, trait use doesn't already exist,
+            // and PHP syntax is preserved after insertion.
+            if matches!(insertion.kind, super::fixer::InsertionKind::TraitUse) {
+                let has_class = content.contains("class ");
+                checks.push(PreflightCheck {
+                    name: "class_exists".to_string(),
+                    passed: has_class,
+                    detail: if has_class {
+                        "target file contains a class definition".to_string()
+                    } else {
+                        "target file does not contain a class definition".to_string()
+                    },
+                });
+
+                let trait_code = insertion.code.trim();
+                let already_present = content.lines().any(|line| line.trim() == trait_code);
+                checks.push(PreflightCheck {
+                    name: "trait_use_absent".to_string(),
+                    passed: !already_present,
+                    detail: if already_present {
+                        format!("trait use `{}` already exists in file", trait_code)
+                    } else {
+                        format!("trait use `{}` is not yet present", trait_code)
+                    },
+                });
+
+                let simulated = apply_insertions_to_content(
+                    &content,
+                    std::slice::from_ref(insertion),
+                    &language,
+                );
+                checks.push(syntax_shape_check(&simulated, insertion, &language));
+
+                return Some(finalize_report(checks));
+            }
+
             // Check that the function exists at the expected line range
             if let super::fixer::InsertionKind::FunctionRemoval {
                 start_line,
@@ -219,6 +255,50 @@ pub fn run_new_file_preflight(
     context: &PreflightContext<'_>,
 ) -> Option<PreflightReport> {
     match new_file.finding {
+        AuditFinding::DuplicateFunction => {
+            // Trait file creation: verify target doesn't exist, content is non-empty,
+            // and parent directory exists.
+            let abs = context.root.join(&new_file.file);
+            let parent_exists = abs
+                .parent()
+                .map(|p| p.exists() || p == context.root)
+                .unwrap_or(false);
+
+            Some(finalize_report(vec![
+                PreflightCheck {
+                    name: "file_absent".to_string(),
+                    passed: !abs.exists(),
+                    detail: if abs.exists() {
+                        format!("{} already exists — will not overwrite", new_file.file)
+                    } else {
+                        format!("{} does not already exist", new_file.file)
+                    },
+                },
+                PreflightCheck {
+                    name: "content_nonempty".to_string(),
+                    passed: !new_file.content.trim().is_empty(),
+                    detail: if new_file.content.trim().is_empty() {
+                        "generated trait content is empty".to_string()
+                    } else {
+                        "generated trait content is non-empty".to_string()
+                    },
+                },
+                PreflightCheck {
+                    name: "parent_exists".to_string(),
+                    passed: parent_exists,
+                    detail: if parent_exists {
+                        "parent directory exists or is project root".to_string()
+                    } else {
+                        format!(
+                            "parent directory {} does not exist",
+                            abs.parent()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default()
+                        )
+                    },
+                },
+            ]))
+        }
         AuditFinding::MissingTestFile => {
             let (_source_file, expected_test_path) =
                 mapping_from_source_comment(&new_file.content)?;
