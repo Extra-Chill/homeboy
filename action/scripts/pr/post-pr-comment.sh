@@ -136,7 +136,13 @@ SECTION_TITLE="$(derive_section_title)"
 SECTION_BODY="### ${SECTION_TITLE}"$'\n\n'
 
 if [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_COMMITTED:-}" = "true" ]; then
-  SECTION_BODY+="> :wrench: **Autofix applied** — a CI bot commit was pushed and checks were re-run"$'\n\n'
+  AUTOFIX_SUMMARY=":wrench: **Autofix applied**"
+  if [ -n "${AUTOFIX_FILE_COUNT:-}" ] && [ -n "${AUTOFIX_FIX_TYPES:-}" ]; then
+    AUTOFIX_SUMMARY+=" — ${AUTOFIX_FILE_COUNT} file(s) fixed via ${AUTOFIX_FIX_TYPES}"
+  elif [ -n "${AUTOFIX_FILE_COUNT:-}" ]; then
+    AUTOFIX_SUMMARY+=" — ${AUTOFIX_FILE_COUNT} file(s) fixed"
+  fi
+  SECTION_BODY+="> ${AUTOFIX_SUMMARY}"$'\n\n'
 elif [ "${AUTOFIX_ENABLED}" = "true" ]; then
   SECTION_BODY+="> :information_source: Autofix enabled, but no fixable file changes were produced"$'\n\n'
 fi
@@ -149,12 +155,6 @@ HAS_DIGEST="false"
 if [ -n "${DIGEST_FILE}" ] && [ -f "${DIGEST_FILE}" ]; then
   HAS_DIGEST="true"
   SECTION_BODY+="$(cat "${DIGEST_FILE}")"$'\n\n'
-else
-  SECTION_BODY+="### Tooling versions"$'\n\n'
-  SECTION_BODY+="- Homeboy CLI: \`${HOMEBOY_CLI_VERSION:-unknown}\`"$'\n'
-  SECTION_BODY+="- Extension: \`${HOMEBOY_EXTENSION_ID:-auto}\` from \`${HOMEBOY_EXTENSION_SOURCE:-auto}\`"$'\n'
-  SECTION_BODY+="- Extension revision: \`${HOMEBOY_EXTENSION_REVISION:-unknown}\`"$'\n'
-  SECTION_BODY+="- Action: \`${HOMEBOY_ACTION_REPOSITORY:-unknown}@${HOMEBOY_ACTION_REF:-unknown}\`"$'\n\n'
 fi
 
 AUDIT_SUMMARY_JSON="${OUTPUT_DIR}/homeboy-audit-summary.json"
@@ -273,11 +273,26 @@ done
 
 SECTION_FILE=$(mktemp)
 COMMENTS_FILE=$(mktemp)
+TOOLING_FILE=$(mktemp)
 printf '%s' "${SECTION_BODY}" > "${SECTION_FILE}"
+
+python3 -c "
+import json, os, sys
+tooling = {
+    'homeboy_cli_version': os.environ.get('HOMEBOY_CLI_VERSION', 'unknown'),
+    'extension_id': os.environ.get('HOMEBOY_EXTENSION_ID', 'auto'),
+    'extension_source': os.environ.get('HOMEBOY_EXTENSION_SOURCE', 'auto'),
+    'extension_revision': os.environ.get('HOMEBOY_EXTENSION_REVISION', 'unknown'),
+    'action_repository': os.environ.get('HOMEBOY_ACTION_REPOSITORY', 'unknown'),
+    'action_ref': os.environ.get('HOMEBOY_ACTION_REF', 'unknown'),
+}
+with open(sys.argv[1], 'w') as f:
+    json.dump(tooling, f)
+" "${TOOLING_FILE}"
 
 if ! gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" > "${COMMENTS_FILE}" 2>/dev/null; then
   echo "::warning::Could not read PR comments (likely restricted token for fork PR). Skipping comment publish."
-  rm -f "${SECTION_FILE}" "${COMMENTS_FILE}"
+  rm -f "${SECTION_FILE}" "${COMMENTS_FILE}" "${TOOLING_FILE}"
   exit 0
 fi
 
@@ -286,9 +301,10 @@ MERGE_RESULT=$(python3 "${GITHUB_ACTION_PATH}/scripts/pr/merge-pr-comment.py" \
   "${COMMENT_KEY}" \
   "${COMP_ID}" \
   "${SECTION_KEY}" \
-  "${SECTION_FILE}" 2>/dev/null || true)
+  "${SECTION_FILE}" \
+  "${TOOLING_FILE}" 2>/dev/null || true)
 
-rm -f "${SECTION_FILE}" "${COMMENTS_FILE}"
+rm -f "${SECTION_FILE}" "${COMMENTS_FILE}" "${TOOLING_FILE}"
 
 if [ -z "${MERGE_RESULT}" ]; then
   echo "::warning::Could not merge PR comment content. Skipping comment publish."
@@ -333,7 +349,22 @@ done
 
 FINAL_SECTION_FILE=$(mktemp)
 FINAL_COMMENTS_FILE=$(mktemp)
+FINAL_TOOLING_FILE=$(mktemp)
 printf '%s' "${SECTION_BODY}" > "${FINAL_SECTION_FILE}"
+
+python3 -c "
+import json, os, sys
+tooling = {
+    'homeboy_cli_version': os.environ.get('HOMEBOY_CLI_VERSION', 'unknown'),
+    'extension_id': os.environ.get('HOMEBOY_EXTENSION_ID', 'auto'),
+    'extension_source': os.environ.get('HOMEBOY_EXTENSION_SOURCE', 'auto'),
+    'extension_revision': os.environ.get('HOMEBOY_EXTENSION_REVISION', 'unknown'),
+    'action_repository': os.environ.get('HOMEBOY_ACTION_REPOSITORY', 'unknown'),
+    'action_ref': os.environ.get('HOMEBOY_ACTION_REF', 'unknown'),
+}
+with open(sys.argv[1], 'w') as f:
+    json.dump(tooling, f)
+" "${FINAL_TOOLING_FILE}"
 
 if gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" > "${FINAL_COMMENTS_FILE}" 2>/dev/null; then
   FINAL_MERGE_RESULT=$(python3 "${GITHUB_ACTION_PATH}/scripts/pr/merge-pr-comment.py" \
@@ -341,7 +372,8 @@ if gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" > "${FINAL_COMMENTS_FILE}
     "${COMMENT_KEY}" \
     "${COMP_ID}" \
     "${SECTION_KEY}" \
-    "${FINAL_SECTION_FILE}" 2>/dev/null || true)
+    "${FINAL_SECTION_FILE}" \
+    "${FINAL_TOOLING_FILE}" 2>/dev/null || true)
 
   if [ -n "${FINAL_MERGE_RESULT}" ]; then
     CANONICAL_COMMENT_ID=$(printf '%s' "${FINAL_MERGE_RESULT}" | jq -r '.comment_id // empty')
@@ -364,6 +396,6 @@ if gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" > "${FINAL_COMMENTS_FILE}
   fi
 fi
 
-rm -f "${FINAL_SECTION_FILE}" "${FINAL_COMMENTS_FILE}"
+rm -f "${FINAL_SECTION_FILE}" "${FINAL_COMMENTS_FILE}" "${FINAL_TOOLING_FILE}"
 
 echo "PR comment posted successfully"

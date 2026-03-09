@@ -338,6 +338,8 @@ runs:
         COMPONENT_NAME: ${{ inputs.component }}
         AUTOFIX_BRANCH: ${{ steps.autofix-prepare-nonpr.outputs.autofix-branch }}
         RESULTS: ${{ steps.rerun-commands.outputs.results }}
+        AUTOFIX_FILE_COUNT: ${{ steps.autofix-prepare-nonpr.outputs.autofix-file-count }}
+        AUTOFIX_FIX_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-fix-types }}
       run: bash ${{ github.action_path }}/scripts/autofix/open-autofix-pr.sh
 
     - name: Select final results
@@ -392,6 +394,8 @@ runs:
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         AUTOFIX_ENABLED: ${{ inputs.autofix }}
         AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
+        AUTOFIX_FILE_COUNT: ${{ steps.autofix-commit.outputs.autofix-file-count }}
+        AUTOFIX_FIX_TYPES: ${{ steps.autofix-commit.outputs.autofix-fix-types }}
         TEST_SCOPE_EFFECTIVE: ${{ steps.resolve-test-scope.outputs.effective-test-scope || inputs.test-scope }}
         COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
         COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key }}

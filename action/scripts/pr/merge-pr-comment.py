@@ -83,7 +83,12 @@ def extract_sections(body: str) -> dict[str, str]:
     return sections
 
 
-def build_comment_body(comment_key: str, component_id: str, sections: dict[str, str]) -> str:
+def build_comment_body(
+    comment_key: str,
+    component_id: str,
+    sections: dict[str, str],
+    tooling: dict[str, str] | None = None,
+) -> str:
     lines: list[str] = []
     lines.append(f"<!-- homeboy-action-results:key={comment_key} -->")
     lines.append(f"## Homeboy Results — `{component_id}`")
@@ -97,6 +102,23 @@ def build_comment_body(comment_key: str, component_id: str, sections: dict[str, 
         if idx != len(ordered_keys) - 1:
             lines.append("")
 
+    if tooling:
+        lines.append("")
+        lines.append("<details><summary>Tooling versions</summary>")
+        lines.append("")
+        lines.append(f"- Homeboy CLI: `{tooling.get('homeboy_cli_version', 'unknown')}`")
+        lines.append(
+            f"- Extension: `{tooling.get('extension_id', 'auto')}` "
+            f"from `{tooling.get('extension_source', 'auto')}`"
+        )
+        lines.append(f"- Extension revision: `{tooling.get('extension_revision', 'unknown')}`")
+        lines.append(
+            f"- Action: `{tooling.get('action_repository', 'unknown')}"
+            f"@{tooling.get('action_ref', 'unknown')}`"
+        )
+        lines.append("")
+        lines.append("</details>")
+
     lines.append("")
     lines.append("---")
     lines.append("*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1*")
@@ -104,9 +126,9 @@ def build_comment_body(comment_key: str, component_id: str, sections: dict[str, 
 
 
 def main() -> int:
-    if len(sys.argv) != 6:
+    if len(sys.argv) not in (6, 7):
         print(
-            "Usage: merge-pr-comment.py <comments-json> <comment-key> <component-id> <section-key> <section-file>",
+            "Usage: merge-pr-comment.py <comments-json> <comment-key> <component-id> <section-key> <section-file> [tooling-json]",
             file=sys.stderr,
         )
         return 1
@@ -116,6 +138,14 @@ def main() -> int:
     component_id = sys.argv[3]
     section_key = sys.argv[4]
     section_file = Path(sys.argv[5])
+    tooling_file = Path(sys.argv[6]) if len(sys.argv) > 6 else None
+
+    tooling: dict[str, str] | None = None
+    if tooling_file and tooling_file.is_file():
+        try:
+            tooling = json.loads(tooling_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            tooling = None
 
     comments: list[dict[str, Any]] = json.loads(comments_path.read_text(encoding="utf-8"))
     current_section = normalize_text(section_file.read_text(encoding="utf-8", errors="replace"))
@@ -137,7 +167,7 @@ def main() -> int:
     payload = {
         "comment_id": canonical_id,
         "delete_ids": delete_ids,
-        "body": build_comment_body(comment_key, component_id, merged_sections),
+        "body": build_comment_body(comment_key, component_id, merged_sections, tooling),
     }
     print(json.dumps(payload))
     return 0
