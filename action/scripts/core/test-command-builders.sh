@@ -21,19 +21,22 @@ assert_equals() {
 WORKSPACE="/tmp/workspace"
 COMPONENT="data-machine"
 
-unset HOMEBOY_CHANGED_SINCE TEST_SCOPE EXTRA_ARGS || true
+# ── Unscoped (full mode) ──
+unset SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true
+SCOPE_MODE="full"
 assert_equals \
   "homeboy lint data-machine --path /tmp/workspace" \
   "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
   "lint includes workspace path"
 
-HOMEBOY_CHANGED_SINCE="origin/main"
+# ── Scoped (changed mode) ──
+SCOPE_MODE="changed"
+SCOPE_BASE_REF="origin/main"
 assert_equals \
   "homeboy lint data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
   "lint keeps path with changed-since"
 
-TEST_SCOPE="changed"
 assert_equals \
   "homeboy test data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "test" "${COMPONENT}" "${WORKSPACE}")" \
@@ -60,7 +63,9 @@ assert_equals \
   "$(build_autofix_command "audit --fix --write" "${COMPONENT}" "${WORKSPACE}")" \
   "autofix audit keeps path and changed-since"
 
-unset HOMEBOY_CHANGED_SINCE TEST_SCOPE EXTRA_ARGS || true
+# ── Unscoped autofix ──
+unset SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true
+SCOPE_MODE="full"
 assert_equals \
   "homeboy test --fix data-machine --path /tmp/workspace" \
   "$(build_autofix_command "test --fix" "${COMPONENT}" "${WORKSPACE}")" \

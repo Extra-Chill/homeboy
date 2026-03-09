@@ -3,6 +3,7 @@
 set -euo pipefail
 
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
+source "${GITHUB_ACTION_PATH}/scripts/scope/context.sh"
 
 AUTOFIX_MAX_COMMITS="${AUTOFIX_MAX_COMMITS:-2}"
 if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then
@@ -10,11 +11,12 @@ if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then
 fi
 
 # Count autofix commits on this branch only (not full repo history).
-# HOMEBOY_CHANGED_SINCE holds the merge base ref when set by the action.
-# Fall back to origin/main..HEAD if not set, then full log as last resort.
+# Use scope base ref when available, fall back to origin/main..HEAD,
+# then full log as last resort.
 # Match the prefix (not full subject) so informative suffixes don't break detection.
-if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
-  AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "${HOMEBOY_CHANGED_SINCE}..HEAD" 2>/dev/null | wc -l | xargs)
+BASE="$(scope_base_ref)"
+if [ -n "${BASE}" ]; then
+  AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "${BASE}..HEAD" 2>/dev/null | wc -l | xargs)
 elif [ -n "${GITHUB_BASE_REF:-}" ]; then
   AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "origin/${GITHUB_BASE_REF}..HEAD" 2>/dev/null | wc -l | xargs)
 else
@@ -26,8 +28,8 @@ if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
   exit 0
 fi
 
-if [ "${PR_HEAD_REPO}" != "${GITHUB_REPOSITORY}" ]; then
-  echo "Skipping autofix: PR head repo (${PR_HEAD_REPO}) differs from target repo (${GITHUB_REPOSITORY})"
+if is_fork; then
+  echo "Skipping autofix: fork PR (${PR_HEAD_REPO:-unknown} → ${GITHUB_REPOSITORY})"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
   exit 0
 fi
@@ -106,7 +108,7 @@ done
 # one invalidates all others). Baselines should only be updated on main.
 # PR CI already uses --changed-since for scoped checks, so the baseline
 # doesn't need to reflect PR-specific state.
-if [ -z "${PR_NUMBER:-}" ]; then
+if [ "$(scope_context)" != "pr" ]; then
   echo "Updating audit baseline (non-PR context)..."
   set +e
   BASELINE_CMD="homeboy audit ${COMP_ID} --baseline --path ${WORKSPACE}"
