@@ -10,7 +10,9 @@ use homeboy::git;
 use homeboy::refactor::{self, AddResult, MoveResult, RenameScope, RenameSpec, RenameTargeting};
 use homeboy::utils::autofix::{self, FixResultsSummary};
 
-use super::args::{BaselineArgs, ComponentArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs};
+use super::args::{
+    BaselineArgs, ComponentArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs,
+};
 use crate::commands::CmdResult;
 
 #[derive(Args)]
@@ -687,7 +689,8 @@ fn plan_audit_stage(
         exclude: exclude_kinds,
     };
     let preflight_context = fixer::PreflightContext { root };
-    let policy_summary = fixer::apply_fix_policy(&mut fix_result, write, &policy, &preflight_context);
+    let policy_summary =
+        fixer::apply_fix_policy(&mut fix_result, write, &policy, &preflight_context);
 
     let changed_files: Vec<String> = collect_audit_changed_files(&fix_result);
     let mut fix_results = summarize_audit_fix_result_entries(&fix_result);
@@ -716,7 +719,8 @@ fn plan_audit_stage(
             files_modified: changed_files.len(),
             detected_findings: Some(result.findings.len()),
             changed_files,
-            fix_summary: if policy_summary.visible_insertions + policy_summary.visible_new_files > 0 {
+            fix_summary: if policy_summary.visible_insertions + policy_summary.visible_new_files > 0
+            {
                 Some(autofix::summarize_audit_fix_result(&fix_result))
             } else {
                 None
@@ -776,16 +780,34 @@ fn run_lint_stage(
         .settings(settings)
         .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1")
         .env_opt("HOMEBOY_LINT_GLOB", &effective_glob)
-        .env("HOMEBOY_LINT_FINDINGS_FILE", &findings_file.to_string_lossy())
-        .env_if(plan_mode, "HOMEBOY_FIX_PLAN_FILE", &fix_plan_file.to_string_lossy())
-        .env_if(plan_mode, "HOMEBOY_FIX_RESULTS_FILE", &fix_results_file.to_string_lossy())
+        .env(
+            "HOMEBOY_LINT_FINDINGS_FILE",
+            &findings_file.to_string_lossy(),
+        )
+        .env_if(
+            plan_mode,
+            "HOMEBOY_FIX_PLAN_FILE",
+            &fix_plan_file.to_string_lossy(),
+        )
+        .env_if(
+            plan_mode,
+            "HOMEBOY_FIX_RESULTS_FILE",
+            &fix_results_file.to_string_lossy(),
+        )
         .run()?;
 
     let changed_files = if plan_mode {
         let after_fix = autofix::changed_file_set(&sandbox_component.local_path)?;
         before_fix
             .as_ref()
-            .map(|before| after_fix.difference(before).cloned().collect::<BTreeSet<_>>().into_iter().collect())
+            .map(|before| {
+                after_fix
+                    .difference(before)
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -798,7 +820,8 @@ fn run_lint_stage(
         planned_fix_results
     };
     let fixes_proposed = fix_results.len();
-    let lint_findings = homeboy::lint_baseline::parse_findings_file(&findings_file).unwrap_or_default();
+    let lint_findings =
+        homeboy::lint_baseline::parse_findings_file(&findings_file).unwrap_or_default();
     let _ = std::fs::remove_file(&fix_results_file);
     let _ = std::fs::remove_file(&fix_plan_file);
     let _ = std::fs::remove_file(&findings_file);
@@ -833,7 +856,8 @@ fn run_test_stage(
     let mut sandbox_component = component.clone();
     sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
     let script_path = super::test::resolve_test_script(&sandbox_component)?;
-    let results_file = std::env::temp_dir().join(format!("homeboy-test-results-{}.json", std::process::id()));
+    let results_file =
+        std::env::temp_dir().join(format!("homeboy-test-results-{}.json", std::process::id()));
     let fix_results_file = autofix::fix_results_temp_path();
     let fix_plan_file = autofix::fix_plan_temp_path();
     let before_fix = if plan_mode {
@@ -846,8 +870,16 @@ fn run_test_stage(
         .component(sandbox_component.clone())
         .settings(settings)
         .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy())
-        .env_if(plan_mode, "HOMEBOY_FIX_PLAN_FILE", &fix_plan_file.to_string_lossy())
-        .env_if(plan_mode, "HOMEBOY_FIX_RESULTS_FILE", &fix_results_file.to_string_lossy())
+        .env_if(
+            plan_mode,
+            "HOMEBOY_FIX_PLAN_FILE",
+            &fix_plan_file.to_string_lossy(),
+        )
+        .env_if(
+            plan_mode,
+            "HOMEBOY_FIX_RESULTS_FILE",
+            &fix_results_file.to_string_lossy(),
+        )
         .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1");
 
     if let Some(changed_test_files) = changed_test_files {
@@ -862,7 +894,14 @@ fn run_test_stage(
         let after_fix = autofix::changed_file_set(&sandbox_component.local_path)?;
         before_fix
             .as_ref()
-            .map(|before| after_fix.difference(before).cloned().collect::<BTreeSet<_>>().into_iter().collect())
+            .map(|before| {
+                after_fix
+                    .difference(before)
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -918,7 +957,10 @@ impl Drop for SandboxDir {
 fn clone_tree(src: &Path) -> homeboy::Result<SandboxDir> {
     let temp = std::env::temp_dir().join(format!("homeboy-refactor-ci-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp).map_err(|e| {
-        homeboy::Error::internal_io(e.to_string(), Some("create temp refactor sandbox".to_string()))
+        homeboy::Error::internal_io(
+            e.to_string(),
+            Some("create temp refactor sandbox".to_string()),
+        )
     })?;
     copy_dir_recursive(src, &temp)?;
     Ok(SandboxDir { path: temp })
@@ -929,11 +971,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> homeboy::Result<()> {
         homeboy::Error::internal_io(e.to_string(), Some("create sandbox dir".to_string()))
     })?;
 
-    for entry in std::fs::read_dir(src)
-        .map_err(|e| homeboy::Error::internal_io(e.to_string(), Some("read source dir".to_string())))?
-    {
-        let entry = entry
-            .map_err(|e| homeboy::Error::internal_io(e.to_string(), Some("read dir entry".to_string())))?;
+    for entry in std::fs::read_dir(src).map_err(|e| {
+        homeboy::Error::internal_io(e.to_string(), Some("read source dir".to_string()))
+    })? {
+        let entry = entry.map_err(|e| {
+            homeboy::Error::internal_io(e.to_string(), Some("read dir entry".to_string()))
+        })?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
@@ -943,22 +986,30 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> homeboy::Result<()> {
             }
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| homeboy::Error::internal_io(e.to_string(), Some("copy sandbox file".to_string())))?;
+            std::fs::copy(&src_path, &dst_path).map_err(|e| {
+                homeboy::Error::internal_io(e.to_string(), Some("copy sandbox file".to_string()))
+            })?;
         }
     }
 
     Ok(())
 }
 
-fn copy_changed_files(src_root: &Path, dst_root: &Path, changed_files: &[String]) -> homeboy::Result<()> {
+fn copy_changed_files(
+    src_root: &Path,
+    dst_root: &Path,
+    changed_files: &[String],
+) -> homeboy::Result<()> {
     for file in changed_files {
         let src = src_root.join(file);
         let dst = dst_root.join(file);
 
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                homeboy::Error::internal_io(e.to_string(), Some(format!("create parent for {}", file)))
+                homeboy::Error::internal_io(
+                    e.to_string(),
+                    Some(format!("create parent for {}", file)),
+                )
             })?;
         }
 
@@ -1009,18 +1060,22 @@ fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) -> Vec<auto
     entries
 }
 
-fn parse_audit_findings(values: &[String]) -> homeboy::Result<Vec<homeboy::code_audit::AuditFinding>> {
+fn parse_audit_findings(
+    values: &[String],
+) -> homeboy::Result<Vec<homeboy::code_audit::AuditFinding>> {
     values
         .iter()
         .map(|value| {
-            value.parse::<homeboy::code_audit::AuditFinding>().map_err(|_| {
-                homeboy::Error::validation_invalid_argument(
-                    "kind",
-                    format!("Unknown audit finding kind: {}", value),
-                    None,
-                    None,
-                )
-            })
+            value
+                .parse::<homeboy::code_audit::AuditFinding>()
+                .map_err(|_| {
+                    homeboy::Error::validation_invalid_argument(
+                        "kind",
+                        format!("Unknown audit finding kind: {}", value),
+                        None,
+                        None,
+                    )
+                })
         })
         .collect()
 }
@@ -1033,7 +1088,11 @@ fn analyze_stage_overlaps(stages: &[CiStageSummary]) -> Vec<CiStageOverlap> {
             continue;
         }
 
-        let later_files: BTreeSet<&str> = later_stage.changed_files.iter().map(String::as_str).collect();
+        let later_files: BTreeSet<&str> = later_stage
+            .changed_files
+            .iter()
+            .map(String::as_str)
+            .collect();
 
         for earlier_stage in stages.iter().take(later_index) {
             if earlier_stage.changed_files.is_empty() {
@@ -1068,7 +1127,10 @@ fn analyze_stage_overlaps(stages: &[CiStageSummary]) -> Vec<CiStageOverlap> {
 
 fn summarize_plan_totals(stages: &[CiStageSummary], total_files_selected: usize) -> CiPlanTotals {
     CiPlanTotals {
-        stages_with_proposals: stages.iter().filter(|stage| stage.fixes_proposed > 0).count(),
+        stages_with_proposals: stages
+            .iter()
+            .filter(|stage| stage.fixes_proposed > 0)
+            .count(),
         total_fixes_proposed: stages.iter().map(|stage| stage.fixes_proposed).sum(),
         total_files_selected,
     }
