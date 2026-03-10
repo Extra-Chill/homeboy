@@ -111,12 +111,6 @@ pub enum ExtensionCapability {
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolvedExtensionCommand {
-    pub extension_id: String,
-    pub script_path: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct ExtensionExecutionContext {
     pub component: Component,
     pub capability: ExtensionCapability,
@@ -247,13 +241,12 @@ pub fn resolve_extension_for_capability(
     }
 }
 
-pub fn resolve_extension_command(
+pub fn resolve_execution_context(
     component: &Component,
     capability: ExtensionCapability,
-) -> Result<ResolvedExtensionCommand> {
+) -> Result<ExtensionExecutionContext> {
     let extension_id = resolve_extension_for_capability(component, capability)?;
     let manifest = load_extension(&extension_id)?;
-
     let script_path = match capability {
         ExtensionCapability::Lint => manifest.lint_script(),
         ExtensionCapability::Test => manifest.test_script(),
@@ -273,25 +266,14 @@ pub fn resolve_extension_command(
         )
     })?;
 
-    Ok(ResolvedExtensionCommand {
-        extension_id,
-        script_path,
-    })
-}
-
-pub fn resolve_execution_context(
-    component: &Component,
-    capability: ExtensionCapability,
-) -> Result<ExtensionExecutionContext> {
-    let resolved = resolve_extension_command(component, capability)?;
-    let extension_path = extension_path(&resolved.extension_id);
+    let extension_path = extension_path(&extension_id);
 
     if !extension_path.exists() {
         return Err(Error::validation_invalid_argument(
             "extension",
             format!(
                 "Extension '{}' not found in ~/.config/homeboy/extensions/",
-                resolved.extension_id
+                extension_id
             ),
             None,
             None,
@@ -301,21 +283,11 @@ pub fn resolve_execution_context(
     Ok(ExtensionExecutionContext {
         component: component.clone(),
         capability,
-        extension_id: resolved.extension_id.clone(),
+        extension_id: extension_id.clone(),
         extension_path,
-        script_path: resolved.script_path,
-        settings: extract_component_extension_settings(component, &resolved.extension_id),
+        script_path,
+        settings: extract_component_extension_settings(component, &extension_id),
     })
-}
-
-pub fn resolve_lint_script(component: &Component) -> Result<String> {
-    resolve_extension_command(component, ExtensionCapability::Lint)
-        .map(|resolved| resolved.script_path)
-}
-
-pub fn resolve_test_script(component: &Component) -> Result<String> {
-    resolve_extension_command(component, ExtensionCapability::Test)
-        .map(|resolved| resolved.script_path)
 }
 
 /// Run a extension's fingerprint script on file content.

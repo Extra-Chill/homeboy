@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_lint_script() {
+    fn test_resolve_lint_command() {
         let component =
             Component::new("test".to_string(), "/tmp".to_string(), "".to_string(), None);
         let result = resolve_lint_command(&component);

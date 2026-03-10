@@ -48,10 +48,9 @@ impl ResolvedBuildCommand {
 /// the extension wins and a warning is emitted.
 pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBuildCommand> {
     // 1. Check exactly one build-capable extension for bundled script or local script patterns
-    if let Ok(extension_id) =
-        extension::resolve_extension_for_capability(component, ExtensionCapability::Build)
+    if let Ok(context) = extension::resolve_execution_context(component, ExtensionCapability::Build)
     {
-        let context = extension::resolve_execution_context(component, ExtensionCapability::Build)?;
+        let extension_id = context.extension_id.clone();
         let extension = extension::load_extension(&extension_id)?;
         if let Some(build) = &extension.build {
             let bundled = build
