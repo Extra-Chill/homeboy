@@ -51,6 +51,34 @@ pub struct ScopedExtensionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CommandScopeConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScopeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults: Option<CommandScopeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<CommandScopeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lint: Option<CommandScopeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<CommandScopeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refactor: Option<CommandScopeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy: Option<CommandScopeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<CommandScopeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet: Option<CommandScopeConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(from = "RawComponent", into = "RawComponent")]
 pub struct Component {
     pub id: String,
@@ -74,6 +102,7 @@ pub struct Component {
     pub auto_cleanup: bool,
     pub docs_dir: Option<String>,
     pub docs_dirs: Vec<String>,
+    pub scopes: Option<ScopeConfig>,
 }
 
 /// Raw JSON shape for Component — handles backward-compatible deserialization
@@ -129,6 +158,8 @@ struct RawComponent {
     docs_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     docs_dirs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scopes: Option<ScopeConfig>,
 }
 
 /// Insert legacy commands into hooks map if the event key doesn't already exist.
@@ -173,6 +204,7 @@ impl From<RawComponent> for Component {
             auto_cleanup: raw.auto_cleanup,
             docs_dir: raw.docs_dir,
             docs_dirs: raw.docs_dirs,
+            scopes: raw.scopes,
         }
     }
 }
@@ -202,6 +234,7 @@ impl From<Component> for RawComponent {
             auto_cleanup: c.auto_cleanup,
             docs_dir: c.docs_dir,
             docs_dirs: c.docs_dirs,
+            scopes: c.scopes,
         }
     }
 }
@@ -268,6 +301,7 @@ impl Component {
             auto_cleanup: false,
             docs_dir: None,
             docs_dirs: Vec::new(),
+            scopes: None,
         }
     }
 }

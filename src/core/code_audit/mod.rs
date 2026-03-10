@@ -603,7 +603,13 @@ fn detect_doc_drift(root: &Path, component_id: &str) -> Vec<Finding> {
         return findings;
     };
 
-    let doc_files = docs_audit::find_doc_files(&docs_path, None);
+    let doc_excludes = if let Ok(comp) = component::load(component_id) {
+        crate::scope::resolve_component_scope(&comp, crate::scope::ScopeCommand::Audit).exclude
+    } else {
+        Vec::new()
+    };
+
+    let doc_files = docs_audit::find_doc_files(&docs_path, &doc_excludes);
     if doc_files.is_empty() {
         return findings;
     }

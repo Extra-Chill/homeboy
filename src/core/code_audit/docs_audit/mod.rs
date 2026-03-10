@@ -21,7 +21,7 @@ pub use verify::VerifyResult;
 
 use regex::Regex;
 
-use crate::{component, extension, git, utils::is_zero, Result};
+use crate::{component, extension, git, scope, utils::is_zero, Result};
 
 /// A doc that needs content review due to referenced files changing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -142,7 +142,7 @@ pub fn audit_path(
     let docs_dirs = vec![docs_dir.to_string()];
     let docs_path = source_path.join(docs_dir);
 
-    let doc_files = find_doc_files(&docs_path, None);
+    let doc_files = find_doc_files(&docs_path, &[]);
     let docs_scanned = doc_files.len();
 
     let mut all_claims = Vec::new();
@@ -178,7 +178,7 @@ pub fn audit_path(
     let priority_docs = build_priority_docs(&tasks, &changed_files);
     let broken_references = extract_broken_references(&tasks, &doc_contents);
 
-    let feature_result = detect_features(&[], source_path, &docs_dirs, None, &HashMap::new());
+    let feature_result = detect_features(&[], source_path, &docs_dirs, &[], &HashMap::new());
 
     let docs_with_issues: HashSet<_> = priority_docs
         .iter()
@@ -236,9 +236,7 @@ pub fn audit_component(
     // Primary docs path (first dir) for claim verification and priority docs
     let docs_path = source_path.join(&docs_dirs[0]);
 
-    // Get changelog target to exclude from audit (historical references are expected).
-    // Default to CHANGELOG.md since changelogs inherently contain historical paths.
-    let changelog_exclude = comp.changelog_target.as_deref().or(Some("CHANGELOG.md"));
+    let effective_scope = scope::resolve_component_scope(&comp, scope::ScopeCommand::Audit);
 
     // Collect ignore patterns from all linked extensions
     let ignore_patterns = collect_extension_ignore_patterns(&comp);
@@ -247,7 +245,7 @@ pub fn audit_component(
     let feature_patterns = collect_extension_feature_patterns(&comp);
 
     // Find all documentation files (excluding changelog)
-    let doc_files = find_doc_files(&docs_path, changelog_exclude);
+    let doc_files = find_doc_files(&docs_path, &effective_scope.exclude);
     let docs_scanned = doc_files.len();
 
     // Extract claims from all docs (keep content for context extraction)
@@ -285,7 +283,7 @@ pub fn audit_component(
         &feature_patterns,
         source_path,
         &docs_dirs,
-        changelog_exclude,
+        &effective_scope.exclude,
         &context_rules,
     );
 
@@ -323,27 +321,26 @@ pub fn audit_component(
 
 /// Find all markdown files in the docs directory.
 ///
-/// Excludes the changelog file since changelogs contain historical references
-/// to file paths that may no longer exist. Uses `changelog_target` from the
-/// component config if set, otherwise defaults to excluding `CHANGELOG.md`.
-pub(crate) fn find_doc_files(docs_path: &Path, exclude_changelog: Option<&str>) -> Vec<String> {
+/// Excludes configured doc targets using file-name matching (case-insensitive).
+pub(crate) fn find_doc_files(docs_path: &Path, excluded_targets: &[String]) -> Vec<String> {
     let mut docs = Vec::new();
 
     if !docs_path.exists() {
         return docs;
     }
 
-    // Extract changelog filename for comparison
-    let changelog_filename = exclude_changelog
-        .and_then(|p| Path::new(p).file_name())
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_lowercase());
+    let excluded_filenames: std::collections::HashSet<String> = excluded_targets
+        .iter()
+        .filter_map(|p| Path::new(p).file_name())
+        .filter_map(|n| n.to_str())
+        .map(|s| s.to_lowercase())
+        .collect();
 
     fn scan_docs(
         dir: &Path,
         prefix: &str,
         docs: &mut Vec<String>,
-        changelog_filename: &Option<String>,
+        excluded_filenames: &std::collections::HashSet<String>,
     ) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -355,11 +352,8 @@ pub(crate) fn find_doc_files(docs_path: &Path, exclude_changelog: Option<&str>) 
                 }
 
                 if path.is_file() && name.ends_with(".md") {
-                    // Skip changelog file if configured
-                    if let Some(changelog) = changelog_filename {
-                        if name.to_lowercase() == *changelog {
-                            continue;
-                        }
+                    if excluded_filenames.contains(&name.to_lowercase()) {
+                        continue;
                     }
 
                     let relative = if prefix.is_empty() {
@@ -374,13 +368,13 @@ pub(crate) fn find_doc_files(docs_path: &Path, exclude_changelog: Option<&str>) 
                     } else {
                         format!("{}/{}", prefix, name)
                     };
-                    scan_docs(&path, &new_prefix, docs, changelog_filename);
+                    scan_docs(&path, &new_prefix, docs, excluded_filenames);
                 }
             }
         }
     }
 
-    scan_docs(docs_path, "", &mut docs, &changelog_filename);
+    scan_docs(docs_path, "", &mut docs, &excluded_filenames);
     docs.sort();
     docs
 }
@@ -824,7 +818,7 @@ fn detect_features(
     feature_patterns: &[String],
     source_path: &Path,
     docs_dirs: &[String],
-    changelog_exclude: Option<&str>,
+    excluded_targets: &[String],
     context_rules: &HashMap<String, extension::FeatureContextRule>,
 ) -> FeatureDetectionResult {
     let empty = FeatureDetectionResult {
@@ -853,7 +847,7 @@ fn detect_features(
 
     for docs_dir in docs_dirs {
         let docs_path = source_path.join(docs_dir);
-        let doc_files = find_doc_files(&docs_path, changelog_exclude);
+        let doc_files = find_doc_files(&docs_path, excluded_targets);
         for f in &doc_files {
             if let Ok(content) = fs::read_to_string(docs_path.join(f)) {
                 all_doc_parts.push(content);
@@ -1269,7 +1263,7 @@ index 111222..333444 100644
             &patterns,
             source_path,
             &["docs".to_string()],
-            None,
+            &[],
             &HashMap::new(),
         );
 
@@ -1284,13 +1278,7 @@ index 111222..333444 100644
     #[test]
     fn test_detect_features_empty_when_no_patterns() {
         let dir = tempfile::tempdir().unwrap();
-        let result = detect_features(
-            &[],
-            dir.path(),
-            &["docs".to_string()],
-            None,
-            &HashMap::new(),
-        );
+        let result = detect_features(&[], dir.path(), &["docs".to_string()], &[], &HashMap::new());
         assert_eq!(result.total, 0);
         assert!(result.undocumented.is_empty());
     }
@@ -1314,7 +1302,7 @@ index 111222..333444 100644
             &patterns,
             source_path,
             &["docs".to_string()],
-            None,
+            &[],
             &HashMap::new(),
         );
         assert_eq!(result.total, 0);
@@ -1345,7 +1333,7 @@ index 111222..333444 100644
             &patterns,
             source_path,
             &["docs".to_string()],
-            None,
+            &[],
             &HashMap::new(),
         );
         assert_eq!(result.total, 1);
@@ -1375,7 +1363,7 @@ index 111222..333444 100644
             &patterns,
             source_path,
             &["docs".to_string()],
-            None,
+            &[],
             &HashMap::new(),
         );
 
@@ -1406,7 +1394,7 @@ index 111222..333444 100644
             &patterns,
             source_path,
             &["docs".to_string()],
-            None,
+            &[],
             &HashMap::new(),
         );
         assert_eq!(result.total, 0);
@@ -1438,7 +1426,7 @@ index 111222..333444 100644
             &patterns,
             source_path,
             &["docs".to_string()],
-            None,
+            &[],
             &HashMap::new(),
         );
         assert_eq!(result.total, 1); // Deduplicated
@@ -1471,7 +1459,7 @@ index 111222..333444 100644
             &patterns,
             source_path,
             &["docs".to_string()],
-            None,
+            &[],
             &HashMap::new(),
         );
 
@@ -1512,7 +1500,7 @@ index 111222..333444 100644
             &patterns,
             source_path,
             &["docs".to_string()],
-            None,
+            &[],
             &HashMap::new(),
         );
         assert_eq!(result.total, 2);
@@ -1523,7 +1511,7 @@ index 111222..333444 100644
             &patterns,
             source_path,
             &["docs".to_string(), "wiki".to_string()],
-            None,
+            &[],
             &HashMap::new(),
         );
         assert_eq!(result.total, 2);
@@ -1596,7 +1584,7 @@ index 111222..333444 100644
     }
 
     #[test]
-    fn test_find_doc_files_excludes_changelog_by_default() {
+    fn test_find_doc_files_excludes_configured_targets() {
         let dir = tempfile::tempdir().unwrap();
         let docs_path = dir.path();
 
@@ -1608,8 +1596,7 @@ index 111222..333444 100644
         .unwrap();
         fs::write(docs_path.join("api.md"), "# API\n").unwrap();
 
-        // With default CHANGELOG.md exclusion
-        let files = find_doc_files(docs_path, Some("CHANGELOG.md"));
+        let files = find_doc_files(docs_path, &["CHANGELOG.md".to_string()]);
         assert_eq!(files.len(), 2);
         assert!(files.contains(&"api.md".to_string()));
         assert!(files.contains(&"guide.md".to_string()));
@@ -1617,15 +1604,14 @@ index 111222..333444 100644
     }
 
     #[test]
-    fn test_find_doc_files_changelog_exclusion_case_insensitive() {
+    fn test_find_doc_files_exclusion_is_case_insensitive() {
         let dir = tempfile::tempdir().unwrap();
         let docs_path = dir.path();
 
         fs::write(docs_path.join("guide.md"), "# Guide\n").unwrap();
         fs::write(docs_path.join("changelog.md"), "# Changes\n").unwrap();
 
-        // CHANGELOG.md target should match lowercase changelog.md
-        let files = find_doc_files(docs_path, Some("CHANGELOG.md"));
+        let files = find_doc_files(docs_path, &["CHANGELOG.md".to_string()]);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], "guide.md");
     }
@@ -1639,13 +1625,13 @@ index 111222..333444 100644
         fs::write(docs_path.join("CHANGELOG.md"), "# Changelog\n").unwrap();
 
         // Without exclusion, changelog should be included
-        let files = find_doc_files(docs_path, None);
+        let files = find_doc_files(docs_path, &[]);
         assert_eq!(files.len(), 2);
         assert!(files.iter().any(|f| f == "CHANGELOG.md"));
     }
 
     #[test]
-    fn test_find_doc_files_custom_changelog_target() {
+    fn test_find_doc_files_custom_excluded_target() {
         let dir = tempfile::tempdir().unwrap();
         let docs_path = dir.path();
 
@@ -1653,8 +1639,7 @@ index 111222..333444 100644
         fs::write(docs_path.join("CHANGELOG.md"), "# Changelog\n").unwrap();
         fs::write(docs_path.join("CHANGES.md"), "# Changes\n").unwrap();
 
-        // Custom target should exclude CHANGES.md, not CHANGELOG.md
-        let files = find_doc_files(docs_path, Some("CHANGES.md"));
+        let files = find_doc_files(docs_path, &["CHANGES.md".to_string()]);
         assert_eq!(files.len(), 2);
         assert!(files.contains(&"CHANGELOG.md".to_string()));
         assert!(files.contains(&"guide.md".to_string()));
