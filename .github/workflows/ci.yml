@@ -90,7 +90,7 @@ jobs:
           extension: rust
           component: homeboy
           commands: audit
-          autofix: 'false'
+          autofix: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Stage 2: Lint ──
@@ -125,7 +125,7 @@ jobs:
           extension: rust
           component: homeboy
           commands: lint
-          autofix: 'false'
+          autofix: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Stage 3: Test ──
@@ -160,7 +160,7 @@ jobs:
           extension: rust
           component: homeboy
           commands: test
-          autofix: 'false'
+          autofix: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Stage 4: Auto-refactor ──

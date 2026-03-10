@@ -194,7 +194,7 @@ jobs:
           component: homeboy
           commands: audit
           auto-issue: 'true'
-          autofix: 'false'
+          autofix: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   gate-lint:
@@ -230,7 +230,7 @@ jobs:
           extension: rust
           component: homeboy
           commands: lint
-          autofix: 'false'
+          autofix: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   gate-test:
@@ -266,7 +266,7 @@ jobs:
           extension: rust
           component: homeboy
           commands: test
-          autofix: 'false'
+          autofix: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   gate-refactor:
