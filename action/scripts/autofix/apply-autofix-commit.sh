@@ -139,6 +139,7 @@ fi
 # Capture autofix summary: file count and which fix commands ran
 AUTOFIX_FILE_COUNT=$(git diff --cached --name-only | wc -l | xargs)
 AUTOFIX_FIX_TYPES=""
+AUTOFIX_FINDING_TYPES=""
 for FIX_CMD in "${FIX_ARRAY[@]}"; do
   FIX_CMD=$(echo "${FIX_CMD}" | xargs)
   BASE=$(echo "${FIX_CMD}" | awk '{print $1}')
@@ -148,7 +149,19 @@ for FIX_CMD in "${FIX_ARRAY[@]}"; do
   AUTOFIX_FIX_TYPES+="${BASE}"
 done
 
-COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}")"
+if [ -n "${HOMEBOY_OUTPUT_DIR:-}" ] && [ -d "${HOMEBOY_OUTPUT_DIR}" ]; then
+  AUTOFIX_FINDING_TYPES="$(jq -r '
+    [
+      .. | .fix_summary? // empty | .rules? // empty | .[]? | .rule? // empty
+    ]
+    | map(select(type == "string" and length > 0))
+    | unique
+    | sort
+    | join(", ")
+  ' "${HOMEBOY_OUTPUT_DIR}"/*.json 2>/dev/null | tail -n 1)"
+fi
+
+COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_FINDING_TYPES}")"
 
 BOT_NAME="homeboy-ci[bot]"
 BOT_EMAIL="266378653+homeboy-ci[bot]@users.noreply.github.com"

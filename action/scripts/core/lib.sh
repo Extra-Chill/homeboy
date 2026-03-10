@@ -16,10 +16,14 @@ AUTOFIX_COMMIT_PREFIX="chore(ci): homeboy autofix"
 build_autofix_commit_message() {
   local fix_types="$1"
   local file_count="$2"
+  local finding_types="${3:-}"
 
   local subject="${AUTOFIX_COMMIT_PREFIX}"
   if [ -n "${fix_types}" ]; then
     subject="${subject} — ${fix_types}"
+  fi
+  if [ -n "${finding_types}" ]; then
+    subject="${subject} [${finding_types}]"
   fi
   subject="${subject} (${file_count} files)"
 
