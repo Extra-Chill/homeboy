@@ -28,7 +28,7 @@ pub(crate) fn is_source_file(path: &str, config: &TestMappingConfig) -> bool {
 }
 
 /// Check if a file path is within one of the configured test directories.
-pub fn is_test_file(path: &str, config: &TestMappingConfig) -> bool {
+pub(crate) fn is_test_file(path: &str, config: &TestMappingConfig) -> bool {
     config.test_dirs.iter().any(|dir| path.starts_with(dir))
 }
 

@@ -1,7 +1,9 @@
-//! Shared autofix outcome primitives.
+//! Shared detector-triggered refactor plumbing.
 //!
-//! Commands with `--fix` behavior can use this to return consistent status and
-//! next-step hints without reimplementing decision logic.
+//! Commands with `--fix` behavior can use this to return consistent status,
+//! next-step hints, and sidecar/result capture without reimplementing decision
+//! logic. The write path itself still belongs to refactor; this module is the
+//! shared transport/reporting layer used by detector commands.
 //!
 //! ## Extension fix results protocol
 //!
@@ -16,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutofixMode {
@@ -29,6 +31,19 @@ pub struct AutofixOutcome {
     pub status: String,
     pub rerun_recommended: bool,
     pub hints: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutofixSidecarFiles {
+    pub results_file: PathBuf,
+    pub plan_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppliedAutofixCapture {
+    pub files_modified: usize,
+    pub fix_results: Vec<FixApplied>,
+    pub fix_summary: Option<FixResultsSummary>,
 }
 
 pub fn standard_outcome(
@@ -68,6 +83,35 @@ pub fn standard_outcome(
         status,
         rerun_recommended,
         hints,
+    }
+}
+
+impl AutofixSidecarFiles {
+    pub fn for_apply() -> Self {
+        Self {
+            results_file: fix_results_temp_path(),
+            plan_file: None,
+        }
+    }
+
+    pub fn for_plan() -> Self {
+        Self {
+            results_file: fix_results_temp_path(),
+            plan_file: Some(fix_plan_temp_path()),
+        }
+    }
+
+    pub fn consume_fix_results(&self) -> Vec<FixApplied> {
+        let fix_results = read_fix_results(&self.results_file, self.plan_file.as_deref());
+        self.cleanup();
+        fix_results
+    }
+
+    pub fn cleanup(&self) {
+        let _ = std::fs::remove_file(&self.results_file);
+        if let Some(plan_file) = &self.plan_file {
+            let _ = std::fs::remove_file(plan_file);
+        }
     }
 }
 
@@ -141,6 +185,18 @@ pub fn parse_fix_plan_file(path: &Path) -> Vec<FixApplied> {
     parse_fix_results_file(path)
 }
 
+/// Read fix results, preferring a plan sidecar when present.
+pub fn read_fix_results(results_file: &Path, plan_file: Option<&Path>) -> Vec<FixApplied> {
+    if let Some(plan_file) = plan_file {
+        let planned_fix_results = parse_fix_plan_file(plan_file);
+        if !planned_fix_results.is_empty() {
+            return planned_fix_results;
+        }
+    }
+
+    parse_fix_results_file(results_file)
+}
+
 /// Summarize a list of fix results into aggregate counts.
 pub fn summarize_fix_results(fixes: &[FixApplied]) -> FixResultsSummary {
     use std::collections::{BTreeMap, HashSet};
@@ -162,6 +218,14 @@ pub fn summarize_fix_results(fixes: &[FixApplied]) -> FixResultsSummary {
         fixes_applied: fixes.len(),
         files_modified: files.len(),
         rules,
+    }
+}
+
+pub fn summarize_optional_fix_results(fixes: &[FixApplied]) -> Option<FixResultsSummary> {
+    if fixes.is_empty() {
+        None
+    } else {
+        Some(summarize_fix_results(fixes))
     }
 }
 
@@ -276,6 +340,33 @@ pub fn count_newly_changed(before: &HashSet<String>, after: &HashSet<String>) ->
     after.difference(before).count()
 }
 
+pub fn newly_changed_files(before: &HashSet<String>, after: &HashSet<String>) -> Vec<String> {
+    let mut changed: Vec<String> = after.difference(before).cloned().collect();
+    changed.sort();
+    changed
+}
+
+pub fn begin_applied_fix_capture(local_path: &str) -> crate::Result<HashSet<String>> {
+    changed_file_set(local_path)
+}
+
+pub fn finish_applied_fix_capture(
+    local_path: &str,
+    before_fix_files: &HashSet<String>,
+    sidecars: &AutofixSidecarFiles,
+) -> crate::Result<AppliedAutofixCapture> {
+    let after_fix_files = changed_file_set(local_path)?;
+    let files_modified = count_newly_changed(before_fix_files, &after_fix_files);
+    let fix_results = sidecars.consume_fix_results();
+    let fix_summary = summarize_optional_fix_results(&fix_results);
+
+    Ok(AppliedAutofixCapture {
+        files_modified,
+        fix_results,
+        fix_summary,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +376,45 @@ mod tests {
     fn parse_fix_results_missing_file() {
         let results = parse_fix_results_file(Path::new("/tmp/definitely-missing-fix-results.json"));
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn read_fix_results_prefers_plan_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let results_path = dir.path().join("fix-results.json");
+        let plan_path = dir.path().join("fix-plan.json");
+
+        std::fs::write(
+            &results_path,
+            r#"[{"file":"src/result.rs","rule":"result-rule"}]"#,
+        )
+        .expect("write results");
+        std::fs::write(&plan_path, r#"[{"file":"src/plan.rs","rule":"plan-rule"}]"#)
+            .expect("write plan");
+
+        let results = read_fix_results(&results_path, Some(&plan_path));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file, "src/plan.rs");
+        assert_eq!(results[0].rule, "plan-rule");
+    }
+
+    #[test]
+    fn read_fix_results_falls_back_to_results_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let results_path = dir.path().join("fix-results.json");
+        let plan_path = dir.path().join("fix-plan.json");
+
+        std::fs::write(
+            &results_path,
+            r#"[{"file":"src/result.rs","rule":"result-rule"}]"#,
+        )
+        .expect("write results");
+        std::fs::write(&plan_path, "[]").expect("write empty plan");
+
+        let results = read_fix_results(&results_path, Some(&plan_path));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file, "src/result.rs");
+        assert_eq!(results[0].rule, "result-rule");
     }
 
     #[test]
@@ -351,6 +481,11 @@ mod tests {
     }
 
     #[test]
+    fn summarize_optional_fix_results_returns_none_for_empty() {
+        assert!(summarize_optional_fix_results(&[]).is_none());
+    }
+
+    #[test]
     fn parse_fix_results_malformed_json_returns_empty() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("fix-results.json");
@@ -394,6 +529,21 @@ mod tests {
         ]);
 
         assert_eq!(count_newly_changed(&before, &after), 2);
+    }
+
+    #[test]
+    fn newly_changed_files_returns_sorted_difference() {
+        let before = HashSet::from(["src/b.rs".to_string()]);
+        let after = HashSet::from([
+            "src/c.rs".to_string(),
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+        ]);
+
+        assert_eq!(
+            newly_changed_files(&before, &after),
+            vec!["src/a.rs", "src/c.rs"]
+        );
     }
 
     #[test]

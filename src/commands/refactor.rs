@@ -18,11 +18,11 @@ pub struct RefactorArgs {
     #[command(flatten)]
     comp: Option<PositionalComponentArgs>,
 
-    /// Include a specific proposal source (repeatable): audit, lint, test
+    /// Include a specific proposal source (repeatable): audit, lint, test, all
     #[arg(long = "from", value_name = "SOURCE", action = clap::ArgAction::Append)]
     from: Vec<String>,
 
-    /// Include all known proposal sources
+    /// Include all known proposal sources (deprecated; prefer `--from all`)
     #[arg(long, default_value_t = false)]
     all: bool,
 
@@ -447,6 +447,8 @@ fn run_refactor_sources(
         only: only_findings,
         exclude: exclude_findings,
         settings: settings.to_vec(),
+        lint: homeboy::refactor::LintSourceOptions::default(),
+        test: homeboy::refactor::TestSourceOptions::default(),
         write,
     })?;
     let exit_code = if plan.files_modified > 0 { 1 } else { 0 };

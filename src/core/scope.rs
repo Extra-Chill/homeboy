@@ -60,7 +60,6 @@ fn builtin_scope_defaults(component: &Component, command: ScopeCommand) -> Effec
 
     effective
 }
-
 fn merge_scope(target: &mut EffectiveScope, scope: &CommandScopeConfig) {
     target.include.extend(scope.include.iter().cloned());
     target.exclude.extend(scope.exclude.iter().cloned());

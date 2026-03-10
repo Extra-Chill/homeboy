@@ -145,12 +145,15 @@ impl InsertionKind {
             Self::ImportAdd | Self::DocReferenceUpdate { .. } | Self::DocLineRemoval { .. } => {
                 FixSafetyTier::SafeAuto
             }
-            Self::MethodStub
-            | Self::RegistrationStub
+            Self::RegistrationStub
             | Self::ConstructorWithRegistration
             | Self::VisibilityChange { .. } => FixSafetyTier::SafeWithChecks,
-            Self::FunctionRemoval { .. } => FixSafetyTier::SafeWithChecks,
-            Self::TraitUse => FixSafetyTier::SafeWithChecks,
+            // Stub generation is useful for planning, but not trustworthy enough
+            // for unattended auto-apply. Keep it plan-only until it graduates.
+            Self::MethodStub => FixSafetyTier::PlanOnly,
+            // Duplicate-function rewrites still need stronger end-to-end guarantees
+            // before they belong in unattended refactor mode.
+            Self::FunctionRemoval { .. } | Self::TraitUse => FixSafetyTier::PlanOnly,
         }
     }
 }
@@ -1692,7 +1695,7 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
                     .unwrap_or("SharedTrait");
                 new_files.push(new_file(
                     AuditFinding::DuplicateFunction,
-                    FixSafetyTier::SafeWithChecks,
+                    FixSafetyTier::PlanOnly,
                     trait_file.to_string(),
                     trait_content.to_string(),
                     format!(

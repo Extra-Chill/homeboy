@@ -27,7 +27,27 @@ pub struct RefactorPlanRequest {
     pub only: Vec<crate::code_audit::AuditFinding>,
     pub exclude: Vec<crate::code_audit::AuditFinding>,
     pub settings: Vec<(String, String)>,
+    pub lint: LintSourceOptions,
+    pub test: TestSourceOptions,
     pub write: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LintSourceOptions {
+    pub selected_files: Option<Vec<String>>,
+    pub file: Option<String>,
+    pub glob: Option<String>,
+    pub errors_only: bool,
+    pub sniffs: Option<String>,
+    pub exclude_sniffs: Option<String>,
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TestSourceOptions {
+    pub selected_files: Option<Vec<String>>,
+    pub skip_lint: bool,
+    pub script_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +173,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 &request.component,
                 &working_root,
                 &request.settings,
+                &request.lint,
                 scoped_changed_files.as_deref(),
                 true,
             )?,
@@ -160,6 +181,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 &request.component,
                 &working_root,
                 &request.settings,
+                &request.test,
                 scoped_test_files.as_deref(),
                 true,
             )?,
@@ -252,6 +274,14 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
 
 pub fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
     let lowered: Vec<String> = sources.iter().map(|source| source.to_lowercase()).collect();
+
+    if lowered.iter().any(|source| source == "all") {
+        return Ok(KNOWN_PLAN_SOURCES
+            .iter()
+            .map(|source| source.to_string())
+            .collect());
+    }
+
     let unknown: Vec<String> = lowered
         .iter()
         .filter(|source| !KNOWN_PLAN_SOURCES.contains(&source.as_str()))
@@ -433,6 +463,7 @@ fn run_lint_stage(
     component: &Component,
     sandbox: &SandboxDir,
     settings: &[(String, String)],
+    options: &LintSourceOptions,
     changed_files: Option<&[String]>,
     plan_mode: bool,
 ) -> crate::Result<PlannedStage> {
@@ -448,15 +479,15 @@ fn run_lint_stage(
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    let fix_results_file = autofix::fix_results_temp_path();
-    let fix_plan_file = autofix::fix_plan_temp_path();
+    let fix_sidecars = autofix::AutofixSidecarFiles::for_plan();
     let before_fix = if plan_mode {
         Some(snapshot_tree(&sandbox_component.local_path)?)
     } else {
         None
     };
 
-    let effective_glob = if let Some(changed_files) = changed_files {
+    let selected_files = options.selected_files.as_deref().or(changed_files);
+    let effective_glob = if let Some(changed_files) = selected_files {
         if changed_files.is_empty() {
             None
         } else {
@@ -471,14 +502,19 @@ fn run_lint_stage(
             }
         }
     } else {
-        None
+        options.glob.clone()
     };
 
     extension::ExtensionRunner::for_context(resolved)
         .component(sandbox_component.clone())
         .settings(settings)
         .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1")
+        .env_opt("HOMEBOY_LINT_FILE", &options.file)
         .env_opt("HOMEBOY_LINT_GLOB", &effective_glob)
+        .env_if(options.errors_only, "HOMEBOY_ERRORS_ONLY", "1")
+        .env_opt("HOMEBOY_SNIFFS", &options.sniffs)
+        .env_opt("HOMEBOY_EXCLUDE_SNIFFS", &options.exclude_sniffs)
+        .env_opt("HOMEBOY_CATEGORY", &options.category)
         .env(
             "HOMEBOY_LINT_FINDINGS_FILE",
             &findings_file.to_string_lossy(),
@@ -486,12 +522,16 @@ fn run_lint_stage(
         .env_if(
             plan_mode,
             "HOMEBOY_FIX_PLAN_FILE",
-            &fix_plan_file.to_string_lossy(),
+            &fix_sidecars
+                .plan_file
+                .as_ref()
+                .expect("plan sidecar initialized")
+                .to_string_lossy(),
         )
         .env_if(
             plan_mode,
             "HOMEBOY_FIX_RESULTS_FILE",
-            &fix_results_file.to_string_lossy(),
+            &fix_sidecars.results_file.to_string_lossy(),
         )
         .run()?;
 
@@ -505,16 +545,9 @@ fn run_lint_stage(
         Vec::new()
     };
 
-    let planned_fix_results = autofix::parse_fix_plan_file(&fix_plan_file);
-    let fix_results = if planned_fix_results.is_empty() {
-        autofix::parse_fix_results_file(&fix_results_file)
-    } else {
-        planned_fix_results
-    };
+    let fix_results = fix_sidecars.consume_fix_results();
     let fixes_proposed = fix_results.len();
     let lint_findings = lint_baseline::parse_findings_file(&findings_file).unwrap_or_default();
-    let _ = std::fs::remove_file(&fix_results_file);
-    let _ = std::fs::remove_file(&fix_plan_file);
     let _ = std::fs::remove_file(&findings_file);
 
     Ok(PlannedStage {
@@ -527,11 +560,7 @@ fn run_lint_stage(
             files_modified: changed_files.len(),
             detected_findings: Some(lint_findings.len()),
             changed_files,
-            fix_summary: if fix_results.is_empty() {
-                None
-            } else {
-                Some(autofix::summarize_fix_results(&fix_results))
-            },
+            fix_summary: autofix::summarize_optional_fix_results(&fix_results),
             warnings: Vec::new(),
         },
         fix_results,
@@ -542,6 +571,7 @@ fn run_test_stage(
     component: &Component,
     sandbox: &SandboxDir,
     settings: &[(String, String)],
+    options: &TestSourceOptions,
     changed_test_files: Option<&[String]>,
     plan_mode: bool,
 ) -> crate::Result<PlannedStage> {
@@ -553,8 +583,7 @@ fn run_test_stage(
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    let fix_results_file = autofix::fix_results_temp_path();
-    let fix_plan_file = autofix::fix_plan_temp_path();
+    let fix_sidecars = autofix::AutofixSidecarFiles::for_plan();
     let before_fix = if plan_mode {
         Some(snapshot_tree(&sandbox_component.local_path)?)
     } else {
@@ -564,23 +593,33 @@ fn run_test_stage(
     let mut runner = extension::ExtensionRunner::for_context(resolved)
         .component(sandbox_component.clone())
         .settings(settings)
+        .env_if(options.skip_lint, "HOMEBOY_SKIP_LINT", "1")
         .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy())
         .env_if(
             plan_mode,
             "HOMEBOY_FIX_PLAN_FILE",
-            &fix_plan_file.to_string_lossy(),
+            &fix_sidecars
+                .plan_file
+                .as_ref()
+                .expect("plan sidecar initialized")
+                .to_string_lossy(),
         )
         .env_if(
             plan_mode,
             "HOMEBOY_FIX_RESULTS_FILE",
-            &fix_results_file.to_string_lossy(),
+            &fix_sidecars.results_file.to_string_lossy(),
         )
         .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1");
 
-    if let Some(changed_test_files) = changed_test_files {
+    let selected_test_files = options.selected_files.as_deref().or(changed_test_files);
+    if let Some(changed_test_files) = selected_test_files {
         if !changed_test_files.is_empty() {
             runner = runner.env("HOMEBOY_CHANGED_TEST_FILES", &changed_test_files.join("\n"));
         }
+    }
+
+    if !options.script_args.is_empty() {
+        runner = runner.script_args(&options.script_args);
     }
 
     runner.run()?;
@@ -595,15 +634,8 @@ fn run_test_stage(
         Vec::new()
     };
 
-    let planned_fix_results = autofix::parse_fix_plan_file(&fix_plan_file);
-    let fix_results = if planned_fix_results.is_empty() {
-        autofix::parse_fix_results_file(&fix_results_file)
-    } else {
-        planned_fix_results
-    };
+    let fix_results = fix_sidecars.consume_fix_results();
     let fixes_proposed = fix_results.len();
-    let _ = std::fs::remove_file(&fix_results_file);
-    let _ = std::fs::remove_file(&fix_plan_file);
     let _ = std::fs::remove_file(&results_file);
 
     Ok(PlannedStage {
@@ -616,11 +648,7 @@ fn run_test_stage(
             files_modified: changed_files.len(),
             detected_findings: None,
             changed_files,
-            fix_summary: if fix_results.is_empty() {
-                None
-            } else {
-                Some(autofix::summarize_fix_results(&fix_results))
-            },
+            fix_summary: autofix::summarize_optional_fix_results(&fix_results),
             warnings: Vec::new(),
         },
         fix_results,
