@@ -495,68 +495,6 @@ function detect_ability_callbacks($content, $filepath, &$map) {
 }
 
 /**
- * @deprecated Legacy unused helper block kept temporarily for safe follow-up removal.
- * Detect explicit class-based REST callback registrations.
- */
-function legacy_unused_detect_explicit_rest_route_class_callbacks($content, $filepath, &$map) {
-    detect_explicit_class_callbacks(
-        $content,
-        $filepath,
-        $map,
-        '~[\'"](?:callback|permission_callback|validate_callback|sanitize_callback)[\'"]\s*=>\s*(?:array\s*\(|\[)\s*([\w\\]+)::class\s*,\s*[\'"]([\w]+)[\'"]\s*(?:\)|\])~',
-        'rest_api'
-    );
-}
-
-/**
- * @deprecated Legacy unused helper block kept temporarily for safe follow-up removal.
- * Detect explicit class-based hook callback registrations.
- */
-function legacy_unused_detect_explicit_hook_class_callbacks($content, $filepath, &$map) {
-    detect_explicit_class_callbacks(
-        $content,
-        $filepath,
-        $map,
-        '~add_(?:filter|action)\s*\(\s*[\'"][\w]+[\'"]\s*,\s*(?:array\s*\(|\[)\s*([\w\\]+)::class\s*,\s*[\'"]([\w]+)[\'"]\s*(?:\)|\])~',
-        'hook'
-    );
-}
-
-/**
- * @deprecated Legacy unused helper block kept temporarily for safe follow-up removal.
- * Detect explicit class-based ability callback registrations.
- */
-function legacy_unused_detect_explicit_ability_class_callbacks($content, $filepath, &$map) {
-    detect_explicit_class_callbacks(
-        $content,
-        $filepath,
-        $map,
-        '~[\'"]execute_callback[\'"]\s*=>\s*(?:array\s*\(|\[)\s*([\w\\]+)::class\s*,\s*[\'"]([\w]+)[\'"]\s*(?:\)|\])~',
-        'ability'
-    );
-}
-
-/**
- * @deprecated Legacy unused helper block kept temporarily for safe follow-up removal.
- * Detect and register callbacks that explicitly reference ClassName::class.
- */
-function legacy_unused_detect_explicit_class_callbacks($content, $filepath, &$map, $pattern, $type) {
-    $pattern = str_replace(
-        '([\\w\\\\]+)',
-        '([A-Za-z_\\\\][A-Za-z0-9_\\\\]*)',
-        $pattern
-    );
-
-    if (!preg_match_all($pattern, $content, $matches, PREG_SET_ORDER)) {
-        return;
-    }
-
-    foreach ($matches as $m) {
-        $map[$m[1] . '::' . $m[2]] = ['type' => $type, 'file' => $filepath];
-    }
-}
-
-/**
  * Detect explicit class-based REST callback registrations.
  */
 function detect_explicit_rest_route_class_callbacks_safe($content, $filepath, &$map) {
