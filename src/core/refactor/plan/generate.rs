@@ -218,6 +218,94 @@ pub(crate) fn generate_test_file_candidate(
     })
 }
 
+fn extract_source_file_from_comment(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("// Source: ")
+            .or_else(|| line.trim().strip_prefix("* Source: "))
+            .or_else(|| line.trim().strip_prefix("// Source: "))
+            .map(|value| value.trim().to_string())
+    })
+}
+
+pub(crate) fn mapping_from_source_comment(content: &str) -> Option<(String, String)> {
+    let source_file = extract_source_file_from_comment(content)?;
+    let expected_test_path = derive_expected_test_file_path(Path::new("."), &source_file)
+        .or_else(|| fallback_expected_test_path(&source_file))?;
+
+    Some((source_file, expected_test_path))
+}
+
+fn fallback_expected_test_path(source_file: &str) -> Option<String> {
+    let source_path = Path::new(source_file);
+    let ext = source_path.extension()?.to_str()?;
+    let name = source_path.file_stem()?.to_str()?;
+    let dir = source_path
+        .parent()
+        .and_then(|parent| parent.strip_prefix("src").ok())
+        .map(|parent| parent.to_string_lossy().trim_start_matches('/').to_string())
+        .unwrap_or_default();
+
+    Some(if dir.is_empty() {
+        format!("tests/{}_test.{}", name, ext)
+    } else {
+        format!("tests/{}/{}_test.{}", dir, name, ext)
+    })
+}
+
+pub(crate) fn extract_source_file_from_test_stub(description: &str) -> Option<String> {
+    let marker = " for '";
+    let start = description.find(marker)? + marker.len();
+    let rest = &description[start..];
+    let end = rest.find("::")?;
+    Some(rest[..end].to_string())
+}
+
+pub(crate) fn extract_expected_test_method_from_fix_description(
+    description: &str,
+) -> Option<String> {
+    let marker = "Scaffold missing test method '";
+    let start = description.find(marker)? + marker.len();
+    let rest = &description[start..];
+    let end = rest.find('"').or_else(|| rest.find('\''))?;
+    Some(rest[..end].to_string())
+}
+
+pub(crate) fn test_method_exists_in_file(
+    root: &Path,
+    test_file: &str,
+    expected_test_method: &str,
+    new_files: &[fixer::NewFile],
+) -> bool {
+    if let Some(new_file) = new_files.iter().find(|new_file| new_file.file == test_file) {
+        return new_file.content.contains(&expected_test_method);
+    }
+
+    let abs_path = root.join(test_file);
+    match std::fs::read_to_string(&abs_path) {
+        Ok(content) => content.contains(expected_test_method),
+        Err(_) => false,
+    }
+}
+
+pub(crate) fn derive_expected_test_file_path(root: &Path, source_file: &str) -> Option<String> {
+    let ext = Path::new(source_file).extension()?.to_str()?;
+    let manifest = crate::extension::find_extension_for_file_ext(ext, "audit")?;
+    let mapping = manifest.test_mapping()?;
+
+    let mut path = crate::code_audit::test_mapping::source_to_test_path(source_file, mapping)?;
+    if path.starts_with('/') {
+        path = path.trim_start_matches('/').to_string();
+    }
+
+    let abs = root.join(&path);
+    if abs.components().count() == 0 {
+        return None;
+    }
+
+    Some(path)
+}
+
 fn generate_test_file_from_scaffold(
     root: &Path,
     test_file: &str,
