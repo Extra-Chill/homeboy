@@ -374,16 +374,12 @@ fn syntax_shape_check(content: &str, insertion: &Insertion, language: &Language)
     };
 
     let parsed_ok = match language {
-        Language::Php => {
-            !crate::code_audit::fixer::extract_php_signatures(content).is_empty()
-                || content.contains("class ")
-        }
-        Language::Rust => {
-            !crate::code_audit::fixer::extract_rust_signatures(content).is_empty()
-                || content.contains("fn ")
-        }
+        Language::Php => !crate::code_audit::fixer::extract_signatures(content, language).is_empty()
+            || content.contains("class "),
+        Language::Rust => !crate::code_audit::fixer::extract_signatures(content, language).is_empty()
+            || content.contains("fn "),
         Language::JavaScript | Language::TypeScript => {
-            !crate::code_audit::fixer::extract_js_signatures(content).is_empty()
+            !crate::code_audit::fixer::extract_signatures(content, language).is_empty()
                 || content.contains("function ")
         }
         Language::Unknown => true,

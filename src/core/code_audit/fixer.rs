@@ -385,73 +385,7 @@ pub(crate) struct MethodSignature {
 
 /// Extract full method signatures from a source file.
 pub(crate) fn extract_signatures(content: &str, language: &Language) -> Vec<MethodSignature> {
-    match language {
-        Language::Php => extract_php_signatures(content),
-        Language::Rust => extract_rust_signatures(content),
-        Language::JavaScript | Language::TypeScript => extract_js_signatures(content),
-        Language::Unknown => vec![],
-    }
-}
-
-pub(crate) fn extract_php_signatures(content: &str) -> Vec<MethodSignature> {
-    let re = Regex::new(
-        r"(?m)^\s*((?:public|protected|private)\s+(?:static\s+)?function\s+(\w+)\s*\([^)]*\)(?:\s*:\s*[\w\\|?]+)?)",
-    )
-    .unwrap();
-
-    re.captures_iter(content)
-        .map(|cap| MethodSignature {
-            name: cap[2].to_string(),
-            signature: cap[1].trim().to_string(),
-            language: Language::Php,
-        })
-        .collect()
-}
-
-pub(crate) fn extract_rust_signatures(content: &str) -> Vec<MethodSignature> {
-    let re = Regex::new(
-        r"(?m)^\s*(pub(?:\(crate\))?\s+(?:async\s+)?fn\s+(\w+)\s*\([^)]*\)(?:\s*->\s*[^\{]+)?)",
-    )
-    .unwrap();
-
-    re.captures_iter(content)
-        .map(|cap| MethodSignature {
-            name: cap[2].to_string(),
-            signature: cap[1].trim().to_string(),
-            language: Language::Rust,
-        })
-        .collect()
-}
-
-pub(crate) fn extract_js_signatures(content: &str) -> Vec<MethodSignature> {
-    // Named function declarations
-    let fn_re =
-        Regex::new(r"(?m)^\s*((?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\([^)]*\))").unwrap();
-    // Class methods
-    let method_re = Regex::new(r"(?m)^\s+((?:async\s+)?(\w+)\s*\([^)]*\))\s*\{").unwrap();
-
-    let mut sigs: Vec<MethodSignature> = fn_re
-        .captures_iter(content)
-        .map(|cap| MethodSignature {
-            name: cap[2].to_string(),
-            signature: cap[1].trim().to_string(),
-            language: Language::JavaScript,
-        })
-        .collect();
-
-    let skip = ["if", "for", "while", "switch", "catch", "return"];
-    for cap in method_re.captures_iter(content) {
-        let name = cap[2].to_string();
-        if !skip.contains(&name.as_str()) && !sigs.iter().any(|s| s.name == name) {
-            sigs.push(MethodSignature {
-                name,
-                signature: cap[1].trim().to_string(),
-                language: Language::JavaScript,
-            });
-        }
-    }
-
-    sigs
+    crate::core::refactor::plan::generate::extract_signatures_from_items(content, language)
 }
 
 // ============================================================================
@@ -1309,7 +1243,7 @@ class MyAbility {
     }
 }
 "#;
-        let sigs = extract_php_signatures(content);
+        let sigs = extract_signatures(content, &Language::Php);
         assert_eq!(sigs.len(), 4);
 
         let execute = sigs.iter().find(|s| s.name == "execute").unwrap();
@@ -1337,7 +1271,7 @@ impl Handler {
     }
 }
 "#;
-        let sigs = extract_rust_signatures(content);
+        let sigs = extract_signatures(content, &Language::Rust);
         assert!(sigs.len() >= 2);
 
         let run = sigs.iter().find(|s| s.name == "run").unwrap();

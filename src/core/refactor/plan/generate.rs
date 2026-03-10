@@ -427,6 +427,46 @@ pub(crate) fn parse_items_for_dedup(
         .and_then(|v| serde_json::from_value(v).ok())
 }
 
+pub(crate) fn extract_signatures_from_items(
+    content: &str,
+    language: &Language,
+) -> Vec<fixer::MethodSignature> {
+    let file_ext = match language {
+        Language::Php => "php",
+        Language::Rust => "rs",
+        Language::JavaScript => "js",
+        Language::TypeScript => "ts",
+        Language::Unknown => return Vec::new(),
+    };
+
+    let Some(grammar) = crate::code_audit::core_fingerprint::load_grammar_for_ext(file_ext) else {
+        return Vec::new();
+    };
+
+    let symbols = crate::utils::grammar::extract(content, &grammar);
+    let lines: Vec<&str> = content.lines().collect();
+
+    symbols
+        .into_iter()
+        .filter(|symbol| matches!(symbol.concept.as_str(), "function" | "free_function" | "method"))
+        .filter_map(|symbol| {
+            let name = symbol.name()?.to_string();
+            let line_idx = symbol.line.checked_sub(1)?;
+            let signature = lines
+                .get(line_idx)
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .unwrap_or_else(|| name.clone());
+
+            Some(fixer::MethodSignature {
+                name,
+                signature,
+                language: language.clone(),
+            })
+        })
+        .collect()
+}
+
 fn insertion(
     kind: fixer::InsertionKind,
     finding: AuditFinding,
