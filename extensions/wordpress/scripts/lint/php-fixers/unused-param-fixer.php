@@ -495,9 +495,10 @@ function detect_ability_callbacks($content, $filepath, &$map) {
 }
 
 /**
+ * @deprecated Legacy unused helper block kept temporarily for safe follow-up removal.
  * Detect explicit class-based REST callback registrations.
  */
-function detect_explicit_rest_route_class_callbacks($content, $filepath, &$map) {
+function legacy_unused_detect_explicit_rest_route_class_callbacks($content, $filepath, &$map) {
     detect_explicit_class_callbacks(
         $content,
         $filepath,
@@ -508,9 +509,10 @@ function detect_explicit_rest_route_class_callbacks($content, $filepath, &$map) 
 }
 
 /**
+ * @deprecated Legacy unused helper block kept temporarily for safe follow-up removal.
  * Detect explicit class-based hook callback registrations.
  */
-function detect_explicit_hook_class_callbacks($content, $filepath, &$map) {
+function legacy_unused_detect_explicit_hook_class_callbacks($content, $filepath, &$map) {
     detect_explicit_class_callbacks(
         $content,
         $filepath,
@@ -521,9 +523,10 @@ function detect_explicit_hook_class_callbacks($content, $filepath, &$map) {
 }
 
 /**
+ * @deprecated Legacy unused helper block kept temporarily for safe follow-up removal.
  * Detect explicit class-based ability callback registrations.
  */
-function detect_explicit_ability_class_callbacks($content, $filepath, &$map) {
+function legacy_unused_detect_explicit_ability_class_callbacks($content, $filepath, &$map) {
     detect_explicit_class_callbacks(
         $content,
         $filepath,
@@ -534,9 +537,10 @@ function detect_explicit_ability_class_callbacks($content, $filepath, &$map) {
 }
 
 /**
+ * @deprecated Legacy unused helper block kept temporarily for safe follow-up removal.
  * Detect and register callbacks that explicitly reference ClassName::class.
  */
-function detect_explicit_class_callbacks($content, $filepath, &$map, $pattern, $type) {
+function legacy_unused_detect_explicit_class_callbacks($content, $filepath, &$map, $pattern, $type) {
     $pattern = str_replace(
         '([\\w\\\\]+)',
         '([A-Za-z_\\\\][A-Za-z0-9_\\\\]*)',
