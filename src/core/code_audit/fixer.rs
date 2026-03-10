@@ -986,7 +986,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
             let mut needs_constructor = false;
 
             for deviation in &outlier.deviations {
-                match deviation.kind {
+                match &deviation.kind {
                     AuditFinding::MissingMethod => {
                         let method_name = deviation
                             .description
@@ -1045,7 +1045,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
                         // Structural concern across directories; no safe automatic
                         // in-file patching yet. Leave for dedicated refactor planning.
                     }
-                    AuditFinding::TodoMarker | AuditFinding::LegacyComment => {
+                    kind if crate::core::refactor::plan::generate::is_actionable_comment_finding(kind) => {
                         // Comment hygiene requires human judgement; do not auto-edit.
                     }
                     _ => {}
@@ -1213,7 +1213,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
             continue;
         }
 
-        let Some(test_file) = extract_expected_test_path(&finding.description) else {
+        let Some(test_file) = crate::core::refactor::plan::generate::extract_expected_test_path(&finding.description) else {
             continue;
         };
 
@@ -1222,7 +1222,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
             continue;
         }
 
-        let Some(candidate) = generate_test_file_candidate(root, &test_file, &finding.file) else {
+        let Some(candidate) = crate::core::refactor::plan::generate::generate_test_file_candidate(root, &test_file, &finding.file) else {
             continue;
         };
         new_files.push(new_file(
@@ -1241,15 +1241,15 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
             continue;
         }
 
-        let Some(expected_test_method) = extract_expected_test_method(&finding.description) else {
+        let Some(expected_test_method) = crate::core::refactor::plan::generate::extract_expected_test_method(&finding.description) else {
             continue;
         };
-        let Some(source_method) = extract_source_method_name(&finding.description) else {
+        let Some(source_method) = crate::core::refactor::plan::generate::extract_source_method_name(&finding.description) else {
             continue;
         };
 
         // Try to find the test file: explicit path in description > derived from extension mapping
-        let test_file_opt = extract_test_file_from_missing_test_method(&finding.description)
+        let test_file_opt = crate::core::refactor::plan::generate::extract_test_file_from_missing_test_method(&finding.description)
             .or_else(|| derive_expected_test_file_path(root, &finding.file));
 
         // For inline-test languages (Rust), when no separate test file is derived,
@@ -1267,7 +1267,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
 
                 // Insert if the source file already has a test module
                 if source_content.contains("#[cfg(test)]") {
-                    let test_stub = generate_test_method_stub(
+                    let test_stub = crate::core::refactor::plan::generate::generate_test_method_stub(
                         &source_language,
                         &expected_test_method,
                         &finding.file,
@@ -1318,8 +1318,12 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
             continue;
         }
 
-        let test_stub =
-            generate_test_method_stub(&ext, &expected_test_method, &finding.file, &source_method);
+        let test_stub = crate::core::refactor::plan::generate::generate_test_method_stub(
+            &ext,
+            &expected_test_method,
+            &finding.file,
+            &source_method,
+        );
 
         let file_exists = root.join(&test_file).exists();
         if file_exists {
@@ -1346,7 +1350,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
                 existing.content.push_str(&test_stub);
             }
         } else {
-            let Some(mut candidate) = generate_test_file_candidate(root, &test_file, &finding.file)
+            let Some(mut candidate) = crate::core::refactor::plan::generate::generate_test_file_candidate(root, &test_file, &finding.file)
             else {
                 continue;
             };
@@ -1741,7 +1745,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
             continue;
         }
 
-        let Some(new_path) = extract_suggested_path(&finding.suggestion) else {
+        let Some(new_path) = crate::core::refactor::plan::generate::extract_suggested_path(&finding.suggestion) else {
             continue;
         };
 
@@ -1798,7 +1802,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
             continue;
         };
 
-        if !should_remove_broken_doc_line(line, &dead_path) {
+        if !crate::core::refactor::plan::generate::should_remove_broken_doc_line(line, &dead_path) {
             continue;
         }
 
@@ -1828,7 +1832,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
     // the file was already modified by the first.  Merging into a single `Fix`
     // per file ensures `apply_insertions_to_content()` sees *all* removals at
     // once and can sort them in reverse order so line numbers stay valid.
-    let fixes = merge_fixes_per_file(fixes);
+    let fixes = crate::core::refactor::plan::generate::merge_fixes_per_file(fixes);
 
     let total_insertions: usize = fixes.iter().map(|f| f.insertions.len()).sum();
     let files_modified = fixes.len();
@@ -1844,51 +1848,6 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
     }
 }
 
-/// Extract the expected test file path from a MissingTestFile description.
-///
-/// Example description:
-/// "No test file found (expected 'tests/utils/token_test.rs') and no inline tests"
-fn extract_expected_test_path(description: &str) -> Option<String> {
-    let needle = "expected '";
-    let start = description.find(needle)? + needle.len();
-    let rest = &description[start..];
-    let end = rest.find('\'')?;
-    Some(rest[..end].to_string())
-}
-
-/// Extract expected test method from MissingTestMethod description.
-///
-/// Examples:
-/// "Method 'run' has no corresponding test (expected 'test_run')"
-/// "Method 'run' has no corresponding test in 'tests/foo_test.rs'"
-fn extract_expected_test_method(description: &str) -> Option<String> {
-    let needle = "expected '";
-    let start = description.find(needle)? + needle.len();
-    let rest = &description[start..];
-    let end = rest.find('\'')?;
-    Some(rest[..end].to_string())
-}
-
-/// Extract target test file from MissingTestMethod description when present.
-///
-/// Example:
-/// "Method 'run' has no corresponding test in 'tests/commands/foo_test.rs'"
-fn extract_test_file_from_missing_test_method(description: &str) -> Option<String> {
-    let needle = " in '";
-    let start = description.find(needle)? + needle.len();
-    let rest = &description[start..];
-    let end = rest.find('\'')?;
-    Some(rest[..end].to_string())
-}
-
-/// Extract source method name from MissingTestMethod description.
-fn extract_source_method_name(description: &str) -> Option<String> {
-    let needle = "Method '";
-    let start = description.find(needle)? + needle.len();
-    let rest = &description[start..];
-    let end = rest.find('\'')?;
-    Some(rest[..end].to_string())
-}
 
 pub(crate) fn test_method_exists_in_file(
     root: &Path,
@@ -1950,109 +1909,6 @@ fn generate_test_method_stub(
     }
 }
 
-/// Generate test file content for audit autofix.
-///
-/// Strategy:
-/// 1) Try scaffold generation from source file for richer, deterministic stubs.
-/// 2) Fall back to minimal placeholder if scaffold yields nothing useful.
-///    Placeholders are still valid compilable test files that satisfy the
-///    `MissingTestFile` audit finding and provide an explicit place for real tests.
-struct TestFileCandidate {
-    content: String,
-}
-
-fn generate_test_file_candidate(
-    root: &Path,
-    test_file: &str,
-    source_file: &str,
-) -> Option<TestFileCandidate> {
-    if let Some(scaffolded) = generate_test_file_from_scaffold(root, test_file, source_file) {
-        return Some(TestFileCandidate {
-            content: scaffolded,
-        });
-    }
-
-    Some(TestFileCandidate {
-        content: generate_test_file_stub(test_file, source_file),
-    })
-}
-
-/// Attempt to scaffold test content from source file.
-///
-/// Returns None when language is unsupported, mapping mismatches, or no stubs
-/// were extracted. Caller should fall back to placeholder generation.
-fn generate_test_file_from_scaffold(
-    root: &Path,
-    test_file: &str,
-    source_file: &str,
-) -> Option<String> {
-    let source_path = root.join(source_file);
-    if !source_path.exists() {
-        return None;
-    }
-
-    let lang = Path::new(source_file)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(Language::from_extension)
-        .unwrap_or(Language::Unknown);
-
-    let config = match lang {
-        Language::Rust => crate::test_scaffold::ScaffoldConfig::rust(),
-        Language::Php => crate::test_scaffold::ScaffoldConfig::php(),
-        _ => return None,
-    };
-
-    let scaffolded =
-        crate::test_scaffold::scaffold_file(&source_path, root, &config, false).ok()?;
-
-    // Safety: only consume scaffold output if it maps to the same expected test file.
-    if scaffolded.test_file != test_file {
-        return None;
-    }
-
-    if scaffolded.stub_count == 0 || scaffolded.content.trim().is_empty() {
-        return None;
-    }
-
-    Some(scaffolded.content)
-}
-
-/// Generate a minimal test file stub for the given test file path.
-///
-/// Keeps stubs intentionally simple and compiling. This unblocks CI/audit
-/// and creates an explicit place for real tests to be added.
-fn generate_test_file_stub(test_file: &str, source_file: &str) -> String {
-    let ext = Path::new(test_file)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(Language::from_extension)
-        .unwrap_or(Language::Unknown);
-
-    match ext {
-        Language::Rust => {
-            let name = Path::new(source_file)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("module")
-                .replace('-', "_");
-            format!(
-                "// Auto-generated by `homeboy audit --fix`\n// Source: {}\n\n#[test]\n#[ignore = \"autogenerated scaffold\"]\nfn test_{}_placeholder() {{\n    todo!(\"Autogenerated scaffold - replace with real assertions\");\n}}\n",
-                source_file, name
-            )
-        }
-        Language::Php => {
-            format!(
-                "<?php\n\n// Auto-generated by `homeboy audit --fix`\n// Source: {}\n\nuse PHPUnit\\Framework\\TestCase;\n\nfinal class GeneratedPlaceholderTest extends TestCase {{\n    public function test_placeholder(): void {{\n        $this->markTestIncomplete('Autogenerated scaffold - replace with real assertions');\n    }}\n}}\n",
-                source_file
-            )
-        }
-        _ => format!(
-            "// Auto-generated by `homeboy audit --fix`\n// Source: {}\n// Add tests\n",
-            source_file
-        ),
-    }
-}
 
 /// Fallback duplicate fix for languages without `extract_shared` support.
 ///
@@ -2255,37 +2111,6 @@ pub(crate) fn rewrite_callers_after_dedup(fix: &Fix, root: &Path) {
     }
 }
 
-/// Merge multiple `Fix` objects that target the same file into one.
-///
-/// Preserves insertion order within each original `Fix`, appending later
-/// fixes' insertions after earlier ones.  The resulting vec has at most one
-/// `Fix` per unique file path.
-fn merge_fixes_per_file(fixes: Vec<Fix>) -> Vec<Fix> {
-    let mut map: std::collections::HashMap<String, Fix> = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
-
-    for fix in fixes {
-        if let Some(existing) = map.get_mut(&fix.file) {
-            for method in fix.required_methods {
-                if !existing.required_methods.contains(&method) {
-                    existing.required_methods.push(method);
-                }
-            }
-            for registration in fix.required_registrations {
-                if !existing.required_registrations.contains(&registration) {
-                    existing.required_registrations.push(registration);
-                }
-            }
-            existing.insertions.extend(fix.insertions);
-        } else {
-            order.push(fix.file.clone());
-            map.insert(fix.file.clone(), fix);
-        }
-    }
-
-    // Preserve original encounter order
-    order.into_iter().filter_map(|f| map.remove(&f)).collect()
-}
 
 /// Convert a relative file path to a Rust module path.
 ///
@@ -2352,17 +2177,6 @@ fn extract_function_name_from_unreferenced(description: &str) -> Option<String> 
     Some(rest[..end].to_string())
 }
 
-/// Extract the suggested new path from a StaleDocReference suggestion.
-///
-/// Example: "Did you mean `src/new/config.rs`? File 'src/old/config.rs' no longer exists."
-/// Returns: Some("src/new/config.rs")
-fn extract_suggested_path(suggestion: &str) -> Option<String> {
-    let start = suggestion.find("Did you mean `")? + "Did you mean `".len();
-    let rest = &suggestion[start..];
-    let end = rest.find('`')?;
-    Some(rest[..end].to_string())
-}
-
 /// Extract the old reference path from a StaleDocReference description.
 ///
 /// Example: "Stale file reference `src/old/config.rs` (line 5) — target has moved"
@@ -2380,22 +2194,6 @@ fn extract_line_number(description: &str) -> Option<usize> {
     let rest = &description[start..];
     let end = rest.find(')')?;
     rest[..end].parse().ok()
-}
-
-fn should_remove_broken_doc_line(line: &str, dead_path: &str) -> bool {
-    let trimmed = line.trim();
-    let exact_backticked = format!("`{}`", dead_path);
-
-    if !trimmed.contains(&exact_backticked) {
-        return false;
-    }
-
-    if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-        return trimmed == format!("- {}", exact_backticked)
-            || trimmed == format!("* {}", exact_backticked);
-    }
-
-    false
 }
 
 /// Check if a function is referenced outside the lib crate — either re-exported
@@ -3829,28 +3627,28 @@ pub struct TestOutput {}
     #[test]
     fn extract_expected_test_path_parses_description() {
         let desc = "No test file found (expected 'tests/utils/token_test.rs') and no inline tests";
-        let parsed = extract_expected_test_path(desc);
+        let parsed = crate::core::refactor::plan::generate::extract_expected_test_path(desc);
         assert_eq!(parsed, Some("tests/utils/token_test.rs".to_string()));
     }
 
     #[test]
     fn extract_expected_test_method_parses_description() {
         let desc = "Method 'run' has no corresponding test (expected 'test_run')";
-        let parsed = extract_expected_test_method(desc);
+        let parsed = crate::core::refactor::plan::generate::extract_expected_test_method(desc);
         assert_eq!(parsed, Some("test_run".to_string()));
     }
 
     #[test]
     fn extract_test_file_from_missing_test_method_parses_description() {
         let desc = "Method 'run' has no corresponding test in 'tests/commands/audit_test.rs'";
-        let parsed = extract_test_file_from_missing_test_method(desc);
+        let parsed = crate::core::refactor::plan::generate::extract_test_file_from_missing_test_method(desc);
         assert_eq!(parsed, Some("tests/commands/audit_test.rs".to_string()));
     }
 
     #[test]
     fn extract_source_method_name_parses_description() {
         let desc = "Method 'run_add' has no corresponding test (expected 'test_run_add')";
-        let parsed = extract_source_method_name(desc);
+        let parsed = crate::core::refactor::plan::generate::extract_source_method_name(desc);
         assert_eq!(parsed, Some("run_add".to_string()));
     }
 
@@ -4141,7 +3939,7 @@ mod tests {
         )
         .unwrap();
 
-        let content = generate_test_file_candidate(
+        let content = crate::core::refactor::plan::generate::generate_test_file_candidate(
             &dir,
             "tests/utils/example_test.rs",
             "src/utils/example.rs",
@@ -4396,7 +4194,7 @@ mod tests {
     #[test]
     fn should_not_remove_broken_doc_reference_in_prose_line() {
         let line = "CLI commands now return typed structs and are serialized in `crates/homeboy/src/main.rs`, standardizing success/error output and exit codes.";
-        assert!(!should_remove_broken_doc_line(
+        assert!(!crate::core::refactor::plan::generate::should_remove_broken_doc_line(
             line,
             "crates/homeboy/src/main.rs"
         ));
@@ -4476,7 +4274,7 @@ mod tests {
             },
         ];
 
-        let merged = merge_fixes_per_file(fixes);
+        let merged = crate::core::refactor::plan::generate::merge_fixes_per_file(fixes);
 
         // Should have 2 files, not 3
         assert_eq!(merged.len(), 2);
