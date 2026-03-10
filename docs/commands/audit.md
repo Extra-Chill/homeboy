@@ -65,7 +65,6 @@ The baseline is saved in `homeboy.json` under `baselines.audit` inside the compo
 
 Layer ownership rule config is optional and read from either:
 
-- `.homeboy/audit-rules.json`
 - `homeboy.json` key: `audit_rules`
 
 See: `docs/commands/audit-rules.md`

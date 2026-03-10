@@ -132,12 +132,19 @@ pub enum InsertionKind {
         /// The new path text to replace with (e.g., "src/new/config.rs").
         new_ref: String,
     },
+    /// Remove a full documentation line containing a dead reference.
+    DocLineRemoval {
+        /// 1-indexed line number to remove.
+        line: usize,
+    },
 }
 
 impl InsertionKind {
     pub fn safety_tier(&self) -> FixSafetyTier {
         match self {
-            Self::ImportAdd | Self::DocReferenceUpdate { .. } => FixSafetyTier::SafeAuto,
+            Self::ImportAdd | Self::DocReferenceUpdate { .. } | Self::DocLineRemoval { .. } => {
+                FixSafetyTier::SafeAuto
+            }
             Self::MethodStub
             | Self::RegistrationStub
             | Self::ConstructorWithRegistration
@@ -1829,6 +1836,50 @@ pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
         });
     }
 
+    // Phase 5: Broken doc reference fixes — remove dead bullet-list entries when safe.
+    for finding in &result.findings {
+        if finding.kind != AuditFinding::BrokenDocReference {
+            continue;
+        }
+
+        let Some(dead_path) = extract_stale_ref_path(&finding.description) else {
+            continue;
+        };
+
+        let Some(line_num) = extract_line_number(&finding.description) else {
+            continue;
+        };
+
+        let abs_path = root.join(&finding.file);
+        let Ok(content) = std::fs::read_to_string(&abs_path) else {
+            continue;
+        };
+
+        let Some(line) = content.lines().nth(line_num.saturating_sub(1)) else {
+            continue;
+        };
+
+        if !should_remove_broken_doc_line(line, &dead_path) {
+            continue;
+        }
+
+        fixes.push(Fix {
+            file: finding.file.clone(),
+            required_methods: vec![],
+            required_registrations: vec![],
+            insertions: vec![insertion(
+                InsertionKind::DocLineRemoval { line: line_num },
+                AuditFinding::BrokenDocReference,
+                dead_path.clone(),
+                format!(
+                    "Remove dead documentation reference line for `{}` (line {})",
+                    dead_path, line_num
+                ),
+            )],
+            applied: false,
+        });
+    }
+
     // All phases complete — merge and return
     // Merge fixes that target the same file.
     //
@@ -2392,6 +2443,22 @@ fn extract_line_number(description: &str) -> Option<usize> {
     rest[..end].parse().ok()
 }
 
+fn should_remove_broken_doc_line(line: &str, dead_path: &str) -> bool {
+    let trimmed = line.trim();
+    let exact_backticked = format!("`{}`", dead_path);
+
+    if !trimmed.contains(&exact_backticked) {
+        return false;
+    }
+
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+        return trimmed == format!("- {}", exact_backticked)
+            || trimmed == format!("* {}", exact_backticked);
+    }
+
+    false
+}
+
 /// Check if a function is referenced outside the lib crate — either re-exported
 /// via `pub use` in parent mod.rs files, or imported by binary crate sources
 /// (main.rs, commands/, docs/, etc.).
@@ -2897,6 +2964,7 @@ pub(crate) fn apply_insertions_to_content(
     let mut removals: Vec<(usize, usize)> = Vec::new();
     let mut visibility_changes: Vec<(usize, &str, &str)> = Vec::new();
     let mut doc_ref_updates: Vec<(usize, &str, &str)> = Vec::new();
+    let mut doc_line_removals: Vec<usize> = Vec::new();
 
     for insertion in insertions {
         match &insertion.kind {
@@ -2921,6 +2989,7 @@ pub(crate) fn apply_insertions_to_content(
             } => {
                 doc_ref_updates.push((*line, old_ref.as_str(), new_ref.as_str()));
             }
+            InsertionKind::DocLineRemoval { line } => doc_line_removals.push(*line),
         }
     }
 
@@ -2946,6 +3015,21 @@ pub(crate) fn apply_insertions_to_content(
             let idx = line_num.saturating_sub(1);
             if idx < lines.len() {
                 lines[idx] = lines[idx].replacen(old_ref, new_ref, 1);
+            }
+        }
+        result = lines.join("\n");
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
+
+    if !doc_line_removals.is_empty() {
+        let mut lines: Vec<String> = result.lines().map(String::from).collect();
+        doc_line_removals.sort_unstable_by(|a, b| b.cmp(a));
+        for line_num in doc_line_removals {
+            let idx = line_num.saturating_sub(1);
+            if idx < lines.len() {
+                lines.remove(idx);
             }
         }
         result = lines.join("\n");
@@ -4394,6 +4478,106 @@ mod tests {
         assert!(!content.contains("src/old/config.rs"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_fixes_emits_broken_doc_reference_line_removal_for_simple_bullet() {
+        let dir = std::env::temp_dir().join("homeboy_fixer_broken_doc_reference_generate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(
+            dir.join("docs/audit-rules.md"),
+            "Use one of:\n\n- `.homeboy/audit-rules.json`\n- `homeboy.json` under `audit_rules`\n",
+        )
+        .unwrap();
+
+        let audit_result = CodeAuditResult {
+            component_id: "homeboy".to_string(),
+            source_path: dir.to_string_lossy().to_string(),
+            summary: AuditSummary {
+                files_scanned: 1,
+                conventions_detected: 0,
+                outliers_found: 1,
+                alignment_score: None,
+                files_skipped: 0,
+                warnings: vec![],
+            },
+            conventions: vec![],
+            findings: vec![super::super::findings::Finding {
+                convention: "docs".to_string(),
+                severity: super::super::findings::Severity::Warning,
+                file: "docs/audit-rules.md".to_string(),
+                description:
+                    "Broken file reference `.homeboy/audit-rules.json` (line 3) — target does not exist"
+                        .to_string(),
+                suggestion:
+                    "File '.homeboy/audit-rules.json' no longer exists. Update or remove this reference from documentation."
+                        .to_string(),
+                kind: AuditFinding::BrokenDocReference,
+            }],
+            directory_conventions: vec![],
+            duplicate_groups: vec![],
+        };
+
+        let fix_result = generate_fixes(&audit_result, &dir);
+        assert_eq!(fix_result.fixes.len(), 1);
+        let insertion = &fix_result.fixes[0].insertions[0];
+        assert_eq!(insertion.finding, AuditFinding::BrokenDocReference);
+        assert_eq!(insertion.safety_tier, FixSafetyTier::SafeAuto);
+        assert!(matches!(
+            insertion.kind,
+            InsertionKind::DocLineRemoval { line: 3 }
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_broken_doc_reference_line_removal_to_disk() {
+        let dir = std::env::temp_dir().join("homeboy_fixer_broken_doc_reference_apply");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(
+            dir.join("docs/audit-rules.md"),
+            "Use one of:\n\n- `.homeboy/audit-rules.json`\n- `homeboy.json` under `audit_rules`\n",
+        )
+        .unwrap();
+
+        let mut fixes = vec![Fix {
+            file: "docs/audit-rules.md".to_string(),
+            required_methods: vec![],
+            required_registrations: vec![],
+            insertions: vec![Insertion {
+                kind: InsertionKind::DocLineRemoval { line: 3 },
+                finding: AuditFinding::BrokenDocReference,
+                safety_tier: InsertionKind::DocLineRemoval { line: 3 }.safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
+                code: ".homeboy/audit-rules.json".to_string(),
+                description: "Remove dead documentation reference line".to_string(),
+            }],
+            applied: false,
+        }];
+
+        let applied = apply_fixes(&mut fixes, &dir);
+        assert_eq!(applied, 1);
+        assert!(fixes[0].applied);
+
+        let content = std::fs::read_to_string(dir.join("docs/audit-rules.md")).unwrap();
+        assert!(!content.contains(".homeboy/audit-rules.json"));
+        assert!(content.contains("homeboy.json"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn should_not_remove_broken_doc_reference_in_prose_line() {
+        let line = "CLI commands now return typed structs and are serialized in `crates/homeboy/src/main.rs`, standardizing success/error output and exit codes.";
+        assert!(!should_remove_broken_doc_line(
+            line,
+            "crates/homeboy/src/main.rs"
+        ));
     }
 
     #[test]

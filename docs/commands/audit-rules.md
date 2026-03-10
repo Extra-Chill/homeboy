@@ -7,7 +7,6 @@ passes lint/static checks.
 
 Use one of:
 
-- `.homeboy/audit-rules.json`
 - `homeboy.json` under `audit_rules`
 
 ## Example
