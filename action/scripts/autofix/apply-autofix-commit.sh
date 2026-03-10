@@ -150,9 +150,15 @@ done
 
 COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}")"
 
-git config user.name "homeboy-ci[bot]"
-git config user.email "266378653+homeboy-ci[bot]@users.noreply.github.com"
-git commit -m "${COMMIT_MSG}"
+BOT_NAME="homeboy-ci[bot]"
+BOT_EMAIL="266378653+homeboy-ci[bot]@users.noreply.github.com"
+git config user.name "${BOT_NAME}"
+git config user.email "${BOT_EMAIL}"
+GIT_AUTHOR_NAME="${BOT_NAME}" \
+GIT_AUTHOR_EMAIL="${BOT_EMAIL}" \
+GIT_COMMITTER_NAME="${BOT_NAME}" \
+GIT_COMMITTER_EMAIL="${BOT_EMAIL}" \
+  git commit -m "${COMMIT_MSG}"
 
 # Use GitHub App token for push if available — pushes from a GitHub App
 # trigger workflow re-runs, while GITHUB_TOKEN pushes do not.
