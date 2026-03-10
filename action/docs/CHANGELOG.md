@@ -20,7 +20,7 @@ All notable changes to Homeboy Action will be documented in this file.
 ### Changed
 - use structured output in release path
 - consume Homeboy structured output directly
-- route autofix through refactor ci
+- derive autofix commands from supported Homeboy commands instead of synthetic refactor CI flow
 - unify scope logic into scripts/scope/ module
 - remove extension revision workaround (belongs in homeboy core #639)
 - consume structured JSON instead of scraping logs (#57)
