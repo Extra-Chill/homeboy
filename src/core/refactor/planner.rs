@@ -198,7 +198,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
         }
 
         if !snapshot_files.is_empty() {
-            let mut snap = UndoSnapshot::new(&request.root, "refactor ci");
+            let mut snap = UndoSnapshot::new(&request.root, "refactor sources");
             for file in &snapshot_files {
                 snap.capture_file(file);
             }

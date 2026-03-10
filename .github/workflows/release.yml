@@ -303,11 +303,11 @@ jobs:
           binary-path: .homeboy-bin/homeboy
           extension: rust
           component: homeboy
-          commands: 'refactor ci'
+          commands: 'refactor --all'
           autofix: 'true'
           autofix-mode: 'always'
           autofix-open-pr: 'true'
-          autofix-commands: 'refactor ci --write'
+          autofix-commands: 'refactor --from-audit --from-lint --from-test --all --write'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
