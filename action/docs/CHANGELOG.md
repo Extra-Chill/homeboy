@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.5.2] - 2026-03-10
+
+### Fixed
+- clarify autofixability messaging
+
 ## [1.5.1] - 2026-03-10
 
 ### Fixed
