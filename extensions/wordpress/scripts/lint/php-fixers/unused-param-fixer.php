@@ -848,10 +848,30 @@ function is_override_method($tokens, $func_info) {
         return false;
     }
 
-    // Check if any enclosing class extends another.
+    $enclosing_class = find_enclosing_class($tokens, $func_info['func_token']);
+    if ($enclosing_class === null) {
+        return false;
+    }
+
+    // Check whether this specific enclosing class extends another class.
     $count = count($tokens);
     for ($i = 0; $i < $count; $i++) {
         if (is_array($tokens[$i]) && $tokens[$i][0] === T_CLASS) {
+            $class_name = null;
+            for ($j = $i + 1; $j < $count; $j++) {
+                if (is_array($tokens[$j]) && $tokens[$j][0] === T_STRING) {
+                    $class_name = $tokens[$j][1];
+                    break;
+                }
+                if (!is_array($tokens[$j]) && $tokens[$j] === '{') {
+                    break;
+                }
+            }
+
+            if ($class_name !== $enclosing_class) {
+                continue;
+            }
+
             // Check for extends.
             for ($j = $i + 1; $j < $count; $j++) {
                 if (!is_array($tokens[$j]) && $tokens[$j] === '{') {

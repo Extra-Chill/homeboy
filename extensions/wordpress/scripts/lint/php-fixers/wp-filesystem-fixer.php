@@ -114,23 +114,29 @@ function process_file( $filepath ) {
 
 		$needs_fix = false;
 
-		// file_get_contents — but skip URL arguments (those should use wp_remote_get).
+		// file_get_contents — but skip special stream/wrapper literals like
+		// php://stdin and URL wrappers that should use different abstractions.
 		// Also skip if already replaced (->get_contents).
 		if ( preg_match( '/\bfile_get_contents\s*\(/', $line ) && ! preg_match( '/->get_contents\s*\(/', $line ) ) {
-			// Skip if argument is a URL string.
-			if ( preg_match( '/file_get_contents\s*\(\s*[\'"]https?:/', $line ) ) {
+			if ( has_special_stream_wrapper_argument( $line, 'file_get_contents' ) ) {
 				continue;
 			}
 			$needs_fix = true;
 		}
 
-		// file_put_contents — skip if already replaced (->put_contents).
+		// file_put_contents — skip special stream/wrapper literals and already-fixed calls.
 		if ( preg_match( '/\bfile_put_contents\s*\(/', $line ) && ! preg_match( '/->put_contents\s*\(/', $line ) ) {
+			if ( has_special_stream_wrapper_argument( $line, 'file_put_contents' ) ) {
+				continue;
+			}
 			$needs_fix = true;
 		}
 
-		// is_writable — but skip if already a method call (->is_writable).
+		// is_writable — skip special stream/wrapper literals and already-fixed calls.
 		if ( preg_match( '/\bis_writable\s*\(/', $line ) && ! preg_match( '/->is_writable\s*\(/', $line ) ) {
+			if ( has_special_stream_wrapper_argument( $line, 'is_writable' ) ) {
+				continue;
+			}
 			$needs_fix = true;
 		}
 
@@ -330,4 +336,34 @@ function find_matching_brace( $lines, $brace_line ) {
 		}
 	}
 	return count( $lines ) - 1;
+}
+
+/**
+ * Check whether a fixer candidate uses a special stream/wrapper literal.
+ *
+ * These cases are not normal filesystem paths, so WP_Filesystem is usually the
+ * wrong abstraction. Stay conservative and leave them alone.
+ *
+ * @param string $line          Source line.
+ * @param string $function_name Function being inspected.
+ * @return bool
+ */
+function has_special_stream_wrapper_argument( $line, $function_name ) {
+	$pattern = '/\\b' . preg_quote( $function_name, '/' ) . '\\s*\\(\\s*[\'"]([^\'"]+)[\'"]/i';
+
+	if ( ! preg_match( $pattern, $line, $matches ) ) {
+		return false;
+	}
+
+	return is_special_stream_wrapper_path( $matches[1] );
+}
+
+/**
+ * Determine whether a string literal points to a stream/wrapper path.
+ *
+ * @param string $path Literal path argument.
+ * @return bool
+ */
+function is_special_stream_wrapper_path( $path ) {
+	return 1 === preg_match( '/^[a-z][a-z0-9+.-]*:\/\//i', $path );
 }
