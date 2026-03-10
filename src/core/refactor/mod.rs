@@ -6,10 +6,17 @@
 pub mod add;
 pub mod decompose;
 pub mod move_items;
+pub mod planner;
 mod rename;
+pub mod runner;
 pub mod transform;
 
 pub use add::{add_import, fixes_from_audit, AddResult};
+pub use planner::{
+    analyze_stage_overlaps, build_refactor_plan, normalize_sources, summarize_plan_totals,
+    PlanOverlap, PlanStageSummary, PlanTotals, RefactorPlan, RefactorPlanRequest,
+    KNOWN_PLAN_SOURCES,
+};
 pub use decompose::{
     apply_plan, apply_plan_skeletons, build_plan, DecomposeAuditImpact, DecomposeGroup,
     DecomposePlan,

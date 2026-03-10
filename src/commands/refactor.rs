@@ -1,53 +1,59 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use homeboy::code_audit::{fixer, CodeAuditResult};
 use homeboy::component;
 use homeboy::extension;
-use homeboy::git;
 use homeboy::refactor::{self, AddResult, MoveResult, RenameScope, RenameSpec, RenameTargeting};
-use homeboy::utils::autofix::{self, FixResultsSummary};
 
 use super::args::{BaselineArgs, ComponentArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs};
 use crate::commands::CmdResult;
 
 #[derive(Args)]
+#[command(
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
+)]
 pub struct RefactorArgs {
+    #[command(flatten)]
+    comp: Option<PositionalComponentArgs>,
+
+    /// Include a specific proposal source (repeatable): audit, lint, test
+    #[arg(long = "from", value_name = "SOURCE", action = clap::ArgAction::Append)]
+    from: Vec<String>,
+
+    /// Include all known proposal sources
+    #[arg(long, default_value_t = false)]
+    all: bool,
+
+    /// Only include files changed since a git ref (branch, tag, or SHA)
+    #[arg(long)]
+    changed_since: Option<String>,
+
+    /// Restrict audit-generated fixes to these fix kinds (repeatable)
+    #[arg(long = "only", value_name = "kind")]
+    only: Vec<String>,
+
+    /// Exclude audit-generated fixes for these fix kinds (repeatable)
+    #[arg(long = "exclude", value_name = "kind")]
+    exclude: Vec<String>,
+
+    #[command(flatten)]
+    setting_args: SettingArgs,
+
+    #[command(flatten)]
+    baseline_args: BaselineArgs,
+
+    #[command(flatten)]
+    write_mode: WriteModeArgs,
+
     #[command(subcommand)]
-    command: RefactorCommand,
+    command: Option<RefactorCommand>,
 }
 
 #[derive(Subcommand)]
 enum RefactorCommand {
-    /// Run the end-of-pipeline automated refactor/fix orchestration
-    Ci {
-        #[command(flatten)]
-        comp: PositionalComponentArgs,
-
-        /// Only include files changed since a git ref (branch, tag, or SHA)
-        #[arg(long)]
-        changed_since: Option<String>,
-
-        /// Restrict audit-generated fixes to these fix kinds (repeatable)
-        #[arg(long = "only", value_name = "kind")]
-        only: Vec<String>,
-
-        /// Exclude audit-generated fixes for these fix kinds (repeatable)
-        #[arg(long = "exclude", value_name = "kind")]
-        exclude: Vec<String>,
-
-        #[command(flatten)]
-        setting_args: SettingArgs,
-
-        #[command(flatten)]
-        baseline_args: BaselineArgs,
-
-        #[command(flatten)]
-        write_mode: WriteModeArgs,
-    },
-
     /// Rename a term across the codebase with case-variant awareness
     Rename {
         /// Term to rename from
@@ -198,24 +204,18 @@ enum RefactorCommand {
 
 pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RefactorOutput> {
     match args.command {
-        RefactorCommand::Ci {
-            comp,
-            changed_since,
-            only,
-            exclude,
-            setting_args,
-            baseline_args: _,
-            write_mode,
-        } => run_ci(
-            &comp,
-            changed_since.as_deref(),
-            &only,
-            &exclude,
-            &setting_args.setting,
-            write_mode.write,
+        None => run_refactor_sources(
+            args.comp.as_ref(),
+            &args.from,
+            args.all,
+            args.changed_since.as_deref(),
+            &args.only,
+            &args.exclude,
+            &args.setting_args.setting,
+            args.write_mode.write,
         ),
 
-        RefactorCommand::Rename {
+        Some(RefactorCommand::Rename {
             from,
             to,
             component,
@@ -225,7 +225,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             exclude,
             no_file_renames,
             write_mode,
-        } => run_rename(
+        }) => run_rename(
             &from,
             &to,
             component.component.as_deref(),
@@ -238,13 +238,13 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             write_mode.write,
         ),
 
-        RefactorCommand::Add {
+        Some(RefactorCommand::Add {
             from_audit,
             import,
             to,
             component,
             write_mode,
-        } => run_add(
+        }) => run_add(
             from_audit.as_deref(),
             import.as_deref(),
             to.as_deref(),
@@ -253,13 +253,13 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             write_mode.write,
         ),
 
-        RefactorCommand::Move {
+        Some(RefactorCommand::Move {
             item,
             from,
             to,
             component,
             write_mode,
-        } => run_move(
+        }) => run_move(
             &item,
             &from,
             &to,
@@ -268,12 +268,12 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             write_mode.write,
         ),
 
-        RefactorCommand::Propagate {
+        Some(RefactorCommand::Propagate {
             struct_name,
             definition,
             component,
             write_mode,
-        } => run_propagate(
+        }) => run_propagate(
             &struct_name,
             definition.as_deref(),
             component.component.as_deref(),
@@ -281,7 +281,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             write_mode.write,
         ),
 
-        RefactorCommand::Transform {
+        Some(RefactorCommand::Transform {
             name,
             find,
             replace,
@@ -289,7 +289,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             rule,
             component,
             write_mode,
-        } => run_transform(
+        }) => run_transform(
             name.as_deref(),
             find.as_deref(),
             replace.as_deref(),
@@ -300,41 +300,27 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             write_mode.write,
         ),
 
-        RefactorCommand::Decompose {
+        Some(RefactorCommand::Decompose {
             file,
             strategy,
             component,
             write_mode,
-        } => run_decompose(
+        }) => run_decompose(
             &file,
             &strategy,
             component.component.as_deref(),
             component.path.as_deref(),
             write_mode.write,
         ),
+
     }
 }
 
 #[derive(Serialize)]
 #[serde(tag = "command")]
 pub enum RefactorOutput {
-    #[serde(rename = "refactor.ci")]
-    Ci {
-        component_id: String,
-        source_path: String,
-        dry_run: bool,
-        applied: bool,
-        merge_strategy: String,
-        stages: Vec<CiStageSummary>,
-        plan_totals: CiPlanTotals,
-        overlaps: Vec<CiStageOverlap>,
-        files_modified: usize,
-        changed_files: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        fix_summary: Option<FixResultsSummary>,
-        warnings: Vec<String>,
-        hints: Vec<String>,
-    },
+    #[serde(rename = "refactor.plan")]
+    Plan(homeboy::refactor::RefactorPlan),
 
     #[serde(rename = "refactor.rename")]
     Rename {
@@ -430,583 +416,42 @@ pub struct WarningSummary {
     pub message: String,
 }
 
-#[derive(Serialize)]
-pub struct CiStageSummary {
-    pub stage: String,
-    pub planned: bool,
-    pub applied: bool,
-    pub fixes_proposed: usize,
-    pub files_modified: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detected_findings: Option<usize>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub changed_files: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fix_summary: Option<FixResultsSummary>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
-}
-
-#[derive(Serialize, Debug, PartialEq, Eq)]
-pub struct CiStageOverlap {
-    pub file: String,
-    pub earlier_stage: String,
-    pub later_stage: String,
-    pub resolution: String,
-}
-
-#[derive(Serialize)]
-pub struct CiPlanTotals {
-    pub stages_with_proposals: usize,
-    pub total_fixes_proposed: usize,
-    pub total_files_selected: usize,
-}
-
-#[derive(Default)]
-struct FixAccumulator {
-    fixes: Vec<autofix::FixApplied>,
-}
-
-impl FixAccumulator {
-    fn extend(&mut self, items: Vec<autofix::FixApplied>) {
-        self.fixes.extend(items);
-    }
-
-    fn summary(&self) -> Option<FixResultsSummary> {
-        if self.fixes.is_empty() {
-            None
-        } else {
-            Some(autofix::summarize_fix_results(&self.fixes))
-        }
-    }
-}
-
-fn run_ci(
-    comp: &PositionalComponentArgs,
+fn run_refactor_sources(
+    comp: Option<&PositionalComponentArgs>,
+    from: &[String],
+    all: bool,
     changed_since: Option<&str>,
     only: &[String],
     exclude: &[String],
     settings: &[(String, String)],
     write: bool,
 ) -> CmdResult<RefactorOutput> {
+    let comp = comp.ok_or_else(|| homeboy::Error::validation_missing_argument(vec!["component".to_string()]))?;
     let component = comp.load()?;
     let root = comp.source_path()?;
-    let root_str = root.to_string_lossy().to_string();
-
-    let original_changes = git::get_uncommitted_changes(&root_str).ok();
-    let scoped_changed_files = if let Some(git_ref) = changed_since {
-        Some(git::get_files_changed_since(&root_str, git_ref)?)
+    let requested_sources = if all {
+        homeboy::refactor::KNOWN_PLAN_SOURCES
+            .iter()
+            .map(|source| (*source).to_string())
+            .collect::<Vec<_>>()
     } else {
-        None
+        from.to_vec()
     };
-    let scoped_test_files = if let Some(git_ref) = changed_since {
-        Some(super::test_scope::compute_changed_test_scope(&component, git_ref)?.selected_files)
-    } else {
-        None
-    };
-
-    let mut planned_stages = Vec::new();
-    let mut warnings = Vec::new();
-    let mut accumulator = FixAccumulator::default();
-
-    warnings.push(
-        "Deterministic merge order: audit structural fixes → lint fixes → test fixes".to_string(),
-    );
-
-    let plan_mode = true;
-    let working_root = clone_tree(&root)?;
-
-    let audit_stage = plan_audit_stage(
-        &component.id,
-        &root,
-        scoped_changed_files.as_deref(),
-        only,
-        exclude,
-        Some(working_root.path()),
-        plan_mode,
-    )?;
-    accumulator.extend(audit_stage.fix_results.clone());
-    planned_stages.push(audit_stage.summary);
-
-    let lint_stage = run_lint_stage(
-        &component,
-        &working_root,
-        settings,
-        scoped_changed_files.as_deref(),
-        plan_mode,
-    )?;
-    accumulator.extend(lint_stage.fix_results.clone());
-    planned_stages.push(lint_stage.summary);
-
-    let test_stage = run_test_stage(
-        &component,
-        &working_root,
-        settings,
-        scoped_test_files.as_deref(),
-        plan_mode,
-    )?;
-    accumulator.extend(test_stage.fix_results.clone());
-    planned_stages.push(test_stage.summary);
-
-    let mut final_changed_files = BTreeSet::new();
-    for stage in &planned_stages {
-        for file in &stage.changed_files {
-            final_changed_files.insert(file.clone());
-        }
-    }
-
-    let overlaps = analyze_stage_overlaps(&planned_stages);
-    if !overlaps.is_empty() {
-        warnings.push(format!(
-            "{} staged file overlap(s) resolved by precedence order {}",
-            overlaps.len(),
-            "audit→lint→test"
-        ));
-    }
-
-    let changed_files: Vec<String> = final_changed_files.into_iter().collect();
-    let plan_totals = summarize_plan_totals(&planned_stages, changed_files.len());
-
-    let files_modified = changed_files.len();
-    let applied = write && files_modified > 0;
-
-    if write && applied {
-        let mut snapshot_files: HashSet<String> = changed_files.iter().cloned().collect();
-        if let Some(changes) = &original_changes {
-            snapshot_files.extend(changes.staged.iter().cloned());
-            snapshot_files.extend(changes.unstaged.iter().cloned());
-            snapshot_files.extend(changes.untracked.iter().cloned());
-        }
-
-        if !snapshot_files.is_empty() {
-            let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor ci");
-            for file in &snapshot_files {
-                snap.capture_file(file);
-            }
-            if let Err(e) = snap.save() {
-                homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
-            }
-        }
-
-        copy_changed_files(working_root.path(), &root, &changed_files)?;
-    }
-
-    for stage in &mut planned_stages {
-        stage.applied = write && stage.files_modified > 0;
-    }
-
-    if files_modified == 0 {
-        warnings.push("No automated fixes accumulated across audit/lint/test".to_string());
-    }
-
-    let hints = if applied {
-        vec![
-            format!("Re-run checks: homeboy audit {}", comp.component),
-            format!("Re-run checks: homeboy lint {}", comp.component),
-            format!("Re-run checks: homeboy test {}", comp.component),
-        ]
-    } else if files_modified > 0 {
-        vec![
-            "Plan only. Sandbox passes were used to accumulate fix proposals without touching the real tree. Re-run with --write to apply them.".to_string(),
-        ]
-    } else {
-        Vec::new()
-    };
-
-    let exit_code = if files_modified > 0 { 1 } else { 0 };
-
-    Ok((
-        RefactorOutput::Ci {
-            component_id: component.id,
-            source_path: root_str,
-            dry_run: !write,
-            applied,
-            merge_strategy: "sequential_sandbox_merge(audit→lint→test)".to_string(),
-            stages: planned_stages,
-            plan_totals,
-            overlaps,
-            files_modified,
-            changed_files,
-            fix_summary: accumulator.summary(),
-            warnings,
-            hints,
-        },
-        exit_code,
-    ))
-}
-
-struct PlannedStage {
-    summary: CiStageSummary,
-    fix_results: Vec<autofix::FixApplied>,
-}
-
-fn plan_audit_stage(
-    component_id: &str,
-    root: &Path,
-    changed_files: Option<&[String]>,
-    only: &[String],
-    exclude: &[String],
-    apply_root: Option<&Path>,
-    write: bool,
-) -> homeboy::Result<PlannedStage> {
-    let result = if let Some(changed) = changed_files {
-        if changed.is_empty() {
-            homeboy::code_audit::CodeAuditResult {
-                component_id: component_id.to_string(),
-                source_path: root.to_string_lossy().to_string(),
-                summary: homeboy::code_audit::AuditSummary {
-                    files_scanned: 0,
-                    conventions_detected: 0,
-                    outliers_found: 0,
-                    alignment_score: None,
-                    files_skipped: 0,
-                    warnings: vec![],
-                },
-                conventions: vec![],
-                directory_conventions: vec![],
-                findings: vec![],
-                duplicate_groups: vec![],
-            }
-        } else {
-            homeboy::code_audit::audit_path_scoped(
-                component_id,
-                &root.to_string_lossy(),
-                changed,
-                None,
-            )?
-        }
-    } else {
-        homeboy::code_audit::audit_path_with_id(component_id, &root.to_string_lossy())?
-    };
-
-    let mut fix_result = fixer::generate_fixes(&result, root);
-    let only_kinds = parse_audit_findings(only)?;
-    let exclude_kinds = parse_audit_findings(exclude)?;
-    let policy = fixer::FixPolicy {
-        only: (!only_kinds.is_empty()).then_some(only_kinds),
-        exclude: exclude_kinds,
-    };
-    let preflight_context = fixer::PreflightContext { root };
-    let policy_summary = fixer::apply_fix_policy(&mut fix_result, write, &policy, &preflight_context);
-
-    let changed_files: Vec<String> = collect_audit_changed_files(&fix_result);
-    let mut fix_results = summarize_audit_fix_result_entries(&fix_result);
-    let fixes_proposed = fix_results.len();
-    if !write {
-        fix_results.clear();
-    }
-
-    if write {
-        if let Some(apply_root) = apply_root {
-            if !fix_result.fixes.is_empty() {
-                fixer::apply_fixes(&mut fix_result.fixes, apply_root);
-            }
-            if !fix_result.new_files.is_empty() {
-                fixer::apply_new_files(&mut fix_result.new_files, apply_root);
-            }
-        }
-    }
-
-    Ok(PlannedStage {
-        summary: CiStageSummary {
-            stage: "audit".to_string(),
-            planned: true,
-            applied: write && !changed_files.is_empty(),
-            fixes_proposed,
-            files_modified: changed_files.len(),
-            detected_findings: Some(result.findings.len()),
-            changed_files,
-            fix_summary: if policy_summary.visible_insertions + policy_summary.visible_new_files > 0 {
-                Some(autofix::summarize_audit_fix_result(&fix_result))
-            } else {
-                None
-            },
-            warnings: Vec::new(),
-        },
-        fix_results,
-    })
-}
-
-fn run_lint_stage(
-    component: &homeboy::component::Component,
-    sandbox: &SandboxDir,
-    settings: &[(String, String)],
-    changed_files: Option<&[String]>,
-    plan_mode: bool,
-) -> homeboy::Result<PlannedStage> {
-    let mut sandbox_component = component.clone();
-    sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
-    let script_path = super::lint::resolve_lint_script(&sandbox_component)?;
-    let findings_file = std::env::temp_dir().join(format!(
-        "homeboy-lint-findings-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let fix_results_file = autofix::fix_results_temp_path();
-    let fix_plan_file = autofix::fix_plan_temp_path();
-    let before_fix = if plan_mode {
-        Some(autofix::changed_file_set(&sandbox_component.local_path)?)
-    } else {
-        None
-    };
-
-    let effective_glob = if let Some(changed_files) = changed_files {
-        if changed_files.is_empty() {
-            None
-        } else {
-            let abs_files: Vec<String> = changed_files
-                .iter()
-                .map(|f| format!("{}/{}", sandbox_component.local_path, f))
-                .collect();
-            if abs_files.len() == 1 {
-                Some(abs_files[0].clone())
-            } else {
-                Some(format!("{{{}}}", abs_files.join(",")))
-            }
-        }
-    } else {
-        None
-    };
-
-    let _output = extension::ExtensionRunner::new(&sandbox_component.id, &script_path)
-        .component(sandbox_component.clone())
-        .settings(settings)
-        .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1")
-        .env_opt("HOMEBOY_LINT_GLOB", &effective_glob)
-        .env("HOMEBOY_LINT_FINDINGS_FILE", &findings_file.to_string_lossy())
-        .env_if(plan_mode, "HOMEBOY_FIX_PLAN_FILE", &fix_plan_file.to_string_lossy())
-        .env_if(plan_mode, "HOMEBOY_FIX_RESULTS_FILE", &fix_results_file.to_string_lossy())
-        .run()?;
-
-    let changed_files = if plan_mode {
-        let after_fix = autofix::changed_file_set(&sandbox_component.local_path)?;
-        before_fix
-            .as_ref()
-            .map(|before| after_fix.difference(before).cloned().collect::<BTreeSet<_>>().into_iter().collect())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let planned_fix_results = autofix::parse_fix_plan_file(&fix_plan_file);
-    let fix_results = if planned_fix_results.is_empty() {
-        autofix::parse_fix_results_file(&fix_results_file)
-    } else {
-        planned_fix_results
-    };
-    let fixes_proposed = fix_results.len();
-    let lint_findings = homeboy::lint_baseline::parse_findings_file(&findings_file).unwrap_or_default();
-    let _ = std::fs::remove_file(&fix_results_file);
-    let _ = std::fs::remove_file(&fix_plan_file);
-    let _ = std::fs::remove_file(&findings_file);
-
-    Ok(PlannedStage {
-        summary: CiStageSummary {
-            stage: "lint".to_string(),
-            planned: true,
-            applied: plan_mode && !changed_files.is_empty(),
-            fixes_proposed,
-            files_modified: changed_files.len(),
-            detected_findings: Some(lint_findings.len()),
-            changed_files: changed_files.clone(),
-            fix_summary: if fix_results.is_empty() {
-                None
-            } else {
-                Some(autofix::summarize_fix_results(&fix_results))
-            },
-            warnings: Vec::new(),
-        },
-        fix_results,
-    })
-}
-
-fn run_test_stage(
-    component: &homeboy::component::Component,
-    sandbox: &SandboxDir,
-    settings: &[(String, String)],
-    changed_test_files: Option<&[String]>,
-    plan_mode: bool,
-) -> homeboy::Result<PlannedStage> {
-    let mut sandbox_component = component.clone();
-    sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
-    let script_path = super::test::resolve_test_script(&sandbox_component)?;
-    let results_file = std::env::temp_dir().join(format!("homeboy-test-results-{}.json", std::process::id()));
-    let fix_results_file = autofix::fix_results_temp_path();
-    let fix_plan_file = autofix::fix_plan_temp_path();
-    let before_fix = if plan_mode {
-        Some(autofix::changed_file_set(&sandbox_component.local_path)?)
-    } else {
-        None
-    };
-
-    let mut runner = extension::ExtensionRunner::new(&sandbox_component.id, &script_path)
-        .component(sandbox_component.clone())
-        .settings(settings)
-        .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy())
-        .env_if(plan_mode, "HOMEBOY_FIX_PLAN_FILE", &fix_plan_file.to_string_lossy())
-        .env_if(plan_mode, "HOMEBOY_FIX_RESULTS_FILE", &fix_results_file.to_string_lossy())
-        .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1");
-
-    if let Some(changed_test_files) = changed_test_files {
-        if !changed_test_files.is_empty() {
-            runner = runner.env("HOMEBOY_CHANGED_TEST_FILES", &changed_test_files.join("\n"));
-        }
-    }
-
-    let _output = runner.run()?;
-
-    let changed_files = if plan_mode {
-        let after_fix = autofix::changed_file_set(&sandbox_component.local_path)?;
-        before_fix
-            .as_ref()
-            .map(|before| after_fix.difference(before).cloned().collect::<BTreeSet<_>>().into_iter().collect())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let planned_fix_results = autofix::parse_fix_plan_file(&fix_plan_file);
-    let fix_results = if planned_fix_results.is_empty() {
-        autofix::parse_fix_results_file(&fix_results_file)
-    } else {
-        planned_fix_results
-    };
-    let fixes_proposed = fix_results.len();
-    let _ = std::fs::remove_file(&fix_results_file);
-    let _ = std::fs::remove_file(&fix_plan_file);
-    let _ = std::fs::remove_file(&results_file);
-
-    Ok(PlannedStage {
-        summary: CiStageSummary {
-            stage: "test".to_string(),
-            planned: true,
-            applied: plan_mode && !changed_files.is_empty(),
-            fixes_proposed,
-            files_modified: changed_files.len(),
-            detected_findings: None,
-            changed_files: changed_files.clone(),
-            fix_summary: if fix_results.is_empty() {
-                None
-            } else {
-                Some(autofix::summarize_fix_results(&fix_results))
-            },
-            warnings: Vec::new(),
-        },
-        fix_results,
-    })
-}
-
-struct SandboxDir {
-    path: PathBuf,
-}
-
-impl SandboxDir {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for SandboxDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-fn clone_tree(src: &Path) -> homeboy::Result<SandboxDir> {
-    let temp = std::env::temp_dir().join(format!("homeboy-refactor-ci-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp).map_err(|e| {
-        homeboy::Error::internal_io(e.to_string(), Some("create temp refactor sandbox".to_string()))
+    let only_findings = parse_audit_findings(only)?;
+    let exclude_findings = parse_audit_findings(exclude)?;
+    let plan = homeboy::refactor::build_refactor_plan(homeboy::refactor::RefactorPlanRequest {
+        component,
+        root,
+        sources: requested_sources,
+        changed_since: changed_since.map(ToOwned::to_owned),
+        only: only_findings,
+        exclude: exclude_findings,
+        settings: settings.to_vec(),
+        write,
     })?;
-    copy_dir_recursive(src, &temp)?;
-    Ok(SandboxDir { path: temp })
-}
+    let exit_code = if plan.files_modified > 0 { 1 } else { 0 };
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> homeboy::Result<()> {
-    std::fs::create_dir_all(dst).map_err(|e| {
-        homeboy::Error::internal_io(e.to_string(), Some("create sandbox dir".to_string()))
-    })?;
-
-    for entry in std::fs::read_dir(src)
-        .map_err(|e| homeboy::Error::internal_io(e.to_string(), Some("read source dir".to_string())))?
-    {
-        let entry = entry
-            .map_err(|e| homeboy::Error::internal_io(e.to_string(), Some("read dir entry".to_string())))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            if entry.file_name() == ".git" {
-                continue;
-            }
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| homeboy::Error::internal_io(e.to_string(), Some("copy sandbox file".to_string())))?;
-        }
-    }
-
-    Ok(())
-}
-
-fn copy_changed_files(src_root: &Path, dst_root: &Path, changed_files: &[String]) -> homeboy::Result<()> {
-    for file in changed_files {
-        let src = src_root.join(file);
-        let dst = dst_root.join(file);
-
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                homeboy::Error::internal_io(e.to_string(), Some(format!("create parent for {}", file)))
-            })?;
-        }
-
-        std::fs::copy(&src, &dst).map_err(|e| {
-            homeboy::Error::internal_io(e.to_string(), Some(format!("copy changed file {}", file)))
-        })?;
-    }
-
-    Ok(())
-}
-
-fn collect_audit_changed_files(fix_result: &fixer::FixResult) -> Vec<String> {
-    let mut files = BTreeSet::new();
-    for fix in &fix_result.fixes {
-        if !fix.insertions.is_empty() {
-            files.insert(fix.file.clone());
-        }
-    }
-    for file in &fix_result.new_files {
-        files.insert(file.file.clone());
-    }
-    files.into_iter().collect()
-}
-
-fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) -> Vec<autofix::FixApplied> {
-    let mut entries = Vec::new();
-
-    for fix in &fix_result.fixes {
-        for insertion in &fix.insertions {
-            if insertion.auto_apply {
-                entries.push(autofix::FixApplied {
-                    file: fix.file.clone(),
-                    rule: format!("{:?}", insertion.finding).to_lowercase(),
-                    action: Some("insert".to_string()),
-                });
-            }
-        }
-    }
-
-    for new_file in &fix_result.new_files {
-        entries.push(autofix::FixApplied {
-            file: new_file.file.clone(),
-            rule: format!("{:?}", new_file.finding).to_lowercase(),
-            action: Some("create".to_string()),
-        });
-    }
-
-    entries
+    Ok((RefactorOutput::Plan(plan), exit_code))
 }
 
 fn parse_audit_findings(values: &[String]) -> homeboy::Result<Vec<homeboy::code_audit::AuditFinding>> {
@@ -1025,63 +470,17 @@ fn parse_audit_findings(values: &[String]) -> homeboy::Result<Vec<homeboy::code_
         .collect()
 }
 
-fn analyze_stage_overlaps(stages: &[CiStageSummary]) -> Vec<CiStageOverlap> {
-    let mut overlaps = Vec::new();
-
-    for (later_index, later_stage) in stages.iter().enumerate() {
-        if later_stage.changed_files.is_empty() {
-            continue;
-        }
-
-        let later_files: BTreeSet<&str> = later_stage.changed_files.iter().map(String::as_str).collect();
-
-        for earlier_stage in stages.iter().take(later_index) {
-            if earlier_stage.changed_files.is_empty() {
-                continue;
-            }
-
-            for file in earlier_stage.changed_files.iter().map(String::as_str) {
-                if later_files.contains(file) {
-                    overlaps.push(CiStageOverlap {
-                        file: file.to_string(),
-                        earlier_stage: earlier_stage.stage.clone(),
-                        later_stage: later_stage.stage.clone(),
-                        resolution: format!(
-                            "{} pass ran after {} in sandbox sequence",
-                            later_stage.stage, earlier_stage.stage
-                        ),
-                    });
-                }
-            }
-        }
-    }
-
-    overlaps.sort_by(|a, b| {
-        a.file
-            .cmp(&b.file)
-            .then(a.earlier_stage.cmp(&b.earlier_stage))
-            .then(a.later_stage.cmp(&b.later_stage))
-    });
-
-    overlaps
-}
-
-fn summarize_plan_totals(stages: &[CiStageSummary], total_files_selected: usize) -> CiPlanTotals {
-    CiPlanTotals {
-        stages_with_proposals: stages.iter().filter(|stage| stage.fixes_proposed > 0).count(),
-        total_fixes_proposed: stages.iter().map(|stage| stage.fixes_proposed).sum(),
-        total_files_selected,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use homeboy::refactor::{
+        analyze_stage_overlaps, normalize_sources, summarize_plan_totals, PlanOverlap,
+        PlanStageSummary,
+    };
 
     #[test]
     fn analyze_stage_overlaps_reports_later_stage_precedence() {
         let stages = vec![
-            CiStageSummary {
+            PlanStageSummary {
                 stage: "audit".to_string(),
                 planned: true,
                 applied: true,
@@ -1092,7 +491,7 @@ mod tests {
                 fix_summary: None,
                 warnings: Vec::new(),
             },
-            CiStageSummary {
+            PlanStageSummary {
                 stage: "lint".to_string(),
                 planned: true,
                 applied: true,
@@ -1103,7 +502,7 @@ mod tests {
                 fix_summary: None,
                 warnings: Vec::new(),
             },
-            CiStageSummary {
+            PlanStageSummary {
                 stage: "test".to_string(),
                 planned: true,
                 applied: true,
@@ -1121,13 +520,13 @@ mod tests {
         assert_eq!(
             overlaps,
             vec![
-                CiStageOverlap {
+                PlanOverlap {
                     file: "src/lib.rs".to_string(),
                     earlier_stage: "audit".to_string(),
                     later_stage: "lint".to_string(),
                     resolution: "lint pass ran after audit in sandbox sequence".to_string(),
                 },
-                CiStageOverlap {
+                PlanOverlap {
                     file: "src/main.rs".to_string(),
                     earlier_stage: "lint".to_string(),
                     later_stage: "test".to_string(),
@@ -1140,7 +539,7 @@ mod tests {
     #[test]
     fn analyze_stage_overlaps_ignores_disjoint_files() {
         let stages = vec![
-            CiStageSummary {
+            PlanStageSummary {
                 stage: "audit".to_string(),
                 planned: true,
                 applied: true,
@@ -1151,7 +550,7 @@ mod tests {
                 fix_summary: None,
                 warnings: Vec::new(),
             },
-            CiStageSummary {
+            PlanStageSummary {
                 stage: "lint".to_string(),
                 planned: true,
                 applied: true,
@@ -1170,7 +569,7 @@ mod tests {
     #[test]
     fn summarize_plan_totals_counts_stage_and_fix_totals() {
         let stages = vec![
-            CiStageSummary {
+            PlanStageSummary {
                 stage: "audit".to_string(),
                 planned: true,
                 applied: false,
@@ -1181,7 +580,7 @@ mod tests {
                 fix_summary: None,
                 warnings: Vec::new(),
             },
-            CiStageSummary {
+            PlanStageSummary {
                 stage: "lint".to_string(),
                 planned: true,
                 applied: false,
@@ -1192,7 +591,7 @@ mod tests {
                 fix_summary: None,
                 warnings: Vec::new(),
             },
-            CiStageSummary {
+            PlanStageSummary {
                 stage: "test".to_string(),
                 planned: true,
                 applied: false,
@@ -1210,6 +609,24 @@ mod tests {
         assert_eq!(totals.stages_with_proposals, 2);
         assert_eq!(totals.total_fixes_proposed, 5);
         assert_eq!(totals.total_files_selected, 3);
+    }
+
+    #[test]
+    fn normalize_sources_orders_known_sources() {
+        let normalized = normalize_sources(&[
+            "test".to_string(),
+            "audit".to_string(),
+            "lint".to_string(),
+        ])
+        .expect("sources should normalize");
+
+        assert_eq!(normalized, vec!["audit", "lint", "test"]);
+    }
+
+    #[test]
+    fn normalize_sources_rejects_unknown_sources() {
+        let err = normalize_sources(&["weird".to_string()]).expect_err("unknown source should fail");
+        assert!(err.to_string().contains("Unknown refactor source"));
     }
 }
 
