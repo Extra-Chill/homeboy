@@ -2,6 +2,49 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.5.0] - 2026-03-10
+
+### Added
+- informative autofix commit messages with fix types and file list
+- enable audit --fix --write on PR autofix path
+- deduplicate tooling versions and show autofix summary in PR comments
+- auto-close audit issues when findings reach zero
+- add binary-path input for build-once CI patterns
+- delegate release to homeboy CLI (#56)
+- add autofix-mode input for always-on baseline auto-ratchet
+- use homeboy-ci-bot identity for all CI commits
+- support GitHub App token for autofix pushes
+- auto-ratchet audit baseline in autofix commits
+- categorized audit issue filing
+
+### Changed
+- use structured output in release path
+- consume Homeboy structured output directly
+- route autofix through refactor ci
+- unify scope logic into scripts/scope/ module
+- remove extension revision workaround (belongs in homeboy core #639)
+- consume structured JSON instead of scraping logs (#57)
+- remove inline review annotations — redundant with PR comment
+
+### Fixed
+- place refactor component before source flags
+- enforce homeboy-ci identity for commits and release pushes
+- default test-scope to 'changed' and fix misleading PR comment
+- resolve extension revision for monorepos and enforce canonical command order
+- pull latest before running release
+- use app token for PR comments, issues, and autofix PRs
+- scope autofix commit count to PR branch only
+- skip baseline update on PR autofix commits
+- scope baseline update to changed files in autofix
+- strip PR references and scope tags from changelog entries
+- revert manual changelog entry — handled at release time
+- aggregate Cargo test results instead of taking last line
+- rename bot identity from homeboy-ci-bot to homeboy-ci
+- update audit issue body instead of adding comments
+- remove collateral damage from inline review, add inline-review input
+- remove redundant audit category labels from auto-filed issues
+- changelog generation uses direct file ops instead of homeboy CLI
+
 ## [1.4.0] - 2026-03-06
 
 ### Added
