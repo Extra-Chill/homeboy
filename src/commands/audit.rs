@@ -4,7 +4,8 @@ use homeboy::component::{self, Component};
 use homeboy::extension::ExtensionRunner;
 use homeboy::git;
 use homeboy::refactor::{
-    run_audit_refactor, AuditConvergenceScoring, AuditRefactorIterationSummary,
+    build_chunk_verifier, finding_fingerprint, run_audit_refactor, score_delta,
+    weighted_finding_score_with, AuditConvergenceScoring, AuditRefactorIterationSummary,
     AuditVerificationToggles,
 };
 use homeboy::utils::autofix::{self, AutofixMode, FixResultsSummary};
@@ -714,6 +715,10 @@ mod tests {
     use super::default_audit_exit_code;
     use super::{run, AuditArgs, AuditOutput};
     use crate::commands::args::{BaselineArgs, PositionalComponentArgs};
+    use homeboy::refactor::{
+        build_chunk_verifier, finding_fingerprint, score_delta, weighted_finding_score_with,
+        AuditConvergenceScoring,
+    };
     use homeboy::code_audit::fixer::{FixSafetyTier, InsertionKind};
     use homeboy::code_audit::AuditFinding;
     use homeboy::code_audit::{AuditSummary, CodeAuditResult, Finding, Severity};
@@ -942,7 +947,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            let verifier = super::build_chunk_verifier(&root, &baseline.findings, vec![]);
+            let verifier = build_chunk_verifier(&root, &baseline.findings, vec![]);
             verifier(&homeboy::code_audit::fixer::ApplyChunkResult {
                 chunk_id: "fix:1".to_string(),
                 files: vec!["commands/good_one.rs".to_string()],
@@ -1001,7 +1006,7 @@ mod tests {
         fs::write(root.join("src/target.rs"), "pub fn placeholder() {}\n").unwrap();
 
         let result = {
-            let verifier = super::build_chunk_verifier(&root, &baseline.findings, vec![]);
+            let verifier = build_chunk_verifier(&root, &baseline.findings, vec![]);
             verifier(&homeboy::code_audit::fixer::ApplyChunkResult {
                 chunk_id: "fix:1".to_string(),
                 files: vec!["src/target.rs".to_string()],
@@ -1058,9 +1063,9 @@ mod tests {
         };
 
         // Same finding should match baseline fingerprint.
-        let baseline_fp = super::finding_fingerprint(&baseline_finding);
-        let same_fp = super::finding_fingerprint(&same_finding);
-        let new_fp = super::finding_fingerprint(&new_finding);
+        let baseline_fp = finding_fingerprint(&baseline_finding);
+        let same_fp = finding_fingerprint(&same_finding);
+        let new_fp = finding_fingerprint(&new_finding);
 
         assert_eq!(
             baseline_fp, same_fp,
@@ -1078,7 +1083,7 @@ mod tests {
         let post_findings = [&same_finding, &new_finding];
         let new_findings: Vec<_> = post_findings
             .iter()
-            .filter(|f| !baseline_set.contains(&super::finding_fingerprint(f)))
+            .filter(|f| !baseline_set.contains(&finding_fingerprint(f)))
             .collect();
 
         assert_eq!(
@@ -1118,7 +1123,7 @@ mod tests {
         };
 
         let result = {
-            let verifier = super::build_chunk_verifier(&root, &baseline.findings, vec![&smoke]);
+            let verifier = build_chunk_verifier(&root, &baseline.findings, vec![&smoke]);
             verifier(&homeboy::code_audit::fixer::ApplyChunkResult {
                 chunk_id: "fix:1".to_string(),
                 files: vec!["commands/good_one.rs".to_string()],
@@ -1167,7 +1172,7 @@ mod tests {
         };
 
         let result = {
-            let verifier = super::build_chunk_verifier(&root, &baseline.findings, vec![&smoke]);
+            let verifier = build_chunk_verifier(&root, &baseline.findings, vec![&smoke]);
             verifier(&homeboy::code_audit::fixer::ApplyChunkResult {
                 chunk_id: "fix:1".to_string(),
                 files: vec!["commands/good_one.rs".to_string()],
@@ -1292,13 +1297,13 @@ mod tests {
         };
 
         assert_eq!(
-            super::weighted_finding_score_with(&result, super::ConvergenceScoring::default()),
+            weighted_finding_score_with(&result, AuditConvergenceScoring::default()),
             4
         );
         assert_eq!(
-            super::weighted_finding_score_with(
+            weighted_finding_score_with(
                 &result,
-                super::ConvergenceScoring {
+                AuditConvergenceScoring {
                     warning_weight: 5,
                     info_weight: 2,
                 }
@@ -1334,7 +1339,7 @@ mod tests {
         };
         let after = before.clone();
 
-        let score_delta = super::score_delta(&before, &after, super::ConvergenceScoring::default());
+        let score_delta = score_delta(&before, &after, AuditConvergenceScoring::default());
 
         assert_eq!(score_delta, 0);
     }
@@ -1388,10 +1393,10 @@ mod tests {
         };
 
         assert_eq!(
-            super::score_delta(
+            score_delta(
                 &before,
                 &after,
-                super::ConvergenceScoring {
+                AuditConvergenceScoring {
                     warning_weight: 5,
                     info_weight: 1,
                 }

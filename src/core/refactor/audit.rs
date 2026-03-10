@@ -182,14 +182,14 @@ pub fn run_audit_refactor(
     })
 }
 
-fn weighted_finding_score_with(
+pub fn weighted_finding_score_with(
     result: &CodeAuditResult,
     scoring: AuditConvergenceScoring,
 ) -> usize {
     scoring.weighted_finding_score(result)
 }
 
-fn score_delta(
+pub fn score_delta(
     before: &CodeAuditResult,
     after: &CodeAuditResult,
     scoring: AuditConvergenceScoring,
@@ -198,7 +198,7 @@ fn score_delta(
         - weighted_finding_score_with(after, scoring) as isize
 }
 
-fn finding_fingerprint(finding: &crate::code_audit::Finding) -> String {
+pub fn finding_fingerprint(finding: &crate::code_audit::Finding) -> String {
     format!(
         "{}::{:?}::{}::{}",
         finding.file, finding.kind, finding.convention, finding.description
@@ -550,7 +550,7 @@ fn is_cascading_finding_kind(kind: &crate::code_audit::AuditFinding) -> bool {
     )
 }
 
-fn build_chunk_verifier<'a>(
+pub fn build_chunk_verifier<'a>(
     root: &'a Path,
     baseline_findings: &'a [crate::code_audit::Finding],
     extra_smokes: Vec<fixer::ChunkVerifier<'a>>,

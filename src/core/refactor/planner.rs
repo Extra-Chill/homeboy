@@ -33,6 +33,68 @@ pub struct RefactorPlanRequest {
     pub write: bool,
 }
 
+pub fn lint_refactor_request(
+    component: Component,
+    root: PathBuf,
+    settings: Vec<(String, String)>,
+    options: LintSourceOptions,
+    write: bool,
+) -> RefactorPlanRequest {
+    RefactorPlanRequest {
+        component,
+        root,
+        sources: vec!["lint".to_string()],
+        changed_since: None,
+        only: Vec::new(),
+        exclude: Vec::new(),
+        settings,
+        lint: options,
+        test: TestSourceOptions::default(),
+        write,
+    }
+}
+
+pub fn test_refactor_request(
+    component: Component,
+    root: PathBuf,
+    settings: Vec<(String, String)>,
+    options: TestSourceOptions,
+    write: bool,
+) -> RefactorPlanRequest {
+    RefactorPlanRequest {
+        component,
+        root,
+        sources: vec!["test".to_string()],
+        changed_since: None,
+        only: Vec::new(),
+        exclude: Vec::new(),
+        settings,
+        lint: LintSourceOptions::default(),
+        test: options,
+        write,
+    }
+}
+
+pub fn run_lint_refactor(
+    component: Component,
+    root: PathBuf,
+    settings: Vec<(String, String)>,
+    options: LintSourceOptions,
+    write: bool,
+) -> crate::Result<RefactorPlan> {
+    build_refactor_plan(lint_refactor_request(component, root, settings, options, write))
+}
+
+pub fn run_test_refactor(
+    component: Component,
+    root: PathBuf,
+    settings: Vec<(String, String)>,
+    options: TestSourceOptions,
+    write: bool,
+) -> crate::Result<RefactorPlan> {
+    build_refactor_plan(test_refactor_request(component, root, settings, options, write))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LintSourceOptions {
     pub selected_files: Option<Vec<String>>,

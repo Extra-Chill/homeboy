@@ -57,7 +57,8 @@ impl AppliedRefactor {
 
 pub use add::{add_import, fixes_from_audit, AddResult};
 pub use audit::{
-    run_audit_refactor, AuditConvergenceScoring, AuditRefactorIterationSummary,
+    build_chunk_verifier, finding_fingerprint, run_audit_refactor, score_delta,
+    weighted_finding_score_with, AuditConvergenceScoring, AuditRefactorIterationSummary,
     AuditRefactorOutcome, AuditVerificationToggles,
 };
 pub use decompose::{
@@ -66,7 +67,8 @@ pub use decompose::{
 };
 pub use move_items::{move_items, ImportRewrite, ItemKind, MoveResult, MovedItem};
 pub use planner::{
-    analyze_stage_overlaps, build_refactor_plan, normalize_sources, summarize_plan_totals,
+    analyze_stage_overlaps, build_refactor_plan, lint_refactor_request, normalize_sources,
+    run_lint_refactor, run_test_refactor, summarize_plan_totals, test_refactor_request,
     LintSourceOptions, PlanOverlap, PlanStageSummary, RefactorPlan, RefactorPlanRequest,
     TestSourceOptions, KNOWN_PLAN_SOURCES,
 };

@@ -6,7 +6,7 @@ use homeboy::extension::{self, ExtensionCapability, ExtensionExecutionContext, E
 use homeboy::git;
 use homeboy::lint_baseline::{self, BaselineComparison as LintBaselineComparison, LintFinding};
 use homeboy::refactor::{
-    AppliedRefactor, LintSourceOptions, RefactorPlanRequest, TestSourceOptions,
+    run_lint_refactor, AppliedRefactor, LintSourceOptions,
 };
 use homeboy::utils::autofix::{self, AutofixMode};
 
@@ -190,15 +190,11 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
             None
         };
 
-        let plan = homeboy::refactor::build_refactor_plan(RefactorPlanRequest {
-            component: component.clone(),
-            root: source_path.clone(),
-            sources: vec!["lint".to_string()],
-            changed_since: None,
-            only: Vec::new(),
-            exclude: Vec::new(),
-            settings: args.setting_args.setting.clone(),
-            lint: LintSourceOptions {
+        let plan = run_lint_refactor(
+            component.clone(),
+            source_path.clone(),
+            args.setting_args.setting.clone(),
+            LintSourceOptions {
                 selected_files: changed_files,
                 file: args.file.clone(),
                 glob: effective_glob.clone(),
@@ -207,9 +203,8 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
                 exclude_sniffs: args.exclude_sniffs.clone(),
                 category: args.category.clone(),
             },
-            test: TestSourceOptions::default(),
-            write: true,
-        })?;
+            true,
+        )?;
 
         let outcome = autofix::standard_outcome(
             AutofixMode::Write,
@@ -354,6 +349,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
 mod tests {
     use super::*;
     use homeboy::lint_baseline::{self, LintFinding};
+    use homeboy::refactor::lint_refactor_request;
     use std::path::Path;
 
     #[test]
@@ -410,5 +406,38 @@ mod tests {
             Component::new("test".to_string(), "/tmp".to_string(), "".to_string(), None);
         let result = resolve_lint_command(&component);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn lint_fix_builds_canonical_refactor_request() {
+        let component = Component::new(
+            "demo".to_string(),
+            "/tmp/demo".to_string(),
+            String::new(),
+            None,
+        );
+
+        let request = lint_refactor_request(
+            component.clone(),
+            std::path::PathBuf::from("/tmp/demo"),
+            vec![("mode".to_string(), "strict".to_string())],
+            LintSourceOptions {
+                selected_files: Some(vec!["src/lib.rs".to_string()]),
+                file: None,
+                glob: Some("/tmp/demo/src/lib.rs".to_string()),
+                errors_only: true,
+                sniffs: Some("WordPress.Security".to_string()),
+                exclude_sniffs: Some("WordPress.WhiteSpace".to_string()),
+                category: Some("security".to_string()),
+            },
+            true,
+        );
+
+        assert_eq!(request.component.id, component.id);
+        assert_eq!(request.sources, vec!["lint".to_string()]);
+        assert!(request.write);
+        assert_eq!(request.settings.len(), 1);
+        assert_eq!(request.lint.selected_files.as_ref().unwrap().len(), 1);
+        assert!(request.test.selected_files.is_none());
     }
 }

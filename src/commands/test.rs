@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use homeboy::component::Component;
 use homeboy::extension::{self, ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
 use homeboy::refactor::{
-    self, AppliedRefactor, LintSourceOptions, RefactorPlanRequest, TestSourceOptions, TransformSet,
+    self, run_test_refactor, AppliedRefactor, TestSourceOptions, TransformSet,
 };
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
@@ -287,22 +287,17 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
         let selected_files = changed_scope
             .as_ref()
             .map(|scope| scope.selected_files.clone());
-        let plan = homeboy::refactor::build_refactor_plan(RefactorPlanRequest {
-            component: component.clone(),
-            root: PathBuf::from(&source_path),
-            sources: vec!["test".to_string()],
-            changed_since: None,
-            only: Vec::new(),
-            exclude: Vec::new(),
-            settings: args.setting_args.setting.clone(),
-            lint: LintSourceOptions::default(),
-            test: TestSourceOptions {
+        let plan = run_test_refactor(
+            component.clone(),
+            PathBuf::from(&source_path),
+            args.setting_args.setting.clone(),
+            TestSourceOptions {
                 selected_files,
                 skip_lint: args.skip_lint,
                 script_args: passthrough_args.clone(),
             },
-            write: true,
-        })?;
+            true,
+        )?;
 
         let outcome = autofix::standard_outcome(
             AutofixMode::Write,
@@ -1137,6 +1132,7 @@ fn run_scaffold(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::refactor::test_refactor_request;
 
     #[test]
     fn filter_strips_boolean_flags() {
@@ -1277,5 +1273,35 @@ mod tests {
         ];
         let result = filter_homeboy_flags(&args);
         assert_eq!(result, vec!["--filter=SomeTest"]);
+    }
+
+    #[test]
+    fn test_fix_builds_canonical_refactor_request() {
+        let component = Component::new(
+            "demo".to_string(),
+            "/tmp/demo".to_string(),
+            String::new(),
+            None,
+        );
+
+        let request = test_refactor_request(
+            component.clone(),
+            PathBuf::from("/tmp/demo"),
+            vec![("runner".to_string(), "ci".to_string())],
+            TestSourceOptions {
+                selected_files: Some(vec!["tests/demo_test.rs".to_string()]),
+                skip_lint: true,
+                script_args: vec!["--filter=DemoTest".to_string()],
+            },
+            true,
+        );
+
+        assert_eq!(request.component.id, component.id);
+        assert_eq!(request.sources, vec!["test".to_string()]);
+        assert!(request.write);
+        assert_eq!(request.settings.len(), 1);
+        assert!(request.lint.selected_files.is_none());
+        assert_eq!(request.test.selected_files.as_ref().unwrap().len(), 1);
+        assert!(request.test.skip_lint);
     }
 }
