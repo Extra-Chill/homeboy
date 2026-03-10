@@ -10,8 +10,7 @@ All notable changes to Homeboy Action will be documented in this file.
 ## [1.5.1] - 2026-03-10
 
 ### Fixed
-- remove refactor command drift
-- remove refactor ci autofix drift
+- remove `refactor ci` drift while preserving real `refactor ...` command support
 
 ## [1.5.0] - 2026-03-10
 
