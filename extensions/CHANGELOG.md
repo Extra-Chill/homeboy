@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.9.0] - 2026-03-10
+
+### Added
+- add generate_module_index command
+
+### Changed
+- delete legacy explicit callback helpers
+- mark legacy explicit callback helpers unused
+
+### Fixed
+- harden WordPress fixer safety checks
+- make reserved param renames prove safety
+- detect explicit class callbacks in unused param fixer
+
 ## [2.8.0] - 2026-03-10
 
 ### Added
