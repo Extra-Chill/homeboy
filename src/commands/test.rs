@@ -298,6 +298,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
 
     let mut runner = ExtensionRunner::new(args.comp.id(), &resolved.script_path)
         .extension_id(resolved.extension_id.clone())
+        .capability(ExtensionCapability::Test)
         .component(component.clone())
         .path_override(args.comp.path.clone())
         .settings(&args.setting_args.setting)

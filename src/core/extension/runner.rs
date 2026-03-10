@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::component::{self, Component, ScopedExtensionConfig};
+use crate::component::{self, Component};
 use crate::error::{Error, ErrorCode, Result};
 use crate::ssh::{execute_local_command_passthrough, CommandOutput};
 use crate::utils::{io, shell};
@@ -13,10 +13,10 @@ pub struct RunnerOutput {
     pub stderr: String,
 }
 
+use super::{ExtensionCapability, ExtensionExecutionContext};
+
 struct ResolvedRunnerContext {
-    component: Component,
-    extension_name: String,
-    extension_path: PathBuf,
+    execution: ExtensionExecutionContext,
     settings_json: String,
 }
 
@@ -28,6 +28,7 @@ pub struct ExtensionRunner {
     component_id: String,
     script_path: String, // Relative to extension root (e.g., "scripts/lint/lint-runner.sh")
     extension_id: Option<String>,
+    capability: Option<ExtensionCapability>,
     settings_overrides: Vec<(String, String)>,
     env_vars: Vec<(String, String)>,
     script_args: Vec<String>,
@@ -45,6 +46,7 @@ impl ExtensionRunner {
             component_id: component_id.to_string(),
             script_path: script_path.to_string(),
             extension_id: None,
+            capability: None,
             settings_overrides: Vec::new(),
             env_vars: Vec::new(),
             script_args: Vec::new(),
@@ -65,6 +67,12 @@ impl ExtensionRunner {
     /// Set the resolved extension explicitly to avoid secondary selection.
     pub fn extension_id(mut self, extension_id: impl Into<String>) -> Self {
         self.extension_id = Some(extension_id.into());
+        self
+    }
+
+    /// Set the capability explicitly to avoid inferring from script naming.
+    pub fn capability(mut self, capability: ExtensionCapability) -> Self {
+        self.capability = Some(capability);
         self
     }
 
@@ -124,15 +132,15 @@ impl ExtensionRunner {
     /// 8. Execute via shell
     pub fn run(&self) -> Result<RunnerOutput> {
         let resolved = self.resolve_context()?;
-        let project_path = PathBuf::from(&resolved.component.local_path);
+        let project_path = PathBuf::from(&resolved.execution.component.local_path);
         let env_vars = self.prepare_env_vars(
-            &resolved.extension_path,
+            &resolved.execution.extension_path,
             &project_path,
             &resolved.settings_json,
-            &resolved.extension_name,
+            &resolved.execution.extension_id,
         );
 
-        let output = self.execute_script(&resolved.extension_path, &env_vars)?;
+        let output = self.execute_script(&resolved.execution.extension_path, &env_vars)?;
 
         Ok(RunnerOutput {
             exit_code: output.exit_code,
@@ -144,20 +152,43 @@ impl ExtensionRunner {
 
     fn resolve_context(&self) -> Result<ResolvedRunnerContext> {
         let component = self.find_component()?;
-        let (extension_name, extension_settings) = self.determine_extension(&component)?;
-        let extension_path = self.find_extension_path(&extension_name)?;
+        let execution = self.resolve_execution(&component)?;
 
-        self.validate_script_exists(&extension_path)?;
+        self.validate_script_exists(&execution.extension_path, &execution.script_path)?;
 
-        let manifest = self.load_extension_manifest(&extension_path)?;
-        let settings_json = self.merge_settings(&manifest, &extension_settings)?;
+        let manifest = self.load_extension_manifest(&execution.extension_path)?;
+        let settings_json = self.merge_settings(&manifest, &execution.settings)?;
 
         Ok(ResolvedRunnerContext {
-            component,
-            extension_name,
-            extension_path,
+            execution,
             settings_json,
         })
+    }
+
+    fn resolve_execution(&self, component: &Component) -> Result<ExtensionExecutionContext> {
+        if let (Some(extension_id), Some(capability)) = (&self.extension_id, self.capability) {
+            let mut execution = super::resolve_execution_context(component, capability)?;
+            if execution.extension_id != *extension_id {
+                execution.extension_id = extension_id.clone();
+                execution.extension_path = super::extension_path(extension_id);
+                execution.settings =
+                    super::extract_component_extension_settings(component, extension_id);
+            }
+            execution.script_path = self.script_path.clone();
+            return Ok(execution);
+        }
+
+        let capability = self.capability.unwrap_or_else(|| {
+            if self.script_path.contains("test") {
+                ExtensionCapability::Test
+            } else {
+                ExtensionCapability::Lint
+            }
+        });
+
+        let mut execution = super::resolve_execution_context(component, capability)?;
+        execution.script_path = self.script_path.clone();
+        Ok(execution)
     }
 
     fn find_component(&self) -> Result<Component> {
@@ -196,51 +227,8 @@ impl ExtensionRunner {
         Ok(comp)
     }
 
-    fn determine_extension(
-        &self,
-        component: &Component,
-    ) -> Result<(String, Vec<(String, String)>)> {
-        let extension_name = match &self.extension_id {
-            Some(extension_id) => extension_id.clone(),
-            None => super::resolve_extension_for_capability(
-                component,
-                if self.script_path.contains("test") {
-                    super::ExtensionCapability::Test
-                } else {
-                    super::ExtensionCapability::Lint
-                },
-            )?,
-        };
-        let extension_settings = component
-            .extensions
-            .as_ref()
-            .and_then(|extensions| extensions.get(&extension_name))
-            .map(extract_extension_settings)
-            .unwrap_or_default();
-
-        Ok((extension_name, extension_settings))
-    }
-
-    fn find_extension_path(&self, extension_name: &str) -> Result<PathBuf> {
-        let extension_path = super::extension_path(extension_name);
-
-        if extension_path.exists() {
-            Ok(extension_path)
-        } else {
-            Err(Error::validation_invalid_argument(
-                "extension",
-                format!(
-                    "Extension '{}' not found in ~/.config/homeboy/extensions/",
-                    extension_name
-                ),
-                None,
-                None,
-            ))
-        }
-    }
-
-    fn validate_script_exists(&self, extension_path: &Path) -> Result<()> {
-        let script_path = extension_path.join(&self.script_path);
+    fn validate_script_exists(&self, extension_path: &Path, script_path: &str) -> Result<()> {
+        let script_path = extension_path.join(script_path);
         if !script_path.exists() {
             return Err(Error::validation_invalid_argument(
                 "extension",
@@ -248,7 +236,7 @@ impl ExtensionRunner {
                     "Extension at {} does not have {} infrastructure (missing {})",
                     extension_path.display(),
                     self.script_description(),
-                    self.script_path
+                    script_path.display()
                 ),
                 None,
                 None,
@@ -379,14 +367,4 @@ impl ExtensionRunner {
             "script"
         }
     }
-}
-
-fn extract_extension_settings(extension_config: &ScopedExtensionConfig) -> Vec<(String, String)> {
-    let mut settings = Vec::new();
-    for (key, value) in &extension_config.settings {
-        if let Some(str_val) = value.as_str() {
-            settings.push((key.clone(), str_val.to_string()));
-        }
-    }
-    settings
 }

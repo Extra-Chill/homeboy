@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::component::{self, Component};
 use crate::config::{is_json_input, parse_bulk_ids};
 use crate::error::{Error, Result};
-use crate::extension::{self, exec_context, ExtensionCapability};
+use crate::extension::{self, exec_context, ExtensionCapability, ExtensionExecutionContext};
 use crate::output::{BulkResult, BulkSummary, ItemOutcome};
 use crate::paths;
 use crate::permissions;
@@ -18,6 +18,7 @@ use crate::utils::shell;
 pub enum ResolvedBuildCommand {
     ComponentDefined(String),
     ExtensionProvided {
+        context: ExtensionExecutionContext,
         command: String,
         source: String,
     },
@@ -50,6 +51,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
     if let Ok(extension_id) =
         extension::resolve_extension_for_capability(component, ExtensionCapability::Build)
     {
+        let context = extension::resolve_execution_context(component, ExtensionCapability::Build)?;
         let extension = extension::load_extension(&extension_id)?;
         if let Some(build) = &extension.build {
             let bundled = build
@@ -68,6 +70,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
                                     .map(|t| t.replace("{{script}}", &quoted_path))
                                     .unwrap_or_else(|| format!("sh {}", quoted_path));
                                 ResolvedBuildCommand::ExtensionProvided {
+                                    context: context.clone(),
                                     command,
                                     source: format!("{}:{}", extension_id, extension_script),
                                 }

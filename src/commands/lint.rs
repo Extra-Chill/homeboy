@@ -191,6 +191,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
 
     let output = ExtensionRunner::new(args.comp.id(), &resolved.script_path)
         .extension_id(resolved.extension_id.clone())
+        .capability(ExtensionCapability::Lint)
         .component(component.clone())
         .path_override(args.comp.path.clone())
         .settings(&args.setting_args.setting)

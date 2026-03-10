@@ -116,6 +116,16 @@ pub struct ResolvedExtensionCommand {
     pub script_path: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExtensionExecutionContext {
+    pub component: Component,
+    pub capability: ExtensionCapability,
+    pub extension_id: String,
+    pub extension_path: PathBuf,
+    pub script_path: String,
+    pub settings: Vec<(String, String)>,
+}
+
 fn no_extensions_error(component: &Component) -> Error {
     Error::validation_invalid_argument(
         "component",
@@ -194,6 +204,24 @@ fn linked_extensions(
         .ok_or_else(|| no_extensions_error(component))
 }
 
+pub fn extract_component_extension_settings(
+    component: &Component,
+    extension_id: &str,
+) -> Vec<(String, String)> {
+    component
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get(extension_id))
+        .map(|extension_config| {
+            extension_config
+                .settings
+                .iter()
+                .filter_map(|(key, value)| value.as_str().map(|v| (key.clone(), v.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn resolve_extension_for_capability(
     component: &Component,
     capability: ExtensionCapability,
@@ -248,6 +276,35 @@ pub fn resolve_extension_command(
     Ok(ResolvedExtensionCommand {
         extension_id,
         script_path,
+    })
+}
+
+pub fn resolve_execution_context(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<ExtensionExecutionContext> {
+    let resolved = resolve_extension_command(component, capability)?;
+    let extension_path = extension_path(&resolved.extension_id);
+
+    if !extension_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "extension",
+            format!(
+                "Extension '{}' not found in ~/.config/homeboy/extensions/",
+                resolved.extension_id
+            ),
+            None,
+            None,
+        ));
+    }
+
+    Ok(ExtensionExecutionContext {
+        component: component.clone(),
+        capability,
+        extension_id: resolved.extension_id.clone(),
+        extension_path,
+        script_path: resolved.script_path,
+        settings: extract_component_extension_settings(component, &resolved.extension_id),
     })
 }
 

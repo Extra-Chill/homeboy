@@ -440,6 +440,7 @@ fn validate_code_quality(component: &Component) -> Result<()> {
 
         match ExtensionRunner::new(&component.id, &lint_resolution.script_path)
             .extension_id(lint_resolution.extension_id.clone())
+            .capability(extension::ExtensionCapability::Lint)
             .component(component.clone())
             .env(
                 "HOMEBOY_LINT_FINDINGS_FILE",
@@ -506,6 +507,7 @@ fn validate_code_quality(component: &Component) -> Result<()> {
         );
         match ExtensionRunner::new(&component.id, &test_resolution.script_path)
             .extension_id(test_resolution.extension_id.clone())
+            .capability(extension::ExtensionCapability::Test)
             .component(component.clone())
             .run()
         {

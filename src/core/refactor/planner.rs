@@ -476,6 +476,7 @@ fn run_lint_stage(
 
     extension::ExtensionRunner::new(&sandbox_component.id, &resolved.script_path)
         .extension_id(resolved.extension_id.clone())
+        .capability(extension::ExtensionCapability::Lint)
         .component(sandbox_component.clone())
         .settings(settings)
         .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1")
@@ -564,6 +565,7 @@ fn run_test_stage(
 
     let mut runner = extension::ExtensionRunner::new(&sandbox_component.id, &resolved.script_path)
         .extension_id(resolved.extension_id.clone())
+        .capability(extension::ExtensionCapability::Test)
         .component(sandbox_component.clone())
         .settings(settings)
         .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy())
