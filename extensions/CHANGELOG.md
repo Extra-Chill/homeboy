@@ -1,10 +1,29 @@
 # Changelog
 
-## Unreleased
+## [2.8.0] - 2026-03-10
 
 ### Added
 - Add Kimaki extension with doctor, model inspection, and fallback repro commands
 - Support focused Kimaki diagnostics with --thread, --session, and --recent filters
+- add kimaki diagnostics extension
+- emit fix plan sidecars for lint and test
+- handle HOMEBOY_CHANGED_TEST_FILES for scoped test runs
+- write test infrastructure fix results to HOMEBOY_FIX_RESULTS_FILE sidecar
+- write structured fix results to HOMEBOY_FIX_RESULTS_FILE sidecar
+- emit type_names in fingerprint output
+- add crossref extension script for test/production hook analysis
+
+### Fixed
+- keep kimaki extension changes unreleased
+- add testdox fallback parser for crashed PHPUnit runs
+- scope cargo fmt --check to changed files in CI
+- recognize Rust shorthand field init syntax
+- smart PHPUnit exit code handling when all tests pass
+- run reserved-param-fixer on full plugin path for cross-file safety
+- normalize test method names in fingerprint and add skip_test_patterns
+- reduce audit false positives in PHP fingerprint extraction
+- update PHP 8 named argument call sites when renaming reserved params
+- auto-detect MySQL credentials from wp-config.php
 
 ## [2.6.0] - 2026-03-04
 
