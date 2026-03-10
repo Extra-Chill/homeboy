@@ -29,6 +29,7 @@ pub struct ExtensionRunner {
     script_path: String, // Relative to extension root (e.g., "scripts/lint/lint-runner.sh")
     extension_id: Option<String>,
     capability: Option<ExtensionCapability>,
+    execution_context: Option<ExtensionExecutionContext>,
     settings_overrides: Vec<(String, String)>,
     env_vars: Vec<(String, String)>,
     script_args: Vec<String>,
@@ -47,6 +48,7 @@ impl ExtensionRunner {
             script_path: script_path.to_string(),
             extension_id: None,
             capability: None,
+            execution_context: None,
             settings_overrides: Vec::new(),
             env_vars: Vec::new(),
             script_args: Vec::new(),
@@ -62,6 +64,22 @@ impl ExtensionRunner {
     pub fn component(mut self, comp: Component) -> Self {
         self.pre_loaded_component = Some(comp);
         self
+    }
+
+    /// Create a runner from a pre-resolved execution context.
+    pub fn for_context(execution_context: ExtensionExecutionContext) -> Self {
+        Self {
+            component_id: execution_context.component.id.clone(),
+            script_path: execution_context.script_path.clone(),
+            extension_id: Some(execution_context.extension_id.clone()),
+            capability: Some(execution_context.capability),
+            execution_context: Some(execution_context),
+            settings_overrides: Vec::new(),
+            env_vars: Vec::new(),
+            script_args: Vec::new(),
+            path_override: None,
+            pre_loaded_component: None,
+        }
     }
 
     /// Set the resolved extension explicitly to avoid secondary selection.
@@ -166,6 +184,16 @@ impl ExtensionRunner {
     }
 
     fn resolve_execution(&self, component: &Component) -> Result<ExtensionExecutionContext> {
+        if let Some(execution_context) = &self.execution_context {
+            let mut execution = execution_context.clone();
+            execution.component = component.clone();
+            if let Some(ref path) = self.path_override {
+                execution.component.local_path = path.clone();
+            }
+            execution.script_path = self.script_path.clone();
+            return Ok(execution);
+        }
+
         if let (Some(extension_id), Some(capability)) = (&self.extension_id, self.capability) {
             let mut execution = super::resolve_execution_context(component, capability)?;
             if execution.extension_id != *extension_id {

@@ -2,7 +2,7 @@ use clap::Args;
 use serde::Serialize;
 
 use homeboy::component::Component;
-use homeboy::extension::{self, ExtensionCapability, ExtensionRunner, ResolvedExtensionCommand};
+use homeboy::extension::{self, ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
 use homeboy::git;
 use homeboy::lint_baseline::{self, BaselineComparison as LintBaselineComparison, LintFinding};
 use homeboy::utils::autofix::{self, AutofixMode, FixResultsSummary};
@@ -92,8 +92,8 @@ pub struct LintAutofixOutput {
 
 pub(crate) fn resolve_lint_command(
     component: &Component,
-) -> homeboy::error::Result<ResolvedExtensionCommand> {
-    extension::resolve_extension_command(component, ExtensionCapability::Lint)
+) -> homeboy::error::Result<ExtensionExecutionContext> {
+    extension::resolve_execution_context(component, ExtensionCapability::Lint)
 }
 
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
@@ -189,9 +189,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
         args.glob.clone()
     };
 
-    let output = ExtensionRunner::new(args.comp.id(), &resolved.script_path)
-        .extension_id(resolved.extension_id.clone())
-        .capability(ExtensionCapability::Lint)
+    let output = ExtensionRunner::for_context(resolved)
         .component(component.clone())
         .path_override(args.comp.path.clone())
         .settings(&args.setting_args.setting)

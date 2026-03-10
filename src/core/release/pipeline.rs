@@ -414,20 +414,16 @@ fn validate_remote_sync(component: &Component) -> Result<()> {
 /// This is the pre-release quality gate — ensures code passes lint and tests
 /// before any version bump or tag is created.
 fn validate_code_quality(component: &Component) -> Result<()> {
-    let lint_resolution =
-        extension::resolve_extension_command(component, extension::ExtensionCapability::Lint);
-    let test_resolution =
-        extension::resolve_extension_command(component, extension::ExtensionCapability::Test);
+    let lint_context =
+        extension::resolve_execution_context(component, extension::ExtensionCapability::Lint);
+    let test_context =
+        extension::resolve_execution_context(component, extension::ExtensionCapability::Test);
 
     let mut checks_run = 0;
     let mut failures = Vec::new();
 
-    if let Ok(lint_resolution) = lint_resolution {
-        log_status!(
-            "release",
-            "Running lint ({})...",
-            lint_resolution.extension_id
-        );
+    if let Ok(lint_context) = lint_context {
+        log_status!("release", "Running lint ({})...", lint_context.extension_id);
 
         // Create a temporary findings file so we can compare against baseline
         let lint_findings_file = std::env::temp_dir().join(format!(
@@ -438,9 +434,7 @@ fn validate_code_quality(component: &Component) -> Result<()> {
                 .as_nanos()
         ));
 
-        match ExtensionRunner::new(&component.id, &lint_resolution.script_path)
-            .extension_id(lint_resolution.extension_id.clone())
-            .capability(extension::ExtensionCapability::Lint)
+        match ExtensionRunner::for_context(lint_context)
             .component(component.clone())
             .env(
                 "HOMEBOY_LINT_FINDINGS_FILE",
@@ -499,15 +493,13 @@ fn validate_code_quality(component: &Component) -> Result<()> {
         }
     }
 
-    if let Ok(test_resolution) = test_resolution {
+    if let Ok(test_context) = test_context {
         log_status!(
             "release",
             "Running tests ({})...",
-            test_resolution.extension_id
+            test_context.extension_id
         );
-        match ExtensionRunner::new(&component.id, &test_resolution.script_path)
-            .extension_id(test_resolution.extension_id.clone())
-            .capability(extension::ExtensionCapability::Test)
+        match ExtensionRunner::for_context(test_context)
             .component(component.clone())
             .run()
         {

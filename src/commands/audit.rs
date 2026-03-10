@@ -917,9 +917,7 @@ fn build_smoke_verifier<'a>(
             format!("{{{}}}", joined)
         };
 
-        let output = ExtensionRunner::new(component_id, &resolved.script_path)
-            .extension_id(resolved.extension_id.clone())
-            .capability(homeboy::extension::ExtensionCapability::Lint)
+        let output = ExtensionRunner::for_context(resolved.clone())
             .path_override(Some(source_path.to_string()))
             .env("HOMEBOY_LINT_GLOB", &glob)
             .run()
@@ -976,9 +974,7 @@ fn build_test_smoke_verifier<'a>(
             chunk.chunk_id.replace(':', "-")
         ));
 
-        let mut runner = ExtensionRunner::new(component_id, &resolved.script_path)
-            .extension_id(resolved.extension_id.clone())
-            .capability(homeboy::extension::ExtensionCapability::Test)
+        let mut runner = ExtensionRunner::for_context(resolved.clone())
             .path_override(Some(source_path.to_string()))
             .env("HOMEBOY_SKIP_LINT", "1")
             .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy());
