@@ -84,22 +84,12 @@ assert_equals \
   "$(build_autofix_command "audit --fix --write" "${COMPONENT}" "${WORKSPACE}")" \
   "autofix audit keeps path and changed-since"
 
-assert_equals \
-  "homeboy refactor data-machine ci --path /tmp/workspace --changed-since origin/main --format json" \
-  "$(build_run_command "refactor ci" "${COMPONENT}" "${WORKSPACE}")" \
-  "refactor keeps path with changed-since"
-
-assert_equals \
-  "homeboy refactor data-machine ci --write --path /tmp/workspace --changed-since origin/main --format json" \
-  "$(build_autofix_command "refactor ci --write" "${COMPONENT}" "${WORKSPACE}")" \
-  "autofix refactor keeps path and changed-since"
-
 # ── Unscoped autofix ──
 unset SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true
 SCOPE_MODE="full"
 assert_equals \
-  "homeboy refactor data-machine ci --write --path /tmp/workspace" \
-  "$(build_autofix_command "refactor ci --write" "${COMPONENT}" "${WORKSPACE}")" \
-  "autofix refactor keeps workspace path"
+  "homeboy test --fix data-machine --path /tmp/workspace" \
+  "$(build_autofix_command "test --fix" "${COMPONENT}" "${WORKSPACE}")" \
+  "autofix test keeps workspace path"
 
 printf 'All command builder checks passed.\n'

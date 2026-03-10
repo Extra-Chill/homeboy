@@ -51,12 +51,11 @@ resolve_workspace() {
   pwd
 }
 
-# Sort commands into canonical order: audit → lint → test → refactor.
-# Audit/lint/test are read-first quality gates. Refactor is the single
-# write/mutation phase when used.
+# Sort commands into canonical order: audit → lint → test.
+# Audit/lint/test are the supported CI quality gates handled directly here.
 canonicalize_commands() {
   local commands="$1"
-  local audit="" lint="" test="" refactor="" others=()
+  local audit="" lint="" test="" others=()
   local cmd base_cmd
 
   IFS=',' read -ra CMD_ARRAY <<< "${commands}"
@@ -67,7 +66,6 @@ canonicalize_commands() {
       audit)   audit="audit" ;;
       lint)    lint="lint" ;;
       test)    test="test" ;;
-      refactor) refactor="${cmd}" ;;
       *)       others+=("${cmd}") ;;
     esac
   done
@@ -76,7 +74,6 @@ canonicalize_commands() {
   [ -n "${audit}" ] && result+=("${audit}")
   [ -n "${lint}" ]  && result+=("${lint}")
   [ -n "${test}" ]  && result+=("${test}")
-  [ -n "${refactor}" ]  && result+=("${refactor}")
   result+=("${others[@]+"${others[@]}"}")
 
   local IFS=','
@@ -103,13 +100,7 @@ build_run_command() {
   local component_id="$2"
   local workspace="$3"
   local output_file="${4:-}"
-  local full_cmd
-
-  if [[ "${cmd}" == refactor* ]]; then
-    full_cmd="homeboy refactor ${component_id} ${cmd#refactor } --path ${workspace}"
-  else
-    full_cmd="homeboy ${cmd} ${component_id} --path ${workspace}"
-  fi
+  local full_cmd="homeboy ${cmd} ${component_id} --path ${workspace}"
 
   if [ -n "${output_file}" ]; then
     full_cmd="${full_cmd} --output ${output_file}"
@@ -131,13 +122,7 @@ build_autofix_command() {
   local component_id="$2"
   local workspace="$3"
   local output_file="${4:-}"
-  local full_cmd
-
-  if [[ "${fix_cmd}" == refactor* ]]; then
-    full_cmd="homeboy refactor ${component_id} ${fix_cmd#refactor } --path ${workspace}"
-  else
-    full_cmd="homeboy ${fix_cmd} ${component_id} --path ${workspace}"
-  fi
+  local full_cmd="homeboy ${fix_cmd} ${component_id} --path ${workspace}"
 
   if [ -n "${output_file}" ]; then
     full_cmd="${full_cmd} --output ${output_file}"
