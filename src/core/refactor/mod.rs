@@ -18,7 +18,10 @@ pub use decompose::{
     DecomposePlan,
 };
 pub use move_items::{move_items, ImportRewrite, ItemKind, MoveResult, MovedItem};
-pub use planner::{build_refactor_plan, RefactorPlan, RefactorPlanRequest, KNOWN_PLAN_SOURCES};
+pub use planner::{
+    analyze_stage_overlaps, build_refactor_plan, normalize_sources, summarize_plan_totals,
+    PlanOverlap, PlanStageSummary, RefactorPlan, RefactorPlanRequest, KNOWN_PLAN_SOURCES,
+};
 pub use rename::{
     apply_renames, find_references, find_references_with_targeting, generate_renames,
     generate_renames_with_targeting, CaseVariant, FileEdit, FileRename, Reference, RenameResult,

@@ -250,7 +250,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
     })
 }
 
-fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
+pub fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
     let lowered: Vec<String> = sources.iter().map(|source| source.to_lowercase()).collect();
     let unknown: Vec<String> = lowered
         .iter()
@@ -666,7 +666,7 @@ fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) -> Vec<FixA
     entries
 }
 
-fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
+pub fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
     let mut overlaps = Vec::new();
 
     for (later_index, later_stage) in stages.iter().enumerate() {
@@ -711,7 +711,10 @@ fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
     overlaps
 }
 
-fn summarize_plan_totals(stages: &[PlanStageSummary], total_files_selected: usize) -> PlanTotals {
+pub fn summarize_plan_totals(
+    stages: &[PlanStageSummary],
+    total_files_selected: usize,
+) -> PlanTotals {
     PlanTotals {
         stages_with_proposals: stages
             .iter()
