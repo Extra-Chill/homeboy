@@ -1,9 +1,10 @@
 use clap::Args;
-use homeboy::code_audit::{self, baseline, fixer, CodeAuditResult};
+use homeboy::code_audit::{self, baseline, CodeAuditResult};
 use homeboy::git;
 use homeboy::refactor::{
-    auto::{self, AutofixMode, FixResultsSummary}, run_audit_refactor, AuditConvergenceScoring,
-    AuditRefactorIterationSummary, AuditVerificationToggles,
+    auto::{self, AutofixMode, FixResult, FixResultsSummary, PolicySummary},
+    run_audit_refactor, AuditConvergenceScoring, AuditRefactorIterationSummary,
+    AuditVerificationToggles,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -123,7 +124,7 @@ pub enum AuditOutput {
         source_path: String,
         status: String,
         #[serde(flatten)]
-        fix_result: fixer::FixResult,
+        fix_result: FixResult,
         /// Universal fix summary bridged from the Rust-native FixResult.
         /// Same structure as lint --fix and test --fix output.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -635,7 +636,7 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
     }
 }
 
-fn build_fix_hints(written: bool, summary: &fixer::PolicySummary) -> Vec<String> {
+fn build_fix_hints(written: bool, summary: &PolicySummary) -> Vec<String> {
     let mut hints = Vec::new();
 
     if !written && summary.has_blocked_items() {
@@ -662,7 +663,7 @@ fn build_fix_hints(written: bool, summary: &fixer::PolicySummary) -> Vec<String>
     hints
 }
 
-fn log_fix_summary(result: &fixer::FixResult, policy: &fixer::PolicySummary, written: bool) {
+fn log_fix_summary(result: &FixResult, policy: &PolicySummary, written: bool) {
     let kind_counts = result.finding_counts();
     let total_insertions = result.total_insertions;
     let total_new_files = result.new_files.len();
@@ -708,10 +709,10 @@ mod tests {
     use super::default_audit_exit_code;
     use super::{run, AuditArgs, AuditOutput};
     use crate::commands::args::{BaselineArgs, PositionalComponentArgs};
-    use homeboy::code_audit::fixer::{FixSafetyTier, InsertionKind};
     use homeboy::code_audit::AuditFinding;
     use homeboy::code_audit::{AuditSummary, CodeAuditResult, Finding, Severity};
     use homeboy::refactor::{
+        auto::{ApplyChunkResult, ChunkStatus, FixSafetyTier, InsertionKind},
         build_chunk_verifier, finding_fingerprint, score_delta, weighted_finding_score_with,
         AuditConvergenceScoring,
     };
@@ -941,10 +942,10 @@ mod tests {
             )
             .unwrap();
             let verifier = build_chunk_verifier(&root, &baseline.findings, vec![]);
-            verifier(&homeboy::code_audit::fixer::ApplyChunkResult {
+            verifier(&ApplyChunkResult {
                 chunk_id: "fix:1".to_string(),
                 files: vec!["commands/good_one.rs".to_string()],
-                status: homeboy::code_audit::fixer::ChunkStatus::Applied,
+                status: ChunkStatus::Applied,
                 applied_files: 1,
                 reverted_files: 0,
                 verification: None,
@@ -1000,10 +1001,10 @@ mod tests {
 
         let result = {
             let verifier = build_chunk_verifier(&root, &baseline.findings, vec![]);
-            verifier(&homeboy::code_audit::fixer::ApplyChunkResult {
+            verifier(&ApplyChunkResult {
                 chunk_id: "fix:1".to_string(),
                 files: vec!["src/target.rs".to_string()],
-                status: homeboy::code_audit::fixer::ChunkStatus::Applied,
+                status: ChunkStatus::Applied,
                 applied_files: 1,
                 reverted_files: 0,
                 verification: None,
@@ -1111,16 +1112,16 @@ mod tests {
         )
         .unwrap();
 
-        let smoke = |_chunk: &homeboy::code_audit::fixer::ApplyChunkResult| {
+        let smoke = |_chunk: &ApplyChunkResult| {
             Ok("lint_smoke_passed".to_string())
         };
 
         let result = {
             let verifier = build_chunk_verifier(&root, &baseline.findings, vec![&smoke]);
-            verifier(&homeboy::code_audit::fixer::ApplyChunkResult {
+            verifier(&ApplyChunkResult {
                 chunk_id: "fix:1".to_string(),
                 files: vec!["commands/good_one.rs".to_string()],
-                status: homeboy::code_audit::fixer::ChunkStatus::Applied,
+                status: ChunkStatus::Applied,
                 applied_files: 1,
                 reverted_files: 0,
                 verification: None,
@@ -1160,16 +1161,16 @@ mod tests {
         )
         .unwrap();
 
-        let smoke = |_chunk: &homeboy::code_audit::fixer::ApplyChunkResult| {
+        let smoke = |_chunk: &ApplyChunkResult| {
             Err("lint smoke failed".to_string())
         };
 
         let result = {
             let verifier = build_chunk_verifier(&root, &baseline.findings, vec![&smoke]);
-            verifier(&homeboy::code_audit::fixer::ApplyChunkResult {
+            verifier(&ApplyChunkResult {
                 chunk_id: "fix:1".to_string(),
                 files: vec!["commands/good_one.rs".to_string()],
-                status: homeboy::code_audit::fixer::ChunkStatus::Applied,
+                status: ChunkStatus::Applied,
                 applied_files: 1,
                 reverted_files: 0,
                 verification: None,
