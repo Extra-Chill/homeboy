@@ -1,10 +1,11 @@
 use crate::code_audit::conventions::{AuditFinding, Language};
 use crate::code_audit::fixer::{
-    apply_insertions_to_content, derive_expected_test_file_path, detect_language,
-    extract_expected_test_method_from_fix_description, extract_source_file_from_test_stub,
-    first_failed_detail, mapping_from_source_comment, test_method_exists_in_file, Fix,
-    FixSafetyTier, Insertion, NewFile, PreflightCheck, PreflightContext, PreflightReport,
-    PreflightStatus,
+    apply_insertions_to_content, detect_language, first_failed_detail, Fix, FixSafetyTier,
+    Insertion, NewFile, PreflightCheck, PreflightContext, PreflightReport, PreflightStatus,
+};
+use crate::core::refactor::plan::generate::{
+    derive_expected_test_file_path, extract_expected_test_method_from_fix_description,
+    extract_source_file_from_test_stub, mapping_from_source_comment, test_method_exists_in_file,
 };
 
 pub fn run_insertion_preflight(

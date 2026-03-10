@@ -14,7 +14,6 @@ use regex::Regex;
 
 use super::conventions::{AuditFinding, Language};
 use super::naming::{detect_naming_suffix, suffix_matches};
-use super::test_mapping::source_to_test_path;
 use super::CodeAuditResult;
 use crate::core::refactor::decompose;
 
@@ -366,59 +365,6 @@ pub(crate) fn first_failed_detail(report: &PreflightReport) -> Option<String> {
         .iter()
         .find(|check| !check.passed)
         .map(|check| format!("Blocked by preflight {}: {}", check.name, check.detail))
-}
-
-fn extract_source_file_from_comment(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("// Source: ")
-            .or_else(|| line.trim().strip_prefix("* Source: "))
-            .or_else(|| line.trim().strip_prefix("// Source: "))
-            .map(|value| value.trim().to_string())
-    })
-}
-
-pub(crate) fn mapping_from_source_comment(content: &str) -> Option<(String, String)> {
-    let source_file = extract_source_file_from_comment(content)?;
-    let expected_test_path = derive_expected_test_file_path(Path::new("."), &source_file)
-        .or_else(|| fallback_expected_test_path(&source_file))?;
-
-    Some((source_file, expected_test_path))
-}
-
-fn fallback_expected_test_path(source_file: &str) -> Option<String> {
-    let source_path = Path::new(source_file);
-    let ext = source_path.extension()?.to_str()?;
-    let name = source_path.file_stem()?.to_str()?;
-    let dir = source_path
-        .parent()
-        .and_then(|parent| parent.strip_prefix("src").ok())
-        .map(|parent| parent.to_string_lossy().trim_start_matches('/').to_string())
-        .unwrap_or_default();
-
-    Some(if dir.is_empty() {
-        format!("tests/{}_test.{}", name, ext)
-    } else {
-        format!("tests/{}/{}_test.{}", dir, name, ext)
-    })
-}
-
-pub(crate) fn extract_source_file_from_test_stub(description: &str) -> Option<String> {
-    let marker = " for '";
-    let start = description.find(marker)? + marker.len();
-    let rest = &description[start..];
-    let end = rest.find("::")?;
-    Some(rest[..end].to_string())
-}
-
-pub(crate) fn extract_expected_test_method_from_fix_description(
-    description: &str,
-) -> Option<String> {
-    let marker = "Scaffold missing test method '";
-    let start = description.find(marker)? + marker.len();
-    let rest = &description[start..];
-    let end = rest.find('"').or_else(|| rest.find('\''))?;
-    Some(rest[..end].to_string())
 }
 
 // ============================================================================
@@ -997,7 +943,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
             crate::core::refactor::plan::generate::extract_test_file_from_missing_test_method(
                 &finding.description,
             )
-            .or_else(|| derive_expected_test_file_path(root, &finding.file));
+            .or_else(|| crate::core::refactor::plan::generate::derive_expected_test_file_path(root, &finding.file));
 
         // For inline-test languages (Rust), when no separate test file is derived,
         // insert the test method directly into the source file's #[cfg(test)] module.
@@ -1062,7 +1008,12 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
             .map(Language::from_extension)
             .unwrap_or(Language::Unknown);
 
-        if test_method_exists_in_file(root, &test_file, &expected_test_method, &new_files) {
+        if crate::core::refactor::plan::generate::test_method_exists_in_file(
+            root,
+            &test_file,
+            &expected_test_method,
+            &new_files,
+        ) {
             continue;
         }
 
@@ -1272,44 +1223,6 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
         total_insertions,
         files_modified,
     }
-}
-
-pub(crate) fn test_method_exists_in_file(
-    root: &Path,
-    test_file: &str,
-    test_method: &str,
-    pending_new_files: &[NewFile],
-) -> bool {
-    if let Some(nf) = pending_new_files.iter().find(|nf| nf.file == test_file) {
-        return nf.content.contains(test_method);
-    }
-
-    let path = root.join(test_file);
-    if !path.exists() {
-        return false;
-    }
-
-    std::fs::read_to_string(path)
-        .map(|content| content.contains(test_method))
-        .unwrap_or(false)
-}
-
-pub(crate) fn derive_expected_test_file_path(root: &Path, source_file: &str) -> Option<String> {
-    let ext = Path::new(source_file).extension()?.to_str()?;
-    let manifest = crate::extension::find_extension_for_file_ext(ext, "audit")?;
-    let mapping = manifest.test_mapping()?;
-
-    let mut path = source_to_test_path(source_file, mapping)?;
-    if path.starts_with('/') {
-        path = path.trim_start_matches('/').to_string();
-    }
-
-    let abs = root.join(&path);
-    if abs.components().count() == 0 {
-        return None;
-    }
-
-    Some(path)
 }
 
 fn generate_fallback_signature(method_name: &str, language: &Language) -> MethodSignature {
@@ -3756,7 +3669,10 @@ class FlowAbilities {
             files_modified: 0,
         };
 
-        let (_, expected_path) = mapping_from_source_comment(&result.new_files[0].content).unwrap();
+        let (_, expected_path) = crate::core::refactor::plan::generate::mapping_from_source_comment(
+            &result.new_files[0].content,
+        )
+        .unwrap();
         assert_eq!(expected_path, "tests/utils/token_test.rs");
 
         let summary = apply_fix_policy(
