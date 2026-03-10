@@ -1,0 +1,67 @@
+{
+  "name": "Kimaki",
+  "version": "1.0.0",
+  "icon": "sparkles.rectangle.stack",
+  "description": "Kimaki diagnostics, model inspection, and repro harness",
+  "author": "Extra Chill",
+  "homepage": "https://github.com/remorses/kimaki",
+  "platform": {
+    "discovery": {
+      "find_command": "kimaki project list --json 2>/dev/null | python3 - <<'PY'\nimport json,sys\ntry:\n    data=json.load(sys.stdin)\nexcept Exception:\n    sys.exit(0)\nfor item in data:\n    directory=item.get('directory')\n    if directory:\n        print(directory)\nPY",
+      "base_path_transform": "cat",
+      "display_name_command": "basename {{basePath}}"
+    },
+    "default_pinned_files": [
+      "opencode.json",
+      "AGENTS.md"
+    ],
+    "default_pinned_logs": [
+      "/root/.kimaki/kimaki.log"
+    ],
+    "commands": [
+      "kimaki",
+      "opencode"
+    ]
+  },
+  "cli": {
+    "tool": "kimaki",
+    "display_name": "Kimaki",
+    "command_template": "bash {{extension_path}}/scripts/kimaki-bridge.sh {{args}}",
+    "help": {
+        "project_id_help": "Homeboy project/component id (for example chubes.net or a linked project)",
+        "args_help": "Kimaki extension command",
+        "examples": [
+          "homeboy kimaki chubes.net doctor",
+          "homeboy kimaki chubes.net inspect-models --recent 5",
+          "homeboy kimaki chubes.net repro-model-fallback --thread 1480783248375287849",
+          "homeboy kimaki chubes.net raw session list --json"
+        ]
+      }
+  },
+  "actions": [
+    {
+      "id": "doctor",
+      "label": "Doctor",
+      "type": "command",
+      "command": "kimaki doctor"
+    },
+    {
+      "id": "inspect-models",
+      "label": "Inspect Models",
+      "type": "command",
+      "command": "kimaki inspect-models"
+    },
+    {
+      "id": "repro-model-fallback",
+      "label": "Repro Model Fallback",
+      "type": "command",
+      "command": "kimaki repro-model-fallback"
+    },
+    {
+      "id": "version",
+      "label": "Show Version",
+      "type": "command",
+      "command": "kimaki raw --version"
+    }
+  ]
+}

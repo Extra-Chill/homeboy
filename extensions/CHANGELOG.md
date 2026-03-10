@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Add Kimaki extension with doctor, model inspection, and fallback repro commands
+- Support focused Kimaki diagnostics with --thread, --session, and --recent filters
+
 ## [2.6.0] - 2026-03-04
 
 ### Added
