@@ -55,8 +55,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .release-last-failed
-          key: release-last-failed-${{ github.sha }}
-          restore-keys: release-last-failed-
+          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            release-last-failed-${{ github.ref_name }}-
 
       - name: Check commits since last tag
         id: check
@@ -64,7 +65,7 @@ jobs:
           # Skip if HEAD matches the last failed attempt (no new commits to retry)
           HEAD_SHA="$(git rev-parse HEAD)"
           if [ -f .release-last-failed ]; then
-            LAST_FAILED="$(cat .release-last-failed)"
+            LAST_FAILED="$(tr -d '[:space:]' < .release-last-failed)"
             if [ "${HEAD_SHA}" = "${LAST_FAILED}" ]; then
               echo "::notice::HEAD ${HEAD_SHA:0:8} matches last failed release attempt — skipping until new commits"
               echo "should-release=false" >> "$GITHUB_OUTPUT"
@@ -712,7 +713,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .release-last-failed
-          key: release-last-failed-${{ github.sha }}
+          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
 
   # ── Clear failure cache on success ──
   # If release succeeded, clear the failure cache so it doesn't
@@ -728,7 +729,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Delete all release-last-failed cache entries
-          gh cache list --key release-last-failed --json id --jq '.[].id' | while read -r id; do
+          # Delete release-last-failed cache entries for this ref only
+          gh cache list --json id,key --jq '.[] | select(.key | startswith("release-last-failed-${{ github.ref_name }}-")) | .id' | while read -r id; do
             gh cache delete "$id" 2>/dev/null || true
           done
