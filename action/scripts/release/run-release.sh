@@ -108,8 +108,20 @@ echo ""
 
 # --- Step 4: Configure git identity ---
 
-git config user.name "homeboy-ci[bot]"
-git config user.email "266378653+homeboy-ci[bot]@users.noreply.github.com"
+BOT_NAME="homeboy-ci[bot]"
+BOT_EMAIL="266378653+homeboy-ci[bot]@users.noreply.github.com"
+git config user.name "${BOT_NAME}"
+git config user.email "${BOT_EMAIL}"
+export GIT_AUTHOR_NAME="${BOT_NAME}"
+export GIT_AUTHOR_EMAIL="${BOT_EMAIL}"
+export GIT_COMMITTER_NAME="${BOT_NAME}"
+export GIT_COMMITTER_EMAIL="${BOT_EMAIL}"
+
+if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+  REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+  git -c "http.https://github.com/.extraheader=" remote set-url origin "${REMOTE_URL}"
+  git -c "http.https://github.com/.extraheader=" remote set-url --push origin "${REMOTE_URL}"
+fi
 
 # --- Step 5: Dry run check ---
 
