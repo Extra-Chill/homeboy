@@ -447,6 +447,8 @@ fn run_refactor_sources(
         only: only_findings,
         exclude: exclude_findings,
         settings: settings.to_vec(),
+        lint: homeboy::refactor::LintSourceOptions::default(),
+        test: homeboy::refactor::TestSourceOptions::default(),
         write,
     })?;
     let exit_code = if plan.files_modified > 0 { 1 } else { 0 };

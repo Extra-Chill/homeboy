@@ -5,7 +5,9 @@ use homeboy::component::Component;
 use homeboy::extension::{self, ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
 use homeboy::git;
 use homeboy::lint_baseline::{self, BaselineComparison as LintBaselineComparison, LintFinding};
-use homeboy::refactor::AppliedRefactor;
+use homeboy::refactor::{
+    AppliedRefactor, LintSourceOptions, RefactorPlanRequest, TestSourceOptions,
+};
 use homeboy::utils::autofix::{self, AutofixMode};
 
 use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
@@ -90,7 +92,6 @@ pub(crate) fn resolve_lint_command(
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
     let component = args.comp.load()?;
     let source_path = args.comp.source_path()?;
-    let resolved = resolve_lint_command(&component)?;
     let lint_findings_file = std::env::temp_dir().join(format!(
         "homeboy-lint-findings-{}-{}.json",
         std::process::id(),
@@ -99,14 +100,6 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    let fix_sidecars = autofix::AutofixSidecarFiles::for_apply();
-
-    let before_fix_files = if args.fix {
-        Some(autofix::begin_applied_fix_capture(&component.local_path)?)
-    } else {
-        None
-    };
-
     // Resolve glob from --changed-only or --changed-since flags
     let effective_glob = if args.changed_only {
         let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
@@ -180,11 +173,62 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
         args.glob.clone()
     };
 
+    let planned_autofix = if args.fix {
+        let changed_files = if args.changed_only {
+            let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
+            let mut changed_files: Vec<String> = Vec::new();
+            changed_files.extend(uncommitted.staged);
+            changed_files.extend(uncommitted.unstaged);
+            changed_files.extend(uncommitted.untracked);
+            Some(changed_files)
+        } else if let Some(ref git_ref) = args.changed_since {
+            Some(git::get_files_changed_since(
+                &component.local_path,
+                git_ref,
+            )?)
+        } else {
+            None
+        };
+
+        let plan = homeboy::refactor::build_refactor_plan(RefactorPlanRequest {
+            component: component.clone(),
+            root: source_path.clone(),
+            sources: vec!["lint".to_string()],
+            changed_since: None,
+            only: Vec::new(),
+            exclude: Vec::new(),
+            settings: args.setting_args.setting.clone(),
+            lint: LintSourceOptions {
+                selected_files: changed_files,
+                file: args.file.clone(),
+                glob: effective_glob.clone(),
+                errors_only: args.errors_only,
+                sniffs: args.sniffs.clone(),
+                exclude_sniffs: args.exclude_sniffs.clone(),
+                category: args.category.clone(),
+            },
+            test: TestSourceOptions::default(),
+            write: true,
+        })?;
+
+        let outcome = autofix::standard_outcome(
+            AutofixMode::Write,
+            plan.files_modified,
+            Some(format!("homeboy test {} --analyze", args.comp.component)),
+            plan.hints.clone(),
+        );
+
+        Some((plan, outcome))
+    } else {
+        None
+    };
+
+    let resolved = resolve_lint_command(&component)?;
+
     let output = ExtensionRunner::for_context(resolved)
         .component(component.clone())
         .path_override(args.comp.path.clone())
         .settings(&args.setting_args.setting)
-        .env_if(args.fix, "HOMEBOY_AUTO_FIX", "1")
         .env_if(args.summary, "HOMEBOY_SUMMARY_MODE", "1")
         .env_opt("HOMEBOY_LINT_FILE", &args.file)
         .env_opt("HOMEBOY_LINT_GLOB", &effective_glob)
@@ -196,44 +240,28 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
             "HOMEBOY_LINT_FINDINGS_FILE",
             &lint_findings_file.to_string_lossy(),
         )
-        .env_if(
-            args.fix,
-            "HOMEBOY_FIX_RESULTS_FILE",
-            &fix_sidecars.results_file.to_string_lossy(),
-        )
         .run()?;
 
     let lint_findings = lint_baseline::parse_findings_file(&lint_findings_file)?;
     let _ = std::fs::remove_file(&lint_findings_file);
 
     let mut status = if output.success { "passed" } else { "failed" }.to_string();
-    let mut autofix = None;
+    let autofix = planned_autofix
+        .as_ref()
+        .map(|(plan, outcome)| AppliedRefactor::from_plan(plan, outcome.rerun_recommended));
 
     let mut hints = Vec::new();
 
-    if args.fix {
-        let capture = autofix::finish_applied_fix_capture(
-            &component.local_path,
-            before_fix_files.as_ref().expect("fix capture initialized"),
-            &fix_sidecars,
-        )?;
-
-        let outcome = autofix::standard_outcome(
-            AutofixMode::Write,
-            capture.files_modified,
-            Some(format!("homeboy test {} --analyze", args.comp.component)),
-            vec![],
-        );
-
+    if let Some((plan, outcome)) = &planned_autofix {
         if output.success && outcome.status == "auto_fixed" {
             status = outcome.status.clone();
         }
 
         hints.extend(outcome.hints.clone());
-        autofix = Some(AppliedRefactor::from_capture(
-            capture,
-            outcome.rerun_recommended,
-        ));
+
+        if plan.files_modified == 0 && output.success {
+            status = "passed".to_string();
+        }
     }
 
     // Baseline lifecycle

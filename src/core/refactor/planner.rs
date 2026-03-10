@@ -27,7 +27,27 @@ pub struct RefactorPlanRequest {
     pub only: Vec<crate::code_audit::AuditFinding>,
     pub exclude: Vec<crate::code_audit::AuditFinding>,
     pub settings: Vec<(String, String)>,
+    pub lint: LintSourceOptions,
+    pub test: TestSourceOptions,
     pub write: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LintSourceOptions {
+    pub selected_files: Option<Vec<String>>,
+    pub file: Option<String>,
+    pub glob: Option<String>,
+    pub errors_only: bool,
+    pub sniffs: Option<String>,
+    pub exclude_sniffs: Option<String>,
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TestSourceOptions {
+    pub selected_files: Option<Vec<String>>,
+    pub skip_lint: bool,
+    pub script_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +173,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 &request.component,
                 &working_root,
                 &request.settings,
+                &request.lint,
                 scoped_changed_files.as_deref(),
                 true,
             )?,
@@ -160,6 +181,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 &request.component,
                 &working_root,
                 &request.settings,
+                &request.test,
                 scoped_test_files.as_deref(),
                 true,
             )?,
@@ -433,6 +455,7 @@ fn run_lint_stage(
     component: &Component,
     sandbox: &SandboxDir,
     settings: &[(String, String)],
+    options: &LintSourceOptions,
     changed_files: Option<&[String]>,
     plan_mode: bool,
 ) -> crate::Result<PlannedStage> {
@@ -455,7 +478,8 @@ fn run_lint_stage(
         None
     };
 
-    let effective_glob = if let Some(changed_files) = changed_files {
+    let selected_files = options.selected_files.as_deref().or(changed_files);
+    let effective_glob = if let Some(changed_files) = selected_files {
         if changed_files.is_empty() {
             None
         } else {
@@ -470,14 +494,19 @@ fn run_lint_stage(
             }
         }
     } else {
-        None
+        options.glob.clone()
     };
 
     extension::ExtensionRunner::for_context(resolved)
         .component(sandbox_component.clone())
         .settings(settings)
         .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1")
+        .env_opt("HOMEBOY_LINT_FILE", &options.file)
         .env_opt("HOMEBOY_LINT_GLOB", &effective_glob)
+        .env_if(options.errors_only, "HOMEBOY_ERRORS_ONLY", "1")
+        .env_opt("HOMEBOY_SNIFFS", &options.sniffs)
+        .env_opt("HOMEBOY_EXCLUDE_SNIFFS", &options.exclude_sniffs)
+        .env_opt("HOMEBOY_CATEGORY", &options.category)
         .env(
             "HOMEBOY_LINT_FINDINGS_FILE",
             &findings_file.to_string_lossy(),
@@ -534,6 +563,7 @@ fn run_test_stage(
     component: &Component,
     sandbox: &SandboxDir,
     settings: &[(String, String)],
+    options: &TestSourceOptions,
     changed_test_files: Option<&[String]>,
     plan_mode: bool,
 ) -> crate::Result<PlannedStage> {
@@ -555,6 +585,7 @@ fn run_test_stage(
     let mut runner = extension::ExtensionRunner::for_context(resolved)
         .component(sandbox_component.clone())
         .settings(settings)
+        .env_if(options.skip_lint, "HOMEBOY_SKIP_LINT", "1")
         .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy())
         .env_if(
             plan_mode,
@@ -572,10 +603,15 @@ fn run_test_stage(
         )
         .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1");
 
-    if let Some(changed_test_files) = changed_test_files {
+    let selected_test_files = options.selected_files.as_deref().or(changed_test_files);
+    if let Some(changed_test_files) = selected_test_files {
         if !changed_test_files.is_empty() {
             runner = runner.env("HOMEBOY_CHANGED_TEST_FILES", &changed_test_files.join("\n"));
         }
+    }
+
+    if !options.script_args.is_empty() {
+        runner = runner.script_args(&options.script_args);
     }
 
     runner.run()?;

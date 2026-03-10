@@ -24,16 +24,32 @@ pub mod transform;
 pub struct AppliedRefactor {
     pub files_modified: usize,
     pub rerun_recommended: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix_summary: Option<FixResultsSummary>,
 }
 
 impl AppliedRefactor {
-    pub fn from_capture(capture: AppliedAutofixCapture, rerun_recommended: bool) -> Self {
+    pub fn from_capture(
+        capture: AppliedAutofixCapture,
+        rerun_recommended: bool,
+        changed_files: Vec<String>,
+    ) -> Self {
         Self {
             files_modified: capture.files_modified,
             rerun_recommended,
+            changed_files,
             fix_summary: capture.fix_summary,
+        }
+    }
+
+    pub fn from_plan(plan: &RefactorPlan, rerun_recommended: bool) -> Self {
+        Self {
+            files_modified: plan.files_modified,
+            rerun_recommended,
+            changed_files: plan.changed_files.clone(),
+            fix_summary: plan.fix_summary.clone(),
         }
     }
 }
@@ -46,7 +62,8 @@ pub use decompose::{
 pub use move_items::{move_items, ImportRewrite, ItemKind, MoveResult, MovedItem};
 pub use planner::{
     analyze_stage_overlaps, build_refactor_plan, normalize_sources, summarize_plan_totals,
-    PlanOverlap, PlanStageSummary, RefactorPlan, RefactorPlanRequest, KNOWN_PLAN_SOURCES,
+    LintSourceOptions, PlanOverlap, PlanStageSummary, RefactorPlan, RefactorPlanRequest,
+    TestSourceOptions, KNOWN_PLAN_SOURCES,
 };
 pub use rename::{
     apply_renames, find_references, find_references_with_targeting, generate_renames,

@@ -340,6 +340,12 @@ pub fn count_newly_changed(before: &HashSet<String>, after: &HashSet<String>) ->
     after.difference(before).count()
 }
 
+pub fn newly_changed_files(before: &HashSet<String>, after: &HashSet<String>) -> Vec<String> {
+    let mut changed: Vec<String> = after.difference(before).cloned().collect();
+    changed.sort();
+    changed
+}
+
 pub fn begin_applied_fix_capture(local_path: &str) -> crate::Result<HashSet<String>> {
     changed_file_set(local_path)
 }
@@ -523,6 +529,21 @@ mod tests {
         ]);
 
         assert_eq!(count_newly_changed(&before, &after), 2);
+    }
+
+    #[test]
+    fn newly_changed_files_returns_sorted_difference() {
+        let before = HashSet::from(["src/b.rs".to_string()]);
+        let after = HashSet::from([
+            "src/c.rs".to_string(),
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+        ]);
+
+        assert_eq!(
+            newly_changed_files(&before, &after),
+            vec!["src/a.rs", "src/c.rs"]
+        );
     }
 
     #[test]

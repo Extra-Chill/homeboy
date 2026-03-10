@@ -1,9 +1,12 @@
 use clap::Args;
 use serde::Serialize;
+use std::path::PathBuf;
 
 use homeboy::component::Component;
 use homeboy::extension::{self, ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
-use homeboy::refactor::{self, AppliedRefactor, TransformSet};
+use homeboy::refactor::{
+    self, AppliedRefactor, LintSourceOptions, RefactorPlanRequest, TestSourceOptions, TransformSet,
+};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
 use homeboy::test_drift::{self, DriftOptions, DriftReport};
@@ -254,7 +257,6 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
     } else {
         None
     };
-    let resolved = resolve_test_command(&component)?;
 
     // Coverage is enabled by --coverage or --coverage-min
     let coverage_enabled = args.coverage || args.coverage_min.is_some();
@@ -279,26 +281,50 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
         None
     };
 
-    let fix_sidecars = autofix::AutofixSidecarFiles::for_apply();
-    let before_fix_files = if args.fix {
-        Some(autofix::begin_applied_fix_capture(&component.local_path)?)
+    let passthrough_args = filter_homeboy_flags(&args.args);
+
+    let planned_autofix = if args.fix {
+        let selected_files = changed_scope
+            .as_ref()
+            .map(|scope| scope.selected_files.clone());
+        let plan = homeboy::refactor::build_refactor_plan(RefactorPlanRequest {
+            component: component.clone(),
+            root: PathBuf::from(&source_path),
+            sources: vec!["test".to_string()],
+            changed_since: None,
+            only: Vec::new(),
+            exclude: Vec::new(),
+            settings: args.setting_args.setting.clone(),
+            lint: LintSourceOptions::default(),
+            test: TestSourceOptions {
+                selected_files,
+                skip_lint: args.skip_lint,
+                script_args: passthrough_args.clone(),
+            },
+            write: true,
+        })?;
+
+        let outcome = autofix::standard_outcome(
+            AutofixMode::Write,
+            plan.files_modified,
+            Some(format!("homeboy test {} --analyze", args.comp.id())),
+            plan.hints.clone(),
+        );
+
+        Some((plan, outcome))
     } else {
         None
     };
+
+    let resolved = resolve_test_command(&component)?;
 
     let mut runner = ExtensionRunner::for_context(resolved)
         .component(component.clone())
         .path_override(args.comp.path.clone())
         .settings(&args.setting_args.setting)
         .env_if(args.skip_lint, "HOMEBOY_SKIP_LINT", "1")
-        .env_if(args.fix, "HOMEBOY_AUTO_FIX", "1")
         .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1")
-        .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy())
-        .env_if(
-            args.fix,
-            "HOMEBOY_FIX_RESULTS_FILE",
-            &fix_sidecars.results_file.to_string_lossy(),
-        );
+        .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy());
 
     if let Some(ref file) = coverage_file {
         runner = runner.env("HOMEBOY_COVERAGE_FILE", &file.to_string_lossy());
@@ -311,8 +337,6 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
     if let Some(min) = args.coverage_min {
         runner = runner.env("HOMEBOY_COVERAGE_MIN", &format!("{}", min));
     }
-
-    let passthrough_args = filter_homeboy_flags(&args.args);
 
     if let Some(ref scope) = changed_scope {
         if scope.selected_files.is_empty() {
@@ -381,19 +405,9 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
     // Clean up test results temp file
     let _ = std::fs::remove_file(&results_file);
 
-    // Read structured fix results from extension sidecar (if written).
-    let test_autofix = if args.fix {
-        let capture = autofix::finish_applied_fix_capture(
-            &component.local_path,
-            before_fix_files.as_ref().expect("fix capture initialized"),
-            &fix_sidecars,
-        )?;
-        let rerun_recommended = capture.files_modified > 0;
-
-        Some(AppliedRefactor::from_capture(capture, rerun_recommended))
-    } else {
-        None
-    };
+    let test_autofix = planned_autofix
+        .as_ref()
+        .map(|(plan, outcome)| AppliedRefactor::from_plan(plan, outcome.rerun_recommended));
 
     // Determine actual test status: when parsed results show 0 failures,
     // treat as passed even if the runner script exited non-zero (e.g., lint
@@ -540,6 +554,10 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
     }
 
     let mut hints = Vec::new();
+
+    if let Some((_, outcome)) = &planned_autofix {
+        hints.extend(outcome.hints.clone());
+    }
 
     let comp_id = args.comp.id();
 
