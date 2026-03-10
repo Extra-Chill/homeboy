@@ -1430,59 +1430,6 @@ pub(crate) fn apply_insertions_to_content(
     crate::core::refactor::auto::apply::apply_insertions_to_content(content, insertions, language)
 }
 
-/// Insert trait `use` statements inside the class body.
-///
-/// For PHP: inserts `use TraitName;` after the class opening brace.
-/// For Rust: would insert trait impl blocks (not yet implemented).
-/// For JS/TS: would insert mixin application (not yet implemented).
-fn insert_trait_uses(content: &str, stubs: &[&String], language: &Language) -> String {
-    match language {
-        Language::Php => {
-            // Find the class opening brace: `class Foo ... {`
-            let class_re = Regex::new(r"(?:class|trait|interface)\s+\w+[^{]*\{").unwrap();
-            if let Some(m) = class_re.find(content) {
-                let insert_pos = m.end();
-                let mut result = String::with_capacity(content.len() + stubs.len() * 40);
-                result.push_str(&content[..insert_pos]);
-                result.push('\n');
-                for stub in stubs {
-                    let trimmed = stub.trim_end();
-                    result.push_str(trimmed);
-                    result.push('\n');
-                }
-                result.push_str(&content[insert_pos..]);
-                result
-            } else {
-                content.to_string()
-            }
-        }
-        _ => {
-            // Other languages: fall back to inserting before closing brace
-            let combined: String = stubs
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            insert_before_closing_brace(content, &combined, language)
-        }
-    }
-}
-
-/// Insert code before the last closing brace of a class/struct/impl block.
-fn insert_before_closing_brace(content: &str, code: &str, _language: &Language) -> String {
-    // Find the last `}` in the file (class/struct closing brace)
-    if let Some(last_brace) = content.rfind('}') {
-        let mut result = String::with_capacity(content.len() + code.len());
-        result.push_str(&content[..last_brace]);
-        result.push_str(code);
-        result.push_str(&content[last_brace..]);
-        result
-    } else {
-        // No closing brace — append to end
-        format!("{}{}", content, code)
-    }
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
