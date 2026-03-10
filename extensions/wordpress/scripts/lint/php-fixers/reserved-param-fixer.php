@@ -32,9 +32,11 @@ if (!file_exists($path)) {
     exit(1);
 }
 
-// Global manifest: collects renames from Pass 1 for use in Pass 2.
-// Structure: [ 'methodName' => [ 'old_param' => 'new_param', ... ], ... ]
-$GLOBALS['rename_manifest'] = [];
+// Global declaration manifest used to classify which renames are safe.
+$GLOBALS['declaration_manifest'] = build_declaration_manifest($path);
+
+// Global manifest: safe renames only, used by both passes.
+$GLOBALS['rename_manifest'] = build_safe_rename_manifest($GLOBALS['declaration_manifest']);
 
 // Pass 1: Rename parameters in declarations + bodies, build manifest
 $result = fixer_process_path($path, 'process_file_pass1');
@@ -58,6 +60,10 @@ if ($total > 0) {
     echo "Reserved param fixer: Fixed " . implode(', ', $parts) . "\n";
 } else {
     echo "Reserved param fixer: No fixable parameters found\n";
+}
+
+if (!empty($GLOBALS['reserved_param_stats']['ambiguous_declarations'])) {
+    echo '  Skipped ambiguous declarations: ' . $GLOBALS['reserved_param_stats']['ambiguous_declarations'] . "\n";
 }
 
 exit(0);
@@ -141,8 +147,16 @@ function process_file_pass1($filepath) {
             continue;
         }
 
-        // Extract parameter names from the parameter list
-        $renames = find_reserved_params($tokens, $paren_open, $paren_close);
+        // Extract parameter names from the parameter list.
+        $safe_entry = ($func_name !== null && isset($GLOBALS['rename_manifest'][$func_name]))
+            ? $GLOBALS['rename_manifest'][$func_name]
+            : null;
+
+        if ($safe_entry === null) {
+            continue;
+        }
+
+        $renames = $safe_entry['variable_renames'];
         if (empty($renames)) {
             continue;
         }
@@ -161,25 +175,6 @@ function process_file_pass1($filepath) {
         // Apply renames to parameter declarations and function body
         $fixes += apply_renames($tokens, $renames, $paren_open, $body_close);
 
-        // Record in manifest for Pass 2 (named argument call site updates)
-        if ($func_name !== null) {
-            // Strip $ prefix for named argument format: '$class' => 'class'
-            $named_arg_renames = [];
-            foreach ($renames as $old_var => $new_var) {
-                $old_arg = substr($old_var, 1); // '$class' => 'class'
-                $new_arg = substr($new_var, 1); // '$class_name' => 'class_name'
-                $named_arg_renames[$old_arg] = $new_arg;
-            }
-            // Merge with any existing renames for this method name
-            // (same method name can appear in multiple classes/traits)
-            if (!isset($GLOBALS['rename_manifest'][$func_name])) {
-                $GLOBALS['rename_manifest'][$func_name] = [];
-            }
-            $GLOBALS['rename_manifest'][$func_name] = array_merge(
-                $GLOBALS['rename_manifest'][$func_name],
-                $named_arg_renames
-            );
-        }
     }
 
     if ($fixes === 0) {
@@ -258,8 +253,8 @@ function process_file_pass2($filepath) {
     // Quick pre-check: does this file contain any of the old named argument names?
     // This avoids tokenizing files that can't possibly have call sites.
     $has_candidate = false;
-    foreach ($manifest as $method_name => $renames) {
-        foreach ($renames as $old_arg => $new_arg) {
+    foreach ($manifest as $method_name => $entry) {
+        foreach ($entry['renames'] as $old_arg => $new_arg) {
             if (strpos($content, $old_arg . ':') !== false) {
                 $has_candidate = true;
                 break 2;
@@ -279,8 +274,8 @@ function process_file_pass2($filepath) {
     // Also track which method names each arg belongs to for context checking
     $arg_to_methods = []; // old_arg => [method_name, ...]
     $arg_renames = [];    // old_arg => new_arg
-    foreach ($manifest as $method_name => $renames) {
-        foreach ($renames as $old_arg => $new_arg) {
+    foreach ($manifest as $method_name => $entry) {
+        foreach ($entry['renames'] as $old_arg => $new_arg) {
             $arg_renames[$old_arg] = $new_arg;
             $arg_to_methods[$old_arg][] = $method_name;
         }
@@ -381,6 +376,205 @@ function get_function_name($tokens, $start, $count) {
         // Unexpected token
         return null;
     }
+    return null;
+}
+
+/**
+ * Build a declaration inventory for all named functions and methods.
+ *
+ * @param string $path Path being processed.
+ * @return array<string, array<int, array<string, mixed>>>
+ */
+function build_declaration_manifest($path) {
+    $manifest = [];
+
+    fixer_process_path($path, function ($filepath) use (&$manifest) {
+        $content = file_get_contents($filepath);
+        if ($content === false) {
+            return 0;
+        }
+
+        $tokens = @token_get_all($content);
+        if ($tokens === false) {
+            return 0;
+        }
+
+        $count = count($tokens);
+        for ($i = 0; $i < $count; $i++) {
+            if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_FUNCTION) {
+                continue;
+            }
+
+            $func_name = get_function_name($tokens, $i + 1, $count);
+            if ($func_name === null) {
+                continue;
+            }
+
+            $paren_open = find_next_token($tokens, $i + 1, $count, '(');
+            if ($paren_open === null) {
+                continue;
+            }
+
+            $paren_close = find_matching_paren($tokens, $paren_open, $count);
+            if ($paren_close === null) {
+                continue;
+            }
+
+            $variable_renames = find_reserved_params($tokens, $paren_open, $paren_close);
+            $renames = normalize_named_arg_renames($variable_renames);
+            $manifest[$func_name][] = [
+                'identity'         => get_declaration_identity($tokens, $i, $func_name),
+                'file'             => $filepath,
+                'line'             => $tokens[$i][2],
+                'variable_renames' => $variable_renames,
+                'renames'          => $renames,
+            ];
+        }
+
+        return 0;
+    });
+
+    return $manifest;
+}
+
+/**
+ * Keep only renames whose callable name is semantically safe to rewrite.
+ *
+ * Safe means every declaration sharing that callable name exposes the exact same
+ * reserved-param rename map. Anything else is ambiguous, so we report-only.
+ *
+ * @param array<string, array<int, array<string, mixed>>> $declaration_manifest
+ * @return array<string, array<string, mixed>>
+ */
+function build_safe_rename_manifest($declaration_manifest) {
+    $safe_manifest = [];
+    $stats = [
+        'ambiguous_callables'    => 0,
+        'ambiguous_declarations' => 0,
+    ];
+
+    foreach ($declaration_manifest as $func_name => $entries) {
+        $fingerprints = [];
+        $has_renames  = false;
+
+        foreach ($entries as $entry) {
+            if (!empty($entry['renames'])) {
+                $has_renames = true;
+            }
+
+            $fingerprints[json_encode($entry['renames'])] = true;
+        }
+
+        if (!$has_renames) {
+            continue;
+        }
+
+        if (count($fingerprints) !== 1) {
+            $stats['ambiguous_callables']++;
+            foreach ($entries as $entry) {
+                if (!empty($entry['renames'])) {
+                    $stats['ambiguous_declarations']++;
+                }
+            }
+            continue;
+        }
+
+        $safe_manifest[$func_name] = [
+            'renames'          => $entries[0]['renames'],
+            'variable_renames' => $entries[0]['variable_renames'],
+            'declarations'     => $entries,
+        ];
+    }
+
+    $GLOBALS['reserved_param_stats'] = $stats;
+
+    return $safe_manifest;
+}
+
+/**
+ * Convert variable rename map to named-argument rename map and sort it.
+ *
+ * @param array<string, string> $renames Variable renames with leading $.
+ * @return array<string, string>
+ */
+function normalize_named_arg_renames($renames) {
+    $named_arg_renames = [];
+
+    foreach ($renames as $old_var => $new_var) {
+        $named_arg_renames[substr($old_var, 1)] = substr($new_var, 1);
+    }
+
+    ksort($named_arg_renames);
+
+    return $named_arg_renames;
+}
+
+/**
+ * Build a readable declaration identity for debugging/reporting.
+ *
+ * @param array       $tokens Token stream.
+ * @param int         $func_token_index Function token index.
+ * @param string      $func_name Function name.
+ * @return string
+ */
+function get_declaration_identity($tokens, $func_token_index, $func_name) {
+    $scope_name = find_enclosing_scope_name($tokens, $func_token_index);
+
+    if ($scope_name === null) {
+        return $func_name;
+    }
+
+    return $scope_name . '::' . $func_name;
+}
+
+/**
+ * Find the enclosing class/trait/interface/enum name for a function token.
+ *
+ * @param array $tokens Token stream.
+ * @param int   $position Token index.
+ * @return string|null
+ */
+function find_enclosing_scope_name($tokens, $position) {
+    $count = count($tokens);
+    $scope_stack = [];
+    $brace_depth = 0;
+    $scope_tokens = [T_CLASS, T_INTERFACE, T_TRAIT];
+
+    if (defined('T_ENUM')) {
+        $scope_tokens[] = T_ENUM;
+    }
+
+    for ($i = 0; $i < $count; $i++) {
+        if (is_array($tokens[$i]) && in_array($tokens[$i][0], $scope_tokens, true)) {
+            for ($j = $i + 1; $j < $count; $j++) {
+                if (is_array($tokens[$j]) && $tokens[$j][0] === T_STRING) {
+                    $scope_stack[] = [
+                        'name'  => $tokens[$j][1],
+                        'depth' => $brace_depth,
+                    ];
+                    break;
+                }
+
+                if (!is_array($tokens[$j]) && $tokens[$j] === '{') {
+                    break;
+                }
+            }
+        } elseif (!is_array($tokens[$i])) {
+            if ($tokens[$i] === '{') {
+                $brace_depth++;
+            } elseif ($tokens[$i] === '}') {
+                $brace_depth--;
+                while (!empty($scope_stack) && end($scope_stack)['depth'] >= $brace_depth) {
+                    array_pop($scope_stack);
+                }
+            }
+        }
+
+        if ($i === $position) {
+            return empty($scope_stack) ? null : end($scope_stack)['name'];
+        }
+    }
+
     return null;
 }
 

@@ -105,6 +105,87 @@ if ( 0 !== $unused_exit ) {
 	}
 }
 
+// -------------------------------------------------------------------------
+// Reserved param fixer should skip ambiguous callable names.
+// -------------------------------------------------------------------------
+$reserved_dir = $tmp_base . '/reserved-fixture';
+mkdir( $reserved_dir, 0777, true );
+
+$reserved_fixture = <<<'PHP'
+<?php
+class SafeOne {
+	public function hydrate( $class ) {
+		return $class;
+	}
+}
+
+class SafeTwo {
+	public function hydrate( $class ) {
+		return $class;
+	}
+}
+
+class AmbiguousOne {
+	public function collide( $class ) {
+		return $class;
+	}
+}
+
+class AmbiguousTwo {
+	public function collide( $default ) {
+		return $default;
+	}
+}
+
+$safe_one = new SafeOne();
+$safe_two = new SafeTwo();
+$ambiguous_one = new AmbiguousOne();
+$ambiguous_two = new AmbiguousTwo();
+
+$safe_one->hydrate( class: 'one' );
+$safe_two->hydrate( class: 'two' );
+$ambiguous_one->collide( class: 'three' );
+$ambiguous_two->collide( default: 'four' );
+PHP;
+
+$reserved_file = $reserved_dir . '/reserved-fixture.php';
+file_put_contents( $reserved_file, $reserved_fixture );
+
+$reserved_command = sprintf(
+	'php %s %s',
+	escapeshellarg( $fixer_dir . '/reserved-param-fixer.php' ),
+	escapeshellarg( $reserved_dir )
+);
+exec( $reserved_command, $reserved_output, $reserved_exit );
+
+if ( 0 !== $reserved_exit ) {
+	$failures[] = 'reserved-param-fixer exited non-zero: ' . implode( "\n", $reserved_output );
+} else {
+	$reserved_result = file_get_contents( $reserved_file );
+	if ( false === $reserved_result ) {
+		$failures[] = 'Failed to read reserved-param regression fixture';
+	} else {
+		if ( false === strpos( $reserved_result, 'function hydrate( $class_name )' ) ) {
+			$failures[] = 'Expected safe hydrate() declarations to be renamed';
+		}
+		if ( false === strpos( $reserved_result, "hydrate( class_name: 'one' )" ) ) {
+			$failures[] = 'Expected safe hydrate() named arguments to be updated';
+		}
+		if ( false !== strpos( $reserved_result, 'function collide( $class_name )' ) ) {
+			$failures[] = 'Expected ambiguous collide() declarations to be left unchanged';
+		}
+		if ( false !== strpos( $reserved_result, 'function collide( $default_value )' ) ) {
+			$failures[] = 'Expected ambiguous collide() declarations to stay report-only';
+		}
+		if ( false === strpos( $reserved_result, "collide( class: 'three' )" ) ) {
+			$failures[] = 'Expected ambiguous collide() named argument to remain unchanged';
+		}
+		if ( false === strpos( $reserved_result, "collide( default: 'four' )" ) ) {
+			$failures[] = 'Expected ambiguous collide() default named argument to remain unchanged';
+		}
+	}
+}
+
 if ( ! empty( $failures ) ) {
 	fwrite( STDERR, "PHP fixer regression check failed:\n" );
 	foreach ( $failures as $failure ) {
