@@ -1,7 +1,7 @@
 //! Generic utility primitives with zero domain knowledge.
 //!
 //! - `args` - CLI argument normalization
-//! - `autofix` - Shared detector-triggered refactor plumbing
+//! - `autofix` - Compatibility shim re-exporting code-factory plumbing from `refactor::auto`
 //! - `base_path` - Remote path joining utilities
 //! - `baseline` - Baseline & ratchet drift detection
 //! - `codebase_scan` - File walking and content search across codebases

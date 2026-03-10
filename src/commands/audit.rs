@@ -773,8 +773,8 @@ mod tests {
 
     #[test]
     fn test_run_fix_write_applies_preflight_checked_method_stub() {
-        use homeboy::code_audit::fixer::{
-            self, Fix, FixPolicy, Insertion, PreflightContext, PreflightStatus,
+        use homeboy::refactor::auto::{
+            self, Fix, FixPolicy, FixResult, Insertion, PreflightContext,
         };
 
         let root = tmp_dir("fix-write-applies-preflight-checked-method-stub");
@@ -783,7 +783,7 @@ mod tests {
 
         // Construct a FixResult directly — tests the fixer logic without
         // requiring an extension to fingerprint .rs files.
-        let mut fix_result = fixer::FixResult {
+        let mut fix_result = FixResult {
             fixes: vec![Fix {
                 file: "commands/bad.rs".to_string(),
                 required_methods: vec!["run".to_string(), "helper".to_string()],
@@ -809,42 +809,37 @@ mod tests {
         };
 
         // Step 1: apply_fix_policy annotates insertions
-        let summary = fixer::apply_fix_policy(
+        let summary = auto::apply_fix_policy(
             &mut fix_result,
             true, // write mode
             &FixPolicy::default(),
             &PreflightContext { root: &root },
         );
 
-        assert_eq!(summary.auto_apply_insertions, 1);
+        assert_eq!(summary.auto_apply_insertions, 0);
         assert_eq!(summary.preflight_failures, 0);
 
         let insertion = &fix_result.fixes[0].insertions[0];
         assert_eq!(insertion.finding, AuditFinding::MissingMethod);
         assert!(matches!(insertion.kind, InsertionKind::MethodStub));
-        assert_eq!(insertion.safety_tier, FixSafetyTier::SafeWithChecks);
-        assert!(insertion.auto_apply);
-        assert!(matches!(
-            insertion.preflight.as_ref().map(|report| report.status),
-            Some(PreflightStatus::Passed)
-        ));
+        assert_eq!(insertion.safety_tier, FixSafetyTier::PlanOnly);
+        assert!(!insertion.auto_apply);
+        assert!(insertion.preflight.is_some());
 
-        // Step 2: apply_fixes writes to disk
-        let mut auto_subset = fixer::auto_apply_subset(&fix_result);
-        let modified = fixer::apply_fixes(&mut auto_subset.fixes, &root);
-        assert_eq!(modified, 1);
-        assert!(auto_subset.fixes[0].applied);
+        // Plan-only method stubs should not be auto-applied in unattended mode.
+        let mut auto_subset = auto::auto_apply_subset(&fix_result);
+        let modified = auto::apply_fixes(&mut auto_subset.fixes, &root);
+        assert_eq!(modified, 0);
 
         let content = fs::read_to_string(root.join("commands/bad.rs")).unwrap();
-        assert!(content.contains("pub fn helper()"));
-        assert!(content.contains("todo!(\"helper\")"));
+        assert_eq!(content, "pub fn run() {}\n");
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn test_run_fix_only_import_add_filters_method_stub() {
-        use homeboy::code_audit::fixer::{self, Fix, FixPolicy, Insertion, PreflightContext};
+        use homeboy::refactor::auto::{self, Fix, FixPolicy, FixResult, Insertion, PreflightContext};
 
         let root = tmp_dir("fix-only-import-add");
         fs::create_dir_all(root.join("commands")).unwrap();
@@ -856,7 +851,7 @@ mod tests {
 
         // Construct a FixResult with both a MethodStub and an ImportAdd.
         // The --only import_add policy should filter out the MethodStub entirely.
-        let mut fix_result = fixer::FixResult {
+        let mut fix_result = FixResult {
             fixes: vec![Fix {
                 file: "commands/bad.rs".to_string(),
                 required_methods: vec!["run".to_string()],
@@ -898,7 +893,7 @@ mod tests {
             exclude: vec![],
         };
 
-        fixer::apply_fix_policy(
+        auto::apply_fix_policy(
             &mut fix_result,
             false, // dry-run
             &policy,
