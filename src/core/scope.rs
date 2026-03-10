@@ -53,7 +53,6 @@ fn builtin_scope_defaults(component: &Component, command: ScopeCommand) -> Effec
     let mut effective = EffectiveScope::default();
 
     if matches!(command, ScopeCommand::Audit) {
-        effective.exclude.push("CHANGELOG.md".to_string());
         if let Some(target) = component.changelog_target.as_ref() {
             effective.exclude.push(target.clone());
         }
@@ -129,32 +128,5 @@ mod tests {
 
         let resolved = resolve_component_scope(&component, ScopeCommand::Audit);
         assert_eq!(resolved.exclude, vec!["docs/CHANGES.md"]);
-    }
-
-    #[test]
-    fn audit_scope_includes_builtin_changelog_default_for_all_components() {
-        let component = Component::new(
-            "generic".to_string(),
-            "/tmp/generic".to_string(),
-            "".to_string(),
-            None,
-        );
-
-        let resolved = resolve_component_scope(&component, ScopeCommand::Audit);
-        assert_eq!(resolved.exclude, vec!["CHANGELOG.md"]);
-    }
-
-    #[test]
-    fn audit_scope_includes_component_changelog_target() {
-        let mut component = Component::new(
-            "generic".to_string(),
-            "/tmp/generic".to_string(),
-            "".to_string(),
-            None,
-        );
-        component.changelog_target = Some("docs/CHANGES.md".to_string());
-
-        let resolved = resolve_component_scope(&component, ScopeCommand::Audit);
-        assert_eq!(resolved.exclude, vec!["CHANGELOG.md", "docs/CHANGES.md"]);
     }
 }
