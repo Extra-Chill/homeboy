@@ -438,7 +438,7 @@ fn run_lint_stage(
 ) -> crate::Result<PlannedStage> {
     let mut sandbox_component = component.clone();
     sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
-    let script_path = super::runner::resolve_lint_script(&sandbox_component)?;
+    let resolved = super::runner::resolve_lint_command(&sandbox_component)?;
     let findings_file = std::env::temp_dir().join(format!(
         "homeboy-lint-findings-{}-{}-{}.json",
         std::process::id(),
@@ -474,7 +474,8 @@ fn run_lint_stage(
         None
     };
 
-    extension::ExtensionRunner::new(&sandbox_component.id, &script_path)
+    extension::ExtensionRunner::new(&sandbox_component.id, &resolved.script_path)
+        .extension_id(resolved.extension_id.clone())
         .component(sandbox_component.clone())
         .settings(settings)
         .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1")
@@ -547,7 +548,7 @@ fn run_test_stage(
 ) -> crate::Result<PlannedStage> {
     let mut sandbox_component = component.clone();
     sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
-    let script_path = super::runner::resolve_test_script(&sandbox_component)?;
+    let resolved = super::runner::resolve_test_command(&sandbox_component)?;
     let results_file = std::env::temp_dir().join(format!(
         "homeboy-test-results-{}-{}.json",
         std::process::id(),
@@ -561,7 +562,8 @@ fn run_test_stage(
         None
     };
 
-    let mut runner = extension::ExtensionRunner::new(&sandbox_component.id, &script_path)
+    let mut runner = extension::ExtensionRunner::new(&sandbox_component.id, &resolved.script_path)
+        .extension_id(resolved.extension_id.clone())
         .component(sandbox_component.clone())
         .settings(settings)
         .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy())

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::component::{self, Component};
 use crate::config::{is_json_input, parse_bulk_ids};
 use crate::error::{Error, Result};
-use crate::extension::{self, exec_context};
+use crate::extension::{self, exec_context, ExtensionCapability};
 use crate::output::{BulkResult, BulkSummary, ItemOutcome};
 use crate::paths;
 use crate::permissions;
@@ -46,58 +46,51 @@ impl ResolvedBuildCommand {
 /// If a component has both an extension with build support AND a build_command,
 /// the extension wins and a warning is emitted.
 pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBuildCommand> {
-    // 1. Check extension for bundled script or local script patterns (takes priority)
-    if let Some(extensions) = &component.extensions {
-        for extension_id in extensions.keys() {
-            if let Ok(extension) = extension::load_extension(extension_id) {
-                if let Some(build) = &extension.build {
-                    // Check for extension's bundled script
-                    let bundled = build
-                        .extension_script
-                        .as_ref()
-                        .and_then(|extension_script| {
-                            paths::extension(extension_id)
-                                .ok()
-                                .and_then(|extension_dir| {
-                                    let script_path = extension_dir.join(extension_script);
-                                    script_path.exists().then(|| {
-                                        let quoted_path =
-                                            shell::quote_path(&script_path.to_string_lossy());
-                                        let command = build
-                                            .command_template
-                                            .as_ref()
-                                            .map(|t| t.replace("{{script}}", &quoted_path))
-                                            .unwrap_or_else(|| format!("sh {}", quoted_path));
-                                        ResolvedBuildCommand::ExtensionProvided {
-                                            command,
-                                            source: format!(
-                                                "{}:{}",
-                                                extension_id, extension_script
-                                            ),
-                                        }
-                                    })
-                                })
-                        });
-                    if let Some(result) = bundled {
-                        return Ok(result);
-                    }
+    // 1. Check exactly one build-capable extension for bundled script or local script patterns
+    if let Ok(extension_id) =
+        extension::resolve_extension_for_capability(component, ExtensionCapability::Build)
+    {
+        let extension = extension::load_extension(&extension_id)?;
+        if let Some(build) = &extension.build {
+            let bundled = build
+                .extension_script
+                .as_ref()
+                .and_then(|extension_script| {
+                    paths::extension(&extension_id)
+                        .ok()
+                        .and_then(|extension_dir| {
+                            let script_path = extension_dir.join(extension_script);
+                            script_path.exists().then(|| {
+                                let quoted_path = shell::quote_path(&script_path.to_string_lossy());
+                                let command = build
+                                    .command_template
+                                    .as_ref()
+                                    .map(|t| t.replace("{{script}}", &quoted_path))
+                                    .unwrap_or_else(|| format!("sh {}", quoted_path));
+                                ResolvedBuildCommand::ExtensionProvided {
+                                    command,
+                                    source: format!("{}:{}", extension_id, extension_script),
+                                }
+                            })
+                        })
+                });
+            if let Some(result) = bundled {
+                return Ok(result);
+            }
 
-                    // Check for local script matching extension's script_names
-                    let local_path = PathBuf::from(&component.local_path);
-                    for script_name in &build.script_names {
-                        let local_script = local_path.join(script_name);
-                        if local_script.exists() {
-                            let command = build
-                                .command_template
-                                .as_ref()
-                                .map(|t| t.replace("{{script}}", script_name))
-                                .unwrap_or_else(|| format!("sh {}", script_name));
-                            return Ok(ResolvedBuildCommand::LocalScript {
-                                command,
-                                script_name: script_name.clone(),
-                            });
-                        }
-                    }
+            let local_path = PathBuf::from(&component.local_path);
+            for script_name in &build.script_names {
+                let local_script = local_path.join(script_name);
+                if local_script.exists() {
+                    let command = build
+                        .command_template
+                        .as_ref()
+                        .map(|t| t.replace("{{script}}", script_name))
+                        .unwrap_or_else(|| format!("sh {}", script_name));
+                    return Ok(ResolvedBuildCommand::LocalScript {
+                        command,
+                        script_name: script_name.clone(),
+                    });
                 }
             }
         }
@@ -115,7 +108,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
             );
             log_status!(
                 "hint",
-                "Remove build_command: homeboy component set {} --replace build_command",
+                "Remove build_command or configure explicit build ownership: homeboy component set {} --replace build_command",
                 component.id
             );
         }
@@ -144,7 +137,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
             Some(component.id.clone()),
             Some(vec![
                 format!("Configure buildCommand: homeboy component set {} --json '{{\"buildCommand\": \"<command>\"}}'", component.id),
-                format!("Link a extension with build support: homeboy component set {} --json '{{\"extensions\": {{\"wordpress\": {{}}}}}}'", component.id),
+                format!("Link an extension with build support: homeboy component set {} --extension <extension_id>", component.id),
             ]),
         ))
     }

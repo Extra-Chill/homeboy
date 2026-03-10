@@ -27,6 +27,7 @@ struct ResolvedRunnerContext {
 pub struct ExtensionRunner {
     component_id: String,
     script_path: String, // Relative to extension root (e.g., "scripts/lint/lint-runner.sh")
+    extension_id: Option<String>,
     settings_overrides: Vec<(String, String)>,
     env_vars: Vec<(String, String)>,
     script_args: Vec<String>,
@@ -43,6 +44,7 @@ impl ExtensionRunner {
         Self {
             component_id: component_id.to_string(),
             script_path: script_path.to_string(),
+            extension_id: None,
             settings_overrides: Vec::new(),
             env_vars: Vec::new(),
             script_args: Vec::new(),
@@ -57,6 +59,12 @@ impl ExtensionRunner {
     /// resolved component (e.g., from portable config discovery in CI).
     pub fn component(mut self, comp: Component) -> Self {
         self.pre_loaded_component = Some(comp);
+        self
+    }
+
+    /// Set the resolved extension explicitly to avoid secondary selection.
+    pub fn extension_id(mut self, extension_id: impl Into<String>) -> Self {
+        self.extension_id = Some(extension_id.into());
         self
     }
 
@@ -192,7 +200,17 @@ impl ExtensionRunner {
         &self,
         component: &Component,
     ) -> Result<(String, Vec<(String, String)>)> {
-        let extension_name = super::resolve_extension_id(component)?;
+        let extension_name = match &self.extension_id {
+            Some(extension_id) => extension_id.clone(),
+            None => super::resolve_extension_for_capability(
+                component,
+                if self.script_path.contains("test") {
+                    super::ExtensionCapability::Test
+                } else {
+                    super::ExtensionCapability::Lint
+                },
+            )?,
+        };
         let extension_settings = component
             .extensions
             .as_ref()

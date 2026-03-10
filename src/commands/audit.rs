@@ -885,7 +885,7 @@ fn build_smoke_verifier<'a>(
     changed_files: &'a [String],
 ) -> Option<impl Fn(&fixer::ApplyChunkResult) -> Result<String, String> + 'a> {
     let component = load_or_discover(component_id, source_path)?;
-    let script_path = super::lint::resolve_lint_script(&component).ok()?;
+    let resolved = super::lint::resolve_lint_command(&component).ok()?;
     let root = PathBuf::from(source_path);
     Some(move |chunk: &fixer::ApplyChunkResult| {
         if changed_files.is_empty() {
@@ -917,7 +917,8 @@ fn build_smoke_verifier<'a>(
             format!("{{{}}}", joined)
         };
 
-        let output = ExtensionRunner::new(component_id, &script_path)
+        let output = ExtensionRunner::new(component_id, &resolved.script_path)
+            .extension_id(resolved.extension_id.clone())
             .path_override(Some(source_path.to_string()))
             .env("HOMEBOY_LINT_GLOB", &glob)
             .run()
@@ -937,7 +938,7 @@ fn build_test_smoke_verifier<'a>(
     changed_files: &'a [String],
 ) -> Option<impl Fn(&fixer::ApplyChunkResult) -> Result<String, String> + 'a> {
     let component = load_or_discover(component_id, source_path)?;
-    let script_path = super::test::resolve_test_script(&component).ok()?;
+    let resolved = super::test::resolve_test_command(&component).ok()?;
     // Pre-compute the changed test files string so the closure can use it.
     // The extension's test runner decides how to scope (e.g., PHPUnit uses
     // --filter, Cargo uses positional test names). Core does not generate
@@ -974,7 +975,8 @@ fn build_test_smoke_verifier<'a>(
             chunk.chunk_id.replace(':', "-")
         ));
 
-        let mut runner = ExtensionRunner::new(component_id, &script_path)
+        let mut runner = ExtensionRunner::new(component_id, &resolved.script_path)
+            .extension_id(resolved.extension_id.clone())
             .path_override(Some(source_path.to_string()))
             .env("HOMEBOY_SKIP_LINT", "1")
             .env("HOMEBOY_TEST_RESULTS_FILE", &results_file.to_string_lossy());

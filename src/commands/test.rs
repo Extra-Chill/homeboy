@@ -2,7 +2,7 @@ use clap::Args;
 use serde::Serialize;
 
 use homeboy::component::Component;
-use homeboy::extension::{self, ExtensionRunner};
+use homeboy::extension::{self, ExtensionCapability, ExtensionRunner, ResolvedExtensionCommand};
 use homeboy::refactor::{self, TransformSet};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
@@ -230,8 +230,10 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
     filtered
 }
 
-pub(crate) fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> {
-    extension::resolve_test_script(component)
+pub(crate) fn resolve_test_command(
+    component: &Component,
+) -> homeboy::error::Result<ResolvedExtensionCommand> {
+    extension::resolve_extension_command(component, ExtensionCapability::Test)
 }
 
 pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
@@ -262,7 +264,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
     } else {
         None
     };
-    let script_path = resolve_test_script(&component)?;
+    let resolved = resolve_test_command(&component)?;
 
     // Coverage is enabled by --coverage or --coverage-min
     let coverage_enabled = args.coverage || args.coverage_min.is_some();
@@ -294,7 +296,8 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
         None
     };
 
-    let mut runner = ExtensionRunner::new(args.comp.id(), &script_path)
+    let mut runner = ExtensionRunner::new(args.comp.id(), &resolved.script_path)
+        .extension_id(resolved.extension_id.clone())
         .component(component.clone())
         .path_override(args.comp.path.clone())
         .settings(&args.setting_args.setting)

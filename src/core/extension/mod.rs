@@ -52,6 +52,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::output::MergeOutput;
 use crate::paths;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub fn load_extension(id: &str) -> Result<ExtensionManifest> {
@@ -102,102 +103,162 @@ pub fn find_extension_for_file_ext(ext: &str, capability: &str) -> Option<Extens
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionCapability {
+    Lint,
+    Test,
+    Build,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedExtensionCommand {
+    pub extension_id: String,
+    pub script_path: String,
+}
+
 fn no_extensions_error(component: &Component) -> Error {
     Error::validation_invalid_argument(
         "component",
+        format!("Component '{}' has no extensions configured", component.id),
+        None,
+        None,
+    )
+    .with_hint(format!(
+        "Add a extension: homeboy component set {} --extension <extension_id>",
+        component.id
+    ))
+}
+
+fn capability_label(capability: ExtensionCapability) -> &'static str {
+    match capability {
+        ExtensionCapability::Lint => "lint",
+        ExtensionCapability::Test => "test",
+        ExtensionCapability::Build => "build",
+    }
+}
+
+fn manifest_has_capability(manifest: &ExtensionManifest, capability: ExtensionCapability) -> bool {
+    match capability {
+        ExtensionCapability::Lint => manifest.has_lint(),
+        ExtensionCapability::Test => manifest.has_test(),
+        ExtensionCapability::Build => manifest.has_build(),
+    }
+}
+
+fn capability_missing_error(component: &Component, capability: ExtensionCapability) -> Error {
+    let capability_name = capability_label(capability);
+    Error::validation_invalid_argument(
+        "extension",
         format!(
-            "Component '{}' has no extensions configured and none could be auto-detected",
-            component.id
+            "Component '{}' has no linked extensions that provide {} support",
+            component.id, capability_name
         ),
         None,
         None,
     )
     .with_hint(format!(
-        "Add a extension: homeboy component set {} --extension wordpress",
-        component.id
+        "Link an extension with {} support: homeboy component set {} --extension <extension_id>",
+        capability_name, component.id
     ))
 }
 
-pub fn auto_detect_extension_id(component: &Component) -> Option<String> {
-    if let Some(ref cmd) = component.build_command {
-        if cmd.contains("extensions/wordpress") {
-            return Some("wordpress".to_string());
-        }
-    }
-
-    let expanded = shellexpand::tilde(&component.local_path);
-    let path = std::path::Path::new(expanded.as_ref());
-
-    if path.join("composer.json").exists()
-        || path.join("wp-content").exists()
-        || path.join("plugin.php").exists()
-        || path.join("wordpress").exists()
-        || path.join("phpcs.xml.dist").exists()
-    {
-        return Some("wordpress".to_string());
-    }
-
-    if path.join("Cargo.toml").exists() {
-        return Some("rust".to_string());
-    }
-
-    if path.join("package.json").exists() {
-        return Some("node".to_string());
-    }
-
-    None
+fn capability_ambiguous_error(
+    component: &Component,
+    capability: ExtensionCapability,
+    matching: &[String],
+) -> Error {
+    let capability_name = capability_label(capability);
+    Error::validation_invalid_argument(
+        "extension",
+        format!(
+            "Component '{}' has multiple linked extensions with {} support: {}",
+            component.id,
+            capability_name,
+            matching.join(", ")
+        ),
+        None,
+        None,
+    )
+    .with_hint(format!(
+        "Configure explicit {} extension ownership before running this command",
+        capability_name
+    ))
 }
 
-pub fn resolve_extension_id(component: &Component) -> Result<String> {
-    if let Some(ref extensions) = component.extensions {
-        if extensions.contains_key("wordpress") {
-            return Ok("wordpress".to_string());
-        }
+fn linked_extensions(
+    component: &Component,
+) -> Result<&HashMap<String, crate::component::ScopedExtensionConfig>> {
+    component
+        .extensions
+        .as_ref()
+        .ok_or_else(|| no_extensions_error(component))
+}
 
-        if let Some(key) = extensions.keys().next() {
-            return Ok(key.clone());
+pub fn resolve_extension_for_capability(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<String> {
+    let extensions = linked_extensions(component)?;
+    if extensions.is_empty() {
+        return Err(no_extensions_error(component));
+    }
+
+    let mut matching = Vec::new();
+
+    for extension_id in extensions.keys() {
+        let manifest = load_extension(extension_id)?;
+        if manifest_has_capability(&manifest, capability) {
+            matching.push(extension_id.clone());
         }
     }
 
-    if let Some(detected) = auto_detect_extension_id(component) {
-        return Ok(detected);
+    match matching.len() {
+        0 => Err(capability_missing_error(component, capability)),
+        1 => Ok(matching.remove(0)),
+        _ => Err(capability_ambiguous_error(component, capability, &matching)),
     }
+}
 
-    Err(no_extensions_error(component))
+pub fn resolve_extension_command(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<ResolvedExtensionCommand> {
+    let extension_id = resolve_extension_for_capability(component, capability)?;
+    let manifest = load_extension(&extension_id)?;
+
+    let script_path = match capability {
+        ExtensionCapability::Lint => manifest.lint_script(),
+        ExtensionCapability::Test => manifest.test_script(),
+        ExtensionCapability::Build => None,
+    }
+    .map(|s| s.to_string())
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "extension",
+            format!(
+                "Extension '{}' does not have {} infrastructure configured",
+                extension_id,
+                capability_label(capability)
+            ),
+            None,
+            None,
+        )
+    })?;
+
+    Ok(ResolvedExtensionCommand {
+        extension_id,
+        script_path,
+    })
 }
 
 pub fn resolve_lint_script(component: &Component) -> Result<String> {
-    let extension_id = resolve_extension_id(component)?;
-    let manifest = load_extension(&extension_id)?;
-
-    manifest.lint_script().map(|s| s.to_string()).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "extension",
-            format!(
-                "Extension '{}' does not have lint infrastructure configured (missing lint.extension_script)",
-                extension_id
-            ),
-            None,
-            None,
-        )
-    })
+    resolve_extension_command(component, ExtensionCapability::Lint)
+        .map(|resolved| resolved.script_path)
 }
 
 pub fn resolve_test_script(component: &Component) -> Result<String> {
-    let extension_id = resolve_extension_id(component)?;
-    let manifest = load_extension(&extension_id)?;
-
-    manifest.test_script().map(|s| s.to_string()).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "extension",
-            format!(
-                "Extension '{}' does not have test infrastructure configured (missing test.extension_script)",
-                extension_id
-            ),
-            None,
-            None,
-        )
-    })
+    resolve_extension_command(component, ExtensionCapability::Test)
+        .map(|resolved| resolved.script_path)
 }
 
 /// Run a extension's fingerprint script on file content.

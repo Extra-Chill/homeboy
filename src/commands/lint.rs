@@ -2,7 +2,7 @@ use clap::Args;
 use serde::Serialize;
 
 use homeboy::component::Component;
-use homeboy::extension::{self, ExtensionRunner};
+use homeboy::extension::{self, ExtensionCapability, ExtensionRunner, ResolvedExtensionCommand};
 use homeboy::git;
 use homeboy::lint_baseline::{self, BaselineComparison as LintBaselineComparison, LintFinding};
 use homeboy::utils::autofix::{self, AutofixMode, FixResultsSummary};
@@ -90,14 +90,16 @@ pub struct LintAutofixOutput {
     fix_summary: Option<FixResultsSummary>,
 }
 
-pub(crate) fn resolve_lint_script(component: &Component) -> homeboy::error::Result<String> {
-    extension::resolve_lint_script(component)
+pub(crate) fn resolve_lint_command(
+    component: &Component,
+) -> homeboy::error::Result<ResolvedExtensionCommand> {
+    extension::resolve_extension_command(component, ExtensionCapability::Lint)
 }
 
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
     let component = args.comp.load()?;
     let source_path = args.comp.source_path()?;
-    let script_path = resolve_lint_script(&component)?;
+    let resolved = resolve_lint_command(&component)?;
     let lint_findings_file = std::env::temp_dir().join(format!(
         "homeboy-lint-findings-{}-{}.json",
         std::process::id(),
@@ -187,7 +189,8 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
         args.glob.clone()
     };
 
-    let output = ExtensionRunner::new(args.comp.id(), &script_path)
+    let output = ExtensionRunner::new(args.comp.id(), &resolved.script_path)
+        .extension_id(resolved.extension_id.clone())
         .component(component.clone())
         .path_override(args.comp.path.clone())
         .settings(&args.setting_args.setting)
@@ -398,7 +401,7 @@ mod tests {
     fn test_resolve_lint_script() {
         let component =
             Component::new("test".to_string(), "/tmp".to_string(), "".to_string(), None);
-        let result = resolve_lint_script(&component);
+        let result = resolve_lint_command(&component);
         assert!(result.is_err());
     }
 }
