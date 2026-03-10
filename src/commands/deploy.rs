@@ -501,4 +501,8 @@ fn run_multi_project(args: &DeployArgs, project_ids: &[String]) -> CmdResult<Dep
         }),
         exit_code,
     ))
+
+    pub fn run(args: TransferArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<TransferOutput> {
+        todo!("run")
+    }
 }

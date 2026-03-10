@@ -777,4 +777,8 @@ mod tests {
         assert_eq!(obj["local_path"], serde_json::json!("/override"));
         assert_eq!(obj["remote_path"], serde_json::json!("/keep-this"));
     }
+
+    pub fn run(args: TransferArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<TransferOutput> {
+        todo!("run")
+    }
 }

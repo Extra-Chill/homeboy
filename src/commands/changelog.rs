@@ -227,4 +227,8 @@ fn show_homeboy_json() -> CmdResult<ChangelogShowOutput> {
         },
         0,
     ))
+
+    pub fn run(args: TransferArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<TransferOutput> {
+        todo!("run")
+    }
 }
