@@ -1,3 +1,4 @@
+pub mod apply;
 pub mod outcome;
 pub mod policy;
 pub mod preflight;
@@ -6,11 +7,13 @@ pub mod summary;
 pub mod tracking;
 
 pub use crate::code_audit::fixer::{
+    generate_fixes, ApplyChunkResult, ApplyOptions, ChunkStatus, ChunkVerifier, Fix, FixPolicy,
+    FixResult, FixSafetyTier, Insertion, InsertionKind, NewFile, PolicySummary, PreflightCheck,
+    PreflightContext, PreflightReport, PreflightStatus, SkippedFile,
+};
+pub use apply::{
     apply_decompose_plans, apply_fixes, apply_fixes_chunked, apply_new_files,
-    apply_new_files_chunked, auto_apply_subset, generate_fixes, ApplyChunkResult, ApplyOptions,
-    ChunkStatus, ChunkVerifier, Fix, FixPolicy, FixResult, FixSafetyTier, Insertion,
-    InsertionKind, NewFile, PolicySummary, PreflightCheck, PreflightContext, PreflightReport,
-    PreflightStatus, SkippedFile,
+    apply_new_files_chunked, auto_apply_subset,
 };
 pub use policy::apply_fix_policy;
 pub use preflight::{
