@@ -475,7 +475,7 @@ fn plan_audit_stage(
         crate::code_audit::audit_path_with_id(component_id, &root.to_string_lossy())?
     };
 
-    let mut fix_result = fixer::generate_fixes(&result, root);
+    let mut fix_result = super::generate::generate_audit_fixes(&result, root);
     let policy = fixer::FixPolicy {
         only: (!only.is_empty()).then_some(only.to_vec()),
         exclude: exclude.to_vec(),

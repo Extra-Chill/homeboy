@@ -164,7 +164,7 @@ pub fn run_audit_refactor(
         }
     } else {
         let root = Path::new(&current_result.source_path);
-        let mut fix_result = fixer::generate_fixes(&current_result, root);
+        let mut fix_result = super::generate::generate_audit_fixes(&current_result, root);
         let policy = fixer::FixPolicy {
             only: (!only_kinds.is_empty()).then_some(only_kinds.to_vec()),
             exclude: exclude_kinds.to_vec(),
@@ -367,7 +367,7 @@ fn run_fix_iteration(
     AuditRefactorIterationSummary,
 )> {
     let root = Path::new(&audit_result.source_path);
-    let mut fix_result = fixer::generate_fixes(audit_result, root);
+    let mut fix_result = super::generate::generate_audit_fixes(audit_result, root);
     let policy = fixer::FixPolicy {
         only: (!only_kinds.is_empty()).then_some(only_kinds.to_vec()),
         exclude: exclude_kinds.to_vec(),

@@ -910,7 +910,7 @@ fn file_has_constructor(content: &str, language: &Language) -> bool {
 ///    (e.g., `FlowHelpers.php` among `*Ability.php` files)
 /// 3. Only add registration stubs when the file already has the callback
 ///    method, or when adding to an existing constructor
-pub fn generate_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
+pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixResult {
     let mut fixes = Vec::new();
     let mut skipped = Vec::new();
 
@@ -2571,6 +2571,7 @@ pub use crate::core::refactor::auto::apply::{
     apply_decompose_plans, apply_fixes, apply_fixes_chunked, apply_new_files,
     apply_new_files_chunked,
 };
+pub use crate::core::refactor::plan::generate::generate_audit_fixes as generate_fixes;
 
 /// Apply insertions to file content, returning the modified content.
 pub(crate) fn apply_insertions_to_content(

@@ -7,8 +7,8 @@ pub mod summary;
 pub mod tracking;
 
 pub use crate::code_audit::fixer::{
-    generate_fixes, ApplyChunkResult, ApplyOptions, ChunkStatus, ChunkVerifier, Fix, FixPolicy,
-    FixResult, FixSafetyTier, Insertion, InsertionKind, NewFile, PolicySummary, PreflightCheck,
+    ApplyChunkResult, ApplyOptions, ChunkStatus, ChunkVerifier, Fix, FixPolicy, FixResult,
+    FixSafetyTier, Insertion, InsertionKind, NewFile, PolicySummary, PreflightCheck,
     PreflightContext, PreflightReport, PreflightStatus, SkippedFile,
 };
 pub use apply::{
