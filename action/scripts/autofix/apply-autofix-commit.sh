@@ -62,8 +62,8 @@ if [ -n "${AUTOFIX_COMMANDS:-}" ]; then
   IFS=',' read -ra FIX_ARRAY <<< "${AUTOFIX_COMMANDS}"
 else
   # Derive fix commands from the command list, but enforce canonical order:
-  # audit → lint → test. The action should follow Homeboy CLI capabilities,
-  # not invent a synthetic refactor CI mode.
+  # audit → lint → test. The action should follow Homeboy CLI capabilities
+  # directly instead of inventing its own CI-only command layer.
   HAS_AUDIT=false HAS_LINT=false HAS_TEST=false
   IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
   for CMD in "${CMD_ARRAY[@]}"; do

@@ -20,14 +20,13 @@ All notable changes to Homeboy Action will be documented in this file.
 ### Changed
 - use structured output in release path
 - consume Homeboy structured output directly
-- derive autofix commands from supported Homeboy commands instead of synthetic refactor CI flow
+- derive autofix commands from supported Homeboy commands only
 - unify scope logic into scripts/scope/ module
 - remove extension revision workaround (belongs in homeboy core #639)
 - consume structured JSON instead of scraping logs (#57)
 - remove inline review annotations — redundant with PR comment
 
 ### Fixed
-- place refactor component before source flags
 - enforce homeboy-ci identity for commits and release pushes
 - default test-scope to 'changed' and fix misleading PR comment
 - resolve extension revision for monorepos and enforce canonical command order

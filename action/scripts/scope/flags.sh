@@ -20,7 +20,7 @@ scope_flags_for() {
   fi
 
   case "${base_cmd}" in
-    audit|lint|test|refactor)
+    audit|lint|test)
       printf '%s' "--changed-since ${SCOPE_BASE_REF}"
       ;;
     # release and other commands are never scoped
