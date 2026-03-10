@@ -97,7 +97,7 @@ def render_markdown(
             and not top_violations
             and not raw_excerpt
         ):
-            lines.append("- No structured lint details parsed from lint log.")
+            lines.append("- No structured lint details available.")
         build_job_url = _resolve_job_link(
             job_links,
             run_url,
@@ -119,7 +119,7 @@ def render_markdown(
                 [_summarize_test_failure(test, idx) for idx, test in enumerate(top_tests[:10], start=1)],
             )
         else:
-            lines.append("- No per-test failure details parsed from test log.")
+            lines.append("- No structured test failure details available.")
 
         raw_excerpt = [str(line) for line in (test_digest.get("raw_excerpt", []) or [])]
         if raw_excerpt:
@@ -186,7 +186,7 @@ def render_markdown(
                 )
             _append_details_block(lines, f"All parsed audit findings ({len(top_findings)})", detail_lines)
         else:
-            lines.append("- No structured audit findings parsed from audit log.")
+            lines.append("- No structured audit findings available.")
 
         raw_excerpt = [str(line) for line in (audit_digest.get("raw_excerpt", []) or [])]
         if raw_excerpt:
@@ -246,6 +246,7 @@ def render_markdown(
     lines.append("")
 
     lines.append("### Machine-readable artifacts")
+    lines.append("- `homeboy-lint-summary.json`")
     lines.append("- `homeboy-test-failures.json`")
     lines.append("- `homeboy-audit-summary.json`")
     lines.append("- `homeboy-autofixability.json`")

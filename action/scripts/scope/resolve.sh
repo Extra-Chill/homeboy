@@ -98,27 +98,7 @@ else
   SCOPE_MODE="full"
 fi
 
-# ── Step 4: Verify CLI support for --changed-since ──
-# If scope is "changed", verify that homeboy supports --changed-since for
-# at least one command. If not, fall back to full.
-
-if [ "${SCOPE_MODE}" = "changed" ]; then
-  CLI_SUPPORTS_SCOPE="false"
-  for probe_cmd in audit lint test; do
-    if homeboy "${probe_cmd}" --help 2>/dev/null | grep -q -- '--changed-since'; then
-      CLI_SUPPORTS_SCOPE="true"
-      break
-    fi
-  done
-
-  if [ "${CLI_SUPPORTS_SCOPE}" = "false" ]; then
-    echo "::warning::Installed homeboy CLI does not support --changed-since; falling back to full scope"
-    SCOPE_MODE="full"
-    SCOPE_BASE_REF=""
-  fi
-fi
-
-# ── Step 5: Write outputs ──
+# ── Step 4: Write outputs ──
 
 echo "SCOPE_CONTEXT=${SCOPE_CONTEXT}" >> "${GITHUB_ENV}"
 echo "SCOPE_BASE_REF=${SCOPE_BASE_REF}" >> "${GITHUB_ENV}"

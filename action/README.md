@@ -118,7 +118,9 @@ Use these outputs to gate downstream jobs:
 | `autofix-max-commits` | No | `2` | Safety limit for autofix commit chain depth per branch |
 | `autofix-commands` | No | | Override autofix commands (comma-separated, e.g. `lint --fix,test --fix`) |
 | `autofix-label` | No | | Optional PR label required before autofix runs (e.g. `autofix`) |
-| `test-scope` | No | `full` | Test scope for PRs: `full` or `changed` |
+| `scope` | No | `changed` | Execution scope: `changed` for PRs or `full` for entire codebase |
+| `lint-changed-only` | No | `true` | Deprecated: use `scope` instead |
+| `test-scope` | No | `changed` | Deprecated: use `scope` instead |
 | `auto-issue` | No | `false` | Auto-file issue on non-PR failures |
 | `comment-key` | No | *(auto)* | Shared PR comment key so multiple jobs aggregate into one sticky comment |
 | `comment-section-key` | No | *(auto)* | Section key within the shared PR comment |
@@ -170,8 +172,7 @@ Use these outputs to gate downstream jobs:
     extension: wordpress
     commands: lint,test,audit
     php-version: '8.2'
-    lint-changed-only: 'true'
-    test-scope: 'changed'
+    scope: 'changed'
 ```
 
 ### Split Jobs, Shared PR Comment
@@ -322,13 +323,19 @@ Use two workflows:
 
 1. **PR workflow** (fast + scoped)
    - `commands: lint,test,audit`
-   - `lint-changed-only: 'true'`
-   - `test-scope: 'changed'`
+   - `scope: 'changed'`
 
 2. **Release workflow** (continuous)
    - trigger on `schedule` (every 15 min) + `workflow_dispatch`
-   - `commands: release`
+   - `commands: lint,test,audit` with `auto-issue: 'true'`
+   - separate release workflow uses `commands: release`
    - quality gate before release
+
+### Scope behavior
+
+`scope: 'changed'` is a thin wrapper around the Homeboy CLI. On PRs, the action resolves the base SHA and passes `--changed-since <base-sha>` to Homeboy for `audit`, `lint`, and `test`.
+
+The action does **not** probe for or emulate missing CLI features. If the installed Homeboy version does not support a requested scoped command, that is a Homeboy CLI compatibility problem to fix in Homeboy itself.
 
 ### Fork PR Note
 

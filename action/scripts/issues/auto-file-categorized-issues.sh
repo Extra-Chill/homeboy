@@ -36,12 +36,12 @@ HOMEBOY_ACTION_REF="${HOMEBOY_ACTION_REF:-unknown}"
 HOMEBOY_ACTION_REPOSITORY="${HOMEBOY_ACTION_REPOSITORY:-unknown}"
 
 AUDIT_JSON="${OUTPUT_DIR}/audit.json"
-AUDIT_LOG="${OUTPUT_DIR}/audit.log"
 
 # --- Step 1: Read audit findings from structured JSON ---
 
-# Prefer the pre-extracted .json file (produced by run-homeboy-commands.sh).
-# Fall back to scraping the .log file for backward compatibility.
+# The structured audit JSON extracted by run-homeboy-commands.sh is the
+# canonical action-side contract. If it is missing or invalid, let generic
+# issue filing handle the failure instead of scraping logs here.
 if [ -f "${AUDIT_JSON}" ] && [ -s "${AUDIT_JSON}" ]; then
   FINDINGS_JSON=$(python3 -c "
 import json, sys
@@ -61,68 +61,14 @@ print(json.dumps({
     'total_findings': len(findings)
 }))
 " "${AUDIT_JSON}" 2>/dev/null) || {
-    echo "Failed to read audit.json — falling back to log scraping"
+    echo "Failed to read structured audit.json — falling back to generic issue filing"
     FINDINGS_JSON=""
   }
 fi
 
-# Fall back to log scraping if JSON file is missing or failed
 if [ -z "${FINDINGS_JSON:-}" ]; then
-  if [ ! -f "${AUDIT_LOG}" ]; then
-    echo "No audit log found at ${AUDIT_LOG} — falling back to generic issue filing"
-    exit 1
-  fi
-
-  FINDINGS_JSON=$(python3 -c "
-import json, sys
-
-text = open(sys.argv[1], 'r', errors='replace').read()
-lines = []
-for line in text.splitlines():
-    if 'Z ' in line:
-        lines.append(line.rsplit('Z ', 1)[1])
-    else:
-        lines.append(line)
-text = '\n'.join(lines)
-
-decoder = json.JSONDecoder()
-i = 0
-payload = None
-while i < len(text):
-    if text[i] != '{':
-        i += 1
-        continue
-    try:
-        obj, end = decoder.raw_decode(text[i:])
-    except json.JSONDecodeError:
-        i += 1
-        continue
-    if isinstance(obj, dict):
-        data = obj.get('data', {})
-        if isinstance(data, dict) and ('findings' in data or 'summary' in data):
-            payload = obj
-    i += max(end, 1)
-
-if not payload:
-    sys.exit(1)
-
-findings = payload.get('data', {}).get('findings', [])
-summary = payload.get('data', {}).get('summary', {})
-component = payload.get('data', {}).get('component_id', '')
-groups = {}
-for f in findings:
-    kind = f.get('kind', 'unknown')
-    groups.setdefault(kind, []).append(f)
-print(json.dumps({
-    'groups': {k: v for k, v in sorted(groups.items(), key=lambda x: -len(x[1]))},
-    'summary': summary,
-    'component_id': component,
-    'total_findings': len(findings)
-}))
-" "${AUDIT_LOG}" 2>/dev/null) || {
-    echo "Failed to parse audit findings from log — falling back to generic issue filing"
-    exit 1
-  }
+  echo "Structured audit.json missing — falling back to generic issue filing"
+  exit 1
 fi
 
 TOTAL_FINDINGS=$(echo "${FINDINGS_JSON}" | jq -r '.total_findings')

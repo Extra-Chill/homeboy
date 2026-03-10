@@ -8,55 +8,15 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import subprocess
-from json import JSONDecoder
 from typing import Any
 
 # NOTE:
 # This script is executed as a file path from composite actions, so Python sets
 # sys.path to this directory (scripts/digest). Use local imports instead of
 # package-qualified imports to avoid ModuleNotFoundError in CI.
-from parsers import extract_audit_digest, extract_lint_digest, extract_test_failures
 from render import render_markdown
-
-
-def read_text(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
-    except OSError:
-        return ""
-
-
-def extract_json_candidates(text: str) -> list[dict[str, Any]]:
-    decoder = JSONDecoder()
-    out: list[dict[str, Any]] = []
-    i = 0
-    while i < len(text):
-        if text[i] != "{":
-            i += 1
-            continue
-        try:
-            obj, end = decoder.raw_decode(text[i:])
-        except json.JSONDecodeError:
-            i += 1
-            continue
-        if isinstance(obj, dict):
-            out.append(obj)
-        i += max(end, 1)
-    return out
-
-
-def normalize_log_text(raw_text: str) -> str:
-    normalized_lines: list[str] = []
-    for line in raw_text.splitlines():
-        if "Z " in line:
-            normalized_lines.append(line.rsplit("Z ", 1)[1])
-        else:
-            normalized_lines.append(line)
-    return "\n".join(normalized_lines)
 
 
 def parse_bool(value: str | None) -> bool:
@@ -364,12 +324,8 @@ def main() -> int:
     autofix_enabled = parse_bool(autofix_enabled_raw)
     autofix_attempted = parse_bool(autofix_attempted_raw)
 
-    lint_log = read_text(os.path.join(output_dir, "lint.log"))
-    test_log = read_text(os.path.join(output_dir, "test.log"))
-    audit_log = read_text(os.path.join(output_dir, "audit.log"))
-
     # Structured JSON files extracted from homeboy output by run-homeboy-commands.sh.
-    # These are preferred over log scraping — only fall back to parsers when missing.
+    # These are the canonical action-side contract for downstream rendering.
     lint_json = read_json(os.path.join(output_dir, "lint.json"))
     test_json = read_json(os.path.join(output_dir, "test.json"))
     audit_json = read_json(os.path.join(output_dir, "audit.json"))
@@ -378,7 +334,18 @@ def main() -> int:
         if lint_json and lint_json.get("data"):
             lint_digest = build_lint_digest_from_json(lint_json)
         else:
-            lint_digest = extract_lint_digest(lint_log)
+            lint_digest = {
+                "lint_summary": "",
+                "phpcs_summary": "",
+                "phpstan_summary": "",
+                "build_failed": "",
+                "error_code": "",
+                "error_message": "",
+                "error_field": "",
+                "error_hint": "",
+                "top_violations": [],
+                "raw_excerpt": [],
+            }
     else:
         lint_digest = {
             "lint_summary": "",
@@ -392,7 +359,11 @@ def main() -> int:
         if test_json and test_json.get("data"):
             test_digest = build_test_digest_from_json(test_json)
         else:
-            test_digest = extract_test_failures(test_log)
+            test_digest = {
+                "failed_tests_count": 0,
+                "top_failed_tests": [],
+                "raw_excerpt": [],
+            }
     else:
         test_digest = {
             "failed_tests_count": 0,
@@ -403,11 +374,17 @@ def main() -> int:
         if audit_json and audit_json.get("data"):
             audit_digest = build_audit_digest_from_json(audit_json)
         else:
-            audit_digest = extract_audit_digest(
-                audit_log,
-                extract_json_candidates,
-                normalize_log_text,
-            )
+            audit_digest = {
+                "drift_increased": False,
+                "new_findings_count": 0,
+                "new_findings": [],
+                "alignment_score": None,
+                "outliers_found": None,
+                "parsed_outlier_items": 0,
+                "severity_counts": {},
+                "top_findings": [],
+                "raw_excerpt": [],
+            }
     else:
         audit_digest = {
             "drift_increased": False,
@@ -423,11 +400,13 @@ def main() -> int:
         autofix_commands_csv,
     )
 
+    lint_json_path = os.path.join(output_dir, "homeboy-lint-summary.json")
     test_json_path = os.path.join(output_dir, "homeboy-test-failures.json")
     audit_json_path = os.path.join(output_dir, "homeboy-audit-summary.json")
     autofixability_json_path = os.path.join(output_dir, "homeboy-autofixability.json")
     md_path = os.path.join(output_dir, "homeboy-failure-digest.md")
 
+    write_json(lint_json_path, lint_digest)
     write_json(test_json_path, test_digest)
     write_json(audit_json_path, audit_digest)
     write_json(autofixability_json_path, autofixability)
