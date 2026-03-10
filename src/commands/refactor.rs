@@ -2,10 +2,12 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use homeboy::code_audit::{fixer, CodeAuditResult};
+use homeboy::code_audit::CodeAuditResult;
 use homeboy::component;
 use homeboy::extension;
-use homeboy::refactor::{self, AddResult, MoveResult, RenameScope, RenameSpec, RenameTargeting};
+use homeboy::refactor::{
+    self, auto, AddResult, MoveResult, RenameScope, RenameSpec, RenameTargeting,
+};
 
 use super::args::{
     BaselineArgs, ComponentArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs,
@@ -339,7 +341,7 @@ pub enum RefactorOutput {
     AddFromAudit {
         source_path: String,
         #[serde(flatten)]
-        fix_result: fixer::FixResult,
+        fix_result: auto::FixResult,
         dry_run: bool,
     },
 
