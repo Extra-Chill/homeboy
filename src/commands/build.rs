@@ -140,8 +140,4 @@ pub fn run(
     } else {
         build::run(target_id)
     }
-
-    pub fn run(args: TransferArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<TransferOutput> {
-        todo!("run")
-    }
 }

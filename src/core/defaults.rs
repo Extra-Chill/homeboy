@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 
 use crate::paths;
-use crate::utils::grammar::default_true;
 use crate::utils::io;
 
 /// Root configuration structure for homeboy.json
@@ -25,6 +24,10 @@ impl Default for HomeboyConfig {
             update_check: true,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// All configurable defaults that can be overridden via homeboy.json

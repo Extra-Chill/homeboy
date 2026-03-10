@@ -123,8 +123,4 @@ pub fn run(
     err = err.with_hint("  homeboy changes <component-id>");
 
     Err(err)
-
-    pub fn run(args: TransferArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<TransferOutput> {
-        todo!("run")
-    }
 }

@@ -773,8 +773,4 @@ fn exec_extension_tool(
         },
         exit_code,
     ))
-
-    pub fn run(args: TransferArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<TransferOutput> {
-        todo!("run")
-    }
 }

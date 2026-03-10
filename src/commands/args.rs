@@ -275,8 +275,4 @@ pub struct SettingArgs {
     /// Override settings as key=value pairs
     #[arg(long, value_parser = super::parse_key_val)]
     pub setting: Vec<(String, String)>,
-
-    pub fn run(args: TransferArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<TransferOutput> {
-        todo!("run")
-    }
 }
