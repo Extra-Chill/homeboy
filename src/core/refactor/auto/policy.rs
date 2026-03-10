@@ -1,5 +1,5 @@
-use crate::code_audit::AuditFinding;
 use crate::code_audit::fixer::first_failed_detail;
+use crate::code_audit::AuditFinding;
 use crate::refactor::auto::preflight;
 use crate::refactor::auto::{
     FixPolicy, FixResult, FixSafetyTier, Insertion, NewFile, PolicySummary, PreflightContext,
