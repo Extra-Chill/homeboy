@@ -102,7 +102,13 @@ build_run_command() {
   local cmd="$1"
   local component_id="$2"
   local workspace="$3"
-  local full_cmd="homeboy ${cmd} ${component_id} --path ${workspace}"
+  local full_cmd
+
+  if [[ "${cmd}" == refactor* ]]; then
+    full_cmd="homeboy refactor ${component_id} ${cmd#refactor } --path ${workspace}"
+  else
+    full_cmd="homeboy ${cmd} ${component_id} --path ${workspace}"
+  fi
 
   local scope
   scope="$(scope_flags_for "${cmd}")"
@@ -119,7 +125,13 @@ build_autofix_command() {
   local fix_cmd="$1"
   local component_id="$2"
   local workspace="$3"
-  local full_cmd="homeboy ${fix_cmd} ${component_id} --path ${workspace}"
+  local full_cmd
+
+  if [[ "${fix_cmd}" == refactor* ]]; then
+    full_cmd="homeboy refactor ${component_id} ${fix_cmd#refactor } --path ${workspace}"
+  else
+    full_cmd="homeboy ${fix_cmd} ${component_id} --path ${workspace}"
+  fi
 
   local scope
   scope="$(scope_flags_for "${fix_cmd}")"
