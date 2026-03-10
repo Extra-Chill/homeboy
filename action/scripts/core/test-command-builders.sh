@@ -70,19 +70,19 @@ assert_equals \
   "run command keeps output path before extra args"
 
 assert_equals \
-  "homeboy lint --fix data-machine --path /tmp/workspace --changed-since origin/main --format json" \
-  "$(build_autofix_command "lint --fix" "${COMPONENT}" "${WORKSPACE}")" \
-  "autofix lint keeps path and changed-since"
+  "homeboy refactor data-machine --from lint --write --path /tmp/workspace --changed-since origin/main --format json" \
+  "$(build_autofix_command "refactor --from lint --write" "${COMPONENT}" "${WORKSPACE}")" \
+  "autofix refactor lint keeps path and changed-since"
 
 assert_equals \
-  "homeboy lint --fix data-machine --path /tmp/workspace --output /tmp/workspace/out.json --changed-since origin/main --format json" \
-  "$(build_autofix_command "lint --fix" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
-  "autofix lint keeps output path and changed-since"
+  "homeboy refactor data-machine --from lint --write --path /tmp/workspace --output /tmp/workspace/out.json --changed-since origin/main --format json" \
+  "$(build_autofix_command "refactor --from lint --write" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "autofix refactor lint keeps output path and changed-since"
 
 assert_equals \
-  "homeboy audit --fix --write data-machine --path /tmp/workspace --changed-since origin/main --format json" \
-  "$(build_autofix_command "audit --fix --write" "${COMPONENT}" "${WORKSPACE}")" \
-  "autofix audit keeps path and changed-since"
+  "homeboy refactor data-machine --from audit --write --path /tmp/workspace --changed-since origin/main --format json" \
+  "$(build_autofix_command "refactor --from audit --write" "${COMPONENT}" "${WORKSPACE}")" \
+  "autofix refactor audit keeps path and changed-since"
 
 assert_equals \
   "homeboy refactor data-machine --all --path /tmp/workspace --changed-since origin/main --format json" \
@@ -95,8 +95,8 @@ assert_equals \
   "output stem sanitizes spaced refactor command"
 
 assert_equals \
-  "audit---fix---write" \
-  "$(command_output_stem "audit --fix --write")" \
+  "refactor---from-audit---write" \
+  "$(command_output_stem "refactor --from audit --write")" \
   "output stem sanitizes autofix command"
 
 assert_equals \
@@ -108,9 +108,9 @@ assert_equals \
 unset SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true
 SCOPE_MODE="full"
 assert_equals \
-  "homeboy test --fix data-machine --path /tmp/workspace" \
-  "$(build_autofix_command "test --fix" "${COMPONENT}" "${WORKSPACE}")" \
-  "autofix test keeps workspace path"
+  "homeboy refactor data-machine --from test --write --path /tmp/workspace" \
+  "$(build_autofix_command "refactor --from test --write" "${COMPONENT}" "${WORKSPACE}")" \
+  "autofix refactor test keeps workspace path"
 
 assert_equals \
   "homeboy refactor data-machine --all --path /tmp/workspace" \

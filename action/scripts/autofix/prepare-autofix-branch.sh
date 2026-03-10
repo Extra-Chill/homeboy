@@ -34,9 +34,9 @@ WORKSPACE="$(resolve_workspace)"
 if [ -n "${AUTOFIX_COMMANDS:-}" ]; then
   IFS=',' read -ra FIX_ARRAY <<< "${AUTOFIX_COMMANDS}"
 else
-  # Derive fix commands from the command list, but enforce canonical order:
-  # audit → lint → test. Audit produces structural changes (missing files,
-  # baselines), lint fixes style on the resulting code, test stubs come last.
+  # Derive refactor sources from the command list, but enforce canonical order:
+  # audit → lint → test. In Homeboy, fix = refactor, so non-PR autofix should
+  # also use canonical refactor source passes.
   HAS_AUDIT=false HAS_LINT=false HAS_TEST=false
   IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
   for CMD in "${CMD_ARRAY[@]}"; do
@@ -48,9 +48,9 @@ else
     esac
   done
   FIX_ARRAY=()
-  [ "${HAS_AUDIT}" = true ] && FIX_ARRAY+=("audit --fix --write")
-  [ "${HAS_LINT}" = true ]  && FIX_ARRAY+=("lint --fix")
-  [ "${HAS_TEST}" = true ]  && FIX_ARRAY+=("test --fix")
+  [ "${HAS_AUDIT}" = true ] && FIX_ARRAY+=("refactor --from audit --write")
+  [ "${HAS_LINT}" = true ]  && FIX_ARRAY+=("refactor --from lint --write")
+  [ "${HAS_TEST}" = true ]  && FIX_ARRAY+=("refactor --from test --write")
 fi
 
 if [ ${#FIX_ARRAY[@]} -eq 0 ]; then

@@ -61,9 +61,9 @@ WORKSPACE="$(resolve_workspace)"
 if [ -n "${AUTOFIX_COMMANDS:-}" ]; then
   IFS=',' read -ra FIX_ARRAY <<< "${AUTOFIX_COMMANDS}"
 else
-  # Derive fix commands from the command list, but enforce canonical order:
-  # audit → lint → test. The action should follow Homeboy CLI capabilities
-  # directly instead of inventing its own CI-only command layer.
+  # Derive refactor sources from the command list, but enforce canonical order:
+  # audit → lint → test. In Homeboy, fix = refactor, so the action should call
+  # canonical refactor source passes instead of command-specific fix modes.
   HAS_AUDIT=false HAS_LINT=false HAS_TEST=false
   IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
   for CMD in "${CMD_ARRAY[@]}"; do
@@ -76,9 +76,9 @@ else
     esac
   done
   FIX_ARRAY=()
-  [ "${HAS_AUDIT}" = true ] && FIX_ARRAY+=("audit --fix --write")
-  [ "${HAS_LINT}" = true ]  && FIX_ARRAY+=("lint --fix")
-  [ "${HAS_TEST}" = true ]  && FIX_ARRAY+=("test --fix")
+  [ "${HAS_AUDIT}" = true ] && FIX_ARRAY+=("refactor --from audit --write")
+  [ "${HAS_LINT}" = true ]  && FIX_ARRAY+=("refactor --from lint --write")
+  [ "${HAS_TEST}" = true ]  && FIX_ARRAY+=("refactor --from test --write")
 fi
 
 if [ ${#FIX_ARRAY[@]} -eq 0 ]; then
