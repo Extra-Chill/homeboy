@@ -89,6 +89,7 @@ jobs:
           component: homeboy
           commands: audit
           autofix: 'false'
+          app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Stage 2: Lint ──
   # Read-only linting after audit passes.
@@ -123,6 +124,7 @@ jobs:
           component: homeboy
           commands: lint
           autofix: 'false'
+          app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Stage 3: Test ──
   # Read-only tests after lint passes.
@@ -157,6 +159,7 @@ jobs:
           component: homeboy
           commands: test
           autofix: 'false'
+          app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Stage 4: Refactor ──
   # Single end-of-pipeline mutation phase.
