@@ -65,8 +65,8 @@ pub struct InitSummary {
 pub struct ComponentSummary {
     pub id: String,
     pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extension: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
     pub status: String,
     #[serde(skip_serializing_if = "utils::is_zero_u32")]
     pub commits_since_version: u32,
@@ -507,17 +507,18 @@ fn build_component_summaries(
                 .map(|s| (s.commits_since_version, s.code_commits, s.docs_only_commits))
                 .unwrap_or((0, 0, 0));
 
-            // Get primary extension
-            let extension = comp
+            let mut extensions = comp
                 .component
                 .extensions
                 .as_ref()
-                .and_then(|m| m.keys().next().cloned());
+                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            extensions.sort();
 
             ComponentSummary {
                 id: comp.component.id.clone(),
                 path: shorten_path(&comp.component.local_path, cwd),
-                extension,
+                extensions,
                 status,
                 commits_since_version: commits,
                 code_commits: code,

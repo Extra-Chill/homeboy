@@ -1,6 +1,5 @@
 use homeboy::refactor::{
-    analyze_stage_overlaps, normalize_sources, summarize_plan_totals, PlanOverlap,
-    PlanStageSummary,
+    analyze_stage_overlaps, normalize_sources, summarize_plan_totals, PlanOverlap, PlanStageSummary,
 };
 
 #[test]
@@ -139,12 +138,9 @@ fn summarize_plan_totals_counts_stage_and_fix_totals() {
 
 #[test]
 fn normalize_sources_orders_known_sources() {
-    let normalized = normalize_sources(&[
-        "test".to_string(),
-        "audit".to_string(),
-        "lint".to_string(),
-    ])
-    .expect("sources should normalize");
+    let normalized =
+        normalize_sources(&["test".to_string(), "audit".to_string(), "lint".to_string()])
+            .expect("sources should normalize");
 
     assert_eq!(normalized, vec!["audit", "lint", "test"]);
 }

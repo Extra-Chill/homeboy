@@ -2,8 +2,7 @@ use clap::Args;
 use serde::Serialize;
 
 use homeboy::component::Component;
-use homeboy::error::Error;
-use homeboy::extension::{self, ExtensionRunner};
+use homeboy::extension::{self, ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
 use homeboy::git;
 use homeboy::lint_baseline::{self, BaselineComparison as LintBaselineComparison, LintFinding};
 use homeboy::utils::autofix::{self, AutofixMode, FixResultsSummary};
@@ -91,59 +90,16 @@ pub struct LintAutofixOutput {
     fix_summary: Option<FixResultsSummary>,
 }
 
-pub(crate) fn resolve_lint_script(component: &Component) -> homeboy::error::Result<String> {
-    let extensions = component.extensions.as_ref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "component",
-            format!("Component '{}' has no extensions configured", component.id),
-            None,
-            None,
-        )
-        .with_hint(format!(
-            "Add a extension: homeboy component set {} --extension <extension_id>",
-            component.id
-        ))
-    })?;
-
-    let extension_id = if extensions.contains_key("wordpress") {
-        "wordpress"
-    } else {
-        extensions.keys().next().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "component",
-                format!("Component '{}' has no extensions configured", component.id),
-                None,
-                None,
-            )
-            .with_hint(format!(
-                "Add a extension: homeboy component set {} --extension <extension_id>",
-                component.id
-            ))
-        })?
-    };
-
-    let manifest = extension::load_extension(extension_id)?;
-
-    manifest
-        .lint_script()
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "extension",
-                format!(
-                    "Extension '{}' does not have lint infrastructure configured (missing lint.extension_script)",
-                    extension_id
-                ),
-                None,
-                None,
-            )
-        })
+pub(crate) fn resolve_lint_command(
+    component: &Component,
+) -> homeboy::error::Result<ExtensionExecutionContext> {
+    extension::resolve_execution_context(component, ExtensionCapability::Lint)
 }
 
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
     let component = args.comp.load()?;
     let source_path = args.comp.source_path()?;
-    let script_path = resolve_lint_script(&component)?;
+    let resolved = resolve_lint_command(&component)?;
     let lint_findings_file = std::env::temp_dir().join(format!(
         "homeboy-lint-findings-{}-{}.json",
         std::process::id(),
@@ -233,7 +189,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
         args.glob.clone()
     };
 
-    let output = ExtensionRunner::new(args.comp.id(), &script_path)
+    let output = ExtensionRunner::for_context(resolved)
         .component(component.clone())
         .path_override(args.comp.path.clone())
         .settings(&args.setting_args.setting)
@@ -441,10 +397,10 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_lint_script() {
+    fn test_resolve_lint_command() {
         let component =
             Component::new("test".to_string(), "/tmp".to_string(), "".to_string(), None);
-        let result = resolve_lint_script(&component);
+        let result = resolve_lint_command(&component);
         assert!(result.is_err());
     }
 }

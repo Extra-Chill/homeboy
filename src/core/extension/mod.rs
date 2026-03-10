@@ -46,10 +46,13 @@ pub use lifecycle::{
 
 // Extension loader functions
 
+use crate::component::Component;
 use crate::config;
+use crate::error::Error;
 use crate::error::Result;
 use crate::output::MergeOutput;
 use crate::paths;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub fn load_extension(id: &str) -> Result<ExtensionManifest> {
@@ -97,6 +100,193 @@ pub fn find_extension_for_file_ext(ext: &str, capability: &str) -> Option<Extens
                 _ => false,
             }
         })
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionCapability {
+    Lint,
+    Test,
+    Build,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtensionExecutionContext {
+    pub component: Component,
+    pub capability: ExtensionCapability,
+    pub extension_id: String,
+    pub extension_path: PathBuf,
+    pub script_path: String,
+    pub settings: Vec<(String, String)>,
+}
+
+fn no_extensions_error(component: &Component) -> Error {
+    Error::validation_invalid_argument(
+        "component",
+        format!("Component '{}' has no extensions configured", component.id),
+        None,
+        None,
+    )
+    .with_hint(format!(
+        "Add a extension: homeboy component set {} --extension <extension_id>",
+        component.id
+    ))
+}
+
+fn capability_label(capability: ExtensionCapability) -> &'static str {
+    match capability {
+        ExtensionCapability::Lint => "lint",
+        ExtensionCapability::Test => "test",
+        ExtensionCapability::Build => "build",
+    }
+}
+
+fn manifest_has_capability(manifest: &ExtensionManifest, capability: ExtensionCapability) -> bool {
+    match capability {
+        ExtensionCapability::Lint => manifest.has_lint(),
+        ExtensionCapability::Test => manifest.has_test(),
+        ExtensionCapability::Build => manifest.has_build(),
+    }
+}
+
+fn capability_missing_error(component: &Component, capability: ExtensionCapability) -> Error {
+    let capability_name = capability_label(capability);
+    Error::validation_invalid_argument(
+        "extension",
+        format!(
+            "Component '{}' has no linked extensions that provide {} support",
+            component.id, capability_name
+        ),
+        None,
+        None,
+    )
+    .with_hint(format!(
+        "Link an extension with {} support: homeboy component set {} --extension <extension_id>",
+        capability_name, component.id
+    ))
+}
+
+fn capability_ambiguous_error(
+    component: &Component,
+    capability: ExtensionCapability,
+    matching: &[String],
+) -> Error {
+    let capability_name = capability_label(capability);
+    Error::validation_invalid_argument(
+        "extension",
+        format!(
+            "Component '{}' has multiple linked extensions with {} support: {}",
+            component.id,
+            capability_name,
+            matching.join(", ")
+        ),
+        None,
+        None,
+    )
+    .with_hint(format!(
+        "Configure explicit {} extension ownership before running this command",
+        capability_name
+    ))
+}
+
+fn linked_extensions(
+    component: &Component,
+) -> Result<&HashMap<String, crate::component::ScopedExtensionConfig>> {
+    component
+        .extensions
+        .as_ref()
+        .ok_or_else(|| no_extensions_error(component))
+}
+
+pub fn extract_component_extension_settings(
+    component: &Component,
+    extension_id: &str,
+) -> Vec<(String, String)> {
+    component
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get(extension_id))
+        .map(|extension_config| {
+            extension_config
+                .settings
+                .iter()
+                .filter_map(|(key, value)| value.as_str().map(|v| (key.clone(), v.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn resolve_extension_for_capability(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<String> {
+    let extensions = linked_extensions(component)?;
+    if extensions.is_empty() {
+        return Err(no_extensions_error(component));
+    }
+
+    let mut matching = Vec::new();
+
+    for extension_id in extensions.keys() {
+        let manifest = load_extension(extension_id)?;
+        if manifest_has_capability(&manifest, capability) {
+            matching.push(extension_id.clone());
+        }
+    }
+
+    match matching.len() {
+        0 => Err(capability_missing_error(component, capability)),
+        1 => Ok(matching.remove(0)),
+        _ => Err(capability_ambiguous_error(component, capability, &matching)),
+    }
+}
+
+pub fn resolve_execution_context(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<ExtensionExecutionContext> {
+    let extension_id = resolve_extension_for_capability(component, capability)?;
+    let manifest = load_extension(&extension_id)?;
+    let script_path = match capability {
+        ExtensionCapability::Lint => manifest.lint_script(),
+        ExtensionCapability::Test => manifest.test_script(),
+        ExtensionCapability::Build => None,
+    }
+    .map(|s| s.to_string())
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "extension",
+            format!(
+                "Extension '{}' does not have {} infrastructure configured",
+                extension_id,
+                capability_label(capability)
+            ),
+            None,
+            None,
+        )
+    })?;
+
+    let extension_path = extension_path(&extension_id);
+
+    if !extension_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "extension",
+            format!(
+                "Extension '{}' not found in ~/.config/homeboy/extensions/",
+                extension_id
+            ),
+            None,
+            None,
+        ));
+    }
+
+    Ok(ExtensionExecutionContext {
+        component: component.clone(),
+        capability,
+        extension_id: extension_id.clone(),
+        extension_path,
+        script_path,
+        settings: extract_component_extension_settings(component, &extension_id),
     })
 }
 

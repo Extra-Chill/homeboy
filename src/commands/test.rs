@@ -2,8 +2,7 @@ use clap::Args;
 use serde::Serialize;
 
 use homeboy::component::Component;
-use homeboy::error::Error;
-use homeboy::extension::{self, ExtensionRunner};
+use homeboy::extension::{self, ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
 use homeboy::refactor::{self, TransformSet};
 use homeboy::test_analyze::{self, TestAnalysis, TestAnalysisInput};
 use homeboy::test_baseline::{self, TestBaselineComparison, TestCounts};
@@ -158,47 +157,6 @@ pub struct AutoFixDriftOutput {
     rerun_recommended: bool,
 }
 
-/// Attempt to auto-detect the extension for a component based on contextual clues.
-fn auto_detect_extension(component: &Component) -> Option<String> {
-    // Check build_command for extension references (e.g., "extensions/wordpress/scripts/build")
-    if let Some(ref cmd) = component.build_command {
-        if cmd.contains("extensions/wordpress") {
-            return Some("wordpress".to_string());
-        }
-    }
-
-    // Check for composer.json in local_path (indicates WordPress/PHP component)
-    let expanded = shellexpand::tilde(&component.local_path);
-    let composer_path = std::path::Path::new(expanded.as_ref()).join("composer.json");
-    if composer_path.exists() {
-        return Some("wordpress".to_string());
-    }
-
-    // Check for Cargo.toml in local_path (indicates Rust component)
-    let cargo_path = std::path::Path::new(expanded.as_ref()).join("Cargo.toml");
-    if cargo_path.exists() {
-        return Some("rust".to_string());
-    }
-
-    None
-}
-
-fn no_extensions_error(component: &Component) -> Error {
-    Error::validation_invalid_argument(
-        "component",
-        format!(
-            "Component '{}' has no extensions configured and none could be auto-detected",
-            component.id
-        ),
-        None,
-        None,
-    )
-    .with_hint(format!(
-        "Add a extension: homeboy component set {} --extension wordpress",
-        component.id
-    ))
-}
-
 /// Filter out homeboy-owned flags from trailing args before passing to extension scripts.
 ///
 /// Clap's `trailing_var_arg = true` + `allow_hyphen_values = true` captures all arguments
@@ -272,42 +230,10 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
     filtered
 }
 
-pub(crate) fn resolve_test_script(component: &Component) -> homeboy::error::Result<String> {
-    let extension_id_owned: String;
-    let extension_id: &str = if let Some(ref extensions) = component.extensions {
-        if extensions.contains_key("wordpress") {
-            "wordpress"
-        } else if let Some(key) = extensions.keys().next() {
-            key.as_str()
-        } else if let Some(detected) = auto_detect_extension(component) {
-            extension_id_owned = detected;
-            &extension_id_owned
-        } else {
-            return Err(no_extensions_error(component));
-        }
-    } else if let Some(detected) = auto_detect_extension(component) {
-        extension_id_owned = detected;
-        &extension_id_owned
-    } else {
-        return Err(no_extensions_error(component));
-    };
-
-    let manifest = extension::load_extension(extension_id)?;
-
-    manifest
-        .test_script()
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "extension",
-                format!(
-                    "Extension '{}' does not have test infrastructure configured (missing test.extension_script)",
-                    extension_id
-                ),
-                None,
-                None,
-            )
-        })
+pub(crate) fn resolve_test_command(
+    component: &Component,
+) -> homeboy::error::Result<ExtensionExecutionContext> {
+    extension::resolve_execution_context(component, ExtensionCapability::Test)
 }
 
 pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
@@ -338,7 +264,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
     } else {
         None
     };
-    let script_path = resolve_test_script(&component)?;
+    let resolved = resolve_test_command(&component)?;
 
     // Coverage is enabled by --coverage or --coverage-min
     let coverage_enabled = args.coverage || args.coverage_min.is_some();
@@ -370,7 +296,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestOutput> {
         None
     };
 
-    let mut runner = ExtensionRunner::new(args.comp.id(), &script_path)
+    let mut runner = ExtensionRunner::for_context(resolved)
         .component(component.clone())
         .path_override(args.comp.path.clone())
         .settings(&args.setting_args.setting)

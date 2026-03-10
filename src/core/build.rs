@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::component::{self, Component};
 use crate::config::{is_json_input, parse_bulk_ids};
 use crate::error::{Error, Result};
-use crate::extension::{self, exec_context};
+use crate::extension::{self, exec_context, ExtensionCapability, ExtensionExecutionContext};
 use crate::output::{BulkResult, BulkSummary, ItemOutcome};
 use crate::paths;
 use crate::permissions;
@@ -18,6 +18,7 @@ use crate::utils::shell;
 pub enum ResolvedBuildCommand {
     ComponentDefined(String),
     ExtensionProvided {
+        context: ExtensionExecutionContext,
         command: String,
         source: String,
     },
@@ -46,58 +47,52 @@ impl ResolvedBuildCommand {
 /// If a component has both an extension with build support AND a build_command,
 /// the extension wins and a warning is emitted.
 pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBuildCommand> {
-    // 1. Check extension for bundled script or local script patterns (takes priority)
-    if let Some(extensions) = &component.extensions {
-        for extension_id in extensions.keys() {
-            if let Ok(extension) = extension::load_extension(extension_id) {
-                if let Some(build) = &extension.build {
-                    // Check for extension's bundled script
-                    let bundled = build
-                        .extension_script
-                        .as_ref()
-                        .and_then(|extension_script| {
-                            paths::extension(extension_id)
-                                .ok()
-                                .and_then(|extension_dir| {
-                                    let script_path = extension_dir.join(extension_script);
-                                    script_path.exists().then(|| {
-                                        let quoted_path =
-                                            shell::quote_path(&script_path.to_string_lossy());
-                                        let command = build
-                                            .command_template
-                                            .as_ref()
-                                            .map(|t| t.replace("{{script}}", &quoted_path))
-                                            .unwrap_or_else(|| format!("sh {}", quoted_path));
-                                        ResolvedBuildCommand::ExtensionProvided {
-                                            command,
-                                            source: format!(
-                                                "{}:{}",
-                                                extension_id, extension_script
-                                            ),
-                                        }
-                                    })
-                                })
-                        });
-                    if let Some(result) = bundled {
-                        return Ok(result);
-                    }
+    // 1. Check exactly one build-capable extension for bundled script or local script patterns
+    if let Ok(context) = extension::resolve_execution_context(component, ExtensionCapability::Build)
+    {
+        let extension_id = context.extension_id.clone();
+        let extension = extension::load_extension(&extension_id)?;
+        if let Some(build) = &extension.build {
+            let bundled = build
+                .extension_script
+                .as_ref()
+                .and_then(|extension_script| {
+                    paths::extension(&extension_id)
+                        .ok()
+                        .and_then(|extension_dir| {
+                            let script_path = extension_dir.join(extension_script);
+                            script_path.exists().then(|| {
+                                let quoted_path = shell::quote_path(&script_path.to_string_lossy());
+                                let command = build
+                                    .command_template
+                                    .as_ref()
+                                    .map(|t| t.replace("{{script}}", &quoted_path))
+                                    .unwrap_or_else(|| format!("sh {}", quoted_path));
+                                ResolvedBuildCommand::ExtensionProvided {
+                                    context: context.clone(),
+                                    command,
+                                    source: format!("{}:{}", extension_id, extension_script),
+                                }
+                            })
+                        })
+                });
+            if let Some(result) = bundled {
+                return Ok(result);
+            }
 
-                    // Check for local script matching extension's script_names
-                    let local_path = PathBuf::from(&component.local_path);
-                    for script_name in &build.script_names {
-                        let local_script = local_path.join(script_name);
-                        if local_script.exists() {
-                            let command = build
-                                .command_template
-                                .as_ref()
-                                .map(|t| t.replace("{{script}}", script_name))
-                                .unwrap_or_else(|| format!("sh {}", script_name));
-                            return Ok(ResolvedBuildCommand::LocalScript {
-                                command,
-                                script_name: script_name.clone(),
-                            });
-                        }
-                    }
+            let local_path = PathBuf::from(&component.local_path);
+            for script_name in &build.script_names {
+                let local_script = local_path.join(script_name);
+                if local_script.exists() {
+                    let command = build
+                        .command_template
+                        .as_ref()
+                        .map(|t| t.replace("{{script}}", script_name))
+                        .unwrap_or_else(|| format!("sh {}", script_name));
+                    return Ok(ResolvedBuildCommand::LocalScript {
+                        command,
+                        script_name: script_name.clone(),
+                    });
                 }
             }
         }
@@ -115,7 +110,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
             );
             log_status!(
                 "hint",
-                "Remove build_command: homeboy component set {} --replace build_command",
+                "Remove build_command or configure explicit build ownership: homeboy component set {} --replace build_command",
                 component.id
             );
         }
@@ -144,7 +139,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
             Some(component.id.clone()),
             Some(vec![
                 format!("Configure buildCommand: homeboy component set {} --json '{{\"buildCommand\": \"<command>\"}}'", component.id),
-                format!("Link a extension with build support: homeboy component set {} --json '{{\"extensions\": {{\"wordpress\": {{}}}}}}'", component.id),
+                format!("Link an extension with build support: homeboy component set {} --extension <extension_id>", component.id),
             ]),
         ))
     }
@@ -206,13 +201,17 @@ pub(crate) fn build_component(component: &component::Component) -> (Option<i32>,
     };
 
     let build_cmd = resolved.command().to_string();
+    let build_context = match &resolved {
+        ResolvedBuildCommand::ExtensionProvided { context, .. } => Some(context),
+        _ => None,
+    };
 
     // Fix local permissions before build to ensure zip has correct permissions
     let local_path_str = validated_path.to_string_lossy().to_string();
     permissions::fix_local_permissions(&local_path_str);
 
     // Get extension path env vars for build command (matches pre-build script behavior)
-    let env_vars = get_build_env_vars(component);
+    let env_vars = get_build_env_vars(component, build_context);
     let env_refs: Vec<(&str, &str)> = env_vars
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -390,9 +389,13 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
 
     let resolved = resolve_build_command(comp)?;
     let build_cmd = resolved.command().to_string();
+    let build_context = match &resolved {
+        ResolvedBuildCommand::ExtensionProvided { context, .. } => Some(context),
+        _ => None,
+    };
 
     // Run pre-build script if extension provides one
-    if let Some((exit_code, stderr)) = run_pre_build_scripts(comp)? {
+    if let Some((exit_code, stderr)) = run_pre_build_scripts(build_context)? {
         if exit_code != 0 {
             return Ok((
                 BuildOutput {
@@ -411,7 +414,7 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
     permissions::fix_local_permissions(&local_path_str);
 
     // Get extension path env vars for build command (matches pre-build script behavior)
-    let env_vars = get_build_env_vars(comp);
+    let env_vars = get_build_env_vars(comp, build_context);
     let env_refs: Vec<(&str, &str)> = env_vars
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -441,55 +444,49 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
 
 /// Run pre-build scripts from all configured extensions.
 /// Returns Some((exit_code, stderr)) if any script fails, None if all pass or no scripts.
-fn run_pre_build_scripts(comp: &Component) -> Result<Option<(i32, String)>> {
-    let extensions = match &comp.extensions {
-        Some(m) => m,
+fn run_pre_build_scripts(
+    build_context: Option<&ExtensionExecutionContext>,
+) -> Result<Option<(i32, String)>> {
+    let Some(build_context) = build_context else {
+        return Ok(None);
+    };
+
+    let extension = extension::load_extension(&build_context.extension_id)?;
+    let build_config = match &extension.build {
+        Some(b) => b,
         None => return Ok(None),
     };
 
-    for extension_id in extensions.keys() {
-        let extension = match extension::load_extension(extension_id) {
-            Ok(m) => m,
-            Err(_) => continue,
+    let pre_build_script = match &build_config.pre_build_script {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let script_path = build_context.extension_path.join(pre_build_script);
+    if !script_path.exists() {
+        return Ok(None);
+    }
+
+    let extension_path_lossy = build_context.extension_path.to_string_lossy().to_string();
+    let env: [(&str, &str); 4] = [
+        (exec_context::EXTENSION_PATH, &extension_path_lossy),
+        (exec_context::COMPONENT_ID, &build_context.component.id),
+        (
+            exec_context::COMPONENT_PATH,
+            &build_context.component.local_path,
+        ),
+        ("HOMEBOY_PLUGIN_PATH", &build_context.component.local_path),
+    ];
+
+    let output = execute_local_command_in_dir(&script_path.to_string_lossy(), None, Some(&env));
+
+    if !output.success {
+        let combined = if output.stderr.is_empty() {
+            output.stdout
+        } else {
+            output.stderr
         };
-
-        let build_config = match &extension.build {
-            Some(b) => b,
-            None => continue,
-        };
-
-        let pre_build_script = match &build_config.pre_build_script {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let extension_path = paths::extension(extension_id)?;
-        let script_path = extension_path.join(pre_build_script);
-
-        if !script_path.exists() {
-            continue;
-        }
-
-        let env: [(&str, &str); 4] = [
-            (
-                exec_context::EXTENSION_PATH,
-                &extension_path.to_string_lossy(),
-            ),
-            (exec_context::COMPONENT_ID, &comp.id),
-            (exec_context::COMPONENT_PATH, &comp.local_path),
-            ("HOMEBOY_PLUGIN_PATH", &comp.local_path),
-        ];
-
-        let output = execute_local_command_in_dir(&script_path.to_string_lossy(), None, Some(&env));
-
-        if !output.success {
-            let combined = if output.stderr.is_empty() {
-                output.stdout
-            } else {
-                output.stderr
-            };
-            return Ok(Some((output.exit_code, combined)));
-        }
+        return Ok(Some((output.exit_code, combined)));
     }
 
     Ok(None)
@@ -497,29 +494,26 @@ fn run_pre_build_scripts(comp: &Component) -> Result<Option<(i32, String)>> {
 
 /// Get environment variables for build commands (extension path, component path).
 /// Matches the env vars passed to pre-build scripts for consistency.
-fn get_build_env_vars(comp: &Component) -> Vec<(String, String)> {
+fn get_build_env_vars(
+    comp: &Component,
+    build_context: Option<&ExtensionExecutionContext>,
+) -> Vec<(String, String)> {
     let mut env = Vec::new();
 
     // Always pass the component ID so build scripts can name artifacts consistently
     env.push((exec_context::COMPONENT_ID.to_string(), comp.id.clone()));
 
-    if let Some(extensions) = &comp.extensions {
-        for extension_id in extensions.keys() {
-            if let Ok(extension) = extension::load_extension(extension_id) {
-                if extension.build.is_some() {
-                    if let Ok(extension_path) = paths::extension(extension_id) {
-                        let extension_path_str = extension_path.to_string_lossy().to_string();
-                        env.push((exec_context::EXTENSION_PATH.to_string(), extension_path_str));
-                        env.push((
-                            exec_context::COMPONENT_PATH.to_string(),
-                            comp.local_path.clone(),
-                        ));
-                        env.push(("HOMEBOY_PLUGIN_PATH".to_string(), comp.local_path.clone()));
-                        break; // Use first extension with build config
-                    }
-                }
-            }
-        }
+    if let Some(build_context) = build_context {
+        let extension_path_str = build_context.extension_path.to_string_lossy().to_string();
+        env.push((exec_context::EXTENSION_PATH.to_string(), extension_path_str));
+        env.push((
+            exec_context::COMPONENT_PATH.to_string(),
+            build_context.component.local_path.clone(),
+        ));
+        env.push((
+            "HOMEBOY_PLUGIN_PATH".to_string(),
+            build_context.component.local_path.clone(),
+        ));
     }
 
     env

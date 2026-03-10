@@ -7,14 +7,13 @@ use homeboy::component;
 use homeboy::extension;
 use homeboy::refactor::{self, AddResult, MoveResult, RenameScope, RenameSpec, RenameTargeting};
 
-use super::args::{BaselineArgs, ComponentArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs};
+use super::args::{
+    BaselineArgs, ComponentArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs,
+};
 use crate::commands::CmdResult;
 
 #[derive(Args)]
-#[command(
-    args_conflicts_with_subcommands = true,
-    subcommand_negates_reqs = true
-)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub struct RefactorArgs {
     #[command(flatten)]
     comp: Option<PositionalComponentArgs>,
@@ -312,7 +311,6 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             component.path.as_deref(),
             write_mode.write,
         ),
-
     }
 }
 
@@ -426,7 +424,9 @@ fn run_refactor_sources(
     settings: &[(String, String)],
     write: bool,
 ) -> CmdResult<RefactorOutput> {
-    let comp = comp.ok_or_else(|| homeboy::Error::validation_missing_argument(vec!["component".to_string()]))?;
+    let comp = comp.ok_or_else(|| {
+        homeboy::Error::validation_missing_argument(vec!["component".to_string()])
+    })?;
     let component = comp.load()?;
     let root = comp.source_path()?;
     let requested_sources = if all {
@@ -454,18 +454,22 @@ fn run_refactor_sources(
     Ok((RefactorOutput::Plan(plan), exit_code))
 }
 
-fn parse_audit_findings(values: &[String]) -> homeboy::Result<Vec<homeboy::code_audit::AuditFinding>> {
+fn parse_audit_findings(
+    values: &[String],
+) -> homeboy::Result<Vec<homeboy::code_audit::AuditFinding>> {
     values
         .iter()
         .map(|value| {
-            value.parse::<homeboy::code_audit::AuditFinding>().map_err(|_| {
-                homeboy::Error::validation_invalid_argument(
-                    "kind",
-                    format!("Unknown audit finding kind: {}", value),
-                    None,
-                    None,
-                )
-            })
+            value
+                .parse::<homeboy::code_audit::AuditFinding>()
+                .map_err(|_| {
+                    homeboy::Error::validation_invalid_argument(
+                        "kind",
+                        format!("Unknown audit finding kind: {}", value),
+                        None,
+                        None,
+                    )
+                })
         })
         .collect()
 }

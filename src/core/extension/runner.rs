@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::component::{self, Component, ScopedExtensionConfig};
+use crate::component::{self, Component};
 use crate::error::{Error, ErrorCode, Result};
 use crate::ssh::{execute_local_command_passthrough, CommandOutput};
 use crate::utils::{io, shell};
@@ -13,13 +13,19 @@ pub struct RunnerOutput {
     pub stderr: String,
 }
 
+use super::{ExtensionCapability, ExtensionExecutionContext};
+
+struct ResolvedRunnerContext {
+    execution: ExtensionExecutionContext,
+    settings_json: String,
+}
+
 /// Orchestrates extension script execution for test/lint runners.
 ///
 /// Encapsulates the shared logic for finding components, resolving extensions,
 /// loading manifests, merging settings, and executing runner scripts.
 pub struct ExtensionRunner {
-    component_id: String,
-    script_path: String, // Relative to extension root (e.g., "scripts/lint/lint-runner.sh")
+    execution_context: ExtensionExecutionContext,
     settings_overrides: Vec<(String, String)>,
     env_vars: Vec<(String, String)>,
     script_args: Vec<String>,
@@ -28,22 +34,6 @@ pub struct ExtensionRunner {
 }
 
 impl ExtensionRunner {
-    /// Create a new ExtensionRunner for a component and script.
-    ///
-    /// - `component_id`: The component to run the script for
-    /// - `script_path`: Path to the script relative to extension root (e.g., "scripts/lint/lint-runner.sh")
-    pub fn new(component_id: &str, script_path: &str) -> Self {
-        Self {
-            component_id: component_id.to_string(),
-            script_path: script_path.to_string(),
-            settings_overrides: Vec::new(),
-            env_vars: Vec::new(),
-            script_args: Vec::new(),
-            path_override: None,
-            pre_loaded_component: None,
-        }
-    }
-
     /// Use a pre-loaded component instead of loading by ID.
     ///
     /// This avoids re-loading from config when the caller already has a
@@ -51,6 +41,18 @@ impl ExtensionRunner {
     pub fn component(mut self, comp: Component) -> Self {
         self.pre_loaded_component = Some(comp);
         self
+    }
+
+    /// Create a runner from a pre-resolved execution context.
+    pub fn for_context(execution_context: ExtensionExecutionContext) -> Self {
+        Self {
+            execution_context,
+            settings_overrides: Vec::new(),
+            env_vars: Vec::new(),
+            script_args: Vec::new(),
+            path_override: None,
+            pre_loaded_component: None,
+        }
     }
 
     /// Override the component's `local_path` for this execution.
@@ -108,18 +110,16 @@ impl ExtensionRunner {
     /// 7. Prepare environment variables
     /// 8. Execute via shell
     pub fn run(&self) -> Result<RunnerOutput> {
-        let component = self.find_component()?;
-        let (extension_name, extension_settings) = self.determine_extension(&component)?;
-        let extension_path = self.find_extension_path(&extension_name)?;
+        let resolved = self.resolve_context()?;
+        let project_path = PathBuf::from(&resolved.execution.component.local_path);
+        let env_vars = self.prepare_env_vars(
+            &resolved.execution.extension_path,
+            &project_path,
+            &resolved.settings_json,
+            &resolved.execution.extension_id,
+        );
 
-        self.validate_script_exists(&extension_path)?;
-
-        let manifest = self.load_extension_manifest(&extension_path)?;
-        let settings_json = self.merge_settings(&manifest, &extension_settings)?;
-        let project_path = PathBuf::from(&component.local_path);
-        let env_vars = self.prepare_env_vars(&extension_path, &project_path, &settings_json);
-
-        let output = self.execute_script(&extension_path, &env_vars)?;
+        let output = self.execute_script(&resolved.execution.extension_path, &env_vars)?;
 
         Ok(RunnerOutput {
             exit_code: output.exit_code,
@@ -129,11 +129,35 @@ impl ExtensionRunner {
         })
     }
 
+    fn resolve_context(&self) -> Result<ResolvedRunnerContext> {
+        let component = self.find_component()?;
+        let execution = self.resolve_execution(component);
+
+        self.validate_script_exists(&execution.extension_path, &execution.script_path)?;
+
+        let manifest = self.load_extension_manifest(&execution.extension_path)?;
+        let settings_json = self.merge_settings(&manifest, &execution.settings)?;
+
+        Ok(ResolvedRunnerContext {
+            execution,
+            settings_json,
+        })
+    }
+
+    fn resolve_execution(&self, component: Component) -> ExtensionExecutionContext {
+        let mut execution = self.execution_context.clone();
+        execution.component = component;
+        if let Some(ref path) = self.path_override {
+            execution.component.local_path = path.clone();
+        }
+        execution
+    }
+
     fn find_component(&self) -> Result<Component> {
         let mut comp = if let Some(ref pre_loaded) = self.pre_loaded_component {
             pre_loaded.clone()
         } else {
-            match component::load(&self.component_id) {
+            match component::load(&self.execution_context.component.id) {
                 Ok(c) => c,
                 Err(err) if matches!(err.code, ErrorCode::ComponentNotFound) => {
                     // Fall back to portable config discovery when --path is provided
@@ -141,12 +165,12 @@ impl ExtensionRunner {
                         if let Some(mut discovered) =
                             component::discover_from_portable(Path::new(path))
                         {
-                            discovered.id = self.component_id.clone();
+                            discovered.id = self.execution_context.component.id.clone();
                             discovered.local_path = path.clone();
                             discovered
                         } else {
                             Component::new(
-                                self.component_id.clone(),
+                                self.execution_context.component.id.clone(),
                                 path.clone(),
                                 String::new(),
                                 None,
@@ -165,79 +189,8 @@ impl ExtensionRunner {
         Ok(comp)
     }
 
-    fn determine_extension(
-        &self,
-        component: &Component,
-    ) -> Result<(String, Vec<(String, String)>)> {
-        let extensions = component.extensions.as_ref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "component",
-                format!(
-                    "Component '{}' has no extensions configured for {}",
-                    component.id,
-                    self.script_description()
-                ),
-                None,
-                None,
-            )
-            .with_hint(format!(
-                "Add a extension: homeboy component set {} --extension <extension_id>",
-                component.id
-            ))
-        })?;
-
-        // Prefer wordpress extension if available
-        if extensions.contains_key("wordpress") {
-            let settings = extract_extension_settings(
-                extensions
-                    .get("wordpress")
-                    .expect("wordpress extension checked above"),
-            );
-            return Ok(("wordpress".to_string(), settings));
-        }
-
-        // Otherwise use the first available extension
-        if let Some((extension_name, extension_config)) = extensions.iter().next() {
-            let settings = extract_extension_settings(extension_config);
-            return Ok((extension_name.clone(), settings));
-        }
-
-        Err(Error::validation_invalid_argument(
-            "component",
-            format!(
-                "Component '{}' has no extensions configured for {}",
-                component.id,
-                self.script_description()
-            ),
-            None,
-            None,
-        )
-        .with_hint(format!(
-            "Add a extension: homeboy component set {} --extension <extension_id>",
-            component.id
-        )))
-    }
-
-    fn find_extension_path(&self, extension_name: &str) -> Result<PathBuf> {
-        let extension_path = super::extension_path(extension_name);
-
-        if extension_path.exists() {
-            Ok(extension_path)
-        } else {
-            Err(Error::validation_invalid_argument(
-                "extension",
-                format!(
-                    "Extension '{}' not found in ~/.config/homeboy/extensions/",
-                    extension_name
-                ),
-                None,
-                None,
-            ))
-        }
-    }
-
-    fn validate_script_exists(&self, extension_path: &Path) -> Result<()> {
-        let script_path = extension_path.join(&self.script_path);
+    fn validate_script_exists(&self, extension_path: &Path, script_path: &str) -> Result<()> {
+        let script_path = extension_path.join(script_path);
         if !script_path.exists() {
             return Err(Error::validation_invalid_argument(
                 "extension",
@@ -245,7 +198,7 @@ impl ExtensionRunner {
                     "Extension at {} does not have {} infrastructure (missing {})",
                     extension_path.display(),
                     self.script_description(),
-                    self.script_path
+                    script_path.display()
                 ),
                 None,
                 None,
@@ -321,17 +274,13 @@ impl ExtensionRunner {
         extension_path: &Path,
         project_path: &Path,
         settings_json: &str,
+        extension_name: &str,
     ) -> Vec<(String, String)> {
-        let extension_name = extension_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "unknown".to_string());
-
         let component_path = project_path.to_string_lossy();
         let mut env = super::execution::build_exec_env(
-            &extension_name,
+            extension_name,
             None, // no project context in runner
-            Some(&self.component_id),
+            Some(&self.execution_context.component.id),
             settings_json,
             Some(&extension_path.to_string_lossy()),
             None,                  // no project base_path in runner
@@ -350,7 +299,7 @@ impl ExtensionRunner {
         extension_path: &Path,
         env_vars: &[(String, String)],
     ) -> Result<CommandOutput> {
-        let script_path = extension_path.join(&self.script_path);
+        let script_path = extension_path.join(&self.execution_context.script_path);
         let mut command = shell::quote_path(&script_path.to_string_lossy());
 
         // Append script arguments if any
@@ -372,22 +321,10 @@ impl ExtensionRunner {
     }
 
     fn script_description(&self) -> &str {
-        if self.script_path.contains("test") {
-            "test"
-        } else if self.script_path.contains("lint") {
-            "lint"
-        } else {
-            "script"
+        match self.execution_context.capability {
+            ExtensionCapability::Lint => "lint",
+            ExtensionCapability::Test => "test",
+            ExtensionCapability::Build => "build",
         }
     }
-}
-
-fn extract_extension_settings(extension_config: &ScopedExtensionConfig) -> Vec<(String, String)> {
-    let mut settings = Vec::new();
-    for (key, value) in &extension_config.settings {
-        if let Some(str_val) = value.as_str() {
-            settings.push((key.clone(), str_val.to_string()));
-        }
-    }
-    settings
 }
