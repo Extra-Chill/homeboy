@@ -228,7 +228,7 @@ def render_markdown(
             lines.append("- No failed commands to classify.")
 
     if potential_fixable_failed:
-        lines.append("- Potentially auto-fixable failed commands (if autofix enabled):")
+        lines.append("- Failed commands with available automated fixes:")
         for cmd in potential_fixable_failed:
             lines.append(f"  - `{cmd}`")
 
@@ -236,12 +236,12 @@ def render_markdown(
         potential_candidates = autofixability.get("potential_fixable_candidates", []) or []
         if potential_candidates:
             lines.append(
-                "- Autofix is currently **disabled**. Commands with autofix support in this run: "
+                "- Automated fixes are **disabled for this step**. Commands with available fix support in this run: "
                 + ", ".join(f"`{cmd}`" for cmd in potential_candidates)
             )
         else:
             lines.append(
-                "- Autofix is currently **disabled** and no autofix-capable commands were detected."
+                "- Automated fixes are **disabled for this step** and no fix-capable commands were detected."
             )
     lines.append("")
 
