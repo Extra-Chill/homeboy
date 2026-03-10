@@ -90,6 +90,16 @@ assert_equals \
   "refactor keeps path with changed-since"
 
 assert_equals \
+  "refactor---all" \
+  "$(command_output_stem "refactor --all")" \
+  "output stem sanitizes spaced refactor command"
+
+assert_equals \
+  "audit---fix---write" \
+  "$(command_output_stem "audit --fix --write")" \
+  "output stem sanitizes autofix command"
+
+assert_equals \
   "homeboy refactor data-machine --from-audit --from-lint --from-test --all --write --path /tmp/workspace --changed-since origin/main --format json" \
   "$(build_autofix_command "refactor --from-audit --from-lint --from-test --all --write" "${COMPONENT}" "${WORKSPACE}")" \
   "autofix refactor keeps path and changed-since"

@@ -126,6 +126,18 @@ build_run_command() {
   printf '%s\n' "${full_cmd}"
 }
 
+command_output_stem() {
+  local cmd="$1"
+  local stem
+  stem="$(printf '%s' "${cmd}" | sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+//; s/-+$//')"
+  stem="${stem#-}"
+  stem="${stem%-}"
+  if [ -z "${stem}" ]; then
+    stem="homeboy-output"
+  fi
+  printf '%s\n' "${stem}"
+}
+
 build_autofix_command() {
   local fix_cmd="$1"
   local component_id="$2"

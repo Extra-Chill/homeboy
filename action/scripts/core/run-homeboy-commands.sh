@@ -36,7 +36,8 @@ for CMD in "${CMD_ARRAY[@]}"; do
     unset HOMEBOY_SKIP_LINT 2>/dev/null || true
   fi
 
-  OUTPUT_JSON="${HOMEBOY_OUTPUT_DIR}/${CMD}.json"
+  OUTPUT_STEM="$(command_output_stem "${CMD}")"
+  OUTPUT_JSON="${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.json"
   FULL_CMD="$(build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_JSON}")"
 
   echo ""
@@ -48,7 +49,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
   echo "::group::${GROUP_PREFIX} ${CMD}"
   CMD_EXIT=0
   set +e
-  eval "${FULL_CMD}" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${CMD}.log"
+  eval "${FULL_CMD}" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log"
   CMD_EXIT=${PIPESTATUS[0]}
   set -e
   echo "::endgroup::"
