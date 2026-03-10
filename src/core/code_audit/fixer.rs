@@ -3382,11 +3382,7 @@ class MyAbility {
     #[test]
     fn insert_namespace_declaration_replaces_existing_php_namespace() {
         let content = "<?php\nnamespace Old\\Space;\n\nclass FlowAbility {}\n";
-        let result = insert_namespace_declaration(
-            content,
-            "namespace New\\Space;",
-            &Language::Php,
-        );
+        let result = insert_namespace_declaration(content, "namespace New\\Space;", &Language::Php);
 
         assert!(result.contains("namespace New\\Space;"));
         assert!(!result.contains("namespace Old\\Space;"));
@@ -3401,7 +3397,9 @@ class MyAbility {
             &Language::Php,
         );
 
-        assert!(result.contains("<?php\n\nnamespace DataMachine\\Abilities;\n\nclass FlowAbility {}"));
+        assert!(
+            result.contains("<?php\n\nnamespace DataMachine\\Abilities;\n\nclass FlowAbility {}")
+        );
     }
 
     #[test]

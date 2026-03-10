@@ -1,21 +1,15 @@
 use clap::Args;
 use homeboy::code_audit::{self, baseline, fixer, CodeAuditResult};
-use homeboy::component::{self, Component};
-use homeboy::extension::ExtensionRunner;
 use homeboy::git;
 use homeboy::refactor::{
-    build_chunk_verifier, finding_fingerprint, run_audit_refactor, score_delta,
-    weighted_finding_score_with, AuditConvergenceScoring, AuditRefactorIterationSummary,
+    run_audit_refactor, AuditConvergenceScoring, AuditRefactorIterationSummary,
     AuditVerificationToggles,
 };
 use homeboy::utils::autofix::{self, AutofixMode, FixResultsSummary};
 use serde::Serialize;
-use std::collections::HashSet;
 use std::path::Path;
-use std::path::PathBuf;
 
 use super::args::{BaselineArgs, PositionalComponentArgs};
-use super::test_scope::compute_changed_test_scope;
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
@@ -715,13 +709,13 @@ mod tests {
     use super::default_audit_exit_code;
     use super::{run, AuditArgs, AuditOutput};
     use crate::commands::args::{BaselineArgs, PositionalComponentArgs};
+    use homeboy::code_audit::fixer::{FixSafetyTier, InsertionKind};
+    use homeboy::code_audit::AuditFinding;
+    use homeboy::code_audit::{AuditSummary, CodeAuditResult, Finding, Severity};
     use homeboy::refactor::{
         build_chunk_verifier, finding_fingerprint, score_delta, weighted_finding_score_with,
         AuditConvergenceScoring,
     };
-    use homeboy::code_audit::fixer::{FixSafetyTier, InsertionKind};
-    use homeboy::code_audit::AuditFinding;
-    use homeboy::code_audit::{AuditSummary, CodeAuditResult, Finding, Severity};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};

@@ -82,7 +82,9 @@ pub fn run_lint_refactor(
     options: LintSourceOptions,
     write: bool,
 ) -> crate::Result<RefactorPlan> {
-    build_refactor_plan(lint_refactor_request(component, root, settings, options, write))
+    build_refactor_plan(lint_refactor_request(
+        component, root, settings, options, write,
+    ))
 }
 
 pub fn run_test_refactor(
@@ -92,7 +94,9 @@ pub fn run_test_refactor(
     options: TestSourceOptions,
     write: bool,
 ) -> crate::Result<RefactorPlan> {
-    build_refactor_plan(test_refactor_request(component, root, settings, options, write))
+    build_refactor_plan(test_refactor_request(
+        component, root, settings, options, write,
+    ))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -508,7 +512,12 @@ fn plan_audit_stage(
             .iterations
             .iter()
             .filter(|iteration| iteration.status != "continued")
-            .map(|iteration| format!("audit iteration {}: {}", iteration.iteration, iteration.status))
+            .map(|iteration| {
+                format!(
+                    "audit iteration {}: {}",
+                    iteration.iteration, iteration.status
+                )
+            })
             .collect::<Vec<_>>();
 
         (
