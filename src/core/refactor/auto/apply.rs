@@ -1,12 +1,406 @@
 use crate::code_audit::conventions::Language;
 use crate::code_audit::fixer::{
-    apply_insertions_to_content, detect_language, ApplyChunkResult, ApplyOptions, ChunkStatus,
-    DecomposeFixPlan, Fix, FixResult, Insertion, NewFile,
+    detect_language, ApplyChunkResult, ApplyOptions, ChunkStatus, DecomposeFixPlan, Fix,
+    FixResult, Insertion, InsertionKind, NewFile,
 };
 use crate::core::refactor::decompose;
 use crate::core::refactor::plan::audit::rewrite_callers_after_dedup;
 use crate::core::undo::InMemoryRollback;
+use regex::Regex;
 use std::path::Path;
+
+/// Apply insertions to file content, returning the modified content.
+pub(crate) fn apply_insertions_to_content(
+    content: &str,
+    insertions: &[Insertion],
+    language: &Language,
+) -> String {
+    let mut result = content.to_string();
+
+    let mut method_stubs = Vec::new();
+    let mut registration_stubs = Vec::new();
+    let mut constructor_stubs = Vec::new();
+    let mut import_adds = Vec::new();
+    let mut type_conformances = Vec::new();
+    let mut namespace_declarations = Vec::new();
+    let mut trait_uses = Vec::new();
+    let mut removals: Vec<(usize, usize)> = Vec::new();
+    let mut visibility_changes: Vec<(usize, &str, &str)> = Vec::new();
+    let mut doc_ref_updates: Vec<(usize, &str, &str)> = Vec::new();
+    let mut doc_line_removals: Vec<usize> = Vec::new();
+
+    for insertion in insertions {
+        match &insertion.kind {
+            InsertionKind::MethodStub => method_stubs.push(&insertion.code),
+            InsertionKind::RegistrationStub => registration_stubs.push(&insertion.code),
+            InsertionKind::ConstructorWithRegistration => constructor_stubs.push(&insertion.code),
+            InsertionKind::ImportAdd => import_adds.push(&insertion.code),
+            InsertionKind::TypeConformance => type_conformances.push(&insertion.code),
+            InsertionKind::NamespaceDeclaration => namespace_declarations.push(&insertion.code),
+            InsertionKind::TraitUse => trait_uses.push(&insertion.code),
+            InsertionKind::FunctionRemoval {
+                start_line,
+                end_line,
+            } => removals.push((*start_line, *end_line)),
+            InsertionKind::VisibilityChange { line, from, to } => {
+                visibility_changes.push((*line, from.as_str(), to.as_str()));
+            }
+            InsertionKind::DocReferenceUpdate {
+                line,
+                old_ref,
+                new_ref,
+            } => doc_ref_updates.push((*line, old_ref.as_str(), new_ref.as_str())),
+            InsertionKind::DocLineRemoval { line } => doc_line_removals.push(*line),
+        }
+    }
+
+    if !visibility_changes.is_empty() {
+        let mut lines: Vec<String> = result.lines().map(String::from).collect();
+        for (line_num, from, to) in &visibility_changes {
+            let idx = line_num.saturating_sub(1);
+            if idx < lines.len() {
+                lines[idx] = lines[idx].replacen(from, to, 1);
+            }
+        }
+        result = lines.join("\n");
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
+
+    if !doc_ref_updates.is_empty() {
+        let mut lines: Vec<String> = result.lines().map(String::from).collect();
+        for (line_num, old_ref, new_ref) in &doc_ref_updates {
+            let idx = line_num.saturating_sub(1);
+            if idx < lines.len() {
+                lines[idx] = lines[idx].replacen(old_ref, new_ref, 1);
+            }
+        }
+        result = lines.join("\n");
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
+
+    if !doc_line_removals.is_empty() {
+        let mut lines: Vec<String> = result.lines().map(String::from).collect();
+        doc_line_removals.sort_unstable_by(|a, b| b.cmp(a));
+        for line_num in doc_line_removals {
+            let idx = line_num.saturating_sub(1);
+            if idx < lines.len() {
+                lines.remove(idx);
+            }
+        }
+        result = lines.join("\n");
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
+
+    if !removals.is_empty() {
+        removals.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut lines: Vec<&str> = result.lines().collect();
+        for (start, end) in &removals {
+            let start_idx = start.saturating_sub(1);
+            let end_idx = (*end).min(lines.len());
+            if start_idx < lines.len() {
+                let remove_end = if end_idx < lines.len() && lines[end_idx].trim().is_empty() {
+                    end_idx + 1
+                } else {
+                    end_idx
+                };
+                lines.drain(start_idx..remove_end);
+            }
+        }
+        result = lines.join("\n");
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
+
+    for declaration in &namespace_declarations {
+        result = insert_namespace_declaration(&result, declaration, language);
+    }
+
+    for import_line in &import_adds {
+        result = insert_import(&result, import_line, language);
+    }
+
+    if !type_conformances.is_empty() {
+        result = insert_type_conformance(&result, &type_conformances, language);
+    }
+
+    if !trait_uses.is_empty() {
+        result = insert_trait_uses(&result, &trait_uses, language);
+    }
+
+    if !registration_stubs.is_empty() {
+        result = insert_into_constructor(&result, &registration_stubs, language);
+    }
+
+    if !constructor_stubs.is_empty() {
+        let combined: String = constructor_stubs
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        result = insert_before_closing_brace(&result, &combined, language);
+    }
+
+    if !method_stubs.is_empty() {
+        let combined: String = method_stubs
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        result = insert_before_closing_brace(&result, &combined, language);
+    }
+
+    result
+}
+
+pub(crate) fn insert_into_constructor(
+    content: &str,
+    stubs: &[&String],
+    language: &Language,
+) -> String {
+    let constructor_pattern = match language {
+        Language::Php => r"function\s+__construct\s*\([^)]*\)\s*\{",
+        Language::Rust => r"fn\s+new\s*\([^)]*\)\s*(?:->[^{]*)?\{",
+        Language::JavaScript | Language::TypeScript => r"constructor\s*\([^)]*\)\s*\{",
+        Language::Unknown => return content.to_string(),
+    };
+
+    let re = match Regex::new(constructor_pattern) {
+        Ok(re) => re,
+        Err(_) => return content.to_string(),
+    };
+
+    if let Some(m) = re.find(content) {
+        let insert_pos = m.end();
+        let insert_text: String = stubs.iter().map(|s| format!("\n{}", s)).collect();
+
+        let mut result = String::with_capacity(content.len() + insert_text.len());
+        result.push_str(&content[..insert_pos]);
+        result.push_str(&insert_text);
+        result.push_str(&content[insert_pos..]);
+        result
+    } else {
+        content.to_string()
+    }
+}
+
+pub(crate) fn insert_trait_uses(content: &str, stubs: &[&String], language: &Language) -> String {
+    match language {
+        Language::Php => {
+            let class_re = Regex::new(r"(?:class|trait|interface)\s+\w+[^\{]*\{").unwrap();
+            if let Some(m) = class_re.find(content) {
+                let insert_pos = m.end();
+                let mut result = String::with_capacity(content.len() + stubs.len() * 40);
+                result.push_str(&content[..insert_pos]);
+                result.push('\n');
+                for stub in stubs {
+                    result.push_str(stub.trim_end());
+                    result.push('\n');
+                }
+                result.push_str(&content[insert_pos..]);
+                result
+            } else {
+                content.to_string()
+            }
+        }
+        _ => {
+            let combined: String = stubs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+            insert_before_closing_brace(content, &combined, language)
+        }
+    }
+}
+
+pub(crate) fn insert_namespace_declaration(
+    content: &str,
+    declaration: &str,
+    language: &Language,
+) -> String {
+    match language {
+        Language::Php => {
+            let namespace_re = Regex::new(r"(?m)^\s*namespace\s+[^;]+;").unwrap();
+            if namespace_re.is_match(content) {
+                return namespace_re.replace(content, declaration).to_string();
+            }
+
+            if let Some(open_tag_pos) = content.find("<?php") {
+                let insert_pos = open_tag_pos + 5;
+                let mut result = String::with_capacity(content.len() + declaration.len() + 2);
+                result.push_str(&content[..insert_pos]);
+                result.push_str("\n\n");
+                result.push_str(declaration);
+                result.push_str(&content[insert_pos..]);
+                return result;
+            }
+
+            format!("{}\n{}", declaration, content)
+        }
+        _ => content.to_string(),
+    }
+}
+
+pub(crate) fn insert_type_conformance(
+    content: &str,
+    declarations: &[&String],
+    language: &Language,
+) -> String {
+    let Some(declaration) = declarations.first() else {
+        return content.to_string();
+    };
+
+    match language {
+        Language::Php | Language::TypeScript => insert_inline_type_conformance(content, declaration, language),
+        Language::Rust => {
+            if content.contains(declaration.as_str()) {
+                content.to_string()
+            } else if content.ends_with('\n') {
+                format!("{}{}", content, declaration)
+            } else {
+                format!("{}\n{}", content, declaration)
+            }
+        }
+        Language::JavaScript | Language::Unknown => content.to_string(),
+    }
+}
+
+fn insert_inline_type_conformance(content: &str, declaration: &str, language: &Language) -> String {
+    let conformance = declaration.trim();
+    let keyword = match language {
+        Language::Php | Language::TypeScript => "implements",
+        _ => return content.to_string(),
+    };
+
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
+    for line in &mut lines {
+        if crate::code_audit::fixer::primary_type_name_from_declaration(line, language).is_none() {
+            continue;
+        }
+
+        if line.contains(conformance) {
+            break;
+        }
+
+        if line.contains(keyword) {
+            if let Some(pos) = line.find('{') {
+                let before = &line[..pos].trim_end();
+                let after = &line[pos..];
+                *line = format!("{}, {} {}", before, conformance, after);
+            } else {
+                *line = format!("{}, {}", line.trim_end(), conformance);
+            }
+        } else if let Some(pos) = line.find('{') {
+            let before = line[..pos].trim_end();
+            let after = &line[pos..];
+            *line = format!("{} {} {} {}", before, keyword, conformance, after);
+        } else {
+            *line = format!("{} {} {}", line.trim_end(), keyword, conformance);
+        }
+
+        break;
+    }
+
+    let mut result = lines.join("\n");
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
+pub(crate) fn insert_import(content: &str, import_line: &str, language: &Language) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+
+    let import_prefix = match language {
+        Language::Rust => "use ",
+        Language::Php => "use ",
+        Language::JavaScript | Language::TypeScript => "import ",
+        Language::Unknown => "use ",
+    };
+
+    let rust_definition_starts = [
+        "fn ", "pub fn ", "pub(crate) fn ", "pub(super) fn ", "struct ", "pub struct ",
+        "pub(crate) struct ", "enum ", "pub enum ", "pub(crate) enum ", "impl ", "impl<",
+        "mod ", "pub mod ", "pub(crate) mod ", "trait ", "pub trait ", "pub(crate) trait ",
+        "const ", "pub const ", "pub(crate) const ", "static ", "pub static ",
+        "pub(crate) static ", "type ", "pub type ", "pub(crate) type ", "#[cfg(test)]",
+    ];
+
+    let mut last_import_idx = None;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        if *language == Language::Rust
+            && rust_definition_starts
+                .iter()
+                .any(|prefix| trimmed.starts_with(prefix))
+        {
+            break;
+        }
+
+        if trimmed.starts_with(import_prefix)
+            || (trimmed.starts_with("use ") && *language == Language::Rust)
+        {
+            last_import_idx = Some(i);
+        }
+    }
+
+    let insert_after = if let Some(idx) = last_import_idx {
+        idx
+    } else {
+        let mut first_code = 0;
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with("//")
+                || trimmed.starts_with("/*")
+                || trimmed.starts_with('*')
+                || trimmed.starts_with('#')
+                || trimmed == "<?php"
+            {
+                first_code = i + 1;
+            } else {
+                break;
+            }
+        }
+        if first_code > 0 { first_code - 1 } else { 0 }
+    };
+
+    let mut result = String::with_capacity(content.len() + import_line.len() + 2);
+    for (i, line) in lines.iter().enumerate() {
+        result.push_str(line);
+        result.push('\n');
+        if i == insert_after {
+            result.push_str(import_line);
+            result.push('\n');
+        }
+    }
+
+    if !content.ends_with('\n') {
+        result.pop();
+    }
+
+    result
+}
+
+pub(crate) fn insert_before_closing_brace(
+    content: &str,
+    code: &str,
+    _language: &Language,
+) -> String {
+    if let Some(last_brace) = content.rfind('}') {
+        let mut result = String::with_capacity(content.len() + code.len());
+        result.push_str(&content[..last_brace]);
+        result.push_str(code);
+        result.push_str(&content[last_brace..]);
+        result
+    } else {
+        format!("{}{}", content, code)
+    }
+}
 
 pub fn auto_apply_subset(result: &FixResult) -> FixResult {
     let fixes: Vec<Fix> = result

@@ -429,12 +429,12 @@ pub(crate) fn extract_expected_test_method_from_fix_description(
 #[derive(Debug, Clone)]
 pub(crate) struct MethodSignature {
     /// Method name.
-    pub(super) name: String,
+    pub(crate) name: String,
     /// Full signature line (e.g., "public function execute(array $config): array").
-    pub(super) signature: String,
+    pub(crate) signature: String,
     /// The language this was extracted from.
     #[allow(dead_code)]
-    pub(super) language: Language,
+    pub(crate) language: Language,
 }
 
 /// Extract full method signatures from a source file.
@@ -513,42 +513,9 @@ pub(crate) fn extract_js_signatures(content: &str) -> Vec<MethodSignature> {
 // ============================================================================
 
 /// Generate a stub body for a method based on language.
-fn stub_body(method_name: &str, language: &Language) -> String {
-    match language {
-        Language::Php => {
-            format!(
-                "        throw new \\RuntimeException('Not implemented: {}');",
-                method_name
-            )
-        }
-        Language::Rust => {
-            format!("        todo!(\"{}\")", method_name)
-        }
-        Language::JavaScript | Language::TypeScript => {
-            format!(
-                "        throw new Error('Not implemented: {}');",
-                method_name
-            )
-        }
-        Language::Unknown => String::new(),
-    }
-}
-
 /// Generate a method stub from a signature.
 fn generate_method_stub(sig: &MethodSignature) -> String {
-    let body = stub_body(&sig.name, &sig.language);
-    match sig.language {
-        Language::Php => {
-            format!("\n    {} {{\n{}\n    }}\n", sig.signature, body)
-        }
-        Language::Rust => {
-            format!("\n    {} {{\n{}\n    }}\n", sig.signature, body)
-        }
-        Language::JavaScript | Language::TypeScript => {
-            format!("\n    {} {{\n{}\n    }}\n", sig.signature, body)
-        }
-        Language::Unknown => String::new(),
-    }
+    crate::core::refactor::plan::generate::generate_method_stub(sig)
 }
 
 // ============================================================================
@@ -559,27 +526,11 @@ fn generate_method_stub(sig: &MethodSignature) -> String {
 ///
 /// Language-aware: `use X;` for Rust/PHP, `import X from 'X';` for JS/TS.
 fn generate_import_statement(import_path: &str, language: &Language) -> String {
-    match language {
-        Language::Rust => format!("use {};", import_path),
-        Language::Php => format!("use {};", import_path),
-        Language::JavaScript | Language::TypeScript => {
-            // Extract the last segment as the name
-            let name = import_path
-                .rsplit("::")
-                .next()
-                .or_else(|| import_path.rsplit('/').next())
-                .unwrap_or(import_path);
-            format!("import {{ {} }} from '{}';", name, import_path)
-        }
-        Language::Unknown => format!("use {};", import_path),
-    }
+    crate::core::refactor::plan::generate::generate_import_statement(import_path, language)
 }
 
 fn generate_namespace_declaration(namespace: &str, language: &Language) -> Option<String> {
-    match language {
-        Language::Php => Some(format!("namespace {};", namespace)),
-        _ => None,
-    }
+    crate::core::refactor::plan::generate::generate_namespace_declaration(namespace, language)
 }
 
 fn extract_expected_namespace(description: &str) -> Option<String> {
@@ -589,43 +540,19 @@ fn extract_expected_namespace(description: &str) -> Option<String> {
         .map(|cap| cap[1].to_string())
 }
 
-fn insert_namespace_declaration(content: &str, declaration: &str, language: &Language) -> String {
-    match language {
-        Language::Php => {
-            let namespace_re = Regex::new(r"(?m)^\s*namespace\s+[^;]+;").unwrap();
-            if namespace_re.is_match(content) {
-                return namespace_re.replace(content, declaration).to_string();
-            }
-
-            if let Some(open_tag_pos) = content.find("<?php") {
-                let insert_pos = open_tag_pos + 5;
-                let mut result = String::with_capacity(content.len() + declaration.len() + 2);
-                result.push_str(&content[..insert_pos]);
-                result.push_str("\n\n");
-                result.push_str(declaration);
-                result.push_str(&content[insert_pos..]);
-                return result;
-            }
-
-            format!("{}\n{}", declaration, content)
-        }
-        _ => content.to_string(),
-    }
-}
-
 fn generate_type_conformance_declaration(
     type_name: &str,
     conformance: &str,
     language: &Language,
 ) -> String {
-    match language {
-        Language::Rust => format!("\nimpl {} for {} {{\n}}\n", conformance, type_name),
-        Language::Php | Language::TypeScript => conformance.to_string(),
-        Language::JavaScript | Language::Unknown => conformance.to_string(),
-    }
+    crate::core::refactor::plan::generate::generate_type_conformance_declaration(
+        type_name,
+        conformance,
+        language,
+    )
 }
 
-fn primary_type_name_from_declaration(line: &str, language: &Language) -> Option<String> {
+pub(crate) fn primary_type_name_from_declaration(line: &str, language: &Language) -> Option<String> {
     let trimmed = line.trim();
     match language {
         Language::Php | Language::TypeScript => Regex::new(r"\b(?:class|interface|trait)\s+(\w+)")
@@ -644,199 +571,15 @@ fn primary_type_name_from_declaration(line: &str, language: &Language) -> Option
     }
 }
 
-fn insert_type_conformance(content: &str, declarations: &[&String], language: &Language) -> String {
-    let Some(declaration) = declarations.first() else {
-        return content.to_string();
-    };
-
-    match language {
-        Language::Php | Language::TypeScript => {
-            insert_inline_type_conformance(content, declaration, language)
-        }
-        Language::Rust => {
-            if content.contains(declaration.as_str()) {
-                content.to_string()
-            } else if content.ends_with('\n') {
-                format!("{}{}", content, declaration)
-            } else {
-                format!("{}\n{}", content, declaration)
-            }
-        }
-        Language::JavaScript | Language::Unknown => content.to_string(),
-    }
-}
-
-fn insert_inline_type_conformance(content: &str, declaration: &str, language: &Language) -> String {
-    let conformance = declaration.trim();
-    let keyword = match language {
-        Language::Php | Language::TypeScript => "implements",
-        _ => return content.to_string(),
-    };
-
-    let mut lines: Vec<String> = content.lines().map(String::from).collect();
-    for line in &mut lines {
-        if primary_type_name_from_declaration(line, language).is_none() {
-            continue;
-        }
-
-        if line.contains(conformance) {
-            break;
-        }
-
-        if line.contains(keyword) {
-            if let Some(pos) = line.find('{') {
-                let before = &line[..pos].trim_end();
-                let after = &line[pos..];
-                *line = format!("{}, {} {}", before, conformance, after);
-            } else {
-                *line = format!("{}, {}", line.trim_end(), conformance);
-            }
-        } else if let Some(pos) = line.find('{') {
-            let before = line[..pos].trim_end();
-            let after = &line[pos..];
-            *line = format!("{} {} {} {}", before, keyword, conformance, after);
-        } else {
-            *line = format!("{} {} {}", line.trim_end(), keyword, conformance);
-        }
-
-        break;
-    }
-
-    let mut result = lines.join("\n");
-    if content.ends_with('\n') {
-        result.push('\n');
-    }
-    result
-}
 /// Insert an import statement into file content at the correct location.
 ///
 /// Finds the last existing import/use line and inserts after it.
 /// If no imports exist, inserts after the first non-comment, non-blank line
 /// (e.g., after `<?php` or after extension-level attributes).
-fn insert_import(content: &str, import_line: &str, language: &Language) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-
-    // Find the last top-level import/use line.
-    // For Rust, stop scanning when we hit a definition keyword at column 0
-    // (fn, struct, enum, impl, mod, trait, const, static, type) to avoid
-    // matching `use super::*;` inside test modules or impl blocks.
-    let import_prefix = match language {
-        Language::Rust => "use ",
-        Language::Php => "use ",
-        Language::JavaScript | Language::TypeScript => "import ",
-        Language::Unknown => "use ",
-    };
-
-    let rust_definition_starts = [
-        "fn ",
-        "pub fn ",
-        "pub(crate) fn ",
-        "pub(super) fn ",
-        "struct ",
-        "pub struct ",
-        "pub(crate) struct ",
-        "enum ",
-        "pub enum ",
-        "pub(crate) enum ",
-        "impl ",
-        "impl<",
-        "mod ",
-        "pub mod ",
-        "pub(crate) mod ",
-        "trait ",
-        "pub trait ",
-        "pub(crate) trait ",
-        "const ",
-        "pub const ",
-        "pub(crate) const ",
-        "static ",
-        "pub static ",
-        "pub(crate) static ",
-        "type ",
-        "pub type ",
-        "pub(crate) type ",
-        "#[cfg(test)]",
-    ];
-
-    let mut last_import_idx = None;
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-
-        // For Rust, stop at the first top-level definition
-        if *language == Language::Rust
-            && rust_definition_starts
-                .iter()
-                .any(|prefix| trimmed.starts_with(prefix))
-        {
-            break;
-        }
-
-        if trimmed.starts_with(import_prefix)
-            || (trimmed.starts_with("use ") && *language == Language::Rust)
-        {
-            last_import_idx = Some(i);
-        }
-    }
-
-    let insert_after = if let Some(idx) = last_import_idx {
-        idx
-    } else {
-        // No existing imports — insert after first non-blank, non-comment line
-        let mut first_code = 0;
-        for (i, line) in lines.iter().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.is_empty()
-                || trimmed.starts_with("//")
-                || trimmed.starts_with("/*")
-                || trimmed.starts_with('*')
-                || trimmed.starts_with('#')
-                || trimmed == "<?php"
-            {
-                first_code = i + 1;
-            } else {
-                break;
-            }
-        }
-        // Insert before first_code (add a blank line separator)
-        if first_code > 0 {
-            first_code - 1
-        } else {
-            0
-        }
-    };
-
-    let mut result = String::with_capacity(content.len() + import_line.len() + 2);
-    for (i, line) in lines.iter().enumerate() {
-        result.push_str(line);
-        result.push('\n');
-        if i == insert_after {
-            result.push_str(import_line);
-            result.push('\n');
-        }
-    }
-
-    // Preserve trailing newline behavior
-    if !content.ends_with('\n') {
-        result.pop();
-    }
-
-    result
-}
 
 /// Generate a registration stub for PHP (add_action/add_filter in __construct).
 fn generate_registration_stub(hook_name: &str) -> String {
-    // The hook name from the audit is the first arg of add_action
-    // We need to generate: add_action('hook_name', [$this, 'methodName']);
-    // Use a generic callback name based on the hook
-    let callback = hook_name
-        .strip_prefix("wp_")
-        .or_else(|| hook_name.strip_prefix("datamachine_"))
-        .unwrap_or(hook_name);
-
-    format!(
-        "        add_action('{}', [$this, '{}']);",
-        hook_name, callback
-    )
+    crate::core::refactor::plan::generate::generate_registration_stub(hook_name)
 }
 
 // ============================================================================
@@ -1624,245 +1367,7 @@ pub(crate) fn apply_insertions_to_content(
     insertions: &[Insertion],
     language: &Language,
 ) -> String {
-    let mut result = content.to_string();
-
-    // Categorize insertions by kind
-    let mut method_stubs = Vec::new();
-    let mut registration_stubs = Vec::new();
-    let mut constructor_stubs = Vec::new();
-    let mut import_adds = Vec::new();
-    let mut type_conformances = Vec::new();
-    let mut namespace_declarations = Vec::new();
-    let mut trait_uses = Vec::new();
-    let mut removals: Vec<(usize, usize)> = Vec::new();
-    let mut visibility_changes: Vec<(usize, &str, &str)> = Vec::new();
-    let mut doc_ref_updates: Vec<(usize, &str, &str)> = Vec::new();
-    let mut doc_line_removals: Vec<usize> = Vec::new();
-
-    for insertion in insertions {
-        match &insertion.kind {
-            InsertionKind::MethodStub => method_stubs.push(&insertion.code),
-            InsertionKind::RegistrationStub => registration_stubs.push(&insertion.code),
-            InsertionKind::ConstructorWithRegistration => constructor_stubs.push(&insertion.code),
-            InsertionKind::ImportAdd => import_adds.push(&insertion.code),
-            InsertionKind::TypeConformance => type_conformances.push(&insertion.code),
-            InsertionKind::NamespaceDeclaration => namespace_declarations.push(&insertion.code),
-            InsertionKind::TraitUse => trait_uses.push(&insertion.code),
-            InsertionKind::FunctionRemoval {
-                start_line,
-                end_line,
-            } => {
-                removals.push((*start_line, *end_line));
-            }
-            InsertionKind::VisibilityChange { line, from, to } => {
-                visibility_changes.push((*line, from.as_str(), to.as_str()));
-            }
-            InsertionKind::DocReferenceUpdate {
-                line,
-                old_ref,
-                new_ref,
-            } => {
-                doc_ref_updates.push((*line, old_ref.as_str(), new_ref.as_str()));
-            }
-            InsertionKind::DocLineRemoval { line } => doc_line_removals.push(*line),
-        }
-    }
-
-    // Apply visibility changes first (line-level text replacements, no line shifts)
-    if !visibility_changes.is_empty() {
-        let mut lines: Vec<String> = result.lines().map(String::from).collect();
-        for (line_num, from, to) in &visibility_changes {
-            let idx = line_num.saturating_sub(1); // 1-indexed → 0-indexed
-            if idx < lines.len() {
-                lines[idx] = lines[idx].replacen(from, to, 1);
-            }
-        }
-        result = lines.join("\n");
-        if content.ends_with('\n') && !result.ends_with('\n') {
-            result.push('\n');
-        }
-    }
-
-    // Apply doc reference updates (line-level text replacements, no line shifts)
-    if !doc_ref_updates.is_empty() {
-        let mut lines: Vec<String> = result.lines().map(String::from).collect();
-        for (line_num, old_ref, new_ref) in &doc_ref_updates {
-            let idx = line_num.saturating_sub(1);
-            if idx < lines.len() {
-                lines[idx] = lines[idx].replacen(old_ref, new_ref, 1);
-            }
-        }
-        result = lines.join("\n");
-        if content.ends_with('\n') && !result.ends_with('\n') {
-            result.push('\n');
-        }
-    }
-
-    if !doc_line_removals.is_empty() {
-        let mut lines: Vec<String> = result.lines().map(String::from).collect();
-        doc_line_removals.sort_unstable_by(|a, b| b.cmp(a));
-        for line_num in doc_line_removals {
-            let idx = line_num.saturating_sub(1);
-            if idx < lines.len() {
-                lines.remove(idx);
-            }
-        }
-        result = lines.join("\n");
-        if content.ends_with('\n') && !result.ends_with('\n') {
-            result.push('\n');
-        }
-    }
-
-    // Apply function removals first (before adding imports, to avoid line shifts)
-    // Process in reverse order so earlier removals don't invalidate later line numbers
-    if !removals.is_empty() {
-        removals.sort_by(|a, b| b.0.cmp(&a.0)); // reverse by start_line
-        let mut lines: Vec<&str> = result.lines().collect();
-        for (start, end) in &removals {
-            let start_idx = start.saturating_sub(1); // 1-indexed → 0-indexed
-            let end_idx = (*end).min(lines.len());
-            if start_idx < lines.len() {
-                // Also remove trailing blank line if present
-                let remove_end = if end_idx < lines.len() && lines[end_idx].trim().is_empty() {
-                    end_idx + 1
-                } else {
-                    end_idx
-                };
-                lines.drain(start_idx..remove_end);
-            }
-        }
-        result = lines.join("\n");
-        // Preserve trailing newline if original had one
-        if content.ends_with('\n') && !result.ends_with('\n') {
-            result.push('\n');
-        }
-    }
-
-    for declaration in &namespace_declarations {
-        result = insert_namespace_declaration(&result, declaration, language);
-    }
-
-    // Apply import additions (they go at the top)
-    for import_line in &import_adds {
-        result = insert_import(&result, import_line, language);
-    }
-
-    if !type_conformances.is_empty() {
-        result = insert_type_conformance(&result, &type_conformances, language);
-    }
-
-    // Insert trait use statements inside the class body (after opening brace)
-    if !trait_uses.is_empty() {
-        result = insert_trait_uses(&result, &trait_uses, language);
-    }
-
-    // Insert registration stubs into existing __construct
-    if !registration_stubs.is_empty() {
-        result = insert_into_constructor(&result, &registration_stubs, language);
-    }
-
-    // Insert constructor stubs (new __construct with registrations)
-    if !constructor_stubs.is_empty() {
-        let combined: String = constructor_stubs
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("");
-        result = insert_before_closing_brace(&result, &combined, language);
-    }
-
-    // Insert method stubs before closing brace
-    if !method_stubs.is_empty() {
-        let combined: String = method_stubs
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("");
-        result = insert_before_closing_brace(&result, &combined, language);
-    }
-
-    result
-}
-
-/// Insert code into the body of __construct (PHP), new() (Rust), or constructor() (JS).
-fn insert_into_constructor(content: &str, stubs: &[&String], language: &Language) -> String {
-    let constructor_pattern = match language {
-        Language::Php => r"function\s+__construct\s*\([^)]*\)\s*\{",
-        Language::Rust => r"fn\s+new\s*\([^)]*\)\s*(?:->[^{]*)?\{",
-        Language::JavaScript | Language::TypeScript => r"constructor\s*\([^)]*\)\s*\{",
-        Language::Unknown => return content.to_string(),
-    };
-
-    let re = match Regex::new(constructor_pattern) {
-        Ok(r) => r,
-        Err(_) => return content.to_string(),
-    };
-
-    if let Some(m) = re.find(content) {
-        let insert_pos = m.end();
-        let insert_text: String = stubs.iter().map(|s| format!("\n{}", s)).collect();
-
-        let mut result = String::with_capacity(content.len() + insert_text.len());
-        result.push_str(&content[..insert_pos]);
-        result.push_str(&insert_text);
-        result.push_str(&content[insert_pos..]);
-        result
-    } else {
-        content.to_string()
-    }
-}
-
-/// Insert trait `use` statements inside the class body.
-///
-/// For PHP: inserts `use TraitName;` after the class opening brace.
-/// For Rust: would insert trait impl blocks (not yet implemented).
-/// For JS/TS: would insert mixin application (not yet implemented).
-fn insert_trait_uses(content: &str, stubs: &[&String], language: &Language) -> String {
-    match language {
-        Language::Php => {
-            // Find the class opening brace: `class Foo ... {`
-            let class_re = Regex::new(r"(?:class|trait|interface)\s+\w+[^{]*\{").unwrap();
-            if let Some(m) = class_re.find(content) {
-                let insert_pos = m.end();
-                let mut result = String::with_capacity(content.len() + stubs.len() * 40);
-                result.push_str(&content[..insert_pos]);
-                result.push('\n');
-                for stub in stubs {
-                    let trimmed = stub.trim_end();
-                    result.push_str(trimmed);
-                    result.push('\n');
-                }
-                result.push_str(&content[insert_pos..]);
-                result
-            } else {
-                content.to_string()
-            }
-        }
-        _ => {
-            // Other languages: fall back to inserting before closing brace
-            let combined: String = stubs
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            insert_before_closing_brace(content, &combined, language)
-        }
-    }
-}
-
-/// Insert code before the last closing brace of a class/struct/impl block.
-fn insert_before_closing_brace(content: &str, code: &str, _language: &Language) -> String {
-    // Find the last `}` in the file (class/struct closing brace)
-    if let Some(last_brace) = content.rfind('}') {
-        let mut result = String::with_capacity(content.len() + code.len());
-        result.push_str(&content[..last_brace]);
-        result.push_str(code);
-        result.push_str(&content[last_brace..]);
-        result
-    } else {
-        // No closing brace — append to end
-        format!("{}{}", content, code)
-    }
+    crate::core::refactor::auto::apply::apply_insertions_to_content(content, insertions, language)
 }
 
 // ============================================================================
@@ -1959,7 +1464,11 @@ class MyClass {
 }
 "#;
         let stub = "\n    public function newMethod() {\n        // stub\n    }\n";
-        let result = insert_before_closing_brace(content, stub, &Language::Php);
+        let result = crate::core::refactor::auto::apply::insert_before_closing_brace(
+            content,
+            stub,
+            &Language::Php,
+        );
 
         assert!(result.contains("newMethod"));
         assert!(result.contains("existing"));
@@ -1974,7 +1483,11 @@ class MyClass {
         let content = "<?php\nclass FlowAbility extends BaseAbility {\n}\n";
         let declaration = "AbilityInterface".to_string();
 
-        let result = insert_type_conformance(content, &[&declaration], &Language::Php);
+        let result = crate::core::refactor::auto::apply::insert_type_conformance(
+            content,
+            &[&declaration],
+            &Language::Php,
+        );
 
         assert!(
             result.contains("class FlowAbility extends BaseAbility implements AbilityInterface {")
@@ -1987,7 +1500,11 @@ class MyClass {
         let declaration =
             generate_type_conformance_declaration("FlowAbility", "Runnable", &Language::Rust);
 
-        let result = insert_type_conformance(content, &[&declaration], &Language::Rust);
+        let result = crate::core::refactor::auto::apply::insert_type_conformance(
+            content,
+            &[&declaration],
+            &Language::Rust,
+        );
 
         assert!(result.contains("impl Runnable for FlowAbility"));
     }
@@ -2074,7 +1591,11 @@ class MyAbility {
 "#;
         let reg = "        add_action('wp_abilities_api_init', [$this, 'abilities_api_init']);"
             .to_string();
-        let result = insert_into_constructor(content, &[&reg], &Language::Php);
+        let result = crate::core::refactor::auto::apply::insert_into_constructor(
+            content,
+            &[&reg],
+            &Language::Php,
+        );
 
         assert!(result.contains("add_action('wp_abilities_api_init'"));
         // Registration should be inside __construct
@@ -2086,7 +1607,11 @@ class MyAbility {
     #[test]
     fn insert_namespace_declaration_replaces_existing_php_namespace() {
         let content = "<?php\nnamespace Old\\Space;\n\nclass FlowAbility {}\n";
-        let result = insert_namespace_declaration(content, "namespace New\\Space;", &Language::Php);
+        let result = crate::core::refactor::auto::apply::insert_namespace_declaration(
+            content,
+            "namespace New\\Space;",
+            &Language::Php,
+        );
 
         assert!(result.contains("namespace New\\Space;"));
         assert!(!result.contains("namespace Old\\Space;"));
@@ -2095,7 +1620,7 @@ class MyAbility {
     #[test]
     fn insert_namespace_declaration_adds_missing_php_namespace() {
         let content = "<?php\n\nclass FlowAbility {}\n";
-        let result = insert_namespace_declaration(
+        let result = crate::core::refactor::auto::apply::insert_namespace_declaration(
             content,
             "namespace DataMachine\\Abilities;",
             &Language::Php,
@@ -2715,7 +2240,11 @@ pub struct MyOutput {}
 
 pub fn run() {}
 "#;
-        let result = insert_import(content, "use super::CmdResult;", &Language::Rust);
+        let result = crate::core::refactor::auto::apply::insert_import(
+            content,
+            "use super::CmdResult;",
+            &Language::Rust,
+        );
         assert!(result.contains("use super::CmdResult;"));
         // Should be after the last existing use line
         let cmd_pos = result.find("use super::CmdResult;").unwrap();
@@ -2734,7 +2263,11 @@ pub fn run() {}
 
 pub struct Output {}
 "#;
-        let result = insert_import(content, "use super::CmdResult;", &Language::Rust);
+        let result = crate::core::refactor::auto::apply::insert_import(
+            content,
+            "use super::CmdResult;",
+            &Language::Rust,
+        );
         assert!(result.contains("use super::CmdResult;"));
         assert!(result.contains("pub struct Output"));
     }
@@ -2756,7 +2289,7 @@ mod tests {
     fn test_something() {}
 }
 "#;
-        let result = insert_import(
+        let result = crate::core::refactor::auto::apply::insert_import(
             content,
             "use crate::core::something::new_dep;",
             &Language::Rust,

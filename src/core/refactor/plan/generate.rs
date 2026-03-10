@@ -62,6 +62,84 @@ pub(crate) fn generate_test_method_stub(
     }
 }
 
+pub(crate) fn generate_method_stub(sig: &fixer::MethodSignature) -> String {
+    let body = stub_body(&sig.name, &sig.language);
+    match sig.language {
+        Language::Php => format!("\n    {} {{\n{}\n    }}\n", sig.signature, body),
+        Language::Rust => format!("\n    {} {{\n{}\n    }}\n", sig.signature, body),
+        Language::JavaScript | Language::TypeScript => {
+            format!("\n    {} {{\n{}\n    }}\n", sig.signature, body)
+        }
+        Language::Unknown => String::new(),
+    }
+}
+
+fn stub_body(method_name: &str, language: &Language) -> String {
+    match language {
+        Language::Php => {
+            format!(
+                "        throw new \\RuntimeException('Not implemented: {}');",
+                method_name
+            )
+        }
+        Language::Rust => format!("        todo!(\"{}\")", method_name),
+        Language::JavaScript | Language::TypeScript => {
+            format!("        throw new Error('Not implemented: {}');", method_name)
+        }
+        Language::Unknown => String::new(),
+    }
+}
+
+pub(crate) fn generate_import_statement(import_path: &str, language: &Language) -> String {
+    match language {
+        Language::Rust => format!("use {};", import_path),
+        Language::Php => format!("use {};", import_path),
+        Language::JavaScript | Language::TypeScript => {
+            let name = import_path
+                .rsplit("::")
+                .next()
+                .or_else(|| import_path.rsplit('/').next())
+                .unwrap_or(import_path);
+            format!("import {{ {} }} from '{}';", name, import_path)
+        }
+        Language::Unknown => format!("use {};", import_path),
+    }
+}
+
+pub(crate) fn generate_namespace_declaration(
+    namespace: &str,
+    language: &Language,
+) -> Option<String> {
+    match language {
+        Language::Php => Some(format!("namespace {};", namespace)),
+        _ => None,
+    }
+}
+
+pub(crate) fn generate_type_conformance_declaration(
+    type_name: &str,
+    conformance: &str,
+    language: &Language,
+) -> String {
+    match language {
+        Language::Rust => format!("\nimpl {} for {} {{\n}}\n", conformance, type_name),
+        Language::Php | Language::TypeScript => conformance.to_string(),
+        Language::JavaScript | Language::Unknown => conformance.to_string(),
+    }
+}
+
+pub(crate) fn generate_registration_stub(hook_name: &str) -> String {
+    let callback = hook_name
+        .strip_prefix("wp_")
+        .or_else(|| hook_name.strip_prefix("datamachine_"))
+        .unwrap_or(hook_name);
+
+    format!(
+        "        add_action('{}', [$this, '{}']);",
+        hook_name, callback
+    )
+}
+
 pub(crate) fn merge_fixes_per_file(fixes: Vec<fixer::Fix>) -> Vec<fixer::Fix> {
     let mut map: std::collections::HashMap<String, fixer::Fix> = std::collections::HashMap::new();
     let mut order: Vec<String> = Vec::new();
