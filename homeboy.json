@@ -1,12 +1,5 @@
 {
   "auto_cleanup": false,
-  "scopes": {
-    "audit": {
-      "exclude": [
-        "CHANGELOG.md"
-      ]
-    }
-  },
   "baselines": {
     "audit": {
       "context_id": "homeboy",
