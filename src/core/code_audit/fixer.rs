@@ -3106,6 +3106,7 @@ fn insert_before_closing_brace(content: &str, code: &str, _language: &Language) 
 mod tests {
     use super::*;
     use crate::code_audit::naming::{extract_class_suffix, pluralize, singularize};
+    use crate::code_audit::AuditSummary;
 
     #[test]
     fn extract_php_signature_with_types() {
@@ -4285,6 +4286,112 @@ mod tests {
         assert!(content.contains("use super::CmdResult;"));
         assert!(content.contains("use serde::Serialize;"));
         assert!(content.contains("pub fn run()"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_fixes_emits_stale_doc_reference_updates() {
+        let dir = std::env::temp_dir().join("homeboy_fixer_stale_doc_reference_generate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(
+            dir.join("docs/guide.md"),
+            "See `src/old/config.rs` for the config loader.\n",
+        )
+        .unwrap();
+
+        let audit_result = CodeAuditResult {
+            component_id: "homeboy".to_string(),
+            source_path: dir.to_string_lossy().to_string(),
+            summary: AuditSummary {
+                files_scanned: 1,
+                conventions_detected: 0,
+                outliers_found: 1,
+                alignment_score: None,
+                files_skipped: 0,
+                warnings: vec![],
+            },
+            conventions: vec![],
+            findings: vec![super::super::findings::Finding {
+                convention: "docs".to_string(),
+                severity: super::super::findings::Severity::Warning,
+                file: "docs/guide.md".to_string(),
+                description: "Stale file reference `src/old/config.rs` (line 1) — target has moved"
+                    .to_string(),
+                suggestion:
+                    "Did you mean `src/new/config.rs`? File 'src/old/config.rs' no longer exists."
+                        .to_string(),
+                kind: AuditFinding::StaleDocReference,
+            }],
+            directory_conventions: vec![],
+            duplicate_groups: vec![],
+        };
+
+        let fix_result = generate_fixes(&audit_result, &dir);
+        assert_eq!(fix_result.fixes.len(), 1);
+        assert_eq!(fix_result.fixes[0].file, "docs/guide.md");
+        assert_eq!(fix_result.fixes[0].insertions.len(), 1);
+
+        let insertion = &fix_result.fixes[0].insertions[0];
+        assert_eq!(insertion.finding, AuditFinding::StaleDocReference);
+        assert_eq!(insertion.safety_tier, FixSafetyTier::SafeAuto);
+        assert!(matches!(
+            insertion.kind,
+            InsertionKind::DocReferenceUpdate {
+                line: 1,
+                ref old_ref,
+                ref new_ref,
+            } if old_ref == "src/old/config.rs" && new_ref == "src/new/config.rs"
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_stale_doc_reference_fix_to_disk() {
+        let dir = std::env::temp_dir().join("homeboy_fixer_stale_doc_reference_apply");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(
+            dir.join("docs/guide.md"),
+            "See `src/old/config.rs` for the config loader.\n",
+        )
+        .unwrap();
+
+        let mut fixes = vec![Fix {
+            file: "docs/guide.md".to_string(),
+            required_methods: vec![],
+            required_registrations: vec![],
+            insertions: vec![Insertion {
+                kind: InsertionKind::DocReferenceUpdate {
+                    line: 1,
+                    old_ref: "src/old/config.rs".to_string(),
+                    new_ref: "src/new/config.rs".to_string(),
+                },
+                finding: AuditFinding::StaleDocReference,
+                safety_tier: InsertionKind::DocReferenceUpdate {
+                    line: 1,
+                    old_ref: "src/old/config.rs".to_string(),
+                    new_ref: "src/new/config.rs".to_string(),
+                }
+                .safety_tier(),
+                auto_apply: false,
+                blocked_reason: None,
+                preflight: None,
+                code: "src/old/config.rs → src/new/config.rs".to_string(),
+                description: "Update stale reference".to_string(),
+            }],
+            applied: false,
+        }];
+
+        let applied = apply_fixes(&mut fixes, &dir);
+        assert_eq!(applied, 1);
+        assert!(fixes[0].applied);
+
+        let content = std::fs::read_to_string(dir.join("docs/guide.md")).unwrap();
+        assert!(content.contains("src/new/config.rs"));
+        assert!(!content.contains("src/old/config.rs"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
