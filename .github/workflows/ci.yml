@@ -3,8 +3,10 @@
 # Build once, then strict serial pipeline: audit → lint → test → refactor
 # A single build job compiles homeboy from source and shares the binary
 # via artifact. Each stage downloads it instead of rebuilding.
-# The single refactor phase owns automated writes. If fixes are committed,
-# the App token push triggers a full re-run.
+# The single refactor phase owns automated writes. It must still run after
+# failing read-only stages on same-repo PRs so autofix can commit repairs
+# back to the branch. If fixes are committed, the App token push triggers a
+# full re-run.
 # Scoped to changed files only (--changed-since via scope module).
 #
 # Fork PRs: CI runs read-only checks (no autofix, no baseline writes).
@@ -162,10 +164,12 @@ jobs:
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Stage 4: Refactor ──
-  # Single end-of-pipeline mutation phase.
+  # Single end-of-pipeline mutation phase. Must run even when earlier
+  # read-only jobs fail so same-repo PRs can autofix and push repairs.
   refactor:
     name: Refactor
     needs: [build, audit, lint, test]
+    if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
