@@ -196,10 +196,10 @@ jobs:
           binary-path: .homeboy-bin/homeboy
           extension: rust
           component: homeboy
-          commands: 'refactor --all'
+          commands: 'refactor --from all'
           autofix: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
           autofix-mode: 'on-failure'
-          autofix-commands: 'refactor --from-audit --from-lint --from-test --all --write'
+          autofix-commands: 'refactor --from all --write'
           autofix-max-commits: '3'
           comment-section-title: 'Auto-refactor'
           app-token: ${{ steps.app-token.outputs.token || '' }}

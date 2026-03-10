@@ -18,11 +18,11 @@ pub struct RefactorArgs {
     #[command(flatten)]
     comp: Option<PositionalComponentArgs>,
 
-    /// Include a specific proposal source (repeatable): audit, lint, test
+    /// Include a specific proposal source (repeatable): audit, lint, test, all
     #[arg(long = "from", value_name = "SOURCE", action = clap::ArgAction::Append)]
     from: Vec<String>,
 
-    /// Include all known proposal sources
+    /// Include all known proposal sources (deprecated; prefer `--from all`)
     #[arg(long, default_value_t = false)]
     all: bool,
 

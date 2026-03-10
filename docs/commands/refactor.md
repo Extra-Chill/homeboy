@@ -19,10 +19,10 @@ The top-level `refactor` command can now build a merged refactor plan from one o
 homeboy refactor homeboy --from audit --from lint --from test
 
 # Preview a merged plan from all known sources
-homeboy refactor homeboy --all
+homeboy refactor homeboy --from all
 
 # Apply the merged plan
-homeboy refactor homeboy --all --write
+homeboy refactor homeboy --from all --write
 ```
 
 Supported sources today:
@@ -31,7 +31,10 @@ Supported sources today:
 - `lint`
 - `test`
 
-`--all` expands to all known sources in canonical order.
+`--from all` expands to all known sources in canonical order.
+
+`--all` still works as a compatibility alias, but prefer `--from all` so source
+selection stays in one extensible input model.
 
 The refactor planner is source-driven and generic; CI is just one consumer of this interface.
 

@@ -274,6 +274,14 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
 
 pub fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
     let lowered: Vec<String> = sources.iter().map(|source| source.to_lowercase()).collect();
+
+    if lowered.iter().any(|source| source == "all") {
+        return Ok(KNOWN_PLAN_SOURCES
+            .iter()
+            .map(|source| source.to_string())
+            .collect());
+    }
+
     let unknown: Vec<String> = lowered
         .iter()
         .filter(|source| !KNOWN_PLAN_SOURCES.contains(&source.as_str()))
