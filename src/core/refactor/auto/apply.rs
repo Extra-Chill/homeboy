@@ -200,6 +200,11 @@ fn insert_imports(content: &str, imports: &[&String], language: &Language) -> St
     result
 }
 
+pub(crate) fn insert_import(content: &str, import_line: &str, language: &Language) -> String {
+    let import = import_line.to_string();
+    insert_imports(content, &[&import], language)
+}
+
 fn insert_namespace_declarations(
     content: &str,
     declarations: &[&String],
@@ -210,7 +215,7 @@ fn insert_namespace_declarations(
     })
 }
 
-fn insert_namespace_declaration(content: &str, declaration: &str, language: &Language) -> String {
+pub(crate) fn insert_namespace_declaration(content: &str, declaration: &str, language: &Language) -> String {
     match language {
         Language::Php => {
             let namespace_re = Regex::new(r"(?m)^\s*namespace\s+[^;]+;").unwrap();
@@ -242,7 +247,7 @@ fn insert_type_conformances(
     insert_type_conformance(content, declarations, language)
 }
 
-fn insert_type_conformance(content: &str, declarations: &[&String], language: &Language) -> String {
+pub(crate) fn insert_type_conformance(content: &str, declarations: &[&String], language: &Language) -> String {
     let Some(declaration) = declarations.first() else {
         return content.to_string();
     };
@@ -307,7 +312,7 @@ fn insert_inline_type_conformance(content: &str, declaration: &str, language: &L
     result
 }
 
-fn primary_type_name_from_declaration(line: &str, language: &Language) -> Option<String> {
+pub(crate) fn primary_type_name_from_declaration(line: &str, language: &Language) -> Option<String> {
     let trimmed = line.trim();
     match language {
         Language::Php | Language::TypeScript => Regex::new(r"\b(?:class|interface|trait)\s+(\w+)")
@@ -340,7 +345,7 @@ fn insert_method_stubs(content: &str, stubs: &[&String], language: &Language) ->
     insert_before_closing_brace(content, &combined, language)
 }
 
-fn insert_into_constructor(content: &str, stubs: &[&String], language: &Language) -> String {
+pub(crate) fn insert_into_constructor(content: &str, stubs: &[&String], language: &Language) -> String {
     let constructor_pattern = match language {
         Language::Php => r"function\s+__construct\s*\([^)]*\)\s*\{",
         Language::Rust => r"fn\s+new\s*\([^)]*\)\s*(?:->[^{]*)?\{",
@@ -367,7 +372,7 @@ fn insert_into_constructor(content: &str, stubs: &[&String], language: &Language
     }
 }
 
-fn insert_trait_uses(content: &str, stubs: &[&String], language: &Language) -> String {
+pub(crate) fn insert_trait_uses(content: &str, stubs: &[&String], language: &Language) -> String {
     match language {
         Language::Php => {
             let class_re = Regex::new(r"(?:class|trait|interface)\s+\w+[^\{]*\{").unwrap();
@@ -393,7 +398,7 @@ fn insert_trait_uses(content: &str, stubs: &[&String], language: &Language) -> S
     }
 }
 
-fn insert_before_closing_brace(content: &str, code: &str, _language: &Language) -> String {
+pub(crate) fn insert_before_closing_brace(content: &str, code: &str, _language: &Language) -> String {
     if let Some(last_brace) = content.rfind('}') {
         let mut result = String::with_capacity(content.len() + code.len());
         result.push_str(&content[..last_brace]);

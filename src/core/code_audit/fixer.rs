@@ -832,7 +832,12 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
             for conformance in &missing_interfaces {
                 let Some(type_name) = content
                     .lines()
-                    .find_map(|line| primary_type_name_from_declaration(line, &language))
+                    .find_map(|line| {
+                        crate::core::refactor::auto::apply::primary_type_name_from_declaration(
+                            line,
+                            &language,
+                        )
+                    })
                     .or_else(|| {
                         abs_path
                             .file_stem()
@@ -1556,7 +1561,11 @@ class MyClass {
 }
 "#;
         let stub = "\n    public function newMethod() {\n        // stub\n    }\n";
-        let result = insert_before_closing_brace(content, stub, &Language::Php);
+        let result = crate::core::refactor::auto::apply::insert_before_closing_brace(
+            content,
+            stub,
+            &Language::Php,
+        );
 
         assert!(result.contains("newMethod"));
         assert!(result.contains("existing"));
@@ -1571,7 +1580,11 @@ class MyClass {
         let content = "<?php\nclass FlowAbility extends BaseAbility {\n}\n";
         let declaration = "AbilityInterface".to_string();
 
-        let result = insert_type_conformance(content, &[&declaration], &Language::Php);
+        let result = crate::core::refactor::auto::apply::insert_type_conformance(
+            content,
+            &[&declaration],
+            &Language::Php,
+        );
 
         assert!(
             result.contains("class FlowAbility extends BaseAbility implements AbilityInterface {")
@@ -1584,7 +1597,11 @@ class MyClass {
         let declaration =
             generate_type_conformance_declaration("FlowAbility", "Runnable", &Language::Rust);
 
-        let result = insert_type_conformance(content, &[&declaration], &Language::Rust);
+        let result = crate::core::refactor::auto::apply::insert_type_conformance(
+            content,
+            &[&declaration],
+            &Language::Rust,
+        );
 
         assert!(result.contains("impl Runnable for FlowAbility"));
     }
@@ -1671,7 +1688,11 @@ class MyAbility {
 "#;
         let reg = "        add_action('wp_abilities_api_init', [$this, 'abilities_api_init']);"
             .to_string();
-        let result = insert_into_constructor(content, &[&reg], &Language::Php);
+        let result = crate::core::refactor::auto::apply::insert_into_constructor(
+            content,
+            &[&reg],
+            &Language::Php,
+        );
 
         assert!(result.contains("add_action('wp_abilities_api_init'"));
         // Registration should be inside __construct
@@ -1683,7 +1704,11 @@ class MyAbility {
     #[test]
     fn insert_namespace_declaration_replaces_existing_php_namespace() {
         let content = "<?php\nnamespace Old\\Space;\n\nclass FlowAbility {}\n";
-        let result = insert_namespace_declaration(content, "namespace New\\Space;", &Language::Php);
+        let result = crate::core::refactor::auto::apply::insert_namespace_declaration(
+            content,
+            "namespace New\\Space;",
+            &Language::Php,
+        );
 
         assert!(result.contains("namespace New\\Space;"));
         assert!(!result.contains("namespace Old\\Space;"));
@@ -1692,7 +1717,7 @@ class MyAbility {
     #[test]
     fn insert_namespace_declaration_adds_missing_php_namespace() {
         let content = "<?php\n\nclass FlowAbility {}\n";
-        let result = insert_namespace_declaration(
+        let result = crate::core::refactor::auto::apply::insert_namespace_declaration(
             content,
             "namespace DataMachine\\Abilities;",
             &Language::Php,
@@ -2312,7 +2337,11 @@ pub struct MyOutput {}
 
 pub fn run() {}
 "#;
-        let result = insert_import(content, "use super::CmdResult;", &Language::Rust);
+        let result = crate::core::refactor::auto::apply::insert_import(
+            content,
+            "use super::CmdResult;",
+            &Language::Rust,
+        );
         assert!(result.contains("use super::CmdResult;"));
         // Should be after the last existing use line
         let cmd_pos = result.find("use super::CmdResult;").unwrap();
@@ -2331,7 +2360,11 @@ pub fn run() {}
 
 pub struct Output {}
 "#;
-        let result = insert_import(content, "use super::CmdResult;", &Language::Rust);
+        let result = crate::core::refactor::auto::apply::insert_import(
+            content,
+            "use super::CmdResult;",
+            &Language::Rust,
+        );
         assert!(result.contains("use super::CmdResult;"));
         assert!(result.contains("pub struct Output"));
     }
@@ -2353,7 +2386,7 @@ mod tests {
     fn test_something() {}
 }
 "#;
-        let result = insert_import(
+        let result = crate::core::refactor::auto::apply::insert_import(
             content,
             "use crate::core::something::new_dep;",
             &Language::Rust,
