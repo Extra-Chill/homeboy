@@ -24,6 +24,26 @@ WORKSPACE="${GITHUB_WORKSPACE:-.}"
 RELEASE_BRANCH="${RELEASE_BRANCH:-main}"
 DRY_RUN="${RELEASE_DRY_RUN:-false}"
 
+json_field() {
+  local file_path="$1"
+  local jq_expr="$2"
+  jq -r "${jq_expr}" "${file_path}" 2>/dev/null || true
+}
+
+run_release_command() {
+  local output_file="$1"
+  shift
+  local exit_code=0
+  set +e
+  homeboy release "$@" --output "${output_file}"
+  exit_code=$?
+  set -e
+  if [ ! -s "${output_file}" ]; then
+    echo "::warning::homeboy release did not write structured output to ${output_file}"
+  fi
+  return "${exit_code}"
+}
+
 # --- Step 1: Resolve component ID ---
 
 COMP_ID="${COMPONENT_NAME:-}"
@@ -58,10 +78,11 @@ git pull --ff-only origin "${RELEASE_BRANCH}" 2>/dev/null || true
 # --- Step 3: Check for releasable commits via homeboy ---
 
 DRY_RUN_FLAGS="--dry-run --skip-checks --skip-publish"
-RELEASE_JSON="$(homeboy release "${COMP_ID}" ${DRY_RUN_FLAGS} --json --path "${WORKSPACE}" 2>/dev/null || true)"
+DRY_RUN_OUTPUT_FILE="$(mktemp)"
+run_release_command "${DRY_RUN_OUTPUT_FILE}" "${COMP_ID}" ${DRY_RUN_FLAGS} --path "${WORKSPACE}" || true
 
 # Parse the response — check for skipped_reason
-SKIPPED_REASON="$(echo "${RELEASE_JSON}" | jq -r '.data.result.skipped_reason // empty' 2>/dev/null || true)"
+SKIPPED_REASON="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.data.result.skipped_reason // empty')"
 
 if [ -n "${SKIPPED_REASON}" ]; then
   echo "::notice::Release skipped: ${SKIPPED_REASON}"
@@ -71,30 +92,35 @@ if [ -n "${SKIPPED_REASON}" ]; then
   } >> "${GITHUB_OUTPUT}"
 
   # If major requires flag, surface the bump type for the workflow to decide
-  BUMP_TYPE="$(echo "${RELEASE_JSON}" | jq -r '.data.result.bump_type // empty' 2>/dev/null || true)"
+  BUMP_TYPE="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.data.result.bump_type // empty')"
   if [ "${SKIPPED_REASON}" = "major-requires-flag" ]; then
     echo "bump-type=${BUMP_TYPE}" >> "${GITHUB_OUTPUT}"
   fi
 
+  rm -f "${DRY_RUN_OUTPUT_FILE}"
   exit 0
 fi
 
 # Check for errors (validation failures, etc.)
-SUCCESS="$(echo "${RELEASE_JSON}" | jq -r '.success // false' 2>/dev/null || true)"
+SUCCESS="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.success // false')"
 if [ "${SUCCESS}" != "true" ]; then
-  ERROR_MSG="$(echo "${RELEASE_JSON}" | jq -r '.error.message // "Unknown error"' 2>/dev/null || true)"
+  ERROR_MSG="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.error.message // "Unknown error"')"
+  if [ -z "${ERROR_MSG}" ] || [ "${ERROR_MSG}" = "null" ]; then
+    ERROR_MSG="Unknown error"
+  fi
   echo "::error::Release dry-run failed: ${ERROR_MSG}"
   {
     echo "released=false"
     echo "skipped-reason=dry-run-failed"
   } >> "${GITHUB_OUTPUT}"
+  rm -f "${DRY_RUN_OUTPUT_FILE}"
   exit 1
 fi
 
 # Extract planned version and bump type from dry-run
-BUMP_TYPE="$(echo "${RELEASE_JSON}" | jq -r '.data.result.bump_type // empty' 2>/dev/null || true)"
-NEW_VERSION="$(echo "${RELEASE_JSON}" | jq -r '.data.result.new_version // empty' 2>/dev/null || true)"
-RELEASABLE="$(echo "${RELEASE_JSON}" | jq -r '.data.result.releasable_commits // 0' 2>/dev/null || true)"
+BUMP_TYPE="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.data.result.bump_type // empty')"
+NEW_VERSION="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.data.result.new_version // empty')"
+RELEASABLE="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.data.result.releasable_commits // 0')"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -134,34 +160,40 @@ if [ "${DRY_RUN}" = "true" ]; then
     echo "bump-type=${BUMP_TYPE}"
     echo "skipped-reason=dry-run"
   } >> "${GITHUB_OUTPUT}"
+  rm -f "${DRY_RUN_OUTPUT_FILE}"
   exit 0
 fi
 
 # --- Step 6: Run the actual release ---
 
-RELEASE_FLAGS="--skip-checks --skip-publish --json --path ${WORKSPACE}"
+RELEASE_FLAGS="--skip-checks --skip-publish --path ${WORKSPACE}"
 if [ "${BUMP_TYPE}" = "major" ]; then
   RELEASE_FLAGS="${RELEASE_FLAGS} --major"
 fi
 
-RELEASE_RESULT="$(homeboy release "${COMP_ID}" ${RELEASE_FLAGS} 2>/dev/null || true)"
+RELEASE_OUTPUT_FILE="$(mktemp)"
+run_release_command "${RELEASE_OUTPUT_FILE}" "${COMP_ID}" ${RELEASE_FLAGS} || true
 
 # Check success
-RELEASE_SUCCESS="$(echo "${RELEASE_RESULT}" | jq -r '.success // false' 2>/dev/null || true)"
+RELEASE_SUCCESS="$(json_field "${RELEASE_OUTPUT_FILE}" '.success // false')"
 if [ "${RELEASE_SUCCESS}" != "true" ]; then
-  ERROR_MSG="$(echo "${RELEASE_RESULT}" | jq -r '.error.message // "Unknown error"' 2>/dev/null || true)"
+  ERROR_MSG="$(json_field "${RELEASE_OUTPUT_FILE}" '.error.message // "Unknown error"')"
+  if [ -z "${ERROR_MSG}" ] || [ "${ERROR_MSG}" = "null" ]; then
+    ERROR_MSG="Unknown error"
+  fi
   echo "::error::Release failed: ${ERROR_MSG}"
   {
     echo "released=false"
     echo "skipped-reason=release-failed"
   } >> "${GITHUB_OUTPUT}"
+  rm -f "${DRY_RUN_OUTPUT_FILE}" "${RELEASE_OUTPUT_FILE}"
   exit 1
 fi
 
 # Extract results from actual release
-ACTUAL_VERSION="$(echo "${RELEASE_RESULT}" | jq -r '.data.result.new_version // empty' 2>/dev/null || true)"
-ACTUAL_TAG="$(echo "${RELEASE_RESULT}" | jq -r '.data.result.tag // empty' 2>/dev/null || true)"
-ACTUAL_BUMP="$(echo "${RELEASE_RESULT}" | jq -r '.data.result.bump_type // empty' 2>/dev/null || true)"
+ACTUAL_VERSION="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.new_version // empty')"
+ACTUAL_TAG="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.tag // empty')"
+ACTUAL_BUMP="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.bump_type // empty')"
 
 # Fallback to dry-run values if extraction from run fails
 ACTUAL_VERSION="${ACTUAL_VERSION:-${NEW_VERSION}}"
@@ -180,3 +212,5 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
   echo "release-tag=${ACTUAL_TAG}"
   echo "bump-type=${ACTUAL_BUMP}"
 } >> "${GITHUB_OUTPUT}"
+
+rm -f "${DRY_RUN_OUTPUT_FILE}" "${RELEASE_OUTPUT_FILE}"
