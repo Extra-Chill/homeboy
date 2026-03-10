@@ -330,12 +330,15 @@ function build_callback_map($root) {
         // Also: register_rest_route(..., array( 'callback' => 'function_name' ))
         // Also: 'permission_callback' => array( ClassName::class, 'method' )
         detect_rest_route_callbacks($content, $filepath, $map);
+        detect_explicit_rest_route_class_callbacks_safe($content, $filepath, $map);
 
         // Detect add_filter / add_action registrations.
         detect_hook_callbacks($content, $filepath, $map);
+        detect_explicit_hook_class_callbacks_safe($content, $filepath, $map);
 
         // Detect wp_register_ability execute_callback registrations.
         detect_ability_callbacks($content, $filepath, $map);
+        detect_explicit_ability_class_callbacks_safe($content, $filepath, $map);
 
         // Detect tool dispatch patterns (handle_tool_call, handleChatToolCall).
         detect_tool_callbacks($content, $filepath, $map);
@@ -488,6 +491,116 @@ function detect_ability_callbacks($content, $filepath, &$map) {
             }
             $map[$key] = ['type' => 'ability', 'file' => $filepath];
         }
+    }
+}
+
+/**
+ * Detect explicit class-based REST callback registrations.
+ */
+function detect_explicit_rest_route_class_callbacks($content, $filepath, &$map) {
+    detect_explicit_class_callbacks(
+        $content,
+        $filepath,
+        $map,
+        '~[\'"](?:callback|permission_callback|validate_callback|sanitize_callback)[\'"]\s*=>\s*(?:array\s*\(|\[)\s*([\w\\]+)::class\s*,\s*[\'"]([\w]+)[\'"]\s*(?:\)|\])~',
+        'rest_api'
+    );
+}
+
+/**
+ * Detect explicit class-based hook callback registrations.
+ */
+function detect_explicit_hook_class_callbacks($content, $filepath, &$map) {
+    detect_explicit_class_callbacks(
+        $content,
+        $filepath,
+        $map,
+        '~add_(?:filter|action)\s*\(\s*[\'"][\w]+[\'"]\s*,\s*(?:array\s*\(|\[)\s*([\w\\]+)::class\s*,\s*[\'"]([\w]+)[\'"]\s*(?:\)|\])~',
+        'hook'
+    );
+}
+
+/**
+ * Detect explicit class-based ability callback registrations.
+ */
+function detect_explicit_ability_class_callbacks($content, $filepath, &$map) {
+    detect_explicit_class_callbacks(
+        $content,
+        $filepath,
+        $map,
+        '~[\'"]execute_callback[\'"]\s*=>\s*(?:array\s*\(|\[)\s*([\w\\]+)::class\s*,\s*[\'"]([\w]+)[\'"]\s*(?:\)|\])~',
+        'ability'
+    );
+}
+
+/**
+ * Detect and register callbacks that explicitly reference ClassName::class.
+ */
+function detect_explicit_class_callbacks($content, $filepath, &$map, $pattern, $type) {
+    $pattern = str_replace(
+        '([\\w\\\\]+)',
+        '([A-Za-z_\\\\][A-Za-z0-9_\\\\]*)',
+        $pattern
+    );
+
+    if (!preg_match_all($pattern, $content, $matches, PREG_SET_ORDER)) {
+        return;
+    }
+
+    foreach ($matches as $m) {
+        $map[$m[1] . '::' . $m[2]] = ['type' => $type, 'file' => $filepath];
+    }
+}
+
+/**
+ * Detect explicit class-based REST callback registrations.
+ */
+function detect_explicit_rest_route_class_callbacks_safe($content, $filepath, &$map) {
+    detect_explicit_class_callbacks_safe(
+        $content,
+        $filepath,
+        $map,
+        '~[\'\"](?:callback|permission_callback|validate_callback|sanitize_callback)[\'\"]\s*=>\s*(?:array\s*\(|\[)\s*((?:[A-Za-z_][A-Za-z0-9_]*\\\\)*[A-Za-z_][A-Za-z0-9_]*)::class\s*,\s*[\'\"]([\w]+)[\'\"]\s*(?:\)|\])~',
+        'rest_api'
+    );
+}
+
+/**
+ * Detect explicit class-based hook callback registrations.
+ */
+function detect_explicit_hook_class_callbacks_safe($content, $filepath, &$map) {
+    detect_explicit_class_callbacks_safe(
+        $content,
+        $filepath,
+        $map,
+        '~add_(?:filter|action)\s*\(\s*[\'\"][\w]+[\'\"]\s*,\s*(?:array\s*\(|\[)\s*((?:[A-Za-z_][A-Za-z0-9_]*\\\\)*[A-Za-z_][A-Za-z0-9_]*)::class\s*,\s*[\'\"]([\w]+)[\'\"]\s*(?:\)|\])~',
+        'hook'
+    );
+}
+
+/**
+ * Detect explicit class-based ability callback registrations.
+ */
+function detect_explicit_ability_class_callbacks_safe($content, $filepath, &$map) {
+    detect_explicit_class_callbacks_safe(
+        $content,
+        $filepath,
+        $map,
+        '~[\'\"]execute_callback[\'\"]\s*=>\s*(?:array\s*\(|\[)\s*((?:[A-Za-z_][A-Za-z0-9_]*\\\\)*[A-Za-z_][A-Za-z0-9_]*)::class\s*,\s*[\'\"]([\w]+)[\'\"]\s*(?:\)|\])~',
+        'ability'
+    );
+}
+
+/**
+ * Detect and register callbacks that explicitly reference ClassName::class.
+ */
+function detect_explicit_class_callbacks_safe($content, $filepath, &$map, $pattern, $type) {
+    if (!preg_match_all($pattern, $content, $matches, PREG_SET_ORDER)) {
+        return;
+    }
+
+    foreach ($matches as $m) {
+        $map[$m[1] . '::' . $m[2]] = ['type' => $type, 'file' => $filepath];
     }
 }
 

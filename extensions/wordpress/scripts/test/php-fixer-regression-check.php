@@ -75,6 +75,20 @@ class PlainController {
 		return true;
 	}
 }
+
+class ExternalHandler {
+	public function rest_callback( $request ) {
+		return true;
+	}
+}
+
+register_rest_route(
+	'test/v1',
+	'/thing',
+	array(
+		'callback' => array( ExternalHandler::class, 'rest_callback' ),
+	)
+);
 PHP;
 
 $unused_file = $tmp_base . '/unused-param-fixture.php';
@@ -101,6 +115,9 @@ if ( 0 !== $unused_exit ) {
 		}
 		if ( false !== strpos( $unused_result, 'public function local_handler( $request )' ) ) {
 			$failures[] = 'Expected local_handler() param to be removed in non-extending class';
+		}
+		if ( false === strpos( $unused_result, 'public function rest_callback( $request )' ) ) {
+			$failures[] = 'Expected explicit ExternalHandler::class REST callback param to remain in place';
 		}
 	}
 }
