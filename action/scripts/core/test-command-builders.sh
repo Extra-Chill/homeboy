@@ -117,4 +117,43 @@ assert_equals \
   "$(build_run_command "refactor --all" "${COMPONENT}" "${WORKSPACE}")" \
   "refactor keeps workspace path"
 
+PR_HEAD_REPO="some-contributor/homeboy-action"
+GITHUB_REPOSITORY="Extra-Chill/homeboy-action"
+GITHUB_HEAD_REF="feat/fork-pr"
+GITHUB_REF_NAME="ignored-here"
+assert_equals \
+  "some-contributor/homeboy-action" \
+  "$(resolve_pr_target_repo)" \
+  "target repo prefers PR head repo"
+
+assert_equals \
+  "feat/fork-pr" \
+  "$(resolve_pr_target_branch)" \
+  "target branch prefers PR head ref"
+
+assert_equals \
+  "https://github.com/some-contributor/homeboy-action.git" \
+  "$(build_github_remote_url "some-contributor/homeboy-action")" \
+  "build github remote url without token"
+
+assert_equals \
+  "https://x-access-token:secret123@github.com/some-contributor/homeboy-action.git" \
+  "$(build_github_remote_url "some-contributor/homeboy-action" "secret123")" \
+  "build github remote url with token"
+
+assert_equals \
+  "origin" \
+  "$(resolve_push_target "Extra-Chill/homeboy-action")" \
+  "same-repo push without token uses origin"
+
+assert_equals \
+  "https://github.com/some-contributor/homeboy-action.git" \
+  "$(resolve_push_target "some-contributor/homeboy-action")" \
+  "fork push without token uses explicit remote url"
+
+assert_equals \
+  "https://x-access-token:secret123@github.com/some-contributor/homeboy-action.git" \
+  "$(resolve_push_target "some-contributor/homeboy-action" "secret123")" \
+  "fork push with token uses authenticated remote url"
+
 printf 'All command builder checks passed.\n'

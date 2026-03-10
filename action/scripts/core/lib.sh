@@ -55,6 +55,48 @@ resolve_workspace() {
   pwd
 }
 
+resolve_pr_target_repo() {
+  if [ -n "${PR_HEAD_REPO:-}" ]; then
+    printf '%s\n' "${PR_HEAD_REPO}"
+  else
+    printf '%s\n' "${GITHUB_REPOSITORY}"
+  fi
+}
+
+resolve_pr_target_branch() {
+  if [ -n "${GITHUB_HEAD_REF:-}" ]; then
+    printf '%s\n' "${GITHUB_HEAD_REF}"
+  elif [ -n "${GITHUB_REF_NAME:-}" ]; then
+    printf '%s\n' "${GITHUB_REF_NAME}"
+  else
+    git rev-parse --abbrev-ref HEAD 2>/dev/null || true
+  fi
+}
+
+build_github_remote_url() {
+  local repo="$1"
+  local token="${2:-}"
+
+  if [ -n "${token}" ]; then
+    printf 'https://x-access-token:%s@github.com/%s.git\n' "${token}" "${repo}"
+  else
+    printf 'https://github.com/%s.git\n' "${repo}"
+  fi
+}
+
+resolve_push_target() {
+  local repo="$1"
+  local token="${2:-}"
+
+  if [ -n "${token}" ]; then
+    build_github_remote_url "${repo}" "${token}"
+  elif [ "${repo}" = "${GITHUB_REPOSITORY:-}" ]; then
+    printf 'origin\n'
+  else
+    build_github_remote_url "${repo}"
+  fi
+}
+
 # Sort commands into canonical order: audit → lint → test → refactor.
 # Audit/lint/test are the core quality gates; real refactor commands run after
 # them when explicitly requested.
