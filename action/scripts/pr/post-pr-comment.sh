@@ -5,66 +5,10 @@ set -euo pipefail
 # Source scope module for scope queries
 source "${GITHUB_ACTION_PATH}/scripts/scope/context.sh"
 
-render_audit_summary_from_log() {
-  local log_file="$1"
-  python3 "${GITHUB_ACTION_PATH}/scripts/digest/render-audit-summary.py" "${log_file}" 2>/dev/null || true
-}
-
-render_audit_summary_from_json() {
-  local json_file="$1"
-  python3 - "$json_file" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-if not path.is_file():
-    raise SystemExit(0)
-
-data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-
-alignment_score = data.get("alignment_score")
-if isinstance(alignment_score, (int, float)):
-    print(f"- Alignment score: **{alignment_score:.3f}**")
-
-severity_counts = data.get("severity_counts") or {}
-if severity_counts:
-    sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(severity_counts.items()))
-    print(f"- Severity counts: **{sev_text}**")
-
-print(f"- Drift increased: **{'yes' if data.get('drift_increased') else 'no'}**")
-
-outliers_found = data.get("outliers_found")
-if isinstance(outliers_found, int):
-    print(f"- Outliers in current run: **{outliers_found}**")
-
-new_findings_count = data.get("new_findings_count")
-new_findings = data.get("new_findings") or []
-if isinstance(new_findings_count, int) and new_findings_count > 0:
-    print(f"- New findings since baseline: **{new_findings_count}**")
-    for idx, item in enumerate(new_findings[:5], start=1):
-        context = str(item.get("context", "unknown"))
-        message = str(item.get("message", ""))
-        fingerprint = str(item.get("fingerprint", ""))
-        line = f"  {idx}. **{context}**"
-        if message:
-            line += f" — {message}"
-        if fingerprint:
-            line += f" (`{fingerprint}`)"
-        print(line)
-
-top_findings = data.get("top_findings") or []
-if top_findings:
-    print("- Top actionable findings:")
-    for idx, item in enumerate(top_findings[:5], start=1):
-        file_value = str(item.get("file", "unknown"))
-        rule_value = str(item.get("rule", "unknown"))
-        message = str(item.get("message", ""))
-        line = f"  {idx}. **{file_value}** — {rule_value}"
-        if message:
-            line += f" — {message}"
-        print(line)
-PY
+render_structured_summary() {
+  local command="$1"
+  local json_file="$2"
+  python3 "${GITHUB_ACTION_PATH}/scripts/digest/render-command-summary.py" "${command}" "${json_file}" markdown 2>/dev/null || true
 }
 
 OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
@@ -160,12 +104,10 @@ if [ -n "${DIGEST_FILE}" ] && [ -f "${DIGEST_FILE}" ]; then
   SECTION_BODY+="$(cat "${DIGEST_FILE}")"$'\n\n'
 fi
 
-AUDIT_SUMMARY_JSON="${OUTPUT_DIR}/homeboy-audit-summary.json"
-
 if is_scoped; then
   SECTION_BODY+="> :zap: Scope: **changed files only**"$'\n\n'
 elif [ "$(scope_context)" = "pr" ] && [ "${SCOPE_MODE:-full}" = "full" ]; then
-  SECTION_BODY+="> :information_source: Scope resolved to **full** (CLI compatibility or explicit override)"$'\n\n'
+  SECTION_BODY+="> :information_source: Scope resolved to **full**"$'\n\n'
 fi
 
 if is_fork; then
@@ -175,7 +117,7 @@ fi
 # Only show test-specific fallback note when commands include test.
 if [[ ",${COMMANDS}," == *",test,"* ]] || [[ "${COMMANDS}" == "test" ]]; then
   if [ "$(scope_context)" = "pr" ] && [ "${SCOPE_MODE:-full}" = "full" ]; then
-    SECTION_BODY+="> :information_source: PR test scope fell back to **full** (CLI compatibility or explicit override)"$'\n\n'
+    SECTION_BODY+="> :information_source: PR test scope: **full**"$'\n\n'
   elif [ "${TEST_SCOPE_EFFECTIVE:-}" = "changed" ]; then
     SECTION_BODY+="> :zap: PR test scope: **changed** (files affected by this PR)"$'\n\n'
   fi
@@ -185,7 +127,18 @@ IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
 
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD=$(echo "${CMD}" | xargs)
-  LOG_FILE="${OUTPUT_DIR}/${CMD}.log"
+  SUMMARY_JSON=""
+  case "${CMD}" in
+    lint)
+      SUMMARY_JSON="${OUTPUT_DIR}/homeboy-lint-summary.json"
+      ;;
+    test)
+      SUMMARY_JSON="${OUTPUT_DIR}/homeboy-test-failures.json"
+      ;;
+    audit)
+      SUMMARY_JSON="${OUTPUT_DIR}/homeboy-audit-summary.json"
+      ;;
+  esac
 
   STATUS=$(echo "${RESULTS}" | jq -r --arg cmd "${CMD}" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
 
@@ -199,84 +152,13 @@ for CMD in "${CMD_ARRAY[@]}"; do
 
   SECTION_BODY+=":${ICON}: **${CMD}**${SCOPE_NOTE}"$'\n'
 
-  if [ "${CMD}" = "audit" ] && [ -f "${AUDIT_SUMMARY_JSON}" ]; then
-    SECTION_BODY+="- Actionable audit summary:"$'\n'
-    SECTION_BODY+="$(render_audit_summary_from_json "${AUDIT_SUMMARY_JSON}")"$'\n'
-  elif [ "${CMD}" = "audit" ] && [ -f "${LOG_FILE}" ]; then
-    AUDIT_MD="$(render_audit_summary_from_log "${LOG_FILE}")"
-    if [ -n "${AUDIT_MD}" ]; then
-      SECTION_BODY+="- Actionable audit summary:"$'\n'
-      SECTION_BODY+="${AUDIT_MD}"$'\n'
+  if [ -f "${SUMMARY_JSON}" ]; then
+    SUMMARY_MD="$(render_structured_summary "${CMD}" "${SUMMARY_JSON}")"
+    if [ -n "${SUMMARY_MD}" ]; then
+      SECTION_BODY+="${SUMMARY_MD}"$'\n'
     fi
-  fi
-
-  if [ -f "${LOG_FILE}" ] && [ "${HAS_DIGEST}" != "true" ]; then
-    PHPCS_SUMMARY=$(grep -o "LINT SUMMARY: .*" "${LOG_FILE}" | head -1 || true)
-    if [ -n "${PHPCS_SUMMARY}" ]; then
-      FIXABLE=$(grep -o "Fixable: [0-9]*" "${LOG_FILE}" | head -1 || true)
-      FILES_INFO=$(grep -o "Files with issues: .*" "${LOG_FILE}" | head -1 || true)
-      SECTION_BODY+="- PHPCS: ${PHPCS_SUMMARY}"$'\n'
-      if [ -n "${FIXABLE}" ]; then
-        SECTION_BODY+="- ${FIXABLE} | ${FILES_INFO}"$'\n'
-      fi
-    fi
-
-    TOP_VIOLATIONS=$(sed -n '/TOP VIOLATIONS:/,/^$/p' "${LOG_FILE}" | grep -E '^\s+\S' | head -5 || true)
-    if [ -n "${TOP_VIOLATIONS}" ]; then
-      SECTION_BODY+=$'\n'"<details><summary>Top violations</summary>"$'\n\n'"\`\`\`"$'\n'
-      SECTION_BODY+="${TOP_VIOLATIONS}"$'\n'
-      SECTION_BODY+="\`\`\`"$'\n'"</details>"$'\n'
-    fi
-
-    PHPSTAN_SUMMARY=$(grep -o "PHPSTAN SUMMARY: .*" "${LOG_FILE}" | head -1 || true)
-    if [ -n "${PHPSTAN_SUMMARY}" ]; then
-      SECTION_BODY+="- PHPStan: ${PHPSTAN_SUMMARY}"$'\n'
-    fi
-
-    BUILD_FAILED=$(grep -o "BUILD FAILED: .*" "${LOG_FILE}" | head -1 || true)
-    if [ -n "${BUILD_FAILED}" ]; then
-      SECTION_BODY+="- ${BUILD_FAILED}"$'\n'
-    fi
-
-    FATAL=$(grep "PHP Fatal error:" "${LOG_FILE}" | head -1 | sed 's/.*PHP Fatal error:/Fatal:/' || true)
-    if [ -n "${FATAL}" ]; then
-      SECTION_BODY+=$'\n'"<details><summary>Fatal error</summary>"$'\n\n'"\`\`\`"$'\n'
-      SECTION_BODY+="${FATAL}"$'\n'
-      SECTION_BODY+="\`\`\`"$'\n'"</details>"$'\n'
-    fi
-
-    CARGO_ERRORS=$(grep -c "^error\[" "${LOG_FILE}" 2>/dev/null || echo "0")
-    CARGO_WARNINGS=$(grep -c "^warning\[" "${LOG_FILE}" 2>/dev/null || echo "0")
-    if [[ "${CARGO_ERRORS}" =~ ^[0-9]+$ ]] && [[ "${CARGO_WARNINGS}" =~ ^[0-9]+$ ]] && { [ "${CARGO_ERRORS}" -gt 0 ] || [ "${CARGO_WARNINGS}" -gt 0 ]; }; then
-      SECTION_BODY+="- Cargo: ${CARGO_ERRORS} error(s), ${CARGO_WARNINGS} warning(s)"$'\n'
-    fi
-
-    # Aggregate all Cargo "test result:" lines (unit + integration + doc-tests).
-    # Cargo emits one line per test binary; the last is often doc-tests with
-    # 0 passed, so we aggregate instead of taking tail -1.
-    CARGO_TEST_LINES=$(grep -E "^test result:" "${LOG_FILE}" 2>/dev/null || true)
-    if [ -n "${CARGO_TEST_LINES}" ]; then
-      CARGO_TOTAL_PASSED=$(echo "${CARGO_TEST_LINES}" | grep -oP '\d+ passed' | awk '{s+=$1} END {print s+0}')
-      CARGO_TOTAL_FAILED=$(echo "${CARGO_TEST_LINES}" | grep -oP '\d+ failed' | awk '{s+=$1} END {print s+0}')
-      CARGO_TOTAL_IGNORED=$(echo "${CARGO_TEST_LINES}" | grep -oP '\d+ ignored' | awk '{s+=$1} END {print s+0}')
-      if [ "${CARGO_TOTAL_PASSED}" -gt 0 ] || [ "${CARGO_TOTAL_FAILED}" -gt 0 ]; then
-        CARGO_STATUS="ok"
-        if [ "${CARGO_TOTAL_FAILED}" -gt 0 ]; then
-          CARGO_STATUS="FAILED"
-        fi
-        SECTION_BODY+="- test result: ${CARGO_STATUS}. ${CARGO_TOTAL_PASSED} passed; ${CARGO_TOTAL_FAILED} failed; ${CARGO_TOTAL_IGNORED} ignored"$'\n'
-      fi
-    fi
-
-    # PHPUnit test results: "OK (N tests, N assertions)" or
-    # "Tests: N, Assertions: N, Failures: N, Errors: N, Skipped: N."
-    PHPUNIT_OK=$(grep -oP "OK \(\d+ tests?, \d+ assertions?\)" "${LOG_FILE}" | tail -1 || true)
-    PHPUNIT_SUMMARY=$(grep -oP "Tests: \d+.*" "${LOG_FILE}" | tail -1 || true)
-    if [ -n "${PHPUNIT_OK}" ]; then
-      SECTION_BODY+="- ${PHPUNIT_OK}"$'\n'
-    elif [ -n "${PHPUNIT_SUMMARY}" ]; then
-      SECTION_BODY+="- ${PHPUNIT_SUMMARY}"$'\n'
-    fi
+  elif [ "${STATUS}" = "fail" ] && [ "${HAS_DIGEST}" != "true" ]; then
+    SECTION_BODY+="- No structured ${CMD} summary artifact was generated."$'\n'
   fi
 
   SECTION_BODY+=$'\n'

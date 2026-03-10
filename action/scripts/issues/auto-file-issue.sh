@@ -2,6 +2,29 @@
 
 set -euo pipefail
 
+compact_summary() {
+  local command="$1"
+  local json_file="$2"
+  python3 "${GITHUB_ACTION_PATH}/scripts/digest/render-command-summary.py" "${command}" "${json_file}" compact 2>/dev/null || true
+}
+
+summary_json_for() {
+  case "$1" in
+    lint)
+      printf '%s\n' "${OUTPUT_DIR}/homeboy-lint-summary.json"
+      ;;
+    test)
+      printf '%s\n' "${OUTPUT_DIR}/homeboy-test-failures.json"
+      ;;
+    audit)
+      printf '%s\n' "${OUTPUT_DIR}/homeboy-audit-summary.json"
+      ;;
+    *)
+      printf '%s\n' ""
+      ;;
+  esac
+}
+
 REPO="${GITHUB_REPOSITORY}"
 COMP_ID="${COMPONENT_NAME:-$(basename "${GITHUB_REPOSITORY}")}"
 OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
@@ -35,8 +58,7 @@ IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
 
 FAILED_COMMANDS=()
 PRIMARY_COMMAND=""
-PRIMARY_LOG_FILE=""
-PRIMARY_FATAL_LINE=""
+PRIMARY_SUMMARY=""
 
 for RAW_CMD in "${CMD_ARRAY[@]}"; do
   CMD="$(echo "${RAW_CMD}" | xargs)"
@@ -45,14 +67,13 @@ for RAW_CMD in "${CMD_ARRAY[@]}"; do
     FAILED_COMMANDS+=("${CMD}")
     if [ -z "${PRIMARY_COMMAND}" ]; then
       PRIMARY_COMMAND="${CMD}"
-      PRIMARY_LOG_FILE="${OUTPUT_DIR}/${CMD}.log"
+      PRIMARY_JSON="$(summary_json_for "${CMD}")"
+      if [ -n "${PRIMARY_JSON}" ] && [ -f "${PRIMARY_JSON}" ]; then
+        PRIMARY_SUMMARY="$(compact_summary "${CMD}" "${PRIMARY_JSON}")"
+      fi
     fi
   fi
 done
-
-if [ -n "${PRIMARY_LOG_FILE}" ] && [ -f "${PRIMARY_LOG_FILE}" ]; then
-  PRIMARY_FATAL_LINE=$(grep -m1 -E "(PHP Fatal error:|Fatal error:|Unhandled exception|panic:|BUILD FAILED:)" "${PRIMARY_LOG_FILE}" || true)
-fi
 
 FAILED_CMDS_MD=""
 for CMD in "${FAILED_COMMANDS[@]}"; do
@@ -88,10 +109,10 @@ if [ -n "${EXISTING_ISSUE}" ]; then
   if [ -n "${PRIMARY_COMMAND}" ]; then
     COMMENT+="- Command: \`homeboy ${PRIMARY_COMMAND}\`"$'\n'
   fi
-  if [ -n "${PRIMARY_FATAL_LINE}" ]; then
-    COMMENT+="- First fatal/error: \`${PRIMARY_FATAL_LINE}\`"$'\n'
+  if [ -n "${PRIMARY_SUMMARY}" ]; then
+    COMMENT+="- Summary: ${PRIMARY_SUMMARY}"$'\n'
   else
-    COMMENT+="- First fatal/error: not detected in log tail"$'\n'
+    COMMENT+="- Summary: structured failure summary unavailable"$'\n'
   fi
 
   if [ -n "${SECONDARY_CMDS_MD}" ]; then
@@ -119,16 +140,6 @@ if [ -n "${EXISTING_ISSUE}" ]; then
   COMMENT+="**Failed commands:**"$'\n'
   COMMENT+="${FAILED_CMDS_MD}"$'\n'
   COMMENT+="**Run:** ${RUN_URL}"$'\n'
-
-  for RAW_CMD in "${CMD_ARRAY[@]}"; do
-    CMD="$(echo "${RAW_CMD}" | xargs)"
-    STATUS=$(echo "${RESULTS}" | jq -r --arg cmd "${CMD}" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
-    if [ "${STATUS}" = "fail" ] && [ -f "${OUTPUT_DIR}/${CMD}.log" ]; then
-      LOG_TAIL=$(tail -30 "${OUTPUT_DIR}/${CMD}.log")
-      COMMENT+=$'\n'"<details><summary>${CMD} output (last 30 lines)</summary>"$'\n\n'
-      COMMENT+="\`\`\`"$'\n'"${LOG_TAIL}"$'\n'"\`\`\`"$'\n'"</details>"$'\n'
-    fi
-  done
 
   gh api "repos/${REPO}/issues/${EXISTING_ISSUE}/comments" \
     --method POST \
@@ -163,10 +174,10 @@ else
   if [ -n "${PRIMARY_COMMAND}" ]; then
     BODY+="- Command: \`homeboy ${PRIMARY_COMMAND}\`"$'\n'
   fi
-  if [ -n "${PRIMARY_FATAL_LINE}" ]; then
-    BODY+="- First fatal/error: \`${PRIMARY_FATAL_LINE}\`"$'\n'
+  if [ -n "${PRIMARY_SUMMARY}" ]; then
+    BODY+="- Summary: ${PRIMARY_SUMMARY}"$'\n'
   else
-    BODY+="- First fatal/error: not detected in log tail"$'\n'
+    BODY+="- Summary: structured failure summary unavailable"$'\n'
   fi
 
   if [ -n "${SECONDARY_CMDS_MD}" ]; then
@@ -181,17 +192,6 @@ else
 
   BODY+="### Failed Commands"$'\n\n'
   BODY+="${FAILED_CMDS_MD}"$'\n'
-
-  for RAW_CMD in "${CMD_ARRAY[@]}"; do
-    CMD="$(echo "${RAW_CMD}" | xargs)"
-    STATUS=$(echo "${RESULTS}" | jq -r --arg cmd "${CMD}" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown")
-    if [ "${STATUS}" = "fail" ] && [ -f "${OUTPUT_DIR}/${CMD}.log" ]; then
-      LOG_TAIL=$(tail -50 "${OUTPUT_DIR}/${CMD}.log")
-      BODY+="### \`homeboy ${CMD}\` output"$'\n\n'
-      BODY+="<details><summary>Last 50 lines</summary>"$'\n\n'
-      BODY+="\`\`\`"$'\n'"${LOG_TAIL}"$'\n'"\`\`\`"$'\n'"</details>"$'\n\n'
-    fi
-  done
 
   BODY+="---"$'\n'
   BODY+="*Filed automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action)*"

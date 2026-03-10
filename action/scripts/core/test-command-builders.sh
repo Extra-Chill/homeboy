@@ -20,6 +20,7 @@ assert_equals() {
 
 WORKSPACE="/tmp/workspace"
 COMPONENT="data-machine"
+OUTPUT_JSON="/tmp/workspace/out.json"
 
 # ── Unscoped (full mode) ──
 unset SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true
@@ -29,6 +30,11 @@ assert_equals \
   "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
   "lint includes workspace path"
 
+assert_equals \
+  "homeboy lint data-machine --path /tmp/workspace --output /tmp/workspace/out.json" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "lint includes structured output path"
+
 # ── Scoped (changed mode) ──
 SCOPE_MODE="changed"
 SCOPE_BASE_REF="origin/main"
@@ -36,6 +42,11 @@ assert_equals \
   "homeboy lint data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
   "lint keeps path with changed-since"
+
+assert_equals \
+  "homeboy lint data-machine --path /tmp/workspace --output /tmp/workspace/out.json --changed-since origin/main" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "lint keeps output path with changed-since"
 
 assert_equals \
   "homeboy test data-machine --path /tmp/workspace --changed-since origin/main" \
@@ -54,12 +65,32 @@ assert_equals \
   "run command appends extra args"
 
 assert_equals \
-  "homeboy refactor ci data-machine --path /tmp/workspace --changed-since origin/main --format json" \
+  "homeboy audit data-machine --path /tmp/workspace --output /tmp/workspace/out.json --changed-since origin/main --format json" \
+  "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "run command keeps output path before extra args"
+
+assert_equals \
+  "homeboy lint --fix data-machine --path /tmp/workspace --changed-since origin/main --format json" \
+  "$(build_autofix_command "lint --fix" "${COMPONENT}" "${WORKSPACE}")" \
+  "autofix lint keeps path and changed-since"
+
+assert_equals \
+  "homeboy lint --fix data-machine --path /tmp/workspace --output /tmp/workspace/out.json --changed-since origin/main --format json" \
+  "$(build_autofix_command "lint --fix" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "autofix lint keeps output path and changed-since"
+
+assert_equals \
+  "homeboy audit --fix --write data-machine --path /tmp/workspace --changed-since origin/main --format json" \
+  "$(build_autofix_command "audit --fix --write" "${COMPONENT}" "${WORKSPACE}")" \
+  "autofix audit keeps path and changed-since"
+
+assert_equals \
+  "homeboy refactor data-machine ci --path /tmp/workspace --changed-since origin/main --format json" \
   "$(build_run_command "refactor ci" "${COMPONENT}" "${WORKSPACE}")" \
   "refactor keeps path with changed-since"
 
 assert_equals \
-  "homeboy refactor ci --write data-machine --path /tmp/workspace --changed-since origin/main --format json" \
+  "homeboy refactor data-machine ci --write --path /tmp/workspace --changed-since origin/main --format json" \
   "$(build_autofix_command "refactor ci --write" "${COMPONENT}" "${WORKSPACE}")" \
   "autofix refactor keeps path and changed-since"
 
@@ -67,7 +98,7 @@ assert_equals \
 unset SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true
 SCOPE_MODE="full"
 assert_equals \
-  "homeboy refactor ci --write data-machine --path /tmp/workspace" \
+  "homeboy refactor data-machine ci --write --path /tmp/workspace" \
   "$(build_autofix_command "refactor ci --write" "${COMPONENT}" "${WORKSPACE}")" \
   "autofix refactor keeps workspace path"
 
