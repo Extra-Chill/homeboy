@@ -394,7 +394,11 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         AUTOFIX_ENABLED: ${{ inputs.autofix }}
+        AUTOFIX_ATTEMPTED: ${{ steps.autofix-commit.outputs.attempted }}
         AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
+        AUTOFIX_STATUS: ${{ steps.autofix-commit.outputs.status }}
+        AUTOFIX_TARGET_REPO: ${{ steps.autofix-commit.outputs.target-repo }}
+        AUTOFIX_TARGET_BRANCH: ${{ steps.autofix-commit.outputs.target-branch }}
         AUTOFIX_FILE_COUNT: ${{ steps.autofix-commit.outputs.autofix-file-count }}
         AUTOFIX_FIX_TYPES: ${{ steps.autofix-commit.outputs.autofix-fix-types }}
         COMMENT_KEY_INPUT: ${{ inputs.comment-key }}

@@ -226,9 +226,12 @@ All three jobs write to the **same PR comment** automatically.
 When enabled, the action will:
 1. Run configured commands
 2. If any fail, run safe autofix commands
-3. Commit changes as `chore(ci): apply homeboy autofixes`
-4. Push to the PR branch
-5. Re-run checks and report final status
+3. Re-fetch the latest PR branch head and recompute fixes there when the branch moved underneath CI
+4. Commit changes as `chore(ci): homeboy autofix ...`
+5. Push directly to the PR branch when credentials allow
+6. Re-run checks and report final status
+
+For fork PRs, Homeboy Action now attempts the same direct-to-PR autofix flow first. Actual push success still depends on the token/permission model available to the workflow run.
 
 ### Auto-open Fix PRs on non-PR runs
 

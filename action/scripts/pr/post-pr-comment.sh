@@ -90,6 +90,8 @@ if [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_COMMITTED:-}" = "true" ]; t
     AUTOFIX_SUMMARY+=" — ${AUTOFIX_FILE_COUNT} file(s) fixed"
   fi
   SECTION_BODY+="> ${AUTOFIX_SUMMARY}"$'\n\n'
+elif [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_ATTEMPTED:-false}" = "true" ] && [ "${AUTOFIX_STATUS:-}" = "push-failed" ]; then
+  SECTION_BODY+="> :warning: Autofix generated changes but could not push them back to **${AUTOFIX_TARGET_REPO:-${REPO}}:${AUTOFIX_TARGET_BRANCH:-unknown}**"$'\n\n'
 elif [ "${AUTOFIX_ENABLED}" = "true" ]; then
   SECTION_BODY+="> :information_source: Autofix enabled, but no fixable file changes were produced"$'\n\n'
 fi
@@ -108,10 +110,6 @@ if is_scoped; then
   SECTION_BODY+="> :zap: Scope: **changed files only**"$'\n\n'
 elif [ "$(scope_context)" = "pr" ] && [ "${SCOPE_MODE:-full}" = "full" ]; then
   SECTION_BODY+="> :information_source: Scope resolved to **full**"$'\n\n'
-fi
-
-if is_fork; then
-  SECTION_BODY+="> :lock: Fork PR — autofix disabled, read-only checks"$'\n\n'
 fi
 
 # Only show test-specific fallback note when commands include test.
