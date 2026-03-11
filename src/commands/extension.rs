@@ -739,7 +739,7 @@ fn exec_extension_tool(
 
     // Resolve working directory: component path if given, otherwise current dir
     let working_dir = if let Some(ref cid) = component {
-        let comp = homeboy::component::load(cid)?;
+        let comp = homeboy::component::resolve_effective(Some(cid), None, None)?;
         comp.local_path.clone()
     } else {
         std::env::current_dir()

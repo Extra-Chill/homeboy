@@ -60,7 +60,7 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<CleanupO
         let source_path = if let Some(ref path) = args.path {
             std::path::PathBuf::from(path)
         } else {
-            let comp = homeboy::component::load(component_id)?;
+            let comp = homeboy::component::resolve_effective(Some(component_id), None, None)?;
             std::path::PathBuf::from(&comp.local_path)
         };
 

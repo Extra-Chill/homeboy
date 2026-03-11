@@ -278,7 +278,8 @@ pub fn run(
 }
 
 fn show(id: &str) -> CmdResult<ComponentOutput> {
-    let component = component::load(id).map_err(|e| e.with_contextual_hint())?;
+    let component = component::resolve_effective(Some(id), None, None)
+        .map_err(|e| e.with_contextual_hint())?;
 
     Ok((
         ComponentOutput {
@@ -400,7 +401,7 @@ fn set(
 
     match component::merge(args.id.as_deref(), &json_string, &replace_fields)? {
         homeboy::MergeOutput::Single(result) => {
-            let comp = component::load(&result.id)?;
+            let comp = component::resolve_effective(Some(&result.id), None, None)?;
             Ok((
                 ComponentOutput {
                     command: "component.set".to_string(),
@@ -444,7 +445,8 @@ fn add_version_target(id: &str, file: &str, pattern: &str) -> CmdResult<Componen
     component::validate_version_pattern(pattern)?;
 
     // Load component to check existing targets
-    let comp = component::load(id).map_err(|e| e.with_contextual_hint())?;
+    let comp = component::resolve_effective(Some(id), None, None)
+        .map_err(|e| e.with_contextual_hint())?;
 
     // Validate no conflicting target exists
     if let Some(ref existing) = comp.version_targets {
@@ -462,7 +464,7 @@ fn add_version_target(id: &str, file: &str, pattern: &str) -> CmdResult<Componen
 
     match component::merge(Some(id), &json_string, &[])? {
         homeboy::MergeOutput::Single(result) => {
-            let comp = component::load(&result.id)?;
+            let comp = component::resolve_effective(Some(&result.id), None, None)?;
             Ok((
                 ComponentOutput {
                     command: "component.add-version-target".to_string(),

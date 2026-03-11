@@ -628,7 +628,7 @@ pub fn read_version(component_id: Option<&str>) -> Result<ComponentVersionInfo> 
         Some(id) => id,
     };
 
-    let component = component::load(id)?;
+    let component = component::resolve_effective(Some(id), None, None)?;
     read_component_version(&component)
 }
 

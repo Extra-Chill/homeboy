@@ -221,7 +221,7 @@ pub fn audit_component(
     docs_dir_override: Option<&str>,
     include_features: bool,
 ) -> Result<AuditResult> {
-    let comp = component::load(component_id)?;
+    let comp = component::resolve_effective(Some(component_id), None, None)?;
     let source_path = Path::new(&comp.local_path);
 
     // Resolve docs directories: CLI override > docs_dirs > docs_dir > default "docs"
