@@ -360,30 +360,12 @@ pub fn has_component(project: &Project, component_id: &str) -> bool {
 }
 
 pub fn set_components(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
-    use crate::component;
-
     if component_ids.is_empty() {
         return Err(Error::validation_invalid_argument(
             "componentIds",
             "At least one component ID is required",
             Some(project_id.to_string()),
             None,
-        ));
-    }
-
-    let mut missing = Vec::new();
-    for component_id in &component_ids {
-        if !component::exists(component_id) {
-            missing.push(component_id.clone());
-        }
-    }
-
-    if !missing.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "componentIds",
-            "Unknown component IDs (must exist in `homeboy component list`)",
-            Some(project_id.to_string()),
-            Some(missing),
         ));
     }
 
@@ -408,30 +390,12 @@ pub fn set_components(project_id: &str, component_ids: Vec<String>) -> Result<Ve
 }
 
 pub fn add_components(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
-    use crate::component;
-
     if component_ids.is_empty() {
         return Err(Error::validation_invalid_argument(
             "componentIds",
             "At least one component ID is required",
             Some(project_id.to_string()),
             None,
-        ));
-    }
-
-    let mut missing = Vec::new();
-    for component_id in &component_ids {
-        if !component::exists(component_id) {
-            missing.push(component_id.clone());
-        }
-    }
-
-    if !missing.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "componentIds",
-            "Unknown component IDs (must exist in `homeboy component list`)",
-            Some(project_id.to_string()),
-            Some(missing),
         ));
     }
 

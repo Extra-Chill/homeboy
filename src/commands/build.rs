@@ -74,13 +74,14 @@ pub fn run(
             )
         })?;
 
-        if proj.component_ids.is_empty() {
+        if proj.components.is_empty() {
             return Err(homeboy::Error::validation_invalid_argument(
                 "project_id",
                 format!("Project '{}' has no components configured", target_id),
                 None,
                 Some(vec![format!(
-                    "Add components: homeboy project components add {} <component-id>",
+                    "Add components: homeboy project components add {} <component-id> or attach a repo: homeboy project components attach-path {} <component-id> <path>",
+                    target_id,
                     target_id
                 )]),
             ));

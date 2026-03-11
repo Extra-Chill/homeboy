@@ -50,8 +50,9 @@ pub fn resolve_project_components(first: &str, rest: &[String]) -> Result<(Strin
                 let hint = if associated_projects.is_empty() {
                     format!(
                         "Component '{}' is not associated with any project.\n  \
-                        Add it to a project: homeboy project components add <project> {}",
-                        first, first
+                        Add it to a project: homeboy project components add <project> {}\n  \
+                        Or attach a repo directly: homeboy project components attach-path <project> {} <path>",
+                        first, first, first
                     )
                 } else if associated_projects.len() == 1 {
                     format!(
