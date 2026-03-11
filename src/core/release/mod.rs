@@ -3,6 +3,7 @@ mod pipeline;
 mod resolver;
 mod types;
 mod utils;
+pub mod version;
 
 pub use pipeline::{plan, run};
 pub use types::{

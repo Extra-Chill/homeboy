@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::component;
 use crate::config::read_json_spec_to_string;
 use crate::core::local_files::{self, FileSystem};
-use crate::core::version;
+use crate::core::release::version;
 use crate::error::{Error, Result};
 use crate::utils::{io, validation};
 
