@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::utils::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use crate::utils::grammar::{self, Grammar};
 
 // ============================================================================

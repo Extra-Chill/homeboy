@@ -7,7 +7,7 @@
 //! 4. Applies changes to disk (or returns a dry-run preview)
 
 use crate::error::{Error, Result};
-use crate::utils::codebase_scan::{
+use crate::engine::codebase_scan::{
     self, find_boundary_matches, find_case_insensitive_matches, find_literal_matches,
     ExtensionFilter, ScanConfig,
 };
@@ -411,11 +411,11 @@ fn join_display(words: &[String]) -> String {
         .join(" ")
 }
 
-// Boundary matching and literal matching are provided by crate::utils::codebase_scan.
+// Boundary matching and literal matching are provided by crate::engine::codebase_scan.
 // See: find_boundary_matches(), find_literal_matches()
 
 // ============================================================================
-// File walking — delegates to crate::utils::codebase_scan
+// File walking — delegates to crate::engine::codebase_scan
 // ============================================================================
 
 /// Build a ScanConfig appropriate for rename operations.

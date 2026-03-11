@@ -3,7 +3,6 @@
 //! - `args` - CLI argument normalization
 //! - `autofix` - Compatibility shim re-exporting code-factory plumbing from `refactor::auto`
 //! - `base_path` - Remote path joining utilities
-//! - `codebase_scan` - File walking and content search across codebases
 //! - `command` - Command execution with error handling
 //! - `entity_suggest` - Entity suggestion for unrecognized CLI subcommands
 //! - `grammar` - Language-agnostic grammar engine (patterns, symbols, extraction)
@@ -21,7 +20,6 @@ pub mod args;
 pub mod artifact;
 pub mod autofix;
 pub mod base_path;
-pub mod codebase_scan;
 pub mod command;
 pub mod entity_suggest;
 pub mod grammar;
