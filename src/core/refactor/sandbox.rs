@@ -1,3 +1,4 @@
+use crate::engine::temp;
 use crate::Error;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -19,13 +20,7 @@ impl Drop for SandboxDir {
 }
 
 pub fn clone_tree(src: &Path) -> crate::Result<SandboxDir> {
-    let temp = std::env::temp_dir().join(format!("homeboy-refactor-ci-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some("create temp refactor sandbox".to_string()),
-        )
-    })?;
+    let temp = temp::runtime_temp_dir("homeboy-refactor-ci")?;
     copy_dir_recursive(src, &temp)?;
     Ok(SandboxDir { path: temp })
 }
