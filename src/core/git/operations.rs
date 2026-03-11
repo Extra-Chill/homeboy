@@ -1058,7 +1058,11 @@ pub fn changes_bulk(json_spec: &str, include_diff: bool) -> Result<BulkResult<Ch
 /// Get changes for all components in a project.
 pub fn changes_project(project_id: &str, include_diff: bool) -> Result<BulkResult<ChangesOutput>> {
     let proj = project::load(project_id)?;
-    Ok(build_bulk_changes_output(&proj.component_ids, include_diff))
+    let component_ids: Vec<String> = project::resolve_project_components(&proj)?
+        .into_iter()
+        .map(|component| component.id)
+        .collect();
+    Ok(build_bulk_changes_output(&component_ids, include_diff))
 }
 
 /// Get changes for specific components in a project (filtered).

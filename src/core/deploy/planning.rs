@@ -207,7 +207,8 @@ struct LoadedComponents {
     skipped: Vec<String>,
 }
 
-/// Load components by ID, resolve artifact paths via extension patterns, and filter non-deployable.
+/// Load effective project components, resolve artifact paths via extension patterns,
+/// and filter non-deployable.
 ///
 /// Validates that any extensions declared in the component's `extensions` field are installed.
 /// Returns an actionable error with install instructions when extensions are missing,
@@ -215,12 +216,12 @@ struct LoadedComponents {
 ///
 /// Returns both the deployable components and the IDs of skipped (non-deployable) ones,
 /// so callers can produce accurate error messages.
-fn load_project_components(component_ids: &[String]) -> Result<LoadedComponents> {
+fn load_project_components(project: &Project) -> Result<LoadedComponents> {
     let mut deployable = Vec::new();
     let mut skipped = Vec::new();
 
-    for id in component_ids {
-        let mut loaded = component::load(id)?;
+    for id in &project.component_ids {
+        let mut loaded = project::resolve_project_component(project, id)?;
 
         // Validate required extensions are installed before attempting artifact resolution.
         // Without this check, missing extensions cause resolve_artifact() to silently

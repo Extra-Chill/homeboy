@@ -6,7 +6,7 @@ fn deploy_components(
     ctx: &RemoteProjectContext,
     base_path: &str,
 ) -> Result<DeployOrchestrationResult> {
-    let loaded = load_project_components(&project.component_ids)?;
+    let loaded = load_project_components(project)?;
     if loaded.deployable.is_empty() {
         let message = if loaded.skipped.is_empty() {
             "No components configured for project".to_string()
