@@ -742,7 +742,7 @@ pub fn is_extension_compatible(extension: &ExtensionManifest, project: Option<&P
     // Required components must be linked to the project (if project context exists)
     if let Some(project) = project {
         for component in &requires.components {
-            if !project.component_ids.contains(component) {
+            if !crate::project::has_component(project, component) {
                 return false;
             }
         }
