@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::changelog;
+use crate::release::changelog;
 use crate::component::{self, Component};
 use crate::core::lint_baseline;
 use crate::core::local_files::FileSystem;

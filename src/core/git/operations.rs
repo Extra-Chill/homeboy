@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-use crate::changelog;
+use crate::release::changelog;
 use crate::component;
 use crate::config::read_json_spec_to_string;
 use crate::error::{Error, Result};

@@ -1,3 +1,4 @@
+pub mod changelog;
 mod executor;
 mod pipeline;
 mod resolver;

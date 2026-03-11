@@ -20,5 +20,6 @@ pub mod utils;
 // Re-export everything from core for ergonomic library use
 // Users can write `homeboy::config` instead of `homeboy::core::config`
 pub use core::*;
+pub use core::release::changelog;
 pub use core::release::version;
 pub use utils::*;

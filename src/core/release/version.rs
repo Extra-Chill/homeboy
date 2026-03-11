@@ -1,4 +1,4 @@
-use crate::changelog;
+use crate::release::changelog;
 use crate::component::{self, Component, VersionTarget};
 use crate::config::{from_str, set_json_pointer, to_string_pretty};
 use crate::error::{Error, Result};
