@@ -267,7 +267,11 @@ pub fn load<M: for<'de> Deserialize<'de> + Serialize>(
 
     let baseline = serde_json::from_value(baseline_value).map_err(|error| {
         Error::internal_io(
-            format!("Failed to deserialize baseline '{}': {}", config.key(), error),
+            format!(
+                "Failed to deserialize baseline '{}': {}",
+                config.key(),
+                error
+            ),
             Some("baseline.load".to_string()),
         )
     })?;
@@ -280,7 +284,10 @@ pub fn compare<T: Fingerprintable, M: Serialize>(
     baseline: &Baseline<M>,
 ) -> Comparison {
     let baseline_set: HashSet<&String> = baseline.known_fingerprints.iter().collect();
-    let current_fingerprints: Vec<String> = current_items.iter().map(|item| item.fingerprint()).collect();
+    let current_fingerprints: Vec<String> = current_items
+        .iter()
+        .map(|item| item.fingerprint())
+        .collect();
     let current_set: HashSet<&String> = current_fingerprints.iter().collect();
 
     let new_items = current_items
