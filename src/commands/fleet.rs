@@ -2,7 +2,6 @@ use clap::{Args, Subcommand};
 use homeboy::log_status;
 use serde::Serialize;
 
-use homeboy::component;
 use homeboy::deploy::{self, DeployConfig};
 use homeboy::fleet::{self, Fleet};
 use homeboy::health::{self, ServerHealth};
@@ -455,7 +454,7 @@ fn status(id: &str, cached: bool, health_only: bool) -> CmdResult<FleetOutput> {
 
             let mut component_statuses = Vec::new();
             for component_id in &proj.component_ids {
-                let comp_version = match component::load(component_id) {
+                let comp_version = match project::resolve_project_component(&proj, component_id) {
                     Ok(comp) => version::get_component_version(&comp),
                     Err(_) => None,
                 };
@@ -542,7 +541,7 @@ fn status(id: &str, cached: bool, health_only: bool) -> CmdResult<FleetOutput> {
 
                     let mut component_statuses = Vec::new();
                     for component_id in &proj.component_ids {
-                        let comp_version = match component::load(component_id) {
+                        let comp_version = match project::resolve_project_component(&proj, component_id) {
                             Ok(comp) => version::get_component_version(&comp),
                             Err(_) => None,
                         };

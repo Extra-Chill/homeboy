@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectComponentAttachment {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectComponentOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_artifact: Option<String>,
@@ -68,6 +75,8 @@ pub struct Project {
     pub sub_targets: Vec<SubTarget>,
     #[serde(default)]
     pub shared_tables: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<ProjectComponentAttachment>,
     #[serde(default)]
     pub component_ids: Vec<String>,
     /// Per-component field overrides applied when a component runs in this project.
@@ -354,6 +363,17 @@ pub fn set_components(project_id: &str, component_ids: Vec<String>) -> Result<Ve
     let deduped = parser::dedupe(component_ids);
 
     let mut project = load(project_id)?;
+    project.components = deduped
+        .iter()
+        .map(|id| ProjectComponentAttachment {
+            id: id.clone(),
+            local_path: project
+                .components
+                .iter()
+                .find(|component| &component.id == id)
+                .and_then(|component| component.local_path.clone()),
+        })
+        .collect();
     project.component_ids = deduped.clone();
     save(&project)?;
     Ok(deduped)
@@ -392,7 +412,11 @@ pub fn add_components(project_id: &str, component_ids: Vec<String>) -> Result<Ve
     let mut project = load(project_id)?;
     for id in deduped {
         if !project.component_ids.contains(&id) {
-            project.component_ids.push(id);
+            project.component_ids.push(id.clone());
+            project.components.push(ProjectComponentAttachment {
+                id,
+                local_path: None,
+            });
         }
     }
     save(&project)?;
@@ -430,8 +454,27 @@ pub fn remove_components(project_id: &str, component_ids: Vec<String>) -> Result
     project
         .component_ids
         .retain(|id| !component_ids.contains(id));
+    project.components.retain(|component| !component_ids.contains(&component.id));
     save(&project)?;
     Ok(project.component_ids)
+}
+
+pub fn attach_component_path(project_id: &str, component_id: &str, local_path: &str) -> Result<()> {
+    let mut project = load(project_id)?;
+
+    if let Some(component) = project.components.iter_mut().find(|c| c.id == component_id) {
+        component.local_path = Some(local_path.to_string());
+    } else {
+        project.components.push(ProjectComponentAttachment {
+            id: component_id.to_string(),
+            local_path: Some(local_path.to_string()),
+        });
+        if !project.component_ids.contains(&component_id.to_string()) {
+            project.component_ids.push(component_id.to_string());
+        }
+    }
+
+    save(&project)
 }
 
 pub fn apply_component_overrides(
@@ -470,7 +513,25 @@ pub fn apply_component_overrides(
 }
 
 pub fn resolve_project_component(project: &Project, component_id: &str) -> Result<crate::component::Component> {
-    let component = crate::component::load(component_id)?;
+    let component = if let Some(attachment) = project.components.iter().find(|component| component.id == component_id) {
+        if let Some(local_path) = &attachment.local_path {
+            crate::component::discover_from_portable(std::path::Path::new(local_path)).ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "components.local_path",
+                    format!(
+                        "Project component '{}' points to '{}' but no homeboy.json was found",
+                        component_id, local_path
+                    ),
+                    Some(project.id.clone()),
+                    None,
+                )
+            })?
+        } else {
+            crate::component::load(component_id)?
+        }
+    } else {
+        crate::component::load(component_id)?
+    };
     Ok(apply_component_overrides(&component, project))
 }
 

@@ -121,6 +121,15 @@ enum ProjectComponentsCommand {
         /// Component IDs
         component_ids: Vec<String>,
     },
+    /// Attach a repo path for a project component discovered via homeboy.json
+    AttachPath {
+        /// Project ID
+        project_id: String,
+        /// Component ID to attach
+        component_id: String,
+        /// Local repo path containing homeboy.json
+        local_path: String,
+    },
     /// Remove one or more components
     Remove {
         /// Project ID
@@ -575,6 +584,11 @@ fn components(command: ProjectComponentsCommand) -> CmdResult<ProjectOutput> {
             project_id,
             component_ids,
         } => components_add(&project_id, component_ids),
+        ProjectComponentsCommand::AttachPath {
+            project_id,
+            component_id,
+            local_path,
+        } => components_attach_path(&project_id, &component_id, &local_path),
         ProjectComponentsCommand::Remove {
             project_id,
             component_ids,
@@ -585,12 +599,7 @@ fn components(command: ProjectComponentsCommand) -> CmdResult<ProjectOutput> {
 
 fn components_list(project_id: &str) -> CmdResult<ProjectOutput> {
     let project = project::load(project_id)?;
-
-    let mut components = Vec::new();
-    for component_id in &project.component_ids {
-        let component = component::load(component_id)?;
-        components.push(component);
-    }
+    let components = project::resolve_project_components(&project)?;
 
     Ok((
         ProjectOutput {
@@ -623,6 +632,16 @@ fn components_add(project_id: &str, component_ids: Vec<String>) -> CmdResult<Pro
     write_project_components(project_id, "add", &project)
 }
 
+fn components_attach_path(
+    project_id: &str,
+    component_id: &str,
+    local_path: &str,
+) -> CmdResult<ProjectOutput> {
+    project::attach_component_path(project_id, component_id, local_path)?;
+    let project = project::load(project_id)?;
+    write_project_components(project_id, "attach_path", &project)
+}
+
 fn components_remove(project_id: &str, component_ids: Vec<String>) -> CmdResult<ProjectOutput> {
     project::remove_components(project_id, component_ids)?;
     let project = project::load(project_id)?;
@@ -642,12 +661,7 @@ fn write_project_components(
     project: &Project,
 ) -> CmdResult<ProjectOutput> {
     project::save(project)?;
-
-    let mut components = Vec::new();
-    for component_id in &project.component_ids {
-        let component = component::load(component_id)?;
-        components.push(component);
-    }
+    let components = project::resolve_project_components(project)?;
 
     Ok((
         ProjectOutput {
