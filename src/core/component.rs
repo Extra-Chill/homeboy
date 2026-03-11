@@ -94,7 +94,6 @@ pub struct Component {
     /// Lifecycle hooks: event name -> list of shell commands.
     /// Events: `pre:version:bump`, `post:version:bump`, `post:release`, `post:deploy`
     pub hooks: HashMap<String, Vec<String>>,
-    pub build_command: Option<String>,
     pub extract_command: Option<String>,
     pub remote_owner: Option<String>,
     pub deploy_strategy: Option<String>,
@@ -142,8 +141,6 @@ struct RawComponent {
     post_version_bump_commands: Vec<String>,
     #[serde(default, skip_serializing)]
     post_release_commands: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    build_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     extract_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,7 +193,6 @@ impl From<RawComponent> for Component {
             changelog_next_section_label: raw.changelog_next_section_label,
             changelog_next_section_aliases: raw.changelog_next_section_aliases,
             hooks,
-            build_command: raw.build_command,
             extract_command: raw.extract_command,
             remote_owner: raw.remote_owner,
             deploy_strategy: raw.deploy_strategy,
@@ -226,7 +222,6 @@ impl From<Component> for RawComponent {
             pre_version_bump_commands: Vec::new(),
             post_version_bump_commands: Vec::new(),
             post_release_commands: Vec::new(),
-            build_command: c.build_command,
             extract_command: c.extract_command,
             remote_owner: c.remote_owner,
             deploy_strategy: c.deploy_strategy,
@@ -293,7 +288,6 @@ impl Component {
             changelog_next_section_label: None,
             changelog_next_section_aliases: None,
             hooks: HashMap::new(),
-            build_command: None,
             extract_command: None,
             remote_owner: None,
             deploy_strategy: None,
@@ -972,14 +966,12 @@ mod tests {
             "remote_path": "/var/www/my-plugin"
         });
         let portable = serde_json::json!({
-            "build_command": "npm run build",
             "changelog_target": "docs/CHANGELOG.md",
             "version_targets": [{"file": "package.json"}]
         });
 
         overlay_portable(&mut stored, &portable);
 
-        assert_eq!(stored["build_command"], "npm run build");
         assert_eq!(stored["changelog_target"], "docs/CHANGELOG.md");
         assert!(stored["version_targets"].is_array());
     }
@@ -989,17 +981,17 @@ mod tests {
         let mut stored: Value = serde_json::json!({
             "id": "my-plugin",
             "local_path": "/home/user/my-plugin",
-            "build_command": "make build"
+            "extract_command": "tar -xf artifact.tar.gz"
         });
         let portable = serde_json::json!({
-            "build_command": "npm run build",
+            "extract_command": "unzip -o artifact.zip",
             "changelog_target": "docs/CHANGELOG.md"
         });
 
         overlay_portable(&mut stored, &portable);
 
         // Stored value wins
-        assert_eq!(stored["build_command"], "make build");
+        assert_eq!(stored["extract_command"], "tar -xf artifact.tar.gz");
         // Absent field filled from portable
         assert_eq!(stored["changelog_target"], "docs/CHANGELOG.md");
     }
@@ -1016,7 +1008,7 @@ mod tests {
             "local_path": "/someone-else/path",
             "remote_path": "/other/remote",
             "aliases": ["alias1"],
-            "build_command": "npm run build"
+            "extract_command": "unzip -o artifact.zip"
         });
 
         overlay_portable(&mut stored, &portable);
@@ -1027,14 +1019,14 @@ mod tests {
         assert_eq!(stored["remote_path"], "/var/www/my-plugin");
         assert!(stored.get("aliases").is_none());
         // Portable field still applied
-        assert_eq!(stored["build_command"], "npm run build");
+        assert_eq!(stored["extract_command"], "unzip -o artifact.zip");
     }
 
     #[test]
     fn overlay_portable_handles_non_objects() {
         // Should be a no-op for non-object values
         let mut stored = serde_json::json!("not an object");
-        let portable = serde_json::json!({"build_command": "make"});
+        let portable = serde_json::json!({"extract_command": "make extract"});
         overlay_portable(&mut stored, &portable);
         assert_eq!(stored, "not an object");
     }
@@ -1044,7 +1036,7 @@ mod tests {
         let mut stored: Value = serde_json::json!({
             "id": "my-plugin",
             "local_path": "/home/user/my-plugin",
-            "build_command": "make"
+            "extract_command": "make extract"
         });
         let original = stored.clone();
         let portable = serde_json::json!({});
@@ -1064,9 +1056,9 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
 
         let config = serde_json::json!({
-            "build_command": "cargo build --release",
             "version_targets": [{"file": "Cargo.toml", "pattern": "(?m)^version\\s*=\\s*\"([0-9.]+)\""}],
-            "changelog_target": "docs/CHANGELOG.md"
+            "changelog_target": "docs/CHANGELOG.md",
+            "extensions": {"rust": {}}
         });
         std::fs::write(dir.join("homeboy.json"), config.to_string()).unwrap();
 
@@ -1079,8 +1071,8 @@ mod tests {
         let comp = result.unwrap();
         assert_eq!(comp.id, "homeboy-test-discover");
         assert_eq!(comp.local_path, dir.to_string_lossy());
-        assert_eq!(comp.build_command.as_deref(), Some("cargo build --release"));
         assert_eq!(comp.changelog_target.as_deref(), Some("docs/CHANGELOG.md"));
+        assert!(comp.extensions.as_ref().is_some_and(|m| m.contains_key("rust")));
         assert!(comp.version_targets.is_some());
         assert!(comp.remote_path.is_empty()); // default
 
@@ -1110,7 +1102,7 @@ mod tests {
             "id": "should-be-overridden",
             "local_path": "/wrong/path",
             "remote_path": "/also/wrong",
-            "build_command": "make"
+            "extract_command": "tar -xf artifact.tar.gz"
         });
         std::fs::write(dir.join("homeboy.json"), config.to_string()).unwrap();
 
@@ -1121,8 +1113,10 @@ mod tests {
         assert_eq!(comp.local_path, dir.to_string_lossy());
         // remote_path from portable is allowed (it's set explicitly)
         assert_eq!(comp.remote_path, "/also/wrong");
-        // build_command from portable
-        assert_eq!(comp.build_command.as_deref(), Some("make"));
+        assert_eq!(
+            comp.extract_command.as_deref(),
+            Some("tar -xf artifact.tar.gz")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

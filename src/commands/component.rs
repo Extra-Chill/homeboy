@@ -46,9 +46,6 @@ enum ComponentCommand {
             conflicts_with = "version_targets"
         )]
         version_targets_json: Option<String>,
-        /// Build command to run in localPath
-        #[arg(long)]
-        build_command: Option<String>,
         /// Extract command to run after upload (e.g., "unzip -o {artifact} && rm {artifact}")
         #[arg(long)]
         extract_command: Option<String>,
@@ -83,9 +80,6 @@ enum ComponentCommand {
         /// Build artifact path relative to localPath
         #[arg(long)]
         build_artifact: Option<String>,
-        /// Build command to run in localPath
-        #[arg(long)]
-        build_command: Option<String>,
         /// Extract command to run after upload (e.g., "unzip -o {artifact} && rm {artifact}")
         #[arg(long)]
         extract_command: Option<String>,
@@ -163,7 +157,6 @@ pub fn run(
             build_artifact,
             version_targets,
             version_targets_json,
-            build_command,
             extract_command,
             changelog_target,
             extensions,
@@ -220,7 +213,6 @@ pub fn run(
                     None
                 };
 
-                new_component.build_command = build_command;
                 new_component.extract_command = extract_command;
                 new_component.changelog_target = changelog_target;
 
@@ -282,7 +274,6 @@ pub fn run(
             local_path,
             remote_path,
             build_artifact,
-            build_command,
             extract_command,
             changelog_target,
             version_targets,
@@ -293,7 +284,6 @@ pub fn run(
                 local_path,
                 remote_path,
                 build_artifact,
-                build_command,
                 extract_command,
                 changelog_target,
             },
@@ -343,7 +333,6 @@ struct ComponentSetFlags {
     local_path: Option<String>,
     remote_path: Option<String>,
     build_artifact: Option<String>,
-    build_command: Option<String>,
     extract_command: Option<String>,
     changelog_target: Option<String>,
 }
@@ -353,7 +342,6 @@ impl ComponentSetFlags {
         self.local_path.is_some()
             || self.remote_path.is_some()
             || self.build_artifact.is_some()
-            || self.build_command.is_some()
             || self.extract_command.is_some()
             || self.changelog_target.is_some()
     }
@@ -368,9 +356,6 @@ impl ComponentSetFlags {
         }
         if let Some(ref v) = self.build_artifact {
             obj.insert("build_artifact".to_string(), serde_json::json!(v));
-        }
-        if let Some(ref v) = self.build_command {
-            obj.insert("build_command".to_string(), serde_json::json!(v));
         }
         if let Some(ref v) = self.extract_command {
             obj.insert("extract_command".to_string(), serde_json::json!(v));
@@ -432,47 +417,6 @@ fn set(
                 "extensions".to_string(),
                 serde_json::Value::Object(extension_map),
             );
-        }
-    }
-
-    // Validate: reject build_command when component has an extension.
-    // Extensions own the build lifecycle; a component-level build_command
-    // creates ambiguity about which build path runs.
-    if let Some(id) = args.id.as_deref() {
-        let has_build_command = merged
-            .get("build_command")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty());
-
-        if has_build_command {
-            // Check if the component already has extensions
-            let existing_has_extension = component::load(id)
-                .ok()
-                .and_then(|c| c.extensions)
-                .is_some_and(|ext| !ext.is_empty());
-
-            // Also check if extensions are being set in this same command
-            let setting_extension = merged
-                .get("extensions")
-                .and_then(|v| v.as_object())
-                .is_some_and(|ext| !ext.is_empty());
-
-            if existing_has_extension || setting_extension {
-                return Err(homeboy::Error::validation_invalid_argument(
-                    "build_command",
-                    format!(
-                        "Component '{}' uses an extension which owns the build lifecycle. \
-                         Setting build_command creates ambiguous build paths.",
-                        id
-                    ),
-                    None,
-                    None,
-                )
-                .with_hint(format!(
-                    "Remove the extension first: homeboy component set {} --replace extensions",
-                    id
-                )));
-            }
         }
     }
 
@@ -716,7 +660,6 @@ mod tests {
             local_path: None,
             remote_path: None,
             build_artifact: None,
-            build_command: None,
             extract_command: None,
             changelog_target: None,
         };
@@ -729,7 +672,6 @@ mod tests {
             local_path: Some("/foo".to_string()),
             remote_path: None,
             build_artifact: None,
-            build_command: None,
             extract_command: None,
             changelog_target: None,
         };
@@ -742,8 +684,7 @@ mod tests {
             local_path: Some("/new/path".to_string()),
             remote_path: None,
             build_artifact: None,
-            build_command: Some("npm run build".to_string()),
-            extract_command: None,
+            extract_command: Some("unzip -o artifact.zip".to_string()),
             changelog_target: Some("CHANGELOG.md".to_string()),
         };
 
@@ -752,7 +693,10 @@ mod tests {
 
         assert_eq!(obj.len(), 3);
         assert_eq!(obj["local_path"], serde_json::json!("/new/path"));
-        assert_eq!(obj["build_command"], serde_json::json!("npm run build"));
+        assert_eq!(
+            obj["extract_command"],
+            serde_json::json!("unzip -o artifact.zip")
+        );
         assert_eq!(obj["changelog_target"], serde_json::json!("CHANGELOG.md"));
         assert!(!obj.contains_key("remote_path"));
     }
@@ -763,7 +707,6 @@ mod tests {
             local_path: Some("/override".to_string()),
             remote_path: None,
             build_artifact: None,
-            build_command: None,
             extract_command: None,
             changelog_target: None,
         };

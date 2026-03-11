@@ -16,7 +16,6 @@ use crate::engine::shell;
 
 #[derive(Debug, Clone)]
 pub enum ResolvedBuildCommand {
-    ComponentDefined(String),
     ExtensionProvided {
         context: ExtensionExecutionContext,
         command: String,
@@ -31,21 +30,17 @@ pub enum ResolvedBuildCommand {
 impl ResolvedBuildCommand {
     pub fn command(&self) -> &str {
         match self {
-            ResolvedBuildCommand::ComponentDefined(cmd) => cmd,
             ResolvedBuildCommand::ExtensionProvided { command, .. } => command,
             ResolvedBuildCommand::LocalScript { command, .. } => command,
         }
     }
 }
 
-/// Resolve build command for a component using the following priority:
-/// 1. Extension's bundled script (extension.build.extension_script)
-/// 2. Local script matching extension's script_names pattern
-/// 3. Explicit component.build_command (fallback when no extension provides build)
+/// Resolve build command for a component using extension-managed build configuration.
 ///
-/// Extensions own the build lifecycle for their component type.
-/// If a component has both an extension with build support AND a build_command,
-/// the extension wins and a warning is emitted.
+/// Priority:
+/// 1. Extension's bundled script (`extension.build.extension_script`)
+/// 2. Local script matching the extension's `script_names` pattern
 pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBuildCommand> {
     // 1. Check exactly one build-capable extension for bundled script or local script patterns
     if let Ok(context) = extension::resolve_execution_context(component, ExtensionCapability::Build)
@@ -98,28 +93,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
         }
     }
 
-    // 2. Fallback: explicit component.build_command (only when no extension provides build)
-    if let Some(cmd) = &component.build_command {
-        if extension::extension_provides_build(component) {
-            // Extension provides build but no scripts found — warn about build_command being ignored
-            log_status!(
-                "build",
-                "Warning: component '{}' has both an extension with build support AND a build_command. \
-                 The extension owns the build lifecycle; build_command is ignored.",
-                component.id
-            );
-            log_status!(
-                "hint",
-                "Remove build_command or configure explicit build ownership: homeboy component set {} --replace build_command",
-                component.id
-            );
-        }
-        return Ok(ResolvedBuildCommand::ComponentDefined(cmd.clone()));
-    }
-
-    // Check if any extension provides build (makes build_command optional)
     if extension::extension_provides_build(component) {
-        // Extension provides build config but no matching scripts found
         Err(Error::validation_invalid_argument(
             "buildCommand",
             format!(
@@ -132,13 +106,14 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
             None,
         ))
     } else {
-        // No extensions with build support - explicit buildCommand required
         Err(Error::validation_invalid_argument(
-            "buildCommand",
-            format!("Component '{}' has no build configuration", component.id),
+            "extensions",
+            format!(
+                "Component '{}' has no linked extension with build support",
+                component.id
+            ),
             Some(component.id.clone()),
             Some(vec![
-                format!("Configure buildCommand: homeboy component set {} --json '{{\"buildCommand\": \"<command>\"}}'", component.id),
                 format!("Link an extension with build support: homeboy component set {} --extension <extension_id>", component.id),
             ]),
         ))
