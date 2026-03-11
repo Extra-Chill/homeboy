@@ -344,7 +344,7 @@ fn resolve_extension_context(
             ExtensionScope::resolve_component_scope(extension, &loaded_project, component_id)?;
 
         if let Some(ref comp_id) = resolved_component_id {
-            component = Some(component::load(comp_id).map_err(|_| {
+            component = Some(project::resolve_project_component(&loaded_project, comp_id).map_err(|_| {
                 Error::config(format!(
                     "Component {} required by extension {} is not configured",
                     comp_id, &extension.id
