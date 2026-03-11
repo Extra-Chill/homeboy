@@ -265,12 +265,8 @@ pub fn run(args: InitArgs, _global: &super::GlobalArgs) -> CmdResult<InitOutput>
     let show_all = args.all || relevant_ids.is_empty();
 
     // Filter components and calculate release state
-    let filtered_components = collect_focused_components(
-        show_all,
-        &relevant_ids,
-        all_components,
-        &all_projects,
-    );
+    let filtered_components =
+        collect_focused_components(show_all, &relevant_ids, all_components, &all_projects);
 
     // Wrap components with release state and gaps
     let cwd = std::env::current_dir().ok();

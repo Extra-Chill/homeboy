@@ -91,10 +91,8 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
     let managed = !matched.is_empty();
 
     // Check for contained components (monorepo pattern)
-    let all_local_components: Vec<component::Component> = components
-        .into_iter()
-        .chain(attached_components)
-        .collect();
+    let all_local_components: Vec<component::Component> =
+        components.into_iter().chain(attached_components).collect();
 
     let contained: Vec<&component::Component> = all_local_components
         .iter()

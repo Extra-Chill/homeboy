@@ -585,7 +585,13 @@ fn update_project_references(old_id: &str, new_id: &str) -> Result<()> {
         if project::has_component(&proj, old_id) {
             let updated_ids: Vec<String> = project::project_component_ids(&proj)
                 .into_iter()
-                .map(|comp_id| if comp_id == old_id { new_id.to_string() } else { comp_id })
+                .map(|comp_id| {
+                    if comp_id == old_id {
+                        new_id.to_string()
+                    } else {
+                        comp_id
+                    }
+                })
                 .collect();
             project::set_components(&proj.id, updated_ids)?;
         }

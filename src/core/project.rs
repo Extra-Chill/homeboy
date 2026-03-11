@@ -333,7 +333,10 @@ entity_crud!(Project; list_ids, merge, slugify_id);
 // ============================================================================
 
 fn component_ids_from_attachments(components: &[ProjectComponentAttachment]) -> Vec<String> {
-    components.iter().map(|component| component.id.clone()).collect()
+    components
+        .iter()
+        .map(|component| component.id.clone())
+        .collect()
 }
 
 fn sync_components_and_ids(project: &mut Project) {
@@ -356,7 +359,10 @@ pub fn project_component_ids(project: &Project) -> Vec<String> {
 }
 
 pub fn has_component(project: &Project, component_id: &str) -> bool {
-    project.components.iter().any(|component| component.id == component_id)
+    project
+        .components
+        .iter()
+        .any(|component| component.id == component_id)
 }
 
 pub fn set_components(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
