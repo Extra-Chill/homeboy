@@ -158,8 +158,7 @@ pub(crate) fn extract_php(content: &str) -> Vec<ExtractedClass> {
         .unwrap_or_default();
 
     let class_re =
-        Regex::new(r"(?m)^(?:abstract\s+)?(?:final\s+)?(class|trait|interface)\s+(\w+)")
-            .unwrap();
+        Regex::new(r"(?m)^(?:abstract\s+)?(?:final\s+)?(class|trait|interface)\s+(\w+)").unwrap();
 
     for cap in class_re.captures_iter(content) {
         let kind = cap[1].to_string();
@@ -281,8 +280,11 @@ pub(crate) fn extract_rust(content: &str) -> Vec<ExtractedClass> {
 }
 
 fn extract_rust_impl_methods(content: &str, type_name: &str) -> Vec<ExtractedMethod> {
-    let impl_re = Regex::new(&format!(r"impl(?:<[^>]*>)?\s+{}\b", regex::escape(type_name)))
-        .unwrap();
+    let impl_re = Regex::new(&format!(
+        r"impl(?:<[^>]*>)?\s+{}\b",
+        regex::escape(type_name)
+    ))
+    .unwrap();
     let fn_re = Regex::new(r"(?m)^\s*(pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([^)]*)\)")
         .unwrap();
 
@@ -627,7 +629,11 @@ pub fn scaffold_untested(
         vec!["src", "inc", "lib"]
     };
 
-    let ext = if config.language == "rust" { "rs" } else { "php" };
+    let ext = if config.language == "rust" {
+        "rs"
+    } else {
+        "php"
+    };
 
     let mut source_files = Vec::new();
     for dir in &source_dirs {
@@ -729,7 +735,10 @@ pub fn extract_with_grammar(content: &str, grammar_def: &grammar::Grammar) -> Ve
     if !type_symbols.is_empty() {
         for symbol in &type_symbols {
             let name = symbol.name().unwrap_or("").to_string();
-            let kind = symbol.get("kind").unwrap_or(symbol.concept.as_str()).to_string();
+            let kind = symbol
+                .get("kind")
+                .unwrap_or(symbol.concept.as_str())
+                .to_string();
 
             let methods: Vec<ExtractedMethod> = method_symbols
                 .iter()
@@ -756,7 +765,11 @@ pub fn extract_with_grammar(content: &str, grammar_def: &grammar::Grammar) -> Ve
                             "public"
                         }
                     } else if let Some(vis) = method.visibility() {
-                        if vis.contains("pub") { "pub" } else { "private" }
+                        if vis.contains("pub") {
+                            "pub"
+                        } else {
+                            "private"
+                        }
                     } else {
                         "public"
                     };
@@ -767,7 +780,9 @@ pub fn extract_with_grammar(content: &str, grammar_def: &grammar::Grammar) -> Ve
                         is_static: method
                             .get("modifiers")
                             .is_some_and(|mods| mods.contains("static"))
-                            || method.get("params").is_some_and(|params| !params.contains("self")),
+                            || method
+                                .get("params")
+                                .is_some_and(|params| !params.contains("self")),
                         line: method.line,
                         params: method.get("params").unwrap_or("").to_string(),
                     }
@@ -782,7 +797,11 @@ pub fn extract_with_grammar(content: &str, grammar_def: &grammar::Grammar) -> Ve
             });
         }
     } else if !method_symbols.is_empty() {
-        let kind = if grammar_def.language.id == "rust" { "module" } else { "procedural" };
+        let kind = if grammar_def.language.id == "rust" {
+            "module"
+        } else {
+            "procedural"
+        };
         let methods: Vec<ExtractedMethod> = method_symbols
             .iter()
             .map(|method| ExtractedMethod {

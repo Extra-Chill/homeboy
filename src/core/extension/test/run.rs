@@ -67,10 +67,9 @@ pub fn run_main_test_workflow(
     let results_file =
         std::env::temp_dir().join(format!("homeboy-test-results-{}.json", std::process::id()));
     let failures_file = if args.analyze {
-        Some(std::env::temp_dir().join(format!(
-            "homeboy-test-failures-{}.json",
-            std::process::id()
-        )))
+        Some(
+            std::env::temp_dir().join(format!("homeboy-test-failures-{}.json", std::process::id())),
+        )
     } else {
         None
     };
@@ -103,7 +102,9 @@ pub fn run_main_test_workflow(
         None
     };
 
-    let changed_test_files = changed_scope.as_ref().map(|scope| scope.selected_files.as_slice());
+    let changed_test_files = changed_scope
+        .as_ref()
+        .map(|scope| scope.selected_files.as_slice());
 
     if let Some(ref scope) = changed_scope {
         if scope.selected_files.is_empty() {
@@ -112,7 +113,10 @@ pub fn run_main_test_workflow(
                     "No impacted tests found for --changed-since {}",
                     scope.changed_since.as_deref().unwrap_or("unknown")
                 ),
-                format!("Run full suite if needed: homeboy test {}", args.component_id),
+                format!(
+                    "Run full suite if needed: homeboy test {}",
+                    args.component_id
+                ),
             ]);
 
             return Ok(TestRunWorkflowResult {
@@ -158,8 +162,8 @@ pub fn run_main_test_workflow(
     .script_args(&args.passthrough_args)
     .run()?;
 
-    let test_counts = parse_test_results_file(&results_file)
-        .or_else(|| parse_test_results_text(&output.stdout));
+    let test_counts =
+        parse_test_results_file(&results_file).or_else(|| parse_test_results_text(&output.stdout));
     let _ = std::fs::remove_file(&results_file);
 
     let test_autofix = planned_autofix
@@ -167,7 +171,11 @@ pub fn run_main_test_workflow(
         .map(|(plan, outcome)| AppliedRefactor::from_plan(plan, outcome.rerun_recommended));
 
     let status = if let Some(ref counts) = test_counts {
-        if counts.failed == 0 { "passed" } else { "failed" }
+        if counts.failed == 0 {
+            "passed"
+        } else {
+            "failed"
+        }
     } else if output.success {
         "passed"
     } else {
@@ -188,7 +196,10 @@ pub fn run_main_test_workflow(
             .unwrap_or_else(|| TestAnalysisInput {
                 failures: Vec::new(),
                 total: test_counts.as_ref().map(|counts| counts.total).unwrap_or(0),
-                passed: test_counts.as_ref().map(|counts| counts.passed).unwrap_or(0),
+                passed: test_counts
+                    .as_ref()
+                    .map(|counts| counts.passed)
+                    .unwrap_or(0),
             });
 
         if let Some(ref file) = failures_file {
@@ -290,7 +301,11 @@ pub fn run_main_test_workflow(
     hints.push("Full options: homeboy docs commands/test".to_string());
 
     let hints = if hints.is_empty() { None } else { Some(hints) };
-    let test_exit_code = if status == "passed" { 0 } else { output.exit_code };
+    let test_exit_code = if status == "passed" {
+        0
+    } else {
+        output.exit_code
+    };
     let exit_code = baseline_exit_override.unwrap_or(test_exit_code);
     let summary = if args.json_summary {
         Some(build_test_summary(

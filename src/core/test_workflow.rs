@@ -1,7 +1,11 @@
 use crate::component::Component;
 use crate::extension::test::TestScopeOutput;
-use crate::refactor::{self, auto::{self, AutofixMode}, TransformSet};
 use crate::refactor::AppliedRefactor;
+use crate::refactor::{
+    self,
+    auto::{self, AutofixMode},
+    TransformSet,
+};
 use crate::test_analyze::TestAnalysis;
 use crate::test_baseline::{TestBaselineComparison, TestCounts};
 use crate::test_drift::{self, DriftOptions, DriftReport};
@@ -80,7 +84,11 @@ pub fn detect_test_drift(
             "drift",
             "{} production change{} detected",
             report.production_changes.len(),
-            if report.production_changes.len() == 1 { "" } else { "s" }
+            if report.production_changes.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
 
         for change in &report.production_changes {
@@ -121,9 +129,17 @@ pub fn detect_test_drift(
                 "drift",
                 "{} drifted reference{} in {} test file{}",
                 report.drifted_tests.len(),
-                if report.drifted_tests.len() == 1 { "" } else { "s" },
+                if report.drifted_tests.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
                 report.total_drifted_files,
-                if report.total_drifted_files == 1 { "" } else { "s" },
+                if report.total_drifted_files == 1 {
+                    ""
+                } else {
+                    "s"
+                },
             );
 
             for drift in report.drifted_tests.iter().take(20) {
@@ -157,7 +173,11 @@ pub fn detect_test_drift(
         }
     }
 
-    let exit_code = if report.drifted_tests.is_empty() { 0 } else { 1 };
+    let exit_code = if report.drifted_tests.is_empty() {
+        0
+    } else {
+        1
+    };
 
     Ok(DriftWorkflowResult {
         component: component_id.to_string(),
@@ -223,7 +243,11 @@ pub fn auto_fix_test_drift(
             "test",
             "Applied {} replacement{} across {} file{}",
             result.total_replacements,
-            if result.total_replacements == 1 { "" } else { "s" },
+            if result.total_replacements == 1 {
+                ""
+            } else {
+                "s"
+            },
             result.total_files,
             if result.total_files == 1 { "" } else { "s" },
         );
@@ -273,6 +297,10 @@ pub fn auto_fix_test_drift(
             ..output
         },
         hints: outcome.hints,
-        report: if include_report { Some(drift_report) } else { None },
+        report: if include_report {
+            Some(drift_report)
+        } else {
+            None
+        },
     })
 }

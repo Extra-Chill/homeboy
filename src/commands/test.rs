@@ -4,17 +4,18 @@ use std::path::PathBuf;
 
 use homeboy::component::Component;
 use homeboy::extension::test as extension_test;
-use homeboy::extension::test::{CoverageOutput, TestRunWorkflowArgs, TestScopeOutput, TestSummaryOutput};
+use homeboy::extension::test::{
+    CoverageOutput, TestRunWorkflowArgs, TestScopeOutput, TestSummaryOutput,
+};
 use homeboy::refactor::AppliedRefactor;
+use homeboy::scaffold::ScaffoldConfig;
 use homeboy::test_analyze::TestAnalysis;
 use homeboy::test_baseline::{TestBaselineComparison, TestCounts};
 use homeboy::test_drift::DriftReport;
-use homeboy::scaffold::ScaffoldConfig;
 use homeboy::test_workflow;
 
 use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
-
 
 #[derive(Args)]
 pub struct TestArgs {
@@ -550,8 +551,8 @@ fn run_scaffold(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::refactor::TestSourceOptions;
     use homeboy::refactor::test_refactor_request;
+    use homeboy::refactor::TestSourceOptions;
 
     #[test]
     fn filter_strips_boolean_flags() {

@@ -627,21 +627,21 @@ fn run_lint_stage(
         options.category.as_deref(),
         &findings_file_str,
     )?
-        .env_if(
-            plan_mode,
-            "HOMEBOY_FIX_PLAN_FILE",
-            &fix_sidecars
-                .plan_file
-                .as_ref()
-                .expect("plan sidecar initialized")
-                .to_string_lossy(),
-        )
-        .env_if(
-            plan_mode,
-            "HOMEBOY_FIX_RESULTS_FILE",
-            &fix_sidecars.results_file.to_string_lossy(),
-        )
-        .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1");
+    .env_if(
+        plan_mode,
+        "HOMEBOY_FIX_PLAN_FILE",
+        &fix_sidecars
+            .plan_file
+            .as_ref()
+            .expect("plan sidecar initialized")
+            .to_string_lossy(),
+    )
+    .env_if(
+        plan_mode,
+        "HOMEBOY_FIX_RESULTS_FILE",
+        &fix_sidecars.results_file.to_string_lossy(),
+    )
+    .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1");
 
     runner.run()?;
 
@@ -714,21 +714,21 @@ fn run_test_stage(
         None,
         selected_test_files,
     )?
-        .env_if(
-            plan_mode,
-            "HOMEBOY_FIX_PLAN_FILE",
-            &fix_sidecars
-                .plan_file
-                .as_ref()
-                .expect("plan sidecar initialized")
-                .to_string_lossy(),
-        )
-        .env_if(
-            plan_mode,
-            "HOMEBOY_FIX_RESULTS_FILE",
-            &fix_sidecars.results_file.to_string_lossy(),
-        )
-        .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1");
+    .env_if(
+        plan_mode,
+        "HOMEBOY_FIX_PLAN_FILE",
+        &fix_sidecars
+            .plan_file
+            .as_ref()
+            .expect("plan sidecar initialized")
+            .to_string_lossy(),
+    )
+    .env_if(
+        plan_mode,
+        "HOMEBOY_FIX_RESULTS_FILE",
+        &fix_sidecars.results_file.to_string_lossy(),
+    )
+    .env_if(plan_mode, "HOMEBOY_AUTO_FIX", "1");
 
     if !options.script_args.is_empty() {
         runner = runner.script_args(&options.script_args);

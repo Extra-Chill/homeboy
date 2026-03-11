@@ -446,7 +446,8 @@ fn validate_code_quality(component: &Component) -> Result<()> {
             None,
             &lint_findings_file_str,
         )
-        .and_then(|runner| runner.run()) {
+        .and_then(|runner| runner.run())
+        {
             Ok(output) => {
                 checks_run += 1;
 
@@ -524,7 +525,8 @@ fn validate_code_quality(component: &Component) -> Result<()> {
             None,
             None,
         )
-        .and_then(|runner| runner.run()) {
+        .and_then(|runner| runner.run())
+        {
             Ok(output) if output.success => {
                 log_status!("release", "Tests passed");
                 checks_run += 1;

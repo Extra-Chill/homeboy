@@ -52,7 +52,9 @@ pub fn build_test_summary(
     } else {
         let total = analysis.map(|analysis| analysis.total_tests).unwrap_or(0);
         let passed = analysis.map(|analysis| analysis.total_passed).unwrap_or(0);
-        let failed = analysis.map(|analysis| analysis.total_failures as u64).unwrap_or(0);
+        let failed = analysis
+            .map(|analysis| analysis.total_failures as u64)
+            .unwrap_or(0);
         let skipped = total.saturating_sub(passed + failed);
         (total, passed, failed, skipped)
     };
@@ -107,10 +109,22 @@ pub fn parse_test_results_file(path: &std::path::Path) -> Option<TestCounts> {
     let content = io::read_file(path, "read test results file").ok()?;
     let data: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-    let total = data.get("total").and_then(|value| value.as_u64()).unwrap_or(0);
-    let passed = data.get("passed").and_then(|value| value.as_u64()).unwrap_or(0);
-    let failed = data.get("failed").and_then(|value| value.as_u64()).unwrap_or(0);
-    let skipped = data.get("skipped").and_then(|value| value.as_u64()).unwrap_or(0);
+    let total = data
+        .get("total")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let passed = data
+        .get("passed")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let failed = data
+        .get("failed")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let skipped = data
+        .get("skipped")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
 
     Some(TestCounts::new(total, passed, failed, skipped))
 }
@@ -179,10 +193,22 @@ pub fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<Covera
     let lines = totals.get("lines").ok_or(())?;
     let methods = totals.get("methods").ok_or(())?;
 
-    let lines_pct = lines.get("pct").and_then(|value| value.as_f64()).unwrap_or(0.0);
-    let lines_total = lines.get("total").and_then(|value| value.as_u64()).unwrap_or(0);
-    let lines_covered = lines.get("covered").and_then(|value| value.as_u64()).unwrap_or(0);
-    let methods_pct = methods.get("pct").and_then(|value| value.as_f64()).unwrap_or(0.0);
+    let lines_pct = lines
+        .get("pct")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let lines_total = lines
+        .get("total")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let lines_covered = lines
+        .get("covered")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let methods_pct = methods
+        .get("pct")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
 
     let uncovered_files = data
         .get("files")

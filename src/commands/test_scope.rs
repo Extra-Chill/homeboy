@@ -1,7 +1,6 @@
 use clap::Args;
 use serde::Serialize;
 
-
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
@@ -32,8 +31,8 @@ pub fn run(args: TestScopeArgs, _global: &GlobalArgs) -> CmdResult<TestScopeComm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::component::Component;
     use homeboy::code_audit::is_test_path;
+    use homeboy::component::Component;
     use homeboy::extension::test::compute_changed_test_scope;
     use std::fs;
     use std::process::Command;

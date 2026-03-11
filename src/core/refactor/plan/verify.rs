@@ -150,7 +150,8 @@ pub fn run_audit_refactor(
                 iteration_summary.findings_after = current_result.findings.len();
                 iteration_summary.weighted_score_after =
                     weighted_finding_score_with(&current_result, scoring);
-                iteration_summary.score_delta = score_delta(&current_result, &current_result, scoring);
+                iteration_summary.score_delta =
+                    score_delta(&current_result, &current_result, scoring);
                 iteration_summary.status = "stopped_no_safe_changes".to_string();
                 iterations.push(iteration_summary);
                 break;
