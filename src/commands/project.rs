@@ -396,7 +396,7 @@ fn show(project_id: &str) -> CmdResult<ProjectOutput> {
             "Local project: Commands execute on this machine. Only deploy requires a server."
                 .to_string(),
         )
-    } else if project.component_ids.is_empty() {
+    } else if project.components.is_empty() {
         Some(format!(
             "No components linked. Use: homeboy project components add {} <component-id>",
             project.id
@@ -463,15 +463,15 @@ fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
     }
 
     // Check components
-    if project.component_ids.is_empty() {
+    if project.components.is_empty() {
         blockers.push(format!(
             "No components linked - add with: homeboy project components add {} <component-id>",
             project.id
         ));
     } else {
         // Check if at least one component is actually deployable (has artifact or git strategy)
-        let has_deployable = project.component_ids.iter().any(|id| {
-            if let Ok(comp) = project::resolve_project_component(project, id) {
+        let has_deployable = project.components.iter().any(|attachment| {
+            if let Ok(comp) = project::resolve_project_component(project, &attachment.id) {
                 let is_git = comp.deploy_strategy.as_deref() == Some("git");
                 let has_artifact = component::resolve_artifact(&comp).is_some();
                 is_git || has_artifact
@@ -482,7 +482,7 @@ fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
         if !has_deployable {
             blockers.push(format!(
                 "No deployable components - {} component(s) exist but none have a build artifact or deploy strategy configured",
-                project.component_ids.len()
+                project.components.len()
             ));
         }
     }

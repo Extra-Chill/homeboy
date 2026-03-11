@@ -74,7 +74,7 @@ pub fn run(
             )
         })?;
 
-        if proj.component_ids.is_empty() {
+        if proj.components.is_empty() {
             return Err(homeboy::Error::validation_invalid_argument(
                 "project_id",
                 format!("Project '{}' has no components configured", target_id),
@@ -99,7 +99,7 @@ pub fn run(
         let proj = project::load(&project_id)?;
         let invalid: Vec<_> = component_ids
             .iter()
-            .filter(|c| !proj.component_ids.contains(c))
+            .filter(|c| !project::has_component(&proj, c))
             .collect();
 
         if !invalid.is_empty() {
@@ -117,7 +117,7 @@ pub fn run(
                 None,
                 Some(vec![format!(
                     "Project components: {}",
-                    proj.component_ids.join(", ")
+                    project::project_component_ids(&proj).join(", ")
                 )]),
             ));
         }

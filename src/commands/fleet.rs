@@ -453,8 +453,8 @@ fn status(id: &str, cached: bool, health_only: bool) -> CmdResult<FleetOutput> {
             };
 
             let mut component_statuses = Vec::new();
-            for component_id in &proj.component_ids {
-                let comp_version = match project::resolve_project_component(&proj, component_id) {
+            for component_id in project::project_component_ids(&proj) {
+                let comp_version = match project::resolve_project_component(&proj, &component_id) {
                     Ok(comp) => version::get_component_version(&comp),
                     Err(_) => None,
                 };
@@ -540,9 +540,9 @@ fn status(id: &str, cached: bool, health_only: bool) -> CmdResult<FleetOutput> {
                     );
 
                     let mut component_statuses = Vec::new();
-                    for component_id in &proj.component_ids {
+                    for component_id in project::project_component_ids(&proj) {
                         let comp_version =
-                            match project::resolve_project_component(&proj, component_id) {
+                            match project::resolve_project_component(&proj, &component_id) {
                                 Ok(comp) => version::get_component_version(&comp),
                                 Err(_) => None,
                             };

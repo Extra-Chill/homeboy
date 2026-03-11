@@ -61,7 +61,7 @@ impl ExtensionScope {
 
         // Required components must be linked to the project
         for required in &requires.components {
-            if !project.component_ids.iter().any(|c| c == required) {
+            if !crate::project::has_component(project, required) {
                 return Err(Error::validation_invalid_argument(
                     "project.componentIds",
                     format!(
@@ -94,7 +94,7 @@ impl ExtensionScope {
 
         let matching_component_ids: Vec<String> = required_components
             .iter()
-            .filter(|required_id| project.component_ids.iter().any(|id| id == *required_id))
+            .filter(|required_id| crate::project::has_component(project, required_id))
             .cloned()
             .collect();
 
