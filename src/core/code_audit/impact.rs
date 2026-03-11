@@ -126,7 +126,8 @@ pub fn fingerprint_from_git_ref(
 
     // Get file content from the git ref
     let git_spec = format!("{}:{}", git_ref, relative_path);
-    let content = crate::engine::command::run_in_optional(source_path, "git", &["show", &git_spec])?;
+    let content =
+        crate::engine::command::run_in_optional(source_path, "git", &["show", &git_spec])?;
 
     // Find the extension for this file type
     let ext = Path::new(relative_path).extension()?.to_str()?;

@@ -1,13 +1,13 @@
 use std::path::Path;
 
-use crate::release::changelog;
 use crate::component::{self, Component};
 use crate::core::local_files::FileSystem;
 use crate::engine::pipeline::{self, PipelineStep};
+use crate::engine::validation::ValidationCollector;
 use crate::error::{Error, ErrorCode, Result};
 use crate::extension::{self, ExtensionManifest};
 use crate::git::{self, UncommittedChanges};
-use crate::engine::validation::ValidationCollector;
+use crate::release::changelog;
 use crate::version;
 
 use super::executor::ReleaseStepExecutor;
@@ -461,8 +461,11 @@ fn validate_code_quality(component: &Component) -> Result<()> {
                             .unwrap_or_default();
                     let _ = std::fs::remove_file(&lint_findings_file);
 
-                    if let Some(baseline) = crate::extension::lint::baseline::load_baseline(source_path) {
-                        let comparison = crate::extension::lint::baseline::compare(&findings, &baseline);
+                    if let Some(baseline) =
+                        crate::extension::lint::baseline::load_baseline(source_path)
+                    {
+                        let comparison =
+                            crate::extension::lint::baseline::compare(&findings, &baseline);
                         if comparison.drift_increased {
                             log_status!(
                                 "release",

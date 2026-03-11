@@ -57,7 +57,11 @@ pub fn run_in_optional(dir: &str, program: &str, args: &[&str]) -> Option<String
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() { None } else { Some(stdout) }
+    if stdout.is_empty() {
+        None
+    } else {
+        Some(stdout)
+    }
 }
 
 pub fn error_text(output: &Output) -> String {

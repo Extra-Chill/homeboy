@@ -1,10 +1,10 @@
 use crate::code_audit::is_test_path;
 use crate::component::Component;
 use crate::extension;
+use crate::extension::test::drift::{detect_drift, DriftOptions};
 use crate::git;
 use crate::refactor::auto as fixer;
 use crate::refactor::auto::{self, FixApplied, FixResultsSummary};
-use crate::extension::test::drift::{detect_drift, DriftOptions};
 use crate::undo::UndoSnapshot;
 use crate::Error;
 use serde::Serialize;
@@ -656,8 +656,8 @@ fn run_lint_stage(
 
     let fix_results = fix_sidecars.consume_fix_results();
     let fixes_proposed = fix_results.len();
-    let lint_findings = crate::extension::lint::baseline::parse_findings_file(&findings_file)
-        .unwrap_or_default();
+    let lint_findings =
+        crate::extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default();
     let _ = std::fs::remove_file(&findings_file);
 
     Ok(PlannedStage {

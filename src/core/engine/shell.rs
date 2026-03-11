@@ -22,7 +22,10 @@ pub fn quote_arg(arg: &str) -> String {
 }
 
 pub fn quote_args(args: &[String]) -> String {
-    args.iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" ")
+    args.iter()
+        .map(|a| quote_arg(a))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn normalize_args(args: &[String]) -> Vec<String> {
