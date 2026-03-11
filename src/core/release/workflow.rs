@@ -118,7 +118,11 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
 
     let new_version = extract_new_version_from_run(&run_result);
     let tag = new_version.as_ref().map(|v| format!("v{}", v));
-    let post_release_exit = if has_post_release_warnings(&run_result) { 3 } else { 0 };
+    let post_release_exit = if has_post_release_warnings(&run_result) {
+        3
+    } else {
+        0
+    };
     let (deployment, deploy_exit_code) = if input.deploy {
         execute_deployment(&input.component_id)
     } else {
@@ -363,8 +367,10 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
     let current_version = &version_info.version;
     let tag_name = format!("v{}", current_version);
 
-    let tag_exists_local = git::tag_exists_locally(&component.local_path, &tag_name).unwrap_or(false);
-    let tag_exists_remote = git::tag_exists_on_remote(&component.local_path, &tag_name).unwrap_or(false);
+    let tag_exists_local =
+        git::tag_exists_locally(&component.local_path, &tag_name).unwrap_or(false);
+    let tag_exists_remote =
+        git::tag_exists_on_remote(&component.local_path, &tag_name).unwrap_or(false);
     let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
 
     let mut actions = Vec::new();
@@ -479,7 +485,10 @@ mod tests {
             hints: vec![],
         };
 
-        assert_eq!(extract_new_version_from_plan(&plan).as_deref(), Some("1.2.3"));
+        assert_eq!(
+            extract_new_version_from_plan(&plan).as_deref(),
+            Some("1.2.3")
+        );
     }
 
     #[test]
