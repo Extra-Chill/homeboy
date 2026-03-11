@@ -766,7 +766,6 @@ pub fn validate_extension_requirements(component: &crate::component::Component) 
 }
 
 /// Check if any of the component's linked extensions provide build configuration.
-/// When true, the component's explicit build_command becomes optional.
 pub fn extension_provides_build(component: &crate::component::Component) -> bool {
     let extensions = match &component.extensions {
         Some(m) => m,

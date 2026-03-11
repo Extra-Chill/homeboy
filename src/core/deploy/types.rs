@@ -112,7 +112,6 @@ pub struct ComponentDeployResult {
     pub error: Option<String>,
     pub artifact_path: Option<String>,
     pub remote_path: Option<String>,
-    pub build_command: Option<String>,
     pub build_exit_code: Option<i32>,
     pub deploy_exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,7 +133,6 @@ impl ComponentDeployResult {
             error: None,
             artifact_path: component.build_artifact.clone(),
             remote_path: base_path::join_remote_path(Some(base_path), &component.remote_path).ok(),
-            build_command: component.build_command.clone(),
             build_exit_code: None,
             deploy_exit_code: None,
             release_state: None,

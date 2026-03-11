@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use crate::component;
 use crate::error::{Error, Result};
 use crate::extension;
-use crate::paths;
 use crate::project::{self, Project};
 use crate::server::{self, Server};
 use crate::ssh::SshClient;
@@ -24,8 +23,6 @@ pub struct ComponentGap {
 pub struct ContainedComponentInfo {
     pub id: String,
     pub build_artifact: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub build_command: Option<String>,
     pub remote_path: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<ComponentGap>,
@@ -244,41 +241,29 @@ pub fn build_component_info(component: &component::Component) -> ContainedCompon
     let mut gaps = Vec::new();
     let local_path = PathBuf::from(&component.local_path);
 
-    // Check for build configuration gaps
-    // Skip gap detection if:
-    // 1. Component has explicit buildCommand, OR
-    // 2. Component's extension provides a bundled build script
-    if component.build_command.is_none() {
-        let extension_provides_build = component
-            .extensions
-            .as_ref()
-            .map(|extensions| {
-                extensions.keys().any(|extension_id| {
-                    extension::load_extension(extension_id)
-                        .ok()
-                        .and_then(|m| m.build)
-                        .and_then(|b| b.extension_script)
-                        .and_then(|script| {
-                            paths::extension(extension_id)
-                                .ok()
-                                .map(|dir| dir.join(&script).exists())
-                        })
-                        .unwrap_or(false)
-                })
+    // Check for build configuration gaps.
+    // Components should link an extension with build support.
+    let extension_provides_build = component
+        .extensions
+        .as_ref()
+        .map(|extensions| {
+            extensions.keys().any(|extension_id| {
+                extension::load_extension(extension_id)
+                    .ok()
+                    .is_some_and(|m| m.has_build())
             })
-            .unwrap_or(false);
+        })
+        .unwrap_or(false);
 
-        // Only flag as gap if extension doesn't provide build and local build.sh exists
-        if !extension_provides_build && local_path.join("build.sh").exists() {
-            gaps.push(ComponentGap {
-                field: "buildCommand".to_string(),
-                reason: "build.sh exists".to_string(),
-                command: format!(
-                    "homeboy component set {} --build-command \"./build.sh\"",
-                    component.id
-                ),
-            });
-        }
+    if !extension_provides_build && local_path.join("build.sh").exists() {
+        gaps.push(ComponentGap {
+            field: "extensions".to_string(),
+            reason: "build.sh exists but no linked extension provides build support".to_string(),
+            command: format!(
+                "homeboy component set {} --extension <extension_id>",
+                component.id
+            ),
+        });
     }
 
     // Check for missing build artifact when component appears deployable
@@ -353,7 +338,6 @@ pub fn build_component_info(component: &component::Component) -> ContainedCompon
     ContainedComponentInfo {
         id: component.id.clone(),
         build_artifact: component.build_artifact.clone().unwrap_or_default(),
-        build_command: component.build_command.clone(),
         remote_path: component.remote_path.clone(),
         gaps,
     }

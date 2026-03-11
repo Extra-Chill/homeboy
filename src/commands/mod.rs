@@ -44,10 +44,10 @@ pub(crate) struct GlobalArgs {}
 ///
 /// ```sh
 /// # Correct: explicit separator before dynamic flags
-/// homeboy component set my-component --json '{"type":"plugin"}' -- --build_command "npm run build"
+/// homeboy component set my-component --json '{"type":"plugin"}' -- --extract_command "unzip -o artifact.zip"
 ///
 /// # Incorrect: will fail with "unexpected argument"
-/// homeboy component set my-component --json '{"type":"plugin"}' --build_command "npm run build"
+/// homeboy component set my-component --json '{"type":"plugin"}' --extract_command "unzip -o artifact.zip"
 /// ```
 ///
 /// This is required because without the positional JSON spec, the parser

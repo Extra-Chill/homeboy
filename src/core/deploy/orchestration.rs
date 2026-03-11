@@ -2,7 +2,7 @@
 ///
 /// If the project has `component_overrides` entries for this component,
 /// merge them onto a clone. Only deploy-relevant fields are applied:
-/// `extract_command`, `remote_owner`, `build_command`, `build_artifact`,
+/// `extract_command`, `remote_owner`, `build_artifact`,
 /// `deploy_strategy`, and `hooks`.
 fn apply_component_overrides(component: &Component, project: &Project) -> Component {
     let overrides = match project.component_overrides.get(&component.id) {

@@ -490,12 +490,12 @@ mod tests {
             "component".into(),
             "set".into(),
             "my-plugin".into(),
-            "--build_command".into(),
-            "npm run build".into(),
+            "--extract_command".into(),
+            "unzip -o artifact.zip".into(),
         ];
         let result = normalize(args);
         assert_eq!(result[4], "--");
-        assert_eq!(result[5], "--build_command");
+        assert_eq!(result[5], "--extract_command");
     }
 
     #[test]
