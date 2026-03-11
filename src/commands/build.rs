@@ -80,7 +80,8 @@ pub fn run(
                 format!("Project '{}' has no components configured", target_id),
                 None,
                 Some(vec![format!(
-                    "Add components: homeboy project components add {} <component-id>",
+                    "Add components: homeboy project components add {} <component-id> or attach a repo: homeboy project components attach-path {} <component-id> <path>",
+                    target_id,
                     target_id
                 )]),
             ));

@@ -398,7 +398,8 @@ fn show(project_id: &str) -> CmdResult<ProjectOutput> {
         )
     } else if project.components.is_empty() {
         Some(format!(
-            "No components linked. Use: homeboy project components add {} <component-id>",
+            "No components linked. Use: homeboy project components add {} <component-id> or homeboy project components attach-path {} <component-id> <path>",
+            project.id,
             project.id
         ))
     } else {
@@ -465,7 +466,8 @@ fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
     // Check components
     if project.components.is_empty() {
         blockers.push(format!(
-            "No components linked - add with: homeboy project components add {} <component-id>",
+            "No components linked - add with: homeboy project components add {} <component-id> or attach a repo: homeboy project components attach-path {} <component-id> <path>",
+            project.id,
             project.id
         ));
     } else {
