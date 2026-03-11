@@ -132,3 +132,29 @@ with open(sys.argv[1], "w") as f:
     json.dump(tooling, f)
 ' "${file_path}"
 }
+
+is_refactor_owning_section() {
+  local section_key="${SECTION_KEY:-}"
+  local section_title="${SECTION_TITLE:-}"
+  local commands_csv="${COMMANDS:-}"
+
+  case "${section_key}" in
+    refactor*|auto-refactor*|*refactor*)
+      return 0
+      ;;
+  esac
+
+  case "${section_title}" in
+    Refactor*|Auto-refactor*|*Refactor*)
+      return 0
+      ;;
+  esac
+
+  case "${commands_csv}" in
+    *refactor*)
+      return 0
+      ;;
+  esac
+
+  return 1
+}

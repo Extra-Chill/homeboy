@@ -6,6 +6,10 @@ source "${GITHUB_ACTION_PATH}/scripts/scope/context.sh"
 source "${GITHUB_ACTION_PATH}/scripts/pr/comment/lib.sh"
 
 append_autofix_section() {
+  if ! is_refactor_owning_section; then
+    return 0
+  fi
+
   if [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_COMMITTED:-}" = "true" ]; then
     local autofix_summary=":wrench: **Autofix applied**"
     if [ -n "${AUTOFIX_FILE_COUNT:-}" ] && [ -n "${AUTOFIX_FIX_TYPES:-}" ]; then
