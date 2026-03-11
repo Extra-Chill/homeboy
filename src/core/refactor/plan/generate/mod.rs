@@ -6,9 +6,7 @@ mod signatures;
 mod test_fixes;
 
 use crate::code_audit::{AuditFinding, CodeAuditResult};
-use crate::core::refactor::auto::{
-    DecomposeFixPlan, Fix, FixResult, SkippedFile,
-};
+use crate::core::refactor::auto::{DecomposeFixPlan, Fix, FixResult, SkippedFile};
 use crate::core::refactor::decompose;
 use std::path::Path;
 
@@ -17,18 +15,18 @@ use test_fixes::{apply_missing_test_file_fixes, apply_missing_test_method_fixes}
 
 pub(crate) use builders::{insertion, new_file};
 pub(crate) use doc_fixes::is_actionable_comment_finding;
-pub(crate) use duplicate_fixes::{generate_duplicate_function_fixes, generate_unreferenced_export_fixes};
+pub(crate) use duplicate_fixes::{
+    generate_duplicate_function_fixes, generate_unreferenced_export_fixes,
+};
 pub(crate) use signatures::{
     extract_signatures, extract_signatures_from_items, find_parsed_item_by_name,
     generate_fallback_signature, generate_method_stub, parse_items_for_dedup,
     primary_type_name_from_declaration,
 };
 pub(crate) use test_fixes::{
-    derive_expected_test_file_path,
-    extract_expected_test_method_from_fix_description, extract_source_file_from_test_stub,
-    mapping_from_source_comment, test_method_exists_in_file,
+    derive_expected_test_file_path, extract_expected_test_method_from_fix_description,
+    extract_source_file_from_test_stub, mapping_from_source_comment, test_method_exists_in_file,
 };
-
 
 pub fn generate_audit_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
     generate_fixes_impl(result, root)
@@ -57,7 +55,10 @@ pub(crate) fn merge_fixes_per_file(fixes: Vec<Fix>) -> Vec<Fix> {
         }
     }
 
-    order.into_iter().filter_map(|file| map.remove(&file)).collect()
+    order
+        .into_iter()
+        .filter_map(|file| map.remove(&file))
+        .collect()
 }
 
 pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixResult {

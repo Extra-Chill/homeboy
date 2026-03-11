@@ -154,8 +154,8 @@ pub(crate) fn generate_duplicate_function_fixes(
             .and_then(|ext| ext.to_str())
             .unwrap_or("");
         let language = detect_language(&canonical_abs);
-        let use_extract_shared =
-            matches!(language, Language::Php) && !crate::code_audit::is_test_path(&group.canonical_file);
+        let use_extract_shared = matches!(language, Language::Php)
+            && !crate::code_audit::is_test_path(&group.canonical_file);
 
         let canonical_content = match std::fs::read_to_string(&canonical_abs) {
             Ok(content) => content,
@@ -221,7 +221,8 @@ pub(crate) fn generate_duplicate_function_fixes(
             "all_file_paths": all_paths,
         });
 
-        let Some(result_val) = crate::extension::run_refactor_script(&manifest, &extract_cmd) else {
+        let Some(result_val) = crate::extension::run_refactor_script(&manifest, &extract_cmd)
+        else {
             generate_simple_duplicate_fixes(group, root, fixes, skipped);
             continue;
         };
@@ -255,8 +256,12 @@ pub(crate) fn generate_duplicate_function_fixes(
         }
 
         if let (Some(trait_file), Some(trait_content)) = (
-            result_val.get("trait_file").and_then(|value| value.as_str()),
-            result_val.get("trait_content").and_then(|value| value.as_str()),
+            result_val
+                .get("trait_file")
+                .and_then(|value| value.as_str()),
+            result_val
+                .get("trait_content")
+                .and_then(|value| value.as_str()),
         ) {
             if !new_files.iter().any(|new_file| new_file.file == trait_file) {
                 let trait_name = result_val
@@ -276,7 +281,10 @@ pub(crate) fn generate_duplicate_function_fixes(
             }
         }
 
-        if let Some(file_edits) = result_val.get("file_edits").and_then(|value| value.as_array()) {
+        if let Some(file_edits) = result_val
+            .get("file_edits")
+            .and_then(|value| value.as_array())
+        {
             for edit in file_edits {
                 let Some(file) = edit
                     .get("file")
@@ -290,8 +298,12 @@ pub(crate) fn generate_duplicate_function_fixes(
 
                 if let Some(remove_lines) = edit.get("remove_lines") {
                     if let (Some(start), Some(end)) = (
-                        remove_lines.get("start_line").and_then(|value| value.as_u64()),
-                        remove_lines.get("end_line").and_then(|value| value.as_u64()),
+                        remove_lines
+                            .get("start_line")
+                            .and_then(|value| value.as_u64()),
+                        remove_lines
+                            .get("end_line")
+                            .and_then(|value| value.as_u64()),
                     ) {
                         insertions.push(insertion(
                             InsertionKind::FunctionRemoval {

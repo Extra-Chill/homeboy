@@ -7,11 +7,11 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::signatures::MethodSignature;
 use super::{
     extract_signatures_from_items, generate_fallback_signature, generate_method_stub, insertion,
     primary_type_name_from_declaration,
 };
-use super::signatures::MethodSignature;
 
 pub(crate) fn generate_import_statement(import_path: &str, language: &Language) -> String {
     match language {
@@ -249,7 +249,10 @@ pub(super) fn apply_convention_fixes(
                     InsertionKind::TypeConformance,
                     AuditFinding::MissingInterface,
                     generate_type_conformance_declaration(&type_name, conformance, &language),
-                    format!("Add declared conformance `{}` to {}", conformance, type_name),
+                    format!(
+                        "Add declared conformance `{}` to {}",
+                        conformance, type_name
+                    ),
                 ));
             }
 
@@ -332,7 +335,10 @@ pub(super) fn apply_convention_fixes(
                         InsertionKind::MethodStub,
                         AuditFinding::MissingMethod,
                         generate_method_stub(sig),
-                        format!("Add {}() stub to match {} convention", method_name, conv_report.name),
+                        format!(
+                            "Add {}() stub to match {} convention",
+                            method_name, conv_report.name
+                        ),
                     ));
                 } else {
                     let fallback_sig = generate_fallback_signature(method_name, &language);

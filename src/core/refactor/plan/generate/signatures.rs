@@ -35,7 +35,10 @@ fn stub_body(method_name: &str, language: &Language) -> String {
         }
         Language::Rust => format!("        todo!(\"{}\")", method_name),
         Language::JavaScript | Language::TypeScript => {
-            format!("        throw new Error('Not implemented: {}');", method_name)
+            format!(
+                "        throw new Error('Not implemented: {}');",
+                method_name
+            )
         }
         Language::Unknown => String::new(),
     }

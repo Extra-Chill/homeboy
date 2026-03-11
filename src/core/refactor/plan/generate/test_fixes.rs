@@ -106,7 +106,9 @@ pub(crate) fn generate_test_file_candidate(
     source_file: &str,
 ) -> Option<TestFileCandidate> {
     if let Some(scaffolded) = generate_test_file_from_scaffold(root, test_file, source_file) {
-        return Some(TestFileCandidate { content: scaffolded });
+        return Some(TestFileCandidate {
+            content: scaffolded,
+        });
     }
 
     Some(TestFileCandidate {
@@ -370,7 +372,9 @@ pub(super) fn apply_missing_test_method_fixes(
                 )],
                 applied: false,
             });
-        } else if let Some(existing) = new_files.iter_mut().find(|new_file| new_file.file == test_file)
+        } else if let Some(existing) = new_files
+            .iter_mut()
+            .find(|new_file| new_file.file == test_file)
         {
             if !existing.content.contains(&expected_test_method) {
                 existing.content.push('\n');
