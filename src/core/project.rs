@@ -454,7 +454,9 @@ pub fn remove_components(project_id: &str, component_ids: Vec<String>) -> Result
     project
         .component_ids
         .retain(|id| !component_ids.contains(id));
-    project.components.retain(|component| !component_ids.contains(&component.id));
+    project
+        .components
+        .retain(|component| !component_ids.contains(&component.id));
     save(&project)?;
     Ok(project.component_ids)
 }
@@ -512,20 +514,29 @@ pub fn apply_component_overrides(
     merged
 }
 
-pub fn resolve_project_component(project: &Project, component_id: &str) -> Result<crate::component::Component> {
-    let component = if let Some(attachment) = project.components.iter().find(|component| component.id == component_id) {
+pub fn resolve_project_component(
+    project: &Project,
+    component_id: &str,
+) -> Result<crate::component::Component> {
+    let component = if let Some(attachment) = project
+        .components
+        .iter()
+        .find(|component| component.id == component_id)
+    {
         if let Some(local_path) = &attachment.local_path {
-            crate::component::discover_from_portable(std::path::Path::new(local_path)).ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "components.local_path",
-                    format!(
-                        "Project component '{}' points to '{}' but no homeboy.json was found",
-                        component_id, local_path
-                    ),
-                    Some(project.id.clone()),
-                    None,
-                )
-            })?
+            crate::component::discover_from_portable(std::path::Path::new(local_path)).ok_or_else(
+                || {
+                    Error::validation_invalid_argument(
+                        "components.local_path",
+                        format!(
+                            "Project component '{}' points to '{}' but no homeboy.json was found",
+                            component_id, local_path
+                        ),
+                        Some(project.id.clone()),
+                        None,
+                    )
+                },
+            )?
         } else {
             crate::component::load(component_id)?
         }

@@ -541,10 +541,11 @@ fn status(id: &str, cached: bool, health_only: bool) -> CmdResult<FleetOutput> {
 
                     let mut component_statuses = Vec::new();
                     for component_id in &proj.component_ids {
-                        let comp_version = match project::resolve_project_component(&proj, component_id) {
-                            Ok(comp) => version::get_component_version(&comp),
-                            Err(_) => None,
-                        };
+                        let comp_version =
+                            match project::resolve_project_component(&proj, component_id) {
+                                Ok(comp) => version::get_component_version(&comp),
+                                Err(_) => None,
+                            };
 
                         component_statuses.push(FleetComponentStatus {
                             component_id: component_id.clone(),

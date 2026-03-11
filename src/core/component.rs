@@ -1072,7 +1072,10 @@ mod tests {
         assert_eq!(comp.id, "homeboy-test-discover");
         assert_eq!(comp.local_path, dir.to_string_lossy());
         assert_eq!(comp.changelog_target.as_deref(), Some("docs/CHANGELOG.md"));
-        assert!(comp.extensions.as_ref().is_some_and(|m| m.contains_key("rust")));
+        assert!(comp
+            .extensions
+            .as_ref()
+            .is_some_and(|m| m.contains_key("rust")));
         assert!(comp.version_targets.is_some());
         assert!(comp.remote_path.is_empty()); // default
 
