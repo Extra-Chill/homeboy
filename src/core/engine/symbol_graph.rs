@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::utils::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use crate::utils::grammar::{self, Grammar};
+use crate::extension::grammar::{self, Grammar};
 
 // ============================================================================
 // Types
@@ -592,11 +592,11 @@ mod tests {
         if !grammar_path.exists() {
             return; // Skip if grammar not installed
         }
-        let grammar = crate::utils::grammar::load_grammar(grammar_path).unwrap();
+        let grammar = crate::extension::grammar::load_grammar(grammar_path).unwrap();
 
         let content = r#"use std::path::Path;
 use crate::core::fixer::{insertion, Fix};
-use crate::utils::grammar;
+use crate::extension::grammar;
 
 pub fn hello() {}
 "#;

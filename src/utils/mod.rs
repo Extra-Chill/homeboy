@@ -6,8 +6,6 @@
 //! - `codebase_scan` - File walking and content search across codebases
 //! - `command` - Command execution with error handling
 //! - `entity_suggest` - Entity suggestion for unrecognized CLI subcommands
-//! - `grammar` - Language-agnostic grammar engine (patterns, symbols, extraction)
-//! - `grammar_items` - Grammar-driven item parsing (boundaries, source extraction)
 //! - `io` - File I/O with consistent error handling
 //! - `parser` - Text extraction and manipulation
 //! - `resolve` - Project/component argument resolution
@@ -24,8 +22,6 @@ pub mod base_path;
 pub mod codebase_scan;
 pub mod command;
 pub mod entity_suggest;
-pub mod grammar;
-pub mod grammar_items;
 pub mod io;
 pub mod output_parse;
 pub mod parser;

@@ -582,7 +582,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::utils::grammar::{
+    use crate::extension::grammar::{
         BlockSyntax, CommentSyntax, ConceptPattern, Grammar, LanguageMeta, StringSyntax,
     };
 

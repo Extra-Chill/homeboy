@@ -115,7 +115,7 @@ pub(crate) fn parse_items_for_dedup(
     file_path: &str,
 ) -> Option<Vec<crate::extension::ParsedItem>> {
     if let Some(grammar) = crate::code_audit::core_fingerprint::load_grammar_for_ext(file_ext) {
-        let items = crate::utils::grammar_items::parse_items(content, &grammar);
+        let items = crate::extension::grammar_items::parse_items(content, &grammar);
         if !items.is_empty() {
             return Some(
                 items
@@ -155,7 +155,7 @@ pub(crate) fn extract_signatures_from_items(
         return Vec::new();
     };
 
-    let symbols = crate::utils::grammar::extract(content, &grammar);
+    let symbols = crate::extension::grammar::extract(content, &grammar);
     let lines: Vec<&str> = content.lines().collect();
 
     symbols

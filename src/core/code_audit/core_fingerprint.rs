@@ -40,7 +40,7 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::extension::{self, DeadCodeMarker, HookRef, UnusedParam};
-use crate::utils::grammar::{self, Grammar, Symbol};
+use crate::extension::grammar::{self, Grammar, Symbol};
 
 use super::conventions::Language;
 use super::fingerprint::FileFingerprint;

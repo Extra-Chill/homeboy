@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::scaffold::load_extension_grammar;
 use crate::extension::{self, ParsedItem};
-use crate::utils::grammar_items;
+use crate::extension::grammar_items;
 use crate::Result;
 
 use super::move_items::MoveOptions;

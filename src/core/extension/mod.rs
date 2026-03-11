@@ -1,4 +1,6 @@
 mod execution;
+pub mod grammar;
+pub mod grammar_items;
 pub mod lint;
 mod lifecycle;
 mod manifest;
@@ -519,8 +521,8 @@ pub struct ParsedItem {
     pub visibility: String,
 }
 
-impl From<crate::utils::grammar_items::GrammarItem> for ParsedItem {
-    fn from(gi: crate::utils::grammar_items::GrammarItem) -> Self {
+impl From<crate::extension::grammar_items::GrammarItem> for ParsedItem {
+    fn from(gi: crate::extension::grammar_items::GrammarItem) -> Self {
         Self {
             name: gi.name,
             kind: gi.kind,
