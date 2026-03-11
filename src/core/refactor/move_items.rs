@@ -18,7 +18,7 @@ use crate::core::scaffold::load_extension_grammar;
 use crate::extension::{
     self, AdjustedItem, ExtensionManifest, ParsedItem, RelatedTests, ResolvedImports,
 };
-use crate::utils::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use crate::extension::grammar_items;
 use crate::{component, Result};
 

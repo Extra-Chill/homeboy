@@ -9,6 +9,7 @@
 
 pub mod baseline;
 pub mod command;
+pub mod codebase_scan;
 pub mod executor;
 pub mod output_parse;
 pub mod pipeline;

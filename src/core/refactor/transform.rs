@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::utils::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use crate::utils::io;
 
 // ============================================================================
