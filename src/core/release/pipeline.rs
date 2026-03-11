@@ -19,7 +19,7 @@ use super::types::{
 
 /// Load a component with portable config fallback when path_override is set.
 /// In CI environments, the component may not be registered — only homeboy.json exists.
-fn load_component(component_id: &str, options: &ReleaseOptions) -> Result<Component> {
+pub(crate) fn load_component(component_id: &str, options: &ReleaseOptions) -> Result<Component> {
     match component::load(component_id) {
         Ok(mut comp) => {
             if let Some(ref path) = options.path_override {

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::engine::pipeline::{self, PipelinePlanStep, PipelineRunResult};
+use crate::utils::is_zero_u32;
 
 /// Internal step types for the release pipeline.
 /// These are used internally - the core flow is non-configurable.
@@ -152,4 +153,70 @@ pub struct ReleaseOptions {
     /// Use when CI handles publishing after the tag is pushed.
     #[serde(default)]
     pub skip_publish: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ReleaseCommandInput {
+    pub component_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_override: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub deploy: bool,
+    #[serde(default)]
+    pub recover: bool,
+    #[serde(default)]
+    pub skip_checks: bool,
+    #[serde(default)]
+    pub major: bool,
+    #[serde(default)]
+    pub skip_publish: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ReleaseDeploymentSummary {
+    pub total_projects: u32,
+    pub succeeded: u32,
+    pub failed: u32,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub skipped: u32,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub planned: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReleaseProjectDeployResult {
+    pub project_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_result: Option<crate::deploy::ComponentDeployResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReleaseDeploymentResult {
+    pub projects: Vec<ReleaseProjectDeployResult>,
+    pub summary: ReleaseDeploymentSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReleaseCommandResult {
+    pub component_id: String,
+    pub bump_type: String,
+    pub dry_run: bool,
+    pub releasable_commits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ReleasePlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<ReleaseRun>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<ReleaseDeploymentResult>,
 }
