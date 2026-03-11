@@ -45,7 +45,7 @@ pub fn resolve_project_components(first: &str, rest: &[String]) -> Result<(Strin
                 Ok((project_id, all_component_ids))
             } else {
                 // Build helpful error message
-                let associated_projects = component::projects_using(first).unwrap_or_default();
+                let associated_projects = component::associated_projects(first).unwrap_or_default();
 
                 let hint = if associated_projects.is_empty() {
                     format!(
@@ -111,7 +111,7 @@ pub fn infer_project_for_components(component_ids: &[String]) -> Option<String> 
     let mut common_projects: Option<Vec<String>> = None;
 
     for comp_id in component_ids {
-        let projects = component::projects_using(comp_id).unwrap_or_default();
+        let projects = component::associated_projects(comp_id).unwrap_or_default();
         if projects.is_empty() {
             return None; // Component has no project
         }

@@ -31,7 +31,7 @@ pub struct EffectiveChangelogSettings {
 
 pub fn resolve_effective_settings(component: Option<&Component>) -> EffectiveChangelogSettings {
     let project_settings = component
-        .and_then(|c| component::projects_using(&c.id).ok())
+        .and_then(|c| component::associated_projects(&c.id).ok())
         .and_then(|projects| {
             if projects.len() == 1 {
                 project::load(&projects[0]).ok()

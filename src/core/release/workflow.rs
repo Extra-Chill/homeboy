@@ -225,7 +225,7 @@ fn empty_deployment_summary(total_projects: u32) -> ReleaseDeploymentSummary {
 }
 
 fn plan_deployment(component_id: &str) -> ReleaseDeploymentResult {
-    let projects = component::projects_using(component_id).unwrap_or_default();
+    let projects = component::associated_projects(component_id).unwrap_or_default();
 
     if projects.is_empty() {
         log_status!(
@@ -252,7 +252,7 @@ fn plan_deployment(component_id: &str) -> ReleaseDeploymentResult {
 }
 
 fn execute_deployment(component_id: &str) -> (Option<ReleaseDeploymentResult>, i32) {
-    let projects = component::projects_using(component_id).unwrap_or_default();
+    let projects = component::associated_projects(component_id).unwrap_or_default();
 
     if projects.is_empty() {
         log_status!(

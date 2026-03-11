@@ -144,7 +144,7 @@ pub fn run(
 
         let mut project_ids: Vec<String> = Vec::new();
         for component_id in &component_ids {
-            let using = homeboy::component::projects_using(component_id).unwrap_or_default();
+            let using = homeboy::component::associated_projects(component_id).unwrap_or_default();
             for pid in using {
                 if !project_ids.contains(&pid) {
                     project_ids.push(pid);
