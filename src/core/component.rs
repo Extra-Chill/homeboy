@@ -342,7 +342,73 @@ where
 
 /// Fields that are machine-specific and must never come from portable config.
 /// These always come from the stored config (or are derived at runtime).
-const MACHINE_SPECIFIC_FIELDS: &[&str] = &["id", "aliases", "local_path", "remote_path"];
+const MACHINE_SPECIFIC_FIELDS: &[&str] = &["aliases", "local_path", "remote_path"];
+
+fn portable_component_id_from_value(portable: &Value, dir: &Path) -> Option<String> {
+    portable
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| crate::utils::slugify::slugify_id(id, "component_id").ok())
+        .flatten()
+        .or_else(|| {
+            let dir_name = dir.file_name()?.to_string_lossy();
+            crate::utils::slugify::slugify_id(&dir_name, "component_id").ok()
+        })
+}
+
+pub fn infer_portable_component_id(dir: &Path) -> Result<String> {
+    let portable = read_portable_config(dir)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "local_path",
+            format!("No homeboy.json found at {}", dir.display()),
+            None,
+            None,
+        )
+    })?;
+
+    portable_component_id_from_value(&portable, dir).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "id",
+            format!("Could not derive component ID from {}", dir.display()),
+            None,
+            None,
+        )
+    })
+}
+
+pub fn portable_json(component: &Component) -> Result<Value> {
+    let mut value = serde_json::to_value(component).map_err(|error| {
+        Error::validation_invalid_argument(
+            "component",
+            "Failed to serialize component to portable config",
+            Some(error.to_string()),
+            None,
+        )
+    })?;
+
+    let obj = value.as_object_mut().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "component",
+            "Portable component config must serialize to an object",
+            None,
+            None,
+        )
+    })?;
+
+    obj.insert("id".to_string(), Value::String(component.id.clone()));
+    obj.remove("aliases");
+    obj.remove("local_path");
+
+    Ok(value)
+}
+
+pub fn write_portable_config(dir: &Path, component: &Component) -> Result<()> {
+    let path = dir.join("homeboy.json");
+    let portable = portable_json(component)?;
+    let content = crate::config::to_string_pretty(&portable)?;
+    crate::utils::io::write_file_atomic(&path, &content, &format!("write {}", path.display()))
+}
 
 /// Overlay portable config as defaults under stored config.
 ///
@@ -735,14 +801,13 @@ pub fn detect_from_cwd() -> Option<String> {
 
 /// Create a virtual (unregistered) Component from a directory's `homeboy.json`.
 ///
-/// Derives `id` from the directory name (slugified) and sets `local_path`
-/// from the given path. All other fields come from the portable config.
+/// Uses portable `id` when present (falling back to the directory name)
+/// and sets `local_path` from the given path. All other fields come from the portable config.
 /// Returns None if no `homeboy.json` found or it can't be parsed.
 pub fn discover_from_portable(dir: &Path) -> Option<Component> {
     let portable = read_portable_config(dir).ok()??;
 
-    let dir_name = dir.file_name()?.to_string_lossy();
-    let id = crate::utils::slugify::slugify_id(&dir_name, "component_id").ok()?;
+    let id = portable_component_id_from_value(&portable, dir)?;
     let local_path = dir.to_string_lossy().to_string();
 
     // Start with portable config, inject machine-specific fields

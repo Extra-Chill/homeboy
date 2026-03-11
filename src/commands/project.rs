@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy::log_status;
 use serde::Serialize;
+use std::path::Path;
 
 use homeboy::component::{self, Component};
 use homeboy::deploy::{self, DeployConfig};
@@ -125,8 +126,6 @@ enum ProjectComponentsCommand {
     AttachPath {
         /// Project ID
         project_id: String,
-        /// Component ID to attach
-        component_id: String,
         /// Local repo path containing homeboy.json
         local_path: String,
     },
@@ -586,9 +585,8 @@ fn components(command: ProjectComponentsCommand) -> CmdResult<ProjectOutput> {
         } => components_add(&project_id, component_ids),
         ProjectComponentsCommand::AttachPath {
             project_id,
-            component_id,
             local_path,
-        } => components_attach_path(&project_id, &component_id, &local_path),
+        } => components_attach_path(&project_id, &local_path),
         ProjectComponentsCommand::Remove {
             project_id,
             component_ids,
@@ -632,12 +630,9 @@ fn components_add(project_id: &str, component_ids: Vec<String>) -> CmdResult<Pro
     write_project_components(project_id, "add", &project)
 }
 
-fn components_attach_path(
-    project_id: &str,
-    component_id: &str,
-    local_path: &str,
-) -> CmdResult<ProjectOutput> {
-    project::attach_component_path(project_id, component_id, local_path)?;
+fn components_attach_path(project_id: &str, local_path: &str) -> CmdResult<ProjectOutput> {
+    let component_id = component::infer_portable_component_id(Path::new(local_path))?;
+    project::attach_component_path(project_id, &component_id, local_path)?;
     let project = project::load(project_id)?;
     write_project_components(project_id, "attach_path", &project)
 }

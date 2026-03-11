@@ -17,7 +17,7 @@ pub struct ComponentArgs {
 
 #[derive(Subcommand)]
 enum ComponentCommand {
-    /// Create a new component configuration
+    /// Initialize portable component config for a repo
     Create {
         /// JSON input spec for create/update (supports single or bulk)
         #[arg(long)]
@@ -27,7 +27,7 @@ enum ComponentCommand {
         #[arg(long)]
         skip_existing: bool,
 
-        /// Absolute path to local source directory (ID derived from directory name)
+        /// Absolute path to local source directory (writes homeboy.json there)
         #[arg(long)]
         local_path: Option<String>,
         /// Remote path relative to project basePath
@@ -161,112 +161,86 @@ pub fn run(
             changelog_target,
             extensions,
         } => {
-            let json_spec = if let Some(spec) = json {
-                spec
-            } else {
-                let local_path = local_path.ok_or_else(|| {
+            if json.is_some() || skip_existing {
+                return Err(homeboy::Error::validation_invalid_argument(
+                    "component.create",
+                    "component create now initializes repo-owned homeboy.json from flags; JSON bulk create is legacy and no longer supported here",
+                    None,
+                    Some(vec![
+                        "Use: homeboy component create --local-path <path> [flags]".to_string(),
+                        "Then attach it to a project with: homeboy project components attach-path <project> <path>".to_string(),
+                    ]),
+                ));
+            }
+
+            let local_path = local_path.ok_or_else(|| {
+                homeboy::Error::validation_invalid_argument(
+                    "local_path",
+                    "Missing required argument: --local-path",
+                    None,
+                    Some(vec![
+                        "Initialize a repo: homeboy component create --local-path <path>".to_string(),
+                        "This writes portable config to <path>/homeboy.json".to_string(),
+                    ]),
+                )
+            })?;
+
+            let remote_path = remote_path.unwrap_or_default();
+            let repo_path = Path::new(&local_path);
+            let dir_name = repo_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| {
                     homeboy::Error::validation_invalid_argument(
                         "local_path",
-                        "Missing required argument: --local-path",
+                        "Could not derive component ID from local path",
+                        Some(local_path.clone()),
                         None,
-                        Some(vec![
-                            "Create from flags: homeboy component create --local-path <path>".to_string(),
-                            "Create from JSON: homeboy component create --json '{...}'".to_string(),
-                            "Tip: portable config in homeboy.json is applied automatically at load time".to_string(),
-                        ]),
                     )
                 })?;
 
-                let remote_path = remote_path.unwrap_or_default();
+            let id = component::slugify_id(dir_name)?;
+            let mut new_component = Component::new(id.clone(), local_path.clone(), remote_path, build_artifact);
 
-                let dir_name = Path::new(&local_path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .ok_or_else(|| {
-                        homeboy::Error::validation_invalid_argument(
-                            "local_path",
-                            "Could not derive component ID from local path",
-                            Some(local_path.clone()),
-                            None,
+            new_component.version_targets = if let Some(json_spec) = version_targets_json {
+                let raw = homeboy::config::read_json_spec_to_string(&json_spec)?;
+                serde_json::from_str::<Vec<homeboy::component::VersionTarget>>(&raw)
+                    .map_err(|e| {
+                        homeboy::Error::validation_invalid_json(
+                            e,
+                            Some("parse version targets JSON".to_string()),
+                            Some(raw.chars().take(200).collect::<String>()),
                         )
-                    })?;
-
-                let id = component::slugify_id(dir_name)?;
-
-                let mut new_component =
-                    Component::new(id.clone(), local_path, remote_path, build_artifact);
-
-                new_component.version_targets = if let Some(json_spec) = version_targets_json {
-                    let raw = homeboy::config::read_json_spec_to_string(&json_spec)?;
-                    serde_json::from_str::<Vec<homeboy::component::VersionTarget>>(&raw)
-                        .map_err(|e| {
-                            homeboy::Error::validation_invalid_json(
-                                e,
-                                Some("parse version targets JSON".to_string()),
-                                Some(raw.chars().take(200).collect::<String>()),
-                            )
-                        })?
-                        .into()
-                } else if !version_targets.is_empty() {
-                    Some(component::parse_version_targets(&version_targets)?)
-                } else {
-                    None
-                };
-
-                new_component.extract_command = extract_command;
-                new_component.changelog_target = changelog_target;
-
-                if !extensions.is_empty() {
-                    let mut extension_map = std::collections::HashMap::new();
-                    for extension_id in extensions {
-                        extension_map
-                            .insert(extension_id, component::ScopedExtensionConfig::default());
-                    }
-                    new_component.extensions = Some(extension_map);
-                }
-
-                homeboy::config::serialize_with_id(&new_component, &id)?
+                    })?
+                    .into()
+            } else if !version_targets.is_empty() {
+                Some(component::parse_version_targets(&version_targets)?)
+            } else {
+                None
             };
 
-            match component::create(&json_spec, skip_existing)? {
-                homeboy::CreateOutput::Single(result) => Ok((
-                    ComponentOutput {
-                        command: "component.create".to_string(),
-                        id: Some(result.id),
-                        entity: Some({
-                            let mut value =
-                                serde_json::to_value(&result.entity).map_err(|error| {
-                                    homeboy::Error::validation_invalid_argument(
-                                        "component",
-                                        "Failed to serialize component",
-                                        Some(error.to_string()),
-                                        None,
-                                    )
-                                })?;
-                            if let Value::Object(ref mut map) = value {
-                                map.insert(
-                                    "id".to_string(),
-                                    Value::String(result.entity.id.clone()),
-                                );
-                            }
-                            value
-                        }),
-                        ..Default::default()
-                    },
-                    0,
-                )),
-                homeboy::CreateOutput::Bulk(summary) => {
-                    let exit_code = summary.exit_code();
-                    Ok((
-                        ComponentOutput {
-                            command: "component.create".to_string(),
-                            import: Some(summary),
-                            ..Default::default()
-                        },
-                        exit_code,
-                    ))
+            new_component.extract_command = extract_command;
+            new_component.changelog_target = changelog_target;
+
+            if !extensions.is_empty() {
+                let mut extension_map = std::collections::HashMap::new();
+                for extension_id in extensions {
+                    extension_map.insert(extension_id, component::ScopedExtensionConfig::default());
                 }
+                new_component.extensions = Some(extension_map);
             }
+
+            component::write_portable_config(repo_path, &new_component)?;
+
+            Ok((
+                ComponentOutput {
+                    command: "component.create".to_string(),
+                    id: Some(id),
+                    entity: Some(component::portable_json(&new_component)?),
+                    ..Default::default()
+                },
+                0,
+            ))
         }
         ComponentCommand::Show { id } => show(&id),
         ComponentCommand::Set {
