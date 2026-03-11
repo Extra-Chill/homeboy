@@ -1,4 +1,7 @@
 use crate::component::Component;
+use crate::engine::temp;
+use crate::extension::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
+use crate::extension::test::baseline::{self, TestBaselineComparison, TestCounts};
 use crate::extension::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope, parse_coverage_file,
     parse_failures_file, parse_test_results_file, parse_test_results_text, CoverageOutput,
@@ -8,8 +11,6 @@ use crate::refactor::{
     auto::{self, AutofixMode},
     run_test_refactor, AppliedRefactor, TestSourceOptions,
 };
-use crate::extension::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
-use crate::extension::test::baseline::{self, TestBaselineComparison, TestCounts};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -60,16 +61,13 @@ pub fn run_main_test_workflow(
 
     let coverage_enabled = args.coverage || args.coverage_min.is_some();
     let coverage_file = if coverage_enabled {
-        Some(std::env::temp_dir().join(format!("homeboy-coverage-{}.json", std::process::id())))
+        Some(temp::runtime_temp_file("homeboy-coverage", ".json")?)
     } else {
         None
     };
-    let results_file =
-        std::env::temp_dir().join(format!("homeboy-test-results-{}.json", std::process::id()));
+    let results_file = temp::runtime_temp_file("homeboy-test-results", ".json")?;
     let failures_file = if args.analyze {
-        Some(
-            std::env::temp_dir().join(format!("homeboy-test-failures-{}.json", std::process::id())),
-        )
+        Some(temp::runtime_temp_file("homeboy-test-failures", ".json")?)
     } else {
         None
     };

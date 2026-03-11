@@ -1,11 +1,12 @@
 use clap::Args;
 use serde::Serialize;
 
+use homeboy::engine::temp;
 use homeboy::extension::lint as extension_lint;
-use homeboy::git;
 use homeboy::extension::lint::baseline::{
     self as lint_baseline, BaselineComparison as LintBaselineComparison, LintFinding,
 };
+use homeboy::git;
 use homeboy::refactor::{
     auto::{self, AutofixMode},
     run_lint_refactor, AppliedRefactor, LintSourceOptions,
@@ -87,14 +88,7 @@ pub struct LintOutput {
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintOutput> {
     let component = args.comp.load()?;
     let source_path = args.comp.source_path()?;
-    let lint_findings_file = std::env::temp_dir().join(format!(
-        "homeboy-lint-findings-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
+    let lint_findings_file = temp::runtime_temp_file("homeboy-lint-findings", ".json")?;
     // Resolve glob from --changed-only or --changed-since flags
     let effective_glob = if args.changed_only {
         let uncommitted = git::get_uncommitted_changes(&component.local_path)?;

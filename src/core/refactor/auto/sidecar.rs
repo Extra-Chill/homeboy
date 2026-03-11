@@ -1,4 +1,5 @@
 use super::outcome::{AutofixSidecarFiles, FixApplied};
+use crate::engine::temp;
 use std::path::Path;
 
 impl AutofixSidecarFiles {
@@ -63,23 +64,11 @@ pub fn read_fix_results(results_file: &Path, plan_file: Option<&Path>) -> Vec<Fi
 }
 
 pub fn fix_results_temp_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "homeboy-fix-results-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ))
+    temp::runtime_temp_file("homeboy-fix-results", ".json")
+        .expect("runtime temp path should be creatable for fix results")
 }
 
 pub fn fix_plan_temp_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "homeboy-fix-plan-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ))
+    temp::runtime_temp_file("homeboy-fix-plan", ".json")
+        .expect("runtime temp path should be creatable for fix plan")
 }

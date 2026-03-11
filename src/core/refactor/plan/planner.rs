@@ -1,10 +1,11 @@
 use crate::code_audit::is_test_path;
 use crate::component::Component;
+use crate::engine::temp;
 use crate::extension;
+use crate::extension::test::drift::{detect_drift, DriftOptions};
 use crate::git;
 use crate::refactor::auto as fixer;
 use crate::refactor::auto::{self, FixApplied, FixResultsSummary};
-use crate::extension::test::drift::{detect_drift, DriftOptions};
 use crate::undo::UndoSnapshot;
 use crate::Error;
 use serde::Serialize;
@@ -577,15 +578,7 @@ fn run_lint_stage(
 ) -> crate::Result<PlannedStage> {
     let mut sandbox_component = component.clone();
     sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
-    let findings_file = std::env::temp_dir().join(format!(
-        "homeboy-lint-findings-{}-{}-{}.json",
-        std::process::id(),
-        uuid::Uuid::new_v4(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
+    let findings_file = temp::runtime_temp_file("homeboy-lint-findings", ".json")?;
     let fix_sidecars = auto::AutofixSidecarFiles::for_plan();
     let before_fix = if plan_mode {
         Some(snapshot_tree(&sandbox_component.local_path)?)
@@ -656,8 +649,8 @@ fn run_lint_stage(
 
     let fix_results = fix_sidecars.consume_fix_results();
     let fixes_proposed = fix_results.len();
-    let lint_findings = crate::extension::lint::baseline::parse_findings_file(&findings_file)
-        .unwrap_or_default();
+    let lint_findings =
+        crate::extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default();
     let _ = std::fs::remove_file(&findings_file);
 
     Ok(PlannedStage {
@@ -687,11 +680,7 @@ fn run_test_stage(
 ) -> crate::Result<PlannedStage> {
     let mut sandbox_component = component.clone();
     sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
-    let results_file = std::env::temp_dir().join(format!(
-        "homeboy-test-results-{}-{}.json",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
+    let results_file = temp::runtime_temp_file("homeboy-test-results", ".json")?;
     let fix_sidecars = auto::AutofixSidecarFiles::for_plan();
     let before_fix = if plan_mode {
         Some(snapshot_tree(&sandbox_component.local_path)?)

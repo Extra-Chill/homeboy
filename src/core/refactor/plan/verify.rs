@@ -1,8 +1,9 @@
 use crate::code_audit::{self, is_test_path, CodeAuditResult};
 use crate::component::{self, Component};
+use crate::engine::temp;
+use crate::extension::test::drift::{detect_drift, DriftOptions};
 use crate::extension::{lint as extension_lint, test as extension_test};
 use crate::refactor::auto as fixer;
-use crate::extension::test::drift::{detect_drift, DriftOptions};
 use crate::undo::UndoSnapshot;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
@@ -308,11 +309,8 @@ fn build_test_smoke_verifier<'a>(
             return Ok("test_smoke_skipped_no_overlap".to_string());
         }
 
-        let results_file = std::env::temp_dir().join(format!(
-            "homeboy-audit-test-smoke-{}-{}",
-            std::process::id(),
-            chunk.chunk_id.replace(':', "-")
-        ));
+        let results_file = temp::runtime_temp_file("homeboy-audit-test-smoke", ".json")
+            .map_err(|error| format!("create test smoke temp file failed: {}", error))?;
         let results_file_str = results_file.to_string_lossy().to_string();
         let selected_test_files = changed_test_files.as_ref().map(|files| {
             files
