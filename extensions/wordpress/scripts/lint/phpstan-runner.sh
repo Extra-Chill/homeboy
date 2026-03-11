@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
+# shellcheck source=../lib/validation-dependencies.sh
+source "${DEPENDENCY_HELPER}"
+
 # Standalone PHP static analysis script using PHPStan
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
 # Supports skip via HOMEBOY_SKIP_PHPSTAN=1
@@ -34,7 +39,6 @@ if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
     COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-.}"
     PLUGIN_PATH="$COMPONENT_PATH"
 else
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     EXTENSION_PATH="$(dirname "$(dirname "$SCRIPT_DIR")")"
     COMPONENT_PATH="$(pwd)"
     PLUGIN_PATH="$COMPONENT_PATH"
@@ -47,7 +51,24 @@ fi
 
 PHPSTAN_BIN="${EXTENSION_PATH}/vendor/bin/phpstan"
 PHPSTAN_CONFIG="${EXTENSION_PATH}/phpstan.neon.dist"
+PHPSTAN_BASE_CONFIG="$PHPSTAN_CONFIG"
 COMPONENT_BASELINE="${PLUGIN_PATH}/phpstan-baseline.neon"
+COMPOSITE_AUTOLOAD=""
+DEPENDENCY_CONFIG=""
+
+homeboy_mktemp() {
+    local template="$1"
+    local candidate_dir
+
+    for candidate_dir in "${TMPDIR:-}" /root/tmp /var/tmp /tmp; do
+        [ -z "$candidate_dir" ] && continue
+        if [ -d "$candidate_dir" ] && [ -w "$candidate_dir" ]; then
+            mktemp "${candidate_dir}/${template}" 2>/dev/null && return 0
+        fi
+    done
+
+    mktemp 2>/dev/null
+}
 
 # Validate PHPStan exists (soft failure - not all installations have it)
 if [ ! -f "$PHPSTAN_BIN" ]; then
@@ -58,6 +79,44 @@ fi
 if [ ! -f "$PHPSTAN_CONFIG" ]; then
     echo "Warning: phpstan.neon.dist not found at $PHPSTAN_CONFIG, skipping static analysis"
     exit 0
+fi
+
+generate_dependency_config() {
+    local tmpfile
+    local has_dependencies=0
+
+    tmpfile=$(homeboy_mktemp 'phpstan-dependencies-XXXXXX.neon')
+
+    {
+        printf '%s\n' 'includes:'
+        printf '    - %s\n' "$PHPSTAN_CONFIG"
+        printf '%s\n' ''
+        printf '%s\n' 'parameters:'
+        printf '%s\n' '    scanDirectories:'
+
+        while IFS= read -r dependency_path; do
+            [ -z "$dependency_path" ] && continue
+            has_dependencies=1
+            printf '        - %s\n' "$dependency_path"
+        done < <(homeboy_resolve_validation_dependency_paths "$PLUGIN_PATH")
+    } > "$tmpfile"
+
+    if [ "$has_dependencies" -eq 1 ]; then
+        printf '%s\n' "$tmpfile"
+    else
+        rm -f "$tmpfile"
+        printf '%s\n' ''
+    fi
+}
+
+cleanup_dependency_config() {
+    [ -n "$DEPENDENCY_CONFIG" ] && rm -f "$DEPENDENCY_CONFIG"
+    DEPENDENCY_CONFIG=""
+}
+
+DEPENDENCY_CONFIG=$(generate_dependency_config)
+if [ -n "$DEPENDENCY_CONFIG" ] && [ -f "$DEPENDENCY_CONFIG" ]; then
+    PHPSTAN_BASE_CONFIG="$DEPENDENCY_CONFIG"
 fi
 
 # Check if component has PHP files
@@ -80,7 +139,7 @@ echo "Running PHPStan static analysis..."
 
 # Build PHPStan arguments
 phpstan_args=(analyse)
-phpstan_args+=(--configuration="$PHPSTAN_CONFIG")
+phpstan_args+=(--configuration="$PHPSTAN_BASE_CONFIG")
 
 # Level override (default: 5)
 PHPSTAN_LEVEL="${HOMEBOY_PHPSTAN_LEVEL:-5}"
@@ -97,13 +156,53 @@ if [ -f "$COMPONENT_BASELINE" ]; then
     phpstan_args+=(--baseline="$COMPONENT_BASELINE")
 fi
 
-# Include component autoloader if it exists
-COMPONENT_AUTOLOAD="${PLUGIN_PATH}/vendor/autoload.php"
-if [ -f "$COMPONENT_AUTOLOAD" ]; then
+# Include component/dependency autoloaders if they exist
+generate_composite_autoload() {
+    local tmpfile
+    local component_autoload="${PLUGIN_PATH}/vendor/autoload.php"
+
+    tmpfile=$(homeboy_mktemp 'homeboy-phpstan-autoload-XXXXXX.php')
+
+    {
+        printf '%s\n' '<?php'
+        printf '%s\n' '$autoloadFiles = ['
+
+        while IFS= read -r dependency_path; do
+            [ -z "$dependency_path" ] && continue
+            local dependency_autoload="${dependency_path}/vendor/autoload.php"
+            if [ -f "$dependency_autoload" ]; then
+                printf '    %s,\n' "$(printf '%s' "$dependency_autoload" | jq -Rsa .)"
+            fi
+        done < <(homeboy_resolve_validation_dependency_paths "$PLUGIN_PATH")
+
+        if [ -f "$component_autoload" ]; then
+            printf '    %s,\n' "$(printf '%s' "$component_autoload" | jq -Rsa .)"
+        fi
+
+        printf '%s\n' '];'
+        printf '%s\n' 'foreach ($autoloadFiles as $autoloadFile) {'
+        printf '%s\n' '    if (is_string($autoloadFile) && $autoloadFile !== "" && file_exists($autoloadFile)) {'
+        printf '%s\n' '        require_once $autoloadFile;'
+        printf '%s\n' '    }'
+        printf '%s\n' '}'
+    } > "$tmpfile"
+
+    printf '%s\n' "$tmpfile"
+}
+
+cleanup_composite_autoload() {
+    [ -n "$COMPOSITE_AUTOLOAD" ] && rm -f "$COMPOSITE_AUTOLOAD"
+    COMPOSITE_AUTOLOAD=""
+}
+
+COMPOSITE_AUTOLOAD=$(generate_composite_autoload)
+
+if [ -f "$COMPOSITE_AUTOLOAD" ]; then
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: Using component autoloader: $COMPONENT_AUTOLOAD"
+        echo "DEBUG: Using composite autoloader: $COMPOSITE_AUTOLOAD"
+        echo "DEBUG: Using PHPStan config: $PHPSTAN_BASE_CONFIG"
     fi
-    phpstan_args+=(--autoload-file="$COMPONENT_AUTOLOAD")
+    phpstan_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
 fi
 
 # No progress bar for cleaner output
@@ -125,10 +224,10 @@ PHPSTAN_TMPCONFIG=""
 generate_phpstan_config() {
     local max_processes="$1"
     local tmpfile
-    tmpfile=$(mktemp "${TMPDIR:-/tmp}/phpstan-XXXXXX.neon" 2>/dev/null || mktemp)
+    tmpfile=$(homeboy_mktemp 'phpstan-XXXXXX.neon')
     cat > "$tmpfile" <<NEON
 includes:
-    - ${PHPSTAN_CONFIG}
+    - ${PHPSTAN_BASE_CONFIG}
 
 parameters:
     parallel:
@@ -141,7 +240,7 @@ cleanup_phpstan_config() {
     [ -n "$PHPSTAN_TMPCONFIG" ] && rm -f "$PHPSTAN_TMPCONFIG"
     PHPSTAN_TMPCONFIG=""
 }
-trap cleanup_phpstan_config EXIT
+trap 'cleanup_phpstan_config; cleanup_composite_autoload; cleanup_dependency_config' EXIT
 
 if [ -n "$PHPSTAN_MAX_PROCESSES" ]; then
     PHPSTAN_TMPCONFIG=$(generate_phpstan_config "$PHPSTAN_MAX_PROCESSES")
@@ -153,8 +252,8 @@ if [ -n "$PHPSTAN_MAX_PROCESSES" ]; then
     if [ -f "$COMPONENT_BASELINE" ]; then
         phpstan_args+=(--baseline="$COMPONENT_BASELINE")
     fi
-    if [ -f "$COMPONENT_AUTOLOAD" ]; then
-        phpstan_args+=(--autoload-file="$COMPONENT_AUTOLOAD")
+    if [ -f "$COMPOSITE_AUTOLOAD" ]; then
+        phpstan_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
     fi
     phpstan_args+=(--no-progress)
     phpstan_args+=("$PLUGIN_PATH")
@@ -193,7 +292,7 @@ is_parallel_worker_failure() {
 if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     set +e
     # Capture stderr separately to show PHPStan errors if it fails
-    stderr_file=$(mktemp)
+    stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
     json_output=$("$PHPSTAN_BIN" "${phpstan_args[@]}" --error-format=json 2>"$stderr_file")
     json_exit=$?
     stderr_output=$(cat "$stderr_file")
@@ -206,9 +305,9 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         PHPSTAN_TMPCONFIG=$(generate_phpstan_config 1)
         retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress)
         [ -f "$COMPONENT_BASELINE" ] && retry_args+=(--baseline="$COMPONENT_BASELINE")
-        [ -f "$COMPONENT_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPONENT_AUTOLOAD")
+        [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
         retry_args+=("$PLUGIN_PATH")
-        stderr_file=$(mktemp)
+        stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
         json_output=$("$PHPSTAN_BIN" "${retry_args[@]}" --error-format=json 2>"$stderr_file")
         json_exit=$?
         stderr_output=$(cat "$stderr_file")
@@ -338,7 +437,7 @@ fi
 
 # Full report mode (default)
 set +e
-stderr_file=$(mktemp)
+stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
 "$PHPSTAN_BIN" "${phpstan_args[@]}" 2>"$stderr_file"
 full_exit=$?
 stderr_output=$(cat "$stderr_file")
@@ -352,7 +451,7 @@ if [ "$full_exit" -ne 0 ] && echo "$stderr_output" | grep -qi "parallel worker";
     PHPSTAN_TMPCONFIG=$(generate_phpstan_config 1)
     retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress)
     [ -f "$COMPONENT_BASELINE" ] && retry_args+=(--baseline="$COMPONENT_BASELINE")
-    [ -f "$COMPONENT_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPONENT_AUTOLOAD")
+    [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
     retry_args+=("$PLUGIN_PATH")
     "$PHPSTAN_BIN" "${retry_args[@]}"
     full_exit=$?

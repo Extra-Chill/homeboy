@@ -44,6 +44,15 @@ if (!defined('WP_TESTS_NETWORK_TITLE')) {
 // Define plugin constants for tests
 define('TESTS_PLUGIN_DIR', $_plugin_path);
 
+$_dependency_paths = array_values(
+	array_filter(
+		array_map(
+			'trim',
+			explode("\n", (string) getenv('HOMEBOY_WORDPRESS_DEPENDENCY_PATHS'))
+		)
+	)
+);
+
 // Define WP_CORE_DIR
 if (!defined('WP_CORE_DIR')) {
     define('WP_CORE_DIR', $_core_dir);
@@ -64,6 +73,52 @@ if (false !== $_phpunit_polyfills_path) {
 // Load WordPress test functions
 require_once "{$_tests_dir}/includes/functions.php";
 
+function homeboy_find_component_main_file( string $path ): ?array {
+	$style_css = $path . '/style.css';
+	if ( file_exists( $style_css ) && false !== strpos( file_get_contents( $style_css ), 'Theme Name:' ) ) {
+		$functions_php = $path . '/functions.php';
+		if ( file_exists( $functions_php ) ) {
+			return array(
+				'type' => 'theme',
+				'file' => $functions_php,
+			);
+		}
+
+		return array(
+			'type' => 'theme',
+			'file' => null,
+		);
+	}
+
+	$files = glob( $path . '/*.php' );
+	if ( false === $files ) {
+		return null;
+	}
+
+	foreach ( $files as $file ) {
+		$content = file_get_contents( $file );
+		if ( false !== $content && false !== strpos( $content, 'Plugin Name:' ) ) {
+			return array(
+				'type' => 'plugin',
+				'file' => $file,
+			);
+		}
+	}
+
+	return null;
+}
+
+function homeboy_load_dependency_components( array $dependency_paths ): void {
+	foreach ( $dependency_paths as $dependency_path ) {
+		$component = homeboy_find_component_main_file( $dependency_path );
+		if ( ! $component || 'plugin' !== $component['type'] || empty( $component['file'] ) ) {
+			continue;
+		}
+
+		require_once $component['file'];
+	}
+}
+
 // Detect component type and find appropriate file to load
 $component_type = null;
 $component_file = null;
@@ -78,14 +133,10 @@ if (file_exists($style_css) && strpos(file_get_contents($style_css), 'Theme Name
     }
 } else {
     // Check if it's a plugin
-    $files = glob($_plugin_path . '/*.php');
-    foreach ($files as $file) {
-        $content = file_get_contents($file);
-        if (strpos($content, 'Plugin Name:') !== false) {
-            $component_type = 'plugin';
-            $component_file = $file;
-            break;
-        }
+    $component = homeboy_find_component_main_file($_plugin_path);
+    if ($component && 'plugin' === $component['type']) {
+        $component_type = 'plugin';
+        $component_file = $component['file'];
     }
 }
 
@@ -116,6 +167,10 @@ if (getenv('HOMEBOY_DEBUG') === '1') {
 
 // Load component at the appropriate WordPress hook
 if ($component_type === 'theme') {
+    tests_add_filter('plugins_loaded', function() use ($_dependency_paths) {
+        homeboy_load_dependency_components($_dependency_paths);
+    });
+
     // Load themes on after_setup_theme hook
     tests_add_filter('after_setup_theme', function() use ($component_file, $_plugin_path) {
         if ($component_file) {
@@ -132,7 +187,8 @@ if ($component_type === 'theme') {
     });
 } else {
     // Load plugins on plugins_loaded hook
-    tests_add_filter('plugins_loaded', function() use ($component_file) {
+    tests_add_filter('plugins_loaded', function() use ($component_file, $_dependency_paths) {
+        homeboy_load_dependency_components($_dependency_paths);
         require_once $component_file;
     });
 }
