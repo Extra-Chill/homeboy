@@ -469,7 +469,10 @@ pub fn apply_component_overrides(
     merged
 }
 
-pub fn resolve_project_component(project: &Project, component_id: &str) -> Result<crate::component::Component> {
+pub fn resolve_project_component(
+    project: &Project,
+    component_id: &str,
+) -> Result<crate::component::Component> {
     let component = crate::component::load(component_id)?;
     Ok(apply_component_overrides(&component, project))
 }
