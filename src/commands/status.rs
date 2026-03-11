@@ -56,7 +56,7 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusOut
         .cloned()
         .collect();
 
-    let all_components = component::list().unwrap_or_default();
+    let all_components = component::inventory().unwrap_or_default();
 
     let show_all = args.all || relevant_ids.is_empty();
 

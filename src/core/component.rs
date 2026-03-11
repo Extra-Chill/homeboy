@@ -6,7 +6,7 @@ use crate::project;
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -690,6 +690,45 @@ pub fn shared_components() -> Result<std::collections::HashMap<String, Vec<Strin
     }
 
     Ok(sharing)
+}
+
+/// Derive a runtime component inventory from project attachments plus legacy stored components.
+///
+/// Project-attached repo-backed components win over stored config because they reflect
+/// the newer canonical model. Stored config remains as a compatibility fallback.
+pub fn inventory() -> Result<Vec<Component>> {
+    let projects = project::list().unwrap_or_default();
+    let mut components = Vec::new();
+    let mut seen = HashSet::new();
+
+    for project in &projects {
+        for attachment in &project.components {
+            if let Ok(component) = project::resolve_project_component(project, &attachment.id) {
+                if seen.insert(component.id.clone()) {
+                    components.push(component);
+                }
+            }
+        }
+    }
+
+    for component in list().unwrap_or_default() {
+        if seen.insert(component.id.clone()) {
+            components.push(component);
+        }
+    }
+
+    components.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(components)
+}
+
+/// Find project associations using the canonical project attachment model.
+pub fn associated_projects(component_id: &str) -> Result<Vec<String>> {
+    let projects = project::list().unwrap_or_default();
+    Ok(projects
+        .into_iter()
+        .filter(|project| project::has_component(project, component_id))
+        .map(|project| project.id)
+        .collect())
 }
 
 /// Resolve effective artifact path for a component.

@@ -65,25 +65,15 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
     let cwd_str = cwd.to_string_lossy().to_string();
     let git_root = detect_git_root(&cwd);
 
-    let components = component::list().unwrap_or_default();
-    let projects = project::list().unwrap_or_default();
-    let attached_components = collect_attached_components(&projects);
-
-    let matched_registered: Vec<String> = components
+    let components = component::inventory().unwrap_or_default();
+    let matched_components: Vec<String> = components
         .iter()
         .filter(|c| path_matches(&cwd, &c.local_path))
         .map(|c| c.id.clone())
         .collect();
 
-    let matched_attached: Vec<String> = attached_components
-        .iter()
-        .filter(|c| path_matches(&cwd, &c.local_path))
-        .map(|c| c.id.clone())
-        .collect();
-
-    let matched: Vec<String> = matched_registered
+    let matched: Vec<String> = matched_components
         .into_iter()
-        .chain(matched_attached)
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
@@ -91,8 +81,7 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
     let managed = !matched.is_empty();
 
     // Check for contained components (monorepo pattern)
-    let all_local_components: Vec<component::Component> =
-        components.into_iter().chain(attached_components).collect();
+    let all_local_components: Vec<component::Component> = components;
 
     let contained: Vec<&component::Component> = all_local_components
         .iter()
@@ -203,30 +192,6 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
         },
         0,
     ))
-}
-
-fn collect_attached_components(projects: &[project::Project]) -> Vec<component::Component> {
-    let mut components = Vec::new();
-    let mut seen = HashSet::new();
-
-    for project in projects {
-        for attachment in &project.components {
-            let Some(local_path) = attachment.local_path.as_deref() else {
-                continue;
-            };
-
-            if !seen.insert((attachment.id.clone(), local_path.to_string())) {
-                continue;
-            }
-
-            if let Some(mut component) = component::discover_from_portable(Path::new(local_path)) {
-                component.id = attachment.id.clone();
-                components.push(component);
-            }
-        }
-    }
-
-    components
 }
 
 fn detect_git_root(cwd: &PathBuf) -> Option<String> {

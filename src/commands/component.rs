@@ -536,7 +536,7 @@ fn rename(id: &str, new_id: &str) -> CmdResult<ComponentOutput> {
 }
 
 fn list() -> CmdResult<ComponentOutput> {
-    let components: Vec<Value> = component::list()?
+    let components: Vec<Value> = component::inventory()?
         .into_iter()
         .map(|component| {
             let mut value = serde_json::to_value(&component).map_err(|error| {
@@ -565,7 +565,7 @@ fn list() -> CmdResult<ComponentOutput> {
 }
 
 fn projects(id: &str) -> CmdResult<ComponentOutput> {
-    let project_ids = component::projects_using(id)?;
+    let project_ids = component::associated_projects(id)?;
 
     let mut projects_list = Vec::new();
     for pid in &project_ids {
@@ -592,7 +592,7 @@ fn projects(id: &str) -> CmdResult<ComponentOutput> {
 fn shared(id: Option<&str>) -> CmdResult<ComponentOutput> {
     if let Some(component_id) = id {
         // Show projects for a specific component
-        let project_ids = component::projects_using(component_id)?;
+        let project_ids = component::associated_projects(component_id)?;
         let mut shared_map = std::collections::HashMap::new();
         shared_map.insert(component_id.to_string(), project_ids);
 

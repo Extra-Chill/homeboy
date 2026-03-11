@@ -256,7 +256,7 @@ pub fn run(args: InitArgs, _global: &super::GlobalArgs) -> CmdResult<InitOutput>
         .collect();
 
     // Load all data sources
-    let all_components = component::list().unwrap_or_default();
+    let all_components = component::inventory().unwrap_or_default();
     let all_projects = project::list().unwrap_or_default();
     let all_servers = server::list().unwrap_or_default();
     let all_extensions = load_all_extensions().unwrap_or_default();

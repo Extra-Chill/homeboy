@@ -55,7 +55,7 @@ pub fn cleanup_component(component_id: &str) -> Result<CleanupResult> {
 
 /// Run cleanup checks across ALL registered components.
 pub fn cleanup_all() -> Result<Vec<CleanupResult>> {
-    let components: Vec<Component> = crate::component::list().unwrap_or_default();
+    let components: Vec<Component> = crate::component::inventory().unwrap_or_default();
     let mut results = Vec::new();
 
     for comp in &components {
