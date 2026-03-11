@@ -6,6 +6,14 @@
 
 $extension_path = getenv('HOMEBOY_EXTENSION_PATH') ?: dirname(__DIR__);
 $plugin_path = getenv('HOMEBOY_PLUGIN_PATH') ?: getenv('HOMEBOY_COMPONENT_PATH') ?: getcwd();
+$dependency_paths = array_values(
+    array_filter(
+        array_map(
+            'trim',
+            explode("\n", (string) getenv('HOMEBOY_WORDPRESS_DEPENDENCY_PATHS'))
+        )
+    )
+);
 
 // WordPress paths from wp-phpunit
 $wp_tests_dir = $extension_path . '/vendor/wp-phpunit/wp-phpunit';
@@ -427,6 +435,8 @@ if (!defined('WP_DEBUG')) {
 
 // Handle based on component type
 if ($component['type'] === 'theme') {
+    load_dependency_plugins($dependency_paths);
+
     // Add theme-specific stubs
     if (!function_exists('get_template_directory')) {
         function get_template_directory() {
@@ -467,6 +477,7 @@ if ($component['type'] === 'theme') {
     }
 } else {
     // Plugin loading
+    load_dependency_plugins($dependency_paths);
     require_once $component['file'];
     echo "Plugin loaded successfully.\n";
 }
@@ -505,4 +516,16 @@ function find_component_main_file($path) {
         }
     }
     return null;
+}
+
+function load_dependency_plugins(array $dependency_paths) {
+    foreach ($dependency_paths as $dependency_path) {
+        $dependency = find_component_main_file($dependency_path);
+
+        if (!$dependency || 'plugin' !== $dependency['type'] || empty($dependency['file'])) {
+            continue;
+        }
+
+        require_once $dependency['file'];
+    }
 }

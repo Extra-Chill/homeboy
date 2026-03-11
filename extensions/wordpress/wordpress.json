@@ -314,6 +314,13 @@
   },
   "settings": [
     {
+      "id": "validation_dependencies",
+      "label": "Validation Dependencies",
+      "type": "string",
+      "default": "",
+      "description": "Local component IDs or paths to load during PHPStan, autoload validation, and PHPUnit. Accepts comma-separated, newline-separated, or JSON-array string values."
+    },
+    {
       "id": "user",
       "label": "WP-CLI User",
       "type": "string",

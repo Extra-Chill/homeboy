@@ -13,8 +13,11 @@ TEST_FIX_ENTRIES=()
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
+DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 # shellcheck source=../lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
+# shellcheck source=../lib/validation-dependencies.sh
+source "${DEPENDENCY_HELPER}"
 
 print_failure_summary() {
     if [ -n "$FAILED_STEP" ]; then
@@ -415,6 +418,7 @@ else
         echo "DEBUG: Using project test directory: $TEST_DIR"
     fi
 fi
+homeboy_export_validation_dependency_paths "$PLUGIN_PATH"
 export WP_TESTS_DIR="$WP_TESTS_DIR"
 export ABSPATH="$ABSPATH"
 
