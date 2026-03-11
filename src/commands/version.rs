@@ -65,7 +65,9 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 if info.targets.is_empty() {
                     None
                 } else {
-                    component::resolve_effective(None, None, None).ok().map(|c| c.id)
+                    component::resolve_effective(None, None, None)
+                        .ok()
+                        .map(|c| c.id)
                 }
             });
 
