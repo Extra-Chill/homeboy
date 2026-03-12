@@ -4,8 +4,8 @@ use serde::Serialize;
 
 use homeboy::deploy::{self, ComponentDeployResult, DeployConfig, DeploySummary};
 
-use super::{CmdResult, ProjectsSummary};
 use super::utils::resolve::{infer_project_for_components, resolve_project_components};
+use super::{CmdResult, ProjectsSummary};
 
 const DEPLOY_RECIPES: &[&str] = &[
     "Deploy single component: homeboy deploy <component-id>",
@@ -279,7 +279,9 @@ pub fn run(
                 "Run 'homeboy project components add {} <component-id>' to add components",
                 project_id
             ))
-            .with_hint("Run 'homeboy status --full' to see project context and available components")
+            .with_hint(
+                "Run 'homeboy status --full' to see project context and available components",
+            )
         } else {
             e
         }
