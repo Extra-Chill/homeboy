@@ -3,7 +3,6 @@ use homeboy::log_status;
 use serde::Serialize;
 use std::path::Path;
 
-use homeboy::component::Component;
 use homeboy::health::ServerHealth;
 use homeboy::project::{self, Project};
 use homeboy::EntityCrudOutput;
@@ -136,51 +135,10 @@ enum ProjectComponentsCommand {
 
 #[derive(Debug, Serialize)]
 
-pub struct ProjectComponentsOutput {
-    pub action: String,
-    pub project_id: String,
-    pub component_ids: Vec<String>,
-    pub components: Vec<Component>,
-}
-
-#[derive(Debug, Serialize)]
-
 pub struct ProjectListItem {
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     domain: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-
-pub struct ProjectPinOutput {
-    pub action: String,
-    pub project_id: String,
-    pub r#type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<Vec<ProjectPinListItem>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub added: Option<ProjectPinChange>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub removed: Option<ProjectPinChange>,
-}
-
-#[derive(Debug, Serialize)]
-
-pub struct ProjectPinListItem {
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    pub display_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tail_lines: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-
-pub struct ProjectPinChange {
-    pub path: String,
-    pub r#type: String,
 }
 
 #[derive(Subcommand)]
@@ -233,9 +191,9 @@ pub struct ProjectExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub projects: Option<Vec<ProjectListItem>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub components: Option<ProjectComponentsOutput>,
+    pub components: Option<homeboy::project::ProjectComponentsOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pin: Option<ProjectPinOutput>,
+    pub pin: Option<homeboy::project::ProjectPinOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -522,20 +480,14 @@ fn components(command: ProjectComponentsCommand) -> CmdResult<ProjectOutput> {
 }
 
 fn components_list(project_id: &str) -> CmdResult<ProjectOutput> {
-    let project = project::load(project_id)?;
-    let components = project::resolve_project_components(&project)?;
+    let components = project::list_components(project_id)?;
 
     Ok((
         ProjectOutput {
             command: "project.components.list".to_string(),
             id: Some(project_id.to_string()),
             extra: ProjectExtra {
-                components: Some(ProjectComponentsOutput {
-                    action: "list".to_string(),
-                    project_id: project_id.to_string(),
-                    component_ids: project::project_component_ids(&project),
-                    components,
-                }),
+                components: Some(components),
                 ..Default::default()
             },
             ..Default::default()
@@ -545,64 +497,47 @@ fn components_list(project_id: &str) -> CmdResult<ProjectOutput> {
 }
 
 fn components_set(project_id: &str, json: &str) -> CmdResult<ProjectOutput> {
-    let raw = homeboy::config::read_json_spec_to_string(json)?;
-    let attachments: Vec<project::ProjectComponentAttachment> = serde_json::from_str(&raw)
-        .map_err(|e| {
-            homeboy::Error::validation_invalid_json(
-                e,
-                Some("parse project component attachments".to_string()),
-                None,
-            )
-        })?;
-    project::set_component_attachments(project_id, attachments)?;
-    let project = project::load(project_id)?;
-    write_project_components(project_id, "set", &project)
+    let components = project::set_components(project_id, json)?;
+    Ok(write_project_components_response(project_id, "set", components))
 }
 
 fn components_attach_path(project_id: &str, local_path: &str) -> CmdResult<ProjectOutput> {
-    project::attach_discovered_component_path(project_id, Path::new(local_path))?;
-    let project = project::load(project_id)?;
-    write_project_components(project_id, "attach_path", &project)
+    let components = project::attach_component_path_report(project_id, Path::new(local_path))?;
+    Ok(write_project_components_response(
+        project_id,
+        "attach_path",
+        components,
+    ))
 }
 
 fn components_remove(project_id: &str, component_ids: Vec<String>) -> CmdResult<ProjectOutput> {
-    project::remove_components(project_id, component_ids)?;
-    let project = project::load(project_id)?;
-    write_project_components(project_id, "remove", &project)
+    let components = project::remove_components_report(project_id, component_ids)?;
+    Ok(write_project_components_response(project_id, "remove", components))
 }
 
 fn components_clear(project_id: &str) -> CmdResult<ProjectOutput> {
-    project::clear_component_attachments(project_id)?;
-    let project = project::load(project_id)?;
-    write_project_components(project_id, "clear", &project)
+    let components = project::clear_components(project_id)?;
+    Ok(write_project_components_response(project_id, "clear", components))
 }
 
-fn write_project_components(
+fn write_project_components_response(
     project_id: &str,
     action: &str,
-    project: &Project,
-) -> CmdResult<ProjectOutput> {
-    project::save(project)?;
-    let components = project::resolve_project_components(project)?;
-
-    Ok((
+    components: homeboy::project::ProjectComponentsOutput,
+) -> (ProjectOutput, i32) {
+    (
         ProjectOutput {
             command: format!("project.components.{action}"),
             id: Some(project_id.to_string()),
             updated_fields: vec!["componentIds".to_string()],
             extra: ProjectExtra {
-                components: Some(ProjectComponentsOutput {
-                    action: action.to_string(),
-                    project_id: project_id.to_string(),
-                    component_ids: project::project_component_ids(project),
-                    components,
-                }),
+                components: Some(components),
                 ..Default::default()
             },
             ..Default::default()
         },
         0,
-    ))
+    )
 }
 
 fn pin(command: ProjectPinCommand) -> CmdResult<ProjectOutput> {
@@ -624,52 +559,14 @@ fn pin(command: ProjectPinCommand) -> CmdResult<ProjectOutput> {
 }
 
 fn pin_list(project_id: &str, pin_type: ProjectPinType) -> CmdResult<ProjectOutput> {
-    let project = project::load(project_id)?;
-
-    let (items, type_string) = match pin_type {
-        ProjectPinType::File => (
-            project
-                .remote_files
-                .pinned_files
-                .iter()
-                .map(|file| ProjectPinListItem {
-                    path: file.path.clone(),
-                    label: file.label.clone(),
-                    display_name: file.display_name().to_string(),
-                    tail_lines: None,
-                })
-                .collect(),
-            "file",
-        ),
-        ProjectPinType::Log => (
-            project
-                .remote_logs
-                .pinned_logs
-                .iter()
-                .map(|log| ProjectPinListItem {
-                    path: log.path.clone(),
-                    label: log.label.clone(),
-                    display_name: log.display_name().to_string(),
-                    tail_lines: Some(log.tail_lines),
-                })
-                .collect(),
-            "log",
-        ),
-    };
+    let pin = project::list_pins(project_id, map_pin_type(pin_type))?;
 
     Ok((
         ProjectOutput {
             command: "project.pin.list".to_string(),
             id: Some(project_id.to_string()),
             extra: ProjectExtra {
-                pin: Some(ProjectPinOutput {
-                    action: "list".to_string(),
-                    project_id: project_id.to_string(),
-                    r#type: type_string.to_string(),
-                    items: Some(items),
-                    added: None,
-                    removed: None,
-                }),
+                pin: Some(pin),
                 ..Default::default()
             },
             ..Default::default()
@@ -685,14 +582,9 @@ fn pin_add(
     label: Option<String>,
     tail: u32,
 ) -> CmdResult<ProjectOutput> {
-    let (core_type, type_string) = match pin_type {
-        ProjectPinType::File => (project::PinType::File, "file"),
-        ProjectPinType::Log => (project::PinType::Log, "log"),
-    };
-
-    project::pin(
+    let pin = project::add_pin(
         project_id,
-        core_type,
+        map_pin_type(pin_type),
         path,
         project::PinOptions {
             label,
@@ -705,17 +597,7 @@ fn pin_add(
             command: "project.pin.add".to_string(),
             id: Some(project_id.to_string()),
             extra: ProjectExtra {
-                pin: Some(ProjectPinOutput {
-                    action: "add".to_string(),
-                    project_id: project_id.to_string(),
-                    r#type: type_string.to_string(),
-                    items: None,
-                    added: Some(ProjectPinChange {
-                        path: path.to_string(),
-                        r#type: type_string.to_string(),
-                    }),
-                    removed: None,
-                }),
+                pin: Some(pin),
                 ..Default::default()
             },
             ..Default::default()
@@ -725,35 +607,27 @@ fn pin_add(
 }
 
 fn pin_remove(project_id: &str, path: &str, pin_type: ProjectPinType) -> CmdResult<ProjectOutput> {
-    let (core_type, type_string) = match pin_type {
-        ProjectPinType::File => (project::PinType::File, "file"),
-        ProjectPinType::Log => (project::PinType::Log, "log"),
-    };
-
-    project::unpin(project_id, core_type, path)?;
+    let pin = project::remove_pin(project_id, map_pin_type(pin_type), path)?;
 
     Ok((
         ProjectOutput {
             command: "project.pin.remove".to_string(),
             id: Some(project_id.to_string()),
             extra: ProjectExtra {
-                pin: Some(ProjectPinOutput {
-                    action: "remove".to_string(),
-                    project_id: project_id.to_string(),
-                    r#type: type_string.to_string(),
-                    items: None,
-                    added: None,
-                    removed: Some(ProjectPinChange {
-                        path: path.to_string(),
-                        r#type: type_string.to_string(),
-                    }),
-                }),
+                pin: Some(pin),
                 ..Default::default()
             },
             ..Default::default()
         },
         0,
     ))
+}
+
+fn map_pin_type(pin_type: ProjectPinType) -> project::PinType {
+    match pin_type {
+        ProjectPinType::File => project::PinType::File,
+        ProjectPinType::Log => project::PinType::Log,
+    }
 }
 
 fn status(project_id: &str, health_only: bool) -> CmdResult<ProjectOutput> {
