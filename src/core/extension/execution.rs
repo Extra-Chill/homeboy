@@ -5,7 +5,6 @@ use crate::error::{Error, Result};
 use crate::http::ApiClient;
 use crate::project::{self, Project};
 use crate::ssh::{execute_local_command_in_dir, execute_local_command_interactive};
-use crate::utils::parser;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -249,7 +248,7 @@ pub(crate) fn execute_action(
                 .and_then(|proj| proj.base_path.clone());
 
             let working_dir =
-                parser::json_path_str(&payload, &["release", "local_path"]).unwrap_or(extension_path);
+                crate::engine::text::json_path_str(&payload, &["release", "local_path"]).unwrap_or(extension_path);
 
             let execution = execute_extension_command(
                 command_template,

@@ -4,10 +4,10 @@ use serde::Serialize;
 use homeboy::context;
 use homeboy::git::{self, ChangesOutput};
 use homeboy::project;
-use homeboy::resolve::resolve_project_components;
 use homeboy::BulkResult;
 
 use super::CmdResult;
+use super::utils::resolve::resolve_project_components;
 
 #[derive(Args)]
 pub struct ChangesArgs {

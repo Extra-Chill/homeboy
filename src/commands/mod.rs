@@ -263,7 +263,6 @@ pub fn finalize_set_spec(
 }
 
 pub mod api;
-pub mod args;
 pub mod audit;
 pub mod auth;
 pub mod build;
@@ -297,6 +296,7 @@ pub mod test_scope;
 pub mod transfer;
 pub mod undo;
 pub mod upgrade;
+pub mod utils;
 pub mod version;
 
 pub(crate) fn run_markdown(

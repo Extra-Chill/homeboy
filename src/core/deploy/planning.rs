@@ -175,10 +175,14 @@ fn calculate_component_status(
 
 /// Calculate release state for a component.
 /// Returns commit count since last version tag and uncommitted changes status.
-fn calculate_release_state(component: &Component) -> Option<ReleaseState> {
+pub fn calculate_release_state(component: &Component) -> Option<ReleaseState> {
     let path = &component.local_path;
 
-    let baseline = git::detect_baseline_for_path(path).ok()?;
+    let current_version = version::read_component_version(component)
+        .ok()
+        .map(|info| info.version);
+
+    let baseline = git::detect_baseline_with_version(path, current_version.as_deref()).ok()?;
 
     let commits = git::get_commits_since_tag(path, baseline.reference.as_deref())
         .ok()
@@ -198,7 +202,34 @@ fn calculate_release_state(component: &Component) -> Option<ReleaseState> {
         docs_only_commits: counts.docs_only,
         has_uncommitted_changes: uncommitted,
         baseline_ref: baseline.reference,
+        baseline_warning: baseline.warning,
     })
+}
+
+pub fn classify_release_state(state: Option<&ReleaseState>) -> ReleaseStateStatus {
+    state.map(ReleaseState::status)
+        .unwrap_or(ReleaseStateStatus::Unknown)
+}
+
+pub fn bucket_release_states<'a, I>(components: I) -> ReleaseStateBuckets
+where
+    I: IntoIterator<Item = (&'a str, Option<&'a ReleaseState>)>,
+{
+    let mut buckets = ReleaseStateBuckets::default();
+
+    for (component_id, state) in components {
+        match classify_release_state(state) {
+            ReleaseStateStatus::Uncommitted => {
+                buckets.has_uncommitted.push(component_id.to_string())
+            }
+            ReleaseStateStatus::NeedsBump => buckets.needs_bump.push(component_id.to_string()),
+            ReleaseStateStatus::DocsOnly => buckets.docs_only.push(component_id.to_string()),
+            ReleaseStateStatus::Clean => buckets.ready_to_deploy.push(component_id.to_string()),
+            ReleaseStateStatus::Unknown => buckets.unknown.push(component_id.to_string()),
+        }
+    }
+
+    buckets
 }
 
 /// Result of loading project components, including skipped (non-deployable) component IDs.
@@ -236,7 +267,7 @@ fn load_project_components(project: &Project) -> Result<LoadedComponents> {
 
         match effective_artifact {
             Some(artifact) if !is_git_deploy => {
-                let resolved_artifact = parser::resolve_path_string(&loaded.local_path, &artifact);
+                let resolved_artifact = crate::paths::resolve_path_string(&loaded.local_path, &artifact);
                 loaded.build_artifact = Some(resolved_artifact);
                 deployable.push(loaded);
             }

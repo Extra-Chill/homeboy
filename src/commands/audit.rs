@@ -9,7 +9,7 @@ use homeboy::refactor::{
 use serde::Serialize;
 use std::path::Path;
 
-use super::args::{BaselineArgs, PositionalComponentArgs};
+use super::utils::args::{BaselineArgs, PositionalComponentArgs};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
@@ -708,7 +708,7 @@ fn log_fix_summary(result: &FixResult, policy: &PolicySummary, written: bool) {
 mod tests {
     use super::default_audit_exit_code;
     use super::{run, AuditArgs, AuditOutput};
-    use crate::commands::args::{BaselineArgs, PositionalComponentArgs};
+    use crate::commands::utils::args::{BaselineArgs, PositionalComponentArgs};
     use homeboy::code_audit::AuditFinding;
     use homeboy::code_audit::{AuditSummary, CodeAuditResult, Finding, Severity};
     use homeboy::refactor::{

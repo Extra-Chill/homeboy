@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use homeboy::release::{self, ReleaseCommandInput, ReleaseCommandResult};
 
-use super::args::{DryRunArgs, HiddenJsonArgs, PositionalComponentArgs};
+use super::utils::args::{DryRunArgs, HiddenJsonArgs, PositionalComponentArgs};
 use super::CmdResult;
 
 #[derive(Args)]

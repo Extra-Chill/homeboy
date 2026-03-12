@@ -1,8 +1,8 @@
 use chrono::Local;
 
+use crate::engine::text;
 use crate::engine::validation;
 use crate::error::{Error, Result};
-use crate::utils::parser;
 
 use super::settings::*;
 
@@ -356,7 +356,7 @@ pub(super) fn ensure_next_section(content: &str, aliases: &[String]) -> Result<(
 /// - "[0.1.0] - 2025-01-14" -> Some("0.1.0")
 /// - "Unreleased" -> None
 fn extract_version_from_heading(label: &str) -> Option<String> {
-    parser::extract_first(label, r"\[?(\d+\.\d+\.\d+)\]?")
+    text::extract_first(label, r"\[?(\d+\.\d+\.\d+)\]?")
 }
 
 /// Get the latest finalized version from the changelog (first ## heading that contains a semver).
@@ -372,6 +372,57 @@ pub fn get_latest_finalized_version(content: &str) -> Option<String> {
             }
         }
     }
+    None
+}
+
+fn extract_date_from_heading(label: &str) -> Option<String> {
+    text::extract_first(label, r"(\d{4}-\d{2}-\d{2})")
+}
+
+fn extract_first_bullet(lines: &[&str], start: usize) -> Option<String> {
+    for line in &lines[start..] {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("- ") {
+            return Some(rest.trim().to_string());
+        }
+        if let Some(rest) = trimmed.strip_prefix("* ") {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+use super::io::FinalizedReleaseSnapshot;
+
+pub fn extract_last_release_snapshot(content: &str) -> Option<FinalizedReleaseSnapshot> {
+    let lines: Vec<&str> = content.lines().collect();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("## ") {
+            continue;
+        }
+
+        let label = trimmed.trim_start_matches("## ").trim();
+        let normalized = normalize_heading_label(label);
+        if normalized.eq_ignore_ascii_case("unreleased") || normalized.eq_ignore_ascii_case("next") {
+            continue;
+        }
+
+        let Some(tag) = extract_version_from_heading(label) else {
+            continue;
+        };
+
+        return Some(FinalizedReleaseSnapshot {
+            tag: format!("v{}", tag),
+            date: extract_date_from_heading(label),
+            summary: extract_first_bullet(&lines, index + 1),
+        });
+    }
+
     None
 }
 

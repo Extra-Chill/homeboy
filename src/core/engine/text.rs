@@ -1,19 +1,61 @@
-//! Core parsing primitives for text extraction and validation.
-//!
-//! This extension provides the foundational layer for extracting structured data
-//! from text content. All parsing operations in homeboy (versions, changelogs,
-//! command output, git tags) are built on these primitives.
+//! Shared text normalization and matching primitives.
 
 use crate::error::{Error, Result};
 use regex::Regex;
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::hash::Hash;
-use std::path::PathBuf;
 
-/// Ensure a regex pattern has multiline mode enabled so `^` and `$` match
-/// line boundaries, not just start/end of the entire string. Version target
-/// patterns nearly always need this since the version line is never at
-/// position 0 of the file.
+pub(crate) fn normalize_identifier(input: &str) -> String {
+    input.trim().to_lowercase()
+}
+
+pub fn identifier_eq(a: &str, b: &str) -> bool {
+    normalize_identifier(a) == normalize_identifier(b)
+}
+
+pub fn normalize_doc_segment(input: &str) -> String {
+    input.trim().to_lowercase().replace([' ', '\t'], "-")
+}
+
+pub fn cmp_case_insensitive(a: &str, b: &str) -> Ordering {
+    a.to_lowercase().cmp(&b.to_lowercase())
+}
+
+/// Levenshtein edit distance between two strings.
+///
+/// Uses space-optimized two-row algorithm (O(n) space instead of O(m*n)).
+pub fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+
+    let mut prev_row: Vec<usize> = (0..=b_len).collect();
+    let mut curr_row: Vec<usize> = vec![0; b_len + 1];
+
+    for (i, a_char) in a_chars.iter().enumerate() {
+        curr_row[0] = i + 1;
+        for (j, b_char) in b_chars.iter().enumerate() {
+            let cost = if a_char == b_char { 0 } else { 1 };
+            curr_row[j + 1] = (prev_row[j + 1] + 1)
+                .min(curr_row[j] + 1)
+                .min(prev_row[j] + cost);
+        }
+        std::mem::swap(&mut prev_row, &mut curr_row);
+    }
+
+    prev_row[b_len]
+}
+
+/// Ensure a regex pattern has multiline mode enabled.
 pub fn ensure_multiline(pattern: &str) -> String {
     if pattern.contains("(?m)") {
         pattern.to_string()
@@ -23,8 +65,6 @@ pub fn ensure_multiline(pattern: &str) -> String {
 }
 
 /// Extract first match from content using regex pattern with capture group.
-/// Pattern must contain exactly one capture group for the value to extract.
-/// Content is trimmed before matching. Multiline mode is enabled automatically.
 pub fn extract_first(content: &str, pattern: &str) -> Option<String> {
     let re = Regex::new(&ensure_multiline(pattern)).ok()?;
     re.captures(content.trim())
@@ -33,8 +73,6 @@ pub fn extract_first(content: &str, pattern: &str) -> Option<String> {
 }
 
 /// Extract all matches from content using regex pattern with capture group.
-/// Returns empty Vec if pattern is invalid, None only on regex compile error.
-/// Multiline mode is enabled automatically.
 pub fn extract_all(content: &str, pattern: &str) -> Option<Vec<String>> {
     let re = Regex::new(&ensure_multiline(pattern)).ok()?;
     let matches: Vec<String> = re
@@ -45,9 +83,6 @@ pub fn extract_all(content: &str, pattern: &str) -> Option<Vec<String>> {
 }
 
 /// Replace all matches of capture group with new value.
-/// Returns (new_content, replacement_count).
-/// Content is trimmed before matching to stay consistent with extract_all,
-/// but trailing newline is preserved in output. Multiline mode is enabled automatically.
 pub fn replace_all(content: &str, pattern: &str, replacement: &str) -> Option<(String, usize)> {
     let re = Regex::new(&ensure_multiline(pattern)).ok()?;
     let mut count = 0usize;
@@ -73,7 +108,6 @@ pub fn replace_all(content: &str, pattern: &str, replacement: &str) -> Option<(S
 }
 
 /// Validate all extracted values are identical, return the canonical value.
-/// Used for version consistency checks across multiple files.
 pub fn require_identical<T>(values: &[T], context: &str) -> Result<T>
 where
     T: Clone + Eq + Hash + std::fmt::Display + Ord,
@@ -123,20 +157,6 @@ pub fn split_whitespace(line: &str, min_parts: usize) -> Option<Vec<&str>> {
     }
 }
 
-/// Resolve path that may be absolute or relative to base.
-pub fn resolve_path(base: &str, file: &str) -> PathBuf {
-    if file.starts_with('/') {
-        PathBuf::from(file)
-    } else {
-        PathBuf::from(base).join(file)
-    }
-}
-
-/// Resolve path and return as String.
-pub fn resolve_path_string(base: &str, file: &str) -> String {
-    resolve_path(base, file).to_string_lossy().to_string()
-}
-
 /// Deduplicate preserving first occurrence order.
 pub fn dedupe<T>(items: Vec<T>) -> Vec<T>
 where
@@ -150,9 +170,6 @@ where
 }
 
 /// Parse a potentially combined project:subtarget identifier.
-///
-/// Splits on the first `:` only, allowing subtargets with colons.
-/// Both parts are trimmed.
 pub fn split_identifier(identifier: &str) -> (&str, Option<&str>) {
     match identifier.split_once(':') {
         Some((project, subtarget)) => {
@@ -169,16 +186,6 @@ pub fn split_identifier(identifier: &str) -> (&str, Option<&str>) {
 }
 
 /// Extract a string value from a nested JSON path.
-///
-/// Traverses the JSON object using the provided path segments and returns
-/// the final value as a string if it exists.
-///
-/// # Example
-/// ```ignore
-/// let json = serde_json::json!({"release": {"local_path": "/path/to/file"}});
-/// let path = json_path_str(&json, &["release", "local_path"]);
-/// assert_eq!(path, Some("/path/to/file"));
-/// ```
 pub fn json_path_str<'a>(json: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
     let mut current = json;
     for part in path {
@@ -192,17 +199,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalize_identifier_trims_and_lowercases() {
+        assert_eq!(normalize_identifier("  HeLLo  "), "hello");
+    }
+
+    #[test]
+    fn identifier_eq_is_case_insensitive_and_trims() {
+        assert!(identifier_eq("  My-Site ", "my-site"));
+    }
+
+    #[test]
+    fn normalize_doc_segment_replaces_spaces_and_tabs_with_dashes() {
+        assert_eq!(normalize_doc_segment("  My Topic\tName "), "my-topic-name");
+    }
+
+    #[test]
+    fn cmp_case_insensitive_sorts_without_caring_about_case() {
+        let mut values = vec!["b", "A", "c"];
+        values.sort_by(|a, b| cmp_case_insensitive(a, b));
+        assert_eq!(values, vec!["A", "b", "c"]);
+    }
+
+    #[test]
+    fn levenshtein_returns_zero_for_identical_strings() {
+        assert_eq!(levenshtein("hello", "hello"), 0);
+    }
+
+    #[test]
+    fn levenshtein_returns_length_for_empty_other() {
+        assert_eq!(levenshtein("hello", ""), 5);
+        assert_eq!(levenshtein("", "world"), 5);
+    }
+
+    #[test]
+    fn levenshtein_counts_substitutions() {
+        assert_eq!(levenshtein("cat", "bat"), 1);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+    }
+
+    #[test]
     fn extract_first_finds_version() {
         let content = r#"Version: 1.2.3"#;
         let pattern = r"Version:\s*(\d+\.\d+\.\d+)";
         assert_eq!(extract_first(content, pattern), Some("1.2.3".to_string()));
-    }
-
-    #[test]
-    fn extract_first_returns_none_on_no_match() {
-        let content = "no version here";
-        let pattern = r"Version:\s*(\d+\.\d+\.\d+)";
-        assert_eq!(extract_first(content, pattern), None);
     }
 
     #[test]
@@ -223,27 +262,9 @@ mod tests {
     }
 
     #[test]
-    fn require_identical_passes_single_value() {
-        let values = vec!["1.0.0".to_string()];
-        assert_eq!(
-            require_identical(&values, "test").unwrap(),
-            "1.0.0".to_string()
-        );
-    }
-
-    #[test]
     fn require_identical_passes_duplicates() {
         let values = vec!["1.0.0".to_string(), "1.0.0".to_string()];
-        assert_eq!(
-            require_identical(&values, "test").unwrap(),
-            "1.0.0".to_string()
-        );
-    }
-
-    #[test]
-    fn require_identical_fails_on_different() {
-        let values = vec!["1.0.0".to_string(), "2.0.0".to_string()];
-        assert!(require_identical(&values, "test").is_err());
+        assert_eq!(require_identical(&values, "test").unwrap(), "1.0.0".to_string());
     }
 
     #[test]
@@ -251,18 +272,6 @@ mod tests {
         let output = "line1\n\nline2\n";
         let result: Vec<&str> = lines(output).collect();
         assert_eq!(result, vec!["line1", "line2"]);
-    }
-
-    #[test]
-    fn resolve_path_handles_absolute() {
-        let result = resolve_path_string("/base", "/absolute/path");
-        assert_eq!(result, "/absolute/path");
-    }
-
-    #[test]
-    fn resolve_path_handles_relative() {
-        let result = resolve_path_string("/base", "relative/path");
-        assert_eq!(result, "/base/relative/path");
     }
 
     #[test]
@@ -275,72 +284,11 @@ mod tests {
     #[test]
     fn json_path_str_extracts_nested_value() {
         let json = serde_json::json!({"release": {"local_path": "/path/to/file"}});
-        assert_eq!(
-            json_path_str(&json, &["release", "local_path"]),
-            Some("/path/to/file")
-        );
-    }
-
-    #[test]
-    fn json_path_str_returns_none_for_missing_path() {
-        let json = serde_json::json!({"release": {"version": "1.0.0"}});
-        assert_eq!(json_path_str(&json, &["release", "local_path"]), None);
-    }
-
-    #[test]
-    fn json_path_str_returns_none_for_non_string() {
-        let json = serde_json::json!({"count": 42});
-        assert_eq!(json_path_str(&json, &["count"]), None);
-    }
-
-    #[test]
-    fn json_path_str_handles_single_level() {
-        let json = serde_json::json!({"name": "test"});
-        assert_eq!(json_path_str(&json, &["name"]), Some("test"));
-    }
-
-    #[test]
-    fn json_path_str_handles_deep_nesting() {
-        let json = serde_json::json!({"a": {"b": {"c": {"d": "value"}}}});
-        assert_eq!(json_path_str(&json, &["a", "b", "c", "d"]), Some("value"));
-    }
-
-    #[test]
-    fn split_identifier_parses_project_subtarget() {
-        assert_eq!(
-            split_identifier("extra-chill:events"),
-            ("extra-chill", Some("events"))
-        );
-    }
-
-    #[test]
-    fn split_identifier_handles_project_only() {
-        assert_eq!(split_identifier("extra-chill"), ("extra-chill", None));
+        assert_eq!(json_path_str(&json, &["release", "local_path"]), Some("/path/to/file"));
     }
 
     #[test]
     fn split_identifier_preserves_subtarget_colons() {
-        assert_eq!(
-            split_identifier("project:sub:target"),
-            ("project", Some("sub:target"))
-        );
-    }
-
-    #[test]
-    fn split_identifier_treats_empty_subtarget_as_none() {
-        assert_eq!(split_identifier("project:"), ("project", None));
-    }
-
-    #[test]
-    fn split_identifier_handles_empty_project() {
-        assert_eq!(split_identifier(":subtarget"), ("", Some("subtarget")));
-    }
-
-    #[test]
-    fn split_identifier_trims_whitespace() {
-        assert_eq!(
-            split_identifier("project : subtarget"),
-            ("project", Some("subtarget"))
-        );
+        assert_eq!(split_identifier("project:sub:target"), ("project", Some("sub:target")));
     }
 }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 
 use crate::paths;
-use crate::utils::io;
+use crate::local_files;
 
 /// Root configuration structure for homeboy.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,7 +345,7 @@ fn load_config_from_file() -> crate::Result<HomeboyConfig> {
         ));
     }
 
-    let content = io::read_file(&path, &format!("read {}", path.display()))?;
+    let content = local_files::read_file(&path, &format!("read {}", path.display()))?;
 
     let config: HomeboyConfig = serde_json::from_str(&content).map_err(|e| {
         crate::Error::validation_invalid_json(
@@ -371,7 +371,7 @@ pub fn save_config(config: &HomeboyConfig) -> crate::Result<()> {
 
     let content = crate::config::to_string_pretty(config)?;
 
-    io::write_file_atomic(&path, &content, &format!("write {}", path.display()))?;
+    local_files::write_file_atomic(&path, &content, &format!("write {}", path.display()))?;
 
     Ok(())
 }

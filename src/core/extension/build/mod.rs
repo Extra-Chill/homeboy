@@ -12,6 +12,10 @@ use crate::ssh::execute_local_command_in_dir;
 use crate::engine::command::CapturedOutput;
 use crate::engine::shell;
 
+mod artifact;
+
+pub use artifact::resolve_artifact_path;
+
 // === Build Command Resolution ===
 
 #[derive(Debug, Clone)]

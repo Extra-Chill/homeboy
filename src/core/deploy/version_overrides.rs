@@ -4,7 +4,7 @@ fn artifact_is_fresh(component: &Component) -> bool {
         None => return false,
     };
 
-    let artifact_path = match artifact::resolve_artifact_path(artifact_pattern) {
+    let artifact_path = match resolve_artifact_path(artifact_pattern) {
         Ok(p) => p,
         Err(_) => return false, // artifact doesn't exist yet
     };
@@ -409,4 +409,3 @@ fn run_post_deploy_hooks(
         }
     }
 }
-

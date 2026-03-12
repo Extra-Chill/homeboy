@@ -4,10 +4,10 @@ use std::process::{Command, Stdio};
 
 use crate::context::{require_project_base_path, resolve_project_ssh};
 use crate::engine::executor::execute_for_project;
+use crate::engine::text;
 use crate::extension::{load_all_extensions, DatabaseCliConfig};
 use crate::project::{self, Project};
 use crate::engine::template::{render_map, TemplateVars};
-use crate::utils::token;
 use crate::{Error, Result};
 
 const DEFAULT_DATABASE_HOST: &str = "127.0.0.1";
@@ -151,7 +151,7 @@ fn resolve_domain(project: &Project, subtarget: Option<&str>, project_id: &str) 
 
     if let Some(target) = project.sub_targets.iter().find(|t| {
         project::slugify_id(&t.name).ok().as_deref() == Some(sub_id)
-            || token::identifier_eq(&t.name, sub_id)
+            || text::identifier_eq(&t.name, sub_id)
     }) {
         return Ok(target.domain.clone());
     }

@@ -95,6 +95,55 @@ pub struct ReleaseState {
     /// The baseline reference (tag or commit hash) used for comparison
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_ref: Option<String>,
+    /// Warning emitted when the detected baseline may not align with the current version
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_warning: Option<String>,
+}
+
+/// High-level status derived from a component release state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseStateStatus {
+    Uncommitted,
+    NeedsBump,
+    DocsOnly,
+    Clean,
+    Unknown,
+}
+
+impl ReleaseState {
+    pub fn status(&self) -> ReleaseStateStatus {
+        if self.has_uncommitted_changes {
+            ReleaseStateStatus::Uncommitted
+        } else if self.code_commits > 0 {
+            ReleaseStateStatus::NeedsBump
+        } else if self.docs_only_commits > 0 {
+            ReleaseStateStatus::DocsOnly
+        } else {
+            ReleaseStateStatus::Clean
+        }
+    }
+}
+
+impl ReleaseStateStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReleaseStateStatus::Uncommitted => "uncommitted",
+            ReleaseStateStatus::NeedsBump => "needs_bump",
+            ReleaseStateStatus::DocsOnly => "docs_only",
+            ReleaseStateStatus::Clean => "clean",
+            ReleaseStateStatus::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReleaseStateBuckets {
+    pub ready_to_deploy: Vec<String>,
+    pub needs_bump: Vec<String>,
+    pub docs_only: Vec<String>,
+    pub has_uncommitted: Vec<String>,
+    pub unknown: Vec<String>,
 }
 
 /// Result for a single component deployment.

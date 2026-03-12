@@ -345,10 +345,10 @@ fn portable_component_id_from_value(portable: &Value, dir: &Path) -> Option<Stri
         .get("id")
         .and_then(|v| v.as_str())
         .filter(|id| !id.trim().is_empty())
-        .and_then(|id| crate::utils::slugify::slugify_id(id, "component_id").ok())
+        .and_then(|id| crate::engine::identifier::slugify_id(id, "component_id").ok())
         .or_else(|| {
             let dir_name = dir.file_name()?.to_string_lossy();
-            crate::utils::slugify::slugify_id(&dir_name, "component_id").ok()
+            crate::engine::identifier::slugify_id(&dir_name, "component_id").ok()
         })
 }
 
@@ -402,7 +402,7 @@ pub fn write_portable_config(dir: &Path, component: &Component) -> Result<()> {
     let path = dir.join("homeboy.json");
     let portable = portable_json(component)?;
     let content = crate::config::to_string_pretty(&portable)?;
-    crate::utils::io::write_file_atomic(&path, &content, &format!("write {}", path.display()))
+    crate::local_files::write_file_atomic(&path, &content, &format!("write {}", path.display()))
 }
 
 pub fn has_portable_config(path: &Path) -> bool {
@@ -456,7 +456,7 @@ pub fn validate_version_pattern(pattern: &str) -> Result<()> {
     }
 
     // Must be valid regex (use multiline mode to match runtime behavior)
-    let re = Regex::new(&crate::utils::parser::ensure_multiline(pattern)).map_err(|e| {
+    let re = Regex::new(&crate::engine::text::ensure_multiline(pattern)).map_err(|e| {
         Error::validation_invalid_argument(
             "version_target.pattern",
             format!("Invalid regex pattern '{}': {}", pattern, e),
@@ -679,7 +679,7 @@ pub fn delete_safe(id: &str) -> Result<()> {
 }
 
 pub fn rename(id: &str, new_id: &str) -> Result<Component> {
-    let resolved_new_id = crate::utils::slugify::slugify_id(new_id, "component_id")?;
+    let resolved_new_id = crate::engine::identifier::slugify_id(new_id, "component_id")?;
     let component = mutate_portable(id, |component| {
         component.id = resolved_new_id.clone();
         Ok(())

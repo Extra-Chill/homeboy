@@ -2,7 +2,7 @@ use clap::Args;
 use homeboy::upgrade;
 use serde_json::Value;
 
-use crate::commands::args::HiddenJsonArgs;
+use crate::commands::utils::args::HiddenJsonArgs;
 use crate::commands::{CmdResult, GlobalArgs};
 
 #[derive(Args)]

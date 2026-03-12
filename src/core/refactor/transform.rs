@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use crate::utils::io;
+use crate::local_files;
 
 // ============================================================================
 // Rule model
@@ -120,7 +120,7 @@ pub fn load_transform_set(root: &Path, name: &str) -> Result<TransformSet> {
         ));
     }
 
-    let content = io::read_file(&json_path, "read homeboy.json")?;
+    let content = local_files::read_file(&json_path, "read homeboy.json")?;
     let data: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
         Error::internal_io(
             format!("Failed to parse homeboy.json: {}", e),
@@ -290,7 +290,7 @@ pub fn apply_transforms(
     // Write if requested
     if write && !file_edits.is_empty() {
         for (path, content) in &file_edits {
-            io::write_file(path, content, "write transformed file")?;
+            local_files::write_file(path, content, "write transformed file")?;
         }
     }
 

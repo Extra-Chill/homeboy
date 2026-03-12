@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use crate::component::{self, Component};
 use crate::context::resolve_project_ssh;
 use crate::engine::executor;
+use crate::engine::text;
 use crate::error::ErrorCode;
 use crate::extension::{find_extension_by_tool, CliConfig};
 use crate::project::{self, Project};
@@ -11,7 +12,6 @@ use crate::server;
 use crate::ssh::{execute_local_command, CommandOutput};
 use crate::engine::shell;
 use crate::engine::template::{render_map, TemplateVars};
-use crate::utils::token;
 use crate::{Error, Result};
 
 #[derive(Serialize, Clone)]
@@ -35,7 +35,7 @@ pub fn run(tool: &str, identifier: &str, args: &[String]) -> Result<CliToolResul
     let args = shell::normalize_args(args);
 
     // Parse project:subtarget syntax
-    let (project_id, embedded_subtarget) = crate::utils::parser::split_identifier(identifier);
+    let (project_id, embedded_subtarget) = crate::engine::text::split_identifier(identifier);
 
     // Build args with embedded subtarget prepended if present
     let full_args: Vec<String> = match embedded_subtarget {
@@ -318,7 +318,7 @@ fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<
 
     if let Some(subtarget) = project.sub_targets.iter().find(|t| {
         project::slugify_id(&t.name).ok().as_deref() == Some(sub_id)
-            || token::identifier_eq(&t.name, sub_id)
+            || text::identifier_eq(&t.name, sub_id)
     }) {
         return Ok((subtarget.domain.clone(), args[1..].to_vec()));
     }

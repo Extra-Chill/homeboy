@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::extension::test::analyze::{TestAnalysis, TestAnalysisInput};
 use crate::extension::test::TestCounts;
-use crate::utils::io;
+use crate::local_files;
 use crate::engine::output_parse::{Aggregate, DeriveRule, ParseRule, ParseSpec};
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,7 +91,7 @@ pub fn build_test_summary(
 }
 
 pub fn parse_failures_file(path: &std::path::Path) -> Option<TestAnalysisInput> {
-    let content = io::read_file(path, "read test failures file").ok()?;
+    let content = local_files::read_file(path, "read test failures file").ok()?;
     let mut parsed: TestAnalysisInput = serde_json::from_str(&content).ok()?;
 
     if parsed.total == 0 && !parsed.failures.is_empty() {
@@ -106,7 +106,7 @@ pub fn parse_failures_file(path: &std::path::Path) -> Option<TestAnalysisInput> 
 }
 
 pub fn parse_test_results_file(path: &std::path::Path) -> Option<TestCounts> {
-    let content = io::read_file(path, "read test results file").ok()?;
+    let content = local_files::read_file(path, "read test results file").ok()?;
     let data: serde_json::Value = serde_json::from_str(&content).ok()?;
 
     let total = data
@@ -186,7 +186,7 @@ pub fn parse_test_results_text(text: &str) -> Option<TestCounts> {
 }
 
 pub fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<CoverageOutput, ()> {
-    let content = io::read_file(path, "read coverage file").map_err(|_| ())?;
+    let content = local_files::read_file(path, "read coverage file").map_err(|_| ())?;
     let data: serde_json::Value = serde_json::from_str(&content).map_err(|_| ())?;
 
     let totals = data.get("totals").ok_or(())?;

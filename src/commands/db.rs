@@ -1,9 +1,9 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::engine::text;
 use homeboy::db::{self, DbResult, DbTunnelResult};
 use homeboy::project;
-use homeboy::token;
 
 use super::CmdResult;
 
@@ -146,7 +146,7 @@ fn parse_subtarget(
     if let Some(sub_id) = args.first() {
         if project.sub_targets.iter().any(|target| {
             project::slugify_id(&target.name).ok().as_deref() == Some(sub_id)
-                || token::identifier_eq(&target.name, sub_id)
+                || text::identifier_eq(&target.name, sub_id)
         }) {
             return Ok((Some(sub_id.clone()), args[1..].to_vec()));
         }

@@ -1,11 +1,11 @@
 use crate::error::Error;
+use crate::engine::identifier;
+use crate::engine::text::levenshtein;
 use crate::local_files::{self, FileSystem};
 use crate::output::{
     BatchResult, CreateOutput, CreateResult, MergeOutput, MergeResult, RemoveResult,
 };
 use crate::paths;
-use crate::utils::slugify;
-use crate::utils::token::levenshtein;
 use crate::Result;
 use heck::ToSnakeCase;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -867,7 +867,7 @@ fn check_alias_collision_all(id: &str, saving_type: &str) -> Result<()> {
 }
 
 pub(crate) fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
-    slugify::validate_component_id(entity.id())?;
+    identifier::validate_component_id(entity.id())?;
     check_id_collision(entity.id(), T::entity_type())?;
 
     let path = T::config_path(entity.id())?;
@@ -880,7 +880,7 @@ pub(crate) fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
 /// Internal: create a single entity from a constructed struct.
 /// Validates ID, checks for existence, runs entity-specific validation, then saves.
 fn create_single<T: ConfigEntity>(entity: T) -> Result<CreateResult<T>> {
-    slugify::validate_component_id(entity.id())?;
+    identifier::validate_component_id(entity.id())?;
     entity.validate()?;
 
     if exists::<T>(entity.id()) {
@@ -1024,7 +1024,7 @@ pub(crate) fn create_batch<T: ConfigEntity>(
             }
         };
 
-        if let Err(e) = slugify::validate_component_id(&id) {
+        if let Err(e) = identifier::validate_component_id(&id) {
             summary.record_error(id, e.message.clone());
             continue;
         }
@@ -1195,7 +1195,7 @@ pub(crate) fn remove_from_json<T: ConfigEntity>(
 
 pub(crate) fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
     let new_id = new_id.to_lowercase();
-    slugify::validate_component_id(&new_id)?;
+    identifier::validate_component_id(&new_id)?;
 
     if new_id == id {
         return Ok(());
@@ -1422,7 +1422,7 @@ macro_rules! entity_crud {
     // Feature: slugify_id
     (@feature $Entity:ty, slugify_id) => {
         pub fn slugify_id(name: &str) -> Result<String> {
-            crate::utils::slugify::slugify_id(name, "name")
+            crate::engine::identifier::slugify_id(name, "name")
         }
     };
 }

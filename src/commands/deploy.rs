@@ -3,9 +3,9 @@ use homeboy::log_status;
 use serde::Serialize;
 
 use homeboy::deploy::{self, ComponentDeployResult, DeployConfig, DeploySummary};
-use homeboy::resolve::{infer_project_for_components, resolve_project_components};
 
 use super::{CmdResult, ProjectsSummary};
+use super::utils::resolve::{infer_project_for_components, resolve_project_components};
 
 const DEPLOY_RECIPES: &[&str] = &[
     "Deploy single component: homeboy deploy <component-id>",

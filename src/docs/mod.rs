@@ -2,8 +2,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::OnceLock;
 
+use homeboy::engine::text;
 use homeboy::extension::load_all_extensions;
-use homeboy::token;
 
 include!(concat!(env!("OUT_DIR"), "/generated_docs.rs"));
 
@@ -84,7 +84,7 @@ fn normalize_topic(topic: &[String]) -> (String, String, Vec<String>) {
     let mut segments: Vec<String> = Vec::new();
     for raw in topic {
         for part in raw.split('/') {
-            let segment = token::normalize_doc_segment(part);
+            let segment = text::normalize_doc_segment(part);
             if !segment.is_empty() {
                 segments.push(segment);
             }

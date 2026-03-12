@@ -3,8 +3,7 @@ use serde::Serialize;
 
 use homeboy::component;
 use homeboy::context;
-use homeboy::git;
-use homeboy::version;
+use homeboy::deploy::{self, ReleaseStateStatus};
 
 use super::CmdResult;
 
@@ -78,12 +77,16 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusOut
     let mut clean: usize = 0;
 
     for comp in &components {
-        match classify_component(comp) {
-            ComponentStatus::Uncommitted => uncommitted.push(comp.id.clone()),
-            ComponentStatus::NeedsBump => needs_bump.push(comp.id.clone()),
-            ComponentStatus::DocsOnly => docs_only.push(comp.id.clone()),
-            ComponentStatus::Clean => ready_to_deploy.push(comp.id.clone()),
-            ComponentStatus::Unknown => clean += 1,
+        let status = deploy::calculate_release_state(comp)
+            .map(|state| state.status())
+            .unwrap_or(ReleaseStateStatus::Unknown);
+
+        match status {
+            ReleaseStateStatus::Uncommitted => uncommitted.push(comp.id.clone()),
+            ReleaseStateStatus::NeedsBump => needs_bump.push(comp.id.clone()),
+            ReleaseStateStatus::DocsOnly => docs_only.push(comp.id.clone()),
+            ReleaseStateStatus::Clean => ready_to_deploy.push(comp.id.clone()),
+            ReleaseStateStatus::Unknown => clean += 1,
         }
     }
 
@@ -117,46 +120,4 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusOut
         },
         0,
     ))
-}
-
-enum ComponentStatus {
-    Uncommitted,
-    NeedsBump,
-    DocsOnly,
-    Clean,
-    Unknown,
-}
-
-fn classify_component(component: &component::Component) -> ComponentStatus {
-    let path = &component.local_path;
-
-    let current_version = version::read_component_version(component)
-        .ok()
-        .map(|info| info.version);
-
-    let baseline = match git::detect_baseline_with_version(path, current_version.as_deref()) {
-        Ok(b) => b,
-        Err(_) => return ComponentStatus::Unknown,
-    };
-
-    let commits = git::get_commits_since_tag(path, baseline.reference.as_deref())
-        .ok()
-        .unwrap_or_default();
-
-    let counts = git::categorize_commits(path, &commits);
-
-    let uncommitted = git::get_uncommitted_changes(path)
-        .ok()
-        .map(|u| u.has_changes)
-        .unwrap_or(false);
-
-    if uncommitted {
-        ComponentStatus::Uncommitted
-    } else if counts.code > 0 {
-        ComponentStatus::NeedsBump
-    } else if counts.docs_only > 0 {
-        ComponentStatus::DocsOnly
-    } else {
-        ComponentStatus::Clean
-    }
 }

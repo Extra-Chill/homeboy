@@ -12,7 +12,7 @@ use homeboy::refactor::AppliedRefactor;
 use homeboy::scaffold::ScaffoldConfig;
 use homeboy::extension::test::{TestBaselineComparison, TestCounts};
 
-use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
+use super::utils::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
