@@ -14,8 +14,7 @@ mod status;
 pub use component::{
     apply_component_overrides, attach_component_path, attach_discovered_component_path,
     clear_component_attachments, has_component, project_component_ids, remove_components,
-    resolve_project_component, resolve_project_components,
-    set_component_attachments,
+    resolve_project_component, resolve_project_components, set_component_attachments,
 };
 pub use logs::{LogContent, LogEntry, LogSearchResult, PinnedLogsContent};
 pub use readiness::calculate_deploy_readiness;

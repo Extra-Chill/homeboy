@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use crate::component::{self, Component};
 use crate::engine::shell;
 use crate::error::{Error, Result};
-use crate::ssh::{execute_local_command_passthrough, CommandOutput};
 use crate::local_files;
+use crate::ssh::{execute_local_command_passthrough, CommandOutput};
 
 /// Output from a extension runner script execution.
 pub struct RunnerOutput {
@@ -202,7 +202,8 @@ impl ExtensionRunner {
             ));
         }
 
-        let content = local_files::read_file(&manifest_path, &format!("read {}", manifest_path.display()))?;
+        let content =
+            local_files::read_file(&manifest_path, &format!("read {}", manifest_path.display()))?;
 
         serde_json::from_str(&content).map_err(|e| {
             Error::validation_invalid_json(e, Some("parse manifest".to_string()), None)

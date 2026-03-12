@@ -408,7 +408,8 @@ pub fn extract_last_release_snapshot(content: &str) -> Option<FinalizedReleaseSn
 
         let label = trimmed.trim_start_matches("## ").trim();
         let normalized = normalize_heading_label(label);
-        if normalized.eq_ignore_ascii_case("unreleased") || normalized.eq_ignore_ascii_case("next") {
+        if normalized.eq_ignore_ascii_case("unreleased") || normalized.eq_ignore_ascii_case("next")
+        {
             continue;
         }
 
