@@ -3,7 +3,6 @@ use crate::error::{Error, Result};
 use crate::extension;
 use crate::output::{MergeOutput, MergeResult};
 use crate::project;
-use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -12,6 +11,7 @@ use std::path::Path;
 pub mod portable;
 pub mod relationships;
 pub mod resolution;
+pub mod versioning;
 
 pub use portable::{
     discover_from_portable, has_portable_config, infer_portable_component_id, mutate_portable,
@@ -21,6 +21,10 @@ pub use relationships::{associated_projects, projects_using, rename_component, s
 pub use resolution::{
     detect_from_cwd, resolve, resolve_artifact, resolve_effective, validate_local_path,
 };
+pub use versioning::{
+    normalize_version_pattern, parse_version_targets, validate_version_pattern,
+    validate_version_target_conflict,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
@@ -28,28 +32,6 @@ pub struct VersionTarget {
     pub file: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
-}
-
-/// Check if adding a new version target would conflict with existing targets.
-/// Multiple targets per file are allowed (e.g. plugin header Version: + PHP define()).
-/// Only rejects if the exact same file+pattern combo already exists.
-pub fn validate_version_target_conflict(
-    existing: &[VersionTarget],
-    new_file: &str,
-    new_pattern: &str,
-    _component_id: &str,
-) -> Result<()> {
-    for target in existing {
-        if target.file == new_file {
-            let existing_pattern = target.pattern.as_deref().unwrap_or("");
-            if existing_pattern == new_pattern {
-                // Same file + same pattern = already exists, no-op (array_union will dedupe)
-                return Ok(());
-            }
-            // Same file + different pattern = allowed (e.g. header + define() in same PHP file)
-        }
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -327,97 +309,6 @@ where
 // ============================================================================
 // Runtime resolution + repo-backed component access
 // ============================================================================
-
-/// Validate that a version target pattern is a valid regex with at least one capture group.
-/// Rejects common mistakes like `{version}` template syntax.
-pub fn validate_version_pattern(pattern: &str) -> Result<()> {
-    // Check for template syntax (common mistake)
-    if pattern.contains("{version}") {
-        return Err(Error::validation_invalid_argument(
-            "version_target.pattern",
-            format!(
-                "Pattern '{}' uses template syntax ({{version}}), but a regex with a capture group is required. \
-                 Example: 'Version: (\\d+\\.\\d+\\.\\d+)'",
-                pattern
-            ),
-            Some(pattern.to_string()),
-            None,
-        ));
-    }
-
-    // Must be valid regex (use multiline mode to match runtime behavior)
-    let re = Regex::new(&crate::engine::text::ensure_multiline(pattern)).map_err(|e| {
-        Error::validation_invalid_argument(
-            "version_target.pattern",
-            format!("Invalid regex pattern '{}': {}", pattern, e),
-            Some(pattern.to_string()),
-            None,
-        )
-    })?;
-
-    // Must have at least one capture group
-    if re.captures_len() < 2 {
-        return Err(Error::validation_invalid_argument(
-            "version_target.pattern",
-            format!(
-                "Pattern '{}' has no capture group. Wrap the version portion in parentheses. \
-                 Example: 'Version: (\\d+\\.\\d+\\.\\d+)'",
-                pattern
-            ),
-            Some(pattern.to_string()),
-            None,
-        ));
-    }
-
-    Ok(())
-}
-
-/// Normalize a regex pattern by converting double-escaped backslashes to single.
-/// This fixes patterns that were incorrectly stored with shell-escaped backslashes
-/// like "Version:\\s*(\\d+\\.\\d+\\.\\d+)" which should be "Version:\s*(\d+\.\d+\.\d+)".
-pub fn normalize_version_pattern(pattern: &str) -> String {
-    // If pattern contains \\ (literal backslash-backslash), convert to \ (literal backslash)
-    // This handles patterns that were double-escaped during CLI input
-    if pattern.contains("\\\\") {
-        pattern.replace("\\\\", "\\")
-    } else {
-        pattern.to_string()
-    }
-}
-
-pub fn parse_version_targets(targets: &[String]) -> Result<Vec<VersionTarget>> {
-    let mut parsed = Vec::new();
-    for target in targets {
-        let mut parts = target.splitn(2, "::");
-        let file = parts
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "version_target",
-                    "Invalid version target format (expected 'file' or 'file::pattern')",
-                    None,
-                    None,
-                )
-            })?;
-        let pattern = parts.next().map(str::trim).filter(|s| !s.is_empty());
-        if let Some(p) = pattern {
-            let normalized = normalize_version_pattern(p);
-            validate_version_pattern(&normalized)?;
-            parsed.push(VersionTarget {
-                file: file.to_string(),
-                pattern: Some(normalized),
-            });
-        } else {
-            parsed.push(VersionTarget {
-                file: file.to_string(),
-                pattern: None,
-            });
-        }
-    }
-    Ok(parsed)
-}
 
 // ============================================================================
 // Operations
