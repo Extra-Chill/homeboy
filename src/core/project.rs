@@ -10,6 +10,7 @@ pub mod component;
 pub mod files;
 pub mod logs;
 pub mod pins;
+pub mod report;
 mod readiness;
 mod status;
 
@@ -23,6 +24,13 @@ pub use component::{
 pub use files::{FileEntry, GrepMatch, LineChange};
 pub use logs::{LogContent, LogEntry, LogSearchResult, PinnedLogsContent};
 pub use pins::{add_pin, list_pins, remove_pin, ProjectPinChange, ProjectPinListItem, ProjectPinOutput};
+pub use report::{
+    build_components_output, build_create_output, build_delete_output, build_list_output,
+    build_pin_output, build_remove_output, build_rename_output, build_set_output,
+    build_show_output, build_status_output, list_report, show_report, status_report,
+    ProjectComponentVersion, ProjectListItem, ProjectListReport, ProjectReportExtra,
+    ProjectReportOutput, ProjectShowReport, ProjectStatusReport,
+};
 pub use readiness::calculate_deploy_readiness;
 pub use status::{collect_status, ProjectComponentStatus, ProjectStatusSnapshot};
 
