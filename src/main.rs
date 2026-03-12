@@ -20,12 +20,12 @@ mod docs;
 mod output;
 mod tty;
 
+use commands::utils::{args, entity_suggest};
 use commands::{
     api, audit, auth, build, changelog, changes, cleanup, cli, component, config, db, deploy,
     extension, file, fleet, git, init, lint, logs, project, refactor, release, server, ssh, status,
     test, transfer, undo, upgrade, version,
 };
-use commands::utils::{args, entity_suggest};
 use homeboy::extension::load_all_extensions;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -420,7 +420,8 @@ fn try_augment_clap_error(e: &clap::Error) -> Option<String> {
     let entity_match = entity_suggest::find_entity_match(&unrecognized)?;
 
     // Generate hints
-    let hints = entity_suggest::generate_entity_hints(&entity_match, &parent_command, &unrecognized);
+    let hints =
+        entity_suggest::generate_entity_hints(&entity_match, &parent_command, &unrecognized);
 
     // Build augmented output
     let mut output = format!("error: unrecognized subcommand '{}'\n\n", unrecognized);

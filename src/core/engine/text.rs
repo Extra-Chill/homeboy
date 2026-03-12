@@ -264,7 +264,10 @@ mod tests {
     #[test]
     fn require_identical_passes_duplicates() {
         let values = vec!["1.0.0".to_string(), "1.0.0".to_string()];
-        assert_eq!(require_identical(&values, "test").unwrap(), "1.0.0".to_string());
+        assert_eq!(
+            require_identical(&values, "test").unwrap(),
+            "1.0.0".to_string()
+        );
     }
 
     #[test]
@@ -284,11 +287,17 @@ mod tests {
     #[test]
     fn json_path_str_extracts_nested_value() {
         let json = serde_json::json!({"release": {"local_path": "/path/to/file"}});
-        assert_eq!(json_path_str(&json, &["release", "local_path"]), Some("/path/to/file"));
+        assert_eq!(
+            json_path_str(&json, &["release", "local_path"]),
+            Some("/path/to/file")
+        );
     }
 
     #[test]
     fn split_identifier_preserves_subtarget_colons() {
-        assert_eq!(split_identifier("project:sub:target"), ("project", Some("sub:target")));
+        assert_eq!(
+            split_identifier("project:sub:target"),
+            ("project", Some("sub:target"))
+        );
     }
 }
