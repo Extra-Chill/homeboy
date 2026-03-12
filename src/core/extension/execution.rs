@@ -522,6 +522,11 @@ pub(crate) fn execute_capability_script(
     ))
 }
 
+pub(crate) struct PreparedCapabilityRun {
+    pub execution: super::ExtensionExecutionContext,
+    pub settings_json: String,
+}
+
 pub(crate) fn resolve_capability_component(
     execution_context: &super::ExtensionExecutionContext,
     pre_loaded_component: Option<&Component>,
@@ -553,6 +558,34 @@ pub(crate) fn build_capability_execution_context(
     }
 
     execution
+}
+
+pub(crate) fn prepare_capability_run(
+    execution_context: &super::ExtensionExecutionContext,
+    pre_loaded_component: Option<&Component>,
+    path_override: Option<&str>,
+    settings_overrides: &[(String, String)],
+) -> Result<PreparedCapabilityRun> {
+    let component = resolve_capability_component(execution_context, pre_loaded_component, path_override)?;
+    let execution = build_capability_execution_context(execution_context, component, path_override);
+
+    validate_capability_script_exists(
+        &execution.extension_path,
+        &execution.script_path,
+        execution.capability,
+    )?;
+
+    let manifest = load_extension_manifest_from_dir(&execution.extension_path)?;
+    let settings_json = build_settings_json_from_manifest(
+        &manifest,
+        &execution.settings,
+        settings_overrides,
+    )?;
+
+    Ok(PreparedCapabilityRun {
+        execution,
+        settings_json,
+    })
 }
 
 fn build_template_vars<'a>(

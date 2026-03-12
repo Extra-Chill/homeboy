@@ -14,11 +14,6 @@ pub struct RunnerOutput {
 
 use super::ExtensionExecutionContext;
 
-struct ResolvedRunnerContext {
-    execution: ExtensionExecutionContext,
-    settings_json: String,
-}
-
 /// Orchestrates extension script execution for test/lint runners.
 ///
 /// Encapsulates the shared logic for finding components, resolving extensions,
@@ -109,54 +104,28 @@ impl ExtensionRunner {
     /// 7. Prepare environment variables
     /// 8. Execute via shell
     pub fn run(&self) -> Result<RunnerOutput> {
-        let resolved = self.resolve_context()?;
-        let project_path = PathBuf::from(&resolved.execution.component.local_path);
+        let prepared = super::execution::prepare_capability_run(
+            &self.execution_context,
+            self.pre_loaded_component.as_ref(),
+            self.path_override.as_deref(),
+            &self.settings_overrides,
+        )?;
+
+        let project_path = PathBuf::from(&prepared.execution.component.local_path);
         let env_vars = self.prepare_env_vars(
-            &resolved.execution.extension_path,
+            &prepared.execution.extension_path,
             &project_path,
-            &resolved.settings_json,
-            &resolved.execution.extension_id,
+            &prepared.settings_json,
+            &prepared.execution.extension_id,
         );
 
-        let output = self.execute_script(&resolved.execution.extension_path, &env_vars)?;
+        let output = self.execute_script(&prepared.execution.extension_path, &env_vars)?;
 
         Ok(RunnerOutput {
             exit_code: output.exit_code,
             success: output.success,
             stdout: output.stdout,
             stderr: output.stderr,
-        })
-    }
-
-    fn resolve_context(&self) -> Result<ResolvedRunnerContext> {
-        let component = super::execution::resolve_capability_component(
-            &self.execution_context,
-            self.pre_loaded_component.as_ref(),
-            self.path_override.as_deref(),
-        )?;
-        let execution = super::execution::build_capability_execution_context(
-            &self.execution_context,
-            component,
-            self.path_override.as_deref(),
-        );
-
-        super::execution::validate_capability_script_exists(
-            &execution.extension_path,
-            &execution.script_path,
-            execution.capability,
-        )?;
-
-        let manifest =
-            super::execution::load_extension_manifest_from_dir(&execution.extension_path)?;
-        let settings_json = super::execution::build_settings_json_from_manifest(
-            &manifest,
-            &execution.settings,
-            &self.settings_overrides,
-        )?;
-
-        Ok(ResolvedRunnerContext {
-            execution,
-            settings_json,
         })
     }
 
