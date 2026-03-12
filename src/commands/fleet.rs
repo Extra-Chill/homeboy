@@ -4,9 +4,8 @@ use serde::Serialize;
 
 use homeboy::deploy::{self, DeployConfig};
 use homeboy::fleet::{self, Fleet};
-use homeboy::health::{self, ServerHealth};
+use homeboy::health::ServerHealth;
 use homeboy::project::{self, Project};
-use homeboy::version;
 use homeboy::EntityCrudOutput;
 
 use super::{CmdResult, DynamicSetArgs};
@@ -441,129 +440,23 @@ fn components(id: &str) -> CmdResult<FleetOutput> {
 }
 
 fn status(id: &str, cached: bool, health_only: bool) -> CmdResult<FleetOutput> {
-    let fl = fleet::load(id)?;
-    let mut project_statuses = Vec::new();
-
-    if cached {
-        // Cached mode: read versions from local files (no SSH, no health)
-        for project_id in &fl.project_ids {
-            let proj = match project::load(project_id) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            let mut component_statuses = Vec::new();
-            for component_id in project::project_component_ids(&proj) {
-                let comp_version = match project::resolve_project_component(&proj, &component_id) {
-                    Ok(comp) => version::get_component_version(&comp),
-                    Err(_) => None,
-                };
-
-                component_statuses.push(FleetComponentStatus {
-                    component_id: component_id.clone(),
-                    version: comp_version,
-                    version_source: Some("cached".to_string()),
-                });
-            }
-
-            project_statuses.push(FleetProjectStatus {
-                project_id: project_id.clone(),
-                server_id: proj.server_id.clone(),
-                components: component_statuses,
-                health: None,
-            });
-        }
-    } else {
-        // Live mode (default): SSH into each server for versions and health
-        for project_id in &fl.project_ids {
-            let proj = match project::load(project_id) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            log_status!("fleet", "Checking '{}'...", project_id);
-
-            // Collect health metrics via direct SSH
-            let health = health::collect_project_health(&proj);
-
-            if health_only {
-                // Skip component version check
-                project_statuses.push(FleetProjectStatus {
-                    project_id: project_id.clone(),
-                    server_id: proj.server_id.clone(),
-                    components: vec![],
-                    health,
-                });
-                continue;
-            }
-
-            // Use the deploy check infrastructure to get remote versions via SSH
-            let config = DeployConfig {
-                component_ids: vec![],
-                all: true,
-                outdated: false,
-                dry_run: false,
-                check: true,
-                force: false,
-                skip_build: true,
-                keep_deps: false,
-                expected_version: None,
-                no_pull: true,
-                head: true,
-            };
-
-            match deploy::run(project_id, &config) {
-                Ok(result) => {
-                    let mut component_statuses = Vec::new();
-                    for comp_result in &result.results {
-                        component_statuses.push(FleetComponentStatus {
-                            component_id: comp_result.id.clone(),
-                            version: comp_result.remote_version.clone(),
-                            version_source: Some("live".to_string()),
-                        });
-                    }
-
-                    project_statuses.push(FleetProjectStatus {
-                        project_id: project_id.clone(),
-                        server_id: proj.server_id.clone(),
-                        components: component_statuses,
-                        health,
-                    });
-                }
-                Err(e) => {
-                    // SSH failed for versions — fall back to cached, but keep whatever health we got
-                    log_status!(
-                        "fleet",
-                        "Warning: could not reach '{}' — falling back to cached versions: {}",
-                        project_id,
-                        e
-                    );
-
-                    let mut component_statuses = Vec::new();
-                    for component_id in project::project_component_ids(&proj) {
-                        let comp_version =
-                            match project::resolve_project_component(&proj, &component_id) {
-                                Ok(comp) => version::get_component_version(&comp),
-                                Err(_) => None,
-                            };
-
-                        component_statuses.push(FleetComponentStatus {
-                            component_id: component_id.clone(),
-                            version: comp_version,
-                            version_source: Some("cached".to_string()),
-                        });
-                    }
-
-                    project_statuses.push(FleetProjectStatus {
-                        project_id: project_id.clone(),
-                        server_id: proj.server_id.clone(),
-                        components: component_statuses,
-                        health,
-                    });
-                }
-            }
-        }
-    }
+    let project_statuses = fleet::collect_status(id, cached, health_only)?
+        .into_iter()
+        .map(|status| FleetProjectStatus {
+            project_id: status.project_id,
+            server_id: status.server_id,
+            components: status
+                .components
+                .into_iter()
+                .map(|component| FleetComponentStatus {
+                    component_id: component.component_id,
+                    version: component.version,
+                    version_source: component.version_source,
+                })
+                .collect(),
+            health: status.health,
+        })
+        .collect();
 
     Ok((
         FleetOutput {

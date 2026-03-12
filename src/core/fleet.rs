@@ -4,6 +4,10 @@ use crate::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::project;
 use serde::{Deserialize, Serialize};
 
+pub mod status;
+
+pub use status::{collect_status, FleetComponentStatus, FleetProjectStatus};
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Fleet {
     #[serde(skip_deserializing, default)]
