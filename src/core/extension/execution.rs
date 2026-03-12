@@ -422,7 +422,10 @@ pub(crate) fn build_settings_json_from_manifest(
                         setting.get("id").and_then(|v| v.as_str()),
                         setting.get("default").and_then(|v| v.as_str()),
                     ) {
-                        obj.insert(id.to_string(), serde_json::Value::String(default.to_string()));
+                        obj.insert(
+                            id.to_string(),
+                            serde_json::Value::String(default.to_string()),
+                        );
                     }
                 }
             }
@@ -527,11 +530,7 @@ pub(crate) fn resolve_capability_component(
     let mut comp = if let Some(pre_loaded) = pre_loaded_component {
         pre_loaded.clone()
     } else {
-        component::resolve_effective(
-            Some(&execution_context.component.id),
-            path_override,
-            None,
-        )?
+        component::resolve_effective(Some(&execution_context.component.id), path_override, None)?
     };
 
     if let Some(path) = path_override {

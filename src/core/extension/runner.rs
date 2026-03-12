@@ -143,10 +143,11 @@ impl ExtensionRunner {
         super::execution::validate_capability_script_exists(
             &execution.extension_path,
             &execution.script_path,
-            execution.capability.clone(),
+            execution.capability,
         )?;
 
-        let manifest = super::execution::load_extension_manifest_from_dir(&execution.extension_path)?;
+        let manifest =
+            super::execution::load_extension_manifest_from_dir(&execution.extension_path)?;
         let settings_json = super::execution::build_settings_json_from_manifest(
             &manifest,
             &execution.settings,
