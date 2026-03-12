@@ -13,7 +13,6 @@ pub mod deploy;
 pub mod engine;
 pub mod error;
 pub mod extension;
-pub mod files;
 pub mod fleet;
 pub mod git;
 pub mod health;

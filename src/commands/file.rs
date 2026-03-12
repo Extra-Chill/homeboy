@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::files::{self, FileEntry, GrepMatch, LineChange};
+use homeboy::project::files::{self, FileEntry, GrepMatch, LineChange};
 
 use super::CmdResult;
 
