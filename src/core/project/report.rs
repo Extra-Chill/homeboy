@@ -80,7 +80,10 @@ pub fn list_report() -> Result<ProjectListReport> {
         .collect();
 
     let hint = if items.is_empty() {
-        Some("No projects configured. Run 'homeboy status --full' to see project context".to_string())
+        Some(
+            "No projects configured. Run 'homeboy status --full' to see project context"
+                .to_string(),
+        )
     } else {
         None
     };
@@ -271,7 +274,11 @@ pub fn build_components_output(
     }
 }
 
-pub fn build_pin_output(command: &str, project_id: &str, pin: crate::project::ProjectPinOutput) -> ProjectReportOutput {
+pub fn build_pin_output(
+    command: &str,
+    project_id: &str,
+    pin: crate::project::ProjectPinOutput,
+) -> ProjectReportOutput {
     ProjectReportOutput {
         command: command.to_string(),
         id: Some(project_id.to_string()),

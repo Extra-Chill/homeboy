@@ -27,7 +27,11 @@ pub fn list_components(project_id: &str) -> Result<ProjectComponentsOutput> {
 pub fn set_components(project_id: &str, json_spec: &str) -> Result<ProjectComponentsOutput> {
     let raw = crate::config::read_json_spec_to_string(json_spec)?;
     let attachments: Vec<ProjectComponentAttachment> = serde_json::from_str(&raw).map_err(|e| {
-        Error::validation_invalid_json(e, Some("parse project component attachments".to_string()), None)
+        Error::validation_invalid_json(
+            e,
+            Some("parse project component attachments".to_string()),
+            None,
+        )
     })?;
 
     set_component_attachments(project_id, attachments)?;
