@@ -77,18 +77,137 @@ pub(crate) fn normalize_changelog_component(args: Vec<String>) -> Vec<String> {
 /// Auto-insert '--' separator before unknown flags for trailing_var_arg commands.
 pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
     let commands: &[(&str, &str, &[&str])] = &[
-        ("component", "set", &["--json", "--base64", "--replace", "--version-target", "--extension", "--help", "-h"]),
-        ("component", "edit", &["--json", "--base64", "--replace", "--version-target", "--extension", "--help", "-h"]),
-        ("component", "merge", &["--json", "--base64", "--replace", "--version-target", "--extension", "--help", "-h"]),
-        ("server", "set", &["--json", "--base64", "--replace", "--help", "-h"]),
-        ("server", "edit", &["--json", "--base64", "--replace", "--help", "-h"]),
-        ("server", "merge", &["--json", "--base64", "--replace", "--help", "-h"]),
-        ("fleet", "set", &["--json", "--base64", "--replace", "--help", "-h"]),
-        ("fleet", "edit", &["--json", "--base64", "--replace", "--help", "-h"]),
-        ("fleet", "merge", &["--json", "--base64", "--replace", "--help", "-h"]),
-        ("test", "", &["--skip-lint", "--fix", "--coverage", "--coverage-min", "--baseline", "--ignore-baseline", "--ratchet", "--analyze", "--drift", "--scaffold", "--scaffold-file", "--write", "--since", "--changed-since", "--setting", "--path", "--json-summary", "--json", "--help", "-h"]),
-        ("docs", "audit", &["--path", "--docs-dir", "--baseline", "--ignore-baseline", "--features", "--help", "-h"]),
-        ("lint", "", &["--fix", "--baseline", "--ignore-baseline", "--summary", "--file", "--glob", "--changed-only", "--changed-since", "--errors-only", "--sniffs", "--exclude-sniffs", "--category", "--setting", "--path", "--json", "--help", "-h"]),
+        (
+            "component",
+            "set",
+            &[
+                "--json",
+                "--base64",
+                "--replace",
+                "--version-target",
+                "--extension",
+                "--help",
+                "-h",
+            ],
+        ),
+        (
+            "component",
+            "edit",
+            &[
+                "--json",
+                "--base64",
+                "--replace",
+                "--version-target",
+                "--extension",
+                "--help",
+                "-h",
+            ],
+        ),
+        (
+            "component",
+            "merge",
+            &[
+                "--json",
+                "--base64",
+                "--replace",
+                "--version-target",
+                "--extension",
+                "--help",
+                "-h",
+            ],
+        ),
+        (
+            "server",
+            "set",
+            &["--json", "--base64", "--replace", "--help", "-h"],
+        ),
+        (
+            "server",
+            "edit",
+            &["--json", "--base64", "--replace", "--help", "-h"],
+        ),
+        (
+            "server",
+            "merge",
+            &["--json", "--base64", "--replace", "--help", "-h"],
+        ),
+        (
+            "fleet",
+            "set",
+            &["--json", "--base64", "--replace", "--help", "-h"],
+        ),
+        (
+            "fleet",
+            "edit",
+            &["--json", "--base64", "--replace", "--help", "-h"],
+        ),
+        (
+            "fleet",
+            "merge",
+            &["--json", "--base64", "--replace", "--help", "-h"],
+        ),
+        (
+            "test",
+            "",
+            &[
+                "--skip-lint",
+                "--fix",
+                "--coverage",
+                "--coverage-min",
+                "--baseline",
+                "--ignore-baseline",
+                "--ratchet",
+                "--analyze",
+                "--drift",
+                "--scaffold",
+                "--scaffold-file",
+                "--write",
+                "--since",
+                "--changed-since",
+                "--setting",
+                "--path",
+                "--json-summary",
+                "--json",
+                "--help",
+                "-h",
+            ],
+        ),
+        (
+            "docs",
+            "audit",
+            &[
+                "--path",
+                "--docs-dir",
+                "--baseline",
+                "--ignore-baseline",
+                "--features",
+                "--help",
+                "-h",
+            ],
+        ),
+        (
+            "lint",
+            "",
+            &[
+                "--fix",
+                "--baseline",
+                "--ignore-baseline",
+                "--summary",
+                "--file",
+                "--glob",
+                "--changed-only",
+                "--changed-since",
+                "--errors-only",
+                "--sniffs",
+                "--exclude-sniffs",
+                "--category",
+                "--setting",
+                "--path",
+                "--json",
+                "--help",
+                "-h",
+            ],
+        ),
     ];
 
     let known_flags = commands.iter().find_map(|(cmd, subcmd, flags)| {
@@ -98,7 +217,11 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
             args.get(1).map(|s| s == *cmd).unwrap_or(false)
                 && args.get(2).map(|s| s == *subcmd).unwrap_or(false)
         };
-        if matches { Some(*flags) } else { None }
+        if matches {
+            Some(*flags)
+        } else {
+            None
+        }
     });
 
     let Some(known_flags) = known_flags else {
@@ -116,7 +239,9 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
         if !found_separator
             && arg.starts_with("--")
             && !known_flags.contains(&arg.as_str())
-            && !known_flags.iter().any(|f| arg.starts_with(&format!("{}=", f)))
+            && !known_flags
+                .iter()
+                .any(|f| arg.starts_with(&format!("{}=", f)))
             && insert_position.is_none()
         {
             insert_position = Some(i);

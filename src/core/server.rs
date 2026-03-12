@@ -176,7 +176,8 @@ pub fn import_key(server_id: &str, source_path: &str) -> Result<KeyImportResult>
 
     let expanded_path = shellexpand::tilde(source_path).to_string();
 
-    let private_key = local_files::read_file(std::path::Path::new(&expanded_path), "read ssh private key")?;
+    let private_key =
+        local_files::read_file(std::path::Path::new(&expanded_path), "read ssh private key")?;
 
     if !private_key.contains("-----BEGIN") || !private_key.contains("PRIVATE KEY-----") {
         return Err(Error::validation_invalid_argument(
