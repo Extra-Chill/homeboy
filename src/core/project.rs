@@ -6,6 +6,19 @@ use crate::server;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod component;
+mod readiness;
+mod status;
+
+pub use component::{
+    apply_component_overrides, attach_component_path, attach_discovered_component_path,
+    clear_component_attachments, has_component, project_component_ids, remove_components,
+    resolve_project_component, resolve_project_components,
+    set_component_attachments,
+};
+pub use readiness::calculate_deploy_readiness;
+pub use status::{collect_status, ProjectComponentStatus, ProjectStatusSnapshot};
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectComponentAttachment {
     pub id: String,
@@ -323,191 +336,6 @@ pub struct NewsletterConfig {
 // ============================================================================
 
 entity_crud!(Project; list_ids, merge, slugify_id);
-
-// ============================================================================
-// Operations
-// ============================================================================
-
-fn component_ids_from_attachments(components: &[ProjectComponentAttachment]) -> Vec<String> {
-    components
-        .iter()
-        .map(|component| component.id.clone())
-        .collect()
-}
-
-pub fn project_component_ids(project: &Project) -> Vec<String> {
-    component_ids_from_attachments(&project.components)
-}
-
-pub fn has_component(project: &Project, component_id: &str) -> bool {
-    project
-        .components
-        .iter()
-        .any(|component| component.id == component_id)
-}
-
-pub fn set_component_attachments(
-    project_id: &str,
-    components: Vec<ProjectComponentAttachment>,
-) -> Result<Vec<String>> {
-    if components.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "components",
-            "At least one component attachment is required",
-            Some(project_id.to_string()),
-            None,
-        ));
-    }
-
-    let mut deduped = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for component in components {
-        if component.local_path.trim().is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "components.local_path",
-                "Project component attachments require a non-empty local_path",
-                Some(project_id.to_string()),
-                None,
-            ));
-        }
-        if seen.insert(component.id.clone()) {
-            deduped.push(component);
-        }
-    }
-
-    let mut project = load(project_id)?;
-    project.components = deduped;
-    save(&project)?;
-    Ok(project_component_ids(&project))
-}
-
-pub fn remove_components(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
-    if component_ids.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "componentIds",
-            "At least one component ID is required",
-            Some(project_id.to_string()),
-            None,
-        ));
-    }
-
-    let mut project = load(project_id)?;
-
-    let mut missing = Vec::new();
-    for id in &component_ids {
-        if !has_component(&project, id) {
-            missing.push(id.clone());
-        }
-    }
-
-    if !missing.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "componentIds",
-            "Component IDs not attached to project",
-            Some(project_id.to_string()),
-            Some(missing),
-        ));
-    }
-
-    project
-        .components
-        .retain(|component| !component_ids.contains(&component.id));
-    save(&project)?;
-    Ok(project_component_ids(&project))
-}
-
-pub fn attach_component_path(project_id: &str, component_id: &str, local_path: &str) -> Result<()> {
-    let mut project = load(project_id)?;
-
-    if let Some(component) = project.components.iter_mut().find(|c| c.id == component_id) {
-        component.local_path = local_path.to_string();
-    } else {
-        project.components.push(ProjectComponentAttachment {
-            id: component_id.to_string(),
-            local_path: local_path.to_string(),
-        });
-    }
-
-    save(&project)
-}
-
-pub fn apply_component_overrides(
-    component: &crate::component::Component,
-    project: &Project,
-) -> crate::component::Component {
-    let Some(overrides) = project.component_overrides.get(&component.id) else {
-        return component.clone();
-    };
-
-    let mut merged = component.clone();
-
-    if let Some(build_artifact) = &overrides.build_artifact {
-        merged.build_artifact = Some(build_artifact.clone());
-    }
-    if let Some(extract_command) = &overrides.extract_command {
-        merged.extract_command = Some(extract_command.clone());
-    }
-    if let Some(remote_owner) = &overrides.remote_owner {
-        merged.remote_owner = Some(remote_owner.clone());
-    }
-    if let Some(deploy_strategy) = &overrides.deploy_strategy {
-        merged.deploy_strategy = Some(deploy_strategy.clone());
-    }
-    if let Some(git_deploy) = &overrides.git_deploy {
-        merged.git_deploy = Some(git_deploy.clone());
-    }
-    if !overrides.hooks.is_empty() {
-        merged.hooks = overrides.hooks.clone();
-    }
-    if let Some(scopes) = &overrides.scopes {
-        merged.scopes = Some(scopes.clone());
-    }
-
-    merged
-}
-
-pub fn resolve_project_component(
-    project: &Project,
-    component_id: &str,
-) -> Result<crate::component::Component> {
-    let component = if let Some(attachment) = project
-        .components
-        .iter()
-        .find(|component| component.id == component_id)
-    {
-        crate::component::discover_from_portable(std::path::Path::new(&attachment.local_path))
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "components.local_path",
-                    format!(
-                        "Project component '{}' points to '{}' but no homeboy.json was found",
-                        component_id, attachment.local_path
-                    ),
-                    Some(project.id.clone()),
-                    None,
-                )
-            })?
-    } else {
-        return Err(Error::validation_invalid_argument(
-            "components",
-            format!(
-                "Project '{}' has no attached component '{}'",
-                project.id, component_id
-            ),
-            Some(project.id.clone()),
-            None,
-        ));
-    };
-    Ok(apply_component_overrides(&component, project))
-}
-
-pub fn resolve_project_components(project: &Project) -> Result<Vec<crate::component::Component>> {
-    project
-        .components
-        .iter()
-        .map(|component| resolve_project_component(project, &component.id))
-        .collect()
-}
 
 pub fn pin(project_id: &str, pin_type: PinType, path: &str, options: PinOptions) -> Result<()> {
     let mut project = load(project_id)?;

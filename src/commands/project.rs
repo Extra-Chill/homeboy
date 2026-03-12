@@ -3,12 +3,9 @@ use homeboy::log_status;
 use serde::Serialize;
 use std::path::Path;
 
-use homeboy::component::{self, Component};
-use homeboy::deploy::{self, DeployConfig};
-use homeboy::health::{self, ServerHealth};
+use homeboy::component::Component;
+use homeboy::health::ServerHealth;
 use homeboy::project::{self, Project};
-use homeboy::server;
-use homeboy::version;
 use homeboy::EntityCrudOutput;
 
 use super::CmdResult;
@@ -256,7 +253,7 @@ pub struct ProjectComponentVersion {
     pub component_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// Where the version was resolved from: "live" (SSH) or "cached" (local file)
+    /// Where the version was resolved from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_source: Option<String>,
 }
@@ -400,7 +397,7 @@ fn show(project_id: &str) -> CmdResult<ProjectOutput> {
     };
 
     // Calculate deploy readiness
-    let (deploy_ready, deploy_blockers) = calculate_deploy_readiness(&project);
+    let (deploy_ready, deploy_blockers) = project::calculate_deploy_readiness(&project);
 
     Ok((
         ProjectOutput {
@@ -421,69 +418,6 @@ fn show(project_id: &str) -> CmdResult<ProjectOutput> {
         },
         0,
     ))
-}
-
-fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
-    let mut blockers = Vec::new();
-
-    // Check server_id
-    match &project.server_id {
-        None => {
-            blockers.push(format!(
-                "Missing server_id - set with: homeboy project set {} '{{\"server_id\": \"<server-id>\"}}'",
-                project.id
-            ));
-        }
-        Some(sid) if !server::exists(sid) => {
-            blockers.push(format!(
-                "Server '{}' not found - create with: homeboy server set {} '{{\"host\": \"...\", \"user\": \"...\"}}'",
-                sid, sid
-            ));
-        }
-        _ => {}
-    }
-
-    // Check base_path
-    if project
-        .base_path
-        .as_ref()
-        .map(|p| p.is_empty())
-        .unwrap_or(true)
-    {
-        blockers.push(format!(
-            "Missing base_path - set with: homeboy project set {} '{{\"base_path\": \"/path/to/webroot\"}}'",
-            project.id
-        ));
-    }
-
-    // Check components
-    if project.components.is_empty() {
-        blockers.push(format!(
-            "No components linked - add with: homeboy project components add {} <component-id> or attach a repo: homeboy project components attach-path {} <component-id> <path>",
-            project.id,
-            project.id
-        ));
-    } else {
-        // Check if at least one component is actually deployable (has artifact or git strategy)
-        let has_deployable = project.components.iter().any(|attachment| {
-            if let Ok(comp) = project::resolve_project_component(project, &attachment.id) {
-                let is_git = comp.deploy_strategy.as_deref() == Some("git");
-                let has_artifact = component::resolve_artifact(&comp).is_some();
-                is_git || has_artifact
-            } else {
-                false
-            }
-        });
-        if !has_deployable {
-            blockers.push(format!(
-                "No deployable components - {} component(s) exist but none have a build artifact or deploy strategy configured",
-                project.components.len()
-            ));
-        }
-    }
-
-    let deploy_ready = blockers.is_empty();
-    (deploy_ready, blockers)
 }
 
 fn set(args: super::DynamicSetArgs) -> CmdResult<ProjectOutput> {
@@ -623,8 +557,7 @@ fn components_set(project_id: &str, json: &str) -> CmdResult<ProjectOutput> {
 }
 
 fn components_attach_path(project_id: &str, local_path: &str) -> CmdResult<ProjectOutput> {
-    let component_id = component::infer_portable_component_id(Path::new(local_path))?;
-    project::attach_component_path(project_id, &component_id, local_path)?;
+    project::attach_discovered_component_path(project_id, Path::new(local_path))?;
     let project = project::load(project_id)?;
     write_project_components(project_id, "attach_path", &project)
 }
@@ -636,9 +569,8 @@ fn components_remove(project_id: &str, component_ids: Vec<String>) -> CmdResult<
 }
 
 fn components_clear(project_id: &str) -> CmdResult<ProjectOutput> {
-    let mut project = project::load(project_id)?;
-    project.components.clear();
-
+    project::clear_component_attachments(project_id)?;
+    let project = project::load(project_id)?;
     write_project_components(project_id, "clear", &project)
 }
 
@@ -822,75 +754,28 @@ fn pin_remove(project_id: &str, path: &str, pin_type: ProjectPinType) -> CmdResu
 }
 
 fn status(project_id: &str, health_only: bool) -> CmdResult<ProjectOutput> {
-    let proj = project::load(project_id)?;
+    project::load(project_id)?;
 
     log_status!("project", "Checking '{}'...", project_id);
 
-    // Collect health metrics via the shared core primitive
-    let project_health = health::collect_project_health(&proj);
-
-    let component_versions = if health_only {
-        None
-    } else {
-        // Collect live component versions via deploy check infrastructure
-        let config = DeployConfig {
-            component_ids: vec![],
-            all: true,
-            outdated: false,
-            dry_run: false,
-            check: true,
-            force: false,
-            skip_build: true,
-            keep_deps: false,
-            expected_version: None,
-            no_pull: true,
-            head: true,
-        };
-
-        match deploy::run(project_id, &config) {
-            Ok(result) => Some(
-                result
-                    .results
-                    .iter()
-                    .map(|r| ProjectComponentVersion {
-                        component_id: r.id.clone(),
-                        version: r.remote_version.clone(),
-                        version_source: Some("live".to_string()),
-                    })
-                    .collect(),
-            ),
-            Err(e) => {
-                // SSH failed for versions — fall back to cached
-                log_status!(
-                    "project",
-                    "Warning: could not reach server — falling back to cached versions: {}",
-                    e
-                );
-                Some(
-                    proj.components
-                        .iter()
-                        .map(|cid| {
-                            let comp_version = component::load(&cid.id)
-                                .ok()
-                                .and_then(|comp| version::get_component_version(&comp));
-                            ProjectComponentVersion {
-                                component_id: cid.id.clone(),
-                                version: comp_version,
-                                version_source: Some("cached".to_string()),
-                            }
-                        })
-                        .collect(),
-                )
-            }
-        }
-    };
+    let snapshot = project::collect_status(project_id, health_only);
+    let component_versions = snapshot.component_versions.map(|versions| {
+        versions
+            .into_iter()
+            .map(|version| ProjectComponentVersion {
+                component_id: version.component_id,
+                version: version.version,
+                version_source: version.version_source,
+            })
+            .collect()
+    });
 
     Ok((
         ProjectOutput {
             command: "project.status".to_string(),
             id: Some(project_id.to_string()),
             extra: ProjectExtra {
-                health: project_health,
+                health: snapshot.health,
                 component_versions,
                 ..Default::default()
             },
