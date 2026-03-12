@@ -566,7 +566,8 @@ pub(crate) fn prepare_capability_run(
     path_override: Option<&str>,
     settings_overrides: &[(String, String)],
 ) -> Result<PreparedCapabilityRun> {
-    let component = resolve_capability_component(execution_context, pre_loaded_component, path_override)?;
+    let component =
+        resolve_capability_component(execution_context, pre_loaded_component, path_override)?;
     let execution = build_capability_execution_context(execution_context, component, path_override);
 
     validate_capability_script_exists(
@@ -576,11 +577,8 @@ pub(crate) fn prepare_capability_run(
     )?;
 
     let manifest = load_extension_manifest_from_dir(&execution.extension_path)?;
-    let settings_json = build_settings_json_from_manifest(
-        &manifest,
-        &execution.settings,
-        settings_overrides,
-    )?;
+    let settings_json =
+        build_settings_json_from_manifest(&manifest, &execution.settings, settings_overrides)?;
 
     Ok(PreparedCapabilityRun {
         execution,
