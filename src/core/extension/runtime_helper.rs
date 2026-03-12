@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
-use crate::paths;
 use crate::local_files;
+use crate::paths;
 use std::fs;
 use std::path::PathBuf;
 
@@ -21,7 +21,11 @@ pub fn ensure_runner_steps_helper() -> Result<PathBuf> {
     let current = fs::read_to_string(&helper_path).ok();
 
     if current.as_deref() != Some(RUNNER_STEPS_SH) {
-        local_files::write_file_atomic(&helper_path, RUNNER_STEPS_SH, "write runtime runner helper")?;
+        local_files::write_file_atomic(
+            &helper_path,
+            RUNNER_STEPS_SH,
+            "write runtime runner helper",
+        )?;
     }
 
     Ok(helper_path)
