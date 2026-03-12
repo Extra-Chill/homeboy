@@ -95,6 +95,6 @@ All config is JSON files in `~/.config/homeboy/`. Run `homeboy docs schemas/<ent
 - **Do not memorize commands.** Run `--help` or `homeboy docs` to discover what you need.
 - **Do not edit version files manually.** Use `homeboy version bump` — it manages version targets across multiple files.
 - **Do not deploy manually.** Use `homeboy deploy` — it builds, uploads, and runs post-deploy hooks.
-- **Start with `homeboy init` or `homeboy status`** to understand the current state before operating.
+- **Start with `homeboy status --full`** to understand the current state before operating. `homeboy init` is a compatibility alias.
 - **Use `--dry-run`** on destructive operations (`deploy`, `release`, `refactor rename`) to preview before executing.
 - **All output is JSON** — parse it programmatically, don't scrape text.

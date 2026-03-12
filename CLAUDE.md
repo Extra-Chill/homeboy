@@ -22,12 +22,12 @@ When validating changes in this workspace, always run tests using the **release 
 
 When working with Homeboy-managed repositories:
 
-1. **Always start with `homeboy init`** - Understand context before any operations
+1. **Always start with `homeboy status --full`** - Understand context before any operations
 2. **Use Homeboy commands for version changes** - `homeboy version set/bump`, never manual file edits
 3. **Use Homeboy for builds** - `homeboy build <component>`, not manual build scripts
 4. **Use Homeboy for deploys** - `homeboy deploy`, not manual rsync/scp
 
-Never assume repo structure. Let `homeboy init` tell you:
+Never assume repo structure. Let `homeboy status --full` tell you:
 - Which components exist
 - What build commands are configured
 - What version targets are managed

@@ -79,7 +79,7 @@ Topics cover commands, schemas, architecture, and developer guides — all embed
 | `version` | Semantic version management. Detects versions from configured file targets using regex patterns. `bump` for patch/minor/major. |
 | `changelog` | Add categorized entries (Feature, Fix, Breaking, Docs, Chore). Finalize for release. Entries stored in `docs/CHANGELOG.md`. |
 | `changes` | Show commits and diffs since last version tag. Works per-component or per-project. `--git-diffs` for full diff output. |
-| `status` | Actionable overview: which components have uncommitted changes, need a version bump, or are ready to deploy. Filters: `--uncommitted`, `--needs-bump`, `--ready`. |
+| `status` | Actionable overview of current repo state. Use filters like `--uncommitted`, `--needs-bump`, `--ready`, or `--full` for the full context report. |
 | `refactor` | Structural renaming across a codebase. Standard mode generates case variants (lowercase, PascalCase, UPPER_CASE, plural, snake_case compounds). Literal mode for exact string matching. Collision detection. Dry-run by default. |
 | `audit` | Discover code conventions from a codebase and flag drift. `--conventions` to see discovered patterns. `--fix --write` to apply corrections. `--baseline` to save state for future comparisons. |
 | `build` | Build a component using its configured build command. |
@@ -100,7 +100,7 @@ Topics cover commands, schemas, architecture, and developer guides — all embed
 | `extension` | Install, list, update, and manage extensions. |
 | `config` | View and modify global Homeboy settings. |
 | `docs` | Read embedded documentation. `audit` to verify docs match code. `map` for machine-optimized codebase maps. `generate` for bulk doc creation from JSON spec. |
-| `init` | Read-only environment discovery. Returns actionable status: what's ready to deploy, what needs a version bump, config gaps. |
+| `init` | Deprecated compatibility alias for the old full context report. Prefer `homeboy status --full`. |
 | `upgrade` | Upgrade Homeboy to the latest version. |
 
 Extensions add top-level commands at runtime. With the WordPress extension installed, `homeboy wp my-site plugin list` runs WP-CLI on the remote server. Rust extension adds `homeboy cargo`. Node.js adds `homeboy pm2`.

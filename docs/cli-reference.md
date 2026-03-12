@@ -641,8 +641,8 @@
 - `Component` — Manage standalone component configurations
 - `Config` — Manage global Homeboy configuration
 - `Extension` — Execute CLI-compatible extensions
-- `Init` — Get repo context (read-only, creates no state)
-- `Status` — Actionable component status overview
+- `Init` — Deprecated alias for `status --full`
+- `Status` — Actionable component status overview (`--full` for the full context report)
 - `Docs` — Display CLI documentation
 - `Changelog` — Changelog operations
 - `Git` — Git operations for components

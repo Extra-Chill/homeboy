@@ -42,9 +42,9 @@ Notes:
 - `error.hints`/`error.retryable` are omitted when not set.
 - JSON serialization errors return `internal.json_error` (no silent fallback).
 
-## Init command output
+## Full status report output
 
-The `homeboy init` command returns actionable intelligence about the current context.
+The `homeboy status --full` command returns actionable intelligence about the current context. The legacy `homeboy init` command is a compatibility alias for the same report.
 
 ### Status section
 
@@ -167,4 +167,3 @@ Commands using this primitive:
 
 - [Docs command JSON](../commands/docs.md)
 - [Changelog command JSON](../commands/changelog.md)
-

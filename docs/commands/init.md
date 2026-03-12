@@ -1,14 +1,14 @@
 # `homeboy init`
 
-Gather repo context and status. Returns comprehensive data in JSON format. **Read-only** - creates no files or state.
+Deprecated compatibility alias for `homeboy status --full`. **Read-only** - creates no files or state.
 
-**Alias:** `homeboy status`
+**Prefer:** `homeboy status --full`
 
 ## Usage
 
 ```bash
 homeboy init
-homeboy status  # equivalent
+homeboy status --full
 ```
 
 ## When You Need It
@@ -32,7 +32,7 @@ Most commands work without running `init` first. The `init` command is purely in
 
 ## Getting Started
 
-Run `homeboy init` to gather all context in one call:
+Run `homeboy status --full` to gather all context in one call:
 - Current directory state (managed, components, gaps)
 - Available servers, projects, components, extensions
 - Version alignment warnings and unconfigured patterns
@@ -45,7 +45,7 @@ Then read workspace docs (CLAUDE.md, README.md) for project context.
 {
   "success": true,
   "data": {
-    "command": "init",
+    "command": "status",
     "context": {
       "cwd": "/path/to/repo",
       "git_root": "/path/to/repo",
@@ -204,5 +204,5 @@ homeboy component set <id> --build-command "./build.sh" --build-artifact "build/
 ## Verification
 
 ```bash
-homeboy init  # Confirm managed: true
+homeboy status --full  # Confirm managed: true
 ```

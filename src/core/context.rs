@@ -9,6 +9,10 @@ use crate::project::{self, Project};
 use crate::server::{self, Server};
 use crate::ssh::SshClient;
 
+pub mod report;
+
+pub use report::build_report;
+
 // === Local Context Detection (homeboy context command) ===
 
 #[derive(Debug, Clone, Serialize)]
