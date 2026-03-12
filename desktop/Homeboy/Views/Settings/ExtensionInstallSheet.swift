@@ -1,8 +1,8 @@
 import SwiftUI
 
-struct ModuleInstallSheet: View {
+struct ExtensionInstallSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var moduleManager = ModuleManager.shared
+    @ObservedObject private var extensionManager = ExtensionManager.shared
     
     @State private var selectedPath: URL?
     @State private var isInstalling = false
@@ -13,7 +13,7 @@ struct ModuleInstallSheet: View {
         VStack(spacing: 20) {
             // Header
             HStack {
-                Text("Install Module")
+                Text("Install Extension")
                     .font(.headline)
                 Spacer()
                 Button("Cancel") {
@@ -26,10 +26,10 @@ struct ModuleInstallSheet: View {
             
             // Instructions
             VStack(alignment: .leading, spacing: 8) {
-                Text("Select a folder containing a module.json manifest file.")
+                Text("Select a folder containing a extension.json manifest file.")
                     .foregroundColor(.secondary)
                 
-                Text("The module will be copied to the application's modules directory.")
+                Text("The extension will be copied to the application's extensions directory.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -70,7 +70,7 @@ struct ModuleInstallSheet: View {
             }
             
             if success {
-                Label("Module installed successfully!", systemImage: "checkmark.circle.fill")
+                Label("Extension installed successfully!", systemImage: "checkmark.circle.fill")
                     .foregroundColor(.green)
             }
             
@@ -81,7 +81,7 @@ struct ModuleInstallSheet: View {
                 Spacer()
                 
                 Button("Install") {
-                    installModule()
+                    installExtension()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(selectedPath == nil || isInstalling)
@@ -97,25 +97,25 @@ struct ModuleInstallSheet: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.message = "Select a module folder containing module.json"
+        panel.message = "Select a extension folder containing extension.json"
         
         if panel.runModal() == .OK {
             selectedPath = panel.url
             error = nil
             success = false
             
-                // Validate that module.json exists
+                // Validate that extension.json exists
                 if let path = panel.url {
-                    let manifestPath = path.appendingPathComponent("module.json")
+                    let manifestPath = path.appendingPathComponent("extension.json")
                     if !FileManager.default.fileExists(atPath: manifestPath.path) {
-                        error = AppError("Selected folder does not contain a module.json file", source: "Module Installer")
+                        error = AppError("Selected folder does not contain a extension.json file", source: "Extension Installer")
                         selectedPath = nil
                     }
                 }
         }
     }
     
-    private func installModule() {
+    private func installExtension() {
         guard let path = selectedPath else { return }
 
         isInstalling = true
@@ -124,7 +124,7 @@ struct ModuleInstallSheet: View {
 
         Task {
             do {
-                try await moduleManager.installModule(from: path.path)
+                try await extensionManager.installExtension(from: path.path)
                 await MainActor.run {
                     success = true
                     isInstalling = false
@@ -134,7 +134,7 @@ struct ModuleInstallSheet: View {
                 }
             } catch {
                 await MainActor.run {
-                    self.error = error.toDisplayableError(source: "Module Installer")
+                    self.error = error.toDisplayableError(source: "Extension Installer")
                     isInstalling = false
                 }
             }

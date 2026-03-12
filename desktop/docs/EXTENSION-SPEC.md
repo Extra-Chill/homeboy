@@ -1,10 +1,10 @@
-# Module Specification
+# Extension Specification
 
-This document describes the `homeboy.json` module manifest format used by the Homeboy CLI and (via the CLI) the desktop app.
+This document describes the `homeboy.json` extension manifest format used by the Homeboy CLI and (via the CLI) the desktop app.
 
 ## Overview
 
-Modules extend Homeboy with custom functionality. Each module is a self-contained directory with:
+Extensions extend Homeboy with custom functionality. Each extension is a self-contained directory with:
 - `homeboy.json` - Manifest file (required)
 - Optional scripts (executed by the CLI based on `runtime.*` commands)
 - Optional assets and configuration
@@ -13,30 +13,30 @@ Modules extend Homeboy with custom functionality. Each module is a self-containe
 
 Homeboy Desktop is macOS-only.
 
-The desktop app stores installed modules under its `AppPaths` root:
+The desktop app stores installed extensions under its `AppPaths` root:
 
 - Desktop config root (single source of truth: `AppPaths`):
   ```
   ~/Library/Application Support/Homeboy/
   ```
-- Modules:
+- Extensions:
   ```
-  ~/Library/Application Support/Homeboy/modules/<module-id>/
+  ~/Library/Application Support/Homeboy/extensions/<extension-id>/
   ```
 
-Homeboy Desktop installs/links modules by running the CLI (`homeboy module install ...`), but the desktop app does not assume it shares the same on-disk config root as the CLI (`dirs::config_dir()/homeboy`).
+Homeboy Desktop installs/links extensions by running the CLI (`homeboy extension install ...`), but the desktop app does not assume it shares the same on-disk config root as the CLI (`dirs::config_dir()/homeboy`).
 
 Note: the CLI embeds its core documentation in the binary (see `homeboy docs`).
-## Module responsibilities
+## Extension responsibilities
 
-Homeboy modules can:
+Homeboy extensions can:
 
 - define **project type behavior** for the platform (discovery, CLI templates, DB templates, deploy verification, version parsing patterns, etc.)
-- define **executable tools** (optional `runtime.*` section) runnable via `homeboy module run`
+- define **executable tools** (optional `runtime.*` section) runnable via `homeboy extension run`
 
-The manifest is a single unified `homeboy.json` file; modules include only fields they need.
+The manifest is a single unified `homeboy.json` file; extensions include only fields they need.
 
-For the authoritative runtime behavior, see [`homeboy/docs/commands/module.md`](../../homeboy/docs/commands/module.md).
+For the authoritative runtime behavior, see [`homeboy/docs/commands/extension.md`](../../homeboy/docs/commands/extension.md).
 
 ## Manifest Schema
 
@@ -58,23 +58,23 @@ For the authoritative runtime behavior, see [`homeboy/docs/commands/module.md`](
 | `deploy` | array | No | Deployment verification rules (platform behavior) |
 | `versionPatterns` | array | No | Version parsing rules by file/extension (platform behavior) |
 | `build` | object | No | Build behavior (platform behavior) |
-| `commands` | array | No | Additional CLI command names this module provides (platform behavior) |
-| `runtime` | object | No | Executable runtime configuration (for `homeboy module run`) |
-| `inputs` | array | No | Input field definitions (for executable modules) |
-| `output` | object | No | Output configuration (for executable modules) |
-| `actions` | array | No | Action button definitions (for executable modules) |
+| `commands` | array | No | Additional CLI command names this extension provides (platform behavior) |
+| `runtime` | object | No | Executable runtime configuration (for `homeboy extension run`) |
+| `inputs` | array | No | Input field definitions (for executable extensions) |
+| `output` | object | No | Output configuration (for executable extensions) |
+| `actions` | array | No | Action button definitions (for executable extensions) |
 | `settings` | array | No | Persistent settings (merged across scopes by the CLI) |
-| `requires` | object | No | Module/component requirements for activation |
+| `requires` | object | No | Extension/component requirements for activation |
 
 ### Runtime Object
 
-Executable modules use the CLI runtime contract described in [`homeboy/docs/commands/module.md`](../../homeboy/docs/commands/module.md).
+Executable extensions use the CLI runtime contract described in [`homeboy/docs/commands/extension.md`](../../homeboy/docs/commands/extension.md).
 
 The manifest's `runtime` object configures shell commands that the CLI runs (for example `runCommand`, `setupCommand`, and optional `readyCheck`). The CLI injects execution context and merged settings via environment variables.
 
 ### Requirements Object
 
-Modules can declare dependencies on project configuration (components, feature flags, and project type). Modules with unmet requirements appear disabled in the sidebar.
+Extensions can declare dependencies on project configuration (components, feature flags, and project type). Extensions with unmet requirements appear disabled in the sidebar.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -137,7 +137,7 @@ Modules can declare dependencies on project configuration (components, feature f
 
 **Template Variables:**
 - `{{selected}}` - Array of selected result rows
-- `{{settings.key}}` - Value from module settings
+- `{{settings.key}}` - Value from extension settings
 
 ### Setting Object
 
@@ -149,15 +149,15 @@ Modules can declare dependencies on project configuration (components, feature f
 | `placeholder` | string | No | Help text |
 | `default` | any | No | Default value |
 
-## Module output
+## Extension output
 
-For `homeboy module run`, the CLI streams the module process output to the console and determines success/failure based on exit code.
+For `homeboy extension run`, the CLI streams the extension process output to the console and determines success/failure based on exit code.
 
-If your module is intended for use in Homeboy Desktop's dynamic UI, structure your module `homeboy.json` using the **inputs/output/actions/settings** fields documented in this file.
+If your extension is intended for use in Homeboy Desktop's dynamic UI, structure your extension `homeboy.json` using the **inputs/output/actions/settings** fields documented in this file.
 
 ## Examples
 
-### Desktop-focused module (dynamic UI)
+### Desktop-focused extension (dynamic UI)
 
 ```json
 {
@@ -165,7 +165,7 @@ If your module is intended for use in Homeboy Desktop's dynamic UI, structure yo
   "name": "Example Tool",
   "version": "1.0.0",
   "icon": "hammer",
-  "description": "Example module demonstrating inputs/output/actions",
+  "description": "Example extension demonstrating inputs/output/actions",
   "author": "Your Name",
 
   "inputs": [
@@ -212,4 +212,4 @@ Project configuration requirements (local environment settings, subtargets, and 
 Use the CLI as the source of truth:
 
 - `homeboy docs project`
-- `homeboy docs module`
+- `homeboy docs extension`

@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// View shown when a module needs dependency installation
-struct ModuleSetupView: View {
-    let module: LoadedModule
-    @ObservedObject var viewModel: ModuleViewModel
+/// View shown when a extension needs dependency installation
+struct ExtensionSetupView: View {
+    let extension: LoadedExtension
+    @ObservedObject var viewModel: ExtensionViewModel
     
     var body: some View {
         VStack(spacing: 20) {
@@ -13,7 +13,7 @@ struct ModuleSetupView: View {
                     ProgressView()
                         .scaleEffect(1.5)
                     
-                    Text("Setting up \(module.name)...")
+                    Text("Setting up \(extension.name)...")
                         .font(.headline)
                     
                     Text("Installing Python dependencies and Playwright browsers")
@@ -23,7 +23,7 @@ struct ModuleSetupView: View {
                 .padding(.top, 40)
                 
                 // Console output during setup
-                ModuleConsoleView(output: $viewModel.consoleOutput, viewModel: viewModel)
+                ExtensionConsoleView(output: $viewModel.consoleOutput, viewModel: viewModel)
                     .frame(maxHeight: 300)
                     .padding(.horizontal)
                 
@@ -37,14 +37,14 @@ struct ModuleSetupView: View {
                     Text("Setup Required")
                         .font(.headline)
                     
-                    Text("This module requires Python dependencies to be installed before it can run.")
+                    Text("This extension requires Python dependencies to be installed before it can run.")
                         .font(.body)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 400)
                     
                     // Dependencies list
-                    if let dependencies = module.manifest.runtime?.dependencies, !dependencies.isEmpty {
+                    if let dependencies = extension.manifest.runtime?.dependencies, !dependencies.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Dependencies:")
                                 .font(.caption)
@@ -58,7 +58,7 @@ struct ModuleSetupView: View {
                         .cornerRadius(8)
                     }
                     
-                    if let browsers = module.manifest.runtime?.playwrightBrowsers, !browsers.isEmpty {
+                    if let browsers = extension.manifest.runtime?.playwrightBrowsers, !browsers.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Playwright Browsers:")
                                 .font(.caption)
@@ -73,7 +73,7 @@ struct ModuleSetupView: View {
                     }
                     
                     Button {
-                        viewModel.setup(module: module)
+                        viewModel.setup(extension: extension)
                     } label: {
                         HStack {
                             Image(systemName: "arrow.down.circle")
@@ -95,7 +95,7 @@ struct ModuleSetupView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             
-                            ModuleConsoleView(output: $viewModel.consoleOutput, viewModel: viewModel)
+                            ExtensionConsoleView(output: $viewModel.consoleOutput, viewModel: viewModel)
                                 .frame(maxHeight: 200)
                         }
                     }

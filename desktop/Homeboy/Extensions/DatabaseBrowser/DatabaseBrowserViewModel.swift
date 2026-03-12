@@ -3,7 +3,7 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// ViewModel for the Database Browser module
+/// ViewModel for the Database Browser extension
 @MainActor
 class DatabaseBrowserViewModel: ObservableObject, ConfigurationObserving {
 

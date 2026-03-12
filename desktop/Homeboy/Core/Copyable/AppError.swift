@@ -26,7 +26,7 @@ struct AppError: CopyableContent {
     }
 }
 
-// MARK: - Module-Specific Factory Methods
+// MARK: - Extension-Specific Factory Methods
 
 extension AppError {
 
@@ -46,7 +46,7 @@ extension AppError {
         AppError(message, source: "Database Browser", path: path)
     }
 
-    static func module(_ moduleId: String, _ message: String) -> AppError {
-        AppError(message, source: "Module: \(moduleId)")
+    static func extension(_ extensionId: String, _ message: String) -> AppError {
+        AppError(message, source: "Extension: \(extensionId)")
     }
 }

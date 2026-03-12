@@ -1,24 +1,24 @@
 import SwiftUI
 
-struct ModulesSettingsTab: View {
-    @ObservedObject private var moduleManager = ModuleManager.shared
+struct ExtensionsSettingsTab: View {
+    @ObservedObject private var extensionManager = ExtensionManager.shared
     @State private var showInstallSheet = false
-    @State private var selectedModuleForUninstall: LoadedModule?
+    @State private var selectedExtensionForUninstall: LoadedExtension?
     @State private var showUninstallConfirmation = false
     
     
     var body: some View {
         Form {
-            Section("Installed Modules") {
-                if moduleManager.modules.isEmpty {
+            Section("Installed Extensions") {
+                if extensionManager.extensions.isEmpty {
                     ContentUnavailableView(
-                        "No Modules Installed",
+                        "No Extensions Installed",
                         systemImage: "puzzlepiece.extension",
-                        description: Text("Install modules to extend functionality")
+                        description: Text("Install extensions to extend functionality")
                     )
                 } else {
-                    ForEach(moduleManager.modules) { module in
-                        moduleRow(module)
+                    ForEach(extensionManager.extensions) { extension in
+                        extensionRow(extension)
                     }
                 }
             }
@@ -27,26 +27,26 @@ struct ModulesSettingsTab: View {
                 Button {
                     showInstallSheet = true
                 } label: {
-                    Label("Install Module from Folder...", systemImage: "plus.circle")
+                    Label("Install Extension from Folder...", systemImage: "plus.circle")
                 }
                 
                 Button {
-                    Task { await moduleManager.loadModules() }
+                    Task { await extensionManager.loadExtensions() }
                 } label: {
-                    Label("Refresh Modules", systemImage: "arrow.clockwise")
+                    Label("Refresh Extensions", systemImage: "arrow.clockwise")
                 }
             }
             
-            Section("Module Directory") {
+            Section("Extension Directory") {
                 HStack {
-                    Text(AppPaths.modules.path)
+                    Text(AppPaths.extensions.path)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.secondary)
 
                     Spacer()
 
                     Button {
-                        NSWorkspace.shared.open(AppPaths.modules)
+                        NSWorkspace.shared.open(AppPaths.extensions)
                     } label: {
                         Image(systemName: "folder")
                     }
@@ -57,55 +57,55 @@ struct ModulesSettingsTab: View {
         }
         .formStyle(.grouped)
         .sheet(isPresented: $showInstallSheet) {
-            ModuleInstallSheet()
+            ExtensionInstallSheet()
         }
         .confirmationDialog(
-            "Uninstall Module",
+            "Uninstall Extension",
             isPresented: $showUninstallConfirmation,
             titleVisibility: .visible
         ) {
             Button("Uninstall", role: .destructive) {
-                if let module = selectedModuleForUninstall {
-                    Task { try? await moduleManager.uninstallModule(moduleId: module.id) }
+                if let extension = selectedExtensionForUninstall {
+                    Task { try? await extensionManager.uninstallExtension(extensionId: extension.id) }
                 }
-                selectedModuleForUninstall = nil
+                selectedExtensionForUninstall = nil
             }
             Button("Cancel", role: .cancel) {
-                selectedModuleForUninstall = nil
+                selectedExtensionForUninstall = nil
             }
         } message: {
-            if let module = selectedModuleForUninstall {
-                Text("Are you sure you want to uninstall \"\(module.name)\"? This will delete all module files including its virtual environment.")
+            if let extension = selectedExtensionForUninstall {
+                Text("Are you sure you want to uninstall \"\(extension.name)\"? This will delete all extension files including its virtual environment.")
             }
         }
     }
     
-    // MARK: - Module Row
+    // MARK: - Extension Row
     
     @ViewBuilder
-    private func moduleRow(_ module: LoadedModule) -> some View {
+    private func extensionRow(_ extension: LoadedExtension) -> some View {
         HStack {
-            Image(systemName: module.icon)
+            Image(systemName: extension.icon)
                 .font(.title2)
                 .foregroundColor(.accentColor)
                 .frame(width: 32)
             
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
-                    Text(module.name)
+                    Text(extension.name)
                         .font(.headline)
                     
-                    Text("v\(module.manifest.version)")
+                    Text("v\(extension.manifest.version)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 
-                Text(module.manifest.description)
+                Text(extension.manifest.description)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                 
-                Text("by \(module.manifest.author)")
+                Text("by \(extension.manifest.author)")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
@@ -113,11 +113,11 @@ struct ModulesSettingsTab: View {
             Spacer()
             
             // Status badge
-                        statusBadge(for: module.state, moduleName: module.name)
+                        statusBadge(for: extension.state, extensionName: extension.name)
             
             // Remove button
             Button("Remove") {
-                selectedModuleForUninstall = module
+                selectedExtensionForUninstall = extension
                 showUninstallConfirmation = true
             }
             .buttonStyle(.bordered)
@@ -128,7 +128,7 @@ struct ModulesSettingsTab: View {
     }
     
     @ViewBuilder
-    private func statusBadge(for state: ModuleState, moduleName: String) -> some View {
+    private func statusBadge(for state: ExtensionState, extensionName: String) -> some View {
         switch state {
         case .ready:
             Label("Ready", systemImage: "checkmark.circle.fill")
@@ -142,7 +142,7 @@ struct ModulesSettingsTab: View {
                     Button("Copy Warning") {
                         AppWarning(
                             "Setup Required",
-                            source: "Module: \(moduleName)"
+                            source: "Extension: \(extensionName)"
                         ).copyToClipboard()
                     }
                 }
@@ -159,7 +159,7 @@ struct ModulesSettingsTab: View {
                     Button("Copy Warning") {
                         AppWarning(
                             "Missing requirements: \(components.joined(separator: ", "))",
-                            source: "Module: \(moduleName)"
+                            source: "Extension: \(extensionName)"
                         ).copyToClipboard()
                     }
                 }
@@ -172,7 +172,7 @@ struct ModulesSettingsTab: View {
                     Button("Copy Error") {
                         AppError(
                             message,
-                            source: "Module: \(moduleName)"
+                            source: "Extension: \(extensionName)"
                         ).copyToClipboard()
                     }
                 }

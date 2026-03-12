@@ -21,7 +21,7 @@ final class ConfigurationObserver: ObservableObject {
     // Snapshots for change detection (file path -> encoded data)
     private var projectSnapshots: [String: Data] = [:]
     private var serverSnapshots: [String: Data] = [:]
-    private var moduleManifestSnapshots: [String: Data] = [:]
+    private var extensionManifestSnapshots: [String: Data] = [:]
 
 
     private let fileManager = FileManager.default
@@ -44,8 +44,8 @@ final class ConfigurationObserver: ObservableObject {
         AppPaths.servers
     }
 
-    private var modulesDir: URL {
-        AppPaths.modules
+    private var extensionsDir: URL {
+        AppPaths.extensions
     }
 
     private init() {
@@ -68,7 +68,7 @@ final class ConfigurationObserver: ObservableObject {
         // Watch directories for add/remove/modify
         watchDirectory(AppPaths.projects, key: "projects")
         watchDirectory(AppPaths.servers, key: "servers")
-        watchDirectory(AppPaths.modules, key: "modules")
+        watchDirectory(AppPaths.extensions, key: "extensions")
     }
 
     private func watchFile(_ url: URL, key: String) {
@@ -153,8 +153,8 @@ final class ConfigurationObserver: ObservableObject {
             detectProjectChanges()
         case "servers":
             detectServerChanges()
-        case "modules":
-            detectModuleChanges()
+        case "extensions":
+            detectExtensionChanges()
         default:
             break
         }
@@ -165,7 +165,7 @@ final class ConfigurationObserver: ObservableObject {
     private func refreshAllSnapshots() {
         projectSnapshots = loadAllProjectData()
         serverSnapshots = loadAllServerData()
-        moduleManifestSnapshots = loadAllModuleManifestData()
+        extensionManifestSnapshots = loadAllExtensionManifestData()
     }
 
 
@@ -177,15 +177,15 @@ final class ConfigurationObserver: ObservableObject {
         loadAllJsonData(from: serversDir)
     }
 
-    private func loadAllModuleManifestData() -> [String: Data] {
+    private func loadAllExtensionManifestData() -> [String: Data] {
         var result: [String: Data] = [:]
-        guard let moduleIds = try? fileManager.contentsOfDirectory(atPath: modulesDir.path) else {
+        guard let extensionIds = try? fileManager.contentsOfDirectory(atPath: extensionsDir.path) else {
             return result
         }
-        for moduleId in moduleIds {
-            let manifestPath = modulesDir.appendingPathComponent(moduleId).appendingPathComponent("\(moduleId).json")
+        for extensionId in extensionIds {
+            let manifestPath = extensionsDir.appendingPathComponent(extensionId).appendingPathComponent("\(extensionId).json")
             if let data = try? Data(contentsOf: manifestPath) {
-                result[moduleId] = data
+                result[extensionId] = data
             }
         }
         return result
@@ -259,31 +259,31 @@ final class ConfigurationObserver: ObservableObject {
         serverSnapshots = currentServers
     }
 
-    private func detectModuleChanges() {
-        let currentManifests = loadAllModuleManifestData()
+    private func detectExtensionChanges() {
+        let currentManifests = loadAllExtensionManifestData()
         let currentIds = Set(currentManifests.keys)
-        let previousIds = Set(moduleManifestSnapshots.keys)
+        let previousIds = Set(extensionManifestSnapshots.keys)
 
-        // Added modules
-        for moduleId in currentIds.subtracting(previousIds) {
-            publish(.moduleAdded(moduleId: moduleId))
+        // Added extensions
+        for extensionId in currentIds.subtracting(previousIds) {
+            publish(.extensionAdded(extensionId: extensionId))
         }
 
-        // Removed modules
-        for moduleId in previousIds.subtracting(currentIds) {
-            publish(.moduleRemoved(moduleId: moduleId))
+        // Removed extensions
+        for extensionId in previousIds.subtracting(currentIds) {
+            publish(.extensionRemoved(extensionId: extensionId))
         }
 
         // Modified manifests
-        for moduleId in currentIds.intersection(previousIds) {
-            if let newData = currentManifests[moduleId],
-               let oldData = moduleManifestSnapshots[moduleId],
+        for extensionId in currentIds.intersection(previousIds) {
+            if let newData = currentManifests[extensionId],
+               let oldData = extensionManifestSnapshots[extensionId],
                newData != oldData {
-                publish(.moduleModified(moduleId: moduleId))
+                publish(.extensionModified(extensionId: extensionId))
             }
         }
 
-        moduleManifestSnapshots = currentManifests
+        extensionManifestSnapshots = currentManifests
     }
 
     // MARK: - Field Detection

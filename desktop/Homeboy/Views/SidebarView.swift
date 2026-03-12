@@ -3,7 +3,7 @@ import SwiftUI
 struct SidebarView: View {
     @Binding var selectedItem: NavigationItem?
     @EnvironmentObject var authManager: AuthManager
-    @ObservedObject private var moduleManager = ModuleManager.shared
+    @ObservedObject private var extensionManager = ExtensionManager.shared
     @ObservedObject private var config = ConfigurationManager.shared
     
     var body: some View {
@@ -30,44 +30,44 @@ struct SidebarView: View {
                         .foregroundColor(.secondary)
                 }
 
-                // Dynamic Modules Section
+                // Dynamic Extensions Section
                 Section {
-                    if moduleManager.modules.isEmpty {
-                        if moduleManager.isLoading {
-                            Label("Loading modules...", systemImage: "arrow.trianglehead.2.clockwise")
+                    if extensionManager.extensions.isEmpty {
+                        if extensionManager.isLoading {
+                            Label("Loading extensions...", systemImage: "arrow.trianglehead.2.clockwise")
                                 .foregroundColor(.secondary)
                                 .font(.callout)
                         } else {
-                            Label("No modules installed", systemImage: "puzzlepiece.extension")
+                            Label("No extensions installed", systemImage: "puzzlepiece.extension")
                                 .foregroundColor(.secondary)
                                 .font(.callout)
                                 .onTapGesture {
                                     selectedItem = .coreTool(.settings)
                                 }
-                                .help("Manage modules in Settings")
+                                .help("Manage extensions in Settings")
                         }
                     } else {
-                        ForEach(moduleManager.modules) { module in
+                        ForEach(extensionManager.extensions) { extension in
                             HStack {
-                                Label(module.name, systemImage: module.icon)
-                                    .foregroundColor(module.isDisabled ? .secondary : .primary)
+                                Label(extension.name, systemImage: extension.icon)
+                                    .foregroundColor(extension.isDisabled ? .secondary : .primary)
 
                                 Spacer()
 
                                 // Status indicator
-                                if module.isDisabled {
+                                if extension.isDisabled {
                                     Image(systemName: "exclamationmark.triangle.fill")
                                         .foregroundColor(.gray)
                                         .font(.caption)
                                         .contextMenu {
                                             Button("Copy Warning") {
                                                 AppWarning(
-                                                    "Missing requirements: \(module.missingComponents.joined(separator: ", "))",
-                                                    source: "Module: \(module.name)"
+                                                    "Missing requirements: \(extension.missingComponents.joined(separator: ", "))",
+                                                    source: "Extension: \(extension.name)"
                                                 ).copyToClipboard()
                                             }
                                         }
-                                } else if module.state == .needsSetup {
+                                } else if extension.state == .needsSetup {
                                     Image(systemName: "exclamationmark.circle.fill")
                                         .foregroundColor(.orange)
                                         .font(.caption)
@@ -75,18 +75,18 @@ struct SidebarView: View {
                                             Button("Copy Warning") {
                                                 AppWarning(
                                                     "Setup Required",
-                                                    source: "Module: \(module.name)"
+                                                    source: "Extension: \(extension.name)"
                                                 ).copyToClipboard()
                                             }
                                         }
                                 }
                             }
-                            .tag(NavigationItem.module(module.id))
-                            .help(module.isDisabled ? "Requires: \(module.missingComponents.joined(separator: ", "))" : module.name)
+                            .tag(NavigationItem.extension(extension.id))
+                            .help(extension.isDisabled ? "Requires: \(extension.missingComponents.joined(separator: ", "))" : extension.name)
                         }
                     }
                 } header: {
-                    Text("Modules")
+                    Text("Extensions")
                 } footer: {
                     Text("Installable extensions \u{2014} manage in Settings")
                         .font(.caption2)

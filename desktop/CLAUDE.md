@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-Native macOS SwiftUI application for development and deployment automation. Project-type agnostic architecture supports WordPress, Node.js, and custom project types via extensible JSON definitions. Configurable site profiles manage multiple installations with an extensible module system for custom automation.
+Native macOS SwiftUI application for development and deployment automation. Project-type agnostic architecture supports WordPress, Node.js, and custom project types via extensible JSON definitions. Configurable site profiles manage multiple installations with an extensible extension system for custom automation.
 
 **Platform**: macOS 14.4+ (Sonoma)
 **Minimum Xcode**: 15.0+
@@ -55,18 +55,18 @@ Homeboy/
 │   ├── Copyable/                 # Error/warning/output copy system
 │   ├── Database/                 # Database tooling (CLI-mediated) and schema helpers
 │   ├── Grouping/                 # GroupingManager, ItemGrouping, TableProtectionManager
-│   ├── Modules/                  # Module plugin system
+│   ├── Extensions/                  # Extension plugin system
 │   ├── Process/                  # Python and shell runners
 │   └── SSH/                      # SSH/SCP operations, DeploymentService
-├── Modules/                      # Built-in core tools
+├── Extensions/                      # Built-in core tools
 │   ├── DatabaseBrowser/          # Database browser (CLI-backed)
-│   ├── Deployer/                 # SSH deployment module
+│   ├── Deployer/                 # SSH deployment extension
 │   ├── RemoteFileEditor/         # Remote file editing over SSH
 │   └── RemoteLogViewer/          # Remote log viewing over SSH
-├── ViewModels/                   # Module view models
+├── ViewModels/                   # Extension view models
 ├── Views/
 │   ├── Components/               # Reusable UI (Table/, Grouping/, etc.)
-│   ├── Modules/                  # Dynamic module UI harness
+│   ├── Extensions/                  # Dynamic extension UI harness
 │   └── Settings/                 # Settings tabs
 └── docs/                         # Documentation
 (Legacy Swift CLI sources have been removed.)
@@ -84,26 +84,26 @@ CLI discovery checks these paths in order:
 (Keep this list in sync with [docs/CLI.md](docs/CLI.md) and the root [README](../README.md).)
 ```
 
-## Module Plugin System
+## Extension Plugin System
 
-The app supports installable modules via the `{module-id}.json` manifest. Modules are stored in the desktop app's config directory:
+The app supports installable extensions via the `{extension-id}.json` manifest. Extensions are stored in the desktop app's config directory:
 ```
-~/Library/Application Support/Homeboy/modules/<module-id>/
+~/Library/Application Support/Homeboy/extensions/<extension-id>/
 ```
 
 ### Key Files
-- `Core/Modules/ModuleManifest.swift` - Codable types for `{module-id}.json`
-- `Core/Modules/ModuleManager.swift` - Module discovery and loading
-- `Core/Modules/ModuleRunner.swift` - Script execution
-- `Core/Modules/ModuleInstaller.swift` - Venv and dependency installation
+- `Core/Extensions/ExtensionManifest.swift` - Codable types for `{extension-id}.json`
+- `Core/Extensions/ExtensionManager.swift` - Extension discovery and loading
+- `Core/Extensions/ExtensionRunner.swift` - Script execution
+- `Core/Extensions/ExtensionInstaller.swift` - Venv and dependency installation
 
-### Module UI Components
-- `Views/Modules/ModuleContainerView.swift` - Main module wrapper
-- `Views/Modules/ModuleInputsView.swift` - Dynamic form from manifest
-- `Views/Modules/ModuleResultsView.swift` - Dynamic table from output schema
-- `Views/Modules/ModuleActionsBar.swift` - Builtin and API actions
+### Extension UI Components
+- `Views/Extensions/ExtensionContainerView.swift` - Main extension wrapper
+- `Views/Extensions/ExtensionInputsView.swift` - Dynamic form from manifest
+- `Views/Extensions/ExtensionResultsView.swift` - Dynamic table from output schema
+- `Views/Extensions/ExtensionActionsBar.swift` - Builtin and API actions
 
-See `docs/MODULE-SPEC.md` for the complete module manifest specification.
+See `docs/EXTENSION-SPEC.md` for the complete extension manifest specification.
 
 ## Copyable Error System
 
@@ -182,7 +182,7 @@ Configuration directory: `~/.config/homeboy/` (managed by CLI, universal across 
 Config change reactivity is implemented by `ConfigurationObserver` (`Homeboy/Core/Config/ConfigurationObserver.swift`), which watches:
 - `AppPaths.projects`
 - `AppPaths.servers`
-- `AppPaths.modules`
+- `AppPaths.extensions`
 
 Desktop app config tree (`~/.config/homeboy/`):
 
@@ -194,7 +194,7 @@ Desktop app config tree (`~/.config/homeboy/`):
 │   └── <server-id>.json
 ├── components/           # Component definitions
 │   └── <component-id>.json
-├── modules/              # Installed modules
+├── extensions/              # Installed extensions
 ├── keys/                 # SSH keys (per server)
 └── backups/              # Local backups (deploy/file operations)
 ```
@@ -214,14 +214,14 @@ The app expects WordPress REST APIs to implement these standard auth patterns:
 - `GET /auth/me` - Get current user
 - `POST /auth/logout` - Logout
 
-Module-defined API actions can call any endpoint on the configured site.
+Extension-defined API actions can call any endpoint on the configured site.
 
 ## Security
 
 - Auth tokens in Keychain (kSecClassGenericPassword)
 - Non-sensitive settings in UserDefaults
 - No hardcoded secrets
-- Per-module isolated Python environments
+- Per-extension isolated Python environments
 
 ## Migration
 

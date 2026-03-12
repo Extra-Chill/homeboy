@@ -71,7 +71,7 @@ struct ProjectConfiguration: Codable, Identifiable {
     var basePath: String?
     var tablePrefix: String?
 
-    var modules: [String]
+    var extensions: [String]
     var remoteFiles: RemoteFileConfig
     var remoteLogs: RemoteLogConfig
     var database: DatabaseConfig
@@ -84,13 +84,13 @@ struct ProjectConfiguration: Codable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case id, name, domain
         case serverId, basePath, tablePrefix
-        case modules, remoteFiles, remoteLogs, database, tools, api
+        case extensions, remoteFiles, remoteLogs, database, tools, api
         case subTargets, sharedTables, componentIds
     }
 
-    /// Whether this is a WordPress project (inferred from modules or table prefix)
+    /// Whether this is a WordPress project (inferred from extensions or table prefix)
     var isWordPress: Bool {
-        modules.contains("wordpress") || tablePrefix?.hasPrefix("wp") == true
+        extensions.contains("wordpress") || tablePrefix?.hasPrefix("wp") == true
     }
     
     /// Whether this project has multiple targets configured
@@ -112,7 +112,7 @@ struct ProjectConfiguration: Codable, Identifiable {
         serverId: String? = nil,
         basePath: String? = nil,
         tablePrefix: String? = nil,
-        modules: [String] = [],
+        extensions: [String] = [],
         remoteFiles: RemoteFileConfig,
         remoteLogs: RemoteLogConfig,
         database: DatabaseConfig,
@@ -128,7 +128,7 @@ struct ProjectConfiguration: Codable, Identifiable {
         self.serverId = serverId
         self.basePath = basePath
         self.tablePrefix = tablePrefix
-        self.modules = modules
+        self.extensions = extensions
         self.remoteFiles = remoteFiles
         self.remoteLogs = remoteLogs
         self.database = database
@@ -147,7 +147,7 @@ struct ProjectConfiguration: Codable, Identifiable {
         self.serverId = config.serverId
         self.basePath = config.basePath
         self.tablePrefix = config.tablePrefix
-        self.modules = []  // CLI doesn't provide modules in config
+        self.extensions = []  // CLI doesn't provide extensions in config
 
         // Convert CLI remote files (generate UUIDs since CLI doesn't provide them)
         self.remoteFiles = RemoteFileConfig(
@@ -219,7 +219,7 @@ struct ProjectConfiguration: Codable, Identifiable {
             serverId: nil,
             basePath: nil,
             tablePrefix: nil,
-            modules: [],
+            extensions: [],
             remoteFiles: RemoteFileConfig(),
             remoteLogs: RemoteLogConfig(),
             database: DatabaseConfig(),
@@ -243,7 +243,7 @@ struct ProjectConfiguration: Codable, Identifiable {
         basePath = try container.decodeIfPresent(String.self, forKey: .basePath)
         tablePrefix = try container.decodeIfPresent(String.self, forKey: .tablePrefix)
 
-        modules = try container.decodeIfPresent([String].self, forKey: .modules) ?? []
+        extensions = try container.decodeIfPresent([String].self, forKey: .extensions) ?? []
         subTargets = try container.decodeIfPresent([SubTarget].self, forKey: .subTargets) ?? []
         sharedTables = try container.decodeIfPresent([String].self, forKey: .sharedTables) ?? []
 
@@ -274,7 +274,7 @@ struct ProjectConfiguration: Codable, Identifiable {
         try container.encodeIfPresent(basePath, forKey: .basePath)
         try container.encodeIfPresent(tablePrefix, forKey: .tablePrefix)
 
-        try container.encode(modules, forKey: .modules)
+        try container.encode(extensions, forKey: .extensions)
         try container.encode(remoteFiles, forKey: .remoteFiles)
         try container.encode(remoteLogs, forKey: .remoteLogs)
         try container.encode(database, forKey: .database)

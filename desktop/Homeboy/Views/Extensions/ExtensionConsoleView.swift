@@ -1,12 +1,12 @@
 import SwiftUI
 
 /// Reusable console output view with copy/clear controls
-struct ModuleConsoleView: View {
+struct ExtensionConsoleView: View {
     @Binding var output: String
-    @ObservedObject var viewModel: ModuleViewModel
+    @ObservedObject var viewModel: ExtensionViewModel
     
-    private var moduleName: String {
-        ModuleManager.shared.module(withId: viewModel.moduleId)?.name ?? viewModel.moduleId
+    private var extensionName: String {
+        ExtensionManager.shared.extension(withId: viewModel.extensionId)?.name ?? viewModel.extensionId
     }
     
     var body: some View {
@@ -15,7 +15,7 @@ struct ModuleConsoleView: View {
             HStack {
                 Spacer()
                 
-                CopyButton.console(output, source: "Module: \(moduleName)")
+                CopyButton.console(output, source: "Extension: \(extensionName)")
                     .disabled(output.isEmpty)
                 
                 Button {

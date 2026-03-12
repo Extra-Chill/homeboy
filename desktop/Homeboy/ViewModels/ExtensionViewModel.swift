@@ -3,12 +3,12 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// ViewModel for managing a single module's execution state
+/// ViewModel for managing a single extension's execution state
 @MainActor
-class ModuleViewModel: ObservableObject, ConfigurationObserving {
+class ExtensionViewModel: ObservableObject, ConfigurationObserving {
 
     var cancellables = Set<AnyCancellable>()
-    let moduleId: String
+    let extensionId: String
     
     @Published var inputValues: [String: String] = [:]
     @Published var selectedNetworkSite: String?
@@ -24,14 +24,14 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
 
     private let configManager = ConfigurationManager.shared
     
-    /// Current module from manager (always up-to-date)
-    private var module: LoadedModule? {
-        ModuleManager.shared.module(withId: moduleId)
+    /// Current extension from manager (always up-to-date)
+    private var extension: LoadedExtension? {
+        ExtensionManager.shared.extension(withId: extensionId)
     }
     
-    /// Whether this module is a CLI module with subtarget support
-    var isCLIModule: Bool {
-        module?.manifest.runtime?.type == .cli
+    /// Whether this extension is a CLI extension with subtarget support
+    var isCLIExtension: Bool {
+        extension?.manifest.runtime?.type == .cli
     }
     
     /// Whether the current project has subtargets (for showing site selector)
@@ -39,13 +39,13 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         configManager.safeActiveProject.hasSubTargets
     }
     
-    /// Available subtargets for CLI modules (e.g., multisite blogs)
+    /// Available subtargets for CLI extensions (e.g., multisite blogs)
     var subTargets: [SubTarget] {
         configManager.safeActiveProject.subTargets
     }
     
-    init(moduleId: String) {
-        self.moduleId = moduleId
+    init(extensionId: String) {
+        self.extensionId = extensionId
         observeConfiguration()
     }
 
@@ -69,15 +69,15 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         }
     }
     
-    /// Initialize input values from module manifest
-    func initializeInputValues(from module: LoadedModule) {
-        // Set default network site for CLI modules
-        if module.manifest.runtime?.type == .cli {
-            selectedNetworkSite = module.manifest.runtime?.defaultSite ?? "main"
+    /// Initialize input values from extension manifest
+    func initializeInputValues(from extension: LoadedExtension) {
+        // Set default network site for CLI extensions
+        if extension.manifest.runtime?.type == .cli {
+            selectedNetworkSite = extension.manifest.runtime?.defaultSite ?? "main"
         }
         
         // Set default input values
-        for input in module.manifest.inputs ?? [] {
+        for input in extension.manifest.inputs ?? [] {
             if let defaultValue = input.default {
                 inputValues[input.id] = defaultValue.stringValue
             } else {
@@ -86,9 +86,9 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         }
     }
     
-    // MARK: - Module Execution
+    // MARK: - Extension Execution
     
-    func run(module: LoadedModule) {
+    func run(extension: LoadedExtension) {
         guard !isRunning && !isSettingUp else { return }
         
         consoleOutput = ""
@@ -101,8 +101,8 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         Task {
             let projectId = configManager.activeProject?.id
 
-            await ModuleManager.shared.runModule(
-                moduleId: module.id,
+            await ExtensionManager.shared.runExtension(
+                extensionId: extension.id,
                 inputs: inputValues,
                 projectId: projectId,
                 onOutput: { [weak self] line in
@@ -113,21 +113,21 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
             )
 
             let output = parseScriptOutput(from: consoleOutput)
-            handleRunResult(output, module: module)
+            handleRunResult(output, extension: extension)
         }
     }
     
     private func parseScriptOutput(from output: String) -> Result<ScriptOutput, Error> {
-        // Find JSON in output - modules may output non-JSON before the result
+        // Find JSON in output - extensions may output non-JSON before the result
         guard let jsonStart = output.lastIndex(of: "{"),
               let jsonEnd = output.lastIndex(of: "}"),
               jsonStart < jsonEnd else {
-            return .failure(NSError(domain: "ModuleViewModel", code: 1, userInfo: [NSLocalizedDescriptionKey: "No JSON output found"]))
+            return .failure(NSError(domain: "ExtensionViewModel", code: 1, userInfo: [NSLocalizedDescriptionKey: "No JSON output found"]))
         }
 
         let jsonString = String(output[jsonStart...jsonEnd])
         guard let data = jsonString.data(using: .utf8) else {
-            return .failure(NSError(domain: "ModuleViewModel", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid UTF-8 in output"]))
+            return .failure(NSError(domain: "ExtensionViewModel", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid UTF-8 in output"]))
         }
 
         do {
@@ -140,7 +140,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         }
     }
 
-    private func handleRunResult(_ result: Result<ScriptOutput, Error>, module: LoadedModule) {
+    private func handleRunResult(_ result: Result<ScriptOutput, Error>, extension: LoadedExtension) {
         isRunning = false
         
         switch result {
@@ -148,7 +148,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
             if output.success {
                 results = output.results ?? []
                 // Auto-select all rows if selectable
-                if module.manifest.output?.selectable == true {
+                if extension.manifest.output?.selectable == true {
                     selectedRows = Set(results.indices)
                 }
                 if let errors = output.errors, !errors.isEmpty {
@@ -159,11 +159,11 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
                 if let errors = output.errors, !errors.isEmpty {
                     message += ": " + errors.joined(separator: ", ")
                 }
-                error = AppError(message, source: "Module: \(moduleId)")
+                error = AppError(message, source: "Extension: \(extensionId)")
             }
             
         case .failure(let err):
-            error = AppError(err.localizedDescription, source: "Module: \(moduleId)")
+            error = AppError(err.localizedDescription, source: "Extension: \(extensionId)")
         }
     }
     
@@ -171,9 +171,9 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         isRunning = false
     }
     
-    // MARK: - Module Setup
+    // MARK: - Extension Setup
     
-    func setup(module: LoadedModule) {
+    func setup(extension: LoadedExtension) {
         guard !isSettingUp && !isRunning else { return }
         
         isSettingUp = true
@@ -182,10 +182,10 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         
         Task {
             do {
-                try await ModuleManager.shared.setupModule(moduleId: module.id)
-                ModuleManager.shared.updateModuleState(moduleId: module.id, state: .ready)
+                try await ExtensionManager.shared.setupExtension(extensionId: extension.id)
+                ExtensionManager.shared.updateExtensionState(extensionId: extension.id, state: .ready)
             } catch {
-                self.error = error.toDisplayableError(source: "Module: \(moduleId)")
+                self.error = error.toDisplayableError(source: "Extension: \(extensionId)")
             }
 
             isSettingUp = false
@@ -219,21 +219,21 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
     
     // MARK: - Actions
     
-    func performAction(_ action: ActionConfig, module: LoadedModule) async {
+    func performAction(_ action: ActionConfig, extension: LoadedExtension) async {
         isPerformingAction = true
         actionResult = nil
         
         switch action.type {
         case .builtin:
-            performBuiltinAction(action, module: module)
+            performBuiltinAction(action, extension: extension)
         case .api:
-            await performAPIAction(action, module: module)
+            await performAPIAction(action, extension: extension)
         }
         
         isPerformingAction = false
     }
     
-    private func performBuiltinAction(_ action: ActionConfig, module: LoadedModule) {
+    private func performBuiltinAction(_ action: ActionConfig, extension: LoadedExtension) {
         guard let builtin = action.builtin else { return }
         
         switch builtin {
@@ -246,7 +246,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
             actionResult = "Copied \(values.count) values to clipboard"
             
         case .exportCsv:
-            exportToCsv(module: module)
+            exportToCsv(extension: extension)
             
         case .copyJson:
             let encoder = JSONEncoder()
@@ -260,10 +260,10 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         }
     }
     
-    private func exportToCsv(module: LoadedModule) {
+    private func exportToCsv(extension: LoadedExtension) {
         guard !results.isEmpty else { return }
         
-        let columns = module.manifest.output?.schema.items?.keys.sorted() ?? []
+        let columns = extension.manifest.output?.schema.items?.keys.sorted() ?? []
         guard !columns.isEmpty else { return }
         
         var csv = columns.joined(separator: ",") + "\n"
@@ -281,36 +281,36 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         // Show save panel
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.commaSeparatedText]
-        panel.nameFieldStringValue = "\(module.id)-export.csv"
+        panel.nameFieldStringValue = "\(extension.id)-export.csv"
         
         if panel.runModal() == .OK, let url = panel.url {
             do {
                 try csv.write(to: url, atomically: true, encoding: .utf8)
                 actionResult = "Exported \(selectedResults.count) rows to \(url.lastPathComponent)"
             } catch {
-                self.error = AppError("Failed to save CSV: \(error.localizedDescription)", source: "Module: \(moduleId)")
+                self.error = AppError("Failed to save CSV: \(error.localizedDescription)", source: "Extension: \(extensionId)")
             }
         }
     }
     
-    private func performAPIAction(_ action: ActionConfig, module: LoadedModule) async {
+    private func performAPIAction(_ action: ActionConfig, extension: LoadedExtension) async {
         guard let endpoint = action.endpoint,
               let method = action.method else {
-            error = AppError("Invalid API action configuration", source: "Module: \(moduleId)")
+            error = AppError("Invalid API action configuration", source: "Extension: \(extensionId)")
             return
         }
         
         // Get current site's API config
         let siteConfig = configManager.safeActiveProject
         guard siteConfig.api.enabled, !siteConfig.api.baseURL.isEmpty else {
-            error = AppError("API not configured for current site. Go to Settings to configure.", source: "Module: \(moduleId)")
+            error = AppError("API not configured for current site. Go to Settings to configure.", source: "Extension: \(extensionId)")
             return
         }
         
         // Check auth if required
         if action.requiresAuth == true {
             guard await APIClient.shared.hasTokens() else {
-                error = AppError("Not logged in. Go to Settings to authenticate.", source: "Module: \(moduleId)")
+                error = AppError("Not logged in. Go to Settings to authenticate.", source: "Extension: \(extensionId)")
                 return
             }
         }
@@ -319,7 +319,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
         var payload: [String: Any] = [:]
         if let payloadTemplate = action.payload {
             for (key, value) in payloadTemplate {
-                payload[key] = interpolateValue(value, module: module)
+                payload[key] = interpolateValue(value, extension: extension)
             }
         }
         
@@ -341,7 +341,7 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
             let (data, response) = try await URLSession.shared.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
-                error = AppError("Invalid response", source: "Module: \(moduleId)")
+                error = AppError("Invalid response", source: "Extension: \(extensionId)")
                 return
             }
             
@@ -354,16 +354,16 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
                 }
             } else {
                 let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
-                error = AppError("API error (\(httpResponse.statusCode)): \(errorText)", source: "Module: \(moduleId)")
+                error = AppError("API error (\(httpResponse.statusCode)): \(errorText)", source: "Extension: \(extensionId)")
             }
             
         } catch {
-            self.error = AppError("Request failed: \(error.localizedDescription)", source: "Module: \(moduleId)")
+            self.error = AppError("Request failed: \(error.localizedDescription)", source: "Extension: \(extensionId)")
         }
     }
     
     /// Interpolates template values like {{selected}} and {{settings.key}}
-    private func interpolateValue(_ value: PayloadValue, module: LoadedModule) -> Any {
+    private func interpolateValue(_ value: PayloadValue, extension: LoadedExtension) -> Any {
         switch value {
         case .string(let template):
             if template == "{{selected}}" {
@@ -407,8 +407,8 @@ class ModuleViewModel: ObservableObject, ConfigurationObserving {
     // MARK: - Console
     
     func copyConsoleOutput() {
-        let moduleName = module?.name ?? moduleId
-        ConsoleOutput(consoleOutput, source: "Module: \(moduleName)").copyToClipboard()
+        let extensionName = extension?.name ?? extensionId
+        ConsoleOutput(consoleOutput, source: "Extension: \(extensionName)").copyToClipboard()
     }
     
     func clearConsole() {

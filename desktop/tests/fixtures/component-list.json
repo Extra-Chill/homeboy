@@ -9,7 +9,7 @@
         "changelog_target": "docs/CHANGELOG.md",
         "id": "ai-http-client",
         "local_path": "/Users/chubes/Developer/ai-http-client",
-        "modules": {
+        "extensions": {
           "github": {
             "settings": {}
           }
@@ -69,7 +69,7 @@
         "build_artifact": "build/blocks-everywhere.zip",
         "id": "blocks-everywhere",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/blocks-everywhere",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -87,7 +87,7 @@
         "extract_command": "unzip -o {artifact} && cp -rf chubes-docs/* . && rm -rf chubes-docs {artifact}",
         "id": "chubes-docs",
         "local_path": "/Users/chubes/Developer/chubes-net/chubes-docs",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -109,7 +109,7 @@
         "changelog_target": "docs/CHANGELOG.md",
         "id": "data-machine",
         "local_path": "/Users/chubes/Developer/Data Machine Ecosystem/data-machine",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -127,7 +127,7 @@
         "extract_command": "unzip -o {artifact} && rm {artifact}",
         "id": "datamachine-events",
         "local_path": "/Users/chubes/Developer/Data Machine Ecosystem/datamachine-events",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -160,7 +160,7 @@
         "build_artifact": "build/extrachill-admin-tools.zip",
         "id": "extra-chill-admin-tools",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-admin-tools",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -177,7 +177,7 @@
         "build_artifact": "build/extrachill-ai-client.zip",
         "id": "extra-chill-ai-client",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-ai-client",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -194,7 +194,7 @@
         "build_artifact": "build/extrachill-analytics.zip",
         "id": "extra-chill-analytics",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-analytics",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -211,7 +211,7 @@
         "build_artifact": "build/extrachill-api.zip",
         "id": "extra-chill-api",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-api",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -228,7 +228,7 @@
         "build_artifact": "build/extrachill-artist-platform.zip",
         "id": "extra-chill-artist-platform",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-artist-platform",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -245,7 +245,7 @@
         "build_artifact": "build/extrachill-blog.zip",
         "id": "extra-chill-blog",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-blog",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -262,7 +262,7 @@
         "build_artifact": "build/extrachill-community.zip",
         "id": "extra-chill-community",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-community",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -279,7 +279,7 @@
         "build_artifact": "build/extrachill-contact.zip",
         "id": "extra-chill-contact",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-contact",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -296,7 +296,7 @@
         "build_artifact": "build/extrachill-docs.zip",
         "id": "extra-chill-docs",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-docs",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -313,7 +313,7 @@
         "build_artifact": "build/extrachill-events.zip",
         "id": "extra-chill-events",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-events",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -330,7 +330,7 @@
         "build_artifact": "build/extrachill-horoscopes.zip",
         "id": "extra-chill-horoscopes",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-horoscopes",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -347,7 +347,7 @@
         "build_artifact": "build/extrachill-multisite.zip",
         "id": "extra-chill-multisite",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-multisite",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -364,7 +364,7 @@
         "build_artifact": "build/extrachill-news-wire.zip",
         "id": "extra-chill-news-wire",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-news-wire",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -381,7 +381,7 @@
         "build_artifact": "build/extrachill-newsletter.zip",
         "id": "extra-chill-newsletter",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-newsletter",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -398,7 +398,7 @@
         "build_artifact": "build/extrachill-search.zip",
         "id": "extra-chill-search",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-search",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -415,7 +415,7 @@
         "build_artifact": "build/extrachill-seo.zip",
         "id": "extra-chill-seo",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-seo",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -432,7 +432,7 @@
         "build_artifact": "build/extrachill-shop.zip",
         "id": "extra-chill-shop",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-shop",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -449,7 +449,7 @@
         "build_artifact": "build/extrachill-stream.zip",
         "id": "extra-chill-stream",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/extrachill-stream",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -466,7 +466,7 @@
         "build_artifact": "build/extrachill.zip",
         "id": "extra-chill-theme",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -483,7 +483,7 @@
         "build_artifact": "build/extrachill-users.zip",
         "id": "extra-chill-users",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/extrachill-plugins/network/extrachill-users",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -501,7 +501,7 @@
         "changelog_target": "docs/changelog.md",
         "id": "homeboy",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/homeboy-ecosystem/homeboy",
-        "modules": {
+        "extensions": {
           "github": {
             "settings": {}
           },
@@ -571,7 +571,7 @@
         "build_command": "./build.sh",
         "id": "homeboy-desktop",
         "local_path": "/Users/chubes/Developer/Extra Chill Platform/homeboy-ecosystem/homeboy-desktop",
-        "modules": {
+        "extensions": {
           "swift": {
             "settings": {}
           }
@@ -586,8 +586,8 @@
       },
       {
         "changelog_target": "CHANGELOG.md",
-        "id": "homeboy-modules",
-        "local_path": "/Users/chubes/Developer/Extra Chill Platform/homeboy-ecosystem/homeboy-modules",
+        "id": "homeboy-extensions",
+        "local_path": "/Users/chubes/Developer/Extra Chill Platform/homeboy-ecosystem/homeboy-extensions",
         "remote_path": "",
         "version_targets": [
           {
@@ -605,7 +605,7 @@
         "changelog_target": "docs/CHANGELOG.md",
         "id": "html-to-blocks-converter",
         "local_path": "/Users/chubes/Developer/WordPress Plugins/html-to-blocks-converter/html-to-blocks-converter",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -650,7 +650,7 @@
         "extract_command": "unzip -o {artifact} && rm {artifact}",
         "id": "sarai-chinwag-theme",
         "local_path": "/Users/chubes/Developer/Sarai Chinwag/saraichinwag",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }
@@ -667,7 +667,7 @@
         "build_artifact": "dist/sell-my-images.zip",
         "id": "sell-my-images",
         "local_path": "/Users/chubes/Developer/Sarai Chinwag/sell-my-images",
-        "modules": {
+        "extensions": {
           "wordpress": {
             "settings": {}
           }

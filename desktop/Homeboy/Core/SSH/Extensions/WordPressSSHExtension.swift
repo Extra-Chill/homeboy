@@ -1,8 +1,8 @@
 import Foundation
 
 /// WordPress-specific SSH operations for WP-CLI execution.
-/// Self-contained module used by the WP-CLI Terminal.
-class WordPressSSHModule {
+/// Self-contained extension used by the WP-CLI Terminal.
+class WordPressSSHExtension {
     private let ssh: SSHService
     private let pathResolver: RemotePathResolver
 

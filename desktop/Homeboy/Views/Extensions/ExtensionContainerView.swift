@@ -1,38 +1,38 @@
 import SwiftUI
 
-/// Main container view for rendering a module based on its manifest
-struct ModuleContainerView: View {
-    let moduleId: String
+/// Main container view for rendering a extension based on its manifest
+struct ExtensionContainerView: View {
+    let extensionId: String
     
-    @StateObject private var viewModel: ModuleViewModel
-    @ObservedObject private var moduleManager = ModuleManager.shared
+    @StateObject private var viewModel: ExtensionViewModel
+    @ObservedObject private var extensionManager = ExtensionManager.shared
     
-    init(moduleId: String) {
-        self.moduleId = moduleId
-        _viewModel = StateObject(wrappedValue: ModuleViewModel(moduleId: moduleId))
+    init(extensionId: String) {
+        self.extensionId = extensionId
+        _viewModel = StateObject(wrappedValue: ExtensionViewModel(extensionId: extensionId))
     }
     
-    private var module: LoadedModule? {
-        moduleManager.module(withId: moduleId)
+    private var extension: LoadedExtension? {
+        extensionManager.extension(withId: extensionId)
     }
     
     var body: some View {
         Group {
-            if let module = module {
-                moduleContent(module)
+            if let extension = extension {
+                extensionContent(extension)
                     .onAppear {
-                        viewModel.initializeInputValues(from: module)
+                        viewModel.initializeInputValues(from: extension)
                     }
             } else {
                 VStack(spacing: 16) {
                     ContentUnavailableView(
-                        "Module Not Found",
+                        "Extension Not Found",
                         systemImage: "exclamationmark.triangle",
-                        description: Text("The module '\(moduleId)' could not be loaded.")
+                        description: Text("The extension '\(extensionId)' could not be loaded.")
                     )
                     CopyButton.error(
-                        "Module '\(moduleId)' could not be loaded",
-                        source: "Module Container"
+                        "Extension '\(extensionId)' could not be loaded",
+                        source: "Extension Container"
                     )
                 }
             }
@@ -40,22 +40,22 @@ struct ModuleContainerView: View {
     }
     
     @ViewBuilder
-    private func moduleContent(_ module: LoadedModule) -> some View {
+    private func extensionContent(_ extension: LoadedExtension) -> some View {
         VStack(spacing: 0) {
             // Header
-            ModuleHeaderView(module: module, viewModel: viewModel)
+            ExtensionHeaderView(extension: extension, viewModel: viewModel)
             
             Divider()
             
-            // Main content based on module state
-            switch module.state {
+            // Main content based on extension state
+            switch extension.state {
             case .needsSetup:
-                ModuleSetupView(module: module, viewModel: viewModel)
+                ExtensionSetupView(extension: extension, viewModel: viewModel)
                 
             case .installing:
                 VStack {
                     ProgressView("Installing dependencies...")
-                    ModuleConsoleView(output: $viewModel.consoleOutput, viewModel: viewModel)
+                    ExtensionConsoleView(output: $viewModel.consoleOutput, viewModel: viewModel)
                 }
                 .padding()
                 
@@ -64,46 +64,46 @@ struct ModuleContainerView: View {
                     ContentUnavailableView(
                         "Missing Requirements",
                         systemImage: "exclamationmark.triangle",
-                        description: Text("This module requires:\n\(requirements.joined(separator: ", "))")
+                        description: Text("This extension requires:\n\(requirements.joined(separator: ", "))")
                     )
                     CopyButton.warning(
                         "Missing requirements: \(requirements.joined(separator: ", "))",
-                        source: "Module: \(module.name)"
+                        source: "Extension: \(extension.name)"
                     )
                 }
                 
             case .error(let message):
                 VStack(spacing: 16) {
                     ContentUnavailableView(
-                        "Module Error",
+                        "Extension Error",
                         systemImage: "exclamationmark.triangle",
                         description: Text(message)
                     )
-                    CopyButton.error(message, source: "Module: \(module.name)")
+                    CopyButton.error(message, source: "Extension: \(extension.name)")
                 }
                 
             case .ready:
-                if let _ = module.manifest.runtime {
-                    ModuleReadyView(module: module, viewModel: viewModel)
+                if let _ = extension.manifest.runtime {
+                    ExtensionReadyView(extension: extension, viewModel: viewModel)
                 } else {
-                    PlatformModuleView(module: module)
+                    PlatformExtensionView(extension: extension)
                 }
             }
         }
     }
 }
 
-// MARK: - Platform Module View (modules without runtime, e.g. OpenClaw)
+// MARK: - Platform Extension View (extensions without runtime, e.g. OpenClaw)
 
-struct PlatformModuleView: View {
-    let module: LoadedModule
+struct PlatformExtensionView: View {
+    let extension: LoadedExtension
     @State private var actionOutput: String = ""
     @State private var isRunning = false
     
     var body: some View {
         VStack(spacing: 0) {
             // Actions grid
-            if let actions = module.manifest.actions, !actions.isEmpty {
+            if let actions = extension.manifest.actions, !actions.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Actions")
                         .font(.headline)
@@ -172,7 +172,7 @@ struct PlatformModuleView: View {
         defer { isRunning = false }
         
         do {
-            let args = ["module", "action", module.id, action.id]
+            let args = ["extension", "action", extension.id, action.id]
             let response = try await CLIBridge.shared.execute(args)
             actionOutput += "$ \(command)\n\(response.output)\n\n"
         } catch {
@@ -183,20 +183,20 @@ struct PlatformModuleView: View {
 
 // MARK: - Header View
 
-struct ModuleHeaderView: View {
-    let module: LoadedModule
-    @ObservedObject var viewModel: ModuleViewModel
+struct ExtensionHeaderView: View {
+    let extension: LoadedExtension
+    @ObservedObject var viewModel: ExtensionViewModel
     
     var body: some View {
         HStack {
-            Image(systemName: module.icon)
+            Image(systemName: extension.icon)
                 .font(.title2)
                 .foregroundColor(.accentColor)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text(module.name)
+                Text(extension.name)
                     .font(.headline)
-                Text(module.manifest.description)
+                Text(extension.manifest.description)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -216,9 +216,9 @@ struct ModuleHeaderView: View {
 
 // MARK: - Ready State View
 
-struct ModuleReadyView: View {
-    let module: LoadedModule
-    @ObservedObject var viewModel: ModuleViewModel
+struct ExtensionReadyView: View {
+    let extension: LoadedExtension
+    @ObservedObject var viewModel: ExtensionViewModel
     
     @State private var showConsole = true
     
@@ -227,7 +227,7 @@ struct ModuleReadyView: View {
             // Left side: Inputs + Console
             VStack(spacing: 0) {
                 // Input form
-                ModuleInputsView(module: module, viewModel: viewModel)
+                ExtensionInputsView(extension: extension, viewModel: viewModel)
                 
                 Divider()
                 
@@ -248,20 +248,20 @@ struct ModuleReadyView: View {
                     .padding(.vertical, 8)
                     
                     if showConsole {
-                        ModuleConsoleView(output: $viewModel.consoleOutput, viewModel: viewModel)
+                        ExtensionConsoleView(output: $viewModel.consoleOutput, viewModel: viewModel)
                     }
                 }
             }
             .frame(minWidth: 300)
             
             // Right side: Results (if table display)
-            if module.manifest.output?.display == .table && !viewModel.results.isEmpty {
+            if extension.manifest.output?.display == .table && !viewModel.results.isEmpty {
                 VStack(spacing: 0) {
-                    ModuleResultsView(module: module, viewModel: viewModel)
+                    ExtensionResultsView(extension: extension, viewModel: viewModel)
                     
                     Divider()
                     
-                    ModuleActionsBar(module: module, viewModel: viewModel)
+                    ExtensionActionsBar(extension: extension, viewModel: viewModel)
                 }
                 .frame(minWidth: 400)
             }

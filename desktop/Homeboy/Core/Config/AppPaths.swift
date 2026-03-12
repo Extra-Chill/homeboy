@@ -8,7 +8,7 @@ enum AppPaths {
     static let projects = homeboy.appendingPathComponent("projects")
     static let servers = homeboy.appendingPathComponent("servers")
     static let components = homeboy.appendingPathComponent("components")
-    static let modules = homeboy.appendingPathComponent("modules")
+    static let extensions = homeboy.appendingPathComponent("extensions")
     static let keys = homeboy.appendingPathComponent("keys")
     static let backups = homeboy.appendingPathComponent("backups")
 

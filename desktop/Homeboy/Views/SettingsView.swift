@@ -24,8 +24,8 @@ struct SettingsView: View {
             ComponentsSettingsTab(config: config)
                 .tabItem { Text("Components") }
             
-            ModulesSettingsTab()
-                .tabItem { Text("Modules") }
+            ExtensionsSettingsTab()
+                .tabItem { Text("Extensions") }
         }
         .padding()
         .frame(minWidth: 600, minHeight: 500)

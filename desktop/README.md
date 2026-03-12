@@ -67,7 +67,7 @@ Homeboy Desktop connects to your servers and shows you a unified view of all you
 
 - **macOS 14.4+** (Sonoma or later)
 - **Homeboy CLI** must be installed ([see CLI installation](../homeboy/#installation))
-- Optional: Python 3.12+ (only needed for certain modules)
+- Optional: Python 3.12+ (only needed for certain extensions)
 
 > **Note:** The Desktop app may lag behind CLI features. The CLI is the source of truth for behavior.
 
@@ -81,7 +81,7 @@ Homeboy Desktop connects to your servers and shows you a unified view of all you
 
 - [CLI documentation](../homeboy/docs/) — Complete command reference
 - [Desktop/CLI integration](docs/CLI.md) — How they work together
-- [Module specification](docs/MODULE-SPEC.md) — Extend with custom modules
+- [Extension specification](docs/EXTENSION-SPEC.md) — Extend with custom extensions
 
 ## License
 

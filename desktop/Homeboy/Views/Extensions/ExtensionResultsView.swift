@@ -1,15 +1,15 @@
 import SwiftUI
 import AppKit
 
-/// Displays module results in a dynamic table based on output schema
-struct ModuleResultsView: View {
-    let module: LoadedModule
-    @ObservedObject var viewModel: ModuleViewModel
+/// Displays extension results in a dynamic table based on output schema
+struct ExtensionResultsView: View {
+    let extension: LoadedExtension
+    @ObservedObject var viewModel: ExtensionViewModel
     
     @State private var sortDescriptor: DataTableSortDescriptor<IndexedRow>?
     
     private var columnNames: [String] {
-        module.manifest.output?.schema.items?.keys.sorted() ?? []
+        extension.manifest.output?.schema.items?.keys.sorted() ?? []
     }
     
     var body: some View {
@@ -22,7 +22,7 @@ struct ModuleResultsView: View {
                 ContentUnavailableView(
                     "No Results",
                     systemImage: "doc.text",
-                    description: Text("Run the module to see results")
+                    description: Text("Run the extension to see results")
                 )
             } else {
                 resultsTable
@@ -39,7 +39,7 @@ struct ModuleResultsView: View {
             
             Spacer()
             
-            if module.manifest.output?.selectable == true {
+            if extension.manifest.output?.selectable == true {
                 Text("\(viewModel.selectedRows.count) selected")
                     .font(.caption)
                     .foregroundColor(.secondary)

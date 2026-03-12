@@ -1,7 +1,7 @@
 import Foundation
 
-/// Represents a module's manifest (module.json)
-struct ModuleManifest: Codable, Identifiable {
+/// Represents a extension's manifest (extension.json)
+struct ExtensionManifest: Codable, Identifiable {
     let id: String
     let name: String
     let version: String
@@ -17,8 +17,8 @@ struct ModuleManifest: Codable, Identifiable {
     let settings: [SettingConfig]?
     let requires: RequirementsConfig?
     
-    /// Path to the module directory (set after loading, not from JSON)
-    var modulePath: String?
+    /// Path to the extension directory (set after loading, not from JSON)
+    var extensionPath: String?
 }
 
 // MARK: - Requirements Configuration
@@ -37,7 +37,7 @@ struct RuntimeConfig: Codable {
     let dependencies: [String]?
     let playwrightBrowsers: [String]?
     
-    // CLI module fields
+    // CLI extension fields
     let args: String?
     let defaultSite: String?
     
@@ -237,7 +237,7 @@ struct SettingConfig: Codable, Identifiable {
 
 // MARK: - Script Output
 
-/// The expected JSON output format from module scripts
+/// The expected JSON output format from extension scripts
 struct ScriptOutput: Codable {
     let success: Bool
     let results: [[String: AnyCodableValue]]?

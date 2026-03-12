@@ -76,7 +76,7 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
     @Published var isSaving: Bool = false
     @Published var error: (any DisplayableError)?
 
-    // Sidebar state (persisted per-module)
+    // Sidebar state (persisted per-extension)
     @AppStorage("fileEditor.sidebarCollapsed") var sidebarCollapsed: Bool = false
 
     // Confirmation dialogs

@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// Navigation items: core tools are static, modules are dynamic
+/// Navigation items: core tools are static, extensions are dynamic
 enum NavigationItem: Hashable {
     case coreTool(CoreTool)
-    case module(String)  // Module ID
+    case extension(String)  // Extension ID
 }
 
-/// Built-in core tools (not modules)
+/// Built-in core tools (not extensions)
 /// Order: Deployer, File Editor, Log Viewer are universal.
 /// Database Browser is shown if project type supports it.
 /// Settings is shown in a separate section.
@@ -33,7 +33,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @EnvironmentObject var authManager: AuthManager
     @ObservedObject private var configManager = ConfigurationManager.shared
-    @ObservedObject private var moduleManager = ModuleManager.shared
+    @ObservedObject private var extensionManager = ExtensionManager.shared
     @State private var selectedItem: NavigationItem? = .coreTool(.deployer)
     
     var body: some View {
@@ -71,10 +71,10 @@ struct ContentView: View {
             SettingsView()
                 .opacity(selectedItem == .coreTool(.settings) ? 1 : 0)
             
-            // Dynamic modules
-            ForEach(moduleManager.modules) { module in
-                ModuleContainerView(moduleId: module.id)
-                    .opacity(selectedItem == .module(module.id) ? 1 : 0)
+            // Dynamic extensions
+            ForEach(extensionManager.extensions) { extension in
+                ExtensionContainerView(extensionId: extension.id)
+                    .opacity(selectedItem == .extension(extension.id) ? 1 : 0)
             }
             
             // Empty state
@@ -82,7 +82,7 @@ struct ContentView: View {
                 ContentUnavailableView(
                     "Select an Item",
                     systemImage: "sidebar.left",
-                    description: Text("Choose a tool or module from the sidebar")
+                    description: Text("Choose a tool or extension from the sidebar")
                 )
             }
         }

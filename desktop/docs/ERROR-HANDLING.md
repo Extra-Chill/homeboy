@@ -22,7 +22,7 @@ func performAction() async {
     do {
         try await riskyOperation()
     } catch {
-        self.error = error.toDisplayableError(source: "My Module")
+        self.error = error.toDisplayableError(source: "My Extension")
     }
 }
 ```
@@ -43,7 +43,7 @@ if let error = viewModel.error {
 
 ## Constructing errors
 
-Prefer providing a stable `source` string (module/tool name) and include file context when available.
+Prefer providing a stable `source` string (extension/tool name) and include file context when available.
 
 ```swift
 AppError("Database credentials not configured", source: "Database Browser")

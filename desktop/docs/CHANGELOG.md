@@ -8,12 +8,12 @@ For current behavior, prefer the code and other documentation (for example `docs
 
 ## [0.11.3] - 2026-02-13
 
-- fix: show platform modules with actions in sidebar
+- fix: show platform extensions with actions in sidebar
 
 ## [0.11.2] - 2026-02-10
 
-- Fix module manifest path to use {id}.json convention (modules now load in Desktop)
-- Add sidebar empty state and section descriptions for modules
+- Fix extension manifest path to use {id}.json convention (extensions now load in Desktop)
+- Add sidebar empty state and section descriptions for extensions
 
 ## [0.11.1] - 2026-01-23
 
@@ -27,21 +27,21 @@ For current behavior, prefer the code and other documentation (for example `docs
 
 ## 0.9.0
 
-- Refactor module system
+- Refactor extension system
 - Revamp configuration handling
 - Improve CLI integration
 
 ## 0.8.1
 
-- Docs: restructure desktop README and refine module spec wording
+- Docs: restructure desktop README and refine extension spec wording
 - Docs: update CLI config tree notes and reserve docs directory
 
 ## 0.8.0
 
-- Delegate module discovery/setup/run to CLI; UI loads manifests from CLI-reported paths
-- Load platform project types from shared modules directory (user overrides still supported)
+- Delegate extension discovery/setup/run to CLI; UI loads manifests from CLI-reported paths
+- Load platform project types from shared extensions directory (user overrides still supported)
 - Remove localEnvironment from project configuration schema and related change detection
-- Sync documentation for CLI discovery paths and module/project-type behavior
+- Sync documentation for CLI discovery paths and extension/project-type behavior
 
 ## 0.7.3
 
@@ -106,9 +106,9 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 ## 0.6.2
 
 ### Improvements
-- **Centralized App Paths**: Added `AppPaths` and updated the app + CLI to use it for Application Support locations (projects, servers, modules, docs, keys, backups).
+- **Centralized App Paths**: Added `AppPaths` and updated the app + CLI to use it for Application Support locations (projects, servers, extensions, docs, keys, backups).
 - **Typed Configuration Change Events**: Replaced NotificationCenter project-change notifications with `ConfigurationObserver` + `ConfigurationChangeType`, and updated observing ViewModels to react only to relevant field changes.
-- **Remote Path Normalization**: Added `RemotePathResolver` (plus WordPress-specific helpers) and refactored SSH file/log browsing + module paths to avoid slash-joining edge cases.
+- **Remote Path Normalization**: Added `RemotePathResolver` (plus WordPress-specific helpers) and refactored SSH file/log browsing + extension paths to avoid slash-joining edge cases.
 - **Non-Blocking SSH Tunnel Startup**: Updated `SSHTunnelService` to avoid `Thread.sleep` during tunnel establishment and stale tunnel cleanup. (Historical; desktop now uses the standalone CLI for DB access.)
 
 ### CLI
@@ -134,28 +134,28 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 ## 0.6.0
 
 ### New Features
-- **Module CLI Command**: Added `homeboy module` command for terminal-based module management and execution.
-  - `homeboy module list [--project <id>]` - List available modules with optional project compatibility filtering
-  - `homeboy module run <module-id> [--project <id>] [args...]` - Run CLI modules locally
-- **Generic CLI Runtime Type**: Added `cli` runtime type for modules, enabling project-type-agnostic CLI execution via command templates.
+- **Extension CLI Command**: Added `homeboy extension` command for terminal-based extension management and execution.
+  - `homeboy extension list [--project <id>]` - List available extensions with optional project compatibility filtering
+  - `homeboy extension run <extension-id> [--project <id>] [args...]` - Run CLI extensions locally
+- **Generic CLI Runtime Type**: Added `cli` runtime type for extensions, enabling project-type-agnostic CLI execution via command templates.
 
 ### Removed
-- **Legacy `wpcli` Runtime Type**: Removed the `wpcli` runtime type alias. Modules should use `cli` runtime type exclusively.
-- **Legacy Module Fields**: Removed `command` and `subcommand` fields from RuntimeConfig. CLI modules use the `args` field for command templates.
+- **Legacy `wpcli` Runtime Type**: Removed the `wpcli` runtime type alias. Extensions should use `cli` runtime type exclusively.
+- **Legacy Extension Fields**: Removed `command` and `subcommand` fields from RuntimeConfig. CLI extensions use the `args` field for command templates.
 
 ### Refactoring
 - **LocalEnvironmentConfig**: Renamed `localDev`/`localCLI` to `localEnvironment` in project configuration with updated field names (`sitePath` instead of legacy `wpCliPath`). Migration support was removed; configs must be updated manually.
 
 ### CLI
-- Added `ModuleCommand.swift` with `ModuleList` and `ModuleRun` commands for CLI module execution.
-- Module execution uses project type's command template with variable substitution (`{{sitePath}}`, `{{domain}}`, `{{cliPath}}`, `{{args}}`).
+- Added `ExtensionCommand.swift` with `ExtensionList` and `ExtensionRun` commands for CLI extension execution.
+- Extension execution uses project type's command template with variable substitution (`{{sitePath}}`, `{{domain}}`, `{{cliPath}}`, `{{args}}`).
 
 ## 0.5.0
 
 ### New Features
 - **Generic Remote CLI System**: Replaced monolithic `WPCommand.swift` with modular `RemoteCommand.swift` supporting multiple tools (WP-CLI, PM2).
 - **Template Rendering**: Added `TemplateRenderer.swift` for flexible command template substitution with `{{variable}}` placeholders.
-- **PM2 Command Support**: Added support for running PM2 on Node.js projects via module-provided CLI tooling.
+- **PM2 Command Support**: Added support for running PM2 on Node.js projects via extension-provided CLI tooling.
 - **CLI Configuration**: Added `CLIConfig` to project type definitions, enabling per-project-type remote CLI tools.
 - **Subtarget Support**: Added `subTargets` computed property to `ProjectConfiguration` for generic subtarget targeting (e.g., multisite sites, environments).
 
@@ -185,8 +185,8 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 
 ### New Features
 - **Copyable System**: Add error/warning/console copy system with one-click clipboard access. Includes `AppError`, `AppWarning`, `ConsoleOutput` types, `ContentContext` for metadata, `CopyButton` component, and view variants (`ErrorView`, `WarningView`, `InlineErrorView`, `InlineWarningView`).
-- **RemoteFileEditor**: New module for editing remote files over SSH with backup support, replacing ConfigEditor.
-- **RemoteLogViewer**: New module for viewing/searching remote log files with filtering, replacing DebugLogs.
+- **RemoteFileEditor**: New extension for editing remote files over SSH with backup support, replacing ConfigEditor.
+- **RemoteLogViewer**: New extension for viewing/searching remote log files with filtering, replacing DebugLogs.
 - **ProjectType System**: Extensible project type definitions via `ProjectTypeManager`. Bundled types (WordPress, Node.js) in `Resources/project-types/`. Each type defines features, default pinned files/logs, and database schema.
 - **SSH CLI Command**: Add `homeboy ssh <project> [command]` for interactive shells and single-command execution.
 - **DeploymentService**: Dedicated service for SSH deployments with build automation, upload, extraction, and permissions.
@@ -201,9 +201,9 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 - **CopyableTextView**: Text view with integrated copy button.
 
 ### Removed
-- **ConfigEditor module**: Removed `Homeboy/Modules/ConfigEditor/` (BackupService, ConfigEditorViewModel, ConfigFile, ConfigEditorView).
-- **DebugLogs module**: Removed `Homeboy/Modules/DebugLogs/` (DebugLogsViewModel, DebugLogsView).
-- **WP-CLI Terminal module**: Removed `Homeboy/Modules/WPCLITerminal/` (local WP-CLI execution on Local by Flywheel sites). Remote WP-CLI is available via module-provided CLI tooling.
+- **ConfigEditor extension**: Removed `Homeboy/Extensions/ConfigEditor/` (BackupService, ConfigEditorViewModel, ConfigFile, ConfigEditorView).
+- **DebugLogs extension**: Removed `Homeboy/Extensions/DebugLogs/` (DebugLogsViewModel, DebugLogsView).
+- **WP-CLI Terminal extension**: Removed `Homeboy/Extensions/WPCLITerminal/` (local WP-CLI execution on Local by Flywheel sites). Remote WP-CLI is available via extension-provided CLI tooling.
 - **MigrationService**: Removed legacy ExtraChillDesktop migration service.
 - **WordPressSiteMap**: Removed in favor of new Database Browser grouping system.
 
@@ -211,8 +211,8 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 - **Database Browser**: Complete overhaul with grouping system, native table component, SchemaResolver integration. Major updates to `SiteListView`, `TableDataView`, `QueryEditorView`.
 - **Deployer**: Refactored ViewModel and Views with improved version comparison and deployment workflow.
 - **Configuration System**: Major updates to `ConfigurationManager`, `ProjectConfiguration`, and `DeployableComponent` with validation, multisite support, and project type integration.
-- **SSH Services**: Refactored `RemoteFileBrowser`, `RemoteFileEntry`, and `WordPressSSHModule` for improved file operations.
-- **Module System**: Updated `ModuleManager`, `ModuleManifest`, `ModuleRunner`, and `ModuleViewModel`.
+- **SSH Services**: Refactored `RemoteFileBrowser`, `RemoteFileEntry`, and `WordPressSSHExtension` for improved file operations.
+- **Extension System**: Updated `ExtensionManager`, `ExtensionManifest`, `ExtensionRunner`, and `ExtensionViewModel`.
 
 ### Build
 - Switch from ZIP to DMG for macOS distribution (`dist/Homeboy-macOS.dmg`).

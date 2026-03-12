@@ -3,7 +3,7 @@
 # Homeboy - Python Environment Setup
 #
 # This script sets up the Python virtual environment required
-# for the Bandcamp scraper module.
+# for the Bandcamp scraper extension.
 #
 
 set -e

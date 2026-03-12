@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Main container view for the Database Browser module
+/// Main container view for the Database Browser extension
 struct DatabaseBrowserView: View {
     @StateObject private var viewModel = DatabaseBrowserViewModel()
     

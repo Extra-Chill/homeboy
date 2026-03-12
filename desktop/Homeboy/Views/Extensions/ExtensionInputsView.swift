@@ -1,14 +1,14 @@
 import SwiftUI
 
-/// Dynamically generates input form from module manifest
-struct ModuleInputsView: View {
-    let module: LoadedModule
-    @ObservedObject var viewModel: ModuleViewModel
+/// Dynamically generates input form from extension manifest
+struct ExtensionInputsView: View {
+    let extension: LoadedExtension
+    @ObservedObject var viewModel: ExtensionViewModel
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Site selector for CLI modules with subtargets
-            if viewModel.isCLIModule && viewModel.hasSubTargets {
+            // Site selector for CLI extensions with subtargets
+            if viewModel.isCLIExtension && viewModel.hasSubTargets {
                 LabeledContent("Site") {
                     Picker("", selection: networkSiteBinding) {
                         ForEach(viewModel.subTargets) { subTarget in
@@ -20,13 +20,13 @@ struct ModuleInputsView: View {
                 }
             }
             
-            ForEach(module.manifest.inputs ?? []) { input in
+            ForEach(extension.manifest.inputs ?? []) { input in
                 inputField(for: input)
             }
             
             HStack {
                 Button {
-                    viewModel.run(module: module)
+                    viewModel.run(extension: extension)
                 } label: {
                     HStack {
                         if viewModel.isRunning {

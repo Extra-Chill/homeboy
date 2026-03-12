@@ -2,8 +2,8 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// Module loading state derived from CLI response
-enum ModuleState: Equatable {
+/// Extension loading state derived from CLI response
+enum ExtensionState: Equatable {
     case ready
     case needsSetup
     case installing
@@ -11,21 +11,21 @@ enum ModuleState: Equatable {
     case error(String)
 }
 
-/// Represents a loaded module with its manifest and state
+/// Represents a loaded extension with its manifest and state
 /// Manifest is loaded from CLI-reported path for UI rendering
-struct LoadedModule: Identifiable {
-    let manifest: ModuleManifest
-    var state: ModuleState
-    let cliEntry: CLIModuleEntry
+struct LoadedExtension: Identifiable {
+    let manifest: ExtensionManifest
+    var state: ExtensionState
+    let cliEntry: CLIExtensionEntry
 
     var id: String { manifest.id }
     var name: String { manifest.name }
     var icon: String { manifest.icon }
-    var modulePath: String { cliEntry.path }
+    var extensionPath: String { cliEntry.path }
     var isLinked: Bool { cliEntry.linked }
 
     var venvPath: String {
-        "\(modulePath)/venv"
+        "\(extensionPath)/venv"
     }
 
     var venvPythonPath: String {
@@ -34,7 +34,7 @@ struct LoadedModule: Identifiable {
 
     var entrypointPath: String {
         guard let entrypoint = manifest.runtime?.entrypoint else { return "" }
-        return "\(modulePath)/\(entrypoint)"
+        return "\(extensionPath)/\(entrypoint)"
     }
 
     var isDisabled: Bool {
@@ -48,16 +48,16 @@ struct LoadedModule: Identifiable {
     }
 }
 
-/// Singleton manager for module operations via CLI delegation
-/// CLI is the single source of truth for module discovery and installation.
+/// Singleton manager for extension operations via CLI delegation
+/// CLI is the single source of truth for extension discovery and installation.
 /// Desktop reads manifests from CLI-reported paths for UI rendering.
 @MainActor
-class ModuleManager: ObservableObject, ConfigurationObserving {
-    static let shared = ModuleManager()
+class ExtensionManager: ObservableObject, ConfigurationObserving {
+    static let shared = ExtensionManager()
 
     var cancellables = Set<AnyCancellable>()
 
-    @Published var modules: [LoadedModule] = []
+    @Published var extensions: [LoadedExtension] = []
     @Published var isLoading = false
     @Published var error: (any DisplayableError)?
 
@@ -72,7 +72,7 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
         jsonEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
         Task {
-            await loadModules()
+            await loadExtensions()
         }
         observeConfiguration()
     }
@@ -82,94 +82,94 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
     func handleConfigChange(_ change: ConfigurationChangeType) {
         switch change {
         case .projectDidSwitch:
-            Task { await loadModules() }
-        case .moduleAdded, .moduleRemoved, .moduleModified:
-            Task { await loadModules() }
+            Task { await loadExtensions() }
+        case .extensionAdded, .extensionRemoved, .extensionModified:
+            Task { await loadExtensions() }
         default:
             break
         }
     }
 
-    // MARK: - Module Discovery via CLI
+    // MARK: - Extension Discovery via CLI
 
-    /// Loads modules from CLI and reads manifests for UI rendering
-    func loadModules() async {
+    /// Loads extensions from CLI and reads manifests for UI rendering
+    func loadExtensions() async {
         isLoading = true
         error = nil
 
         do {
             let projectId = ConfigurationManager.shared.activeProject?.id
-            var args = ["module", "list", "--json"]
+            var args = ["extension", "list", "--json"]
             if let project = projectId {
                 args += ["--project", project]
             }
 
             let response = try await CLIBridge.shared.execute(args)
-            let result = try response.decodeResponse(CLIModuleListData.self)
+            let result = try response.decodeResponse(CLIExtensionListData.self)
 
             guard result.success, let data = result.data else {
                 if let errorDetail = result.error {
-                    self.error = errorDetail.toCLIError(source: "Module Manager")
+                    self.error = errorDetail.toCLIError(source: "Extension Manager")
                 } else {
-                    self.error = AppError("Failed to load modules", source: "Module Manager")
+                    self.error = AppError("Failed to load extensions", source: "Extension Manager")
                 }
-                self.modules = []
+                self.extensions = []
                 isLoading = false
                 return
             }
 
-            // Include executable modules and platform modules that have actions
-            let visibleEntries = data.modules.filter {
+            // Include executable extensions and platform extensions that have actions
+            let visibleEntries = data.extensions.filter {
                 $0.runtime == "executable" || !($0.actions ?? []).isEmpty
             }
 
             // Load manifests from CLI-reported paths
-            var loadedModules: [LoadedModule] = []
+            var loadedExtensions: [LoadedExtension] = []
             for entry in visibleEntries {
-                if let module = loadManifest(from: entry) {
-                    loadedModules.append(module)
+                if let extension = loadManifest(from: entry) {
+                    loadedExtensions.append(extension)
                 }
             }
 
-            modules = loadedModules.sorted { $0.name < $1.name }
+            extensions = loadedExtensions.sorted { $0.name < $1.name }
 
         } catch {
-            self.error = error.toDisplayableError(source: "Module Manager")
-            modules = []
+            self.error = error.toDisplayableError(source: "Extension Manager")
+            extensions = []
         }
 
         isLoading = false
     }
 
-    /// Loads manifest from CLI-reported path and creates LoadedModule
-    private func loadManifest(from entry: CLIModuleEntry) -> LoadedModule? {
+    /// Loads manifest from CLI-reported path and creates LoadedExtension
+    private func loadManifest(from entry: CLIExtensionEntry) -> LoadedExtension? {
         let manifestPath = URL(fileURLWithPath: entry.path).appendingPathComponent("\(entry.id).json")
 
         guard fileManager.fileExists(atPath: manifestPath.path) else {
-            print("[ModuleManager] No \(entry.id).json at \(entry.path)")
+            print("[ExtensionManager] No \(entry.id).json at \(entry.path)")
             return nil
         }
 
         do {
             let data = try Data(contentsOf: manifestPath)
-            var manifest = try jsonDecoder.decode(ModuleManifest.self, from: data)
-            manifest.modulePath = entry.path
+            var manifest = try jsonDecoder.decode(ExtensionManifest.self, from: data)
+            manifest.extensionPath = entry.path
 
             let state = deriveState(from: entry)
 
-            return LoadedModule(
+            return LoadedExtension(
                 manifest: manifest,
                 state: state,
                 cliEntry: entry
             )
         } catch {
-            print("[ModuleManager] Failed to load manifest at \(entry.path): \(error)")
+            print("[ExtensionManager] Failed to load manifest at \(entry.path): \(error)")
             return nil
         }
     }
 
-    /// Derives ModuleState from CLI entry
-    private func deriveState(from entry: CLIModuleEntry) -> ModuleState {
+    /// Derives ExtensionState from CLI entry
+    private func deriveState(from entry: CLIExtensionEntry) -> ExtensionState {
         if !entry.compatible {
             return .missingRequirements(["Incompatible with current project"])
         }
@@ -180,78 +180,78 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
     }
 
 
-    // MARK: - Module Installation via CLI
+    // MARK: - Extension Installation via CLI
 
-    /// Installs a module from a Git URL
-    func installModule(from url: String) async throws {
-        let args = ["module", "install", url]
+    /// Installs a extension from a Git URL
+    func installExtension(from url: String) async throws {
+        let args = ["extension", "install", url]
         let response = try await CLIBridge.shared.execute(args, timeout: 300)
 
         guard response.success else {
-            throw ModuleError.installFailed
+            throw ExtensionError.installFailed
         }
 
-        await loadModules()
+        await loadExtensions()
     }
 
-    /// Links a local module directory (uses install which auto-symlinks local paths)
-    func linkModule(path: String) async throws {
-        let args = ["module", "install", path]
+    /// Links a local extension directory (uses install which auto-symlinks local paths)
+    func linkExtension(path: String) async throws {
+        let args = ["extension", "install", path]
         let response = try await CLIBridge.shared.execute(args)
 
         guard response.success else {
-            throw ModuleError.installFailed
+            throw ExtensionError.installFailed
         }
 
-        await loadModules()
+        await loadExtensions()
     }
 
-    /// Unlinks a linked module (uses uninstall which handles symlinks)
-    func unlinkModule(moduleId: String) async throws {
-        let args = ["module", "uninstall", moduleId, "--force"]
+    /// Unlinks a linked extension (uses uninstall which handles symlinks)
+    func unlinkExtension(extensionId: String) async throws {
+        let args = ["extension", "uninstall", extensionId, "--force"]
         let response = try await CLIBridge.shared.execute(args)
 
         guard response.success else {
-            throw ModuleError.moduleNotFound
+            throw ExtensionError.extensionNotFound
         }
 
-        await loadModules()
+        await loadExtensions()
     }
 
-    /// Uninstalls a module via CLI
-    func uninstallModule(moduleId: String) async throws {
-        let args = ["module", "uninstall", moduleId, "--force"]
+    /// Uninstalls a extension via CLI
+    func uninstallExtension(extensionId: String) async throws {
+        let args = ["extension", "uninstall", extensionId, "--force"]
         let response = try await CLIBridge.shared.execute(args)
 
         guard response.success else {
-            throw ModuleError.moduleNotFound
+            throw ExtensionError.extensionNotFound
         }
 
-        await loadModules()
+        await loadExtensions()
     }
 
-    /// Sets up a module via CLI
-    func setupModule(moduleId: String) async throws {
-        let args = ["module", "setup", moduleId]
+    /// Sets up a extension via CLI
+    func setupExtension(extensionId: String) async throws {
+        let args = ["extension", "setup", extensionId]
         let response = try await CLIBridge.shared.execute(args, timeout: 600)
 
         guard response.success else {
-            throw ModuleError.setupFailed(response.errorOutput)
+            throw ExtensionError.setupFailed(response.errorOutput)
         }
 
-        await loadModules()
+        await loadExtensions()
     }
 
-    // MARK: - Module Execution via CLI
+    // MARK: - Extension Execution via CLI
 
-    /// Runs a module via CLI and streams output
-    func runModule(
-        moduleId: String,
+    /// Runs a extension via CLI and streams output
+    func runExtension(
+        extensionId: String,
         inputs: [String: String],
         projectId: String?,
         onOutput: @escaping (String) -> Void
     ) async {
-        var args = ["module", "run", moduleId]
+        var args = ["extension", "run", extensionId]
         if let project = projectId {
             args += ["--project", project]
         }
@@ -265,25 +265,25 @@ class ModuleManager: ObservableObject, ConfigurationObserving {
         }
     }
 
-    /// Updates a module's state
-    func updateModuleState(moduleId: String, state: ModuleState) {
-        guard let index = modules.firstIndex(where: { $0.id == moduleId }) else { return }
-        modules[index].state = state
+    /// Updates a extension's state
+    func updateExtensionState(extensionId: String, state: ExtensionState) {
+        guard let index = extensions.firstIndex(where: { $0.id == extensionId }) else { return }
+        extensions[index].state = state
     }
 
-    // MARK: - Module Lookup
+    // MARK: - Extension Lookup
 
-    func module(withId id: String) -> LoadedModule? {
-        modules.first { $0.id == id }
+    func extension(withId id: String) -> LoadedExtension? {
+        extensions.first { $0.id == id }
     }
 }
 
 // MARK: - Errors
 
-enum ModuleError: LocalizedError {
+enum ExtensionError: LocalizedError {
     case missingManifest
     case invalidManifest
-    case moduleNotFound
+    case extensionNotFound
     case installFailed
     case setupFailed(String)
     case cliNotInstalled
@@ -291,13 +291,13 @@ enum ModuleError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingManifest:
-            return "No module manifest found in the selected directory"
+            return "No extension manifest found in the selected directory"
         case .invalidManifest:
-            return "Invalid module manifest format"
-        case .moduleNotFound:
-            return "Module not found"
+            return "Invalid extension manifest format"
+        case .extensionNotFound:
+            return "Extension not found"
         case .installFailed:
-            return "Failed to install module"
+            return "Failed to install extension"
         case .setupFailed(let reason):
             return "Setup failed: \(reason)"
         case .cliNotInstalled:

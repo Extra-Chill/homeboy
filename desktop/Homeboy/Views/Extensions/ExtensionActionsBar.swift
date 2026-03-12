@@ -1,14 +1,14 @@
 import SwiftUI
 
-/// Renders action buttons from module manifest
-struct ModuleActionsBar: View {
-    let module: LoadedModule
-    @ObservedObject var viewModel: ModuleViewModel
+/// Renders action buttons from extension manifest
+struct ExtensionActionsBar: View {
+    let extension: LoadedExtension
+    @ObservedObject var viewModel: ExtensionViewModel
     @EnvironmentObject var authManager: AuthManager
     
     var body: some View {
         HStack {
-            ForEach(module.manifest.actions ?? []) { action in
+            ForEach(extension.manifest.actions ?? []) { action in
                 actionButton(for: action)
             }
             
@@ -33,7 +33,7 @@ struct ModuleActionsBar: View {
         
         Button {
             Task {
-                await viewModel.performAction(action, module: module)
+                await viewModel.performAction(action, extension: extension)
             }
         } label: {
             HStack(spacing: 4) {
@@ -54,7 +54,7 @@ struct ModuleActionsBar: View {
         }
         
         // Check row selection for selectable outputs
-        if module.manifest.output?.selectable == true && viewModel.selectedRows.isEmpty {
+        if extension.manifest.output?.selectable == true && viewModel.selectedRows.isEmpty {
             return (false, "Select rows first")
         }
         
@@ -67,7 +67,7 @@ struct ModuleActionsBar: View {
             
             // Check if required settings are configured
             if let missingSettings = missingRequiredSettings(for: action) {
-                return (false, "Configure \(missingSettings) in Settings > Modules")
+                return (false, "Configure \(missingSettings) in Settings > Extensions")
             }
         }
         

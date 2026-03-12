@@ -27,10 +27,10 @@ enum ConfigurationChangeType {
     case serverModified(serverId: String)
     case serverRemoved(serverId: String)
 
-    // Module changes
-    case moduleAdded(moduleId: String)
-    case moduleModified(moduleId: String)
-    case moduleRemoved(moduleId: String)
+    // Extension changes
+    case extensionAdded(extensionId: String)
+    case extensionModified(extensionId: String)
+    case extensionRemoved(extensionId: String)
 
     // Project type changes
     case projectTypeModified(typeId: String)
