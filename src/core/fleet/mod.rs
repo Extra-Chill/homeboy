@@ -4,8 +4,12 @@ use crate::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::project;
 use serde::{Deserialize, Serialize};
 
+pub mod check;
+pub mod exec;
 pub mod status;
 
+pub use check::{collect_check, FleetCheckSummary, FleetComponentCheck, FleetProjectCheck};
+pub use exec::{collect_exec, FleetExecProjectResult, FleetExecSummary};
 pub use status::{collect_status, FleetComponentStatus, FleetProjectStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
