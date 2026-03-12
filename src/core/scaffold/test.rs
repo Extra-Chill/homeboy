@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use crate::extension::grammar;
 use crate::error::{Error, Result};
-use crate::utils::io;
+use crate::local_files;
 
 /// A public method/function extracted from a source file.
 #[derive(Debug, Clone, Serialize)]
@@ -549,7 +549,7 @@ pub fn scaffold_file(
         .to_string_lossy()
         .to_string();
 
-    let content = io::read_file(source_path, "read source file")?;
+    let content = local_files::read_file(source_path, "read source file")?;
     let classes = if config.language == "rust" {
         extract_rust(&content)
     } else {
@@ -605,7 +605,7 @@ pub fn scaffold_file(
                 )
             })?;
         }
-        io::write_file(&test_path, &generated, "write test scaffold")?;
+        local_files::write_file(&test_path, &generated, "write test scaffold")?;
     }
 
     Ok(ScaffoldResult {

@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use homeboy::cleanup::{self, baseline as cleanup_baseline, CleanupResult};
 
-use super::args::BaselineArgs;
+use super::utils::args::BaselineArgs;
 use super::CmdResult;
 
 #[derive(Args)]

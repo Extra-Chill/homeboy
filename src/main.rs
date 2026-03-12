@@ -25,9 +25,8 @@ use commands::{
     extension, file, fleet, git, init, lint, logs, project, refactor, release, server, ssh, status,
     test, transfer, undo, upgrade, version,
 };
+use commands::utils::{args, entity_suggest};
 use homeboy::extension::load_all_extensions;
-use homeboy::utils::args;
-use homeboy::utils::entity_suggest::{find_entity_match, generate_entity_hints};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -418,10 +417,10 @@ fn try_augment_clap_error(e: &clap::Error) -> Option<String> {
     let parent_command = extract_parent_command_from_error(e)?;
 
     // Check if it matches a known entity
-    let entity_match = find_entity_match(&unrecognized)?;
+    let entity_match = entity_suggest::find_entity_match(&unrecognized)?;
 
     // Generate hints
-    let hints = generate_entity_hints(&entity_match, &parent_command, &unrecognized);
+    let hints = entity_suggest::generate_entity_hints(&entity_match, &parent_command, &unrecognized);
 
     // Build augmented output
     let mut output = format!("error: unrecognized subcommand '{}'\n\n", unrecognized);

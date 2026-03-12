@@ -1,0 +1,288 @@
+//! Shared CLI argument groups for composable command definitions.
+//!
+//! Commands compose these via `#[command(flatten)]` instead of
+//! redeclaring the same flags independently. Each group owns its
+//! resolution/apply logic so behavior lives with the args.
+//!
+//! See: https://github.com/Extra-Chill/homeboy/issues/436
+
+use clap::Args;
+use std::path::PathBuf;
+
+use homeboy::component::{self, Component};
+
+/// Normalize version command arguments.
+pub(crate) fn normalize_version_show(args: Vec<String>) -> Vec<String> {
+    if args.len() < 3 {
+        return args;
+    }
+
+    let is_version_cmd = args.get(1).map(|s| s == "version").unwrap_or(false);
+    if !is_version_cmd {
+        return args;
+    }
+
+    let known_subcommands = ["show", "--help", "-h", "help"];
+    let second_arg = args.get(2).map(|s| s.as_str()).unwrap_or("");
+
+    if known_subcommands.contains(&second_arg) || second_arg.starts_with('-') {
+        return args;
+    }
+
+    let mut result = Vec::with_capacity(args.len() + 1);
+    result.push(args[0].clone());
+    result.push(args[1].clone());
+    result.push("show".to_string());
+    result.extend(args[2..].iter().cloned());
+
+    result
+}
+
+/// Normalize changelog add --component flag to positional form.
+pub(crate) fn normalize_changelog_component(args: Vec<String>) -> Vec<String> {
+    let is_changelog_add = args.len() >= 4
+        && args.get(1).map(|s| s == "changelog").unwrap_or(false)
+        && args.get(2).map(|s| s == "add").unwrap_or(false);
+
+    if !is_changelog_add {
+        return args;
+    }
+
+    let component_pos = args.iter().position(|s| s == "--component");
+    let Some(component_pos) = component_pos else {
+        return args;
+    };
+
+    let Some(component_value) = args.get(component_pos + 1) else {
+        return args;
+    };
+
+    let mut result = vec![
+        args[0].clone(),
+        args[1].clone(),
+        args[2].clone(),
+        component_value.clone(),
+    ];
+
+    for (i, arg) in args.iter().enumerate().skip(3) {
+        if i == component_pos || i == component_pos + 1 {
+            continue;
+        }
+        result.push(arg.clone());
+    }
+
+    result
+}
+
+/// Auto-insert '--' separator before unknown flags for trailing_var_arg commands.
+pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
+    let commands: &[(&str, &str, &[&str])] = &[
+        ("component", "set", &["--json", "--base64", "--replace", "--version-target", "--extension", "--help", "-h"]),
+        ("component", "edit", &["--json", "--base64", "--replace", "--version-target", "--extension", "--help", "-h"]),
+        ("component", "merge", &["--json", "--base64", "--replace", "--version-target", "--extension", "--help", "-h"]),
+        ("server", "set", &["--json", "--base64", "--replace", "--help", "-h"]),
+        ("server", "edit", &["--json", "--base64", "--replace", "--help", "-h"]),
+        ("server", "merge", &["--json", "--base64", "--replace", "--help", "-h"]),
+        ("fleet", "set", &["--json", "--base64", "--replace", "--help", "-h"]),
+        ("fleet", "edit", &["--json", "--base64", "--replace", "--help", "-h"]),
+        ("fleet", "merge", &["--json", "--base64", "--replace", "--help", "-h"]),
+        ("test", "", &["--skip-lint", "--fix", "--coverage", "--coverage-min", "--baseline", "--ignore-baseline", "--ratchet", "--analyze", "--drift", "--scaffold", "--scaffold-file", "--write", "--since", "--changed-since", "--setting", "--path", "--json-summary", "--json", "--help", "-h"]),
+        ("docs", "audit", &["--path", "--docs-dir", "--baseline", "--ignore-baseline", "--features", "--help", "-h"]),
+        ("lint", "", &["--fix", "--baseline", "--ignore-baseline", "--summary", "--file", "--glob", "--changed-only", "--changed-since", "--errors-only", "--sniffs", "--exclude-sniffs", "--category", "--setting", "--path", "--json", "--help", "-h"]),
+    ];
+
+    let known_flags = commands.iter().find_map(|(cmd, subcmd, flags)| {
+        let matches = if subcmd.is_empty() {
+            args.get(1).map(|s| s == *cmd).unwrap_or(false)
+        } else {
+            args.get(1).map(|s| s == *cmd).unwrap_or(false)
+                && args.get(2).map(|s| s == *subcmd).unwrap_or(false)
+        };
+        if matches { Some(*flags) } else { None }
+    });
+
+    let Some(known_flags) = known_flags else {
+        return args;
+    };
+
+    let mut result = Vec::new();
+    let mut found_separator = false;
+    let mut insert_position: Option<usize> = None;
+
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--" {
+            found_separator = true;
+        }
+        if !found_separator
+            && arg.starts_with("--")
+            && !known_flags.contains(&arg.as_str())
+            && !known_flags.iter().any(|f| arg.starts_with(&format!("{}=", f)))
+            && insert_position.is_none()
+        {
+            insert_position = Some(i);
+        }
+        result.push(arg.clone());
+    }
+
+    if let Some(pos) = insert_position {
+        result.insert(pos, "--".to_string());
+    }
+
+    result
+}
+
+/// Apply all argument normalizations in sequence.
+pub fn normalize(args: Vec<String>) -> Vec<String> {
+    let args = normalize_version_show(args);
+    let args = normalize_changelog_component(args);
+    normalize_trailing_flags(args)
+}
+
+// ============================================================================
+// ComponentArgs: --component + --path + resolve()
+// ============================================================================
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ComponentArgs {
+    #[arg(short, long)]
+    pub component: Option<String>,
+
+    #[arg(long)]
+    pub path: Option<String>,
+}
+
+#[allow(dead_code)]
+impl ComponentArgs {
+    pub fn resolve(&self) -> homeboy::Result<Component> {
+        component::resolve_effective(self.component.as_deref(), self.path.as_deref(), None)
+    }
+
+    pub fn resolve_root(&self) -> homeboy::Result<PathBuf> {
+        if let Some(ref p) = self.path {
+            Ok(PathBuf::from(p))
+        } else {
+            let comp = component::resolve(self.component.as_deref())?;
+            component::validate_local_path(&comp)
+        }
+    }
+
+    pub fn load(&self) -> homeboy::Result<Component> {
+        let id = self.component.as_deref().ok_or_else(|| {
+            homeboy::Error::validation_missing_argument(vec!["component".to_string()])
+        })?;
+        component::resolve_effective(Some(id), self.path.as_deref(), None)
+    }
+}
+
+// ============================================================================
+// PositionalComponentArgs: positional component + --path
+// ============================================================================
+
+#[derive(Args, Debug, Clone)]
+pub struct PositionalComponentArgs {
+    pub component: String,
+
+    #[arg(long)]
+    pub path: Option<String>,
+}
+
+impl PositionalComponentArgs {
+    pub fn load(&self) -> homeboy::Result<Component> {
+        component::resolve_effective(Some(&self.component), self.path.as_deref(), None)
+    }
+
+    pub fn id(&self) -> &str {
+        &self.component
+    }
+
+    pub fn source_path(&self) -> homeboy::Result<PathBuf> {
+        if let Some(ref path) = self.path {
+            Ok(PathBuf::from(path))
+        } else {
+            let comp = component::resolve_effective(Some(&self.component), None, None)?;
+            let expanded = shellexpand::tilde(&comp.local_path);
+            Ok(PathBuf::from(expanded.as_ref()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod positional_tests {
+    use super::*;
+
+    #[test]
+    fn load_uses_path_when_component_missing() {
+        let args = PositionalComponentArgs {
+            component: "missing-component".to_string(),
+            path: Some("/tmp/homeboy-missing-component".to_string()),
+        };
+
+        let loaded = args
+            .load()
+            .expect("path-based synthetic component should load");
+
+        assert_eq!(loaded.id, "missing-component");
+        assert_eq!(loaded.local_path, "/tmp/homeboy-missing-component");
+        assert_eq!(loaded.remote_path, "");
+    }
+}
+
+// ============================================================================
+// BaselineArgs: --baseline + --ignore-baseline
+// ============================================================================
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct BaselineArgs {
+    #[arg(long)]
+    pub baseline: bool,
+
+    #[arg(long)]
+    pub ignore_baseline: bool,
+}
+
+// ============================================================================
+// WriteModeArgs: --write (dry-run by default)
+// ============================================================================
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct WriteModeArgs {
+    #[arg(long)]
+    pub write: bool,
+}
+
+#[allow(dead_code)]
+impl WriteModeArgs {
+    pub(crate) fn is_dry_run(&self) -> bool {
+        !self.write
+    }
+}
+
+// ============================================================================
+// DryRunArgs: --dry-run (execute by default)
+// ============================================================================
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct DryRunArgs {
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+// ============================================================================
+// HiddenJsonArgs: --json (hidden compatibility flag)
+// ============================================================================
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct HiddenJsonArgs {
+    #[arg(long, hide = true)]
+    pub json: bool,
+}
+
+// ============================================================================
+// SettingArgs: --setting key=value pairs
+// ============================================================================
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct SettingArgs {
+    #[arg(long, value_parser = crate::commands::parse_key_val)]
+    pub setting: Vec<(String, String)>,
+}

@@ -12,7 +12,7 @@ use homeboy::refactor::{
     run_lint_refactor, AppliedRefactor, LintSourceOptions,
 };
 
-use super::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
+use super::utils::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]

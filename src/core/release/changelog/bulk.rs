@@ -8,7 +8,7 @@ use crate::core::local_files::{self, FileSystem};
 use crate::core::release::version;
 use crate::engine::validation;
 use crate::error::{Error, Result};
-use crate::utils::io;
+use crate::paths::resolve_path;
 
 use super::io::*;
 use super::sections::*;
@@ -146,7 +146,7 @@ pub fn show(component_id: &str) -> Result<ShowOutput> {
     let component = component::resolve_effective(Some(component_id), None, None)?;
     let changelog_path = resolve_changelog_path(&component)?;
 
-    let content = io::read_file(
+        let content = local_files::read_file(
         &changelog_path,
         &format!("read changelog at {}", changelog_path.display()),
     )?;
@@ -193,12 +193,12 @@ pub fn init(component_id: &str, path: Option<&str>, configure: bool) -> Result<I
     // Determine changelog path (relative to component)
     let mut relative_path = path.unwrap_or("CHANGELOG.md").to_string();
     let mut changelog_path =
-        crate::utils::parser::resolve_path(&component.local_path, &relative_path);
+        resolve_path(&component.local_path, &relative_path);
 
     // Check for existing changelog_target configuration
     if let Some(ref configured_target) = component.changelog_target {
         let configured_path =
-            crate::utils::parser::resolve_path(&component.local_path, configured_target);
+            resolve_path(&component.local_path, configured_target);
 
         // If user didn't specify a custom path, or specified the same path, check for existing changelog
         if (path.is_none() || path == Some(configured_target)) && configured_path.exists() {
@@ -257,7 +257,7 @@ pub fn init(component_id: &str, path: Option<&str>, configure: bool) -> Result<I
 
     // Handle existing file: ensure Unreleased section exists
     if changelog_path.exists() {
-        let content = io::read_file(&changelog_path, "read changelog")?;
+        let content = local_files::read_file(&changelog_path, "read changelog")?;
 
         let (new_content, changed) = ensure_next_section(&content, &settings.next_section_aliases)?;
 

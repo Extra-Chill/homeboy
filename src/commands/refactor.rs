@@ -9,7 +9,7 @@ use homeboy::refactor::{
     self, auto, AddResult, MoveResult, RenameScope, RenameSpec, RenameTargeting,
 };
 
-use super::args::{
+use super::utils::args::{
     BaselineArgs, ComponentArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs,
 };
 use crate::commands::CmdResult;

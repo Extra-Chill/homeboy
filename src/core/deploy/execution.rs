@@ -177,7 +177,7 @@ fn execute_artifact_deploy(
         }
     };
 
-    let artifact_path = match artifact::resolve_artifact_path(artifact_pattern) {
+    let artifact_path = match resolve_artifact_path(artifact_pattern) {
         Ok(path) => path,
         Err(e) => {
             let error_msg = if config.skip_build {

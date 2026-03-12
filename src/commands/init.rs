@@ -7,14 +7,14 @@ use homeboy::component::{self, Component};
 use homeboy::context::{
     self, build_component_info, path_is_parent_of, ComponentGap, ContextOutput,
 };
+use homeboy::deploy;
 use homeboy::extension::{
     extension_ready_status, is_extension_compatible, is_extension_linked, load_all_extensions,
 };
 use homeboy::project::{self, Project};
 use homeboy::server::{self, Server};
-use homeboy::utils::{self, parser};
+use homeboy::utils;
 use homeboy::{changelog, git, version};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 fn collect_focused_components(
@@ -51,7 +51,7 @@ fn collect_focused_components(
     by_id.into_values().collect()
 }
 
-use super::args::HiddenJsonArgs;
+use super::utils::args::HiddenJsonArgs;
 use super::CmdResult;
 
 #[derive(Args)]
@@ -217,19 +217,7 @@ pub struct ChangelogSnapshot {
     pub items: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ComponentReleaseState {
-    pub commits_since_version: u32,
-    #[serde(skip_serializing_if = "utils::is_zero_u32")]
-    pub code_commits: u32,
-    #[serde(skip_serializing_if = "utils::is_zero_u32")]
-    pub docs_only_commits: u32,
-    pub has_uncommitted_changes: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_warning: Option<String>,
-}
+pub type ComponentReleaseState = homeboy::deploy::ReleaseState;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ComponentWithState {
@@ -271,7 +259,7 @@ pub fn run(args: InitArgs, _global: &super::GlobalArgs) -> CmdResult<InitOutput>
     let components_with_state: Vec<ComponentWithState> = filtered_components
         .into_iter()
         .map(|component| {
-            let release_state = calculate_component_release_state(&component);
+            let release_state = deploy::calculate_release_state(&component);
             // Calculate gaps for contained components (parent context)
             let gaps = if let Some(ref cwd_path) = cwd {
                 if path_is_parent_of(cwd_path, &component.local_path) {
@@ -291,7 +279,12 @@ pub fn run(args: InitArgs, _global: &super::GlobalArgs) -> CmdResult<InitOutput>
         .collect();
 
     // Compute status buckets
-    let status = compute_status(&components_with_state);
+    let release_buckets = deploy::bucket_release_states(
+        components_with_state
+            .iter()
+            .map(|comp| (comp.component.id.as_str(), comp.release_state.as_ref())),
+    );
+    let status = compute_status(&components_with_state, &release_buckets);
 
     // Compute summary
     let summary = compute_summary(&components_with_state);
@@ -421,11 +414,10 @@ pub fn run(args: InitArgs, _global: &super::GlobalArgs) -> CmdResult<InitOutput>
     ))
 }
 
-fn compute_status(components: &[ComponentWithState]) -> InitStatus {
-    let mut ready_to_deploy = Vec::new();
-    let mut needs_version_bump = Vec::new();
-    let mut docs_only = Vec::new();
-    let mut has_uncommitted = Vec::new();
+fn compute_status(
+    components: &[ComponentWithState],
+    release_buckets: &homeboy::deploy::ReleaseStateBuckets,
+) -> InitStatus {
     let mut config_gaps = 0;
     let mut gap_details = Vec::new();
 
@@ -443,24 +435,13 @@ fn compute_status(components: &[ComponentWithState]) -> InitStatus {
             });
         }
 
-        if let Some(ref state) = comp.release_state {
-            if state.has_uncommitted_changes {
-                has_uncommitted.push(id.clone());
-            } else if state.code_commits > 0 {
-                needs_version_bump.push(id.clone());
-            } else if state.docs_only_commits > 0 {
-                docs_only.push(id.clone());
-            } else {
-                ready_to_deploy.push(id.clone());
-            }
-        }
     }
 
     InitStatus {
-        ready_to_deploy,
-        needs_version_bump,
-        docs_only,
-        has_uncommitted,
+        ready_to_deploy: release_buckets.ready_to_deploy.clone(),
+        needs_version_bump: release_buckets.needs_bump.clone(),
+        docs_only: release_buckets.docs_only.clone(),
+        has_uncommitted: release_buckets.has_uncommitted.clone(),
         config_gaps,
         gap_details,
     }
@@ -479,7 +460,9 @@ fn compute_summary(components: &[ComponentWithState]) -> InitSummary {
         }
 
         // Count by status
-        let status = determine_component_status(comp);
+        let status = deploy::classify_release_state(comp.release_state.as_ref())
+            .as_str()
+            .to_string();
         *by_status.entry(status).or_insert(0) += 1;
     }
 
@@ -487,16 +470,6 @@ fn compute_summary(components: &[ComponentWithState]) -> InitSummary {
         total_components: components.len(),
         by_extension,
         by_status,
-    }
-}
-
-fn determine_component_status(comp: &ComponentWithState) -> String {
-    match &comp.release_state {
-        Some(state) if state.has_uncommitted_changes => "uncommitted".to_string(),
-        Some(state) if state.code_commits > 0 => "needs_bump".to_string(),
-        Some(state) if state.docs_only_commits > 0 => "docs_only".to_string(),
-        Some(_) => "clean".to_string(),
-        None => "unknown".to_string(),
     }
 }
 
@@ -528,7 +501,9 @@ fn build_component_summaries(
     components
         .iter()
         .map(|comp| {
-            let status = determine_component_status(comp);
+            let status = deploy::classify_release_state(comp.release_state.as_ref())
+                .as_str()
+                .to_string();
             let (commits, code, docs) = comp
                 .release_state
                 .as_ref()
@@ -713,46 +688,14 @@ fn build_actionable_next_steps(
     next_steps
 }
 
-fn calculate_component_release_state(component: &Component) -> Option<ComponentReleaseState> {
-    let path = &component.local_path;
-
-    // Get current version for alignment checking
-    let current_version = version::read_component_version(component)
-        .ok()
-        .map(|info| info.version);
-
-    let baseline = git::detect_baseline_with_version(path, current_version.as_deref()).ok()?;
-
-    let commits = git::get_commits_since_tag(path, baseline.reference.as_deref())
-        .ok()
-        .unwrap_or_default();
-
-    // Categorize commits into code vs docs-only
-    let counts = git::categorize_commits(path, &commits);
-
-    let uncommitted = git::get_uncommitted_changes(path)
-        .ok()
-        .map(|u| u.has_changes)
-        .unwrap_or(false);
-
-    Some(ComponentReleaseState {
-        commits_since_version: counts.total,
-        code_commits: counts.code,
-        docs_only_commits: counts.docs_only,
-        has_uncommitted_changes: uncommitted,
-        baseline_ref: baseline.reference,
-        baseline_warning: baseline.warning,
-    })
-}
-
 fn resolve_version_snapshot(components: &[ComponentWithState]) -> Option<VersionSnapshot> {
     let wrapper = components.first()?;
     let component = &wrapper.component;
-    let info = version::read_component_version(component).ok()?;
+    let snapshot = version::read_component_snapshot(component).ok()?;
     Some(VersionSnapshot {
-        component_id: component.id.clone(),
-        version: info.version,
-        targets: info.targets,
+        component_id: snapshot.component_id,
+        version: snapshot.version,
+        targets: snapshot.targets,
     })
 }
 
@@ -761,24 +704,15 @@ fn resolve_git_snapshot(
     current_version: Option<&str>,
 ) -> Option<GitSnapshot> {
     let root = git_root?;
-    let snapshot = git::get_repo_snapshot(root).ok()?;
-
-    // Get release state info with version alignment checking
-    let baseline = git::detect_baseline_with_version(root, current_version).ok();
-    let commits_since = baseline.as_ref().and_then(|b| {
-        git::get_commits_since_tag(root, b.reference.as_deref())
-            .ok()
-            .map(|c| c.len() as u32)
-    });
-
+    let snapshot = git::build_repo_baseline_snapshot(root, current_version).ok()?;
     Some(GitSnapshot {
         branch: snapshot.branch,
         clean: snapshot.clean,
         ahead: snapshot.ahead,
         behind: snapshot.behind,
-        commits_since_version: commits_since,
-        baseline_ref: baseline.as_ref().and_then(|b| b.reference.clone()),
-        baseline_warning: baseline.and_then(|b| b.warning),
+        commits_since_version: snapshot.commits_since_version,
+        baseline_ref: snapshot.baseline_ref,
+        baseline_warning: snapshot.baseline_warning,
     })
 }
 
@@ -791,132 +725,27 @@ fn resolve_changelog_snapshots(
     };
     let component = &wrapper.component;
 
-    let changelog_path = match changelog::resolve_changelog_path(component) {
-        Ok(path) => path,
+    let (last_release, changelog_snapshot) = match changelog::read_component_snapshots(component) {
+        Ok((last_release, changelog_snapshot)) => (last_release, changelog_snapshot),
         Err(_) => return (None, None),
     };
-    let content = match fs::read_to_string(&changelog_path) {
-        Ok(content) => content,
-        Err(_) => return (None, None),
-    };
-    let settings = changelog::resolve_effective_settings(Some(component));
 
-    let changelog_snapshot = build_changelog_snapshot(&content, &changelog_path, &settings);
-    let last_release = build_last_release_snapshot(&content);
-
-    (last_release, changelog_snapshot)
-}
-
-fn build_changelog_snapshot(
-    content: &str,
-    changelog_path: &Path,
-    settings: &changelog::EffectiveChangelogSettings,
-) -> Option<ChangelogSnapshot> {
-    let items = extract_section_items(content, &settings.next_section_aliases);
-    Some(ChangelogSnapshot {
-        path: changelog_path.to_string_lossy().to_string(),
-        label: settings.next_section_label.clone(),
-        items: if items.is_empty() { None } else { Some(items) },
-    })
-}
-
-fn build_last_release_snapshot(content: &str) -> Option<ReleaseSnapshot> {
-    let lines: Vec<&str> = content.lines().collect();
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("## ") {
-            continue;
-        }
-
-        let label = trimmed.trim_start_matches("## ").trim();
-        if label.eq_ignore_ascii_case("unreleased")
-            || label.starts_with("[Unreleased")
-            || label.starts_with("[unreleased")
-        {
-            continue;
-        }
-
-        let Some(tag) = parse_version_label(label) else {
-            continue;
-        };
-
-        let date = parse_date_label(label);
-        let summary = extract_first_bullet(&lines, index + 1);
-
-        return Some(ReleaseSnapshot {
-            tag: format!("v{}", tag),
-            date,
-            summary,
-        });
-    }
-
-    None
-}
-
-fn extract_section_items(content: &str, aliases: &[String]) -> Vec<String> {
-    let lines: Vec<&str> = content.lines().collect();
-    let start = find_section_start(&lines, aliases);
-    let Some(start_index) = start else {
-        return Vec::new();
-    };
-    let end_index = find_section_end(&lines, start_index);
-    let mut items = Vec::new();
-
-    for line in &lines[start_index + 1..end_index] {
-        let trimmed = line.trim();
-        if trimmed.starts_with('-') {
-            items.push(trimmed.trim_start_matches('-').trim().to_string());
-        }
-    }
-
-    items
-}
-
-fn find_section_start(lines: &[&str], aliases: &[String]) -> Option<usize> {
-    lines.iter().position(|line| {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("## ") {
-            return false;
-        }
-        let label = trimmed.trim_start_matches("## ").trim();
-        aliases.iter().any(|alias| {
-            let alias_trim = alias.trim().trim_matches(['[', ']']);
-            let label_trim = label.trim().trim_matches(['[', ']']);
-            alias_trim == label_trim
-        })
-    })
-}
-
-fn find_section_end(lines: &[&str], start: usize) -> usize {
-    let mut index = start + 1;
-    while index < lines.len() {
-        if lines[index].trim().starts_with("## ") {
-            break;
-        }
-        index += 1;
-    }
-    index
-}
-
-fn extract_first_bullet(lines: &[&str], start: usize) -> Option<String> {
-    for line in &lines[start..] {
-        let trimmed = line.trim();
-        if trimmed.starts_with("## ") {
-            break;
-        }
-        if trimmed.starts_with('-') {
-            return Some(trimmed.trim_start_matches('-').trim().to_string());
-        }
-    }
-    None
-}
-
-fn parse_version_label(label: &str) -> Option<String> {
-    parser::extract_first(label, r"\[?(\d+\.\d+\.\d+)\]?")
-}
-
-fn parse_date_label(label: &str) -> Option<String> {
-    parser::extract_first(label, r"(\d{4}-\d{2}-\d{2})")
+    (
+        last_release.map(|snapshot| ReleaseSnapshot {
+            tag: snapshot.tag,
+            date: snapshot.date,
+            summary: snapshot.summary,
+        }),
+        changelog_snapshot.map(|snapshot| ChangelogSnapshot {
+            path: snapshot.path,
+            label: snapshot.label,
+            items: if snapshot.items.is_empty() {
+                None
+            } else {
+                Some(snapshot.items)
+            },
+        }),
+    )
 }
 
 fn resolve_agent_context_files(git_root: Option<&String>) -> Vec<String> {
@@ -930,55 +759,24 @@ fn resolve_agent_context_files(git_root: Option<&String>) -> Vec<String> {
 }
 
 fn validate_version_targets(components: &[ComponentWithState]) -> Vec<String> {
-    let mut warnings = Vec::new();
-    for wrapper in components {
-        let comp = &wrapper.component;
-
-        // Check for missing patterns on configured targets
-        if let Some(targets) = &comp.version_targets {
-            for target in targets {
-                if target.pattern.is_none()
-                    && version::default_pattern_for_file(&target.file).is_none()
-                {
-                    warnings.push(format!(
-                        "Component '{}' has version target '{}' with no pattern and no extension default. Run: homeboy component set {} --version-targets @file.json",
-                        comp.id, target.file, comp.id
-                    ));
-                }
-            }
-        }
-
-        // Check for unconfigured patterns (version patterns found but not managed)
-        let unconfigured = version::detect_unconfigured_patterns(comp);
-        for pattern in &unconfigured {
-            warnings.push(format!(
-                "Unconfigured version pattern in '{}': {} found in {} (v{}). Add with: homeboy component add-version-target {} '{}' '{}'",
-                comp.id, pattern.description, pattern.file, pattern.found_version,
-                comp.id, pattern.file, pattern.pattern
-            ));
-        }
-    }
-    warnings
+    components
+        .iter()
+        .flat_map(|wrapper| version::build_init_warnings(&wrapper.component))
+        .collect()
 }
 
 fn validate_version_baseline_alignment(
     version: &Option<VersionSnapshot>,
     git: &Option<GitSnapshot>,
 ) -> Option<String> {
-    let version_snapshot = version.as_ref()?;
-    let git_snapshot = git.as_ref()?;
-    let baseline = git_snapshot.baseline_ref.as_ref()?;
+    let version_snapshot = version.as_ref().map(|snapshot| version::ComponentVersionSnapshot {
+        component_id: snapshot.component_id.clone(),
+        version: snapshot.version.clone(),
+        targets: snapshot.targets.clone(),
+    });
 
-    // Extract version from tag (v0.5.1 -> 0.5.1)
-    let baseline_version = baseline.strip_prefix('v').unwrap_or(baseline);
-
-    if version_snapshot.version != baseline_version {
-        Some(format!(
-            "Version mismatch: source files show {} but git baseline is {}. \
-            Consider creating a tag or bumping the version.",
-            version_snapshot.version, baseline
-        ))
-    } else {
-        None
-    }
+    version::validate_baseline_alignment(
+        version_snapshot.as_ref(),
+        git.as_ref().and_then(|snapshot| snapshot.baseline_ref.as_deref()),
+    )
 }

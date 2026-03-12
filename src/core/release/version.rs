@@ -2,10 +2,12 @@ use crate::release::changelog;
 use crate::component::{self, Component, VersionTarget};
 use crate::config::{from_str, set_json_pointer, to_string_pretty};
 use crate::error::{Error, Result};
+use crate::engine::text;
 use crate::extension::{load_all_extensions, ExtensionManifest};
 use crate::hooks::{self, HookFailureMode};
 use crate::local_files::{self, FileSystem};
-use crate::utils::{self, io, parser};
+use crate::paths::resolve_path_string;
+use crate::utils;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
@@ -16,13 +18,13 @@ use std::path::Path;
 /// Pattern must contain a capture group for the version string.
 /// Content is trimmed to handle trailing newlines in VERSION files.
 pub fn parse_version(content: &str, pattern: &str) -> Option<String> {
-    parser::extract_first(content, pattern)
+    text::extract_first(content, pattern)
 }
 
 /// Parse all versions from content using regex pattern.
 /// Content is trimmed to handle trailing newlines in VERSION files.
 pub(crate) fn parse_versions(content: &str, pattern: &str) -> Option<Vec<String>> {
-    parser::extract_all(content, pattern)
+    text::extract_all(content, pattern)
 }
 
 pub(crate) fn replace_versions(
@@ -30,7 +32,7 @@ pub(crate) fn replace_versions(
     pattern: &str,
     new_version: &str,
 ) -> Option<(String, usize)> {
-    parser::replace_all(content, pattern, new_version)
+    text::replace_all(content, pattern, new_version)
 }
 
 /// Get version pattern from extension configuration.
@@ -114,7 +116,7 @@ pub(crate) fn update_version_in_file(
     }
 
     // Text files use regex replacement
-    let content = io::read_file(Path::new(path), "read version file")?;
+    let content = local_files::read_file(Path::new(path), "read version file")?;
 
     let versions = parse_versions(&content, pattern).ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -152,7 +154,7 @@ pub(crate) fn update_version_in_file(
             )
         })?;
 
-    io::write_file(Path::new(path), &new_content, "write version file")?;
+    local_files::write_file(Path::new(path), &new_content, "write version file")?;
 
     Ok(replaced_count)
 }
@@ -184,7 +186,7 @@ pub(crate) fn read_local_version(
 
 /// Resolve version file path (absolute or relative to local_path)
 fn resolve_version_file_path(local_path: &str, file: &str) -> String {
-    parser::resolve_path_string(local_path, file)
+    resolve_path_string(local_path, file)
 }
 
 /// Information about a version target after reading
@@ -201,6 +203,13 @@ pub struct VersionTargetInfo {
 #[derive(Debug, Clone, Serialize)]
 
 pub struct ComponentVersionInfo {
+    pub version: String,
+    pub targets: Vec<VersionTargetInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ComponentVersionSnapshot {
+    pub component_id: String,
     pub version: String,
     pub targets: Vec<VersionTargetInfo>,
 }
@@ -274,7 +283,7 @@ fn pre_validate_version_targets(
         }
 
         // Validate all versions in this file match expected
-        let found = parser::require_identical(&versions, &target.file)?;
+        let found = text::require_identical(&versions, &target.file)?;
         if found != expected_version {
             return Err(Error::internal_unexpected(format!(
                 "Version mismatch in {}: found {}, expected {}",
@@ -516,7 +525,7 @@ fn build_version_parse_error(file: &str, pattern: &str, content: &str) -> Error 
     }
 
     if content.contains("Version:")
-        && !Regex::new(&crate::utils::parser::ensure_multiline(pattern))
+        && !Regex::new(&crate::engine::text::ensure_multiline(pattern))
             .map(|r| r.is_match(content))
             .unwrap_or(false)
     {
@@ -575,7 +584,7 @@ pub fn read_component_version(component: &Component) -> Result<ComponentVersionI
         ));
     }
 
-    let version = parser::require_identical(&versions, &primary.file)?;
+    let version = text::require_identical(&versions, &primary.file)?;
 
     // Build target info for primary
     let mut target_infos = vec![VersionTargetInfo {
@@ -632,6 +641,64 @@ pub fn read_version(component_id: Option<&str>) -> Result<ComponentVersionInfo> 
     read_component_version(&component)
 }
 
+pub fn read_component_snapshot(component: &Component) -> Result<ComponentVersionSnapshot> {
+    let info = read_component_version(component)?;
+    Ok(ComponentVersionSnapshot {
+        component_id: component.id.clone(),
+        version: info.version,
+        targets: info.targets,
+    })
+}
+
+pub fn build_init_warnings(component: &Component) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if let Some(targets) = &component.version_targets {
+        for target in targets {
+            if target.pattern.is_none() && default_pattern_for_file(&target.file).is_none() {
+                warnings.push(format!(
+                    "Component '{}' has version target '{}' with no pattern and no extension default. Run: homeboy component set {} --version-targets @file.json",
+                    component.id, target.file, component.id
+                ));
+            }
+        }
+    }
+
+    let unconfigured = detect_unconfigured_patterns(component);
+    for pattern in &unconfigured {
+        warnings.push(format!(
+            "Unconfigured version pattern in '{}': {} found in {} (v{}). Add with: homeboy component add-version-target {} '{}' '{}'",
+            component.id,
+            pattern.description,
+            pattern.file,
+            pattern.found_version,
+            component.id,
+            pattern.file,
+            pattern.pattern
+        ));
+    }
+
+    warnings
+}
+
+pub fn validate_baseline_alignment(
+    version: Option<&ComponentVersionSnapshot>,
+    baseline_ref: Option<&str>,
+) -> Option<String> {
+    let version_snapshot = version?;
+    let baseline = baseline_ref?;
+    let baseline_version = baseline.strip_prefix('v').unwrap_or(baseline);
+
+    if version_snapshot.version != baseline_version {
+        Some(format!(
+            "Version mismatch: source files show {} but git baseline is {}. Consider creating a tag or bumping the version.",
+            version_snapshot.version, baseline
+        ))
+    } else {
+        None
+    }
+}
+
 /// Bump a component's version and finalize changelog.
 /// bump_type: "patch", "minor", or "major"
 pub(crate) fn bump_component_version(
@@ -678,7 +745,7 @@ pub(crate) fn bump_component_version(
         ));
     }
 
-    let old_version = parser::require_identical(&primary_versions, &primary.file)?;
+    let old_version = text::require_identical(&primary_versions, &primary.file)?;
     let new_version = increment_version(&old_version, bump_type).ok_or_else(|| {
         Error::validation_invalid_argument(
             "version",

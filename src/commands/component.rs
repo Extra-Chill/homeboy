@@ -200,7 +200,7 @@ pub fn run(
                     )
                 })?;
 
-            let id = homeboy::slugify::slugify_id(dir_name, "component_id")?;
+            let id = homeboy::engine::identifier::slugify_id(dir_name, "component_id")?;
             let mut new_component =
                 Component::new(id.clone(), local_path.clone(), remote_path, build_artifact);
 

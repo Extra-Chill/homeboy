@@ -2,8 +2,8 @@ use clap::Args;
 use homeboy::build;
 use homeboy::component;
 use homeboy::project;
-use homeboy::resolve::resolve_project_components;
 
+use crate::commands::utils::resolve::resolve_project_components;
 use crate::commands::CmdResult;
 
 #[derive(Args)]

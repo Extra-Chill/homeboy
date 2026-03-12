@@ -10,10 +10,10 @@ use crate::context::{require_project_base_path, resolve_project_ssh_with_base_pa
 use crate::defaults;
 use crate::engine::{command, shell};
 use crate::engine::executor::execute_for_project;
+use crate::engine::text;
 use crate::error::{Error, Result};
+use crate::paths::{self as base_path, resolve_path_string};
 use crate::project;
-use crate::utils::base_path;
-use crate::utils::{parser, token};
 
 use std::path::Path;
 use std::process::Command;
@@ -71,7 +71,7 @@ pub struct RenameResult {
 /// Parse `ls -la` output into structured file entries.
 fn parse_ls_output(output: &str, base_path: &str) -> Vec<FileEntry> {
     let mut entries: Vec<FileEntry> =
-        parser::lines_filtered(output, |line| !line.starts_with("total "))
+        text::lines_filtered(output, |line| !line.starts_with("total "))
             .filter_map(|line| parse_ls_line(line, base_path))
             .collect();
 
@@ -79,14 +79,14 @@ fn parse_ls_output(output: &str, base_path: &str) -> Vec<FileEntry> {
         if a.is_directory != b.is_directory {
             return b.is_directory.cmp(&a.is_directory);
         }
-        token::cmp_case_insensitive(&a.name, &b.name)
+        text::cmp_case_insensitive(&a.name, &b.name)
     });
 
     entries
 }
 
 fn parse_ls_line(line: &str, base_path: &str) -> Option<FileEntry> {
-    let parts = parser::split_whitespace(line, 9)?;
+    let parts = text::split_whitespace(line, 9)?;
 
     let permissions = parts[0];
     let name = parts[8..].join(" ");
@@ -97,7 +97,7 @@ fn parse_ls_line(line: &str, base_path: &str) -> Option<FileEntry> {
 
     Some(FileEntry {
         name: name.clone(),
-        path: parser::resolve_path_string(base_path, &name),
+        path: resolve_path_string(base_path, &name),
         is_directory: permissions.starts_with('d'),
         size: parts[4].parse().ok(),
         permissions: permissions[1..].to_string(),
@@ -276,7 +276,7 @@ pub struct LineChange {
 
 /// Parse find output into list of matching paths.
 fn parse_find_output(output: &str) -> Vec<String> {
-    parser::lines(output).map(|s| s.to_string()).collect()
+    text::lines(output).map(|s| s.to_string()).collect()
 }
 
 /// Parse grep output into structured matches.

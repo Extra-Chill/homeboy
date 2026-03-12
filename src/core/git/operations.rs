@@ -49,6 +49,22 @@ pub struct RepoSnapshot {
     pub behind: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoBaselineSnapshot {
+    pub branch: String,
+    pub clean: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits_since_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_warning: Option<String>,
+}
+
 impl GitOutput {
     fn from_output(id: String, path: String, action: &str, output: std::process::Output) -> Self {
         Self {
@@ -118,6 +134,29 @@ pub struct BaselineInfo {
 /// For version-aware baseline detection, use detect_baseline_with_version().
 pub(crate) fn detect_baseline_for_path(path: &str) -> Result<BaselineInfo> {
     detect_baseline_with_version(path, None)
+}
+
+pub fn build_repo_baseline_snapshot(
+    path: &str,
+    current_version: Option<&str>,
+) -> Result<RepoBaselineSnapshot> {
+    let snapshot = get_repo_snapshot(path)?;
+    let baseline = detect_baseline_with_version(path, current_version).ok();
+    let commits_since = baseline.as_ref().and_then(|b| {
+        get_commits_since_tag(path, b.reference.as_deref())
+            .ok()
+            .map(|c| c.len() as u32)
+    });
+
+    Ok(RepoBaselineSnapshot {
+        branch: snapshot.branch,
+        clean: snapshot.clean,
+        ahead: snapshot.ahead,
+        behind: snapshot.behind,
+        commits_since_version: commits_since,
+        baseline_ref: baseline.as_ref().and_then(|b| b.reference.clone()),
+        baseline_warning: baseline.and_then(|b| b.warning),
+    })
 }
 
 /// Detect baseline with version alignment checking.

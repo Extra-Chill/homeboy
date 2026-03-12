@@ -10,19 +10,19 @@ use crate::config;
 use crate::context::{resolve_project_ssh_with_base_path, RemoteProjectContext};
 use crate::defaults;
 use crate::error::{Error, Result};
+use crate::extension::build::resolve_artifact_path;
 use crate::extension::{
     self, load_all_extensions, DeployOverride, DeployVerification, ExtensionManifest,
 };
 use crate::git;
 use crate::hooks::{self, HookFailureMode};
 use crate::permissions;
+use crate::paths as base_path;
 use crate::project::{self, Project};
 use crate::ssh::SshClient;
-use crate::utils::base_path;
-use crate::utils::parser;
 use crate::engine::shell;
 use crate::engine::template::{render_map, TemplateVars};
-use crate::utils::{self, artifact};
+use crate::utils;
 use crate::version;
 
 include!("deploy/safety_and_artifact.rs");

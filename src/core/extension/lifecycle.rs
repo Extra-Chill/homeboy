@@ -1,9 +1,9 @@
 use crate::config::{self, from_str};
+use crate::engine::identifier;
 use crate::error::{Error, Result};
 use crate::git;
 use crate::local_files::{self, FileSystem};
 use crate::paths;
-use crate::utils::slugify;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,7 +27,7 @@ pub struct UpdateResult {
 }
 
 pub fn slugify_id(value: &str) -> Result<String> {
-    slugify::slugify_id(value, "extension_id")
+    identifier::slugify_id(value, "extension_id")
 }
 
 /// Derive a extension ID from a git URL.

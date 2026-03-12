@@ -4,7 +4,6 @@ use crate::local_files::{self, FileSystem};
 use crate::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::paths;
 use crate::project;
-use crate::utils::io;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
@@ -177,7 +176,7 @@ pub fn import_key(server_id: &str, source_path: &str) -> Result<KeyImportResult>
 
     let expanded_path = shellexpand::tilde(source_path).to_string();
 
-    let private_key = io::read_file(std::path::Path::new(&expanded_path), "read ssh private key")?;
+    let private_key = local_files::read_file(std::path::Path::new(&expanded_path), "read ssh private key")?;
 
     if !private_key.contains("-----BEGIN") || !private_key.contains("PRIVATE KEY-----") {
         return Err(Error::validation_invalid_argument(
@@ -208,7 +207,7 @@ pub fn import_key(server_id: &str, source_path: &str) -> Result<KeyImportResult>
         local_files::local().ensure_dir(parent)?;
     }
 
-    io::write_file(&key_path, &private_key, "write ssh private key")?;
+    local_files::write_file(&key_path, &private_key, "write ssh private key")?;
 
     #[cfg(unix)]
     {
@@ -219,7 +218,7 @@ pub fn import_key(server_id: &str, source_path: &str) -> Result<KeyImportResult>
     }
 
     let pub_key_path = format!("{}.pub", key_path_str);
-    io::write_file(
+    local_files::write_file(
         std::path::Path::new(&pub_key_path),
         &public_key,
         "write ssh public key",
