@@ -10,12 +10,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub mod portable;
+pub mod relationships;
 pub mod resolution;
 
 pub use portable::{
     discover_from_portable, has_portable_config, infer_portable_component_id, mutate_portable,
     portable_json, read_portable_config, write_portable_config,
 };
+pub use relationships::{associated_projects, projects_using, rename_component, shared_components};
 pub use resolution::{
     detect_from_cwd, resolve, resolve_artifact, resolve_effective, validate_local_path,
 };
@@ -430,54 +432,6 @@ pub fn set_changelog_target(component_id: &str, file_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn update_project_references(old_id: &str, new_id: &str) -> Result<()> {
-    let projects = project::list().unwrap_or_default();
-    for proj in projects {
-        if project::has_component(&proj, old_id) {
-            let updated_components: Vec<project::ProjectComponentAttachment> = proj
-                .components
-                .into_iter()
-                .map(|mut component| {
-                    if component.id == old_id {
-                        component.id = new_id.to_string();
-                    }
-                    component
-                })
-                .collect();
-            project::set_component_attachments(&proj.id, updated_components)?;
-        }
-    }
-    Ok(())
-}
-
-pub fn projects_using(component_id: &str) -> Result<Vec<String>> {
-    let projects = project::list().unwrap_or_default();
-    Ok(projects
-        .iter()
-        .filter(|p| project::has_component(p, component_id))
-        .map(|p| p.id.clone())
-        .collect())
-}
-
-/// Returns a map of component_id -> Vec<project_id> for all components used by projects.
-/// Only includes components that are used by at least one project.
-pub fn shared_components() -> Result<std::collections::HashMap<String, Vec<String>>> {
-    let projects = project::list().unwrap_or_default();
-    let mut sharing: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-
-    for project in projects {
-        for component_id in project::project_component_ids(&project) {
-            sharing
-                .entry(component_id)
-                .or_default()
-                .push(project.id.clone());
-        }
-    }
-
-    Ok(sharing)
-}
-
 pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Result<MergeOutput> {
     let id = id.ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -567,13 +521,7 @@ pub fn delete_safe(id: &str) -> Result<()> {
 }
 
 pub fn rename(id: &str, new_id: &str) -> Result<Component> {
-    let resolved_new_id = crate::engine::identifier::slugify_id(new_id, "component_id")?;
-    let component = mutate_portable(id, |component| {
-        component.id = resolved_new_id.clone();
-        Ok(())
-    })?;
-    update_project_references(id, &resolved_new_id)?;
-    Ok(component)
+    rename_component(id, new_id)
 }
 
 /// Derive a runtime component inventory from project attachments plus legacy stored components.
@@ -611,16 +559,6 @@ pub fn inventory() -> Result<Vec<Component>> {
 
     components.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(components)
-}
-
-/// Find project associations using the canonical project attachment model.
-pub fn associated_projects(component_id: &str) -> Result<Vec<String>> {
-    let projects = project::list().unwrap_or_default();
-    Ok(projects
-        .into_iter()
-        .filter(|project| project::has_component(project, component_id))
-        .map(|project| project.id)
-        .collect())
 }
 
 /// Check if any linked extension provides an artifact pattern.
