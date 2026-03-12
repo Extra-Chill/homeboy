@@ -11,9 +11,9 @@ use homeboy::deploy;
 use homeboy::extension::{
     extension_ready_status, is_extension_compatible, is_extension_linked, load_all_extensions,
 };
+use homeboy::{is_zero, is_zero_u32};
 use homeboy::project::{self, Project};
 use homeboy::server::{self, Server};
-use homeboy::utils;
 use homeboy::{changelog, git, version};
 use std::path::{Path, PathBuf};
 
@@ -82,7 +82,7 @@ pub struct InitStatus {
     pub docs_only: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub has_uncommitted: Vec<String>,
-    #[serde(skip_serializing_if = "utils::is_zero")]
+    #[serde(skip_serializing_if = "is_zero")]
     pub config_gaps: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gap_details: Vec<GapSummary>,
@@ -102,11 +102,11 @@ pub struct ComponentSummary {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
     pub status: String,
-    #[serde(skip_serializing_if = "utils::is_zero_u32")]
+    #[serde(skip_serializing_if = "is_zero_u32")]
     pub commits_since_version: u32,
-    #[serde(skip_serializing_if = "utils::is_zero_u32")]
+    #[serde(skip_serializing_if = "is_zero_u32")]
     pub code_commits: u32,
-    #[serde(skip_serializing_if = "utils::is_zero_u32")]
+    #[serde(skip_serializing_if = "is_zero_u32")]
     pub docs_only_commits: u32,
 }
 

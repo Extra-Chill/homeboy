@@ -22,7 +22,6 @@ use crate::project::{self, Project};
 use crate::ssh::SshClient;
 use crate::engine::shell;
 use crate::engine::template::{render_map, TemplateVars};
-use crate::utils;
 use crate::version;
 
 include!("deploy/safety_and_artifact.rs");

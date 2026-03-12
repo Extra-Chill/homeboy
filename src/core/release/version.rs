@@ -5,9 +5,9 @@ use crate::error::{Error, Result};
 use crate::engine::text;
 use crate::extension::{load_all_extensions, ExtensionManifest};
 use crate::hooks::{self, HookFailureMode};
+use crate::is_zero;
 use crate::local_files::{self, FileSystem};
 use crate::paths::resolve_path_string;
-use crate::utils;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
@@ -225,7 +225,7 @@ pub struct BumpResult {
     pub changelog_finalized: bool,
     pub changelog_changed: bool,
     /// Number of `@since` placeholder tags replaced with the new version.
-    #[serde(skip_serializing_if = "utils::is_zero")]
+    #[serde(skip_serializing_if = "is_zero")]
     pub since_tags_replaced: usize,
 }
 

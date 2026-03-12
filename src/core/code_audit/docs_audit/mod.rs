@@ -21,7 +21,7 @@ pub use verify::VerifyResult;
 
 use regex::Regex;
 
-use crate::{component, extension, git, scope, utils::is_zero, Result};
+use crate::{component, extension, git, is_zero, scope, Result};
 
 /// A doc that needs content review due to referenced files changing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

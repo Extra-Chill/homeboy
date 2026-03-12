@@ -52,7 +52,7 @@ pub use findings::{Finding, Severity};
 pub use fingerprint::FileFingerprint;
 pub use walker::is_test_path;
 
-use crate::{component, utils::is_zero, Result};
+use crate::{component, is_zero, Result};
 
 /// Summary counts for the audit report.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

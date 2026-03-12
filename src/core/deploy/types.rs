@@ -1,3 +1,5 @@
+use crate::is_zero_u32;
+
 /// Parse bulk component IDs from a JSON spec.
 pub fn parse_bulk_component_ids(json_spec: &str) -> Result<Vec<String>> {
     let input = config::parse_bulk_ids(json_spec)?;
@@ -85,10 +87,10 @@ pub struct ReleaseState {
     /// Number of commits since the last version tag
     pub commits_since_version: u32,
     /// Number of code commits (non-docs)
-    #[serde(skip_serializing_if = "utils::is_zero_u32")]
+    #[serde(skip_serializing_if = "is_zero_u32")]
     pub code_commits: u32,
     /// Number of docs-only commits
-    #[serde(skip_serializing_if = "utils::is_zero_u32")]
+    #[serde(skip_serializing_if = "is_zero_u32")]
     pub docs_only_commits: u32,
     /// Whether there are uncommitted changes in the working directory
     pub has_uncommitted_changes: bool,
