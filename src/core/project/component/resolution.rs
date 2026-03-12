@@ -13,17 +13,19 @@ pub fn resolve_project_component(
         .iter()
         .find(|component| component.id == component_id)
     {
-        discover_attached_component(std::path::Path::new(&attachment.local_path)).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "components.local_path",
-                format!(
-                    "Project component '{}' points to '{}' but no homeboy.json was found",
-                    component_id, attachment.local_path
-                ),
-                Some(project.id.clone()),
-                None,
-            )
-        })?
+        discover_attached_component(std::path::Path::new(&attachment.local_path)).ok_or_else(
+            || {
+                Error::validation_invalid_argument(
+                    "components.local_path",
+                    format!(
+                        "Project component '{}' points to '{}' but no homeboy.json was found",
+                        component_id, attachment.local_path
+                    ),
+                    Some(project.id.clone()),
+                    None,
+                )
+            },
+        )?
     } else {
         return Err(Error::validation_invalid_argument(
             "components",

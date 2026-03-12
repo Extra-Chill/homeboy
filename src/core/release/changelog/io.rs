@@ -116,7 +116,10 @@ pub struct FinalizedReleaseSnapshot {
 
 pub fn read_component_snapshots(
     component: &Component,
-) -> Result<(Option<FinalizedReleaseSnapshot>, Option<ChangelogSnapshotData>)> {
+) -> Result<(
+    Option<FinalizedReleaseSnapshot>,
+    Option<ChangelogSnapshotData>,
+)> {
     let changelog_path = resolve_changelog_path(component)?;
     let content = local_files::read_file(&changelog_path, "read changelog")?;
     let settings = resolve_effective_settings(Some(component));

@@ -17,7 +17,6 @@ pub mod fleet;
 pub mod git;
 pub mod health;
 pub mod hooks;
-pub mod logs;
 pub mod output;
 pub mod project;
 pub mod refactor;

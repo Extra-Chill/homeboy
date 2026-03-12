@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::logs::{self, LogContent, LogEntry, LogSearchResult, PinnedLogsContent};
+use homeboy::project::logs::{self, LogContent, LogEntry, LogSearchResult, PinnedLogsContent};
 
 use crate::commands::CmdResult;
 
