@@ -166,7 +166,10 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             args.scaffold_file.as_deref(),
             args.write,
         )?;
-        return Ok(report::from_scaffold_workflow(result.component, result.output));
+        return Ok(report::from_scaffold_workflow(
+            result.component,
+            result.output,
+        ));
     }
 
     // Drift detection mode — delegate to core drift workflows

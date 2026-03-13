@@ -1,7 +1,9 @@
 use clap::Args;
 use std::path::PathBuf;
 
-use homeboy::extension::lint::{report, run_main_lint_workflow, LintCommandOutput, LintRunWorkflowArgs};
+use homeboy::extension::lint::{
+    report, run_main_lint_workflow, LintCommandOutput, LintRunWorkflowArgs,
+};
 
 use super::utils::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};

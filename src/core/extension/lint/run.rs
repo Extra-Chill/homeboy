@@ -78,7 +78,12 @@ pub fn run_main_lint_workflow(
 
     // Autofix planning (--fix)
     let planned_autofix = if args.fix {
-        Some(plan_autofix(component, source_path, &args, effective_glob.as_deref())?)
+        Some(plan_autofix(
+            component,
+            source_path,
+            &args,
+            effective_glob.as_deref(),
+        )?)
     } else {
         None
     };
@@ -285,8 +290,7 @@ fn process_baseline(
     let mut baseline_exit_override = None;
 
     if args.baseline {
-        let saved =
-            lint_baseline::save_baseline(source_path, &args.component_id, lint_findings)?;
+        let saved = lint_baseline::save_baseline(source_path, &args.component_id, lint_findings)?;
         eprintln!(
             "[lint] Baseline saved to {} ({} findings)",
             saved.display(),
