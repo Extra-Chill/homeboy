@@ -6,6 +6,11 @@
 - Add Kimaki extension with doctor, model inspection, and fallback repro commands
 - Support focused Kimaki diagnostics with --thread, --session, and --recent filters
 
+## [2.9.1] - 2026-03-13
+
+### Fixed
+- WordPress: add dependency-aware validation so PHPStan, autoload preflight, and PHPUnit run against the real local plugin graph
+
 ## [2.6.0] - 2026-03-04
 
 ### Added
