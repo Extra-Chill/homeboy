@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.10.0] - 2026-03-13
+
+### Added
+- Auto-discover plugin dependencies from Requires Plugins header (zero-config)
+- Git-clone fallback for CI dependency resolution (infers GitHub org from remote)
+
+### Refactored
+- Extract shared helpers for context resolution and component detection (5 scripts deduplicated)
+- add git-clone fallback for CI dependency resolution
+- auto-discover dependencies from Requires Plugins header
+
+### Fixed
+- Remove ambient VPS path scanning from test-runner database discovery
+- Replace hardcoded /root/tmp probe with HOMEBOY_CACHE_DIR in phpstan-runner
+
 ## [2.9.3] - 2026-03-13
 
 ### Fixed
