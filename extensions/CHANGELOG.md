@@ -1,10 +1,18 @@
 # Changelog
 
-## Unreleased
+## [2.9.2] - 2026-03-13
 
 ### Added
 - Add Kimaki extension with doctor, model inspection, and fallback repro commands
 - Support focused Kimaki diagnostics with --thread, --session, and --recent filters
+
+### Fixed
+- Replace bare $var; noops with unset() to avoid PHPStan expr.resultUnused (#140)
+- Skip public/protected param renames in inheriting classes; add stale named-arg verification (#112)
+- PHPStan critical-only mode blocks function.notFound/class.notFound even with --skip-checks (#111)
+- Add text-domain-fixer.php for deterministic i18n text domain correction (#110)
+- Set reportUnmatchedIgnoredErrors: false to suppress config noise (#137)
+- improve lint safety — PHPStan-safe noops, param rename guardrails, critical-only checks, text domain fixer
 
 ## [2.9.1] - 2026-03-13
 
