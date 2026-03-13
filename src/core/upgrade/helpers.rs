@@ -218,7 +218,11 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
         return (vec![], vec![]);
     }
 
-    log_status!("upgrade", "Updating {} installed extension(s)...", extension_ids.len());
+    log_status!(
+        "upgrade",
+        "Updating {} installed extension(s)...",
+        extension_ids.len()
+    );
 
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
@@ -243,11 +247,7 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
                     .unwrap_or_default();
 
                 if old_version != new_version {
-                    log_status!(
-                        "upgrade",
-                        "  {} {} → {}",
-                        id, old_version, new_version
-                    );
+                    log_status!("upgrade", "  {} {} → {}", id, old_version, new_version);
                 } else {
                     log_status!("upgrade", "  {} {} (up to date)", id, new_version);
                 }
