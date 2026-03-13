@@ -1,12 +1,12 @@
-use crate::code_audit::{self, is_test_path, CodeAuditResult};
+use crate::code_audit::{self, CodeAuditResult};
 use crate::component::{self, Component};
 use crate::engine::temp;
-use crate::extension::test::drift::{detect_drift, DriftOptions};
+use crate::extension::test::compute_changed_test_files;
 use crate::extension::{lint as extension_lint, test as extension_test};
 use crate::refactor::auto as fixer;
 use crate::undo::UndoSnapshot;
 use serde::Serialize;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub use crate::code_audit::{
@@ -343,33 +343,6 @@ fn build_test_smoke_verifier<'a>(
             Err("test smoke failed".to_string())
         }
     })
-}
-
-fn compute_changed_test_files(component: &Component, git_ref: &str) -> crate::Result<Vec<String>> {
-    let source_path = PathBuf::from(shellexpand::tilde(&component.local_path).as_ref());
-    let changed_files =
-        crate::git::get_files_changed_since(&source_path.to_string_lossy(), git_ref)?;
-
-    let opts = if source_path.join("Cargo.toml").exists() {
-        DriftOptions::rust(&source_path, git_ref)
-    } else {
-        DriftOptions::php(&source_path, git_ref)
-    };
-
-    let report = detect_drift(&component.id, &opts)?;
-    let mut selected: BTreeSet<String> = BTreeSet::new();
-
-    for file in &changed_files {
-        if is_test_path(file) {
-            selected.insert(file.clone());
-        }
-    }
-
-    for drifted in &report.drifted_tests {
-        selected.insert(drifted.test_file.clone());
-    }
-
-    Ok(selected.into_iter().collect())
 }
 
 fn run_fix_iteration(

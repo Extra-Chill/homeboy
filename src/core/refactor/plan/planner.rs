@@ -1,8 +1,7 @@
-use crate::code_audit::is_test_path;
 use crate::component::Component;
 use crate::engine::temp;
 use crate::extension;
-use crate::extension::test::drift::{detect_drift, DriftOptions};
+use crate::extension::test::compute_changed_test_files;
 use crate::git;
 use crate::refactor::auto as fixer;
 use crate::refactor::auto::{self, FixApplied, FixResultsSummary};
@@ -402,32 +401,6 @@ fn collect_fix_proposals(stages: &[PlannedStage]) -> Vec<FixProposal> {
     });
 
     proposals
-}
-
-fn compute_changed_test_files(component: &Component, git_ref: &str) -> crate::Result<Vec<String>> {
-    let source_path = std::path::PathBuf::from(shellexpand::tilde(&component.local_path).as_ref());
-    let changed_files = git::get_files_changed_since(&source_path.to_string_lossy(), git_ref)?;
-
-    let opts = if source_path.join("Cargo.toml").exists() {
-        DriftOptions::rust(&source_path, git_ref)
-    } else {
-        DriftOptions::php(&source_path, git_ref)
-    };
-
-    let report = detect_drift(&component.id, &opts)?;
-    let mut selected: BTreeSet<String> = BTreeSet::new();
-
-    for file in &changed_files {
-        if is_test_path(file) {
-            selected.insert(file.clone());
-        }
-    }
-
-    for drifted in &report.drifted_tests {
-        selected.insert(drifted.test_file.clone());
-    }
-
-    Ok(selected.into_iter().collect())
 }
 
 fn collect_stage_changed_files(stages: &[PlanStageSummary]) -> Vec<String> {

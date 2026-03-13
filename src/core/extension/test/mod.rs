@@ -93,10 +93,16 @@ pub fn build_test_runner(
     Ok(runner)
 }
 
-pub fn compute_changed_test_scope(
+/// Compute which test files are impacted by changes since a git ref.
+///
+/// Combines two sources: (1) changed files that are test paths, and
+/// (2) test files flagged by drift detection as needing re-runs.
+/// This is the single source of truth — used by test scope, refactor
+/// planning, and verification smoke tests.
+pub fn compute_changed_test_files(
     component: &Component,
     git_ref: &str,
-) -> crate::error::Result<TestScopeOutput> {
+) -> crate::error::Result<Vec<String>> {
     let source_path = {
         let expanded = shellexpand::tilde(&component.local_path);
         PathBuf::from(expanded.as_ref())
@@ -123,7 +129,18 @@ pub fn compute_changed_test_scope(
         selected.insert(drifted.test_file.clone());
     }
 
-    let selected_files: Vec<String> = selected.into_iter().collect();
+    Ok(selected.into_iter().collect())
+}
+
+/// Compute changed test scope with metadata for command-layer output.
+///
+/// Wraps [`compute_changed_test_files`] with the `TestScopeOutput` envelope
+/// that the test command uses for JSON output.
+pub fn compute_changed_test_scope(
+    component: &Component,
+    git_ref: &str,
+) -> crate::error::Result<TestScopeOutput> {
+    let selected_files = compute_changed_test_files(component, git_ref)?;
 
     Ok(TestScopeOutput {
         mode: "changed".to_string(),
