@@ -9,11 +9,12 @@
 #   homeboy_detect_component <path>
 #
 # After calling, these variables are set:
-#   HOMEBOY_COMPONENT_TYPE       — "plugin" or "theme" or ""
-#   HOMEBOY_COMPONENT_MAIN_FILE  — path to the main plugin/theme file
-#   HOMEBOY_COMPONENT_NAME       — Plugin Name / Theme Name value
-#   HOMEBOY_COMPONENT_TEXT_DOMAIN — Text Domain value (may be empty)
-#   HOMEBOY_COMPONENT_VERSION    — Version value (may be empty)
+#   HOMEBOY_COMPONENT_TYPE             — "plugin" or "theme" or ""
+#   HOMEBOY_COMPONENT_MAIN_FILE        — path to the main plugin/theme file
+#   HOMEBOY_COMPONENT_NAME             — Plugin Name / Theme Name value
+#   HOMEBOY_COMPONENT_TEXT_DOMAIN      — Text Domain value (may be empty)
+#   HOMEBOY_COMPONENT_VERSION          — Version value (may be empty)
+#   HOMEBOY_COMPONENT_REQUIRES_PLUGINS — comma-separated plugin slugs (may be empty)
 
 homeboy_detect_component() {
     local component_path="${1:-.}"
@@ -23,6 +24,7 @@ homeboy_detect_component() {
     HOMEBOY_COMPONENT_NAME=""
     HOMEBOY_COMPONENT_TEXT_DOMAIN=""
     HOMEBOY_COMPONENT_VERSION=""
+    HOMEBOY_COMPONENT_REQUIRES_PLUGINS=""
 
     # Check for theme first (style.css with "Theme Name:")
     if [ -f "${component_path}/style.css" ]; then
@@ -32,6 +34,7 @@ homeboy_detect_component() {
             HOMEBOY_COMPONENT_NAME=$(grep -m1 "Theme Name:" "${component_path}/style.css" | sed 's/.*Theme Name:[[:space:]]*//' | sed 's/[[:space:]]*$//' | tr -d '\r')
             HOMEBOY_COMPONENT_TEXT_DOMAIN=$(grep -m1 "Text Domain:" "${component_path}/style.css" | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
             HOMEBOY_COMPONENT_VERSION=$(grep -m1 "Version:" "${component_path}/style.css" | sed 's/.*Version:[[:space:]]*//' | tr -d ' \r')
+            HOMEBOY_COMPONENT_REQUIRES_PLUGINS=$(grep -m1 "Requires Plugins:" "${component_path}/style.css" 2>/dev/null | sed 's/.*Requires Plugins:[[:space:]]*//' | sed 's/[[:space:]]*$//' | tr -d '\r')
             return 0
         fi
     fi
@@ -46,6 +49,7 @@ homeboy_detect_component() {
         HOMEBOY_COMPONENT_NAME=$(grep -m1 "Plugin Name:" "$main_file" | sed 's/.*Plugin Name:[[:space:]]*//' | sed 's/[[:space:]]*$//' | tr -d '\r')
         HOMEBOY_COMPONENT_TEXT_DOMAIN=$(grep -m1 "Text Domain:" "$main_file" | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
         HOMEBOY_COMPONENT_VERSION=$(grep -m1 "Version:" "$main_file" | sed 's/.*Version:[[:space:]]*//' | tr -d ' \r')
+        HOMEBOY_COMPONENT_REQUIRES_PLUGINS=$(grep -m1 "Requires Plugins:" "$main_file" 2>/dev/null | sed 's/.*Requires Plugins:[[:space:]]*//' | sed 's/[[:space:]]*$//' | tr -d '\r')
         return 0
     fi
 
