@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.76.0] - 2026-03-13
+
+### Added
+- add orphaned test removal fixer — 709 new fixable findings
+
 ## [0.75.1] - 2026-03-13
 
 ### Changed
