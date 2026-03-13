@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InstallMethod {
@@ -43,17 +45,17 @@ pub struct ExtensionUpgradeEntry {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct CratesIoResponse {
+pub(super) struct CratesIoResponse {
     #[serde(rename = "crate")]
-    crate_info: CrateInfo,
+    pub(super) crate_info: CrateInfo,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct CrateInfo {
-    newest_version: String,
+pub(super) struct CrateInfo {
+    pub(super) newest_version: String,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct GitHubRelease {
-    tag_name: String,
+pub(super) struct GitHubRelease {
+    pub(super) tag_name: String,
 }

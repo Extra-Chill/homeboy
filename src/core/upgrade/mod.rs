@@ -1,16 +1,18 @@
-use crate::defaults;
-use crate::error::{Error, Result};
-use serde::{Deserialize, Serialize};
-use std::process::Command;
-
-include!("upgrade/types.rs");
-include!("upgrade/constants.rs");
-include!("upgrade/helpers.rs");
-include!("upgrade/planning.rs");
-include!("upgrade/execution.rs");
-include!("upgrade/validation.rs");
-
+mod types;
+mod constants;
+mod helpers;
+mod planning;
+mod execution;
+mod validation;
 pub mod update_check;
+
+pub use types::*;
+pub use helpers::{
+    current_version, detect_install_method, fetch_latest_version,
+    restart_with_new_binary, run_upgrade_with_method,
+};
+pub use planning::resolve_binary_on_path;
+pub use validation::check_for_updates;
 
 impl InstallMethod {
     pub fn as_str(&self) -> &'static str {
@@ -24,12 +26,6 @@ impl InstallMethod {
     }
 }
 
-#[cfg(not(unix))]
-pub fn restart_with_new_binary() {
-    // On Windows, just print a message
-    log_status!("upgrade", "Please restart homeboy to use the new version.");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,11 +34,11 @@ mod tests {
 
     #[test]
     fn test_version_comparison() {
-        assert!(version_is_newer("0.12.0", "0.11.0"));
-        assert!(version_is_newer("1.0.0", "0.99.99"));
-        assert!(version_is_newer("0.11.1", "0.11.0"));
-        assert!(!version_is_newer("0.11.0", "0.11.0"));
-        assert!(!version_is_newer("0.10.0", "0.11.0"));
+        assert!(helpers::version_is_newer("0.12.0", "0.11.0"));
+        assert!(helpers::version_is_newer("1.0.0", "0.99.99"));
+        assert!(helpers::version_is_newer("0.11.1", "0.11.0"));
+        assert!(!helpers::version_is_newer("0.11.0", "0.11.0"));
+        assert!(!helpers::version_is_newer("0.10.0", "0.11.0"));
     }
 
     #[test]
@@ -71,7 +67,7 @@ mod tests {
         fs::write(second.join("homeboy"), "#!/bin/sh\n").unwrap();
 
         let path_var = format!("{}:{}", first.display(), second.display());
-        let found = resolve_binary_on_path_var(&path_var).unwrap();
+        let found = planning::resolve_binary_on_path_var(&path_var).unwrap();
         assert_eq!(found, second.join("homeboy"));
     }
 
@@ -84,7 +80,7 @@ mod tests {
         fs::create_dir_all(&second).unwrap();
 
         let path_var = format!("{}:{}", first.display(), second.display());
-        let found = resolve_binary_on_path_var(&path_var);
+        let found = planning::resolve_binary_on_path_var(&path_var);
         assert!(found.is_none());
     }
 }

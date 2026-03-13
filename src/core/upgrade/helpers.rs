@@ -1,3 +1,13 @@
+use crate::defaults;
+use crate::error::{Error, Result};
+use std::process::Command;
+
+use super::constants::{CRATES_IO_API, GITHUB_RELEASES_API, VERSION};
+use super::execution::execute_upgrade;
+use super::planning::resolve_binary_on_path;
+use super::types::*;
+use super::validation::check_for_updates;
+
 pub fn current_version() -> &'static str {
     VERSION
 }
@@ -256,6 +266,11 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
     }
 
     (updated, skipped)
+}
+
+#[cfg(not(unix))]
+pub fn restart_with_new_binary() {
+    log_status!("upgrade", "Please restart homeboy to use the new version.");
 }
 
 #[cfg(unix)]

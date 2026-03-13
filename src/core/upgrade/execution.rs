@@ -1,3 +1,10 @@
+use crate::defaults;
+use crate::error::{Error, Result};
+use std::process::Command;
+
+use super::helpers::fetch_latest_version;
+use super::types::InstallMethod;
+
 pub(crate) fn execute_upgrade(method: InstallMethod) -> Result<(bool, Option<String>)> {
     let defaults = defaults::load_defaults();
 
