@@ -268,7 +268,6 @@ pub mod auth;
 pub mod build;
 pub mod changelog;
 pub mod changes;
-pub mod cleanup;
 pub mod cli;
 pub mod component;
 pub mod config;
@@ -335,7 +334,6 @@ pub(crate) fn run_json(
         crate::Commands::Supports(args) => dispatch!(args, global, supports),
         crate::Commands::Test(args) => dispatch!(args, global, test),
         crate::Commands::Lint(args) => dispatch!(args, global, lint),
-        crate::Commands::Cleanup(args) => dispatch!(args, global, cleanup),
         crate::Commands::Project(args) => dispatch!(args, global, project),
         crate::Commands::Ssh(args) => dispatch!(args, global, ssh),
         crate::Commands::Server(args) => dispatch!(args, global, server),

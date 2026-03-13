@@ -2,7 +2,9 @@ pub mod analyze;
 pub mod parsing;
 pub mod baseline;
 pub mod drift;
+pub mod report;
 pub mod run;
+pub mod scaffold;
 pub mod workflow;
 
 use crate::component::Component;
@@ -33,7 +35,11 @@ pub use parsing::{
     build_test_summary, parse_coverage_file, parse_failures_file, parse_test_results_file,
     parse_test_results_text, CoverageOutput, TestSummaryOutput,
 };
+pub use report::TestCommandOutput;
 pub use run::{run_main_test_workflow, TestRunWorkflowArgs, TestRunWorkflowResult};
+pub use scaffold::{
+    run_scaffold_workflow, ScaffoldFileOutput, ScaffoldOutput, ScaffoldWorkflowResult,
+};
 pub use workflow::{
     auto_fix_test_drift, detect_test_drift, AutoFixDriftOutput, AutoFixDriftWorkflowResult,
     DriftWorkflowResult, MainTestWorkflowResult,

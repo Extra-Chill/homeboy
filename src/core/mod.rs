@@ -3,7 +3,6 @@
 pub mod config;
 pub mod api;
 pub mod auth;
-pub mod cleanup;
 pub mod cli_tool;
 pub mod code_audit;
 pub mod component;

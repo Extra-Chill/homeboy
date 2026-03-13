@@ -183,7 +183,6 @@ With `--baseline` comparison:
 
 ## Related
 
-- [cleanup](cleanup.md) — config-level health checks (complementary to code audit)
 - [docs audit](docs.md) — documentation-level auditing (broken links, stale references)
 - [lint](lint.md) — extension-driven code style validation
 - [JSON output contract](../architecture/output-system.md)

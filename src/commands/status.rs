@@ -1,14 +1,17 @@
 use clap::Args;
-use serde::Serialize;
-
 use homeboy::component;
 use homeboy::context;
 use homeboy::deploy::{self, ReleaseStateStatus};
+use serde::Serialize;
 
 use super::CmdResult;
 
 #[derive(Args)]
 pub struct StatusArgs {
+    /// Show the full workspace/context report (the old init behavior)
+    #[arg(long)]
+    pub full: bool,
+
     /// Show only components with uncommitted changes
     #[arg(long)]
     pub uncommitted: bool,
@@ -45,7 +48,30 @@ pub struct StatusOutput {
     pub clean: usize,
 }
 
-pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusOutput> {
+pub enum StatusResult {
+    Summary(StatusOutput),
+    Full(homeboy::context::report::ContextReport),
+}
+
+impl serde::Serialize for StatusResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            StatusResult::Summary(output) => output.serialize(serializer),
+            StatusResult::Full(output) => output.serialize(serializer),
+        }
+    }
+}
+
+pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusResult> {
+    if args.full {
+        let mut report = context::build_report(args.all, "status")?;
+        report.command = "status".to_string();
+        return Ok((StatusResult::Full(report), 0));
+    }
+
     let (context_output, _) = context::run(None)?;
 
     let relevant_ids: std::collections::HashSet<String> = context_output
@@ -109,7 +135,7 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusOut
     }
 
     Ok((
-        StatusOutput {
+        StatusResult::Summary(StatusOutput {
             command: "status",
             total,
             uncommitted,
@@ -117,7 +143,7 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusOut
             ready_to_deploy,
             docs_only,
             clean,
-        },
+        }),
         0,
     ))
 }

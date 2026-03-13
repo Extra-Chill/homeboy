@@ -117,7 +117,7 @@ pub fn run(
         err = err.with_hint("Specify one explicitly:");
     } else {
         err = err.with_hint(
-            "Run 'homeboy init' to see available components, or specify one explicitly:",
+            "Run 'homeboy status --full' to see available components, or specify one explicitly:",
         );
     }
     err = err.with_hint("  homeboy changes <component-id>");

@@ -283,7 +283,7 @@ If Homeboy cannot find config directory:
 
 1. Verify config directory location for your platform
 2. Create directory manually: `mkdir -p ~/.config/homeboy`
-3. Run `homeboy init` to initialize
+3. Run `homeboy status --full` to inspect current Homeboy context
 
 ### Corrupt Configuration
 
@@ -294,7 +294,7 @@ If configuration file is invalid:
 
 ## Related
 
-- [Init command](../commands/init.md) - Initialize Homeboy
+- [Init command](../commands/init.md) - Deprecated alias for the full status report
 - [Config command](../commands/config.md) - Manage global configuration
 - [Project command](../commands/project.md) - Manage project configurations
 - [Server command](../commands/server.md) - Manage server configurations

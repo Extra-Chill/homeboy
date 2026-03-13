@@ -201,19 +201,9 @@ Documentation verification:
 - Identifies priority docs (source files changed since baseline tag)
 - Supports `--features` for machine-readable feature inventory
 
-### Cleanup
-
-**Location:** `src/core/cleanup/`
-
-Config health checking:
-- Validates component configs (local_path, remote_path, version_targets, extensions)
-- Detects broken paths, dead version targets, unused extension links
-- Provides actionable fix hints (`homeboy component set` commands)
-- Single component or all-components mode
-
 ### Fleet Management
 
-**Location:** `src/core/fleet.rs`
+**Location:** `src/core/fleet/`
 
 Fleet management for cloud version management:
 - Named groups of projects

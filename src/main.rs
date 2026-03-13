@@ -22,7 +22,7 @@ mod tty;
 
 use commands::utils::{args, entity_suggest};
 use commands::{
-    api, audit, auth, build, changelog, changes, cleanup, cli, component, config, db, deploy,
+    api, audit, auth, build, changelog, changes, cli, component, config, db, deploy,
     extension, file, fleet, git, init, lint, logs, project, refactor, release, server, ssh, status,
     test, transfer, undo, upgrade, version,
 };
@@ -58,8 +58,6 @@ enum Commands {
     Test(test::TestArgs),
     /// Lint a component
     Lint(lint::LintArgs),
-    /// Identify config drift, stale state, and hygiene issues
-    Cleanup(cleanup::CleanupArgs),
     /// Database operations
     Db(db::DbArgs),
     /// Remote file operations
@@ -81,7 +79,8 @@ enum Commands {
     /// Execute CLI-compatible extensions
     #[command(visible_alias = "extensions")]
     Extension(extension::ExtensionArgs),
-    /// Get repo context (read-only, creates no state)
+    /// Deprecated alias for `status --full`
+    #[command(hide = true)]
     Init(init::InitArgs),
     /// Actionable component status overview
     Status(status::StatusArgs),

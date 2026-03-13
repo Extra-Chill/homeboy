@@ -6,7 +6,6 @@
 - [build](build.md)
 - [changelog](changelog.md)
 - [changes](changes.md)
-- [cleanup](cleanup.md) — config health checks and hygiene
 - [component](component.md)
 - [config](config.md)
 - [db](db.md)
@@ -16,7 +15,7 @@
 - [file](file.md)
 - [fleet](fleet.md)
 - [git](git.md)
-- [init](init.md) — repo context (read-only)
+- [init](init.md) — deprecated alias for `status --full`
 - [lint](lint.md)
 - [list](list.md)
 - [logs](logs.md)
@@ -25,7 +24,7 @@
 - [release](release.md) — local release pipeline
 - [server](server.md)
 - [ssh](ssh.md)
-- status — actionable component overview (`--uncommitted`, `--needs-bump`, `--ready`, `--docs-only`, `--all`)
+- status — actionable component overview (`--uncommitted`, `--needs-bump`, `--ready`, `--docs-only`, `--all`, `--full`)
 - [supports](supports.md) — machine-readable CLI capability checks
 - [test](test.md)
 - transfer — transfer files between servers (`<source> <destination>`, supports `-r`, `-c`, `--dry-run`, `--exclude`)

@@ -1,12 +1,9 @@
 use clap::{Args, Subcommand};
-use homeboy::log_status;
 use serde::Serialize;
 
-use homeboy::deploy::{self, DeployConfig};
 use homeboy::fleet::{self, Fleet};
-use homeboy::health::{self, ServerHealth};
-use homeboy::project::{self, Project};
-use homeboy::version;
+use homeboy::health::ServerHealth;
+use homeboy::project::Project;
 use homeboy::EntityCrudOutput;
 
 use super::{CmdResult, DynamicSetArgs};
@@ -146,74 +143,16 @@ pub struct FleetExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<Vec<FleetProjectStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub check: Option<Vec<FleetProjectCheck>>,
+    pub check: Option<Vec<homeboy::fleet::FleetProjectCheck>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<FleetCheckSummary>,
+    pub summary: Option<homeboy::fleet::FleetCheckSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exec: Option<Vec<FleetExecProjectResult>>,
+    pub exec: Option<Vec<homeboy::fleet::FleetExecProjectResult>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exec_summary: Option<FleetExecSummary>,
+    pub exec_summary: Option<homeboy::fleet::FleetExecSummary>,
 }
 
 pub type FleetOutput = EntityCrudOutput<Fleet, FleetExtra>;
-
-#[derive(Debug, Default, Serialize)]
-pub struct FleetExecProjectResult {
-    pub project_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub server_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_path: Option<String>,
-    pub command: String,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stdout: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stderr: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct FleetExecSummary {
-    pub total: u32,
-    pub succeeded: u32,
-    pub failed: u32,
-    pub skipped: u32,
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct FleetProjectCheck {
-    pub project_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub server_id: Option<String>,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub components: Vec<FleetComponentCheck>,
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct FleetComponentCheck {
-    pub component_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub local_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote_version: Option<String>,
-    pub status: String,
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct FleetCheckSummary {
-    pub total_projects: u32,
-    pub projects_checked: u32,
-    pub projects_failed: u32,
-    pub components_up_to_date: u32,
-    pub components_needs_update: u32,
-    pub components_unknown: u32,
-}
 
 #[derive(Debug, Default, Serialize)]
 pub struct FleetProjectStatus {
@@ -441,129 +380,23 @@ fn components(id: &str) -> CmdResult<FleetOutput> {
 }
 
 fn status(id: &str, cached: bool, health_only: bool) -> CmdResult<FleetOutput> {
-    let fl = fleet::load(id)?;
-    let mut project_statuses = Vec::new();
-
-    if cached {
-        // Cached mode: read versions from local files (no SSH, no health)
-        for project_id in &fl.project_ids {
-            let proj = match project::load(project_id) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            let mut component_statuses = Vec::new();
-            for component_id in project::project_component_ids(&proj) {
-                let comp_version = match project::resolve_project_component(&proj, &component_id) {
-                    Ok(comp) => version::get_component_version(&comp),
-                    Err(_) => None,
-                };
-
-                component_statuses.push(FleetComponentStatus {
-                    component_id: component_id.clone(),
-                    version: comp_version,
-                    version_source: Some("cached".to_string()),
-                });
-            }
-
-            project_statuses.push(FleetProjectStatus {
-                project_id: project_id.clone(),
-                server_id: proj.server_id.clone(),
-                components: component_statuses,
-                health: None,
-            });
-        }
-    } else {
-        // Live mode (default): SSH into each server for versions and health
-        for project_id in &fl.project_ids {
-            let proj = match project::load(project_id) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            log_status!("fleet", "Checking '{}'...", project_id);
-
-            // Collect health metrics via direct SSH
-            let health = health::collect_project_health(&proj);
-
-            if health_only {
-                // Skip component version check
-                project_statuses.push(FleetProjectStatus {
-                    project_id: project_id.clone(),
-                    server_id: proj.server_id.clone(),
-                    components: vec![],
-                    health,
-                });
-                continue;
-            }
-
-            // Use the deploy check infrastructure to get remote versions via SSH
-            let config = DeployConfig {
-                component_ids: vec![],
-                all: true,
-                outdated: false,
-                dry_run: false,
-                check: true,
-                force: false,
-                skip_build: true,
-                keep_deps: false,
-                expected_version: None,
-                no_pull: true,
-                head: true,
-            };
-
-            match deploy::run(project_id, &config) {
-                Ok(result) => {
-                    let mut component_statuses = Vec::new();
-                    for comp_result in &result.results {
-                        component_statuses.push(FleetComponentStatus {
-                            component_id: comp_result.id.clone(),
-                            version: comp_result.remote_version.clone(),
-                            version_source: Some("live".to_string()),
-                        });
-                    }
-
-                    project_statuses.push(FleetProjectStatus {
-                        project_id: project_id.clone(),
-                        server_id: proj.server_id.clone(),
-                        components: component_statuses,
-                        health,
-                    });
-                }
-                Err(e) => {
-                    // SSH failed for versions — fall back to cached, but keep whatever health we got
-                    log_status!(
-                        "fleet",
-                        "Warning: could not reach '{}' — falling back to cached versions: {}",
-                        project_id,
-                        e
-                    );
-
-                    let mut component_statuses = Vec::new();
-                    for component_id in project::project_component_ids(&proj) {
-                        let comp_version =
-                            match project::resolve_project_component(&proj, &component_id) {
-                                Ok(comp) => version::get_component_version(&comp),
-                                Err(_) => None,
-                            };
-
-                        component_statuses.push(FleetComponentStatus {
-                            component_id: component_id.clone(),
-                            version: comp_version,
-                            version_source: Some("cached".to_string()),
-                        });
-                    }
-
-                    project_statuses.push(FleetProjectStatus {
-                        project_id: project_id.clone(),
-                        server_id: proj.server_id.clone(),
-                        components: component_statuses,
-                        health,
-                    });
-                }
-            }
-        }
-    }
+    let project_statuses = fleet::collect_status(id, cached, health_only)?
+        .into_iter()
+        .map(|status| FleetProjectStatus {
+            project_id: status.project_id,
+            server_id: status.server_id,
+            components: status
+                .components
+                .into_iter()
+                .map(|component| FleetComponentStatus {
+                    component_id: component.component_id,
+                    version: component.version,
+                    version_source: component.version_source,
+                })
+                .collect(),
+            health: status.health,
+        })
+        .collect();
 
     Ok((
         FleetOutput {
@@ -580,96 +413,7 @@ fn status(id: &str, cached: bool, health_only: bool) -> CmdResult<FleetOutput> {
 }
 
 fn check(id: &str, only_outdated: bool) -> CmdResult<FleetOutput> {
-    let fl = fleet::load(id)?;
-    let mut project_checks = Vec::new();
-    let mut summary = FleetCheckSummary {
-        total_projects: fl.project_ids.len() as u32,
-        ..Default::default()
-    };
-
-    for project_id in &fl.project_ids {
-        log_status!("fleet", "Checking project '{}'...", project_id);
-
-        // Use existing deploy check infrastructure
-        let config = DeployConfig {
-            component_ids: vec![],
-            all: true,
-            outdated: false,
-            dry_run: false,
-            check: true,
-            force: false,
-            skip_build: true,
-            keep_deps: false,
-            expected_version: None,
-            no_pull: true, // Fleet checks are read-only
-            head: true,    // Fleet checks don't build — skip tag checkout
-        };
-
-        match deploy::run(project_id, &config) {
-            Ok(result) => {
-                summary.projects_checked += 1;
-
-                let proj = project::load(project_id).ok();
-                let mut component_checks = Vec::new();
-
-                for comp_result in &result.results {
-                    let status_str = match &comp_result.component_status {
-                        Some(deploy::ComponentStatus::UpToDate) => "up_to_date",
-                        Some(deploy::ComponentStatus::NeedsUpdate) => "needs_update",
-                        Some(deploy::ComponentStatus::BehindRemote) => "behind_remote",
-                        Some(deploy::ComponentStatus::Unknown) | None => "unknown",
-                    };
-
-                    // Count for summary
-                    match status_str {
-                        "up_to_date" => summary.components_up_to_date += 1,
-                        "needs_update" | "behind_remote" => summary.components_needs_update += 1,
-                        _ => summary.components_unknown += 1,
-                    }
-
-                    // Skip up-to-date if only_outdated
-                    if only_outdated && status_str == "up_to_date" {
-                        continue;
-                    }
-
-                    component_checks.push(FleetComponentCheck {
-                        component_id: comp_result.id.clone(),
-                        local_version: comp_result.local_version.clone(),
-                        remote_version: comp_result.remote_version.clone(),
-                        status: status_str.to_string(),
-                    });
-                }
-
-                // Skip project entirely if only_outdated and nothing to show
-                if only_outdated && component_checks.is_empty() {
-                    continue;
-                }
-
-                project_checks.push(FleetProjectCheck {
-                    project_id: project_id.clone(),
-                    server_id: proj.and_then(|p| p.server_id),
-                    status: "checked".to_string(),
-                    error: None,
-                    components: component_checks,
-                });
-            }
-            Err(e) => {
-                summary.projects_failed += 1;
-
-                if !only_outdated {
-                    project_checks.push(FleetProjectCheck {
-                        project_id: project_id.clone(),
-                        server_id: None,
-                        status: "failed".to_string(),
-                        error: Some(e.to_string()),
-                        components: vec![],
-                    });
-                }
-            }
-        }
-    }
-
-    let exit_code = if summary.projects_failed > 0 { 1 } else { 0 };
+    let (project_checks, summary, exit_code) = fleet::collect_check(id, only_outdated)?;
 
     Ok((
         FleetOutput {
@@ -687,138 +431,7 @@ fn check(id: &str, only_outdated: bool) -> CmdResult<FleetOutput> {
 }
 
 fn exec(id: &str, command: Vec<String>, check: bool) -> CmdResult<FleetOutput> {
-    use homeboy::engine::shell;
-    use homeboy::ssh::{resolve_context, SshClient, SshResolveArgs};
-
-    if command.is_empty() {
-        return Err(
-            homeboy::Error::validation_missing_argument(vec!["command".to_string()])
-                .with_hint("Usage: homeboy fleet exec <fleet> -- <command>".to_string()),
-        );
-    }
-
-    let command_string = if command.len() == 1 {
-        command[0].clone()
-    } else {
-        shell::quote_args(&command)
-    };
-
-    let projects = fleet::get_projects(id)?;
-
-    if projects.is_empty() {
-        return Err(homeboy::Error::validation_invalid_argument(
-            "fleet",
-            "Fleet has no projects",
-            Some(id.to_string()),
-            None,
-        ));
-    }
-
-    let mut results: Vec<FleetExecProjectResult> = Vec::new();
-    let mut summary = FleetExecSummary {
-        total: projects.len() as u32,
-        ..Default::default()
-    };
-
-    for proj in &projects {
-        let server_id = proj.server_id.clone();
-
-        // Check mode: just show the plan
-        if check {
-            let effective_cmd = match &proj.base_path {
-                Some(bp) => format!("cd {} && {}", shell::quote_path(bp), &command_string),
-                None => command_string.clone(),
-            };
-
-            results.push(FleetExecProjectResult {
-                project_id: proj.id.clone(),
-                server_id: server_id.clone(),
-                base_path: proj.base_path.clone(),
-                command: effective_cmd,
-                status: "planned".to_string(),
-                ..Default::default()
-            });
-            continue;
-        }
-
-        homeboy::log_status!("fleet", "Executing on '{}'...", proj.id);
-
-        // Resolve SSH context via project
-        let resolve_result = match resolve_context(&SshResolveArgs {
-            id: None,
-            project: Some(proj.id.clone()),
-            server: None,
-        }) {
-            Ok(r) => r,
-            Err(e) => {
-                summary.failed += 1;
-                results.push(FleetExecProjectResult {
-                    project_id: proj.id.clone(),
-                    server_id: server_id.clone(),
-                    base_path: proj.base_path.clone(),
-                    command: command_string.clone(),
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                    ..Default::default()
-                });
-                continue;
-            }
-        };
-
-        let client = match SshClient::from_server(&resolve_result.server, &resolve_result.server_id)
-        {
-            Ok(c) => c,
-            Err(e) => {
-                summary.failed += 1;
-                results.push(FleetExecProjectResult {
-                    project_id: proj.id.clone(),
-                    server_id: server_id.clone(),
-                    base_path: proj.base_path.clone(),
-                    command: command_string.clone(),
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                    ..Default::default()
-                });
-                continue;
-            }
-        };
-
-        // Build effective command with cd to base_path if available
-        let effective_cmd = match &resolve_result.base_path {
-            Some(bp) => format!("cd {} && {}", shell::quote_path(bp), &command_string),
-            None => command_string.clone(),
-        };
-
-        let output = client.execute(&effective_cmd);
-
-        if output.success {
-            summary.succeeded += 1;
-        } else {
-            summary.failed += 1;
-        }
-
-        results.push(FleetExecProjectResult {
-            project_id: proj.id.clone(),
-            server_id: server_id.clone(),
-            base_path: proj.base_path.clone(),
-            command: effective_cmd,
-            status: if output.success {
-                "success".to_string()
-            } else {
-                "failed".to_string()
-            },
-            stdout: Some(output.stdout),
-            stderr: Some(output.stderr),
-            exit_code: Some(output.exit_code),
-            error: None,
-        });
-    }
-
-    if check {
-        summary.skipped = summary.total;
-    }
-
-    let exit_code = if summary.failed > 0 { 1 } else { 0 };
+    let (results, summary, exit_code) = fleet::collect_exec(id, command, check)?;
 
     Ok((
         FleetOutput {
