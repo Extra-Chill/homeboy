@@ -12,7 +12,8 @@
  * Phase 2: Runs PHPCS to find UnusedFunctionParameter violations
  *
  * Phase 3: Cross-references each violation against the callback map to decide:
- *          - Contract-mandated param (callback/interface) → prefix with underscore
+ *          - Contract-mandated param (callback/interface) → insert unset() noop
+ *            (satisfies both PHPCS and PHPStan without expr.resultUnused noise)
  *          - Genuinely dead param (private, traceable callers) → remove from
  *            signature AND all call sites
  *          - Include-scope param ($data used by included templates) → skip
@@ -262,9 +263,14 @@ foreach ($by_file as $filepath => $file_violations) {
             $indent = detect_body_indent($lines, $insert_after + 1);
 
             // Build noop lines for each unused param.
+            // Use unset() as a PHPStan-safe noop that also satisfies PHPCS.
+            // Unlike bare "$param;" which triggers PHPStan expr.resultUnused,
+            // unset() is a real language construct that PHPStan recognizes as
+            // intentional. For contract-mandated callback parameters, this
+            // communicates "we received this but don't need it."
             $noop_lines = [];
             foreach ($info['params'] as $param) {
-                $noop_lines[] = $indent . $param . ';';
+                $noop_lines[] = $indent . 'unset( ' . $param . ' );';
                 $stats['noop_inserted']++;
             }
 

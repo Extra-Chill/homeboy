@@ -2,6 +2,11 @@ includes:
     - vendor/szepeviktor/phpstan-wordpress/extension.neon
 
 parameters:
+    # Don't treat unmatched ignoreErrors patterns as failures.
+    # These are config hygiene issues, not component code problems.
+    # Reporting them as errors creates false failure signals (see #137).
+    reportUnmatchedIgnoredErrors: false
+
     ignoreErrors:
         -
             identifier: return.void
