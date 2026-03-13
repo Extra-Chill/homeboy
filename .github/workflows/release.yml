@@ -166,6 +166,9 @@ jobs:
           commands: audit
           auto-issue: 'true'
           autofix: 'true'
+          autofix-commands: 'audit --fix --write'
+          autofix-open-pr: 'true'
+          autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   gate-lint:
