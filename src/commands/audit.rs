@@ -1,13 +1,10 @@
 use clap::Args;
-use homeboy::code_audit::{self, baseline, CodeAuditResult};
-use homeboy::git;
-use homeboy::refactor::{
-    auto::{self, AutofixMode, FixResult, FixResultsSummary, PolicySummary},
-    run_audit_refactor, AuditConvergenceScoring, AuditRefactorIterationSummary,
-    AuditVerificationToggles,
-};
-use serde::Serialize;
 use std::path::Path;
+
+use homeboy::code_audit::{
+    self, report, run_main_audit_workflow, AuditCommandOutput, AuditRunWorkflowArgs,
+};
+use homeboy::refactor::{AuditConvergenceScoring, AuditVerificationToggles};
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs};
 use super::{CmdResult, GlobalArgs};
@@ -58,8 +55,6 @@ pub struct AuditArgs {
     pub exclude: Vec<String>,
 
     /// Update baseline when findings are resolved (ratchet forward).
-    /// Without this flag, --fix --write applies code fixes but does not
-    /// touch the baseline in homeboy.json.
     #[arg(long)]
     pub ratchet: bool,
 
@@ -67,8 +62,6 @@ pub struct AuditArgs {
     pub baseline_args: BaselineArgs,
 
     /// Only audit files changed since a git ref (branch, tag, or SHA).
-    /// Uses merge-base for accurate PR-scoped audits.
-    /// Example: --changed-since origin/main
     #[arg(long)]
     pub changed_since: Option<String>,
 
@@ -81,200 +74,26 @@ pub struct AuditArgs {
     pub preview: bool,
 }
 
-#[derive(Serialize)]
-pub struct AuditSummaryOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    alignment_score: Option<f32>,
-    total_findings: usize,
-    warnings: usize,
-    info: usize,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    top_findings: Vec<AuditSummaryFinding>,
-    exit_code: i32,
-}
-
-#[derive(Serialize)]
-pub struct AuditSummaryFinding {
-    file: String,
-    /// Convention this finding belongs to (matches Finding.convention).
-    convention: String,
-    kind: homeboy::code_audit::AuditFinding,
-    severity: homeboy::code_audit::Severity,
-    description: String,
-    suggestion: String,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "command")]
-pub enum AuditOutput {
-    #[serde(rename = "audit")]
-    Full(CodeAuditResult),
-
-    #[serde(rename = "audit.conventions")]
-    Conventions {
-        component_id: String,
-        conventions: Vec<homeboy::code_audit::ConventionReport>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        directory_conventions: Vec<homeboy::code_audit::DirectoryConvention>,
-    },
-
-    #[serde(rename = "audit.fix")]
-    Fix {
-        component_id: String,
-        source_path: String,
-        status: String,
-        #[serde(flatten)]
-        fix_result: FixResult,
-        /// Universal fix summary bridged from the Rust-native FixResult.
-        /// Same structure as lint --fix and test --fix output.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        fix_summary: Option<FixResultsSummary>,
-        policy_summary: AuditFixPolicySummary,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        iterations: Vec<AuditFixIterationSummary>,
-        written: bool,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        hints: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        ratchet_summary: Option<AutoRatchetSummary>,
-    },
-
-    #[serde(rename = "audit.baseline")]
-    BaselineSaved {
-        component_id: String,
-        path: String,
-        findings_count: usize,
-        outliers_count: usize,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        alignment_score: Option<f32>,
-    },
-
-    #[serde(rename = "audit.compared")]
-    Compared {
-        #[serde(flatten)]
-        result: CodeAuditResult,
-        baseline_comparison: baseline::BaselineComparison,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        summary: Option<AuditSummaryOutput>,
-    },
-
-    #[serde(rename = "audit.summary")]
-    Summary(AuditSummaryOutput),
-}
-
-#[derive(Debug, Serialize)]
-pub struct AutoRatchetSummary {
-    /// Number of findings resolved by autofix.
-    pub resolved_count: usize,
-    /// Baseline finding count before auto-ratchet.
-    pub previous_count: usize,
-    /// Current finding count after auto-ratchet.
-    pub current_count: usize,
-    /// Whether the baseline file was successfully updated.
-    pub baseline_updated: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AuditFixPolicySummary {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    selected_only: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    excluded: Vec<String>,
-    visible_insertions: usize,
-    visible_new_files: usize,
-    auto_apply_insertions: usize,
-    auto_apply_new_files: usize,
-    blocked_insertions: usize,
-    blocked_new_files: usize,
-    preflight_failures: usize,
-}
-
-type AuditFixIterationSummary = AuditRefactorIterationSummary;
-
 fn parse_finding_kinds(
     values: &[String],
     flag: &str,
-) -> homeboy::Result<Vec<homeboy::code_audit::AuditFinding>> {
+) -> homeboy::Result<Vec<code_audit::AuditFinding>> {
     use std::str::FromStr;
     values
         .iter()
         .map(|value| {
-            homeboy::code_audit::AuditFinding::from_str(value)
+            code_audit::AuditFinding::from_str(value)
                 .map_err(|msg| homeboy::Error::validation_invalid_argument(flag, msg, None, None))
         })
         .collect()
 }
 
-pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditOutput> {
-    run_inner(args)
-}
-
-fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSummaryOutput {
-    let warnings = result
-        .findings
-        .iter()
-        .filter(|f| matches!(f.severity, homeboy::code_audit::Severity::Warning))
-        .count();
-    let info = result
-        .findings
-        .iter()
-        .filter(|f| matches!(f.severity, homeboy::code_audit::Severity::Info))
-        .count();
-
-    let top_findings = result
-        .findings
-        .iter()
-        .take(20)
-        .map(|f| AuditSummaryFinding {
-            file: f.file.clone(),
-            convention: f.convention.clone(),
-            kind: f.kind.clone(),
-            severity: f.severity.clone(),
-            description: f.description.clone(),
-            suggestion: f.suggestion.clone(),
-        })
-        .collect();
-
-    AuditSummaryOutput {
-        alignment_score: result.summary.alignment_score,
-        total_findings: result.findings.len(),
-        warnings,
-        info,
-        top_findings,
-        exit_code,
-    }
-}
-
-fn default_audit_exit_code(result: &CodeAuditResult, is_scoped: bool) -> i32 {
-    if is_scoped {
-        if result.findings.is_empty() {
-            0
-        } else {
-            1
-        }
-    } else if result.summary.outliers_found > 0 {
-        1
-    } else {
-        0
-    }
-}
-
-fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
-    let scoring = AuditConvergenceScoring {
-        warning_weight: args.warning_weight,
-        info_weight: args.info_weight,
-    };
-    let verification = AuditVerificationToggles {
-        lint_smoke: !args.no_lint_smoke,
-        test_smoke: !args.no_test_smoke,
-    };
+pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutput> {
     let only_kinds = parse_finding_kinds(&args.only, "only")?;
     let exclude_kinds = parse_finding_kinds(&args.exclude, "exclude")?;
 
-    // Resolve component ID and source path.
-    // Supports: component ID with --path, registered component, or direct filesystem path.
+    // Resolve component ID and source path
     let (resolved_id, resolved_path) = if Path::new(&args.comp.component).is_dir() {
-        // Direct path passed as component ID (e.g. `homeboy audit /some/path`)
         let effective = args
             .comp
             .path
@@ -287,430 +106,48 @@ fn run_inner(args: AuditArgs) -> CmdResult<AuditOutput> {
             .unwrap_or_else(|| "unknown".to_string());
         (name, effective)
     } else {
-        // Standard resolution: registered → portable config → synthetic
         let comp = args.comp.load()?;
         homeboy::component::validate_local_path(&comp)?;
         let expanded = shellexpand::tilde(&comp.local_path).to_string();
         (comp.id.clone(), expanded)
     };
 
-    // Run audit — scoped or full
-    let result = if let Some(ref git_ref) = args.changed_since {
-        let changed = git::get_files_changed_since(&resolved_path, git_ref)?;
-        if changed.is_empty() {
-            homeboy::log_status!("audit", "No files changed since {}", git_ref);
-            return Ok((
-                AuditOutput::Full(code_audit::CodeAuditResult {
-                    component_id: resolved_id,
-                    source_path: resolved_path,
-                    summary: code_audit::AuditSummary {
-                        files_scanned: 0,
-                        conventions_detected: 0,
-                        outliers_found: 0,
-                        alignment_score: None,
-                        files_skipped: 0,
-                        warnings: vec![],
-                    },
-                    conventions: vec![],
-                    directory_conventions: vec![],
-                    findings: vec![],
-                    duplicate_groups: vec![],
-                }),
-                0,
-            ));
-        }
-        code_audit::audit_path_scoped(&resolved_id, &resolved_path, &changed, Some(git_ref))?
-    } else {
-        code_audit::audit_path_with_id(&resolved_id, &resolved_path)?
-    };
+    let workflow = run_main_audit_workflow(AuditRunWorkflowArgs {
+        component_id: resolved_id,
+        source_path: resolved_path,
+        conventions: args.conventions,
+        fix: args.fix,
+        write: args.write,
+        max_iterations: args.max_iterations,
+        scoring: AuditConvergenceScoring {
+            warning_weight: args.warning_weight,
+            info_weight: args.info_weight,
+        },
+        verification: AuditVerificationToggles {
+            lint_smoke: !args.no_lint_smoke,
+            test_smoke: !args.no_test_smoke,
+        },
+        only_kinds,
+        exclude_kinds,
+        only_labels: args.only,
+        exclude_labels: args.exclude,
+        ratchet: args.ratchet,
+        baseline: args.baseline_args.baseline,
+        ignore_baseline: args.baseline_args.ignore_baseline,
+        changed_since: args.changed_since,
+        json_summary: args.json_summary,
+        preview: args.preview,
+    })?;
 
-    // --conventions: just show conventions
-    if args.conventions {
-        return Ok((
-            AuditOutput::Conventions {
-                component_id: result.component_id,
-                conventions: result.conventions,
-                directory_conventions: result.directory_conventions,
-            },
-            0,
-        ));
-    }
-
-    // --fix: generate stubs
-    if args.fix {
-        let written = args.write;
-        let refactor_outcome = run_audit_refactor(
-            result,
-            &only_kinds,
-            &exclude_kinds,
-            scoring,
-            verification,
-            args.max_iterations,
-            written,
-        )?;
-        let current_result = refactor_outcome.current_result;
-        let mut final_fix_result = refactor_outcome.fix_result;
-        let final_policy_summary = refactor_outcome.policy_summary;
-        let iterations = refactor_outcome.iterations;
-
-        // Ratchet: if --ratchet is set and --fix --write applied changes,
-        // update the baseline to remove resolved findings.
-        // This makes the baseline shrink as autofix eliminates fixable findings.
-        //
-        // Ratchet is opt-in to avoid homeboy.json merge conflicts in CI:
-        // only main/release workflows should pass --ratchet, never PR branches.
-        //
-        // When --changed-since is active, use scoped baseline update to avoid
-        // touching fingerprints for files outside the change set.
-        let mut ratchet_summary = None;
-        if args.ratchet && written && !args.baseline_args.ignore_baseline {
-            if let Some(existing_baseline) =
-                baseline::load_baseline(Path::new(&current_result.source_path))
-            {
-                let comparison = baseline::compare(&current_result, &existing_baseline);
-                if !comparison.resolved_fingerprints.is_empty() {
-                    // Findings were eliminated — save updated baseline
-                    let save_result = if let Some(ref git_ref) = args.changed_since {
-                        let changed =
-                            git::get_files_changed_since(&current_result.source_path, git_ref)
-                                .unwrap_or_default();
-                        baseline::save_baseline_scoped(&current_result, &changed)
-                    } else {
-                        baseline::save_baseline(&current_result)
-                    };
-                    match save_result {
-                        Ok(_path) => {
-                            homeboy::log_status!(
-                                "ratchet",
-                                "Auto-updated baseline: {} finding(s) resolved ({} → {})",
-                                comparison.resolved_fingerprints.len(),
-                                existing_baseline.item_count,
-                                current_result.findings.len()
-                            );
-                            ratchet_summary = Some(AutoRatchetSummary {
-                                resolved_count: comparison.resolved_fingerprints.len(),
-                                previous_count: existing_baseline.item_count,
-                                current_count: current_result.findings.len(),
-                                baseline_updated: true,
-                            });
-                        }
-                        Err(e) => {
-                            homeboy::log_status!(
-                                "ratchet",
-                                "Warning: failed to auto-update baseline: {}",
-                                e
-                            );
-                        }
-                    }
-                } else if comparison.new_items.is_empty() {
-                    homeboy::log_status!(
-                        "ratchet",
-                        "No findings resolved — baseline unchanged ({} findings)",
-                        existing_baseline.item_count
-                    );
-                }
-            }
-        }
-
-        let outcome = auto::standard_outcome(
-            if written {
-                AutofixMode::Write
-            } else {
-                AutofixMode::DryRun
-            },
-            final_fix_result.total_insertions,
-            Some(format!("homeboy audit {}", current_result.component_id)),
-            build_fix_hints(written, &final_policy_summary),
-        );
-
-        let exit_code = if final_fix_result.total_insertions > 0 {
-            1
-        } else {
-            0
-        };
-
-        // Print human-readable summary to stderr
-        log_fix_summary(&final_fix_result, &final_policy_summary, written);
-
-        // Bridge to universal fix summary (before strip_code mutates the data).
-        let fix_summary = if written && final_fix_result.files_modified > 0 {
-            Some(auto::summarize_audit_fix_result(&final_fix_result))
-        } else {
-            None
-        };
-
-        // Strip generated code from JSON output unless --preview is set
-        if !args.preview {
-            final_fix_result.strip_code();
-        }
-
-        return Ok((
-            AuditOutput::Fix {
-                component_id: current_result.component_id,
-                source_path: current_result.source_path,
-                status: outcome.status,
-                fix_result: final_fix_result,
-                fix_summary,
-                policy_summary: AuditFixPolicySummary {
-                    selected_only: args.only,
-                    excluded: args.exclude,
-                    visible_insertions: final_policy_summary.visible_insertions,
-                    visible_new_files: final_policy_summary.visible_new_files,
-                    auto_apply_insertions: final_policy_summary.auto_apply_insertions,
-                    auto_apply_new_files: final_policy_summary.auto_apply_new_files,
-                    blocked_insertions: final_policy_summary.blocked_insertions,
-                    blocked_new_files: final_policy_summary.blocked_new_files,
-                    preflight_failures: final_policy_summary.preflight_failures,
-                },
-                iterations,
-                written,
-                hints: outcome.hints,
-                ratchet_summary,
-            },
-            exit_code,
-        ));
-    }
-
-    // --baseline: save current state
-    if args.baseline_args.baseline {
-        let saved = if let Some(ref git_ref) = args.changed_since {
-            // Scoped baseline: only update fingerprints for changed files
-            let changed = git::get_files_changed_since(&resolved_path, git_ref)?;
-            if changed.is_empty() {
-                homeboy::log_status!(
-                    "baseline",
-                    "No files changed since {} — baseline unchanged",
-                    git_ref
-                );
-            } else {
-                homeboy::log_status!(
-                    "baseline",
-                    "Scoped baseline update: {} file(s) in scope",
-                    changed.len()
-                );
-            }
-            baseline::save_baseline_scoped(&result, &changed)
-                .map_err(homeboy::Error::internal_unexpected)?
-        } else {
-            // Full baseline: replace everything
-            baseline::save_baseline(&result).map_err(homeboy::Error::internal_unexpected)?
-        };
-
-        let baseline_data =
-            baseline::load_baseline(Path::new(&result.source_path)).ok_or_else(|| {
-                homeboy::Error::internal_unexpected("Failed to read back saved baseline")
-            })?;
-
-        if let Some(score) = baseline_data.metadata.alignment_score {
-            eprintln!(
-                "[audit] Baseline saved to {} ({} findings, {:.0}% alignment)",
-                saved.display(),
-                baseline_data.item_count,
-                score * 100.0
-            );
-        } else {
-            eprintln!(
-                "[audit] Baseline saved to {} ({} findings, alignment: N/A)",
-                saved.display(),
-                baseline_data.item_count,
-            );
-        }
-
-        return Ok((
-            AuditOutput::BaselineSaved {
-                component_id: result.component_id,
-                path: saved.to_string_lossy().to_string(),
-                findings_count: baseline_data.item_count,
-                outliers_count: baseline_data.metadata.outliers_count,
-                alignment_score: baseline_data.metadata.alignment_score,
-            },
-            0,
-        ));
-    }
-
-    // Default: run audit, compare against baseline if one exists
-    if !args.baseline_args.ignore_baseline {
-        if let Some(existing_baseline) = baseline::load_baseline(Path::new(&result.source_path)) {
-            let comparison = baseline::compare(&result, &existing_baseline);
-
-            let exit_code = if comparison.drift_increased { 1 } else { 0 };
-
-            if comparison.drift_increased {
-                eprintln!(
-                    "[audit] DRIFT INCREASED: {} new finding(s) since baseline",
-                    comparison.new_items.len()
-                );
-            } else if !comparison.resolved_fingerprints.is_empty() {
-                eprintln!(
-                    "[audit] Drift reduced: {} finding(s) resolved since baseline",
-                    comparison.resolved_fingerprints.len()
-                );
-            } else {
-                eprintln!("[audit] No change from baseline");
-            }
-
-            let summary = if args.json_summary {
-                Some(build_audit_summary(&result, exit_code))
-            } else {
-                None
-            };
-
-            return Ok((
-                if args.json_summary {
-                    AuditOutput::Summary(build_audit_summary(&result, exit_code))
-                } else {
-                    AuditOutput::Compared {
-                        result,
-                        baseline_comparison: comparison,
-                        summary,
-                    }
-                },
-                exit_code,
-            ));
-        }
-    }
-
-    // No explicit baseline — try differential comparison from git ref
-    if let Some(ref git_ref) = args.changed_since {
-        if let Some(ref_baseline) = baseline::load_baseline_from_ref(&result.source_path, git_ref) {
-            let comparison = baseline::compare(&result, &ref_baseline);
-            let exit_code = if comparison.drift_increased { 1 } else { 0 };
-
-            if comparison.drift_increased {
-                eprintln!(
-                    "[audit] {} new finding(s) introduced by this change",
-                    comparison.new_items.len()
-                );
-            } else if !result.findings.is_empty() {
-                eprintln!(
-                    "[audit] {} finding(s) in changed files — all pre-existing (0 introduced)",
-                    result.findings.len()
-                );
-            }
-
-            let summary = if args.json_summary {
-                Some(build_audit_summary(&result, exit_code))
-            } else {
-                None
-            };
-
-            return Ok((
-                if args.json_summary {
-                    AuditOutput::Summary(build_audit_summary(&result, exit_code))
-                } else {
-                    AuditOutput::Compared {
-                        result,
-                        baseline_comparison: comparison,
-                        summary,
-                    }
-                },
-                exit_code,
-            ));
-        }
-    }
-
-    // No baseline at all
-    //
-    // When --changed-since is active but no baseline exists anywhere (neither
-    // explicit file nor at the base ref), we cannot determine which findings
-    // are new vs pre-existing. In this case, pass — the correct fix is to
-    // add a baseline, not to fail PRs on unattributable debt.
-    let exit_code = if args.changed_since.is_some() {
-        if !result.findings.is_empty() {
-            eprintln!(
-                "[audit] {} finding(s) in changed files — no baseline to compare against, treating as pre-existing",
-                result.findings.len()
-            );
-        }
-        0
-    } else {
-        default_audit_exit_code(&result, false)
-    };
-    if args.json_summary {
-        Ok((
-            AuditOutput::Summary(build_audit_summary(&result, exit_code)),
-            exit_code,
-        ))
-    } else {
-        Ok((AuditOutput::Full(result), exit_code))
-    }
-}
-
-fn build_fix_hints(written: bool, summary: &PolicySummary) -> Vec<String> {
-    let mut hints = Vec::new();
-
-    if !written && summary.has_blocked_items() {
-        hints.push(format!(
-            "{} fix(es) are visible but would be blocked on --write because they are safe_with_checks or plan_only.",
-            summary.blocked_insertions + summary.blocked_new_files
-        ));
-    }
-
-    if summary.preflight_failures > 0 {
-        hints.push(format!(
-            "{} fix(es) failed deterministic preflight checks and will stay preview-only until their validator passes.",
-            summary.preflight_failures
-        ));
-    }
-
-    if written && summary.has_blocked_items() {
-        hints.push(format!(
-            "Applied only safe_auto fixes. {} fix(es) were left as preview because they need checks or manual review.",
-            summary.blocked_insertions + summary.blocked_new_files
-        ));
-    }
-
-    hints
-}
-
-fn log_fix_summary(result: &FixResult, policy: &PolicySummary, written: bool) {
-    let kind_counts = result.finding_counts();
-    let total_insertions = result.total_insertions;
-    let total_new_files = result.new_files.len();
-    let total_skipped = result.skipped.len();
-
-    if total_insertions == 0 && total_new_files == 0 {
-        homeboy::log_status!("fix", "No fixes to apply");
-        return;
-    }
-
-    let mode = if written { "Applied" } else { "Would apply" };
-    homeboy::log_status!(
-        "fix",
-        "{mode} {total_insertions} insertion(s) across {} file(s), {} new file(s)",
-        result.files_modified,
-        total_new_files
-    );
-
-    for (kind, count) in &kind_counts {
-        homeboy::log_status!("fix", "  {kind:?}: {count}");
-    }
-
-    if total_skipped > 0 {
-        homeboy::log_status!("fix", "Skipped: {total_skipped} file(s)");
-    }
-
-    if policy.has_blocked_items() {
-        homeboy::log_status!(
-            "fix",
-            "Blocked: {} insertion(s), {} new file(s) (safe_with_checks or plan_only)",
-            policy.blocked_insertions,
-            policy.blocked_new_files
-        );
-    }
-
-    if policy.preflight_failures > 0 {
-        homeboy::log_status!("fix", "Preflight failures: {}", policy.preflight_failures);
-    }
+    Ok(report::from_main_workflow(workflow))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::default_audit_exit_code;
-    use super::{run, AuditArgs, AuditOutput};
-    use crate::commands::utils::args::{BaselineArgs, PositionalComponentArgs};
-    use homeboy::code_audit::AuditFinding;
-    use homeboy::code_audit::{AuditSummary, CodeAuditResult, Finding, Severity};
+    use super::*;
+    use crate::commands::utils::args::BaselineArgs;
+    use homeboy::code_audit::run::default_audit_exit_code;
+    use homeboy::code_audit::{AuditFinding, AuditSummary, CodeAuditResult, Finding, Severity};
     use homeboy::refactor::{
         auto::{ApplyChunkResult, ChunkStatus, FixSafetyTier, InsertionKind},
         build_chunk_verifier, finding_fingerprint, score_delta, weighted_finding_score_with,
@@ -781,8 +218,6 @@ mod tests {
         fs::create_dir_all(root.join("commands")).unwrap();
         fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
 
-        // Construct a FixResult directly — tests the fixer logic without
-        // requiring an extension to fingerprint .rs files.
         let mut fix_result = FixResult {
             fixes: vec![Fix {
                 file: "commands/bad.rs".to_string(),
@@ -808,10 +243,9 @@ mod tests {
             files_modified: 0,
         };
 
-        // Step 1: apply_fix_policy annotates insertions
         let summary = auto::apply_fix_policy(
             &mut fix_result,
-            true, // write mode
+            true,
             &FixPolicy::default(),
             &PreflightContext { root: &root },
         );
@@ -826,7 +260,6 @@ mod tests {
         assert!(!insertion.auto_apply);
         assert!(insertion.preflight.is_some());
 
-        // Plan-only method stubs should not be auto-applied in unattended mode.
         let mut auto_subset = auto::auto_apply_subset(&fix_result);
         let modified = auto::apply_fixes(&mut auto_subset.fixes, &root);
         assert_eq!(modified, 0);
@@ -851,8 +284,6 @@ mod tests {
         )
         .unwrap();
 
-        // Construct a FixResult with both a MethodStub and an ImportAdd.
-        // The --only import_add policy should filter out the MethodStub entirely.
         let mut fix_result = FixResult {
             fixes: vec![Fix {
                 file: "commands/bad.rs".to_string(),
@@ -897,12 +328,11 @@ mod tests {
 
         auto::apply_fix_policy(
             &mut fix_result,
-            false, // dry-run
+            false,
             &policy,
             &PreflightContext { root: &root },
         );
 
-        // Policy filters out MethodStub entirely — only ImportAdd survives
         assert_eq!(fix_result.fixes.len(), 1);
         assert_eq!(fix_result.fixes[0].insertions.len(), 1);
 
@@ -957,19 +387,6 @@ mod tests {
 
     #[test]
     fn test_chunk_verifier_rejects_new_findings_in_changed_files() {
-        // Test that the chunk verifier rejects when a scoped re-audit finds
-        // findings not present in the baseline.
-        //
-        // Uses a real (empty) temp dir so the scoped re-audit runs against
-        // actual files. The baseline is constructed with zero findings, and
-        // target.rs is written with content that the re-audit will scan.
-        // Since the re-audit runs on an empty codebase with no conventions,
-        // it typically produces zero findings too — but if any finding
-        // appears that wasn't in the baseline, the verifier must reject it.
-        //
-        // To guarantee the rejection path fires regardless of detection
-        // thresholds, we also verify the logic via the companion unit test
-        // test_finding_fingerprint_comparison below.
         if homeboy::extension::find_extension_for_file_ext("rs", "fingerprint").is_none() {
             eprintln!("SKIP: no Rust fingerprint extension installed");
             return;
@@ -978,7 +395,6 @@ mod tests {
         let root = tmp_dir("chunk-verifier-dirty");
         fs::create_dir_all(root.join("src")).unwrap();
 
-        // Baseline: target.rs is empty — no findings.
         fs::write(root.join("src/target.rs"), "// empty\n").unwrap();
 
         let baseline = homeboy::code_audit::audit_path_scoped(
@@ -993,7 +409,6 @@ mod tests {
             "Baseline for empty file should have no findings"
         );
 
-        // After "fix": target.rs has a function. The verifier re-audits.
         fs::write(root.join("src/target.rs"), "pub fn placeholder() {}\n").unwrap();
 
         let result = {
@@ -1009,10 +424,6 @@ mod tests {
             })
         };
 
-        // With a tiny codebase, the re-audit likely produces no findings,
-        // so the verifier passes. That's correct behavior — no new findings.
-        // The rejection logic is tested directly in
-        // test_finding_fingerprint_comparison below.
         assert!(
             result.is_ok(),
             "Verifier should pass when re-audit finds no new findings: {:?}",
@@ -1024,8 +435,6 @@ mod tests {
 
     #[test]
     fn test_finding_fingerprint_comparison() {
-        // Directly test the fingerprint-based comparison logic that
-        // build_chunk_verifier uses to detect new findings.
         let baseline_finding = Finding {
             convention: "naming".to_string(),
             severity: Severity::Warning,
@@ -1053,7 +462,6 @@ mod tests {
             kind: AuditFinding::DuplicateFunction,
         };
 
-        // Same finding should match baseline fingerprint.
         let baseline_fp = finding_fingerprint(&baseline_finding);
         let same_fp = finding_fingerprint(&same_finding);
         let new_fp = finding_fingerprint(&new_finding);
@@ -1067,7 +475,6 @@ mod tests {
             "Different findings should have different fingerprints"
         );
 
-        // Simulate the verifier's filtering: new findings not in baseline.
         let baseline_set: std::collections::HashSet<String> =
             vec![baseline_fp].into_iter().collect();
 
@@ -1179,9 +586,6 @@ mod tests {
 
     #[test]
     fn test_run_fix_write_stops_when_no_safe_changes_apply() {
-        // FunctionRemoval is SafeWithChecks, so duplicate_function fixes can
-        // be auto-applied. This test verifies that the fix loop applies the
-        // removal and then converges (no more findings → stops).
         let root = tmp_dir("fix-write-no-safe-changes");
         fs::create_dir_all(root.join("commands")).unwrap();
 
@@ -1226,11 +630,8 @@ mod tests {
             run(args, &crate::commands::GlobalArgs {}).expect("audit fix should run");
 
         match output {
-            AuditOutput::Fix { iterations, .. } => {
-                // The fix loop should apply duplicate removals and then converge.
-                // First iteration applies fixes, second finds no more duplicates.
+            AuditCommandOutput::Fix { iterations, .. } => {
                 assert!(!iterations.is_empty(), "expected at least one iteration");
-                // At least one iteration should have applied changes
                 let any_applied = iterations.iter().any(|i| i.applied_chunks > 0);
                 assert!(
                     any_applied,
@@ -1239,7 +640,7 @@ mod tests {
                 );
             }
             other => panic!(
-                "expected AuditOutput::Fix, got {:?}",
+                "expected AuditCommandOutput::Fix, got {:?}",
                 std::mem::discriminant(&other)
             ),
         }
@@ -1252,7 +653,7 @@ mod tests {
         let result = CodeAuditResult {
             component_id: "demo".to_string(),
             source_path: "/tmp/demo".to_string(),
-            summary: homeboy::code_audit::AuditSummary {
+            summary: AuditSummary {
                 files_scanned: 1,
                 conventions_detected: 1,
                 outliers_found: 2,
@@ -1263,21 +664,21 @@ mod tests {
             conventions: vec![],
             directory_conventions: vec![],
             findings: vec![
-                homeboy::code_audit::Finding {
+                Finding {
                     convention: "Test".to_string(),
-                    severity: homeboy::code_audit::Severity::Warning,
+                    severity: Severity::Warning,
                     file: "src/a.rs".to_string(),
                     description: "Warning finding".to_string(),
                     suggestion: "Fix it".to_string(),
-                    kind: homeboy::code_audit::AuditFinding::MissingMethod,
+                    kind: AuditFinding::MissingMethod,
                 },
-                homeboy::code_audit::Finding {
+                Finding {
                     convention: "Test".to_string(),
-                    severity: homeboy::code_audit::Severity::Info,
+                    severity: Severity::Info,
                     file: "src/b.rs".to_string(),
                     description: "Info finding".to_string(),
                     suggestion: "Investigate".to_string(),
-                    kind: homeboy::code_audit::AuditFinding::MissingImport,
+                    kind: AuditFinding::MissingImport,
                 },
             ],
             duplicate_groups: vec![],
@@ -1304,7 +705,7 @@ mod tests {
         let before = CodeAuditResult {
             component_id: "demo".to_string(),
             source_path: "/tmp/demo".to_string(),
-            summary: homeboy::code_audit::AuditSummary {
+            summary: AuditSummary {
                 files_scanned: 1,
                 conventions_detected: 1,
                 outliers_found: 1,
@@ -1314,13 +715,13 @@ mod tests {
             },
             conventions: vec![],
             directory_conventions: vec![],
-            findings: vec![homeboy::code_audit::Finding {
+            findings: vec![Finding {
                 convention: "Test".to_string(),
-                severity: homeboy::code_audit::Severity::Warning,
+                severity: Severity::Warning,
                 file: "src/a.rs".to_string(),
                 description: "Warning finding".to_string(),
                 suggestion: "Fix it".to_string(),
-                kind: homeboy::code_audit::AuditFinding::MissingMethod,
+                kind: AuditFinding::MissingMethod,
             }],
             duplicate_groups: vec![],
         };
@@ -1336,7 +737,7 @@ mod tests {
         let before = CodeAuditResult {
             component_id: "demo".to_string(),
             source_path: "/tmp/demo".to_string(),
-            summary: homeboy::code_audit::AuditSummary {
+            summary: AuditSummary {
                 files_scanned: 1,
                 conventions_detected: 1,
                 outliers_found: 2,
@@ -1347,34 +748,34 @@ mod tests {
             conventions: vec![],
             directory_conventions: vec![],
             findings: vec![
-                homeboy::code_audit::Finding {
+                Finding {
                     convention: "Test".to_string(),
-                    severity: homeboy::code_audit::Severity::Warning,
+                    severity: Severity::Warning,
                     file: "src/a.rs".to_string(),
                     description: "Warning finding".to_string(),
                     suggestion: "Fix it".to_string(),
-                    kind: homeboy::code_audit::AuditFinding::MissingMethod,
+                    kind: AuditFinding::MissingMethod,
                 },
-                homeboy::code_audit::Finding {
+                Finding {
                     convention: "Test".to_string(),
-                    severity: homeboy::code_audit::Severity::Info,
+                    severity: Severity::Info,
                     file: "src/b.rs".to_string(),
                     description: "Info finding".to_string(),
                     suggestion: "Investigate".to_string(),
-                    kind: homeboy::code_audit::AuditFinding::MissingImport,
+                    kind: AuditFinding::MissingImport,
                 },
             ],
             duplicate_groups: vec![],
         };
 
         let after = CodeAuditResult {
-            findings: vec![homeboy::code_audit::Finding {
+            findings: vec![Finding {
                 convention: "Test".to_string(),
-                severity: homeboy::code_audit::Severity::Info,
+                severity: Severity::Info,
                 file: "src/b.rs".to_string(),
                 description: "Info finding".to_string(),
                 suggestion: "Investigate".to_string(),
-                kind: homeboy::code_audit::AuditFinding::MissingImport,
+                kind: AuditFinding::MissingImport,
             }],
             ..before.clone()
         };

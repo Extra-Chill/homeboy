@@ -13,6 +13,8 @@
 
 pub mod baseline;
 pub mod compare;
+pub mod report;
+pub mod run;
 mod checks;
 mod comment_hygiene;
 pub(crate) mod conventions;
@@ -50,6 +52,8 @@ pub use conventions::{AuditFinding, Convention, Deviation, Language, Outlier};
 pub use duplication::DuplicateGroup;
 pub use findings::{Finding, Severity};
 pub use fingerprint::FileFingerprint;
+pub use report::AuditCommandOutput;
+pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs, AuditRunWorkflowResult};
 pub use walker::is_test_path;
 
 use crate::{component, is_zero, Result};
