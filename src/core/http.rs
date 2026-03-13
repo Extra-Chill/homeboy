@@ -5,13 +5,10 @@
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::extension::HttpMethod;
-use crate::keychain;
 use crate::project::{ApiConfig, AuthConfig, AuthFlowConfig, VariableSource};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn config_error(msg: impl Into<String>) -> Error {
     Error::new(ErrorCode::ConfigInvalidValue, msg, Value::Null)
@@ -154,43 +151,10 @@ impl ApiClient {
         self.execute_auth_flow(login, credentials)
     }
 
-    /// Executes the refresh flow if configured and tokens are expired.
+    /// Token refresh is not supported in the CLI.
+    /// Use environment variables or config-based auth instead.
     pub fn refresh_if_needed(&self) -> Result<bool> {
-        let auth = match &self.auth {
-            Some(a) => a,
-            None => return Ok(false),
-        };
-
-        let refresh = match &auth.refresh {
-            Some(r) => r,
-            None => return Ok(false),
-        };
-
-        // Check if we have an expires_at value
-        let expires_at = match keychain::get(&self.project_id, "expires_at")? {
-            Some(v) => v.parse::<i64>().unwrap_or(0),
-            None => return Ok(false),
-        };
-
-        // Check if expired (with 60 second buffer)
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before Unix epoch")
-            .as_secs() as i64;
-
-        if now < expires_at - 60 {
-            return Ok(false); // Not expired yet
-        }
-
-        // Get refresh token
-        let refresh_token = keychain::get(&self.project_id, "refresh_token")?
-            .ok_or_else(|| not_found_error("No refresh token stored"))?;
-
-        let mut credentials = HashMap::new();
-        credentials.insert("refresh_token".to_string(), refresh_token);
-
-        self.execute_auth_flow(refresh, &credentials)?;
-        Ok(true)
+        Ok(false)
     }
 
     /// Executes an auth flow (login or refresh).
@@ -207,19 +171,11 @@ impl ApiClient {
         }
 
         // Make the request
-        let response = self.post_unauthenticated(&flow.endpoint, &Value::Object(body))?;
+        let _response = self.post_unauthenticated(&flow.endpoint, &Value::Object(body))?;
 
-        // Store response fields in keychain
-        for (var_name, json_path) in &flow.store {
-            if let Some(value) = get_json_path(&response, json_path) {
-                let value_str = match value {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => n.to_string(),
-                    _ => value.to_string(),
-                };
-                keychain::store(&self.project_id, var_name, &value_str)?;
-            }
-        }
+        // Note: credential storage (keychain) has been removed from the CLI.
+        // Auth tokens from login flows are not persisted. Use env vars or
+        // config-based auth for CLI/CI workflows.
 
         Ok(())
     }
@@ -247,32 +203,22 @@ impl ApiClient {
         Ok(Some(header))
     }
 
-    /// Clears all stored auth data for this project.
+    /// Clears stored auth data for this project.
+    /// No-op in CLI mode (credentials are not persisted).
     pub fn logout(&self) -> Result<()> {
-        let common_vars = ["access_token", "refresh_token", "expires_at", "password"];
-        keychain::clear_project(&self.project_id, &common_vars)?;
-
-        // Also clear any custom variables from auth config
-        // Auth cleanup is best-effort: logout succeeds even if some vars fail to delete
-        if let Some(auth) = &self.auth {
-            for var_name in auth.variables.keys() {
-                let _ = keychain::delete(&self.project_id, var_name);
-            }
-        }
-
         Ok(())
     }
 
-    /// Checks if authenticated (has access token or required variables).
+    /// Checks if authenticated (has required variables available).
     pub fn is_authenticated(&self) -> bool {
         let auth = match &self.auth {
             Some(a) => a,
             None => return true, // No auth required
         };
 
-        // Check if all keychain variables have values
+        // Check that all variables can be resolved from config or env
         for (var_name, source) in &auth.variables {
-            if source.source == "keychain" && !keychain::exists(&self.project_id, var_name) {
+            if resolve_variable(&self.project_id, var_name, source).is_err() {
                 return false;
             }
         }
@@ -282,11 +228,8 @@ impl ApiClient {
 }
 
 /// Resolves a variable from its source.
-fn resolve_variable(project_id: &str, var_name: &str, source: &VariableSource) -> Result<String> {
+fn resolve_variable(_project_id: &str, var_name: &str, source: &VariableSource) -> Result<String> {
     match source.source.as_str() {
-        "keychain" => keychain::get(project_id, var_name)?.ok_or_else(|| {
-            not_found_error(format!("Variable '{}' not found in keychain", var_name))
-        }),
         "config" => source
             .value
             .clone()
@@ -297,6 +240,10 @@ fn resolve_variable(project_id: &str, var_name: &str, source: &VariableSource) -
             std::env::var(env_var)
                 .map_err(|_| not_found_error(format!("Environment variable '{}' not set", env_var)))
         }
+        "keychain" => Err(config_error(format!(
+            "Variable source 'keychain' is not supported in the CLI. Use 'env' or 'config' instead for '{}'",
+            var_name
+        ))),
         _ => Err(config_error(format!(
             "Unknown variable source: {}",
             source.source
@@ -304,35 +251,17 @@ fn resolve_variable(project_id: &str, var_name: &str, source: &VariableSource) -
     }
 }
 
-fn template_regex() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"\{\{(\w+)\}\}").expect("hardcoded regex"))
-}
-
 /// Resolves a template string with credential values.
 fn resolve_template(
     template: &str,
     credentials: &HashMap<String, String>,
-    project_id: &str,
+    _project_id: &str,
 ) -> Result<String> {
     let mut result = template.to_string();
 
-    // First, try credentials
     for (key, value) in credentials {
         let placeholder = format!("{{{{{}}}}}", key);
         result = result.replace(&placeholder, value);
-    }
-
-    // Then, try keychain for any remaining placeholders
-    let re = template_regex();
-    for cap in re.captures_iter(template) {
-        let var_name = &cap[1];
-        let placeholder = format!("{{{{{}}}}}", var_name);
-        if result.contains(&placeholder) {
-            if let Some(value) = keychain::get(project_id, var_name)? {
-                result = result.replace(&placeholder, &value);
-            }
-        }
     }
 
     Ok(result)
@@ -345,18 +274,6 @@ fn parse_header(header: &str) -> Result<(&str, &str)> {
         return Err(config_error(format!("Invalid header format: {}", header)));
     }
     Ok((parts[0].trim(), parts[1].trim()))
-}
-
-/// Gets a value from JSON using a simple dot-notation path.
-fn get_json_path<'a>(json: &'a Value, path: &str) -> Option<&'a Value> {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut current = json;
-
-    for part in parts {
-        current = current.get(part)?;
-    }
-
-    Some(current)
 }
 
 fn parse_json_response(response: Response) -> Result<Value> {

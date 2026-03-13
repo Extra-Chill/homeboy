@@ -29,7 +29,6 @@ regex = "1.11"
 glob-match = "0.2"
 glob = "0.3"
 zip = "0.6"
-keyring = "3"
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"] }
 arboard = "3"
 chrono = "0.4"

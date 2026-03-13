@@ -30,7 +30,6 @@ pub mod upgrade;
 
 // Internal extensions - not part of public API
 pub(crate) mod http;
-pub(crate) mod keychain;
 pub(crate) mod local_files;
 pub(crate) mod paths;
 pub(crate) mod permissions;
