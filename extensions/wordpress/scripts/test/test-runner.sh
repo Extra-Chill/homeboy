@@ -14,10 +14,15 @@ TEST_FIX_ENTRIES=()
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
+PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 # shellcheck source=../lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
 # shellcheck source=../lib/validation-dependencies.sh
 source "${DEPENDENCY_HELPER}"
+# shellcheck source=../lib/php-preflight.sh
+if [ -f "$PHP_PREFLIGHT_HELPER" ]; then
+    source "$PHP_PREFLIGHT_HELPER"
+fi
 
 print_failure_summary() {
     if [ -n "$FAILED_STEP" ]; then
@@ -110,6 +115,12 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
         echo "Plugin path: $PLUGIN_PATH"
     fi
     echo "Database: $DATABASE_TYPE"
+fi
+
+# PHP version preflight: fail fast if runtime PHP is too old for the component.
+# This catches mismatches before composer install fails with opaque errors.
+if type homeboy_php_preflight &>/dev/null; then
+    homeboy_php_preflight "$PLUGIN_PATH"
 fi
 
 # wp-phpunit test library path (always from vendor)
