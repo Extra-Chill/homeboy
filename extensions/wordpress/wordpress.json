@@ -110,7 +110,10 @@
   },
   "hooks": {
     "post:deploy": [
-      "wp cache flush --path={{base_path}} --allow-root 2>/dev/null || true"
+      "wp cache flush --path={{base_path}} --allow-root 2>/dev/null || true",
+      "wp breeze purge --cache=local --path={{base_path}} --allow-root 2>/dev/null || true",
+      "wp w3-total-cache flush all --path={{base_path}} --allow-root 2>/dev/null || true",
+      "DEPLOY_OWNER=$(stat -c '%U:%G' {{install_dir}} 2>/dev/null || stat -f '%Su:%Sg' {{install_dir}} 2>/dev/null) && case \"$DEPLOY_OWNER\" in root:root) echo 'WARNING: {{install_dir}} is owned by root:root. PHP-FPM (www-data) may not be able to read plugin files.' && echo '  Fix: homeboy component set {{component_id}} remote_owner www-data:www-data' ;; esac || true"
     ]
   },
   "deploy": {
