@@ -6,8 +6,8 @@ use crate::component;
 use crate::error::{Error, Result};
 use crate::extension;
 use crate::project::{self, Project};
-use crate::server::{self, Server};
 use crate::server::SshClient;
+use crate::server::{self, Server};
 
 pub mod report;
 

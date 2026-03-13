@@ -3,8 +3,8 @@
 //! Core primitive used by both `fleet status` and `project status` commands
 //! to collect uptime, load, disk, memory, and service health from remote servers.
 
-use crate::project::Project;
 use super::SshClient;
+use crate::project::Project;
 use serde::Serialize;
 
 // ============================================================================
