@@ -38,7 +38,7 @@ impl ExtensionRunner {
     }
 
     /// Create a runner from a pre-resolved execution context.
-    pub fn for_context(execution_context: ExtensionExecutionContext) -> Self {
+    pub(crate) fn for_context(execution_context: ExtensionExecutionContext) -> Self {
         Self {
             execution_context,
             settings_overrides: Vec::new(),
@@ -79,7 +79,7 @@ impl ExtensionRunner {
     }
 
     /// Add an environment variable if the Option is Some.
-    pub fn env_opt(mut self, key: &str, value: &Option<String>) -> Self {
+    pub(crate) fn env_opt(mut self, key: &str, value: &Option<String>) -> Self {
         if let Some(v) = value {
             self.env_vars.push((key.to_string(), v.clone()));
         }

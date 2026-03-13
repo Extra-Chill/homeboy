@@ -9,7 +9,7 @@ use crate::server::{CommandOutput, SshClient};
 ///
 /// Ensures files have group read/write so the zip archive contains correct permissions.
 /// This addresses the issue where Claude Code sometimes creates files with 600 permissions.
-pub fn fix_local_permissions(local_path: &str) {
+pub(crate) fn fix_local_permissions(local_path: &str) {
     let quoted_path = shell::quote_path(local_path);
     let perms = defaults::load_defaults().permissions.local;
 
