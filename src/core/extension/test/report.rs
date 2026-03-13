@@ -5,15 +5,15 @@
 //! envelope and builder functions that assemble results into command-ready output.
 
 use crate::extension::test::{
-    CoverageOutput, DriftReport, TestAnalysis, TestBaselineComparison, TestCounts,
-    TestScopeOutput, TestSummaryOutput,
+    CoverageOutput, DriftReport, TestAnalysis, TestBaselineComparison, TestCounts, TestScopeOutput,
+    TestSummaryOutput,
 };
 use crate::refactor::AppliedRefactor;
 use serde::Serialize;
 
+use super::run::TestRunWorkflowResult;
 use super::scaffold::ScaffoldOutput;
 use super::workflow::{AutoFixDriftOutput, AutoFixDriftWorkflowResult, DriftWorkflowResult};
-use super::run::TestRunWorkflowResult;
 
 /// Unified output envelope for all test command modes.
 ///
@@ -97,9 +97,16 @@ pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i
 }
 
 /// Build output from an auto-fix drift workflow result.
-pub fn from_auto_fix_drift_workflow(result: AutoFixDriftWorkflowResult) -> (TestCommandOutput, i32) {
+pub fn from_auto_fix_drift_workflow(
+    result: AutoFixDriftWorkflowResult,
+) -> (TestCommandOutput, i32) {
     let status = if result.output.replacements > 0 || !result.hints.is_empty() {
-        if result.output.written { "fixed" } else { "planned" }.to_string()
+        if result.output.written {
+            "fixed"
+        } else {
+            "planned"
+        }
+        .to_string()
     } else {
         "passed".to_string()
     };
