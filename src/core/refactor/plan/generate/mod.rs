@@ -2,6 +2,7 @@ mod builders;
 mod convention_fixes;
 mod doc_fixes;
 mod duplicate_fixes;
+mod orphaned_test_fixes;
 mod signatures;
 
 use crate::code_audit::{AuditFinding, CodeAuditResult};
@@ -63,6 +64,7 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
     let mut new_files = Vec::new();
     generate_unreferenced_export_fixes(result, root, &mut fixes, &mut skipped);
     generate_duplicate_function_fixes(result, root, &mut fixes, &mut new_files, &mut skipped);
+    orphaned_test_fixes::generate_orphaned_test_fixes(result, root, &mut fixes, &mut skipped);
 
     let mut decompose_plans = Vec::new();
     for finding in &result.findings {
