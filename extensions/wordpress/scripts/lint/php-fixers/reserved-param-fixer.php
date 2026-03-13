@@ -36,7 +36,14 @@ if (!file_exists($path)) {
 // Structure: [ 'methodName' => [ 'old_param' => 'new_param', ... ], ... ]
 $GLOBALS['rename_manifest'] = [];
 
-// Pass 1: Rename parameters in declarations + bodies, build manifest
+// Safety: track which methods were skipped because they're public/protected
+// and could have external callers we can't verify.
+$GLOBALS['rename_skipped'] = [];
+
+// Pass 1: Rename parameters in declarations + bodies, build manifest.
+// Public/protected methods are SKIPPED (report-only) unless all call sites
+// can be verified within the scanned path. Private methods and standalone
+// functions are always safe to rename.
 $result = fixer_process_path($path, 'process_file_pass1');
 
 // Pass 2: Update named argument call sites across all files
@@ -44,6 +51,13 @@ $callsite_fixes = 0;
 if (!empty($GLOBALS['rename_manifest'])) {
     $callsite_result = fixer_process_path($path, 'process_file_pass2');
     $callsite_fixes = $callsite_result['total_fixes'];
+}
+
+// Pass 3: Verification — check for stale named argument call sites.
+// If any old-name patterns remain after Pass 2, warn loudly.
+$stale_warnings = [];
+if (!empty($GLOBALS['rename_manifest'])) {
+    $stale_warnings = verify_no_stale_named_args($path, $GLOBALS['rename_manifest']);
 }
 
 $total = $result['total_fixes'] + $callsite_fixes;
@@ -58,6 +72,22 @@ if ($total > 0) {
     echo "Reserved param fixer: Fixed " . implode(', ', $parts) . "\n";
 } else {
     echo "Reserved param fixer: No fixable parameters found\n";
+}
+
+// Report skipped public/protected methods
+if (!empty($GLOBALS['rename_skipped'])) {
+    echo "  Skipped (public/protected, report-only): " . count($GLOBALS['rename_skipped']) . "\n";
+    foreach ($GLOBALS['rename_skipped'] as $skip_info) {
+        echo "    - {$skip_info['method']}: \${$skip_info['old_param']} → \${$skip_info['new_param']} (has external callers)\n";
+    }
+}
+
+// Report stale named argument warnings
+if (!empty($stale_warnings)) {
+    echo "  WARNING: Found stale named argument call sites after rename:\n";
+    foreach ($stale_warnings as $warning) {
+        echo "    - {$warning}\n";
+    }
 }
 
 exit(0);
@@ -101,7 +131,93 @@ function get_reserved_param_map() {
 }
 
 /**
+ * Detect the visibility of a method from tokens preceding T_FUNCTION.
+ *
+ * @return string|null 'public', 'protected', 'private', or null (standalone function).
+ */
+function detect_method_visibility($tokens, $func_token_idx) {
+    for ($j = $func_token_idx - 1; $j >= 0; $j--) {
+        if (!is_array($tokens[$j])) {
+            break;
+        }
+        $code = $tokens[$j][0];
+        if ($code === T_PUBLIC) {
+            return 'public';
+        }
+        if ($code === T_PROTECTED) {
+            return 'protected';
+        }
+        if ($code === T_PRIVATE) {
+            return 'private';
+        }
+        if (in_array($code, [T_STATIC, T_ABSTRACT, T_FINAL, T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+            continue;
+        }
+        break;
+    }
+    return null;
+}
+
+/**
+ * Check if a method is inside a class that extends or implements something.
+ * Methods in such classes may be called from parent/child contexts with
+ * named arguments that we can't see.
+ */
+function is_in_inheriting_class($tokens, $position) {
+    $count = count($tokens);
+    // Scan forward from start, tracking class declarations.
+    $class_stack = [];
+    $brace_depth = 0;
+
+    for ($i = 0; $i < $count; $i++) {
+        if (is_array($tokens[$i])) {
+            if ($tokens[$i][0] === T_CLASS) {
+                $has_extends    = false;
+                $has_implements = false;
+                for ($j = $i + 1; $j < $count; $j++) {
+                    if (!is_array($tokens[$j]) && $tokens[$j] === '{') {
+                        break;
+                    }
+                    if (is_array($tokens[$j]) && $tokens[$j][0] === T_EXTENDS) {
+                        $has_extends = true;
+                    }
+                    if (is_array($tokens[$j]) && $tokens[$j][0] === T_IMPLEMENTS) {
+                        $has_implements = true;
+                    }
+                }
+                $class_stack[] = [
+                    'depth'      => $brace_depth,
+                    'inherits'   => $has_extends || $has_implements,
+                ];
+            }
+        } else {
+            if ($tokens[$i] === '{') {
+                $brace_depth++;
+            } elseif ($tokens[$i] === '}') {
+                $brace_depth--;
+                while (!empty($class_stack) && end($class_stack)['depth'] >= $brace_depth) {
+                    array_pop($class_stack);
+                }
+            }
+        }
+
+        if ($i === $position) {
+            return !empty($class_stack) && end($class_stack)['inherits'];
+        }
+    }
+
+    return false;
+}
+
+/**
  * Pass 1: Process a single PHP file — rename declarations + bodies, record manifest.
+ *
+ * Safety rules:
+ * - Private methods: always safe to rename (callers are in the same file).
+ * - Standalone functions (no class): safe to rename within the scanned path.
+ * - Public/protected methods in classes that extend/implement: SKIP (report-only).
+ *   These may have callers in parent/child classes or external code that use
+ *   PHP 8 named arguments with the old parameter name.
  */
 function process_file_pass1($filepath) {
     $content = file_get_contents($filepath);
@@ -144,6 +260,24 @@ function process_file_pass1($filepath) {
         // Extract parameter names from the parameter list
         $renames = find_reserved_params($tokens, $paren_open, $paren_close);
         if (empty($renames)) {
+            continue;
+        }
+
+        // Safety check: skip public/protected methods in inheriting classes.
+        // These could be called with named arguments from code we can't see
+        // (parent classes, child classes, external consumers).
+        $visibility = detect_method_visibility($tokens, $i);
+        if (in_array($visibility, ['public', 'protected'], true) && is_in_inheriting_class($tokens, $i)) {
+            // Report-only: record what we would have renamed, but don't touch the code.
+            foreach ($renames as $old_var => $new_var) {
+                $method_display = $func_name ?? '(closure)';
+                $GLOBALS['rename_skipped'][] = [
+                    'method'    => $method_display,
+                    'old_param' => substr($old_var, 1),
+                    'new_param' => substr($new_var, 1),
+                    'file'      => $filepath,
+                ];
+            }
             continue;
         }
 
@@ -595,4 +729,71 @@ function find_matching_brace($tokens, $open, $count) {
         }
     }
     return null;
+}
+
+/**
+ * Verify no stale named argument call sites remain after Pass 2.
+ *
+ * Scans all PHP files in the path for patterns like "old_name:" that match
+ * renamed parameters. Returns a list of warning strings for any stale sites found.
+ *
+ * @param string $path     Root path to scan.
+ * @param array  $manifest The rename manifest from Pass 1.
+ * @return array List of warning strings.
+ */
+function verify_no_stale_named_args($path, $manifest) {
+    $warnings = [];
+
+    // Build list of old arg names to search for
+    $search_patterns = [];
+    foreach ($manifest as $method_name => $renames) {
+        foreach ($renames as $old_arg => $new_arg) {
+            $search_patterns[$old_arg] = [
+                'method'  => $method_name,
+                'new_arg' => $new_arg,
+            ];
+        }
+    }
+
+    if (empty($search_patterns)) {
+        return $warnings;
+    }
+
+    // Use grep to find potential stale call sites
+    foreach ($search_patterns as $old_arg => $info) {
+        // Search for "old_arg:" pattern (named argument syntax)
+        $cmd = sprintf(
+            'grep -rn --include="*.php" "%s\s*:" %s 2>/dev/null | grep -v vendor/ | grep -v node_modules/',
+            preg_quote($old_arg, '/'),
+            escapeshellarg($path)
+        );
+
+        $output = shell_exec($cmd);
+        if ($output === null || trim($output) === '') {
+            continue;
+        }
+
+        foreach (explode("\n", trim($output)) as $line) {
+            // Quick heuristic: check if this looks like a named argument context
+            // (inside a function call, preceded by ( or ,)
+            if (preg_match('/\b' . preg_quote($old_arg, '/') . '\s*:/', $line)) {
+                // Exclude function declarations, array keys, ternary, switch cases, goto labels
+                if (preg_match('/function\s/', $line)) {
+                    continue;
+                }
+                if (preg_match("/['\"]" . preg_quote($old_arg, '/') . "['\"]/", $line)) {
+                    continue; // String literal, not a named arg
+                }
+                if (preg_match('/^\s*\/\//', $line)) {
+                    continue; // Comment line
+                }
+                // Extract file:line for the warning
+                if (preg_match('/^(.+?:\d+):/', $line, $m)) {
+                    $warnings[] = "{$m[1]} — potential stale named arg '{$old_arg}:' (renamed to '{$info['new_arg']}:' for method {$info['method']})";
+                }
+            }
+        }
+    }
+
+    return $warnings;
 }

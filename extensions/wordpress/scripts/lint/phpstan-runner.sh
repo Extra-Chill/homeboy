@@ -25,12 +25,27 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "HOMEBOY_PHPSTAN_LEVEL=${HOMEBOY_PHPSTAN_LEVEL:-NOT_SET}"
 fi
 
-# Skip if explicitly requested
+# Critical PHPStan error identifiers that indicate guaranteed runtime fatals.
+# These must NEVER be skipped, even with --skip-checks or HOMEBOY_SKIP_PHPSTAN=1.
+# Skipping these allows code that will crash on first request to reach production.
+CRITICAL_PHPSTAN_IDENTIFIERS="function.notFound|class.notFound"
+
+# Skip mode: when PHPStan is explicitly skipped, we still run a critical-only check.
+# This catches guaranteed runtime fatals (undefined functions/classes) while
+# respecting the user's intent to skip style-level static analysis.
+PHPSTAN_CRITICAL_ONLY=0
 if [[ "${HOMEBOY_SKIP_PHPSTAN:-}" == "1" ]]; then
-    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: Skipping PHPStan (HOMEBOY_SKIP_PHPSTAN=1)"
+    if [[ "${HOMEBOY_SKIP_ALL_CHECKS:-}" == "1" ]]; then
+        # Explicit nuclear option — skip everything including critical checks.
+        # This is dangerous and should only be used in emergencies.
+        echo "WARNING: Skipping ALL PHPStan checks including fatal-class detection (HOMEBOY_SKIP_ALL_CHECKS=1)"
+        echo "         This may allow code with undefined functions/classes to pass validation."
+        exit 0
     fi
-    exit 0
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: PHPStan skipped but running critical-only check for fatal-class errors"
+    fi
+    PHPSTAN_CRITICAL_ONLY=1
 fi
 
 # Determine execution context
@@ -323,6 +338,10 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
 
             $level = $argv[1] ?? "5";
             $componentPath = $argv[2] ?? "";
+            $criticalOnly = ($argv[3] ?? "0") === "1";
+            $criticalPattern = $argv[4] ?? "function.notFound|class.notFound";
+
+            $criticalIdentifiers = explode("|", $criticalPattern);
 
             $totals = $json["totals"] ?? [];
             $errorCount = $totals["file_errors"] ?? 0;
@@ -330,24 +349,63 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
 
             if ($errorCount === 0) exit;
 
+            // When in critical-only mode, filter to just fatal-class errors
+            $filteredFiles = [];
+            $filteredErrorCount = 0;
+
+            foreach ($json["files"] ?? [] as $filePath => $data) {
+                $filteredMessages = [];
+                foreach ($data["messages"] ?? [] as $msg) {
+                    $identifier = $msg["identifier"] ?? "unknown";
+                    if ($criticalOnly) {
+                        $isCritical = false;
+                        foreach ($criticalIdentifiers as $crit) {
+                            if ($identifier === trim($crit)) {
+                                $isCritical = true;
+                                break;
+                            }
+                        }
+                        if (!$isCritical) continue;
+                    }
+                    $filteredMessages[] = $msg;
+                    $filteredErrorCount++;
+                }
+                if (!empty($filteredMessages)) {
+                    $filteredFiles[$filePath] = $filteredMessages;
+                }
+            }
+
+            if ($criticalOnly && $filteredErrorCount === 0) {
+                // No critical errors — skip output entirely
+                exit;
+            }
+
+            $displayErrorCount = $criticalOnly ? $filteredErrorCount : $errorCount;
+            $displayFileCount = $criticalOnly ? count($filteredFiles) : $fileCount;
+
             // Summary header
             echo "============================================\n";
-            echo "PHPSTAN SUMMARY: " . $errorCount . " errors at level " . $level . "\n";
-            echo "Files with issues: " . $fileCount . "\n";
+            if ($criticalOnly) {
+                echo "PHPSTAN CRITICAL: " . $displayErrorCount . " fatal-class error(s) found\n";
+                echo "These indicate guaranteed runtime fatals and cannot be skipped.\n";
+            } else {
+                echo "PHPSTAN SUMMARY: " . $displayErrorCount . " errors at level " . $level . "\n";
+            }
+            echo "Files with issues: " . $displayFileCount . "\n";
             echo "============================================\n";
 
             // Error details section
             echo "\nERRORS:\n";
             $identifiers = [];
 
-            foreach ($json["files"] ?? [] as $filePath => $data) {
+            foreach ($filteredFiles as $filePath => $messages) {
                 // Strip component path prefix for cleaner output
                 $displayPath = $filePath;
                 if ($componentPath && strpos($filePath, $componentPath) === 0) {
                     $displayPath = ltrim(substr($filePath, strlen($componentPath)), "/");
                 }
 
-                foreach ($data["messages"] ?? [] as $msg) {
+                foreach ($messages as $msg) {
                     $line = $msg["line"] ?? "?";
                     $message = $msg["message"] ?? "Unknown error";
                     $identifier = $msg["identifier"] ?? "unknown";
@@ -372,7 +430,13 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                     if ($count >= 10) break;
                 }
             }
-        ' "$PHPSTAN_LEVEL" "$PLUGIN_PATH" 2>/dev/null)
+
+            // In critical-only mode, signal the caller that critical errors were found
+            // by writing a marker that the shell can check
+            if ($criticalOnly && $filteredErrorCount > 0) {
+                echo "\nCRITICAL_ERRORS_FOUND=" . $filteredErrorCount . "\n";
+            }
+        ' "$PHPSTAN_LEVEL" "$PLUGIN_PATH" "$PHPSTAN_CRITICAL_ONLY" "$CRITICAL_PHPSTAN_IDENTIFIERS" 2>/dev/null)
 
         if [ -n "$parsed_output" ]; then
             echo ""
@@ -424,6 +488,21 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     fi
 
     # Exit with appropriate code
+    if [ "$PHPSTAN_CRITICAL_ONLY" -eq 1 ]; then
+        # In critical-only mode, only fail if critical errors were found
+        if echo "$parsed_output" | grep -q "CRITICAL_ERRORS_FOUND="; then
+            echo ""
+            echo "PHPStan critical check FAILED — fatal-class errors detected"
+            echo "These errors indicate undefined functions or classes that will crash at runtime."
+            echo "Fix these before releasing, even with --skip-checks."
+            exit 1
+        else
+            echo ""
+            echo "PHPStan critical check passed (style checks skipped)"
+            exit 0
+        fi
+    fi
+
     if [ "$json_exit" -eq 0 ]; then
         echo ""
         echo "PHPStan analysis passed"
@@ -436,6 +515,77 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
 fi
 
 # Full report mode (default)
+# In critical-only mode, we use JSON output to filter for fatal-class errors.
+# In normal mode, we show the full PHPStan text report.
+if [ "$PHPSTAN_CRITICAL_ONLY" -eq 1 ]; then
+    echo "Running PHPStan critical-only check (style checks skipped)..."
+    set +e
+    stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
+    json_output=$("$PHPSTAN_BIN" "${phpstan_args[@]}" --error-format=json 2>"$stderr_file")
+    full_exit=$?
+    stderr_output=$(cat "$stderr_file")
+    rm -f "$stderr_file"
+    set -e
+
+    # Check for critical errors in JSON output
+    if [ -n "$json_output" ] && command -v php &> /dev/null; then
+        critical_count=$(echo "$json_output" | php -r '
+            $json = json_decode(file_get_contents("php://stdin"), true);
+            if (!$json) { echo "0"; exit; }
+            $criticalPattern = $argv[1] ?? "function.notFound|class.notFound";
+            $criticalIds = explode("|", $criticalPattern);
+            $count = 0;
+            foreach ($json["files"] ?? [] as $data) {
+                foreach ($data["messages"] ?? [] as $msg) {
+                    $id = $msg["identifier"] ?? "";
+                    foreach ($criticalIds as $crit) {
+                        if ($id === trim($crit)) { $count++; break; }
+                    }
+                }
+            }
+            echo $count;
+        ' "$CRITICAL_PHPSTAN_IDENTIFIERS" 2>/dev/null || echo "0")
+
+        if [ "$critical_count" -gt 0 ]; then
+            echo ""
+            echo "============================================"
+            echo "PHPSTAN CRITICAL: $critical_count fatal-class error(s) found"
+            echo "These indicate guaranteed runtime fatals and cannot be skipped."
+            echo "============================================"
+            # Show the critical errors
+            echo "$json_output" | php -r '
+                $json = json_decode(file_get_contents("php://stdin"), true);
+                if (!$json) exit;
+                $criticalPattern = $argv[1] ?? "function.notFound|class.notFound";
+                $componentPath = $argv[2] ?? "";
+                $criticalIds = explode("|", $criticalPattern);
+                foreach ($json["files"] ?? [] as $filePath => $data) {
+                    $displayPath = $filePath;
+                    if ($componentPath && strpos($filePath, $componentPath) === 0) {
+                        $displayPath = ltrim(substr($filePath, strlen($componentPath)), "/");
+                    }
+                    foreach ($data["messages"] ?? [] as $msg) {
+                        $id = $msg["identifier"] ?? "";
+                        $isCritical = false;
+                        foreach ($criticalIds as $crit) {
+                            if ($id === trim($crit)) { $isCritical = true; break; }
+                        }
+                        if (!$isCritical) continue;
+                        echo "  " . $displayPath . ":" . ($msg["line"] ?? "?") . "\n";
+                        echo "    " . ($msg["message"] ?? "Unknown") . "\n";
+                        echo "    [" . $id . "]\n\n";
+                    }
+                }
+            ' "$CRITICAL_PHPSTAN_IDENTIFIERS" "$PLUGIN_PATH" 2>/dev/null
+            echo "Fix these before releasing, even with --skip-checks."
+            exit 1
+        fi
+    fi
+
+    echo "PHPStan critical check passed (style checks skipped)"
+    exit 0
+fi
+
 set +e
 stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
 "$PHPSTAN_BIN" "${phpstan_args[@]}" 2>"$stderr_file"

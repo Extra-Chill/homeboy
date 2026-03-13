@@ -131,6 +131,7 @@ READDIR_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/readdir-fixer.php"
 COMMENTED_CODE_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/commented-code-fixer.php"
 WP_ALTERNATIVES_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/wp-alternatives-fixer.php"
 WP_FILESYSTEM_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/wp-filesystem-fixer.php"
+TEXT_DOMAIN_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/text-domain-fixer.php"
 PHPCS_IGNORE_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/phpcs-ignore-fixer.php"
 PHPCS_CONFIG="${EXTENSION_PATH}/phpcs.xml.dist"
 
@@ -263,6 +264,12 @@ print(json.dumps(results))
         run_fixer "commented-code" "$COMMENTED_CODE_FIXER" "$lint_target"
         run_fixer "wp-alternatives" "$WP_ALTERNATIVES_FIXER" "$lint_target"
         run_fixer "wp-filesystem" "$WP_FILESYSTEM_FIXER" "$lint_target"
+
+        # Text domain fixer: replace wrong text domains in i18n function calls.
+        # Needs --text-domain arg if detected from plugin header.
+        if [ -n "$TEXT_DOMAIN" ]; then
+            run_fixer "text-domain" "$TEXT_DOMAIN_FIXER" "$lint_target" --text-domain="$TEXT_DOMAIN"
+        fi
     done
 
     # Run reserved keyword parameter name fixer ($default -> $default_value, etc.)
