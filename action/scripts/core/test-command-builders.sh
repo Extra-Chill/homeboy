@@ -31,7 +31,7 @@ assert_equals \
   "lint includes workspace path"
 
 assert_equals \
-  "homeboy lint data-machine --path /tmp/workspace --output /tmp/workspace/out.json" \
+  "homeboy --output /tmp/workspace/out.json lint data-machine --path /tmp/workspace" \
   "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
   "lint includes structured output path"
 
@@ -44,7 +44,7 @@ assert_equals \
   "lint keeps path with changed-since"
 
 assert_equals \
-  "homeboy lint data-machine --path /tmp/workspace --output /tmp/workspace/out.json --changed-since origin/main" \
+  "homeboy --output /tmp/workspace/out.json lint data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
   "lint keeps output path with changed-since"
 
@@ -65,7 +65,7 @@ assert_equals \
   "run command appends extra args"
 
 assert_equals \
-  "homeboy audit data-machine --path /tmp/workspace --output /tmp/workspace/out.json --changed-since origin/main --format json" \
+  "homeboy --output /tmp/workspace/out.json audit data-machine --path /tmp/workspace --changed-since origin/main --format json" \
   "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
   "run command keeps output path before extra args"
 
@@ -75,7 +75,7 @@ assert_equals \
   "autofix refactor lint keeps path and changed-since"
 
 assert_equals \
-  "homeboy refactor data-machine --from lint --write --path /tmp/workspace --output /tmp/workspace/out.json --changed-since origin/main --format json" \
+  "homeboy --output /tmp/workspace/out.json refactor data-machine --from lint --write --path /tmp/workspace --changed-since origin/main --format json" \
   "$(build_autofix_command "refactor --from lint --write" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
   "autofix refactor lint keeps output path and changed-since"
 

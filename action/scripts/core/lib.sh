@@ -150,15 +150,18 @@ build_run_command() {
   local workspace="$3"
   local output_file="${4:-}"
   local full_cmd
+  local global_flags=""
 
-  if [[ "${cmd}" == refactor* ]]; then
-    full_cmd="homeboy refactor ${component_id} ${cmd#refactor } --path ${workspace}"
-  else
-    full_cmd="homeboy ${cmd} ${component_id} --path ${workspace}"
+  # --output is a global flag and must appear before the subcommand
+  # (clap global args don't propagate when placed after positional args)
+  if [ -n "${output_file}" ]; then
+    global_flags="--output ${output_file} "
   fi
 
-  if [ -n "${output_file}" ]; then
-    full_cmd="${full_cmd} --output ${output_file}"
+  if [[ "${cmd}" == refactor* ]]; then
+    full_cmd="homeboy ${global_flags}refactor ${component_id} ${cmd#refactor } --path ${workspace}"
+  else
+    full_cmd="homeboy ${global_flags}${cmd} ${component_id} --path ${workspace}"
   fi
 
   local scope
@@ -190,15 +193,17 @@ build_autofix_command() {
   local workspace="$3"
   local output_file="${4:-}"
   local full_cmd
+  local global_flags=""
 
-  if [[ "${fix_cmd}" == refactor* ]]; then
-    full_cmd="homeboy refactor ${component_id} ${fix_cmd#refactor } --path ${workspace}"
-  else
-    full_cmd="homeboy ${fix_cmd} ${component_id} --path ${workspace}"
+  # --output is a global flag and must appear before the subcommand
+  if [ -n "${output_file}" ]; then
+    global_flags="--output ${output_file} "
   fi
 
-  if [ -n "${output_file}" ]; then
-    full_cmd="${full_cmd} --output ${output_file}"
+  if [[ "${fix_cmd}" == refactor* ]]; then
+    full_cmd="homeboy ${global_flags}refactor ${component_id} ${fix_cmd#refactor } --path ${workspace}"
+  else
+    full_cmd="homeboy ${global_flags}${fix_cmd} ${component_id} --path ${workspace}"
   fi
 
   local scope

@@ -35,7 +35,7 @@ run_release_command() {
   shift
   local exit_code=0
   set +e
-  homeboy release "$@" --output "${output_file}"
+  homeboy --output "${output_file}" release "$@"
   exit_code=$?
   set -e
   if [ ! -s "${output_file}" ]; then
