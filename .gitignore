@@ -15,4 +15,7 @@ dist-manifest.json
 # OS
 .DS_Store
 
+# CI artifacts
+.release-last-failed
+
 # Keep Cargo.lock for reproducible builds
