@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.9.3] - 2026-03-13
+
+### Fixed
+- Warn when deployed files are root:root in wp-content (#128)
+- Purge Breeze and W3 Total Cache after deploy (#127)
+- PHP version preflight check fails fast on runtime mismatch (#95)
+- deploy safety and PHP version preflight
+
 ## [2.9.2] - 2026-03-13
 
 ### Added
