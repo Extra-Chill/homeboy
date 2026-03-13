@@ -1,6 +1,8 @@
 use crate::error::Result;
 
-use super::helpers::{current_version, detect_install_method, fetch_latest_version, version_is_newer};
+use super::helpers::{
+    current_version, detect_install_method, fetch_latest_version, version_is_newer,
+};
 use super::types::VersionCheck;
 
 pub fn check_for_updates() -> Result<VersionCheck> {
