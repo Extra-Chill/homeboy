@@ -725,4 +725,200 @@ final class HomeboyCLI {
         }
         return try await cli.executeCommand(args, dataType: LogsOutput.self, source: "Logs Search", timeout: 60)
     }
+
+    // MARK: - Audit Commands
+
+    /// Run code audit on a component
+    func auditCode(componentId: String, fix: Bool = false, write: Bool = false) async throws -> AuditOutput {
+        var args = ["audit", "code", componentId]
+        if fix {
+            args.append("--fix")
+        }
+        if write {
+            args.append("--write")
+        }
+        return try await cli.executeCommand(args, dataType: AuditOutput.self, source: "Audit Code", timeout: 120)
+    }
+
+    /// Run documentation audit on a component
+    func auditDocs(componentId: String, fix: Bool = false) async throws -> AuditOutput {
+        var args = ["audit", "docs", componentId]
+        if fix {
+            args.append("--fix")
+        }
+        return try await cli.executeCommand(args, dataType: AuditOutput.self, source: "Audit Docs", timeout: 60)
+    }
+
+    /// Run structural audit on a component
+    func auditStructure(componentId: String) async throws -> AuditOutput {
+        try await cli.executeCommand(
+            ["audit", "structure", componentId],
+            dataType: AuditOutput.self,
+            source: "Audit Structure",
+            timeout: 60
+        )
+    }
+
+    // MARK: - Refactor Commands
+
+    /// Generate a refactoring plan for a component
+    func refactorPlan(componentId: String, from: String? = nil) async throws -> RefactorPlanOutput {
+        var args = ["refactor", componentId]
+        if let fromSource = from {
+            args.append(contentsOf: ["--from", fromSource])
+        }
+        return try await cli.executeCommand(args, dataType: RefactorPlanOutput.self, source: "Refactor Plan", timeout: 60)
+    }
+
+    /// Apply a refactoring to a component
+    func refactorApply(componentId: String, write: Bool = true) async throws -> RefactorResult {
+        try await cli.executeCommand(
+            ["refactor", componentId, "--write"],
+            dataType: RefactorResult.self,
+            source: "Refactor Apply",
+            timeout: 120
+        )
+    }
+
+    /// Decompose a large source file into smaller modules
+    func refactorDecompose(componentId: String, file: String) async throws -> RefactorResult {
+        try await cli.executeCommand(
+            ["refactor", "decompose", componentId, file],
+            dataType: RefactorResult.self,
+            source: "Refactor Decompose",
+            timeout: 120
+        )
+    }
+
+    /// Rename a term across the codebase
+    func refactorRename(componentId: String, from: String, to: String, write: Bool = false) async throws -> RefactorResult {
+        var args = ["refactor", "rename", componentId, "--from", from, "--to", to]
+        if write {
+            args.append("--write")
+        }
+        return try await cli.executeCommand(args, dataType: RefactorResult.self, source: "Refactor Rename", timeout: 120)
+    }
+
+    // MARK: - Supports Command
+
+    /// Check if CLI supports a specific capability
+    func supports(command: String, option: String? = nil) async throws -> Bool {
+        var args = ["supports", command]
+        if let opt = option {
+            args.append(opt)
+        }
+        let output: SupportsOutput = try await cli.executeCommand(args, dataType: SupportsOutput.self, source: "Supports Check", timeout: 10)
+        return output.supported ?? false
+    }
+
+    // MARK: - Undo Command
+
+    /// Undo the last write operation
+    func undo(snapshotId: String? = nil) async throws -> UndoOutput {
+        var args = ["undo"]
+        if let id = snapshotId {
+            args.append(contentsOf: ["--id", id])
+        }
+        return try await cli.executeCommand(args, dataType: UndoOutput.self, source: "Undo", timeout: 30)
+    }
+
+    /// List available undo snapshots
+    func undoList() async throws -> [UndoSnapshot] {
+        let output: UndoListOutput = try await cli.executeCommand(
+            ["undo", "list"],
+            dataType: UndoListOutput.self,
+            source: "Undo List",
+            timeout: 10
+        )
+        return output.snapshots ?? []
+    }
+}
+
+// MARK: - New Command Output Types
+
+/// Output from audit commands (code, docs, structure)
+struct AuditOutput: Decodable {
+    let command: String
+    let componentId: String?
+    let findings: [AuditFinding]?
+    let summary: AuditSummary?
+    let fixed: Int?
+    let unchanged: Int?
+}
+
+struct AuditFinding: Decodable, Identifiable {
+    let id: String
+    let severity: String  // "error", "warning", "info"
+    let category: String
+    let message: String
+    let file: String?
+    let line: Int?
+    let suggestion: String?
+}
+
+struct AuditSummary: Decodable {
+    let total: Int
+    let errors: Int
+    let warnings: Int
+    let info: Int
+}
+
+/// Output from refactor plan command
+struct RefactorPlanOutput: Decodable {
+    let command: String
+    let componentId: String?
+    let plan: RefactorPlan?
+}
+
+struct RefactorPlan: Decodable {
+    let id: String
+    let description: String
+    let changes: [RefactorChange]?
+    let estimatedImpact: String?
+}
+
+struct RefactorChange: Decodable, Identifiable {
+    let id: String
+    let type: String  // "rename", "move", "decompose", "add", etc.
+    let description: String
+    let files: [String]?
+}
+
+/// Output from refactor apply/decompose/rename commands
+struct RefactorResult: Decodable {
+    let command: String
+    let componentId: String?
+    let success: Bool
+    let changesApplied: Int?
+    let filesModified: [String]?
+    let errors: [String]?
+}
+
+/// Output from supports command
+struct SupportsOutput: Decodable {
+    let command: String
+    let supported: Bool?
+    let message: String?
+}
+
+/// Output from undo command
+struct UndoOutput: Decodable {
+    let command: String
+    let success: Bool
+    let restoredSnapshot: UndoSnapshot?
+    let message: String?
+}
+
+/// Output from undo list command
+struct UndoListOutput: Decodable {
+    let command: String
+    let snapshots: [UndoSnapshot]?
+}
+
+struct UndoSnapshot: Decodable, Identifiable {
+    let id: String
+    let command: String
+    let timestamp: String
+    let componentId: String?
+    let description: String?
 }
