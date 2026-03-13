@@ -48,16 +48,11 @@ if [[ "${HOMEBOY_SKIP_PHPSTAN:-}" == "1" ]]; then
     PHPSTAN_CRITICAL_ONLY=1
 fi
 
-# Determine execution context
-if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
-    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
-    COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-.}"
-    PLUGIN_PATH="$COMPONENT_PATH"
-else
-    EXTENSION_PATH="$(dirname "$(dirname "$SCRIPT_DIR")")"
-    COMPONENT_PATH="$(pwd)"
-    PLUGIN_PATH="$COMPONENT_PATH"
-fi
+# Resolve execution context (shared helper)
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+# shellcheck source=../lib/resolve-context.sh
+source "${RESOLVE_CONTEXT_HELPER}"
+homeboy_resolve_context
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Extension path: $EXTENSION_PATH"
@@ -73,14 +68,11 @@ DEPENDENCY_CONFIG=""
 
 homeboy_mktemp() {
     local template="$1"
-    local candidate_dir
+    local tmpdir="${HOMEBOY_CACHE_DIR:-${TMPDIR:-/tmp}}"
 
-    for candidate_dir in "${TMPDIR:-}" /root/tmp /var/tmp /tmp; do
-        [ -z "$candidate_dir" ] && continue
-        if [ -d "$candidate_dir" ] && [ -w "$candidate_dir" ]; then
-            mktemp "${candidate_dir}/${template}" 2>/dev/null && return 0
-        fi
-    done
+    if [ -d "$tmpdir" ] && [ -w "$tmpdir" ]; then
+        mktemp "${tmpdir}/${template}" 2>/dev/null && return 0
+    fi
 
     mktemp 2>/dev/null
 }

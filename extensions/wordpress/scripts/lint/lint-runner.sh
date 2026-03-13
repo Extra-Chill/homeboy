@@ -62,16 +62,11 @@ if [ -n "${HOMEBOY_CATEGORY:-}" ]; then
     fi
 fi
 
-# Determine execution context
-if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
-    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
-    COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-.}"
-    PLUGIN_PATH="$COMPONENT_PATH"
-else
-    EXTENSION_PATH="$(dirname "$SCRIPT_DIR")"
-    COMPONENT_PATH="$(pwd)"
-    PLUGIN_PATH="$COMPONENT_PATH"
-fi
+# Resolve execution context (shared helper)
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+# shellcheck source=../lib/resolve-context.sh
+source "${RESOLVE_CONTEXT_HELPER}"
+homeboy_resolve_context
 
 # Determine lint target (file, glob, or full component)
 # Use array to properly handle paths with spaces
@@ -146,27 +141,30 @@ if [ ! -f "$PHPCS_CONFIG" ]; then
     exit 1
 fi
 
-# Auto-detect text domain from plugin header (required for i18n validation)
-TEXT_DOMAIN=""
-MAIN_PLUGIN_FILE=$(find "$PLUGIN_PATH" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
-if [ -n "$MAIN_PLUGIN_FILE" ]; then
-    # Check if Text Domain header exists before extracting
-    if ! grep -q "Text Domain:" "$MAIN_PLUGIN_FILE" 2>/dev/null; then
-        echo "" >&2
-        echo "============================================" >&2
-        echo "ERROR: Missing Text Domain header" >&2
-        echo "============================================" >&2
-        echo "File: $MAIN_PLUGIN_FILE" >&2
-        echo "" >&2
-        echo "Add this line to your plugin header:" >&2
-        echo "  * Text Domain: your-plugin-slug" >&2
-        echo "" >&2
-        exit 1
-    fi
-    TEXT_DOMAIN=$(grep -m1 "Text Domain:" "$MAIN_PLUGIN_FILE" | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
-    if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
-    fi
+# Auto-detect text domain from plugin/theme header (shared helper)
+DETECT_COMPONENT_HELPER="${HOMEBOY_RUNTIME_DETECT_COMPONENT:-${SCRIPT_DIR}/../lib/detect-component.sh}"
+# shellcheck source=../lib/detect-component.sh
+source "${DETECT_COMPONENT_HELPER}"
+homeboy_detect_component "$PLUGIN_PATH" || true
+
+TEXT_DOMAIN="${HOMEBOY_COMPONENT_TEXT_DOMAIN:-}"
+
+# Require text domain header for plugins (themes use stylesheet slug)
+if [ "$HOMEBOY_COMPONENT_TYPE" = "plugin" ] && [ -z "$TEXT_DOMAIN" ] && [ -n "$HOMEBOY_COMPONENT_MAIN_FILE" ]; then
+    echo "" >&2
+    echo "============================================" >&2
+    echo "ERROR: Missing Text Domain header" >&2
+    echo "============================================" >&2
+    echo "File: $HOMEBOY_COMPONENT_MAIN_FILE" >&2
+    echo "" >&2
+    echo "Add this line to your plugin header:" >&2
+    echo "  * Text Domain: your-plugin-slug" >&2
+    echo "" >&2
+    exit 1
+fi
+
+if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+    echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
 fi
 
 # Auto-detect PHP version from composer.json (overrides phpcs.xml.dist default)
