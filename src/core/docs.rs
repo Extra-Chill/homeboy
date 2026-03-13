@@ -68,10 +68,7 @@ pub fn generate_from_spec(spec: &GenerateSpec) -> Result<GenerateResult, Error> 
         if let Some(parent) = file_path.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent).map_err(|e| {
-                    Error::internal_io(
-                        e.to_string(),
-                        Some(format!("create {}", parent.display())),
-                    )
+                    Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
                 })?;
             }
         }
@@ -155,10 +152,7 @@ pub fn generate_from_spec(spec: &GenerateSpec) -> Result<GenerateResult, Error> 
 ///
 /// Groups features by extension-configured labels, then renders each group
 /// into the appropriate doc file using the configured template and heading.
-pub fn generate_from_audit(
-    audit: &AuditResult,
-    dry_run: bool,
-) -> Result<GenerateResult, Error> {
+pub fn generate_from_audit(audit: &AuditResult, dry_run: bool) -> Result<GenerateResult, Error> {
     if audit.detected_features.is_empty() {
         return Err(Error::validation_invalid_argument(
             "from-audit",

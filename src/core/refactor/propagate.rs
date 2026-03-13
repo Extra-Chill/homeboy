@@ -353,9 +353,8 @@ fn apply_propagate_edits(edits: &[PropagateEdit], root: &Path) -> Result<(), Err
 
     for (file, file_edits) in &edits_by_file {
         let file_path = root.join(file);
-        let content = std::fs::read_to_string(&file_path).map_err(|e| {
-            Error::internal_io(e.to_string(), Some(format!("read {}", file)))
-        })?;
+        let content = std::fs::read_to_string(&file_path)
+            .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", file))))?;
 
         let lines: Vec<&str> = content.lines().collect();
         let mut sorted_edits: Vec<&&PropagateEdit> = file_edits.iter().collect();
@@ -378,9 +377,8 @@ fn apply_propagate_edits(edits: &[PropagateEdit], root: &Path) -> Result<(), Err
             new_content
         };
 
-        std::fs::write(&file_path, &final_content).map_err(|e| {
-            Error::internal_io(e.to_string(), Some(format!("write {}", file)))
-        })?;
+        std::fs::write(&file_path, &final_content)
+            .map_err(|e| Error::internal_io(e.to_string(), Some(format!("write {}", file))))?;
 
         crate::log_status!("write", "{} ({} edits)", file, file_edits.len());
     }

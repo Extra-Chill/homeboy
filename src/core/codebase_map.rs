@@ -339,10 +339,7 @@ pub fn build_map(config: &MapConfig) -> Result<CodebaseMap, Error> {
 const MODULE_SPLIT_THRESHOLD: usize = 30;
 
 /// Render a [`CodebaseMap`] into markdown files on disk. Returns list of created file paths.
-pub fn render_map_to_markdown(
-    map: &CodebaseMap,
-    output_dir: &Path,
-) -> Result<Vec<String>, Error> {
+pub fn render_map_to_markdown(map: &CodebaseMap, output_dir: &Path) -> Result<Vec<String>, Error> {
     let mut created = Vec::new();
 
     fs::create_dir_all(output_dir).map_err(|e| {
@@ -413,9 +410,8 @@ fn write_file(path: &Path, content: &str) -> Result<(), Error> {
             Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
         })?;
     }
-    fs::write(path, content).map_err(|e| {
-        Error::internal_io(e.to_string(), Some(format!("write {}", path.display())))
-    })
+    fs::write(path, content)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("write {}", path.display()))))
 }
 
 fn render_index(map: &CodebaseMap) -> String {
