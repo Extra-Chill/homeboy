@@ -1,6 +1,6 @@
 # Homeboy
 
-The code factory that audits for slop, lints, tests, refactors, updates your changelog, and releases a new version in CI.
+The code factory that audits for slop, lints, tests, refactors, updates your changelog, and releases a new version in CI. If it can be fixed mechanically, Homeboy will find it and fix it without human input.
 
 ## How It Works
 
