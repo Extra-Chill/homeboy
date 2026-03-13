@@ -614,8 +614,8 @@ pub fn hello() {}
         assert_eq!(imports[1].module_path, "crate::core::fixer");
         assert_eq!(imports[1].imported_names, vec!["insertion", "Fix"]);
 
-        // Third import: module-level
-        assert_eq!(imports[2].module_path, "crate::utils");
+        // Third import: module-level use
+        assert_eq!(imports[2].module_path, "crate::extension");
         assert_eq!(imports[2].imported_names, vec!["grammar"]);
     }
 

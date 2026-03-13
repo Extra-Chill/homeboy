@@ -437,10 +437,11 @@ mod tests {
 
     #[test]
     fn discover_from_portable_creates_component_from_homeboy_json() {
-        let dir = std::env::temp_dir().join("homeboy_test_discover");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
 
         let config = serde_json::json!({
+            "id": "test-discover",
             "version_targets": [{"file": "Cargo.toml", "pattern": "(?m)^version\\s*=\\s*\"([0-9.]+)\""}],
             "changelog_target": "docs/CHANGELOG.md",
             "extensions": {"rust": {}}
@@ -454,7 +455,7 @@ mod tests {
         );
 
         let comp = result.unwrap();
-        assert_eq!(comp.id, "homeboy-test-discover");
+        assert_eq!(comp.id, "test-discover");
         assert_eq!(comp.local_path, dir.to_string_lossy());
         assert_eq!(comp.changelog_target.as_deref(), Some("docs/CHANGELOG.md"));
         assert!(comp
@@ -463,31 +464,25 @@ mod tests {
             .is_some_and(|m| m.contains_key("rust")));
         assert!(comp.version_targets.is_some());
         assert!(comp.remote_path.is_empty()); // default
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn discover_from_portable_returns_none_without_homeboy_json() {
-        let dir = std::env::temp_dir().join("homeboy_test_no_config");
-        let _ = std::fs::create_dir_all(&dir);
-        // Ensure no homeboy.json
-        let _ = std::fs::remove_file(dir.join("homeboy.json"));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+        // No homeboy.json in the temp dir
 
         let result = discover_from_portable(&dir);
         assert!(result.is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn discover_from_portable_ignores_machine_specific_in_portable() {
-        let dir = std::env::temp_dir().join("homeboy_test_machine_fields");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
 
         let config = serde_json::json!({
-            "id": "should-be-overridden",
+            "id": "test-machine-fields",
             "local_path": "/wrong/path",
             "remote_path": "/also/wrong",
             "extract_command": "tar -xf artifact.tar.gz"
@@ -495,26 +490,24 @@ mod tests {
         std::fs::write(dir.join("homeboy.json"), config.to_string()).unwrap();
 
         let comp = discover_from_portable(&dir).unwrap();
-        // id is derived from dir name, not from portable
-        assert_eq!(comp.id, "homeboy-test-machine-fields");
-        // local_path is derived from actual dir, not portable
+        // id comes from portable JSON
+        assert_eq!(comp.id, "test-machine-fields");
+        // local_path is derived from actual dir, overriding the portable value
         assert_eq!(comp.local_path, dir.to_string_lossy());
-        // remote_path from portable is allowed (it's set explicitly)
+        // remote_path from portable is preserved
         assert_eq!(comp.remote_path, "/also/wrong");
         assert_eq!(
             comp.extract_command.as_deref(),
             Some("tar -xf artifact.tar.gz")
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn discover_from_portable_with_baselines_and_extensions() {
         // Mirrors data-machine's real homeboy.json — includes baselines (unknown field)
         // and extensions (known field). This must not silently fail.
-        let dir = std::env::temp_dir().join("homeboy_test_baselines");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
 
         let config = serde_json::json!({
             "auto_cleanup": false,
@@ -547,8 +540,8 @@ mod tests {
         );
 
         let comp = result.unwrap();
-        // id derived from dir name, not portable
-        assert_eq!(comp.id, "homeboy-test-baselines");
+        // id comes from portable JSON
+        assert_eq!(comp.id, "data-machine");
         assert_eq!(comp.local_path, dir.to_string_lossy());
         // extensions must be present
         assert!(
@@ -561,7 +554,5 @@ mod tests {
         );
         assert_eq!(comp.changelog_target.as_deref(), Some("docs/CHANGELOG.md"));
         assert!(comp.version_targets.is_some());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

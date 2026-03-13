@@ -884,8 +884,8 @@ mod tests {
 
     #[test]
     fn signature_check_detects_mismatch() {
-        let dir = std::env::temp_dir().join("homeboy_sig_mismatch_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
         std::fs::create_dir_all(dir.join("steps")).unwrap();
 
         // Two conforming files with matching signatures
@@ -951,14 +951,12 @@ class AgentPing {
         assert!(conv.outliers[0].deviations.iter().any(|d| {
             d.kind == AuditFinding::SignatureMismatch && d.description.contains("execute")
         }));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn signature_check_adds_to_existing_outliers() {
-        let dir = std::env::temp_dir().join("homeboy_sig_existing_outlier_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
         std::fs::create_dir_all(dir.join("steps")).unwrap();
 
         std::fs::write(
@@ -1022,8 +1020,8 @@ class AgentPing {
 
     #[test]
     fn signature_check_no_change_when_all_match() {
-        let dir = std::env::temp_dir().join("homeboy_sig_all_match_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
         std::fs::create_dir_all(dir.join("steps")).unwrap();
 
         std::fs::write(
@@ -1056,14 +1054,12 @@ class AgentPing {
         assert_eq!(conv.conforming.len(), 2);
         assert!(conv.outliers.is_empty());
         assert!((conv.confidence - 1.0).abs() < f32::EPSILON);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn signature_check_skips_unknown_language() {
-        let dir = std::env::temp_dir().join("homeboy_sig_unknown_lang_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
         std::fs::create_dir_all(dir.join("data")).unwrap();
 
         std::fs::write(dir.join("data/a.txt"), "some text\n").unwrap();
@@ -1088,15 +1084,13 @@ class AgentPing {
         // Should not change anything for unknown language
         assert_eq!(conventions[0].conforming.len(), 2);
         assert!(conventions[0].outliers.is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn signature_check_majority_wins() {
         // 2 files have one signature (2 params), 1 file has another (1 param) — the 2-file version is canonical
-        let dir = std::env::temp_dir().join("homeboy_sig_majority_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
         std::fs::create_dir_all(dir.join("steps")).unwrap();
 
         std::fs::write(
@@ -1141,16 +1135,14 @@ class AgentPing {
         assert_eq!(conv.conforming.len(), 2);
         assert_eq!(conv.outliers.len(), 1);
         assert_eq!(conv.outliers[0].file, "steps/C.php");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn return_type_difference_not_a_mismatch() {
         // Files with and without return types should NOT produce a SignatureMismatch.
         // This was the bug reported in #571.
-        let dir = std::env::temp_dir().join("homeboy_sig_return_type_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
         std::fs::create_dir_all(dir.join("api")).unwrap();
 
         std::fs::write(
@@ -1190,8 +1182,6 @@ class AgentPing {
             conv.outliers.is_empty(),
             "No outliers expected for return type differences"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

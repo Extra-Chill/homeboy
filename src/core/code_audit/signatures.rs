@@ -40,6 +40,12 @@ pub(crate) fn normalize_signature(sig: &str) -> String {
     // Rust: "fn foo() -> Result<T>" → "fn foo()"
     let normalized = strip_return_type(&normalized);
 
+    // Strip trailing body markers — the `{ }` or `{ ... }` are not part of the
+    // function's structural contract. Without this, stripping a return type from
+    // "register(): void {}" yields "register()" but "register() {}" keeps the
+    // braces, causing a false structural mismatch.
+    let normalized = strip_body_markers(&normalized);
+
     // Strip parameter type annotations — only arity and parameter names matter
     // for structural comparison.  This is language-agnostic: for each comma-
     // separated parameter, keep only the last identifier (the parameter name).
@@ -185,6 +191,25 @@ fn extract_param_name(param: &str) -> String {
 ///
 /// Finds the last closing paren (end of parameter list) and removes
 /// everything after it that looks like a return type annotation.
+/// Strip trailing body markers like `{ }`, `{ ... }`, or `{` from a signature.
+///
+/// Function signatures extracted from source lines often include the opening
+/// brace or inline body. These aren't part of the structural contract and
+/// should be removed before comparison.
+fn strip_body_markers(sig: &str) -> String {
+    let trimmed = sig.trim_end();
+    // Strip trailing `{ ... }` (inline body)
+    if let Some(brace_pos) = trimmed.rfind('{') {
+        // Only strip if the `{` comes after the parameter list's `)`
+        if let Some(paren_pos) = trimmed.rfind(')') {
+            if brace_pos > paren_pos {
+                return trimmed[..brace_pos].trim_end().to_string();
+            }
+        }
+    }
+    sig.to_string()
+}
+
 fn strip_return_type(sig: &str) -> String {
     // Find the last ')' — that's the end of the parameter list
     if let Some(paren_pos) = sig.rfind(')') {
