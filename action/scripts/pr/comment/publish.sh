@@ -23,7 +23,7 @@ publish_comment_body() {
   local existing_comment_id="$2"
 
   if [ -n "${existing_comment_id}" ]; then
-    echo "Updating shared comment ${existing_comment_id}..."
+    echo "Updating shared comment ${existing_comment_id}..." >&2
     if ! gh api "repos/${REPO}/issues/comments/${existing_comment_id}" \
       --method PATCH \
       --field body="${comment_body}" > /dev/null 2>&1; then
@@ -34,7 +34,7 @@ publish_comment_body() {
     return 0
   fi
 
-  echo "Creating shared comment..."
+  echo "Creating shared comment..." >&2
   local create_response
   create_response=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
     --method POST \
