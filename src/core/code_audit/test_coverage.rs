@@ -5,10 +5,11 @@
 //! `TestMappingConfig` to understand how source files map to test files
 //! and how source methods map to test methods.
 //!
-//! Performs three checks:
+//! Performs four checks:
 //! 1. Missing test files — source files with no corresponding test file
 //! 2. Missing test methods — source methods with no corresponding test method
-//! 3. Orphaned tests — test files/methods with no corresponding source
+//! 3. Orphaned tests — test files with no corresponding source file
+//! 4. Orphaned test methods — test methods whose source method no longer exists
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -127,18 +128,23 @@ pub(crate) fn analyze_test_coverage(
                 }
             }
 
-            // Find source methods without tests
-            for method in &source_fp.methods {
-                if method.starts_with(&config.method_prefix) {
-                    continue; // Skip test methods themselves
-                }
+            // Build set of non-test source method names for orphaned test detection
+            let source_methods: HashSet<&str> = source_fp
+                .methods
+                .iter()
+                .filter(|m| !m.starts_with(&config.method_prefix))
+                .map(|m| m.as_str())
+                .collect();
+
+            // Find source methods without tests (Check 2: MissingTestMethod)
+            for method in &source_methods {
                 if is_trivial_method(method) {
                     continue;
                 }
                 if !is_testable_visibility(method, &source_fp.visibility) {
                     continue; // Skip private helpers — tested transitively
                 }
-                if !covered_methods.contains(method.as_str()) {
+                if !covered_methods.contains(method) {
                     findings.push(Finding {
                         convention: "test_coverage".to_string(),
                         severity: severity.clone(),
@@ -154,6 +160,39 @@ pub(crate) fn analyze_test_coverage(
                         kind: AuditFinding::MissingTestMethod,
                     });
                 }
+            }
+
+            // Check 4a: Orphaned test methods (inline) — test methods whose
+            // source method no longer exists. This catches tests left behind
+            // when a function is deleted from the source.
+            find_orphaned_test_methods(
+                &mut findings,
+                &source_fp.relative_path,
+                &collect_test_methods_from_fp(source_fp, config),
+                &source_methods,
+                config,
+            );
+
+            // Also check dedicated test file methods against this source
+            if let Some(test_fingerprint) = test_fp {
+                find_orphaned_test_methods(
+                    &mut findings,
+                    &test_fingerprint.relative_path,
+                    &collect_test_methods_from_fp(test_fingerprint, config),
+                    &source_methods,
+                    config,
+                );
+            } else if let Some(test_methods) = &disk_test_methods {
+                let test_path = expected_test_path
+                    .as_deref()
+                    .unwrap_or("test file");
+                find_orphaned_test_methods(
+                    &mut findings,
+                    test_path,
+                    test_methods,
+                    &source_methods,
+                    config,
+                );
             }
         } else {
             // Non-inline test languages (PHP, JS, etc.)
@@ -177,6 +216,12 @@ pub(crate) fn analyze_test_coverage(
             } else {
                 disk_test_methods.unwrap_or_default()
             };
+
+            let source_methods: HashSet<&str> = source_fp
+                .methods
+                .iter()
+                .map(|m| m.as_str())
+                .collect();
 
             if !test_methods.is_empty() {
                 let covered_methods: HashSet<&str> = test_methods
@@ -213,6 +258,15 @@ pub(crate) fn analyze_test_coverage(
                         });
                     }
                 }
+
+                // Check 4b: Orphaned test methods (external file)
+                find_orphaned_test_methods(
+                    &mut findings,
+                    &test_file_label,
+                    &test_methods,
+                    &source_methods,
+                    config,
+                );
             }
         }
     }
@@ -386,6 +440,59 @@ fn is_skipped_path(path: &str, config: &TestMappingConfig) -> bool {
         .skip_test_patterns
         .iter()
         .any(|pattern| path.contains(pattern))
+}
+
+/// Collect test method names from a fingerprint.
+fn collect_test_methods_from_fp(fp: &FileFingerprint, config: &TestMappingConfig) -> Vec<String> {
+    fp.methods
+        .iter()
+        .filter(|m| m.starts_with(&config.method_prefix))
+        .cloned()
+        .collect()
+}
+
+/// Check 4: Orphaned test methods — test methods whose source method no longer exists.
+///
+/// For each `test_X` method, checks whether `X` exists in the source file's methods.
+/// This catches tests left behind when a function is deleted from the source — the kind
+/// of breakage that `#[cfg(test)]` hides from normal compilation.
+fn find_orphaned_test_methods(
+    findings: &mut Vec<Finding>,
+    file_path: &str,
+    test_methods: &[String],
+    source_methods: &HashSet<&str>,
+    config: &TestMappingConfig,
+) {
+    for test_method in test_methods {
+        let Some(expected_source) = test_method.strip_prefix(&config.method_prefix) else {
+            continue;
+        };
+
+        // Skip if the test doesn't follow the naming convention (no source method implied)
+        if expected_source.is_empty() {
+            continue;
+        }
+
+        // If the source method exists, this test is valid
+        if source_methods.contains(expected_source) {
+            continue;
+        }
+
+        findings.push(Finding {
+            convention: "test_coverage".to_string(),
+            severity: Severity::Warning,
+            file: file_path.to_string(),
+            description: format!(
+                "Test method '{}' references '{}' which no longer exists in the source",
+                test_method, expected_source
+            ),
+            suggestion: format!(
+                "Remove the orphaned test '{}' or rename it to match an existing method",
+                test_method
+            ),
+            kind: AuditFinding::OrphanedTest,
+        });
+    }
 }
 
 // ============================================================================
@@ -803,6 +910,158 @@ mod tests {
                 .map(|f| &f.description)
                 .collect::<Vec<_>>()
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ========================================================================
+    // Orphaned test method detection (Check 4)
+    // ========================================================================
+
+    #[test]
+    fn orphaned_test_method_inline_detected() {
+        // A source file has test_overlay_portable but overlay_portable was deleted
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_orphaned_inline");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+
+        let source = make_fp(
+            "src/core/component.rs",
+            vec![
+                "discover_from_portable",
+                "has_portable_config",
+                "test_discover_from_portable",        // valid — source method exists
+                "test_overlay_portable_fills_absent",  // orphaned — overlay_portable was deleted
+                "test_overlay_portable_stored_wins",   // orphaned — overlay_portable was deleted
+            ],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest
+                    && f.description.contains("no longer exists")
+            })
+            .collect();
+        assert_eq!(
+            orphaned.len(),
+            2,
+            "Should detect 2 orphaned test methods, found: {:?}",
+            orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+        assert!(orphaned[0].description.contains("overlay_portable_fills_absent"));
+        assert!(orphaned[1].description.contains("overlay_portable_stored_wins"));
+        assert!(orphaned.iter().all(|f| f.severity == Severity::Warning));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphaned_test_method_external_file_detected() {
+        // A test file has test_old_function but the source no longer has old_function
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_orphaned_external");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        let source = make_fp("src/parser.rs", vec!["parse", "validate"]);
+        let test = make_fp(
+            "tests/parser_test.rs",
+            vec![
+                "test_parse",        // valid
+                "test_validate",     // valid
+                "test_old_function", // orphaned — old_function was deleted
+            ],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest
+                    && f.description.contains("no longer exists")
+            })
+            .collect();
+        assert_eq!(orphaned.len(), 1);
+        assert!(orphaned[0].description.contains("old_function"));
+        assert!(orphaned[0].file.contains("parser_test.rs"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphaned_test_method_not_flagged_when_source_exists() {
+        // All test methods map to existing source methods — no findings
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_no_orphaned");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        let source = make_fp(
+            "src/utils.rs",
+            vec!["helper", "compute", "test_helper", "test_compute"],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest
+                    && f.description.contains("no longer exists")
+            })
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "No orphaned test methods expected: {:?}",
+            orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphaned_test_method_mixed_valid_and_orphaned() {
+        // Some tests valid, some orphaned — only orphaned should be flagged
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_mixed_orphaned");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        let source = make_fp("src/engine.rs", vec!["start", "stop"]);
+        let test = make_fp(
+            "tests/engine_test.rs",
+            vec![
+                "test_start",   // valid
+                "test_stop",    // valid
+                "test_pause",   // orphaned
+                "test_resume",  // orphaned
+            ],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest
+                    && f.description.contains("no longer exists")
+            })
+            .collect();
+        assert_eq!(orphaned.len(), 2);
+
+        let orphaned_names: Vec<&str> = orphaned
+            .iter()
+            .map(|f| f.description.as_str())
+            .collect();
+        assert!(orphaned_names.iter().any(|d| d.contains("pause")));
+        assert!(orphaned_names.iter().any(|d| d.contains("resume")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
