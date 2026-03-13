@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::docs;
-use homeboy::code_audit::docs_audit::{self, AuditResult, DetectedFeature};
+use homeboy::code_audit::docs_audit::{AuditResult, DetectedFeature};
 use homeboy::component;
 use homeboy::extension;
 
@@ -23,32 +23,6 @@ pub struct DocsArgs {
 
 #[derive(Subcommand)]
 pub enum DocsCommand {
-    /// Audit documentation for broken links and stale references
-    Audit {
-        /// Component ID or direct filesystem path to audit
-        component_id: String,
-
-        /// Override component local_path for this audit run
-        #[arg(long)]
-        path: Option<String>,
-
-        /// Docs directory relative to component/project root (overrides config, default: docs)
-        #[arg(long)]
-        docs_dir: Option<String>,
-
-        /// Save current audit state as baseline for future comparisons
-        #[arg(long)]
-        baseline: bool,
-
-        /// Skip baseline comparison even if a baseline exists
-        #[arg(long)]
-        ignore_baseline: bool,
-
-        /// Include full list of all detected features in output
-        #[arg(long)]
-        features: bool,
-    },
-
     /// Generate a machine-optimized codebase map for AI documentation
     Map {
         /// Component to analyze
@@ -168,24 +142,6 @@ pub struct CodebaseMap {
 #[derive(Serialize)]
 #[serde(tag = "command")]
 pub enum DocsOutput {
-    #[serde(rename = "docs.audit")]
-    Audit(AuditResult),
-
-    #[serde(rename = "docs.audit.baseline")]
-    AuditBaselineSaved {
-        component_id: String,
-        path: String,
-        broken_references: usize,
-        docs_scanned: usize,
-    },
-
-    #[serde(rename = "docs.audit.compared")]
-    AuditCompared {
-        #[serde(flatten)]
-        result: AuditResult,
-        baseline_comparison: homeboy::code_audit::docs_audit::baseline::BaselineComparison,
-    },
-
     #[serde(rename = "docs.map")]
     Map(CodebaseMap),
 
@@ -220,13 +176,11 @@ pub struct GenerateFileSpec {
 // Public API
 // ============================================================================
 
-/// Check if this invocation should return JSON (audit, map, or generate subcommand)
+/// Check if this invocation should return JSON (map or generate subcommand)
 pub(crate) fn is_json_mode(args: &DocsArgs) -> bool {
     matches!(
         args.command,
-        Some(DocsCommand::Audit { .. })
-            | Some(DocsCommand::Map { .. })
-            | Some(DocsCommand::Generate { .. })
+        Some(DocsCommand::Map { .. }) | Some(DocsCommand::Generate { .. })
     )
 }
 
@@ -244,24 +198,9 @@ pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
     Ok((resolved.content, 0))
 }
 
-/// JSON output mode (audit, map, generate subcommands)
+/// JSON output mode (map, generate subcommands)
 pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput> {
     match args.command {
-        Some(DocsCommand::Audit {
-            component_id,
-            path,
-            docs_dir,
-            baseline,
-            ignore_baseline,
-            features,
-        }) => run_audit(
-            &component_id,
-            path.as_deref(),
-            docs_dir.as_deref(),
-            features,
-            baseline,
-            ignore_baseline,
-        ),
         Some(DocsCommand::Map { component_id, source_dirs, include_private, write, output_dir }) => run_map(&component_id, source_dirs, include_private, write, &output_dir),
         Some(DocsCommand::Generate { spec, json, from_audit, dry_run }) => {
             if let Some(ref audit_source) = from_audit {
@@ -273,10 +212,9 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
         }
         None => Err(homeboy::Error::validation_invalid_argument(
             "command",
-            "JSON output requires audit, map, or generate subcommand. Use `homeboy docs <topic>` for topic display.",
+            "JSON output requires map or generate subcommand. Use `homeboy docs <topic>` for topic display.",
             None,
             Some(vec![
-                "homeboy docs audit <component-id>".to_string(),
                 "homeboy docs map <component-id>".to_string(),
                 "homeboy docs generate --json '<spec>'".to_string(),
                 "homeboy docs generate --from-audit @audit.json".to_string(),
@@ -1227,96 +1165,6 @@ fn collect_fingerprints_recursive(
 // Audit (Claim-Based Documentation Verification)
 // ============================================================================
 
-fn run_audit(
-    component_id: &str,
-    path_override: Option<&str>,
-    docs_dir: Option<&str>,
-    features: bool,
-    baseline: bool,
-    ignore_baseline: bool,
-) -> CmdResult<DocsOutput> {
-    // Resolve effective source path with --path parity to `homeboy audit`
-    let (resolved_id, source_path) = if std::path::Path::new(component_id).is_dir() {
-        let effective = path_override.unwrap_or(component_id);
-        let path = std::path::PathBuf::from(effective);
-        let label = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        (label, path)
-    } else if let Some(path) = path_override {
-        (component_id.to_string(), std::path::PathBuf::from(path))
-    } else {
-        let comp = homeboy::component::load(component_id)?;
-        (
-            component_id.to_string(),
-            std::path::PathBuf::from(&comp.local_path),
-        )
-    };
-
-    let source_path_str = source_path.to_string_lossy().to_string();
-
-    // Audit directly by path so --path semantics are consistent
-    let mut result = docs_audit::audit_path(&source_path_str, docs_dir, features)?;
-    result.component_id = resolved_id;
-
-    // --baseline: save current state
-    if baseline {
-        let saved = docs_audit::baseline::save_baseline(&source_path, &result)?;
-
-        eprintln!(
-            "[docs audit] Baseline saved to {} ({} broken reference(s), {} docs scanned)",
-            saved.display(),
-            result.summary.broken_references,
-            result.summary.docs_scanned,
-        );
-
-        return Ok((
-            DocsOutput::AuditBaselineSaved {
-                component_id: result.component_id,
-                path: saved.to_string_lossy().to_string(),
-                broken_references: result.summary.broken_references,
-                docs_scanned: result.summary.docs_scanned,
-            },
-            0,
-        ));
-    }
-
-    // Default: compare against baseline if one exists
-    if !ignore_baseline {
-        if let Some(existing_baseline) = docs_audit::baseline::load_baseline(&source_path) {
-            let comparison = docs_audit::baseline::compare(&result, &existing_baseline);
-
-            let exit_code = if comparison.drift_increased { 1 } else { 0 };
-
-            if comparison.drift_increased {
-                eprintln!(
-                    "[docs audit] DRIFT INCREASED: {} new broken reference(s) since baseline",
-                    comparison.new_items.len()
-                );
-            } else if !comparison.resolved_fingerprints.is_empty() {
-                eprintln!(
-                    "[docs audit] Drift reduced: {} broken reference(s) resolved since baseline",
-                    comparison.resolved_fingerprints.len()
-                );
-            } else {
-                eprintln!("[docs audit] No change from baseline");
-            }
-
-            return Ok((
-                DocsOutput::AuditCompared {
-                    result,
-                    baseline_comparison: comparison,
-                },
-                exit_code,
-            ));
-        }
-    }
-
-    Ok((DocsOutput::Audit(result), 0))
-}
-
 // ============================================================================
 // Source Directory Detection Helpers (shared by map)
 // ============================================================================
@@ -1609,10 +1457,10 @@ fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput>
     if audit.detected_features.is_empty() {
         return Err(homeboy::Error::validation_invalid_argument(
             "from-audit",
-            "Audit result has no detected_features. Run `docs audit --features` to include them.",
+            "Audit result has no detected_features. Use `homeboy audit` to generate audit output with features.",
             None,
             Some(vec![
-                "homeboy docs audit docsync --features > audit.json".to_string(),
+                "homeboy audit <component-id> > audit.json".to_string(),
                 "homeboy docs generate --from-audit @audit.json".to_string(),
             ]),
         ));
