@@ -16,17 +16,12 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "HOMEBOY_ERRORS_ONLY=${HOMEBOY_ERRORS_ONLY:-NOT_SET}"
 fi
 
-# Determine execution context
-if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
-    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
-    COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-.}"
-    PLUGIN_PATH="$COMPONENT_PATH"
-else
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    EXTENSION_PATH="$(dirname "$SCRIPT_DIR")"
-    COMPONENT_PATH="$(pwd)"
-    PLUGIN_PATH="$COMPONENT_PATH"
-fi
+# Resolve execution context (shared helper)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+# shellcheck source=../lib/resolve-context.sh
+source "${RESOLVE_CONTEXT_HELPER}"
+homeboy_resolve_context
 
 # Check if component has JavaScript files
 js_file_count=$(find "$PLUGIN_PATH" -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \) \
@@ -105,14 +100,15 @@ if [ ! -f "$ESLINT_CONFIG" ]; then
     exit 0
 fi
 
-# Auto-detect text domain from plugin header
-TEXT_DOMAIN=""
-MAIN_PLUGIN_FILE=$(find "$PLUGIN_PATH" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
-if [ -n "$MAIN_PLUGIN_FILE" ]; then
-    TEXT_DOMAIN=$(grep -m1 "Text Domain:" "$MAIN_PLUGIN_FILE" 2>/dev/null | sed 's/.*Text Domain:[[:space:]]*//' | tr -d ' \r')
-    if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
-    fi
+# Auto-detect text domain from plugin/theme header (shared helper)
+DETECT_COMPONENT_HELPER="${HOMEBOY_RUNTIME_DETECT_COMPONENT:-${SCRIPT_DIR}/../lib/detect-component.sh}"
+# shellcheck source=../lib/detect-component.sh
+source "${DETECT_COMPONENT_HELPER}"
+homeboy_detect_component "$PLUGIN_PATH" || true
+
+TEXT_DOMAIN="${HOMEBOY_COMPONENT_TEXT_DOMAIN:-}"
+if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+    echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
 fi
 
 # Build base ESLint arguments

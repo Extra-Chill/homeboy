@@ -9,15 +9,13 @@ source "${DEPENDENCY_HELPER}"
 # Autoload validation for WordPress components (plugins and themes)
 # Catches class loading errors before tests run
 
-# Determine extension path
-if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
-    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
-else
-    EXTENSION_PATH="$(dirname "$SCRIPT_DIR")"
-fi
+# Resolve execution context (shared helper)
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+# shellcheck source=../lib/resolve-context.sh
+source "${RESOLVE_CONTEXT_HELPER}"
+homeboy_resolve_context
 
-# Determine component path
-PLUGIN_PATH="${HOMEBOY_PLUGIN_PATH:-${HOMEBOY_COMPONENT_PATH:-$(pwd)}}"
+PLUGIN_PATH="${HOMEBOY_PLUGIN_PATH:-${PLUGIN_PATH}}"
 homeboy_export_validation_dependency_paths "$PLUGIN_PATH"
 
 # Export for PHP script

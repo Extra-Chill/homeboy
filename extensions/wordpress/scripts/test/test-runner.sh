@@ -80,8 +80,17 @@ if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
     # Parse settings from JSON using jq
     if [ -n "$SETTINGS_JSON" ] && [ "$SETTINGS_JSON" != "{}" ]; then
         DATABASE_TYPE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.database_type // "auto"')
+        # MySQL settings (explicit configuration takes priority over ambient discovery)
+        SETTINGS_MYSQL_HOST=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_host // ""')
+        SETTINGS_MYSQL_DATABASE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_database // ""')
+        SETTINGS_MYSQL_USER=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_user // ""')
+        SETTINGS_MYSQL_PASSWORD=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_password // ""')
     else
         DATABASE_TYPE="auto"
+        SETTINGS_MYSQL_HOST=""
+        SETTINGS_MYSQL_DATABASE=""
+        SETTINGS_MYSQL_USER=""
+        SETTINGS_MYSQL_PASSWORD=""
     fi
 else
     # Called directly (e.g., from composer test in component directory)
@@ -142,7 +151,8 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
 fi
 
 # WordPress core cache directory
-WP_CACHE_BASE="${HOME}/.cache/homeboy/wordpress"
+# HOMEBOY_CACHE_DIR allows explicit override (e.g., for CI or shared build caches).
+WP_CACHE_BASE="${HOMEBOY_CACHE_DIR:-${HOME}/.cache/homeboy}/wordpress"
 WP_CACHE_DIR="${WP_CACHE_BASE}/${WP_VERSION}"
 ABSPATH="${WP_CACHE_DIR}/wordpress"
 
@@ -207,118 +217,109 @@ WP_TESTS_CONFIG_PATH="$(dirname "$ABSPATH")/wp-tests-config.php"
 export WP_PHPUNIT__TESTS_CONFIG="$WP_TESTS_CONFIG_PATH"
 
 # Resolve "auto" database type: try MySQL first, fall back to SQLite
+#
+# Priority order for MySQL credentials:
+#   1. Explicit settings (mysql_host, mysql_user, etc. from homeboy component settings)
+#   2. wp-config.php in the component's parent tree (only if component is inside a WP install)
+#   3. root@127.0.0.1 with no password (CI environments)
+#   4. Fall back to SQLite
+#
+# NOTE: We do NOT scan random VPS paths like /var/www/*, /srv/*, /home/*.
+# If MySQL credentials aren't configured or discoverable from the project
+# tree, we fall back to SQLite. Use `homeboy component set <id> mysql_host ...`
+# to configure MySQL explicitly.
 MYSQL_AUTO_CREATED=""
 if [ "$DATABASE_TYPE" = "auto" ]; then
-    # Step 1: Find wp-config.php to read DB credentials from a live WP install.
-    # Search strategy (in order):
-    #   a) Walk up from plugin directory (works when plugin is deployed inside WP)
-    #   b) Walk up from project path (works when project IS the WP site)
-    #   c) Use wp-cli to locate a WP install (works on any machine with wp-cli)
-    WP_CONFIG_PATH=""
-    for _start_dir in "${PLUGIN_PATH}" "${HOMEBOY_PROJECT_PATH:-}"; do
-        [ -z "$_start_dir" ] && continue
-        _search_dir="$_start_dir"
-        for _i in 1 2 3 4 5; do
-            _search_dir="$(dirname "$_search_dir")"
-            if [ -f "${_search_dir}/wp-config.php" ]; then
-                WP_CONFIG_PATH="${_search_dir}/wp-config.php"
-                break 2
-            fi
-        done
-    done
-
-    # Fallback: ask wp-cli for a WP install path
-    if [ -z "$WP_CONFIG_PATH" ] && command -v wp &>/dev/null; then
-        _wp_path=$(wp --allow-root --path=/var/www eval "echo ABSPATH;" 2>/dev/null || true)
-        # wp-cli with no --path tries CWD which may not be a WP install.
-        # Try common paths if eval failed.
-        if [ -z "$_wp_path" ]; then
-            for _wp_dir in /var/www/*/wp-config.php /srv/*/wp-config.php /home/*/public_html/wp-config.php; do
-                if [ -f "$_wp_dir" ]; then
-                    WP_CONFIG_PATH="$_wp_dir"
-                    break
-                fi
-            done
-        elif [ -f "${_wp_path}wp-config.php" ]; then
-            WP_CONFIG_PATH="${_wp_path}wp-config.php"
-        fi
-    fi
-
-    # Last resort: scan common WordPress locations
-    if [ -z "$WP_CONFIG_PATH" ]; then
-        for _wp_dir in /var/www/*/wp-config.php /srv/*/wp-config.php; do
-            if [ -f "$_wp_dir" ]; then
-                WP_CONFIG_PATH="$_wp_dir"
-                break
-            fi
-        done
-    fi
-
-    # Step 2: Extract DB credentials from wp-config.php if found.
-    if [ -n "$WP_CONFIG_PATH" ]; then
-        # Use grep to extract define() values — avoids PHP quoting hell in bash.
-        _extract_wp_define() {
-            grep -oP "define\s*\(\s*['\"]$1['\"]\s*,\s*['\"]\\K[^'\"]*" "$WP_CONFIG_PATH" 2>/dev/null | head -1
-        }
-        WP_DB_HOST=$(_extract_wp_define DB_HOST)
-        WP_DB_USER=$(_extract_wp_define DB_USER)
-        WP_DB_PASSWORD=$(_extract_wp_define DB_PASSWORD)
-        WP_DB_NAME=$(_extract_wp_define DB_NAME)
-
-        if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-            echo "DEBUG: Found wp-config.php at $WP_CONFIG_PATH"
-            echo "DEBUG: DB_HOST=${WP_DB_HOST:-NOT_FOUND}, DB_USER=${WP_DB_USER:-NOT_FOUND}, DB_NAME=${WP_DB_NAME:-NOT_FOUND}"
-        fi
-    fi
-
-    # Step 3: Try MySQL connection. Prefer wp-config.php credentials, then
-    # fall back to root@127.0.0.1, then SQLite.
+    MYSQL_HOST="${SETTINGS_MYSQL_HOST:-127.0.0.1}"
+    MYSQL_USER="${SETTINGS_MYSQL_USER:-root}"
+    MYSQL_PASSWORD="${SETTINGS_MYSQL_PASSWORD:-}"
+    MYSQL_DATABASE="${SETTINGS_MYSQL_DATABASE:-homeboy_wptests}"
     MYSQL_CONNECTED=""
-    if command -v mysql &>/dev/null; then
-        # Try wp-config.php credentials first (the live WP site's DB)
-        if [ -n "${WP_DB_HOST:-}" ] && [ -n "${WP_DB_USER:-}" ]; then
-            _mysql_auth=(-h "$WP_DB_HOST" -u "$WP_DB_USER")
-            [ -n "${WP_DB_PASSWORD:-}" ] && _mysql_auth+=(-p"$WP_DB_PASSWORD")
+
+    # Source 1: Explicit settings — if mysql_host was explicitly configured, use it.
+    if [ -n "${SETTINGS_MYSQL_HOST}" ]; then
+        if command -v mysql &>/dev/null; then
+            _mysql_auth=(-h "$MYSQL_HOST" -u "$MYSQL_USER")
+            [ -n "$MYSQL_PASSWORD" ] && _mysql_auth+=(-p"$MYSQL_PASSWORD")
             if mysql "${_mysql_auth[@]}" -e "SELECT 1" &>/dev/null; then
                 DATABASE_TYPE="mysql"
-                MYSQL_HOST="$WP_DB_HOST"
-                MYSQL_USER="$WP_DB_USER"
-                MYSQL_PASSWORD="${WP_DB_PASSWORD:-}"
-                MYSQL_DATABASE="homeboy_wptests"
-                MYSQL_CONNECTED="wp-config"
+                MYSQL_CONNECTED="settings"
+            else
+                echo "Warning: Configured MySQL ($MYSQL_USER@$MYSQL_HOST) is not reachable"
             fi
         fi
+    fi
 
-        # Fall back to root@127.0.0.1 with no password (CI environments)
-        if [ -z "$MYSQL_CONNECTED" ]; then
-            if mysql -h 127.0.0.1 -u root -e "SELECT 1" &>/dev/null; then
-                DATABASE_TYPE="mysql"
-                MYSQL_HOST="127.0.0.1"
-                MYSQL_USER="root"
-                MYSQL_PASSWORD=""
-                MYSQL_DATABASE="homeboy_wptests"
-                MYSQL_CONNECTED="root-nopass"
+    # Source 2: wp-config.php in project tree (only walk UP from component/project path).
+    # This is a focused search — it only looks at parent directories of the actual
+    # component, not random locations on the machine.
+    if [ -z "$MYSQL_CONNECTED" ] && command -v mysql &>/dev/null; then
+        WP_CONFIG_PATH=""
+        for _start_dir in "${PLUGIN_PATH}" "${HOMEBOY_PROJECT_PATH:-}"; do
+            [ -z "$_start_dir" ] && continue
+            _search_dir="$_start_dir"
+            for _i in 1 2 3 4 5; do
+                _search_dir="$(dirname "$_search_dir")"
+                if [ -f "${_search_dir}/wp-config.php" ]; then
+                    WP_CONFIG_PATH="${_search_dir}/wp-config.php"
+                    break 2
+                fi
+            done
+        done
+
+        if [ -n "$WP_CONFIG_PATH" ]; then
+            _extract_wp_define() {
+                grep -oP "define\s*\(\s*['\"]$1['\"]\s*,\s*['\"]\\K[^'\"]*" "$WP_CONFIG_PATH" 2>/dev/null | head -1
+            }
+            WP_DB_HOST=$(_extract_wp_define DB_HOST)
+            WP_DB_USER=$(_extract_wp_define DB_USER)
+            WP_DB_PASSWORD=$(_extract_wp_define DB_PASSWORD)
+            WP_DB_NAME=$(_extract_wp_define DB_NAME)
+
+            if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+                echo "DEBUG: Found wp-config.php at $WP_CONFIG_PATH"
             fi
+
+            if [ -n "${WP_DB_HOST:-}" ] && [ -n "${WP_DB_USER:-}" ]; then
+                _mysql_auth=(-h "$WP_DB_HOST" -u "$WP_DB_USER")
+                [ -n "${WP_DB_PASSWORD:-}" ] && _mysql_auth+=(-p"$WP_DB_PASSWORD")
+                if mysql "${_mysql_auth[@]}" -e "SELECT 1" &>/dev/null; then
+                    DATABASE_TYPE="mysql"
+                    MYSQL_HOST="$WP_DB_HOST"
+                    MYSQL_USER="$WP_DB_USER"
+                    MYSQL_PASSWORD="${WP_DB_PASSWORD:-}"
+                    MYSQL_DATABASE="homeboy_wptests"
+                    MYSQL_CONNECTED="wp-config"
+                fi
+            fi
+        fi
+    fi
+
+    # Source 3: root@127.0.0.1 with no password (CI environments)
+    if [ -z "$MYSQL_CONNECTED" ] && command -v mysql &>/dev/null; then
+        if mysql -h 127.0.0.1 -u root -e "SELECT 1" &>/dev/null; then
+            DATABASE_TYPE="mysql"
+            MYSQL_HOST="127.0.0.1"
+            MYSQL_USER="root"
+            MYSQL_PASSWORD=""
+            MYSQL_DATABASE="homeboy_wptests"
+            MYSQL_CONNECTED="root-nopass"
         fi
     fi
 
     if [ -n "$MYSQL_CONNECTED" ]; then
-        # Try to create a dedicated test database; if the user lacks CREATE
-        # privileges, fall back to the live WP database (tests use their own
-        # table prefix so this is safe).
         _mysql_create=(-h "$MYSQL_HOST" -u "$MYSQL_USER")
         [ -n "${MYSQL_PASSWORD:-}" ] && _mysql_create+=(-p"$MYSQL_PASSWORD")
         if mysql "${_mysql_create[@]}" -e "CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`" 2>/dev/null; then
             MYSQL_AUTO_CREATED="1"
         else
-            # Can't create DB — reuse the live WP database name
             MYSQL_DATABASE="${WP_DB_NAME:-wordpress}"
             if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
                 echo "DEBUG: Cannot CREATE DATABASE — reusing WP database '${MYSQL_DATABASE}'"
             fi
         fi
         if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-            echo "DEBUG: Auto-detected MySQL via ${MYSQL_CONNECTED} (${MYSQL_USER}@${MYSQL_HOST}, db=${MYSQL_DATABASE})"
+            echo "DEBUG: MySQL via ${MYSQL_CONNECTED} (${MYSQL_USER}@${MYSQL_HOST}, db=${MYSQL_DATABASE})"
         fi
     elif php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);' 2>/dev/null; then
         DATABASE_TYPE="sqlite"
@@ -326,8 +327,9 @@ if [ "$DATABASE_TYPE" = "auto" ]; then
     else
         echo "Error: No database backend available."
         echo ""
-        echo "Either:"
-        echo "  - Install MySQL/MariaDB (recommended)"
+        echo "Options:"
+        echo "  - Configure MySQL: homeboy component set <id> mysql_host 127.0.0.1"
+        echo "  - Install MySQL/MariaDB"
         echo "  - Install PHP pdo_sqlite extension"
         echo ""
         exit 1
