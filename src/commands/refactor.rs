@@ -1,10 +1,9 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use homeboy::code_audit::CodeAuditResult;
 use homeboy::component;
-use homeboy::extension;
 use homeboy::refactor::{
     self, auto, AddResult, MoveResult, RenameScope, RenameSpec, RenameTargeting,
 };
@@ -362,15 +361,9 @@ pub enum RefactorOutput {
 
     #[serde(rename = "refactor.propagate")]
     Propagate {
-        struct_name: String,
-        definition_file: String,
-        fields: Vec<PropagateField>,
-        files_scanned: usize,
-        instantiations_found: usize,
-        instantiations_needing_fix: usize,
-        edits: Vec<PropagateEdit>,
+        #[serde(flatten)]
+        result: refactor::PropagateResult,
         dry_run: bool,
-        applied: bool,
     },
 
     #[serde(rename = "refactor.transform")]
@@ -476,22 +469,6 @@ fn parse_audit_findings(
                 })
         })
         .collect()
-}
-
-#[derive(Serialize)]
-pub struct PropagateField {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub field_type: String,
-    pub default: String,
-}
-
-#[derive(Serialize)]
-pub struct PropagateEdit {
-    pub file: String,
-    pub line: usize,
-    pub insert_text: String,
-    pub description: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -857,200 +834,48 @@ fn run_propagate(
 ) -> CmdResult<RefactorOutput> {
     let root = refactor::move_items::resolve_root(component_id, path)?;
 
-    // Step 1: Find the struct definition file
-    let def_file = if let Some(f) = definition_file {
-        PathBuf::from(f)
-    } else {
-        find_struct_definition(struct_name, &root)?
+    // Capture undo snapshot before writes
+    let config = refactor::PropagateConfig {
+        struct_name,
+        definition_file,
+        root: &root,
+        write: false, // dry-run first if we need undo
     };
 
-    let def_path = if def_file.is_absolute() {
-        def_file.clone()
-    } else {
-        root.join(&def_file)
-    };
-
-    let def_content = std::fs::read_to_string(&def_path).map_err(|e| {
-        homeboy::Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "read struct definition from {}",
-                def_path.display()
-            )),
-        )
-    })?;
-
-    // Step 2: Extract the struct source block
-    let struct_source = extract_struct_source(struct_name, &def_content).ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
-            "struct_name",
-            format!(
-                "Could not find struct `{}` in {}",
-                struct_name,
-                def_path.display()
-            ),
-            None,
-            None,
-        )
-    })?;
-
-    // Step 3: Find the extension for .rs files
-    let ext_manifest = extension::find_extension_for_file_ext("rs", "refactor").ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
-            "extension",
-            "No extension with refactor capability found for .rs files. Install the Rust extension.",
-            None,
-            None,
-        )
-    })?;
-
-    // Step 4: Walk all .rs files and call the extension for each
-    let rs_files = walk_rs_files(&root);
-    let def_relative = def_file
-        .strip_prefix(&root)
-        .unwrap_or(&def_file)
-        .to_string_lossy()
-        .to_string();
-
-    let mut all_edits: Vec<PropagateEdit> = Vec::new();
-    let mut total_instantiations = 0usize;
-    let mut total_needing_fix = 0usize;
-    let mut files_scanned = 0usize;
-
-    homeboy::log_status!(
-        "propagate",
-        "Scanning {} .rs files for {} instantiations",
-        rs_files.len(),
-        struct_name
-    );
-
-    for file_path in &rs_files {
-        let relative = file_path
-            .strip_prefix(&root)
-            .unwrap_or(file_path)
-            .to_string_lossy()
-            .to_string();
-
-        let Ok(file_content) = std::fs::read_to_string(file_path) else {
-            continue;
-        };
-
-        // Quick check: skip files that don't mention the struct name at all
-        if !file_content.contains(struct_name) {
-            continue;
-        }
-
-        files_scanned += 1;
-
-        let cmd = serde_json::json!({
-            "command": "propagate_struct_fields",
-            "struct_name": struct_name,
-            "struct_source": struct_source,
-            "file_content": file_content,
-            "file_path": relative,
-        });
-
-        let Some(result) = extension::run_refactor_script(&ext_manifest, &cmd) else {
-            homeboy::log_status!("warning", "Extension returned no result for {}", relative);
-            continue;
-        };
-
-        if let Some(found) = result.get("instantiations_found").and_then(|v| v.as_u64()) {
-            total_instantiations += found as usize;
-        }
-        if let Some(needing) = result
-            .get("instantiations_needing_fix")
-            .and_then(|v| v.as_u64())
-        {
-            total_needing_fix += needing as usize;
-        }
-
-        if let Some(edits) = result.get("edits").and_then(|v| v.as_array()) {
-            for edit in edits {
-                let file = edit
-                    .get("file")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&relative)
-                    .to_string();
-                let line = edit.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let insert_text = edit
-                    .get("insert_text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let description = edit
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                all_edits.push(PropagateEdit {
-                    file,
-                    line,
-                    insert_text,
-                    description,
-                });
+    if write {
+        // Run a dry-run to discover affected files for the undo snapshot
+        let preview = refactor::propagate(&config)?;
+        let affected_files: std::collections::HashSet<&str> =
+            preview.edits.iter().map(|e| e.file.as_str()).collect();
+        if !affected_files.is_empty() {
+            let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor propagate");
+            for file in &affected_files {
+                snap.capture_file(file);
+            }
+            if let Err(e) = snap.save() {
+                homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
             }
         }
     }
 
-    // Step 5: Apply edits if --write
-    let applied = if write && !all_edits.is_empty() {
-        // Capture undo snapshot before writes
-        let affected_files: std::collections::HashSet<&str> =
-            all_edits.iter().map(|e| e.file.as_str()).collect();
-        let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor propagate");
-        for file in &affected_files {
-            snap.capture_file(file);
-        }
-        if let Err(e) = snap.save() {
-            homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
-        }
-
-        apply_propagate_edits(&all_edits, &root)?;
-        true
-    } else {
-        false
+    // Run the actual propagation (with write mode as requested)
+    let write_config = refactor::PropagateConfig {
+        struct_name,
+        definition_file,
+        root: &root,
+        write,
     };
+    let result = refactor::propagate(&write_config)?;
 
-    // Parse struct fields from the edits we collected — each edit's description
-    // tells us the field name and the insert_text gives us the default value.
-    let fields: Vec<PropagateField> = {
-        let mut seen = std::collections::HashSet::new();
-        all_edits
-            .iter()
-            .filter_map(|e| {
-                // "Add missing field `verbose` to FileFingerprint instantiation"
-                let start = e.description.find('`')? + 1;
-                let end = e.description[start..].find('`')? + start;
-                let field_name = &e.description[start..end];
-                if seen.insert(field_name.to_string()) {
-                    // Extract type and default from insert_text: "        verbose: false,"
-                    let trimmed = e.insert_text.trim().trim_end_matches(',');
-                    let colon_pos = trimmed.find(':')?;
-                    let default = trimmed[colon_pos + 1..].trim().to_string();
-                    Some(PropagateField {
-                        name: field_name.to_string(),
-                        field_type: String::new(), // We don't have the type info from edits alone
-                        default,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
-
-    let edit_count = all_edits.len();
-
+    // Log results to stderr
     homeboy::log_status!(
         "propagate",
         "{} instantiation(s) found, {} need fixes, {} edit(s){}",
-        total_instantiations,
-        total_needing_fix,
-        edit_count,
+        result.instantiations_found,
+        result.instantiations_needing_fix,
+        result.edits.len(),
         if write {
-            if applied {
+            if result.applied {
                 " (applied)".to_string()
             } else {
                 " (nothing to apply)".to_string()
@@ -1060,212 +885,19 @@ fn run_propagate(
         }
     );
 
-    for edit in &all_edits {
+    for edit in &result.edits {
         homeboy::log_status!("edit", "{}:{} — {}", edit.file, edit.line, edit.description);
     }
 
-    let exit_code = if all_edits.is_empty() { 0 } else { 1 };
+    let exit_code = if result.edits.is_empty() { 0 } else { 1 };
 
     Ok((
         RefactorOutput::Propagate {
-            struct_name: struct_name.to_string(),
-            definition_file: def_relative,
-            fields,
-            files_scanned,
-            instantiations_found: total_instantiations,
-            instantiations_needing_fix: total_needing_fix,
-            edits: all_edits,
+            result,
             dry_run: !write,
-            applied,
         },
         exit_code,
     ))
-}
-
-/// Find the file containing a struct definition by grepping the codebase.
-fn find_struct_definition(struct_name: &str, root: &Path) -> Result<PathBuf, homeboy::Error> {
-    let pattern = format!("pub struct {} ", struct_name);
-    let pattern_brace = format!("pub struct {} {{", struct_name);
-    let pattern_crate = format!("pub(crate) struct {} ", struct_name);
-    let pattern_crate_brace = format!("pub(crate) struct {} {{", struct_name);
-
-    let files = walk_rs_files(root);
-    for file_path in &files {
-        let Ok(content) = std::fs::read_to_string(file_path) else {
-            continue;
-        };
-        if content.contains(&pattern)
-            || content.contains(&pattern_brace)
-            || content.contains(&pattern_crate)
-            || content.contains(&pattern_crate_brace)
-        {
-            return Ok(file_path.clone());
-        }
-    }
-
-    Err(homeboy::Error::validation_invalid_argument(
-        "struct_name",
-        format!(
-            "Could not find struct `{}` in any .rs file under {}",
-            struct_name,
-            root.display()
-        ),
-        None,
-        Some(vec![format!(
-            "homeboy refactor propagate --struct {} --definition src/path/to/file.rs",
-            struct_name
-        )]),
-    ))
-}
-
-/// Extract the full struct source block from file content.
-fn extract_struct_source(struct_name: &str, content: &str) -> Option<String> {
-    let lines: Vec<&str> = content.lines().collect();
-
-    // Find the struct keyword line
-    let struct_pattern = format!("struct {} ", struct_name);
-    let struct_pattern_brace = format!("struct {} {{", struct_name);
-    let mut start_line = None;
-
-    for (i, line) in lines.iter().enumerate() {
-        if line.contains(&struct_pattern) || line.contains(&struct_pattern_brace) {
-            // Walk backwards to include attributes and doc comments
-            let mut actual_start = i;
-            for j in (0..i).rev() {
-                let trimmed = lines[j].trim();
-                if trimmed.starts_with('#')
-                    || trimmed.starts_with("///")
-                    || trimmed.starts_with("//!")
-                {
-                    actual_start = j;
-                } else if trimmed.is_empty() {
-                    // Allow one blank line between attrs and struct
-                    if j > 0
-                        && (lines[j - 1].trim().starts_with('#')
-                            || lines[j - 1].trim().starts_with("///"))
-                    {
-                        actual_start = j;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            start_line = Some(actual_start);
-            break;
-        }
-    }
-
-    let start = start_line?;
-
-    // Find the closing brace
-    let mut depth = 0i32;
-    let mut found_open = false;
-    let mut end_line = start;
-
-    for (i, line_content) in lines.iter().enumerate().skip(start) {
-        for ch in line_content.chars() {
-            if ch == '{' {
-                depth += 1;
-                found_open = true;
-            } else if ch == '}' {
-                depth -= 1;
-            }
-        }
-        if found_open && depth == 0 {
-            end_line = i;
-            break;
-        }
-    }
-
-    Some(lines[start..=end_line].join("\n"))
-}
-
-/// Walk all .rs files in the project, skipping standard non-source directories.
-fn walk_rs_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    walk_rs_recursive(root, root, &mut files);
-    files
-}
-
-fn walk_rs_recursive(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-
-    let is_root = dir == root;
-    let skip_always = ["node_modules", "vendor", ".git", ".svn", ".hg"];
-    let skip_root = ["build", "dist", "target", "cache", "tmp"];
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if skip_always.iter().any(|&s| s == name) {
-                continue;
-            }
-            if is_root && skip_root.iter().any(|&s| s == name) {
-                continue;
-            }
-            walk_rs_recursive(&path, root, files);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            files.push(path);
-        }
-    }
-}
-
-/// Apply propagate edits to disk. Edits are line-based insertions.
-fn apply_propagate_edits(edits: &[PropagateEdit], root: &Path) -> Result<(), homeboy::Error> {
-    // Group edits by file
-    let mut edits_by_file: std::collections::HashMap<&str, Vec<&PropagateEdit>> =
-        std::collections::HashMap::new();
-    for edit in edits {
-        edits_by_file.entry(&edit.file).or_default().push(edit);
-    }
-
-    for (file, file_edits) in &edits_by_file {
-        let file_path = root.join(file);
-        let content = std::fs::read_to_string(&file_path).map_err(|e| {
-            homeboy::Error::internal_io(e.to_string(), Some(format!("read {}", file)))
-        })?;
-
-        let lines: Vec<&str> = content.lines().collect();
-        // Sort edits by line number descending so we insert from bottom to top
-        let mut sorted_edits: Vec<&&PropagateEdit> = file_edits.iter().collect();
-        sorted_edits.sort_by(|a, b| b.line.cmp(&a.line));
-
-        // Convert to a mutable Vec<String>
-        let mut mutable_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-
-        // Insert from bottom to top to preserve line numbers
-        for edit in &sorted_edits {
-            let insert_idx = edit.line.saturating_sub(1); // Convert 1-indexed to 0-indexed
-            if insert_idx <= mutable_lines.len() {
-                mutable_lines.insert(insert_idx, edit.insert_text.clone());
-            }
-        }
-
-        let new_content = mutable_lines.join("\n");
-
-        // Preserve trailing newline if original had one
-        let final_content = if content.ends_with('\n') && !new_content.ends_with('\n') {
-            format!("{}\n", new_content)
-        } else {
-            new_content
-        };
-
-        std::fs::write(&file_path, &final_content).map_err(|e| {
-            homeboy::Error::internal_io(e.to_string(), Some(format!("write {}", file)))
-        })?;
-
-        homeboy::log_status!("write", "{} ({} edits)", file, file_edits.len());
-    }
-
-    Ok(())
 }
 
 // ============================================================================

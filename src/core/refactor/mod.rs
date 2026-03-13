@@ -11,6 +11,7 @@ pub mod auto;
 pub mod decompose;
 pub mod move_items;
 pub mod plan;
+pub mod propagate;
 mod rename;
 pub mod runner;
 mod sandbox;
@@ -81,6 +82,7 @@ pub use rename::{
     generate_renames_with_targeting, CaseVariant, FileEdit, FileRename, Reference, RenameResult,
     RenameScope, RenameSpec, RenameTargeting, RenameWarning,
 };
+pub use propagate::{propagate, PropagateConfig, PropagateEdit, PropagateField, PropagateResult};
 pub use transform::{
     ad_hoc_transform, apply_transforms, load_transform_set, TransformResult, TransformRule,
     TransformSet,
