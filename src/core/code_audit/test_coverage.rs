@@ -468,9 +468,38 @@ fn find_orphaned_test_methods(
             continue;
         }
 
-        // If the source method exists, this test is valid
+        // If the source method exists (exact match), this test is valid
         if source_methods.contains(expected_source) {
             continue;
+        }
+
+        // Prefix match: test_compare_detects_new_drift should match source method
+        // "compare" because it's testing a specific scenario of that method.
+        // We require the prefix to be followed by '_' to prevent false matches
+        // (e.g., test_parse_this should not match source method "par").
+        let has_prefix_match = source_methods.iter().any(|source_method| {
+            let prefix = format!("{}_", source_method);
+            expected_source.starts_with(&prefix)
+        });
+        if has_prefix_match {
+            continue;
+        }
+
+        // Behavior-driven test names: test_detects_exact_duplicate describes a
+        // behavior, not a method reference. Short names (1-2 segments like
+        // "old_function" or "pause") are likely real method references. But
+        // longer compound names (3+ segments like "detects_exact_duplicate" or
+        // "audit_metadata_roundtrips") are probably behavioral descriptions
+        // unless the first segment matches a source method.
+        let segment_count = expected_source.split('_').count();
+        if segment_count >= 3 {
+            let first_word = expected_source.split('_').next().unwrap_or(expected_source);
+            let any_method_starts_with_first_word = source_methods
+                .iter()
+                .any(|m| m.starts_with(first_word) || first_word.starts_with(m));
+            if !any_method_starts_with_first_word {
+                continue;
+            }
         }
 
         findings.push(Finding {
@@ -915,7 +944,12 @@ mod tests {
 
     #[test]
     fn orphaned_test_method_inline_detected() {
-        // A source file has test_overlay_portable but overlay_portable was deleted
+        // Source has discover_from_portable and has_portable_config.
+        // Tests: test_discover_from_portable (valid — exact match),
+        //        test_discover_stale_data (orphaned — 3+ segments, first word "discover"
+        //          matches source method "discover_from_portable", but "discover_stale_data"
+        //          doesn't match any source method by exact or prefix match),
+        //        test_load_config (orphaned — "load_config" is 2 segments, no exact/prefix match).
         let config = make_rust_config();
         let dir = std::env::temp_dir().join("homeboy_test_coverage_orphaned_inline");
         let _ = std::fs::remove_dir_all(&dir);
@@ -927,8 +961,8 @@ mod tests {
                 "discover_from_portable",
                 "has_portable_config",
                 "test_discover_from_portable", // valid — source method exists
-                "test_overlay_portable_fills_absent", // orphaned — overlay_portable was deleted
-                "test_overlay_portable_stored_wins", // orphaned — overlay_portable was deleted
+                "test_discover_stale_data",    // orphaned — first word matches but no prefix match
+                "test_load_config",            // orphaned — short name, no match at all
             ],
         );
 
@@ -946,12 +980,12 @@ mod tests {
             "Should detect 2 orphaned test methods, found: {:?}",
             orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
         );
-        assert!(orphaned[0]
-            .description
-            .contains("overlay_portable_fills_absent"));
-        assert!(orphaned[1]
-            .description
-            .contains("overlay_portable_stored_wins"));
+        assert!(orphaned
+            .iter()
+            .any(|f| f.description.contains("discover_stale_data")));
+        assert!(orphaned
+            .iter()
+            .any(|f| f.description.contains("load_config")));
         assert!(orphaned.iter().all(|f| f.severity == Severity::Warning));
 
         let _ = std::fs::remove_dir_all(&dir);

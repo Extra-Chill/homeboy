@@ -610,6 +610,96 @@ const MIN_JACCARD_SIMILARITY: f64 = 0.5;
 /// a different order.
 const MIN_LCS_RATIO: f64 = 0.5;
 
+/// Minimum number of shared (intersecting) calls between two methods
+/// to flag as a parallel implementation. This prevents false positives
+/// from methods that share only 1-2 trivial calls like `to_string`.
+const MIN_SHARED_CALLS: usize = 3;
+
+/// Ubiquitous stdlib/trait method calls that appear in almost every function
+/// and carry no signal for parallel implementation detection. Two functions
+/// both calling `.to_string()` does not mean they implement the same workflow.
+const TRIVIAL_CALLS: &[&str] = &[
+    "to_string",
+    "to_owned",
+    "to_lowercase",
+    "to_uppercase",
+    "clone",
+    "default",
+    "new",
+    "len",
+    "is_empty",
+    "is_some",
+    "is_none",
+    "is_ok",
+    "is_err",
+    "unwrap",
+    "unwrap_or",
+    "unwrap_or_default",
+    "unwrap_or_else",
+    "expect",
+    "as_str",
+    "as_ref",
+    "as_deref",
+    "into",
+    "from",
+    "iter",
+    "into_iter",
+    "collect",
+    "map",
+    "filter",
+    "any",
+    "all",
+    "find",
+    "contains",
+    "push",
+    "pop",
+    "insert",
+    "remove",
+    "extend",
+    "join",
+    "split",
+    "trim",
+    "starts_with",
+    "ends_with",
+    "strip_prefix",
+    "strip_suffix",
+    "replace",
+    "display",
+    "write",
+    "read",
+    "flush",
+    "ok",
+    "err",
+    "map_err",
+    "and_then",
+    "or_else",
+    "flatten",
+    "take",
+    "skip",
+    "chain",
+    "zip",
+    "enumerate",
+    "cloned",
+    "copied",
+    "rev",
+    "sort",
+    "sort_by",
+    "dedup",
+    "retain",
+    "get",
+    "set",
+    "entry",
+    "or_insert",
+    "or_insert_with",
+    "keys",
+    "values",
+    "exists",
+    "parent",
+    "file_name",
+    "extension",
+    "with_extension",
+];
+
 /// Per-method call sequence extracted from file content.
 #[derive(Debug)]
 struct MethodCallSequence {
@@ -647,8 +737,11 @@ fn extract_calls_from_body(body: &str) -> Vec<String> {
                 }
                 if start < end {
                     let name: String = chars[start..end].iter().collect();
-                    // Skip language keywords and control flow
-                    if !is_keyword(&name) && !name.is_empty() {
+                    // Skip language keywords, control flow, and trivial stdlib calls
+                    if !is_keyword(&name)
+                        && !name.is_empty()
+                        && !TRIVIAL_CALLS.contains(&name.as_str())
+                    {
                         calls.push(name);
                     }
                 }
@@ -720,11 +813,22 @@ fn extract_call_sequences(fingerprints: &[&FileFingerprint]) -> Vec<MethodCallSe
             continue;
         }
 
+        // Skip test files entirely — test code is expected to mirror production
+        // call patterns and flagging it as "parallel implementation" is noise.
+        if super::walker::is_test_path(&fp.relative_path) {
+            continue;
+        }
+
         let lines: Vec<&str> = fp.content.lines().collect();
 
         for method_name in &fp.methods {
             // Skip generic names — they're expected to have similar call patterns
             if GENERIC_NAMES.contains(&method_name.as_str()) {
+                continue;
+            }
+
+            // Skip test methods (inline #[cfg(test)] modules)
+            if method_name.starts_with("test_") {
                 continue;
             }
 
@@ -864,14 +968,20 @@ pub(crate) fn detect_parallel_implementations(fingerprints: &[&FileFingerprint])
             let lcs = lcs_ratio(&a.calls, &b.calls);
 
             if jaccard >= MIN_JACCARD_SIMILARITY && lcs >= MIN_LCS_RATIO {
-                reported_pairs.insert(pair_key);
-
                 // Find the shared calls for the description
                 let set_a: std::collections::HashSet<&str> =
                     a.calls.iter().map(|s| s.as_str()).collect();
                 let set_b: std::collections::HashSet<&str> =
                     b.calls.iter().map(|s| s.as_str()).collect();
                 let mut shared: Vec<&&str> = set_a.intersection(&set_b).collect();
+
+                // Require a minimum absolute number of shared calls.
+                // Jaccard/LCS alone can trigger on tiny overlaps (2 shared out of 4 total).
+                if shared.len() < MIN_SHARED_CALLS {
+                    continue;
+                }
+
+                reported_pairs.insert(pair_key);
                 shared.sort();
                 let shared_preview: String = shared
                     .iter()
