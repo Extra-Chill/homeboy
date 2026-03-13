@@ -25,6 +25,7 @@ pub mod scope;
 pub mod server;
 pub mod ssh;
 pub mod scaffold;
+pub mod transfer;
 pub mod undo;
 pub mod upgrade;
 
