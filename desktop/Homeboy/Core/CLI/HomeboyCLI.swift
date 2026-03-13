@@ -257,17 +257,29 @@ struct ComponentListItemCLI: Decodable, Identifiable {
 }
 
 /// Component from CLI show (no name field)
+/// Updated to match CLI's Component struct with extensions support
 struct ComponentRecordCLI: Decodable, Identifiable {
     let id: String
+    let aliases: [String]              // NEW: Multiple aliases for component
     let localPath: String
     let remotePath: String
     let buildArtifact: String?
-    let versionTargets: [VersionTarget]?
+    let extensions: [String: ScopedExtensionConfig]?  // NEW: Extension configs by ID
+    let versionTargets: [VersionTargetCLI]?
+    let changelogTarget: String?       // NEW: Dedicated changelog file path
+    let hooks: [String: [String]]?     // NEW: Lifecycle hooks
 
-    struct VersionTarget: Decodable {
+    struct VersionTargetCLI: Decodable {
         let file: String
         let pattern: String?
     }
+}
+
+/// Extension configuration scoped to a component (for CLI output parsing)
+/// Settings use [String: String] for simplicity - CLI returns settings as strings
+struct ScopedExtensionConfig: Decodable {
+    let version: String?
+    let settings: [String: String]?
 }
 
 // MARK: - Project Mutation Output Models
