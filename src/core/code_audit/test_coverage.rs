@@ -183,9 +183,7 @@ pub(crate) fn analyze_test_coverage(
                     config,
                 );
             } else if let Some(test_methods) = &disk_test_methods {
-                let test_path = expected_test_path
-                    .as_deref()
-                    .unwrap_or("test file");
+                let test_path = expected_test_path.as_deref().unwrap_or("test file");
                 find_orphaned_test_methods(
                     &mut findings,
                     test_path,
@@ -217,11 +215,8 @@ pub(crate) fn analyze_test_coverage(
                 disk_test_methods.unwrap_or_default()
             };
 
-            let source_methods: HashSet<&str> = source_fp
-                .methods
-                .iter()
-                .map(|m| m.as_str())
-                .collect();
+            let source_methods: HashSet<&str> =
+                source_fp.methods.iter().map(|m| m.as_str()).collect();
 
             if !test_methods.is_empty() {
                 let covered_methods: HashSet<&str> = test_methods
@@ -931,9 +926,9 @@ mod tests {
             vec![
                 "discover_from_portable",
                 "has_portable_config",
-                "test_discover_from_portable",        // valid — source method exists
-                "test_overlay_portable_fills_absent",  // orphaned — overlay_portable was deleted
-                "test_overlay_portable_stored_wins",   // orphaned — overlay_portable was deleted
+                "test_discover_from_portable", // valid — source method exists
+                "test_overlay_portable_fills_absent", // orphaned — overlay_portable was deleted
+                "test_overlay_portable_stored_wins", // orphaned — overlay_portable was deleted
             ],
         );
 
@@ -942,8 +937,7 @@ mod tests {
         let orphaned: Vec<&Finding> = findings
             .iter()
             .filter(|f| {
-                f.kind == AuditFinding::OrphanedTest
-                    && f.description.contains("no longer exists")
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
             })
             .collect();
         assert_eq!(
@@ -952,8 +946,12 @@ mod tests {
             "Should detect 2 orphaned test methods, found: {:?}",
             orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
         );
-        assert!(orphaned[0].description.contains("overlay_portable_fills_absent"));
-        assert!(orphaned[1].description.contains("overlay_portable_stored_wins"));
+        assert!(orphaned[0]
+            .description
+            .contains("overlay_portable_fills_absent"));
+        assert!(orphaned[1]
+            .description
+            .contains("overlay_portable_stored_wins"));
         assert!(orphaned.iter().all(|f| f.severity == Severity::Warning));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -983,8 +981,7 @@ mod tests {
         let orphaned: Vec<&Finding> = findings
             .iter()
             .filter(|f| {
-                f.kind == AuditFinding::OrphanedTest
-                    && f.description.contains("no longer exists")
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
             })
             .collect();
         assert_eq!(orphaned.len(), 1);
@@ -1012,8 +1009,7 @@ mod tests {
         let orphaned: Vec<&Finding> = findings
             .iter()
             .filter(|f| {
-                f.kind == AuditFinding::OrphanedTest
-                    && f.description.contains("no longer exists")
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
             })
             .collect();
         assert!(
@@ -1038,10 +1034,10 @@ mod tests {
         let test = make_fp(
             "tests/engine_test.rs",
             vec![
-                "test_start",   // valid
-                "test_stop",    // valid
-                "test_pause",   // orphaned
-                "test_resume",  // orphaned
+                "test_start",  // valid
+                "test_stop",   // valid
+                "test_pause",  // orphaned
+                "test_resume", // orphaned
             ],
         );
 
@@ -1050,16 +1046,12 @@ mod tests {
         let orphaned: Vec<&Finding> = findings
             .iter()
             .filter(|f| {
-                f.kind == AuditFinding::OrphanedTest
-                    && f.description.contains("no longer exists")
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
             })
             .collect();
         assert_eq!(orphaned.len(), 2);
 
-        let orphaned_names: Vec<&str> = orphaned
-            .iter()
-            .map(|f| f.description.as_str())
-            .collect();
+        let orphaned_names: Vec<&str> = orphaned.iter().map(|f| f.description.as_str()).collect();
         assert!(orphaned_names.iter().any(|d| d.contains("pause")));
         assert!(orphaned_names.iter().any(|d| d.contains("resume")));
 
