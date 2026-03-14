@@ -466,19 +466,30 @@ pub(crate) fn is_reexported(file_path: &str, fn_name: &str, root: &Path) -> bool
 }
 
 pub(crate) fn has_pub_use_of(content: &str, fn_name: &str) -> bool {
+    let word_re = match Regex::new(&format!(r"\b{}\b", regex::escape(fn_name))) {
+        Ok(re) => re,
+        Err(_) => return false,
+    };
+
     let mut in_pub_use_block = false;
     for line in content.lines() {
         let trimmed = line.trim();
 
         if in_pub_use_block {
-            if trimmed.contains(fn_name) {
+            if word_re.is_match(trimmed) {
                 return true;
             }
             if trimmed.contains("};") || trimmed == "}" {
                 in_pub_use_block = false;
             }
         } else if trimmed.starts_with("pub use") {
-            if trimmed.contains(fn_name) {
+            // Skip glob re-exports like `pub use core::*;` — they make
+            // the name accessible but the audit already checked whether
+            // anyone actually references it.
+            if trimmed.contains("::*") {
+                continue;
+            }
+            if word_re.is_match(trimmed) {
                 return true;
             }
             if trimmed.contains('{') && !trimmed.contains('}') {
@@ -490,12 +501,17 @@ pub(crate) fn has_pub_use_of(content: &str, fn_name: &str) -> bool {
 }
 
 fn is_used_by_binary_crate(fn_name: &str, root: &Path) -> bool {
+    let word_re = match Regex::new(&format!(r"\b{}\b", regex::escape(fn_name))) {
+        Ok(re) => re,
+        Err(_) => return false,
+    };
+
     let src = root.join("src");
     let main_rs = src.join("main.rs");
     if main_rs.exists()
         && std::fs::read_to_string(&main_rs)
             .ok()
-            .is_some_and(|content| content.contains(fn_name))
+            .is_some_and(|content| word_re.is_match(&content))
     {
         return true;
     }
@@ -521,7 +537,7 @@ fn is_used_by_binary_crate(fn_name: &str, root: &Path) -> bool {
 
     for mod_name in main_mods.difference(&lib_mods) {
         let mod_dir = src.join(mod_name);
-        if mod_dir.is_dir() && scan_dir_for_reference(&mod_dir, fn_name) {
+        if mod_dir.is_dir() && scan_dir_for_reference(&mod_dir, &word_re) {
             return true;
         }
 
@@ -529,7 +545,7 @@ fn is_used_by_binary_crate(fn_name: &str, root: &Path) -> bool {
         if mod_file.exists()
             && std::fs::read_to_string(&mod_file)
                 .ok()
-                .is_some_and(|content| content.contains(fn_name))
+                .is_some_and(|content| word_re.is_match(&content))
         {
             return true;
         }
@@ -547,7 +563,7 @@ fn extract_mod_names(content: &str) -> HashSet<String> {
     mods
 }
 
-fn scan_dir_for_reference(dir: &Path, fn_name: &str) -> bool {
+fn scan_dir_for_reference(dir: &Path, word_re: &Regex) -> bool {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return false,
@@ -556,13 +572,13 @@ fn scan_dir_for_reference(dir: &Path, fn_name: &str) -> bool {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if scan_dir_for_reference(&path, fn_name) {
+            if scan_dir_for_reference(&path, word_re) {
                 return true;
             }
         } else if path.extension().is_some_and(|ext| ext == "rs")
             && std::fs::read_to_string(&path)
                 .ok()
-                .is_some_and(|content| content.contains(fn_name))
+                .is_some_and(|content| word_re.is_match(&content))
         {
             return true;
         }
