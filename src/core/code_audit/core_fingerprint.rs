@@ -585,14 +585,15 @@ fn extract_functions(
         let in_test_mod = is_in_test_range(symbol.line, test_range);
         let is_test = has_test_attr || in_test_mod;
 
-        // Determine if inside a trait impl
+        // Determine if inside a trait impl by finding the nearest enclosing
+        // impl context (the last one that starts before this function at a
+        // shallower depth). Using `any()` was wrong — it matched unrelated
+        // impl blocks earlier in the file.
         let is_trait_impl = if symbol.depth > 0 {
-            // Find the innermost impl context that encloses this function
-            impl_contexts.iter().any(|ctx| {
-                ctx.depth < symbol.depth
-                    && ctx.line < symbol.line
-                    && ctx.trait_name.as_ref().is_some_and(|t| !t.is_empty())
-            })
+            impl_contexts
+                .iter()
+                .rfind(|ctx| ctx.depth < symbol.depth && ctx.line < symbol.line)
+                .is_some_and(|ctx| ctx.trait_name.as_ref().is_some_and(|t| !t.is_empty()))
         } else {
             false
         };
@@ -657,6 +658,14 @@ fn extract_fn_body(lines: &[&str], start_idx: usize, _grammar: &Grammar) -> Stri
     let mut body_lines = Vec::new();
 
     for i in start_idx..lines.len() {
+        let trimmed = lines[i].trim();
+
+        // Trait method declarations end with `;` and have no body.
+        // If we hit a semicolon before finding any `{`, this is a bodyless declaration.
+        if !found_open && trimmed.ends_with(';') {
+            return String::new();
+        }
+
         for ch in lines[i].chars() {
             if ch == '{' {
                 depth += 1;
@@ -1120,7 +1129,7 @@ fn detect_unused_params(functions: &[FunctionInfo], _lang_id: &str) -> Vec<Unuse
     let mut unused = Vec::new();
 
     for f in functions {
-        if f.is_test || f.params.is_empty() || f.body.is_empty() {
+        if f.is_test || f.is_trait_impl || f.params.is_empty() || f.body.is_empty() {
             continue;
         }
 
@@ -1539,6 +1548,55 @@ pub(crate) fn ignores_second(a: i32, b: i32) -> i32 {
                 .iter()
                 .any(|p| p.function == "uses_both"),
             "uses_both should have no unused params"
+        );
+    }
+
+    #[test]
+    fn trait_method_declarations_not_flagged_as_unused_params() {
+        let grammar = rust_grammar();
+        let content = r#"
+pub trait FileSystem {
+    fn read(&self, path: &Path) -> Result<String>;
+    fn write(&self, path: &Path, content: &str) -> Result<()>;
+    fn delete(&self, path: &Path) -> Result<()>;
+}
+"#;
+
+        let fp = fingerprint_from_grammar(content, &grammar, "src/lib.rs").unwrap();
+
+        assert!(
+            fp.unused_parameters.is_empty(),
+            "Trait method declarations should not produce unused param findings, got: {:?}",
+            fp.unused_parameters
+        );
+    }
+
+    #[test]
+    fn trait_impl_methods_not_flagged_as_unused_params() {
+        let grammar = rust_grammar();
+        // The trait impl uses `path` via display(), but the detector shouldn't
+        // even check — trait impls must match the trait's param names.
+        let content = r#"
+pub trait Store {
+    fn save(&self, key: &str, value: &str) -> bool;
+}
+
+pub struct MemStore;
+
+impl Store for MemStore {
+    fn save(&self, key: &str, value: &str) -> bool {
+        key.len() > 0
+    }
+}
+"#;
+
+        let fp = fingerprint_from_grammar(content, &grammar, "src/lib.rs").unwrap();
+
+        // value is unused in the impl, but since it's a trait impl it should be skipped
+        assert!(
+            !fp.unused_parameters.iter().any(|p| p.function == "save"),
+            "Trait impl methods should not produce unused param findings, got: {:?}",
+            fp.unused_parameters
         );
     }
 
