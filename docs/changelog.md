@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.76.1] - 2026-03-14
+
+### Changed
+- Remove backward-compat shims and rehome homeless core modules
+- reduce false positives in parallel_implementation and orphaned_test detectors
+
+### Fixed
+- eliminate unused_parameter false positives for trait methods
+- prune stale refactor sandbox directories on startup
+
 ## [0.76.0] - 2026-03-13
 
 ### Added
