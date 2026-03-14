@@ -371,7 +371,17 @@ pub fn fingerprint_from_grammar(
         "php" => SKIP_CALLS_PHP,
         _ => SKIP_CALLS_RUST,
     };
-    let internal_calls = extract_internal_calls(content, skip_calls);
+    // Build the effective skip list: exclude names that are also defined as
+    // functions in this file. E.g. "write" is in SKIP_CALLS (for the write!
+    // macro) but if this file defines `fn write(...)`, we need to track calls
+    // to it in internal_calls.
+    let defined_names: HashSet<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+    let effective_skip: Vec<&str> = skip_calls
+        .iter()
+        .filter(|name| !defined_names.contains(*name))
+        .copied()
+        .collect();
+    let internal_calls = extract_internal_calls(content, &effective_skip);
 
     // --- Public API ---
     let public_api: Vec<String> = functions
@@ -1605,6 +1615,32 @@ impl Store for MemStore {
             !fp.unused_parameters.iter().any(|p| p.function == "save"),
             "Trait impl methods should not produce unused param findings, got: {:?}",
             fp.unused_parameters
+        );
+    }
+
+    #[test]
+    fn skip_list_does_not_suppress_defined_function_calls() {
+        let grammar = rust_grammar();
+        // "write" is in SKIP_CALLS_RUST (for the write! macro), but this
+        // file defines fn write(...) and calls it — so it should appear
+        // in internal_calls.
+        let content = r#"
+fn run() {
+    let result = write("hello");
+}
+
+fn write(msg: &str) -> bool {
+    println!("{}", msg);
+    true
+}
+"#;
+
+        let fp = fingerprint_from_grammar(content, &grammar, "src/file.rs").unwrap();
+
+        assert!(
+            fp.internal_calls.contains(&"write".to_string()),
+            "write should be in internal_calls when the file defines fn write(), got: {:?}",
+            fp.internal_calls
         );
     }
 
