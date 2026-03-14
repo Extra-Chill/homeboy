@@ -131,7 +131,23 @@ pub(crate) fn analyze_dead_code(fingerprints: &[&FileFingerprint]) -> Vec<Findin
             .collect();
 
         for method in private_methods {
+            // Skip trait impl methods — they're called via trait dispatch,
+            // not direct function calls, so internal_calls won't contain them.
+            if fp.trait_impl_methods.contains(method) {
+                continue;
+            }
+
             if !fp.internal_calls.contains(method) {
+                // Fallback: check if the method name appears as a call in the
+                // file content. internal_calls may miss names in the skip list
+                // (e.g., "write" is skipped to avoid matching the write! macro,
+                // but it could also be a real function name in this file).
+                let call_pattern = format!("{}(", method);
+                let method_pattern = format!(".{}(", method);
+                if fp.content.contains(&call_pattern) || fp.content.contains(&method_pattern) {
+                    continue;
+                }
+
                 findings.push(Finding {
                     convention: "dead_code".to_string(),
                     severity: Severity::Warning,
@@ -402,6 +418,61 @@ mod tests {
         assert!(
             unreferenced.is_empty(),
             "Framework entry points should not be flagged"
+        );
+    }
+
+    #[test]
+    fn trait_impl_methods_not_flagged_as_orphaned() {
+        let mut fp = make_fingerprint(
+            "src/local_files.rs",
+            vec!["read", "write", "delete"],
+            vec![],
+            vec!["read", "delete"], // write not in internal_calls (skip list)
+            vec![
+                ("read", "private"),
+                ("write", "private"),
+                ("delete", "private"),
+            ],
+        );
+        fp.trait_impl_methods = vec![
+            "read".to_string(),
+            "write".to_string(),
+            "delete".to_string(),
+        ];
+
+        let findings = analyze_dead_code(&[&fp]);
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::OrphanedInternal)
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "Trait impl methods should not be flagged as orphaned, got: {:?}",
+            orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn skipped_call_name_found_in_content_not_flagged() {
+        let mut fp = make_fingerprint(
+            "src/file.rs",
+            vec!["run", "write"],
+            vec!["run"],
+            vec!["run"], // write not in internal_calls (it's in skip list)
+            vec![("write", "private")],
+        );
+        // The file content contains a direct call to write()
+        fp.content = "fn run() { let result = write(&id, &path); }".to_string();
+
+        let findings = analyze_dead_code(&[&fp]);
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::OrphanedInternal)
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "Function called in content should not be flagged, got: {:?}",
+            orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
         );
     }
 }

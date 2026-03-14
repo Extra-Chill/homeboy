@@ -159,6 +159,7 @@ pub fn fingerprint_from_git_ref(
         dead_code_markers: output.dead_code_markers,
         internal_calls: output.internal_calls,
         public_api: output.public_api,
+        trait_impl_methods: Vec::new(),
     })
 }
 

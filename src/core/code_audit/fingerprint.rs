@@ -51,6 +51,8 @@ pub struct FileFingerprint {
     pub internal_calls: Vec<String>,
     /// Public functions/methods exported from this file.
     pub public_api: Vec<String>,
+    /// Method names that are trait implementations (called via trait dispatch).
+    pub trait_impl_methods: Vec<String>,
 }
 
 /// Extract a structural fingerprint from a source file.
@@ -114,5 +116,6 @@ fn fingerprint_via_extension(
         dead_code_markers: output.dead_code_markers,
         internal_calls: output.internal_calls,
         public_api: output.public_api,
+        trait_impl_methods: Vec::new(), // Extension scripts don't track this
     })
 }

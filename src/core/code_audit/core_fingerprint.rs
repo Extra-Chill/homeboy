@@ -382,6 +382,13 @@ pub fn fingerprint_from_grammar(
         .into_iter()
         .collect();
 
+    // --- Trait impl methods ---
+    let trait_impl_methods: Vec<String> = functions
+        .iter()
+        .filter(|f| f.is_trait_impl && !f.is_test)
+        .map(|f| f.name.clone())
+        .collect();
+
     // --- Unused parameters ---
     let unused_parameters = detect_unused_params(&functions, lang_id);
 
@@ -415,6 +422,7 @@ pub fn fingerprint_from_grammar(
         dead_code_markers,
         internal_calls,
         public_api,
+        trait_impl_methods,
     })
 }
 
