@@ -592,8 +592,7 @@ fn extract_functions(
         let is_trait_impl = if symbol.depth > 0 {
             impl_contexts
                 .iter()
-                .filter(|ctx| ctx.depth < symbol.depth && ctx.line < symbol.line)
-                .last()
+                .rfind(|ctx| ctx.depth < symbol.depth && ctx.line < symbol.line)
                 .is_some_and(|ctx| ctx.trait_name.as_ref().is_some_and(|t| !t.is_empty()))
         } else {
             false
