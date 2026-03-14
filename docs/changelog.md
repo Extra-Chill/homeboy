@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.76.2] - 2026-03-14
+
+### Fixed
+- prevent skip list from suppressing calls to defined functions
+- eliminate orphaned_internal false positives
+- reduce false positives in unreferenced_export fixer guards
+
 ## [0.76.1] - 2026-03-14
 
 ### Changed
