@@ -50,6 +50,9 @@ pub use lifecycle::{
     slugify_id, uninstall, update, InstallResult, UpdateAvailable, UpdateResult,
 };
 
+// Re-export aggregate query types
+// (ActionSummary, ExtensionSummary, UpdateAllResult, UpdateEntry defined below in this file)
+
 // Extension loader functions
 
 use crate::component::Component;
@@ -594,6 +597,222 @@ pub fn extension_path(id: &str) -> PathBuf {
 
 pub fn available_extension_ids() -> Vec<String> {
     config::list_ids::<ExtensionManifest>().unwrap_or_default()
+}
+
+// ============================================================================
+// Aggregate query functions
+// ============================================================================
+
+use serde::Serialize;
+
+/// Summary of an extension for list views.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionSummary {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub runtime: String,
+    pub compatible: bool,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_detail: Option<String>,
+    pub linked: bool,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_setup: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_ready_check: Option<bool>,
+}
+
+/// Summary of an extension action.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionSummary {
+    pub id: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub action_type: ActionType,
+}
+
+/// List all extensions with pre-computed summary fields.
+///
+/// Aggregates ready status, compatibility, linked status, CLI info, actions,
+/// and runtime details into a single summary per extension.
+pub fn list_summaries(project: Option<&crate::project::Project>) -> Vec<ExtensionSummary> {
+    let extensions = load_all_extensions().unwrap_or_default();
+
+    extensions
+        .iter()
+        .map(|ext| {
+            let ready_status = extension_ready_status(ext);
+            let compatible = is_extension_compatible(ext, project);
+            let linked = is_extension_linked(&ext.id);
+
+            let (cli_tool, cli_display_name) = ext
+                .cli
+                .as_ref()
+                .map(|cli| (Some(cli.tool.clone()), Some(cli.display_name.clone())))
+                .unwrap_or((None, None));
+
+            let actions: Vec<ActionSummary> = ext
+                .actions
+                .iter()
+                .map(|a| ActionSummary {
+                    id: a.id.clone(),
+                    label: a.label.clone(),
+                    action_type: a.action_type.clone(),
+                })
+                .collect();
+
+            let has_setup = ext
+                .runtime()
+                .and_then(|r| r.setup_command.as_ref())
+                .map(|_| true);
+            let has_ready_check = ext
+                .runtime()
+                .and_then(|r| r.ready_check.as_ref())
+                .map(|_| true);
+
+            let source_revision = read_source_revision(&ext.id);
+
+            ExtensionSummary {
+                id: ext.id.clone(),
+                name: ext.name.clone(),
+                version: ext.version.clone(),
+                description: ext
+                    .description
+                    .as_ref()
+                    .and_then(|d| d.lines().next())
+                    .unwrap_or("")
+                    .to_string(),
+                runtime: if ext.executable.is_some() {
+                    "executable".to_string()
+                } else {
+                    "platform".to_string()
+                },
+                compatible,
+                ready: ready_status.ready,
+                ready_reason: ready_status.reason,
+                ready_detail: ready_status.detail,
+                linked,
+                path: ext.extension_path.clone().unwrap_or_default(),
+                source_revision,
+                cli_tool,
+                cli_display_name,
+                actions,
+                has_setup,
+                has_ready_check,
+            }
+        })
+        .collect()
+}
+
+/// Result of updating all extensions.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateAllResult {
+    pub updated: Vec<UpdateEntry>,
+    pub skipped: Vec<String>,
+}
+
+/// A single extension update entry with before/after versions.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateEntry {
+    pub extension_id: String,
+    pub old_version: String,
+    pub new_version: String,
+}
+
+/// Update all installed extensions, skipping linked ones.
+///
+/// Linked extensions are managed externally (symlinks to dev directories)
+/// and should not be updated via git pull.
+pub fn update_all(force: bool) -> UpdateAllResult {
+    let extension_ids = available_extension_ids();
+    let mut updated = Vec::new();
+    let mut skipped = Vec::new();
+
+    for id in &extension_ids {
+        if is_extension_linked(id) {
+            skipped.push(id.clone());
+            continue;
+        }
+
+        let old_version = load_extension(id).ok().map(|m| m.version.clone());
+
+        match update(id, force) {
+            Ok(_) => {
+                let new_version = load_extension(id)
+                    .ok()
+                    .map(|m| m.version.clone())
+                    .unwrap_or_default();
+
+                updated.push(UpdateEntry {
+                    extension_id: id.clone(),
+                    old_version: old_version.unwrap_or_default(),
+                    new_version,
+                });
+            }
+            Err(_) => {
+                skipped.push(id.clone());
+            }
+        }
+    }
+
+    UpdateAllResult { updated, skipped }
+}
+
+/// Execute a tool from an extension's vendor directory.
+///
+/// Sets up PATH with the extension's vendor/bin and node_modules/.bin,
+/// resolves the working directory from an optional component, and runs
+/// the command interactively.
+pub fn exec_tool(extension_id: &str, component_id: Option<&str>, args: &[String]) -> Result<i32> {
+    use crate::server::execute_local_command_interactive;
+
+    let extension = load_extension(extension_id)?;
+    let ext_path = extension
+        .extension_path
+        .as_deref()
+        .ok_or_else(|| Error::config_missing_key("extension_path", Some(extension_id.into())))?;
+
+    // Resolve working directory
+    let working_dir = if let Some(cid) = component_id {
+        let comp = crate::component::load(cid)?;
+        comp.local_path.clone()
+    } else {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_string())
+    };
+
+    // Build PATH with extension vendor directories prepended
+    let vendor_bin = format!("{}/vendor/bin", ext_path);
+    let node_bin = format!("{}/node_modules/.bin", ext_path);
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let enriched_path = format!("{}:{}:{}", vendor_bin, node_bin, current_path);
+
+    let env = vec![
+        ("PATH", enriched_path.as_str()),
+        (exec_context::EXTENSION_PATH, ext_path),
+        (exec_context::EXTENSION_ID, extension_id),
+    ];
+
+    let command = args.join(" ");
+    Ok(execute_local_command_interactive(
+        &command,
+        Some(&working_dir),
+        Some(&env),
+    ))
 }
 
 pub fn save_manifest(manifest: &ExtensionManifest) -> Result<()> {

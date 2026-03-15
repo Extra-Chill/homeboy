@@ -2,8 +2,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::extension::{
-    self, extension_ready_status, is_extension_compatible, is_extension_linked,
-    load_all_extensions, load_extension, run_setup,
+    self, extension_ready_status, is_extension_linked, load_extension, run_setup, ExtensionSummary,
+    UpdateEntry,
 };
 use homeboy::project::{self, Project};
 
@@ -187,7 +187,7 @@ pub enum ExtensionOutput {
     List {
         #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
-        extensions: Vec<ExtensionEntry>,
+        extensions: Vec<ExtensionSummary>,
     },
     #[serde(rename = "extension.show")]
     Show { extension: ExtensionDetail },
@@ -222,7 +222,7 @@ pub enum ExtensionOutput {
     },
     #[serde(rename = "extension.update_all")]
     UpdateAll {
-        updated: Vec<ExtensionUpdateEntry>,
+        updated: Vec<UpdateEntry>,
         skipped: Vec<String>,
     },
     #[serde(rename = "extension.uninstall")]
@@ -252,52 +252,6 @@ pub enum ExtensionOutput {
     },
     #[serde(rename = "extension.set")]
     SetBatch { batch: homeboy::BatchResult },
-}
-
-#[derive(Serialize)]
-pub struct ExtensionUpdateEntry {
-    pub extension_id: String,
-    pub old_version: String,
-    pub new_version: String,
-}
-
-#[derive(Serialize)]
-pub struct ActionSummary {
-    pub id: String,
-    pub label: String,
-    #[serde(rename = "type")]
-    pub action_type: homeboy::extension::ActionType,
-}
-
-#[derive(Serialize)]
-
-pub struct ExtensionEntry {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub runtime: String,
-    pub compatible: bool,
-    pub ready: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ready_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ready_detail: Option<String>,
-    pub configured: bool,
-    pub linked: bool,
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_revision: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cli_tool: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cli_display_name: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub actions: Vec<ActionSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub has_setup: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub has_ready_check: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -371,80 +325,13 @@ pub struct RequiresDetail {
 }
 
 fn list(project: Option<String>) -> CmdResult<ExtensionOutput> {
-    let extensions = load_all_extensions().unwrap_or_default();
-
     let project_config: Option<Project> = project.as_ref().and_then(|id| project::load(id).ok());
-
-    let entries: Vec<ExtensionEntry> = extensions
-        .iter()
-        .map(|extension| {
-            let ready_status = extension_ready_status(extension);
-            let compatible = is_extension_compatible(extension, project_config.as_ref());
-            let linked = is_extension_linked(&extension.id);
-
-            let (cli_tool, cli_display_name) = extension
-                .cli
-                .as_ref()
-                .map(|cli| (Some(cli.tool.clone()), Some(cli.display_name.clone())))
-                .unwrap_or((None, None));
-
-            let actions: Vec<ActionSummary> = extension
-                .actions
-                .iter()
-                .map(|a| ActionSummary {
-                    id: a.id.clone(),
-                    label: a.label.clone(),
-                    action_type: a.action_type.clone(),
-                })
-                .collect();
-
-            let has_setup = extension
-                .runtime()
-                .and_then(|r| r.setup_command.as_ref())
-                .map(|_| true);
-            let has_ready_check = extension
-                .runtime()
-                .and_then(|r| r.ready_check.as_ref())
-                .map(|_| true);
-
-            let source_revision = homeboy::extension::read_source_revision(&extension.id);
-
-            ExtensionEntry {
-                id: extension.id.clone(),
-                name: extension.name.clone(),
-                version: extension.version.clone(),
-                description: extension
-                    .description
-                    .as_ref()
-                    .and_then(|d| d.lines().next())
-                    .unwrap_or("")
-                    .to_string(),
-                runtime: if extension.executable.is_some() {
-                    "executable".to_string()
-                } else {
-                    "platform".to_string()
-                },
-                compatible,
-                ready: ready_status.ready,
-                ready_reason: ready_status.reason,
-                ready_detail: ready_status.detail,
-                configured: true,
-                linked,
-                path: extension.extension_path.clone().unwrap_or_default(),
-                source_revision,
-                cli_tool,
-                cli_display_name,
-                actions,
-                has_setup,
-                has_ready_check,
-            }
-        })
-        .collect();
+    let summaries = extension::list_summaries(project_config.as_ref());
 
     Ok((
         ExtensionOutput::List {
             project_id: project,
-            extensions: entries,
+            extensions: summaries,
         },
         0,
     ))
@@ -623,39 +510,15 @@ fn update_extension(
 }
 
 fn update_all_extensions(force: bool) -> CmdResult<ExtensionOutput> {
-    let extension_ids = extension::available_extension_ids();
-    let mut updated = Vec::new();
-    let mut skipped = Vec::new();
+    let result = extension::update_all(force);
 
-    for id in &extension_ids {
-        // Skip linked extensions (they're managed externally)
-        if is_extension_linked(id) {
-            skipped.push(id.clone());
-            continue;
-        }
-
-        let old_version = load_extension(id).ok().map(|m| m.version.clone());
-
-        match extension::update(id, force) {
-            Ok(_) => {
-                let new_version = load_extension(id)
-                    .ok()
-                    .map(|m| m.version.clone())
-                    .unwrap_or_default();
-
-                updated.push(ExtensionUpdateEntry {
-                    extension_id: id.clone(),
-                    old_version: old_version.unwrap_or_default(),
-                    new_version,
-                });
-            }
-            Err(_) => {
-                skipped.push(id.clone());
-            }
-        }
-    }
-
-    Ok((ExtensionOutput::UpdateAll { updated, skipped }, 0))
+    Ok((
+        ExtensionOutput::UpdateAll {
+            updated: result.updated,
+            skipped: result.skipped,
+        },
+        0,
+    ))
 }
 
 fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
@@ -732,42 +595,7 @@ fn exec_extension_tool(
     component: Option<String>,
     args: Vec<String>,
 ) -> CmdResult<ExtensionOutput> {
-    let extension = load_extension(extension_id)?;
-    let extension_path = extension.extension_path.as_deref().ok_or_else(|| {
-        homeboy::Error::config_missing_key("extension_path", Some(extension_id.into()))
-    })?;
-
-    // Resolve working directory: component path if given, otherwise current dir
-    let working_dir = if let Some(ref cid) = component {
-        let comp = homeboy::component::load(cid)?;
-        comp.local_path.clone()
-    } else {
-        std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string())
-    };
-
-    // Build PATH with extension's vendor/bin prepended
-    let vendor_bin = format!("{}/vendor/bin", extension_path);
-    let node_bin = format!("{}/node_modules/.bin", extension_path);
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    let enriched_path = format!("{}:{}:{}", vendor_bin, node_bin, current_path);
-
-    let env = vec![
-        ("PATH", enriched_path.as_str()),
-        (
-            homeboy::extension::exec_context::EXTENSION_PATH,
-            extension_path,
-        ),
-        (homeboy::extension::exec_context::EXTENSION_ID, extension_id),
-    ];
-
-    let command = args.join(" ");
-    let exit_code = homeboy::server::execute_local_command_interactive(
-        &command,
-        Some(&working_dir),
-        Some(&env),
-    );
+    let exit_code = extension::exec_tool(extension_id, component.as_deref(), &args)?;
 
     Ok((
         ExtensionOutput::Exec {
