@@ -14,7 +14,7 @@ pub struct RunnerOutput {
 
 use super::ExtensionExecutionContext;
 
-/// Orchestrates extension script execution for test/lint runners.
+/// Orchestrates extension script execution for lint/test/build runners.
 ///
 /// Encapsulates the shared logic for finding components, resolving extensions,
 /// loading manifests, merging settings, and executing runner scripts.
@@ -25,6 +25,13 @@ pub struct ExtensionRunner {
     script_args: Vec<String>,
     path_override: Option<String>,
     pre_loaded_component: Option<Component>,
+    /// Override the working directory for script execution.
+    /// When set, the script runs in this directory instead of deriving it from the extension path.
+    /// Used by Build to run in the component's `local_path`.
+    working_dir: Option<String>,
+    /// Override the command string instead of constructing from extension_path + script_path.
+    /// Used by Build when `command_template` produces a pre-resolved command.
+    command_override: Option<String>,
 }
 
 impl ExtensionRunner {
@@ -46,6 +53,8 @@ impl ExtensionRunner {
             script_args: Vec::new(),
             path_override: None,
             pre_loaded_component: None,
+            working_dir: None,
+            command_override: None,
         }
     }
 
@@ -92,13 +101,31 @@ impl ExtensionRunner {
         self
     }
 
+    /// Set the working directory for script execution.
+    ///
+    /// By default, scripts run relative to the extension path. Use this to
+    /// run in a different directory (e.g., the component's `local_path` for builds).
+    pub fn working_dir(mut self, dir: &str) -> Self {
+        self.working_dir = Some(dir.to_string());
+        self
+    }
+
+    /// Override the command string instead of constructing from extension_path + script_path.
+    ///
+    /// Use this when the command is pre-resolved (e.g., Build's `command_template`
+    /// has already been interpolated with the script path).
+    pub fn command_override(mut self, command: String) -> Self {
+        self.command_override = Some(command);
+        self
+    }
+
     /// Execute the extension runner script.
     ///
     /// Performs the full orchestration:
     /// 1. Load component configuration
     /// 2. Determine extension from component config
     /// 3. Find extension path
-    /// 4. Validate script exists
+    /// 4. Validate script exists (unless command_override is set)
     /// 5. Load manifest
     /// 6. Merge settings (manifest defaults → component → overrides)
     /// 7. Prepare environment variables
@@ -109,6 +136,7 @@ impl ExtensionRunner {
             self.pre_loaded_component.as_ref(),
             self.path_override.as_deref(),
             &self.settings_overrides,
+            self.command_override.is_some(),
         )?;
 
         let project_path = PathBuf::from(&prepared.execution.component.local_path);
@@ -156,6 +184,8 @@ impl ExtensionRunner {
             &self.execution_context.script_path,
             &self.script_args,
             env_vars,
+            self.working_dir.as_deref(),
+            self.command_override.as_deref(),
         )
     }
 }

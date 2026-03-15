@@ -501,25 +501,37 @@ pub(crate) fn execute_capability_script(
     script_path: &str,
     script_args: &[String],
     env_vars: &[(String, String)],
+    working_dir: Option<&str>,
+    command_override: Option<&str>,
 ) -> Result<CommandOutput> {
-    let script_path = extension_path.join(script_path);
-    let mut command = shell::quote_path(&script_path.to_string_lossy());
-
-    if !script_args.is_empty() {
-        command.push(' ');
-        command.push_str(&shell::quote_args(script_args));
-    }
+    let command = if let Some(cmd) = command_override {
+        cmd.to_string()
+    } else {
+        let resolved = extension_path.join(script_path);
+        let mut cmd = shell::quote_path(&resolved.to_string_lossy());
+        if !script_args.is_empty() {
+            cmd.push(' ');
+            cmd.push_str(&shell::quote_args(script_args));
+        }
+        cmd
+    };
 
     let env_refs: Vec<(&str, &str)> = env_vars
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    Ok(execute_local_command_passthrough(
-        &command,
-        None,
-        Some(&env_refs),
-    ))
+    let env_opt = if env_refs.is_empty() {
+        None
+    } else {
+        Some(env_refs.as_slice())
+    };
+
+    if let Some(dir) = working_dir {
+        Ok(execute_local_command_in_dir(&command, Some(dir), env_opt))
+    } else {
+        Ok(execute_local_command_passthrough(&command, None, env_opt))
+    }
 }
 
 pub(crate) struct PreparedCapabilityRun {
@@ -565,16 +577,21 @@ pub(crate) fn prepare_capability_run(
     pre_loaded_component: Option<&Component>,
     path_override: Option<&str>,
     settings_overrides: &[(String, String)],
+    skip_script_validation: bool,
 ) -> Result<PreparedCapabilityRun> {
     let component =
         resolve_capability_component(execution_context, pre_loaded_component, path_override)?;
     let execution = build_capability_execution_context(execution_context, component, path_override);
 
-    validate_capability_script_exists(
-        &execution.extension_path,
-        &execution.script_path,
-        execution.capability,
-    )?;
+    // Skip validation when a command_override is provided (e.g., Build with command_template)
+    // since the script_path may be empty or not point to an actual file.
+    if !skip_script_validation && !execution.script_path.is_empty() {
+        validate_capability_script_exists(
+            &execution.extension_path,
+            &execution.script_path,
+            execution.capability,
+        )?;
+    }
 
     let manifest = load_extension_manifest_from_dir(&execution.extension_path)?;
     let settings_json =
