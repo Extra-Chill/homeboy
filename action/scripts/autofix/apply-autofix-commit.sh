@@ -15,20 +15,30 @@ if ! [[ "${AUTOFIX_PUSH_ATTEMPTS}" =~ ^[0-9]+$ ]]; then
   AUTOFIX_PUSH_ATTEMPTS=3
 fi
 
-# Count autofix commits on this branch only (not full repo history).
-# Use scope base ref when available, fall back to origin/main..HEAD,
-# then full log as last resort.
-# Match the prefix (not full subject) so informative suffixes don't break detection.
+# Count autofix commits on THIS PR branch only.
+# Scope: base_ref..HEAD counts only commits added by this PR, so autofix
+# commits on other PRs or merged to main never count against this branch.
+# Fallback: count consecutive autofix commits at HEAD (same logic as non-PR)
+# so we never accidentally count the entire repo history.
 BASE="$(scope_base_ref)"
 if [ -n "${BASE}" ]; then
   AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "${BASE}..HEAD" 2>/dev/null | wc -l | xargs)
 elif [ -n "${GITHUB_BASE_REF:-}" ]; then
   AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "origin/${GITHUB_BASE_REF}..HEAD" 2>/dev/null | wc -l | xargs)
 else
-  AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" | wc -l | xargs)
+  # No base ref available — count consecutive autofix commits at HEAD.
+  # This prevents false positives from historical autofix commits on other branches.
+  AUTOFIX_COMMIT_COUNT=0
+  while IFS= read -r subject; do
+    if [[ "${subject}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
+      AUTOFIX_COMMIT_COUNT=$((AUTOFIX_COMMIT_COUNT + 1))
+    else
+      break
+    fi
+  done < <(git log --format=%s -n "$((AUTOFIX_MAX_COMMITS + 1))" 2>/dev/null)
 fi
 if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
-  echo "Skipping autofix: reached max autofix commits (${AUTOFIX_COMMIT_COUNT}/${AUTOFIX_MAX_COMMITS})"
+  echo "Skipping autofix: ${AUTOFIX_COMMIT_COUNT} autofix commits on this branch (max ${AUTOFIX_MAX_COMMITS})"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
   exit 0
 fi
