@@ -52,6 +52,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
         let extension_id = context.extension_id.clone();
         let extension = extension::load_extension(&extension_id)?;
         if let Some(build) = &extension.build {
+            // Priority 1: Extension's bundled build script
             let bundled = build
                 .extension_script
                 .as_ref()
@@ -79,6 +80,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
                 return Ok(result);
             }
 
+            // Priority 2: Local script matching the extension's script_names pattern
             let local_path = PathBuf::from(&component.local_path);
             for script_name in &build.script_names {
                 let local_script = local_path.join(script_name);
