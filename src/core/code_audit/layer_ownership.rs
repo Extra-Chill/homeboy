@@ -1,8 +1,6 @@
 //! Layer ownership rules for architecture-level audit constraints.
 //!
-//! Rules are optional and loaded from either:
-//! - `.homeboy/audit-rules.json`
-//! - `homeboy.json` under `audit_rules`
+//! Rules are optional and loaded from `homeboy.json` under `audit_rules`.
 
 use std::path::Path;
 
@@ -149,13 +147,6 @@ fn walk_candidate_files(root: &Path) -> std::io::Result<Vec<std::path::PathBuf>>
 }
 
 fn load_rules_config(root: &Path) -> Option<AuditRulesConfig> {
-    let rules_path = root.join(".homeboy").join("audit-rules.json");
-    if let Ok(content) = std::fs::read_to_string(&rules_path) {
-        if let Ok(cfg) = serde_json::from_str::<AuditRulesConfig>(&content) {
-            return Some(cfg);
-        }
-    }
-
     let homeboy_json = root.join("homeboy.json");
     let content = std::fs::read_to_string(homeboy_json).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -190,26 +181,26 @@ mod tests {
     }
 
     #[test]
-    fn test_detects_violation_from_audit_rules_file() {
+    fn test_detects_violation_from_homeboy_json() {
         let dir = tempfile::tempdir().unwrap();
-        let homeboy_dir = dir.path().join(".homeboy");
         let steps_dir = dir.path().join("inc/Core/Steps");
-        std::fs::create_dir_all(&homeboy_dir).unwrap();
         std::fs::create_dir_all(&steps_dir).unwrap();
 
         std::fs::write(
-            homeboy_dir.join("audit-rules.json"),
+            dir.path().join("homeboy.json"),
             r#"{
-              "layer_rules": [
-                {
-                  "name": "engine-owns-terminal-status",
-                  "forbid": {
-                    "glob": "inc/Core/Steps/**/*.php",
-                    "patterns": ["JobStatus::", "datamachine_fail_job"]
-                  },
-                  "allow": {"glob": "inc/Abilities/Engine/**/*.php"}
-                }
-              ]
+              "audit_rules": {
+                "layer_rules": [
+                  {
+                    "name": "engine-owns-terminal-status",
+                    "forbid": {
+                      "glob": "inc/Core/Steps/**/*.php",
+                      "patterns": ["JobStatus::", "datamachine_fail_job"]
+                    },
+                    "allow": {"glob": "inc/Abilities/Engine/**/*.php"}
+                  }
+                ]
+              }
             }"#,
         )
         .unwrap();

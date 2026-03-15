@@ -758,22 +758,23 @@ mod tests {
     #[test]
     fn test_analyze_layer_ownership() {
         let dir = std::env::temp_dir().join("homeboy_audit_layer_test");
-        let _ = fs::create_dir_all(dir.join(".homeboy"));
         let _ = fs::create_dir_all(dir.join("inc/Core/Steps"));
 
         fs::write(
-            dir.join(".homeboy/audit-rules.json"),
+            dir.join("homeboy.json"),
             r#"{
-              "layer_rules": [
-                {
-                  "name": "engine-owns-terminal-status",
-                  "forbid": {
-                    "glob": "inc/Core/Steps/**/*.php",
-                    "patterns": ["JobStatus::"]
-                  },
-                  "allow": {"glob": "inc/Abilities/Engine/**/*.php"}
-                }
-              ]
+              "audit_rules": {
+                "layer_rules": [
+                  {
+                    "name": "engine-owns-terminal-status",
+                    "forbid": {
+                      "glob": "inc/Core/Steps/**/*.php",
+                      "patterns": ["JobStatus::"]
+                    },
+                    "allow": {"glob": "inc/Abilities/Engine/**/*.php"}
+                  }
+                ]
+              }
             }"#,
         )
         .unwrap();
