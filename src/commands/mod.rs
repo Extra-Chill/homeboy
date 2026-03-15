@@ -287,7 +287,6 @@ pub mod release;
 pub mod server;
 pub mod ssh;
 pub mod status;
-pub mod supports;
 pub mod test;
 pub mod transfer;
 pub mod undo;
@@ -328,7 +327,6 @@ pub(crate) fn run_json(
         // All commands use global context
         crate::Commands::Init(args) => dispatch!(args, global, init),
         crate::Commands::Status(args) => dispatch!(args, global, status),
-        crate::Commands::Supports(args) => dispatch!(args, global, supports),
         crate::Commands::Test(args) => dispatch!(args, global, test),
         crate::Commands::Lint(args) => dispatch!(args, global, lint),
         crate::Commands::Project(args) => dispatch!(args, global, project),
