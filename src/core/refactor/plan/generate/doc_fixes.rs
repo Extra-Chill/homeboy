@@ -5,11 +5,19 @@ use std::path::Path;
 use super::insertion;
 
 pub(crate) fn extract_suggested_path(suggestion: &str) -> Option<String> {
-    let needle = "Replace with `";
-    let start = suggestion.find(needle)? + needle.len();
-    let rest = &suggestion[start..];
-    let end = rest.find('`')?;
-    Some(rest[..end].to_string())
+    // Support both suggestion formats:
+    //   "Replace with `new/path`"
+    //   "Did you mean `new/path`?"
+    let needles = ["Replace with `", "Did you mean `"];
+    for needle in needles {
+        if let Some(pos) = suggestion.find(needle) {
+            let start = pos + needle.len();
+            let rest = &suggestion[start..];
+            let end = rest.find('`')?;
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
 }
 
 pub(crate) fn should_remove_broken_doc_line(line: &str, dead_path: &str) -> bool {
@@ -120,5 +128,74 @@ pub(super) fn apply_broken_doc_reference_fixes(
             )],
             applied: false,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_suggested_path_replace_with_format() {
+        let suggestion = "Replace with `src/core/engine/shell.rs`";
+        assert_eq!(
+            extract_suggested_path(suggestion),
+            Some("src/core/engine/shell.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_suggested_path_did_you_mean_format() {
+        let suggestion = "Did you mean `src/core/engine/shell.rs`? File 'src/utils/shell.rs' no longer exists at the documented path.";
+        assert_eq!(
+            extract_suggested_path(suggestion),
+            Some("src/core/engine/shell.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_suggested_path_did_you_mean_directory() {
+        let suggestion = "Did you mean `src/core/release/changelog/`? Directory 'src/core/changelog/' no longer exists at the documented path.";
+        assert_eq!(
+            extract_suggested_path(suggestion),
+            Some("src/core/release/changelog/".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_suggested_path_no_match() {
+        let suggestion = "File no longer exists. Update or remove this reference.";
+        assert_eq!(extract_suggested_path(suggestion), None);
+    }
+
+    #[test]
+    fn should_remove_broken_doc_line_bullet_with_path() {
+        assert!(should_remove_broken_doc_line(
+            "- **Location:** `src/core/ssh/`",
+            "src/core/ssh/"
+        ));
+    }
+
+    #[test]
+    fn should_remove_broken_doc_line_prose_not_bullet() {
+        assert!(!should_remove_broken_doc_line(
+            "For example, in a project containing `src/widget/widget.rs`",
+            "src/widget/widget.rs"
+        ));
+    }
+
+    #[test]
+    fn extract_stale_ref_path_from_description() {
+        let desc = "Stale file reference `src/utils/shell.rs` (line 87) — target has moved";
+        assert_eq!(
+            extract_stale_ref_path(desc),
+            Some("src/utils/shell.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_line_number_from_description() {
+        let desc = "Stale file reference `src/utils/shell.rs` (line 87) — target has moved";
+        assert_eq!(extract_line_number(desc), Some(87));
     }
 }

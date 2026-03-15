@@ -643,6 +643,11 @@ fn detect_doc_drift(root: &Path, component_id: &str) -> Vec<Finding> {
         let claims = docs_audit::claims::extract_claims(&content, &finding_file, &ignore_patterns);
 
         for claim in claims {
+            // Skip example/placeholder paths — they're illustrative, not real references
+            if claim.confidence == ClaimConfidence::Example {
+                continue;
+            }
+
             let result = docs_audit::verify::verify_claim(&claim, root, &docs_path, None);
 
             match result {
