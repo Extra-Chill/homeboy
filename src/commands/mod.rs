@@ -1,25 +1,8 @@
 use base64::Engine;
 use clap::Args;
-use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 pub type CmdResult<T> = homeboy::Result<(T, i32)>;
-
-/// Summary of a multi-project operation (deploy, release deploy, etc.).
-#[derive(Serialize)]
-pub struct ProjectsSummary {
-    pub total_projects: u32,
-    pub succeeded: u32,
-    pub failed: u32,
-    #[serde(skip_serializing_if = "is_zero")]
-    pub skipped: u32,
-    #[serde(skip_serializing_if = "is_zero")]
-    pub planned: u32,
-}
-
-fn is_zero(v: &u32) -> bool {
-    *v == 0
-}
 
 /// Parse a `KEY=value` string into a (key, value) tuple.
 /// Used by clap `value_parser` attributes on `--setting` and `--input` flags.

@@ -257,6 +257,35 @@ impl ComponentDeployResult {
     }
 }
 
+/// Result of deploying to a single project within a multi-project run.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectDeployResult {
+    pub project_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub results: Vec<ComponentDeployResult>,
+    pub summary: DeploySummary,
+}
+
+/// Result of a multi-project deployment.
+#[derive(Debug, Clone, Serialize)]
+pub struct MultiDeployResult {
+    pub component_ids: Vec<String>,
+    pub projects: Vec<ProjectDeployResult>,
+    pub summary: MultiDeploySummary,
+}
+
+/// Summary of multi-project deployment.
+#[derive(Debug, Clone, Serialize)]
+pub struct MultiDeploySummary {
+    pub total_projects: u32,
+    pub succeeded: u32,
+    pub failed: u32,
+    pub skipped: u32,
+    pub planned: u32,
+}
+
 /// Summary of deploy orchestration.
 #[derive(Debug, Clone, Serialize)]
 
