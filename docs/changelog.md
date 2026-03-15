@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.77.0] - 2026-03-15
+
+### Added
+- two-step unreferenced_export fixer — narrow visibility + remove re-exports
+
+### Changed
+- move undo/ into engine/ (cross-cutting infrastructure)
+- relocate audit.rs core tests to their library modules
+- extract extension aggregate queries to core
+- add UndoSnapshot::capture_and_save, collapse 4 duplicates
+- extract deploy orchestration to core (#764, fleet automation)
+- consolidate binary crate sprawl into commands/
+- remove command-layer cruft (test_scope.rs, refactor_tests.rs)
+- move local_files into engine/ (filesystem utility)
+- unify Build execution with ExtensionRunner contract
+- Resolve core/ homeless files and file-directory collisions
+
+### Fixed
+- resolve_execution_context now handles Build capability (#764)
+- repair stale doc reference fixer and eliminate example-path false positives
+- exclude pub(crate) functions from public_api
+
 ## [0.76.2] - 2026-03-14
 
 ### Fixed
