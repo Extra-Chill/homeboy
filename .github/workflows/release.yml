@@ -207,6 +207,9 @@ jobs:
           component: homeboy
           commands: lint
           autofix: 'true'
+          autofix-commands: 'lint --fix'
+          autofix-open-pr: 'true'
+          autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   gate-test:
