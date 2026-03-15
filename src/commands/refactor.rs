@@ -1,12 +1,9 @@
 use clap::{Args, Subcommand};
-use serde::Serialize;
-use std::path::PathBuf;
-
-use homeboy::code_audit::CodeAuditResult;
-use homeboy::component;
+use homeboy::code_audit::{AuditFinding, CodeAuditResult};
 use homeboy::refactor::{
     self, auto, AddResult, MoveResult, RenameScope, RenameSpec, RenameTargeting,
 };
+use serde::Serialize;
 
 use super::utils::args::{
     BaselineArgs, ComponentArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs,
@@ -438,22 +435,18 @@ fn run_refactor_sources(
     Ok((RefactorOutput::Plan(plan), exit_code))
 }
 
-fn parse_audit_findings(
-    values: &[String],
-) -> homeboy::Result<Vec<homeboy::code_audit::AuditFinding>> {
+fn parse_audit_findings(values: &[String]) -> homeboy::Result<Vec<AuditFinding>> {
     values
         .iter()
         .map(|value| {
-            value
-                .parse::<homeboy::code_audit::AuditFinding>()
-                .map_err(|_| {
-                    homeboy::Error::validation_invalid_argument(
-                        "kind",
-                        format!("Unknown audit finding kind: {}", value),
-                        None,
-                        None,
-                    )
-                })
+            value.parse::<AuditFinding>().map_err(|_| {
+                homeboy::Error::validation_invalid_argument(
+                    "kind",
+                    format!("Unknown audit finding kind: {}", value),
+                    None,
+                    None,
+                )
+            })
         })
         .collect()
 }
@@ -473,13 +466,7 @@ fn run_rename(
 ) -> CmdResult<RefactorOutput> {
     let scope = RenameScope::from_str(scope)?;
 
-    // Resolve root directory
-    let root = if let Some(p) = path {
-        std::path::PathBuf::from(p)
-    } else {
-        let comp = component::resolve(component_id)?;
-        component::validate_local_path(&comp)?
-    };
+    let root = refactor::move_items::resolve_root(component_id, path)?;
 
     let spec = if literal {
         RenameSpec::literal(from, to, scope.clone())
@@ -517,20 +504,9 @@ fn run_rename(
             .iter()
             .map(|e| e.file.clone())
             .chain(result.file_renames.iter().map(|r| r.from.clone()))
+            .chain(result.file_renames.iter().map(|r| r.to.clone()))
             .collect();
-        if !affected_files.is_empty() {
-            let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor rename");
-            for file in &affected_files {
-                snap.capture_file(file);
-            }
-            // New files from renames
-            for rename in &result.file_renames {
-                snap.capture_file(&rename.to);
-            }
-            if let Err(e) = snap.save() {
-                homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
-            }
-        }
+        homeboy::undo::UndoSnapshot::capture_and_save(&root, "refactor rename", &affected_files);
 
         refactor::apply_renames(&mut result, &root)?;
     }
@@ -744,14 +720,8 @@ fn run_move(
 ) -> CmdResult<RefactorOutput> {
     let root = refactor::move_items::resolve_root(component_id, path)?;
 
-    // Capture undo snapshot before write operations
     if write {
-        let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor move");
-        snap.capture_file(from);
-        snap.capture_file(to);
-        if let Err(e) = snap.save() {
-            homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
-        }
+        homeboy::undo::UndoSnapshot::capture_and_save(&root, "refactor move", [from, to]);
     }
 
     let item_refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
@@ -830,19 +800,10 @@ fn run_propagate(
     };
 
     if write {
-        // Run a dry-run to discover affected files for the undo snapshot
+        // Dry-run to discover affected files for the undo snapshot
         let preview = refactor::propagate(&config)?;
-        let affected_files: std::collections::HashSet<&str> =
-            preview.edits.iter().map(|e| e.file.as_str()).collect();
-        if !affected_files.is_empty() {
-            let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor propagate");
-            for file in &affected_files {
-                snap.capture_file(file);
-            }
-            if let Err(e) = snap.save() {
-                homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
-            }
-        }
+        let affected_files: Vec<&str> = preview.edits.iter().map(|e| e.file.as_str()).collect();
+        homeboy::undo::UndoSnapshot::capture_and_save(&root, "refactor propagate", affected_files);
     }
 
     // Run the actual propagation (with write mode as requested)
@@ -902,13 +863,7 @@ fn run_transform(
     path: Option<&str>,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
-    // Resolve root directory
-    let root = if let Some(p) = path {
-        PathBuf::from(p)
-    } else {
-        let comp = component::resolve(component_id)?;
-        component::validate_local_path(&comp)?
-    };
+    let root = refactor::move_items::resolve_root(component_id, path)?;
 
     // Resolve transform set: ad-hoc or named
     let (set_name, set) = if let (Some(f), Some(r)) = (find, replace) {
@@ -949,27 +904,20 @@ fn run_transform(
         homeboy::log_status!("info", "{}", set.description);
     }
 
-    // Capture undo snapshot before writes
     if write {
-        // Dry-run first to discover affected files
+        // Dry-run to discover affected files for the undo snapshot
         if let Ok(preview) = refactor::apply_transforms(&root, &set_name, &set, false, rule_filter)
         {
-            let affected_files: Vec<String> = preview
+            let affected_files: std::collections::HashSet<String> = preview
                 .rules
                 .iter()
                 .flat_map(|r| r.matches.iter().map(|m| m.file.clone()))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
                 .collect();
-            if !affected_files.is_empty() {
-                let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor transform");
-                for file in &affected_files {
-                    snap.capture_file(file);
-                }
-                if let Err(e) = snap.save() {
-                    homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
-                }
-            }
+            homeboy::undo::UndoSnapshot::capture_and_save(
+                &root,
+                "refactor transform",
+                &affected_files,
+            );
         }
     }
 
@@ -1049,16 +997,11 @@ fn run_decompose(
     let root = refactor::move_items::resolve_root(component_id, path)?;
     let plan = refactor::build_plan(file, &root, strategy)?;
 
-    // Capture undo snapshot before writes
     if write {
-        let mut snap = homeboy::undo::UndoSnapshot::new(&root, "refactor decompose");
-        snap.capture_file(file);
-        for group in &plan.groups {
-            snap.capture_file(&group.suggested_target);
-        }
-        if let Err(e) = snap.save() {
-            homeboy::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
-        }
+        let affected: Vec<&str> = std::iter::once(file)
+            .chain(plan.groups.iter().map(|g| g.suggested_target.as_str()))
+            .collect();
+        homeboy::undo::UndoSnapshot::capture_and_save(&root, "refactor decompose", affected);
     }
 
     let move_results = refactor::apply_plan(&plan, &root, write)?;
