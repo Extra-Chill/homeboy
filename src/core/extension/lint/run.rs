@@ -110,20 +110,33 @@ pub fn run_main_lint_workflow(
     let lint_findings = lint_baseline::parse_findings_file(&lint_findings_file)?;
     let _ = std::fs::remove_file(&lint_findings_file);
 
-    // Status computation
-    let mut status = if output.success { "passed" } else { "failed" }.to_string();
+    // Status computation — check findings first, exit code as fallback.
+    // The extension runner uses passthrough mode (stdout goes to terminal),
+    // so `output.success` only reflects the shell exit code. PHPCS/PHPStan
+    // wrappers may exit 0 even when findings exist, so the sidecar findings
+    // file is the canonical source of truth (mirrors test command pattern).
+    let mut status = if !lint_findings.is_empty() {
+        "failed"
+    } else if output.success {
+        "passed"
+    } else {
+        "failed"
+    }
+    .to_string();
     let autofix = planned_autofix
         .as_ref()
         .map(|(plan, outcome)| AppliedRefactor::from_plan(plan, outcome.rerun_recommended));
 
     let mut hints = Vec::new();
 
+    let lint_clean = lint_findings.is_empty() && output.success;
+
     if let Some((plan, outcome)) = &planned_autofix {
-        if output.success && outcome.status == "auto_fixed" {
+        if lint_clean && outcome.status == "auto_fixed" {
             status = outcome.status.clone();
         }
         hints.extend(outcome.hints.clone());
-        if plan.files_modified == 0 && output.success {
+        if plan.files_modified == 0 && lint_clean {
             status = "passed".to_string();
         }
     }
@@ -133,7 +146,7 @@ pub fn run_main_lint_workflow(
         process_baseline(source_path, &args, &lint_findings)?;
 
     // Hint assembly
-    if !output.success && !args.fix {
+    if !lint_clean && !args.fix {
         hints.push(format!(
             "Run 'homeboy lint {} --fix' to auto-fix formatting issues",
             args.component_label

@@ -30,12 +30,19 @@ pub struct LintCommandOutput {
 
 /// Build output from a main lint workflow result.
 pub fn from_main_workflow(result: LintRunWorkflowResult) -> (LintCommandOutput, i32) {
-    let exit_code = result.exit_code;
+    // Exit code should reflect the computed status, not just the extension's
+    // shell exit code. When findings exist but the extension exited 0, the
+    // process must still exit non-zero so CI treats it as a failure (#696).
+    let exit_code = if result.status == "failed" && result.exit_code == 0 {
+        1
+    } else {
+        result.exit_code
+    };
     (
         LintCommandOutput {
             status: result.status,
             component: result.component,
-            exit_code: result.exit_code,
+            exit_code,
             autofix: result.autofix,
             hints: result.hints,
             baseline_comparison: result.baseline_comparison,
