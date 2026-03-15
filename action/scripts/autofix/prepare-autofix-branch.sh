@@ -9,17 +9,21 @@ if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then
   AUTOFIX_MAX_COMMITS=2
 fi
 
-# Count autofix commits since the last release tag, not the entire repo history.
-# Without this scoping, past autofix commits permanently count against the limit,
-# turning the loop guard into a permanent shutoff after N total historical commits.
-LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-if [ -n "${LAST_TAG}" ]; then
-  AUTOFIX_COMMIT_COUNT=$(git log "${LAST_TAG}..HEAD" --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" | wc -l | xargs)
-else
-  AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" | wc -l | xargs)
-fi
+# Count consecutive autofix commits at HEAD. A human commit resets the counter.
+# This prevents runaway autofix-PR loops while allowing autofix to resume after
+# any human merge. The old approach (count all autofix commits since last tag)
+# permanently tripped the guard after N total historical autofix commits across
+# all PRs, blocking all future autofix even after human intervention.
+AUTOFIX_COMMIT_COUNT=0
+while IFS= read -r subject; do
+  if [[ "${subject}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
+    AUTOFIX_COMMIT_COUNT=$((AUTOFIX_COMMIT_COUNT + 1))
+  else
+    break
+  fi
+done < <(git log --format=%s -n "$((AUTOFIX_MAX_COMMITS + 1))" 2>/dev/null)
 if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
-  echo "Skipping non-PR autofix: reached max autofix commits since ${LAST_TAG:-beginning} (${AUTOFIX_COMMIT_COUNT}/${AUTOFIX_MAX_COMMITS})"
+  echo "Skipping non-PR autofix: ${AUTOFIX_COMMIT_COUNT} consecutive autofix commits at HEAD (max ${AUTOFIX_MAX_COMMITS})"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
   exit 0
 fi
