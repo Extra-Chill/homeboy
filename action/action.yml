@@ -341,6 +341,7 @@ runs:
         RESULTS: ${{ steps.rerun-commands.outputs.results }}
         AUTOFIX_FILE_COUNT: ${{ steps.autofix-prepare-nonpr.outputs.autofix-file-count }}
         AUTOFIX_FIX_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-fix-types }}
+        AUTOFIX_FINDING_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-finding-types }}
       run: bash ${{ github.action_path }}/scripts/autofix/open-autofix-pr.sh
 
     - name: Select final results
