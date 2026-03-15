@@ -9,9 +9,17 @@ if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then
   AUTOFIX_MAX_COMMITS=2
 fi
 
-AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" | wc -l | xargs)
+# Count autofix commits since the last release tag, not the entire repo history.
+# Without this scoping, past autofix commits permanently count against the limit,
+# turning the loop guard into a permanent shutoff after N total historical commits.
+LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+if [ -n "${LAST_TAG}" ]; then
+  AUTOFIX_COMMIT_COUNT=$(git log "${LAST_TAG}..HEAD" --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" | wc -l | xargs)
+else
+  AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" | wc -l | xargs)
+fi
 if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
-  echo "Skipping non-PR autofix: reached max autofix commits (${AUTOFIX_COMMIT_COUNT}/${AUTOFIX_MAX_COMMITS})"
+  echo "Skipping non-PR autofix: reached max autofix commits since ${LAST_TAG:-beginning} (${AUTOFIX_COMMIT_COUNT}/${AUTOFIX_MAX_COMMITS})"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
   exit 0
 fi
