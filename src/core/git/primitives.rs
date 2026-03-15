@@ -42,7 +42,7 @@ pub fn is_workdir_clean(path: &Path) -> bool {
 /// List all git-tracked markdown files in a directory.
 /// Uses `git ls-files` to respect .gitignore and only include tracked/staged files.
 /// Returns relative paths from the repository root.
-pub fn list_tracked_markdown_files(path: &Path) -> Result<Vec<String>> {
+pub(crate) fn list_tracked_markdown_files(path: &Path) -> Result<Vec<String>> {
     let stdout = command::run_in(
         &path.to_string_lossy(),
         "git",

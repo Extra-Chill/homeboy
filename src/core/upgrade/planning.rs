@@ -6,7 +6,7 @@ pub fn resolve_binary_on_path() -> Option<std::path::PathBuf> {
     resolve_binary_on_path_var(&path_var)
 }
 
-pub fn resolve_binary_on_path_var(path_var: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn resolve_binary_on_path_var(path_var: &str) -> Option<std::path::PathBuf> {
     for dir in path_var.split(':') {
         let candidate = std::path::PathBuf::from(dir).join("homeboy");
         if candidate.exists() {

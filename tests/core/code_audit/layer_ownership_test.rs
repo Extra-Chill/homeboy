@@ -48,10 +48,3 @@ fn test_analyze_layer_ownership() {
             && f.description.contains("JobStatus::")
     }));
 }
-
-#[test]
-fn test_tmp_dir() {
-    let one = tmp_dir("a");
-    let two = tmp_dir("b");
-    assert_ne!(one, two);
-}

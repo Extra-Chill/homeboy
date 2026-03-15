@@ -20,7 +20,7 @@ stable while moving behavior to a reusable core primitive.
 
 ## Output parse primitive (core)
 
-`src/utils/output_parse.rs`
+`src/core/engine/output_parse.rs`
 
 Generic parser with declarative rule spec:
 
@@ -40,7 +40,7 @@ Expressions support `+` and `-` over numeric literals and parsed field names.
 
 ## Initial wiring
 
-- `src/commands/test/parsing.rs` now uses `output_parse` for text fallback parsing in
+- `src/core/extension/test/parsing.rs` now uses `output_parse` for text fallback parsing in
   `parse_test_results_text()`.
 - `src/commands/test.rs` falls back from sidecar JSON to parsed stdout via this primitive.
 

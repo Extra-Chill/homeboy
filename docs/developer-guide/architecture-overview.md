@@ -48,7 +48,7 @@ Config entities:
 
 ### Storage Layer
 
-**Location:** `src/core/local_files.rs`
+**Location:** `src/core/engine/local_files.rs`
 
 File-based storage for configurations:
 - Reads/writes JSON files in config directory
@@ -59,7 +59,7 @@ File-based storage for configurations:
 
 ### Template System
 
-**Location:** `src/utils/template.rs`
+**Location:** `src/core/engine/template.rs`
 
 Variable substitution in templates:
 - Both `{var}` and `{{var}}` syntax supported
@@ -84,7 +84,6 @@ Supports:
 
 ### SSH Operations
 
-**Location:** `src/core/ssh/` and `src/utils/shell.rs`
 
 SSH client wrapper that:
 - Manages SSH connections
@@ -94,7 +93,7 @@ SSH client wrapper that:
 
 ### HTTP Client
 
-**Location:** `src/core/http.rs`
+**Location:** `src/core/server/http.rs`
 
 HTTP client for API operations:
 - Template-based URL construction
@@ -104,7 +103,6 @@ HTTP client for API operations:
 
 ### Keychain Integration
 
-**Location:** `src/core/keychain.rs`
 
 Secure credential storage:
 - macOS: Keychain Access
@@ -128,7 +126,7 @@ Git wrapper for:
 
 ### Version Management
 
-**Location:** `src/core/version.rs`
+**Location:** `src/core/extension/version.rs`
 
 Semantic versioning:
 - Pattern-based version detection in files
@@ -137,7 +135,7 @@ Semantic versioning:
 
 ### Changelog Management
 
-**Location:** `src/core/changelog/`
+**Location:** `src/core/release/changelog/`
 
 Changelog operations:
 - Add entries
@@ -226,7 +224,6 @@ Command-line interface built with `clap`:
 
 ### Documentation System
 
-**Location:** `src/docs/mod.rs` and `build.rs`
 
 Embedded documentation:
 - Markdown files embedded at compile time (`build.rs`)
@@ -320,7 +317,6 @@ Centralized error system:
 
 ## Output System
 
-**Location:** `src/output/` (response.rs, mod.rs)
 
 Output modes:
 - **JSON**: Machine-readable, wrapped in stable envelope

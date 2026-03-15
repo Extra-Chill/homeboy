@@ -201,7 +201,7 @@ Extension hooks merge with component hooks at resolution time. They are not stor
 
 ## Implementation
 
-The hook engine lives in `src/core/hooks.rs` and provides:
+The hook engine lives in `src/core/engine/hooks.rs` and provides:
 
 - `resolve_hooks(component, event)` — merge extension + component hooks for an event
 - `run_hooks(component, event, failure_mode)` — resolve and execute locally

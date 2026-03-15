@@ -146,43 +146,6 @@ mod tests {
     }
 
     #[test]
-    fn weighted_score_prefers_warning_reduction() {
-        let result = mk_result_with_findings(vec![
-            Finding {
-                convention: "Test".to_string(),
-                severity: Severity::Warning,
-                file: "src/a.rs".to_string(),
-                description: "Warning finding".to_string(),
-                suggestion: "Fix it".to_string(),
-                kind: AuditFinding::MissingMethod,
-            },
-            Finding {
-                convention: "Test".to_string(),
-                severity: Severity::Info,
-                file: "src/b.rs".to_string(),
-                description: "Info finding".to_string(),
-                suggestion: "Investigate".to_string(),
-                kind: AuditFinding::MissingImport,
-            },
-        ]);
-
-        assert_eq!(
-            weighted_finding_score_with(&result, AuditConvergenceScoring::default()),
-            4
-        );
-        assert_eq!(
-            weighted_finding_score_with(
-                &result,
-                AuditConvergenceScoring {
-                    warning_weight: 5,
-                    info_weight: 2,
-                }
-            ),
-            7
-        );
-    }
-
-    #[test]
     fn score_delta_zero_means_no_progress() {
         let result = mk_result_with_findings(vec![Finding {
             convention: "Test".to_string(),

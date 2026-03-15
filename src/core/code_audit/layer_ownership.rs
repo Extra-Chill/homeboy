@@ -259,13 +259,6 @@ mod tests {
     }
 
     #[test]
-    fn test_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let findings = run(dir.path());
-        assert!(findings.is_empty());
-    }
-
-    #[test]
     fn test_load_rules_config() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(

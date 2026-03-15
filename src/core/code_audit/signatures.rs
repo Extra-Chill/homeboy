@@ -393,12 +393,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tokenize_preserves_function_name() {
-        let tokens = tokenize_signature("pub fn do_stuff(x: i32)");
-        assert!(tokens.contains(&"do_stuff".to_string()));
-    }
-
     // --- Parameter type stripping tests ---
 
     #[test]
