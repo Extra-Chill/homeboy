@@ -100,17 +100,24 @@ enum RefactorCommand {
         write_mode: WriteModeArgs,
     },
 
-    /// Move functions, structs, or other items from one file to another
+    /// Move items or entire files between modules
     ///
-    /// Example: `refactor move --item has_import --item contains_word --from src/conventions.rs --to src/import_matching.rs`
+    /// Item mode: `refactor move --item has_import --from src/conventions.rs --to src/import_matching.rs`
+    /// File mode: `refactor move --file src/core/hooks.rs --to src/core/engine/hooks.rs`
     Move {
-        /// Name(s) of items to move (functions, structs, enums, consts)
-        #[arg(long, value_name = "NAME", required = true, num_args = 1..)]
+        /// Name(s) of items to move (functions, structs, enums, consts).
+        /// When omitted with --file, moves the entire file.
+        #[arg(long, value_name = "NAME", num_args = 1..)]
         item: Vec<String>,
 
-        /// Source file (relative to component/path root)
+        /// Move an entire module file to a new location.
+        /// Rewrites all imports and updates mod.rs declarations.
+        #[arg(long, value_name = "FILE", conflicts_with = "from")]
+        file: Option<String>,
+
+        /// Source file (for item mode — relative to component/path root)
         #[arg(long, value_name = "FILE")]
-        from: String,
+        from: Option<String>,
 
         /// Destination file (relative to component/path root, created if needed)
         #[arg(long, value_name = "FILE")]
@@ -247,18 +254,56 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
 
         Some(RefactorCommand::Move {
             item,
+            file,
             from,
             to,
             component,
             write_mode,
-        }) => run_move(
-            &item,
-            &from,
-            &to,
-            component.component.as_deref(),
-            component.path.as_deref(),
-            write_mode.write,
-        ),
+        }) => {
+            if let Some(file_path) = file {
+                // File mode: move entire module
+                run_move_file(
+                    &file_path,
+                    &to,
+                    component.component.as_deref(),
+                    component.path.as_deref(),
+                    write_mode.write,
+                )
+            } else if let Some(from_path) = from {
+                // Item mode: move specific items
+                if item.is_empty() {
+                    return Err(homeboy::Error::validation_invalid_argument(
+                        "item",
+                        "Either --item (with --from) or --file is required",
+                        None,
+                        Some(vec![
+                            "Move items: refactor move --item foo --from src/a.rs --to src/b.rs"
+                                .to_string(),
+                            "Move file: refactor move --file src/a.rs --to src/b.rs".to_string(),
+                        ]),
+                    ));
+                }
+                run_move(
+                    &item,
+                    &from_path,
+                    &to,
+                    component.component.as_deref(),
+                    component.path.as_deref(),
+                    write_mode.write,
+                )
+            } else {
+                return Err(homeboy::Error::validation_invalid_argument(
+                    "from",
+                    "Either --from (with --item) or --file is required",
+                    None,
+                    Some(vec![
+                        "Move items: refactor move --item foo --from src/a.rs --to src/b.rs"
+                            .to_string(),
+                        "Move file: refactor move --file src/a.rs --to src/b.rs".to_string(),
+                    ]),
+                ));
+            }
+        }
 
         Some(RefactorCommand::Propagate {
             struct_name,
@@ -349,6 +394,12 @@ pub enum RefactorOutput {
     Move {
         #[serde(flatten)]
         result: MoveResult,
+    },
+
+    #[serde(rename = "refactor.move_file")]
+    MoveFile {
+        #[serde(flatten)]
+        result: refactor::move_items::MoveFileResult,
     },
 
     #[serde(rename = "refactor.propagate")]
@@ -780,6 +831,46 @@ fn run_move(
     }
 
     Ok((RefactorOutput::Move { result }, exit_code))
+}
+
+fn run_move_file(
+    file: &str,
+    to: &str,
+    component_id: Option<&str>,
+    path: Option<&str>,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let root = refactor::move_items::resolve_root(component_id, path)?;
+
+    if write {
+        homeboy::engine::undo::UndoSnapshot::capture_and_save(&root, "refactor move --file", [file, to]);
+    }
+
+    let result = refactor::move_items::move_file(file, to, &root, write)?;
+
+    let exit_code = if result.imports_updated > 0 || result.mod_declarations_updated { 0 } else { 1 };
+
+    homeboy::log_status!(
+        "refactor",
+        "move {} → {}{}",
+        file,
+        to,
+        if write { " (applied)" } else { " (dry run)" }
+    );
+    homeboy::log_status!(
+        "move",
+        "{} import(s) rewritten across {} file(s)",
+        result.imports_updated,
+        result.caller_files_modified.len()
+    );
+    if result.mod_declarations_updated {
+        homeboy::log_status!("move", "mod.rs declarations updated");
+    }
+    for warning in &result.warnings {
+        homeboy::log_status!("warning", "{}", warning);
+    }
+
+    Ok((RefactorOutput::MoveFile { result }, exit_code))
 }
 
 // ============================================================================
