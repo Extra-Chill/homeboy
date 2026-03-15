@@ -1,4 +1,25 @@
-fn artifact_is_fresh(component: &Component) -> bool {
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::SystemTime;
+
+use super::permissions;
+use crate::component::Component;
+use crate::engine::hooks::{self, HookFailureMode};
+use crate::engine::shell;
+use crate::engine::template::{render_map, TemplateVars};
+use crate::error::{Error, Result};
+use crate::extension::build::resolve_artifact_path;
+use crate::extension::{
+    load_all_extensions, DeployOverride, DeployVerification, ExtensionManifest,
+};
+use crate::paths as base_path;
+use crate::server::SshClient;
+use crate::version;
+
+use super::transfer::scp_file;
+use super::types::DeployResult;
+
+pub(super) fn artifact_is_fresh(component: &Component) -> bool {
     let artifact_pattern = match component.build_artifact.as_ref() {
         Some(p) => p,
         None => return false,
@@ -37,7 +58,7 @@ fn artifact_is_fresh(component: &Component) -> bool {
 
 /// Detect if a component's artifact is a CLI binary matching the currently
 /// running process name. Used to print a post-deploy hint for self-deploy.
-fn is_self_deploy(component: &Component) -> bool {
+pub(super) fn is_self_deploy(component: &Component) -> bool {
     let artifact_pattern = match component.build_artifact.as_ref() {
         Some(p) => p,
         None => return false,
@@ -66,7 +87,7 @@ fn is_self_deploy(component: &Component) -> bool {
 /// new binary to e.g. /usr/local/bin/homeboy, but the build artifact at
 /// target/release/homeboy is still the old version. Without this check,
 /// `deploy --shared` would push the stale build artifact to the fleet.
-fn prefer_installed_binary(build_artifact: &Path) -> Option<std::path::PathBuf> {
+pub(super) fn prefer_installed_binary(build_artifact: &Path) -> Option<std::path::PathBuf> {
     let exe_path = std::env::current_exe().ok()?;
 
     // Don't redirect if they're the same file
@@ -91,7 +112,7 @@ fn prefer_installed_binary(build_artifact: &Path) -> Option<std::path::PathBuf> 
 }
 
 /// Fetch versions from remote server for components.
-fn fetch_remote_versions(
+pub(super) fn fetch_remote_versions(
     components: &[Component],
     base_path: &str,
     client: &SshClient,
@@ -128,8 +149,7 @@ fn fetch_version_from_file(
         .map(|t| t.file.as_str())?;
 
     let remote_path =
-        base_path::join_remote_child(Some(base_path), &component.remote_path, version_file)
-            .ok()?;
+        base_path::join_remote_child(Some(base_path), &component.remote_path, version_file).ok()?;
 
     let output = client.execute(&format!("cat '{}' 2>/dev/null", remote_path));
 
@@ -164,8 +184,10 @@ fn fetch_version_from_binary(component: &Component, client: &SshClient) -> Optio
     ];
 
     for candidate in &candidates {
-        let output =
-            client.execute(&format!("{} --version 2>/dev/null", shell::quote_path(candidate)));
+        let output = client.execute(&format!(
+            "{} --version 2>/dev/null",
+            shell::quote_path(candidate)
+        ));
         if output.success {
             let stdout = output.stdout.trim();
             // Parse "binary_name X.Y.Z" or just "X.Y.Z"
@@ -201,7 +223,7 @@ fn parse_component_version(content: &str, pattern: Option<&str>, filename: &str)
 }
 
 /// Find deploy verification config from extensions.
-fn find_deploy_verification(target_path: &str) -> Option<DeployVerification> {
+pub(super) fn find_deploy_verification(target_path: &str) -> Option<DeployVerification> {
     for extension in load_all_extensions().unwrap_or_default() {
         for verification in extension.deploy_verifications() {
             if target_path.contains(&verification.path_pattern) {
@@ -213,7 +235,9 @@ fn find_deploy_verification(target_path: &str) -> Option<DeployVerification> {
 }
 
 /// Find deploy override config from extensions.
-fn find_deploy_override(target_path: &str) -> Option<(DeployOverride, ExtensionManifest)> {
+pub(super) fn find_deploy_override(
+    target_path: &str,
+) -> Option<(DeployOverride, ExtensionManifest)> {
     for extension in load_all_extensions().unwrap_or_default() {
         for override_config in extension.deploy_overrides() {
             if target_path.contains(&override_config.path_pattern) {
@@ -226,7 +250,7 @@ fn find_deploy_override(target_path: &str) -> Option<(DeployOverride, ExtensionM
 
 /// Deploy using extension-defined override strategy.
 #[allow(clippy::too_many_arguments)]
-fn deploy_with_override(
+pub(super) fn deploy_with_override(
     ssh_client: &SshClient,
     local_path: &Path,
     remote_path: &str,
@@ -369,7 +393,7 @@ fn deploy_with_override(
 /// This is a convenience wrapper around `hooks::run_hooks_remote` that builds
 /// the standard deploy template variables and runs hooks non-fatally (failures
 /// are logged but do not abort the deploy).
-fn run_post_deploy_hooks(
+pub(super) fn run_post_deploy_hooks(
     ssh_client: &SshClient,
     component: &Component,
     install_dir: &str,

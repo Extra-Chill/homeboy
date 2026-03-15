@@ -473,11 +473,11 @@ impl ReleaseStepExecutor {
             })
             .unwrap_or_default();
 
-        let hook_result = crate::hooks::run_commands(
+        let hook_result = crate::engine::hooks::run_commands(
             &commands,
             &self.component.local_path,
-            crate::hooks::events::POST_RELEASE,
-            crate::hooks::HookFailureMode::NonFatal,
+            crate::engine::hooks::events::POST_RELEASE,
+            crate::engine::hooks::HookFailureMode::NonFatal,
         )?;
 
         // Post-release failures are non-fatal (release already published).

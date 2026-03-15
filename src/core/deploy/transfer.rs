@@ -1,4 +1,14 @@
-fn upload_directory(
+use std::path::Path;
+use std::process::Command;
+
+use crate::defaults;
+use crate::engine::shell;
+use crate::error::{Error, Result};
+use crate::server::SshClient;
+
+use super::types::DeployResult;
+
+pub(super) fn upload_directory(
     ssh_client: &SshClient,
     local_path: &Path,
     remote_path: &str,
@@ -99,7 +109,7 @@ fn rsync_directory(
     }
 }
 
-fn upload_file(
+pub(super) fn upload_file(
     ssh_client: &SshClient,
     local_path: &Path,
     remote_path: &str,
@@ -192,7 +202,11 @@ fn scp_transfer(
     }
 }
 
-fn scp_file(ssh_client: &SshClient, local_path: &Path, remote_path: &str) -> Result<DeployResult> {
+pub(super) fn scp_file(
+    ssh_client: &SshClient,
+    local_path: &Path,
+    remote_path: &str,
+) -> Result<DeployResult> {
     scp_transfer(ssh_client, local_path, remote_path, false)
 }
 

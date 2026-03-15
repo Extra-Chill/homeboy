@@ -1,4 +1,20 @@
-fn calculate_directory_size(path: &Path) -> std::io::Result<u64> {
+use std::collections::HashMap;
+use std::path::Path;
+
+use crate::component::{self, Component};
+use crate::error::{Error, Result};
+use crate::extension;
+use crate::git;
+use crate::project::{self, Project};
+use crate::server::SshClient;
+use crate::version;
+
+use super::types::{
+    ComponentStatus, DeployConfig, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
+};
+use super::version_overrides::fetch_remote_versions;
+
+pub(super) fn calculate_directory_size(path: &Path) -> std::io::Result<u64> {
     let mut total_size = 0;
 
     if path.is_dir() {
@@ -20,7 +36,7 @@ fn calculate_directory_size(path: &Path) -> std::io::Result<u64> {
 }
 
 /// Format bytes into human-readable format.
-fn format_bytes(bytes: u64) -> String {
+pub(super) fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
     let mut size = bytes as f64;
     let mut unit_index = 0;
@@ -42,7 +58,7 @@ fn format_bytes(bytes: u64) -> String {
 // =============================================================================
 
 /// Plan which components to deploy based on config flags.
-fn plan_components(
+pub(super) fn plan_components(
     config: &DeployConfig,
     all_components: &[Component],
     skipped_component_ids: &[String],
@@ -152,7 +168,7 @@ fn plan_components(
 }
 
 /// Calculate component status based on local and remote versions.
-fn calculate_component_status(
+pub(super) fn calculate_component_status(
     component: &Component,
     remote_versions: &HashMap<String, String>,
 ) -> ComponentStatus {
@@ -207,7 +223,8 @@ pub fn calculate_release_state(component: &Component) -> Option<ReleaseState> {
 }
 
 pub fn classify_release_state(state: Option<&ReleaseState>) -> ReleaseStateStatus {
-    state.map(ReleaseState::status)
+    state
+        .map(ReleaseState::status)
         .unwrap_or(ReleaseStateStatus::Unknown)
 }
 
@@ -233,9 +250,9 @@ where
 }
 
 /// Result of loading project components, including skipped (non-deployable) component IDs.
-struct LoadedComponents {
-    deployable: Vec<Component>,
-    skipped: Vec<String>,
+pub(super) struct LoadedComponents {
+    pub deployable: Vec<Component>,
+    pub skipped: Vec<String>,
 }
 
 /// Load effective project components, resolve artifact paths via extension patterns,
@@ -247,7 +264,7 @@ struct LoadedComponents {
 ///
 /// Returns both the deployable components and the IDs of skipped (non-deployable) ones,
 /// so callers can produce accurate error messages.
-fn load_project_components(project: &Project) -> Result<LoadedComponents> {
+pub(super) fn load_project_components(project: &Project) -> Result<LoadedComponents> {
     let mut deployable = Vec::new();
     let mut skipped = Vec::new();
 
@@ -267,7 +284,8 @@ fn load_project_components(project: &Project) -> Result<LoadedComponents> {
 
         match effective_artifact {
             Some(artifact) if !is_git_deploy => {
-                let resolved_artifact = crate::paths::resolve_path_string(&loaded.local_path, &artifact);
+                let resolved_artifact =
+                    crate::paths::resolve_path_string(&loaded.local_path, &artifact);
                 loaded.build_artifact = Some(resolved_artifact);
                 deployable.push(loaded);
             }

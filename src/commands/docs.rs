@@ -3,8 +3,8 @@ use serde::Serialize;
 use std::path::Path;
 
 use crate::docs;
+use homeboy::code_audit::codebase_map;
 use homeboy::code_audit::docs_audit::AuditResult;
-use homeboy::codebase_map;
 use homeboy::component;
 
 use super::CmdResult;
@@ -200,11 +200,16 @@ fn run_generate(json_spec: Option<&str>) -> CmdResult<DocsOutput> {
     })?;
 
     let json_content = super::merge_json_sources(Some(spec_str), &[])?;
-    let spec: homeboy::docs::GenerateSpec = serde_json::from_value(json_content).map_err(|e| {
-        homeboy::Error::validation_invalid_json(e, Some("parse generate spec".to_string()), None)
-    })?;
+    let spec: homeboy::code_audit::docs::GenerateSpec = serde_json::from_value(json_content)
+        .map_err(|e| {
+            homeboy::Error::validation_invalid_json(
+                e,
+                Some("parse generate spec".to_string()),
+                None,
+            )
+        })?;
 
-    let result = homeboy::docs::generate_from_spec(&spec)?;
+    let result = homeboy::code_audit::docs::generate_from_spec(&spec)?;
 
     Ok((
         DocsOutput::Generate {
@@ -240,7 +245,7 @@ fn run_generate_from_audit(source: &str, dry_run: bool) -> CmdResult<DocsOutput>
         homeboy::Error::validation_invalid_json(e, Some("parse audit result".to_string()), None)
     })?;
 
-    let result = homeboy::docs::generate_from_audit(&audit, dry_run)?;
+    let result = homeboy::code_audit::docs::generate_from_audit(&audit, dry_run)?;
 
     Ok((
         DocsOutput::Generate {

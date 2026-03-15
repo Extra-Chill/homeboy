@@ -1,6 +1,25 @@
+use std::collections::HashMap;
+use std::path::Path;
+
+use crate::component::Component;
+use crate::context::RemoteProjectContext;
+use crate::error::{Error, Result};
+use crate::git;
+use crate::project::Project;
+use crate::version;
+
+use super::execution::execute_component_deploy;
+use super::planning::{
+    calculate_component_status, calculate_release_state, load_project_components, plan_components,
+};
+use super::types::{
+    ComponentDeployResult, ComponentStatus, DeployConfig, DeployOrchestrationResult, DeploySummary,
+};
+use super::version_overrides::fetch_remote_versions;
+
 /// Main deploy orchestration entry point.
 /// Handles component selection, building, and deployment.
-fn deploy_components(
+pub(super) fn deploy_components(
     config: &DeployConfig,
     project: &Project,
     ctx: &RemoteProjectContext,
@@ -119,7 +138,10 @@ fn deploy_components(
         );
 
         // Record which git ref was deployed
-        if let Some(checkout) = tag_checkouts.iter().find(|c| c.component_id == component.id) {
+        if let Some(checkout) = tag_checkouts
+            .iter()
+            .find(|c| c.component_id == component.id)
+        {
             result = result.with_deployed_ref(checkout.tag.clone());
         } else if config.head {
             // Deploying from HEAD — record the current branch
@@ -355,9 +377,15 @@ fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
 
         // If already on this tag's commit, skip checkout
         let tag_commit = crate::engine::command::run_in_optional(path, "git", &["rev-parse", &tag]);
-        let head_commit = crate::engine::command::run_in_optional(path, "git", &["rev-parse", "HEAD"]);
+        let head_commit =
+            crate::engine::command::run_in_optional(path, "git", &["rev-parse", "HEAD"]);
         if tag_commit.is_some() && tag_commit == head_commit {
-            log_status!("deploy", "'{}' is already at tag {} — no checkout needed", component.id, tag);
+            log_status!(
+                "deploy",
+                "'{}' is already at tag {} — no checkout needed",
+                component.id,
+                tag
+            );
             checkouts.push(TagCheckout {
                 component_id: component.id.clone(),
                 tag: tag.clone(),
@@ -368,7 +396,12 @@ fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
         }
 
         // Checkout the tag
-        log_status!("deploy", "'{}' checking out tag {} for deploy...", component.id, tag);
+        log_status!(
+            "deploy",
+            "'{}' checking out tag {} for deploy...",
+            component.id,
+            tag
+        );
         match crate::engine::command::run_in(path, "git", &["checkout", &tag], "git checkout tag") {
             Ok(_) => {
                 checkouts.push(TagCheckout {

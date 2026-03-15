@@ -1,4 +1,10 @@
+use serde::Serialize;
+
+use crate::component::Component;
+use crate::config;
+use crate::error::Result;
 use crate::is_zero_u32;
+use crate::paths as base_path;
 
 /// Parse bulk component IDs from a JSON spec.
 pub fn parse_bulk_component_ids(json_spec: &str) -> Result<Vec<String>> {
@@ -13,7 +19,7 @@ pub struct DeployResult {
 }
 
 impl DeployResult {
-    fn success(exit_code: i32) -> Self {
+    pub(super) fn success(exit_code: i32) -> Self {
         Self {
             success: true,
             exit_code,
@@ -21,7 +27,7 @@ impl DeployResult {
         }
     }
 
-    fn failure(exit_code: i32, error: String) -> Self {
+    pub(super) fn failure(exit_code: i32, error: String) -> Self {
         Self {
             success: false,
             exit_code,
@@ -29,7 +35,6 @@ impl DeployResult {
         }
     }
 }
-
 
 pub struct DeployConfig {
     pub component_ids: Vec<String>,
@@ -173,7 +178,7 @@ pub struct ComponentDeployResult {
 }
 
 impl ComponentDeployResult {
-    fn new(component: &Component, base_path: &str) -> Self {
+    pub(super) fn new(component: &Component, base_path: &str) -> Self {
         Self {
             id: component.id.clone(),
             status: String::new(),
@@ -192,7 +197,7 @@ impl ComponentDeployResult {
     }
 
     /// Shorthand for the common failure pattern: status="failed" + versions + error.
-    fn failed(
+    pub(super) fn failed(
         component: &Component,
         base_path: &str,
         local_version: Option<String>,
@@ -205,48 +210,48 @@ impl ComponentDeployResult {
             .with_error(error)
     }
 
-    fn with_status(mut self, status: &str) -> Self {
+    pub(super) fn with_status(mut self, status: &str) -> Self {
         self.status = status.to_string();
         self
     }
 
-    fn with_versions(mut self, local: Option<String>, remote: Option<String>) -> Self {
+    pub(super) fn with_versions(mut self, local: Option<String>, remote: Option<String>) -> Self {
         self.local_version = local;
         self.remote_version = remote;
         self
     }
 
-    fn with_error(mut self, error: String) -> Self {
+    pub(super) fn with_error(mut self, error: String) -> Self {
         self.error = Some(error);
         self
     }
 
-    fn with_build_exit_code(mut self, code: Option<i32>) -> Self {
+    pub(super) fn with_build_exit_code(mut self, code: Option<i32>) -> Self {
         self.build_exit_code = code;
         self
     }
 
-    fn with_deploy_exit_code(mut self, code: Option<i32>) -> Self {
+    pub(super) fn with_deploy_exit_code(mut self, code: Option<i32>) -> Self {
         self.deploy_exit_code = code;
         self
     }
 
-    fn with_component_status(mut self, status: ComponentStatus) -> Self {
+    pub(super) fn with_component_status(mut self, status: ComponentStatus) -> Self {
         self.component_status = Some(status);
         self
     }
 
-    fn with_remote_path(mut self, path: String) -> Self {
+    pub(super) fn with_remote_path(mut self, path: String) -> Self {
         self.remote_path = Some(path);
         self
     }
 
-    fn with_release_state(mut self, state: ReleaseState) -> Self {
+    pub(super) fn with_release_state(mut self, state: ReleaseState) -> Self {
         self.release_state = Some(state);
         self
     }
 
-    fn with_deployed_ref(mut self, git_ref: String) -> Self {
+    pub(super) fn with_deployed_ref(mut self, git_ref: String) -> Self {
         self.deployed_ref = Some(git_ref);
         self
     }
@@ -268,14 +273,4 @@ pub struct DeploySummary {
 pub struct DeployOrchestrationResult {
     pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
-}
-
-/// High-level deploy entry point. Resolves SSH context internally.
-///
-/// This is the preferred entry point for callers - it handles project loading
-/// and SSH context resolution, keeping those details encapsulated.
-pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
-    let project = project::load(project_id)?;
-    let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
-    deploy_components(config, &project, &ctx, &base_path)
 }

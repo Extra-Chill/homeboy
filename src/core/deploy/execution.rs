@@ -1,4 +1,22 @@
-fn execute_component_deploy(
+use std::path::Path;
+
+use crate::build;
+use crate::component::Component;
+use crate::context::RemoteProjectContext;
+use crate::error::Result;
+use crate::extension::build::resolve_artifact_path;
+use crate::paths as base_path;
+use crate::project::Project;
+
+use super::planning::{calculate_directory_size, format_bytes};
+use super::safety_and_artifact::{deploy_artifact, deploy_via_git, validate_deploy_target};
+use super::types::{ComponentDeployResult, DeployConfig, DeployResult};
+use super::version_overrides::{
+    artifact_is_fresh, deploy_with_override, find_deploy_override, find_deploy_verification,
+    is_self_deploy, prefer_installed_binary, run_post_deploy_hooks,
+};
+
+pub(super) fn execute_component_deploy(
     component: &Component,
     config: &DeployConfig,
     ctx: &RemoteProjectContext,

@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::collections::HashMap;
 
-use homeboy::auth::{self, AuthStatus, LoginResult, LogoutResult};
+use homeboy::server::auth::{self, AuthStatus, LoginResult, LogoutResult};
 
 use super::{CmdResult, GlobalArgs};
 use crate::tty::{prompt, prompt_password};

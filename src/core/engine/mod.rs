@@ -8,9 +8,11 @@
 //! to build their orchestration logic.
 
 pub mod baseline;
+pub mod cli_tool;
 pub mod codebase_scan;
 pub mod command;
 pub mod executor;
+pub mod hooks;
 pub mod identifier;
 pub mod output_parse;
 pub mod pipeline;

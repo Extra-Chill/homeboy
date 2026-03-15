@@ -1,3 +1,18 @@
+use std::collections::HashMap;
+use std::path::Path;
+
+use super::permissions;
+use crate::component;
+use crate::defaults;
+use crate::engine::shell;
+use crate::engine::template::{render_map, TemplateVars};
+use crate::error::{Error, Result};
+use crate::extension::DeployVerification;
+use crate::server::SshClient;
+
+use super::transfer::{upload_directory, upload_file};
+use super::types::DeployResult;
+
 /// Well-known shared directory names that typically contain multiple sibling components.
 ///
 /// Deploy targets ending with one of these are almost certainly misconfigured —
@@ -29,7 +44,11 @@ const DANGEROUS_PATH_SUFFIXES: &[&str] = &[
 ///    (e.g., `/wp-content/plugins`).
 /// 2. The resolved path must not equal the project's `base_path` — deploying
 ///    directly to the site root would destroy the entire site.
-fn validate_deploy_target(install_dir: &str, base_path: &str, component_id: &str) -> Result<()> {
+pub(super) fn validate_deploy_target(
+    install_dir: &str,
+    base_path: &str,
+    component_id: &str,
+) -> Result<()> {
     let normalized = install_dir.trim_end_matches('/');
     let base_normalized = base_path.trim_end_matches('/');
 
@@ -68,7 +87,7 @@ fn validate_deploy_target(install_dir: &str, base_path: &str, component_id: &str
 }
 
 /// Deploy a component via git pull on the remote server.
-fn deploy_via_git(
+pub(super) fn deploy_via_git(
     ssh_client: &SshClient,
     remote_path: &str,
     git_config: &component::GitDeployConfig,
@@ -149,7 +168,7 @@ fn deploy_via_git(
 }
 
 /// Main entry point - uploads artifact and runs extract command if configured
-fn deploy_artifact(
+pub(super) fn deploy_artifact(
     ssh_client: &SshClient,
     local_path: &Path,
     remote_path: &str,
@@ -339,4 +358,3 @@ fn render_extract_command(template: &str, vars: &HashMap<String, String>) -> Str
     }
     result
 }
-

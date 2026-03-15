@@ -1,4 +1,4 @@
-use homeboy::cli_tool::{self, CliToolResult};
+use homeboy::engine::cli_tool::{self, CliToolResult};
 use serde::Serialize;
 
 use super::CmdResult;

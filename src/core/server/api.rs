@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::http::ApiClient;
 use crate::error::{Error, Result};
-use crate::http::ApiClient;
 use crate::project;
 
 #[derive(Debug, Clone, Serialize)]

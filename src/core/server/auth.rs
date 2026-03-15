@@ -3,8 +3,8 @@
 //! Provides login, logout, and status checking without exposing
 //! the underlying HTTP client or keychain implementation.
 
+use super::http::ApiClient;
 use crate::error::Result;
-use crate::http::ApiClient;
 use crate::project;
 use serde::Serialize;
 use std::collections::HashMap;
