@@ -520,7 +520,6 @@ fn title_from_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     fn create_temp_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("Failed to create temp dir")
