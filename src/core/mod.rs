@@ -30,15 +30,14 @@ pub mod defaults;
 pub use extension::build;
 
 // Re-export relocated modules so existing `homeboy::api`, `homeboy::auth`, etc. paths keep working.
-// Also re-exports for internal `crate::http`, `crate::hooks`, `crate::permissions` usage.
+// Consumers within the crate have been updated to canonical paths; these re-exports
+// preserve the public API for external users of the library.
 pub use code_audit::codebase_map;
 pub use code_audit::docs;
-pub(crate) use deploy::permissions;
 pub use engine::cli_tool;
 pub use engine::hooks;
 pub use server::api;
 pub use server::auth;
-pub(crate) use server::http;
 
 // Re-export common types for convenience
 pub use error::{Error, ErrorCode, Result};

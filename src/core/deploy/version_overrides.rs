@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::SystemTime;
 
+use super::permissions;
 use crate::component::Component;
+use crate::engine::hooks::{self, HookFailureMode};
 use crate::engine::shell;
 use crate::engine::template::{render_map, TemplateVars};
 use crate::error::{Error, Result};
@@ -10,9 +12,7 @@ use crate::extension::build::resolve_artifact_path;
 use crate::extension::{
     load_all_extensions, DeployOverride, DeployVerification, ExtensionManifest,
 };
-use crate::hooks::{self, HookFailureMode};
 use crate::paths as base_path;
-use crate::permissions;
 use crate::server::SshClient;
 use crate::version;
 

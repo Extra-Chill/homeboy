@@ -3,13 +3,13 @@ use std::path::PathBuf;
 
 use crate::component::{self, Component};
 use crate::config::{is_json_input, parse_bulk_ids};
+use crate::deploy::permissions;
 use crate::engine::command::CapturedOutput;
 use crate::engine::shell;
 use crate::error::{Error, Result};
 use crate::extension::{self, exec_context, ExtensionCapability, ExtensionExecutionContext};
 use crate::output::{BulkResult, BulkSummary, ItemOutcome};
 use crate::paths;
-use crate::permissions;
 use crate::server::execute_local_command_in_dir;
 
 mod artifact;

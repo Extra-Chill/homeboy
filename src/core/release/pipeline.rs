@@ -885,7 +885,7 @@ fn build_release_steps(
 
     // === POST-RELEASE STEP (optional, runs after everything else, skipped with --skip-publish) ===
     let post_release_hooks =
-        crate::hooks::resolve_hooks(component, crate::hooks::events::POST_RELEASE);
+        crate::engine::hooks::resolve_hooks(component, crate::engine::hooks::events::POST_RELEASE);
     if !post_release_hooks.is_empty() && !options.skip_publish {
         let post_release_needs = if !publish_targets.is_empty() {
             vec!["cleanup".to_string()]

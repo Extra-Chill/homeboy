@@ -1,9 +1,9 @@
 use crate::component::{self, Component, VersionTarget};
 use crate::config::{from_str, set_json_pointer, to_string_pretty};
+use crate::engine::hooks::{self, HookFailureMode};
 use crate::engine::text;
 use crate::error::{Error, Result};
 use crate::extension::{load_all_extensions, ExtensionManifest};
-use crate::hooks::{self, HookFailureMode};
 use crate::is_zero;
 use crate::local_files::{self, FileSystem};
 use crate::paths::resolve_path_string;
