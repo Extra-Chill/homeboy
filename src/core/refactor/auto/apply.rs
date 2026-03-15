@@ -2,7 +2,7 @@ use crate::code_audit::conventions::Language;
 use crate::core::refactor::decompose;
 use crate::core::refactor::plan::generate::primary_type_name_from_declaration;
 use crate::core::refactor::plan::verify::rewrite_callers_after_dedup;
-use crate::core::refactor::shared::detect_language;
+
 use crate::engine::undo::InMemoryRollback;
 use crate::refactor::auto::{
     ApplyChunkResult, ApplyOptions, ChunkStatus, DecomposeFixPlan, Fix, FixResult, Insertion,
@@ -644,7 +644,7 @@ pub fn apply_fixes_chunked(
             }
         };
 
-        let language: Language = detect_language(&abs_path);
+        let language: Language = Language::from_path(&abs_path);
         let modified = apply_insertions_to_content(&content, &fix.insertions, &language);
 
         if modified == content {

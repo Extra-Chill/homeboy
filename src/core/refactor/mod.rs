@@ -13,9 +13,7 @@ pub mod move_items;
 pub mod plan;
 pub mod propagate;
 mod rename;
-pub mod runner;
 mod sandbox;
-pub(crate) mod shared;
 pub mod transform;
 
 /// Shared output for detector-triggered refactors/fixes.

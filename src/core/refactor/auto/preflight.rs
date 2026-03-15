@@ -1,6 +1,6 @@
 use crate::code_audit::conventions::{AuditFinding, Language};
 use crate::core::refactor::plan::generate::extract_signatures_from_items;
-use crate::core::refactor::shared::detect_language;
+
 use crate::refactor::auto::apply::apply_insertions_to_content;
 use crate::refactor::auto::policy::blocked_reason_from_preflight;
 use crate::refactor::auto::{
@@ -20,7 +20,7 @@ pub fn run_insertion_preflight(
         | AuditFinding::NamespaceMismatch => {
             let abs_path = context.root.join(file);
             let content = std::fs::read_to_string(&abs_path).ok()?;
-            let language = detect_language(&abs_path);
+            let language = Language::from_path(&abs_path);
             let simulated =
                 apply_insertions_to_content(&content, std::slice::from_ref(insertion), &language);
 
@@ -33,7 +33,7 @@ pub fn run_insertion_preflight(
         AuditFinding::UnreferencedExport => {
             let abs_path = context.root.join(file);
             let content = std::fs::read_to_string(&abs_path).ok()?;
-            let language = detect_language(&abs_path);
+            let language = Language::from_path(&abs_path);
             let simulated =
                 apply_insertions_to_content(&content, std::slice::from_ref(insertion), &language);
 
@@ -52,7 +52,7 @@ pub fn run_insertion_preflight(
         AuditFinding::DuplicateFunction => {
             let abs_path = context.root.join(file);
             let content = std::fs::read_to_string(&abs_path).ok()?;
-            let language = detect_language(&abs_path);
+            let language = Language::from_path(&abs_path);
 
             let mut checks = Vec::new();
 
@@ -142,7 +142,7 @@ pub fn run_insertion_preflight(
         AuditFinding::OrphanedTest => {
             let abs_path = context.root.join(file);
             let content = std::fs::read_to_string(&abs_path).ok()?;
-            let language = detect_language(&abs_path);
+            let language = Language::from_path(&abs_path);
 
             if let InsertionKind::FunctionRemoval {
                 start_line,
@@ -204,7 +204,7 @@ pub fn run_fix_preflight(fix: &mut Fix, context: &PreflightContext<'_>, write: b
     let Ok(content) = std::fs::read_to_string(&abs_path) else {
         return;
     };
-    let language = detect_language(&abs_path);
+    let language = Language::from_path(&abs_path);
     let simulated = apply_insertions_to_content(&content, &fix.insertions, &language);
 
     let mut extra_checks = Vec::new();

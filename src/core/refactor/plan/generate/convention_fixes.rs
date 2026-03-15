@@ -2,7 +2,7 @@ use crate::code_audit::conventions::Language;
 use crate::code_audit::naming::{detect_naming_suffix, suffix_matches};
 use crate::code_audit::{AuditFinding, CodeAuditResult};
 use crate::core::refactor::auto::{Fix, InsertionKind, SkippedFile};
-use crate::core::refactor::shared::detect_language;
+
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
@@ -72,7 +72,7 @@ pub(crate) fn build_signature_map(
     for rel_path in conforming_files {
         let abs_path = root.join(rel_path);
         if let Ok(content) = std::fs::read_to_string(&abs_path) {
-            let language = detect_language(&abs_path);
+            let language = Language::from_path(&abs_path);
             for sig in extract_signatures_from_items(&content, &language) {
                 sig_map.entry(sig.name.clone()).or_insert(sig);
             }
@@ -155,7 +155,7 @@ pub(super) fn apply_convention_fixes(
 
             let mut insertions = Vec::new();
             let abs_path = root.join(&outlier.file);
-            let language = detect_language(&abs_path);
+            let language = Language::from_path(&abs_path);
             let content = std::fs::read_to_string(&abs_path).unwrap_or_default();
             let has_constructor = file_has_constructor(&content, &language);
 
