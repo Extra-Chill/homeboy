@@ -1,6 +1,9 @@
+pub mod api;
+pub mod auth;
 mod client;
 mod connection;
 pub mod health;
+pub(crate) mod http;
 mod keys;
 pub mod transfer;
 

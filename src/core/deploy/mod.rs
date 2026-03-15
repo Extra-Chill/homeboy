@@ -1,5 +1,6 @@
 mod execution;
 mod orchestration;
+pub(crate) mod permissions;
 mod planning;
 mod safety_and_artifact;
 mod transfer;
