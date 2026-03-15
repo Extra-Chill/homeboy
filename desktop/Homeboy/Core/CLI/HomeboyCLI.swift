@@ -292,6 +292,109 @@ struct ProjectMutationOutput: Decodable {
     let deleted: [String]?
 }
 
+// MARK: - Init Output Models (NEW)
+
+/// Output from `homeboy init --json` command
+/// Provides full context including extensions, components, and config gaps
+struct InitOutput: Decodable {
+    let command: String
+    let status: InitStatus
+    let summary: InitSummary
+    let context: ContextOutput
+    let nextSteps: [String]
+    let components: [ComponentSummary]
+    let extensions: [ExtensionEntry]?  // NEW: Extension runtime status
+    let servers: [ServerRecordCLI]
+    let projects: [ProjectListItem]
+    let version: VersionSnapshot?
+    let git: GitSnapshot?
+    let lastRelease: ReleaseSnapshot?
+    let changelog: ChangelogSnapshot?
+    let agentContextFiles: [String]
+    let warnings: [String]
+}
+
+struct InitStatus: Decodable {
+    let totalComponents: Int
+    let configGaps: Int?
+    let gapDetails: [ConfigGapDetail]?
+    let hasUncommitted: [String]?
+    let needsVersionBump: [String]?
+    let readyToDeploy: [String]?
+}
+
+struct InitSummary: Decodable {
+    let byExtension: [String: Int]?
+    let byStatus: [String: Int]
+}
+
+struct ContextOutput: Decodable {
+    let cwd: String
+    let gitRoot: String?
+    let managed: Bool
+    let matchedComponents: [String]?
+    let suggestion: String?
+}
+
+struct ComponentSummary: Decodable, Identifiable {
+    let id: String
+    let path: String
+    let status: String
+    let codeCommits: Int?
+    let commitsSinceVersion: Int?
+    let docsOnlyCommits: Int?
+}
+
+/// Extension entry from init output - shows runtime status
+struct ExtensionEntry: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let version: String
+    let description: String
+    let runtime: String        // "executable" or "platform"
+    let compatible: Bool       // Version compatibility
+    let ready: Bool            // Runtime ready (deps installed)
+    let readyReason: String?   // Why not ready (if applicable)
+    let readyDetail: String?   // Detailed reason
+    let linked: Bool           // Symlinked (dev) vs installed
+}
+
+struct VersionSnapshot: Decodable {
+    let componentId: String?
+    let version: String?
+    let targets: [ComponentRecordCLI.VersionTargetCLI]?
+}
+
+struct GitSnapshot: Decodable {
+    let branch: String
+    let ahead: Int
+    let behind: Int
+    let clean: Bool
+    let commitsSinceVersion: Int?
+    let baselineRef: String?
+}
+
+struct ReleaseSnapshot: Decodable {
+    let tag: String?
+    let date: String?
+    let summary: String?
+}
+
+struct ChangelogSnapshot: Decodable {
+    let label: String?
+    let path: String?
+}
+
+/// Config gap with actionable fix command
+struct ConfigGapDetail: Decodable, Identifiable {
+    let componentId: String
+    let field: String
+    let reason: String
+    let command: String
+    
+    var id: String { "\(componentId).\(field)" }
+}
+
 @MainActor
 final class HomeboyCLI {
     static let shared = HomeboyCLI()
@@ -302,9 +405,21 @@ final class HomeboyCLI {
         cli.isInstalled
     }
 
-    private init() {}
+private init() {}
 
-    // MARK: - Project Commands
+// MARK: - Init Command
+
+/// Run `homeboy init` to get full context including extensions and components
+/// This is the primary way the desktop app discovers the workspace state
+func initWorkspace(path: String? = nil) async throws -> InitOutput {
+    var args = ["init"]
+    if let p = path {
+        args.append(contentsOf: ["--path", p])
+    }
+    return try await cli.executeCommand(args, dataType: InitOutput.self, source: "Init", timeout: 30)
+}
+
+// MARK: - Project Commands
 
     func projectList() async throws -> [ProjectListItem] {
         let output: ProjectListOutput = try await cli.executeCommand(

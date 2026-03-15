@@ -273,7 +273,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
 
     // MARK: - Extension Lookup
 
-    func extension(withId id: String) -> LoadedExtension? {
+    func loadedExtension(withId id: String) -> LoadedExtension? {
         extensions.first { $0.id == id }
     }
 }

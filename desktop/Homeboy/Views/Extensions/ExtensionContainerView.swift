@@ -12,16 +12,16 @@ struct ExtensionContainerView: View {
         _viewModel = StateObject(wrappedValue: ExtensionViewModel(extensionId: extensionId))
     }
     
-    private var extension: LoadedExtension? {
-        extensionManager.extension(withId: extensionId)
+    private var currentExtension: LoadedExtension? {
+        extensionManager.loadedExtension(withId: extensionId)
     }
     
     var body: some View {
         Group {
-            if let extension = extension {
-                extensionContent(extension)
+            if let currentExtension = currentExtension {
+                extensionContent(currentExtension)
                     .onAppear {
-                        viewModel.initializeInputValues(from: extension)
+                        viewModel.initializeInputValues(from: currentExtension)
                     }
             } else {
                 VStack(spacing: 16) {
@@ -96,7 +96,7 @@ struct ExtensionContainerView: View {
 // MARK: - Platform Extension View (extensions without runtime, e.g. OpenClaw)
 
 struct PlatformExtensionView: View {
-    let extension: LoadedExtension
+    let currentExtension: LoadedExtension
     @State private var actionOutput: String = ""
     @State private var isRunning = false
     
@@ -184,7 +184,7 @@ struct PlatformExtensionView: View {
 // MARK: - Header View
 
 struct ExtensionHeaderView: View {
-    let extension: LoadedExtension
+    let currentExtension: LoadedExtension
     @ObservedObject var viewModel: ExtensionViewModel
     
     var body: some View {
@@ -217,7 +217,7 @@ struct ExtensionHeaderView: View {
 // MARK: - Ready State View
 
 struct ExtensionReadyView: View {
-    let extension: LoadedExtension
+    let currentExtension: LoadedExtension
     @ObservedObject var viewModel: ExtensionViewModel
     
     @State private var showConsole = true

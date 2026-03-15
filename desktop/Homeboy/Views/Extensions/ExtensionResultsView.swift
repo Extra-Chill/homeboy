@@ -3,7 +3,7 @@ import AppKit
 
 /// Displays extension results in a dynamic table based on output schema
 struct ExtensionResultsView: View {
-    let extension: LoadedExtension
+    let currentExtension: LoadedExtension
     @ObservedObject var viewModel: ExtensionViewModel
     
     @State private var sortDescriptor: DataTableSortDescriptor<IndexedRow>?

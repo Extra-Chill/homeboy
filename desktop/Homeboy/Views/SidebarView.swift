@@ -81,7 +81,7 @@ struct SidebarView: View {
                                         }
                                 }
                             }
-                            .tag(NavigationItem.extension(extension.id))
+                            .tag(NavigationItem.extensionItem(extension.id))
                             .help(extension.isDisabled ? "Requires: \(extension.missingComponents.joined(separator: ", "))" : extension.name)
                         }
                     }

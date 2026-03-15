@@ -46,7 +46,7 @@ extension AppError {
         AppError(message, source: "Database Browser", path: path)
     }
 
-    static func extension(_ extensionId: String, _ message: String) -> AppError {
+    static func extensionError(_ extensionId: String, _ message: String) -> AppError {
         AppError(message, source: "Extension: \(extensionId)")
     }
 }

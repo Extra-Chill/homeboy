@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Dynamically generates input form from extension manifest
 struct ExtensionInputsView: View {
-    let extension: LoadedExtension
+    let currentExtension: LoadedExtension
     @ObservedObject var viewModel: ExtensionViewModel
     
     var body: some View {

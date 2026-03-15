@@ -2,7 +2,7 @@ import SwiftUI
 
 /// View shown when a extension needs dependency installation
 struct ExtensionSetupView: View {
-    let extension: LoadedExtension
+    let currentExtension: LoadedExtension
     @ObservedObject var viewModel: ExtensionViewModel
     
     var body: some View {

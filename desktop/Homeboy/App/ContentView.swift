@@ -3,7 +3,7 @@ import SwiftUI
 /// Navigation items: core tools are static, extensions are dynamic
 enum NavigationItem: Hashable {
     case coreTool(CoreTool)
-    case extension(String)  // Extension ID
+    case extensionItem(String) // Extension ID
 }
 
 /// Built-in core tools (not extensions)
@@ -71,11 +71,11 @@ struct ContentView: View {
             SettingsView()
                 .opacity(selectedItem == .coreTool(.settings) ? 1 : 0)
             
-            // Dynamic extensions
-            ForEach(extensionManager.extensions) { extension in
-                ExtensionContainerView(extensionId: extension.id)
-                    .opacity(selectedItem == .extension(extension.id) ? 1 : 0)
-            }
+        // Dynamic extensions
+        ForEach(extensionManager.extensions) { ext in
+            ExtensionContainerView(extensionId: ext.id)
+                .opacity(selectedItem == .extensionItem(ext.id) ? 1 : 0)
+        }
             
             // Empty state
             if selectedItem == nil {

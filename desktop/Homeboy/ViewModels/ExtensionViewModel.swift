@@ -25,8 +25,8 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
     private let configManager = ConfigurationManager.shared
     
     /// Current extension from manager (always up-to-date)
-    private var extension: LoadedExtension? {
-        ExtensionManager.shared.extension(withId: extensionId)
+    private var currentExtension: LoadedExtension? {
+        ExtensionManager.shared.loadedExtension(withId: extensionId)
     }
     
     /// Whether this extension is a CLI extension with subtarget support

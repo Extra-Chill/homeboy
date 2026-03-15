@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Renders action buttons from extension manifest
 struct ExtensionActionsBar: View {
-    let extension: LoadedExtension
+    let currentExtension: LoadedExtension
     @ObservedObject var viewModel: ExtensionViewModel
     @EnvironmentObject var authManager: AuthManager
     

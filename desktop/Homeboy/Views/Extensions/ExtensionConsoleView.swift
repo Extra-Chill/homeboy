@@ -6,7 +6,7 @@ struct ExtensionConsoleView: View {
     @ObservedObject var viewModel: ExtensionViewModel
     
     private var extensionName: String {
-        ExtensionManager.shared.extension(withId: viewModel.extensionId)?.name ?? viewModel.extensionId
+        ExtensionManager.shared.loadedExtension(withId: viewModel.extensionId)?.name ?? viewModel.extensionId
     }
     
     var body: some View {
