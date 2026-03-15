@@ -123,6 +123,28 @@ impl UndoSnapshot {
     pub fn save(self) -> Result<String> {
         save_to_dir(self, &snapshots_dir())
     }
+
+    /// Capture multiple files and save the snapshot in one step.
+    ///
+    /// Convenience method that eliminates the repeated create-capture-save
+    /// boilerplate. Logs a warning on save failure (non-fatal — undo is
+    /// best-effort and should never block the primary operation).
+    pub fn capture_and_save(
+        root: &Path,
+        label: &str,
+        files: impl IntoIterator<Item = impl AsRef<str>>,
+    ) {
+        let mut snap = Self::new(root, label);
+        for file in files {
+            snap.capture_file(file.as_ref());
+        }
+        if snap.entries.is_empty() {
+            return;
+        }
+        if let Err(e) = snap.save() {
+            crate::log_status!("undo", "Warning: failed to save undo snapshot: {}", e);
+        }
+    }
 }
 
 /// Save a snapshot to a specific directory. Used internally and by tests.
