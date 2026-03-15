@@ -317,6 +317,12 @@ impl ExtensionManifest {
             .and_then(|c| c.extension_script.as_deref())
     }
 
+    pub fn build_script(&self) -> Option<&str> {
+        self.build
+            .as_ref()
+            .and_then(|c| c.extension_script.as_deref())
+    }
+
     /// Convenience: get deploy verifications (empty if no deploy capability).
     pub fn deploy_verifications(&self) -> &[DeployVerification] {
         self.deploy

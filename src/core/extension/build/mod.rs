@@ -52,6 +52,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
         let extension_id = context.extension_id.clone();
         let extension = extension::load_extension(&extension_id)?;
         if let Some(build) = &extension.build {
+            // Priority 1: Extension's bundled build script
             let bundled = build
                 .extension_script
                 .as_ref()
@@ -79,6 +80,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
                 return Ok(result);
             }
 
+            // Priority 2: Local script matching the extension's script_names pattern
             let local_path = PathBuf::from(&component.local_path);
             for script_name in &build.script_names {
                 let local_script = local_path.join(script_name);
@@ -159,78 +161,29 @@ pub fn run(input: &str) -> Result<(BuildResult, i32)> {
 /// Build a component for deploy context.
 /// Returns (exit_code, error_message) - None error means success.
 ///
-/// Shell execution is required for build commands by design:
-/// - Build commands execute shell scripts (bash, sh, npm, composer, etc.)
-/// - Scripts use shell features (pipes, redirects, environment variables)
-/// - Examples: "bash {{script}}", "sh build.sh", "npm run build"
-/// - Build processes often require chaining with &&, ||, ;
-/// - Direct execution cannot handle shell scripts or shell features
-///
-/// See executor.rs for detailed execution strategy decision tree
+/// Thin wrapper around `execute_build_component` that adapts the return type
+/// for the deploy pipeline's error handling convention.
 pub(crate) fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
-    // Validate local_path before attempting build
-    let validated_path = match component::validate_local_path(component) {
-        Ok(p) => p,
-        Err(e) => return (Some(1), Some(format_path_validation_error(component, &e))),
-    };
-
-    let resolved = match resolve_build_command(component) {
-        Ok(r) => r,
-        Err(e) => return (Some(1), Some(e.to_string())),
-    };
-
-    let build_cmd = resolved.command().to_string();
-    let build_context = match &resolved {
-        ResolvedBuildCommand::ExtensionProvided { context, .. } => Some(context),
-        _ => None,
-    };
-
-    // Fix local permissions before build to ensure zip has correct permissions
-    let local_path_str = validated_path.to_string_lossy().to_string();
-    permissions::fix_local_permissions(&local_path_str);
-
-    // Get extension path env vars for build command (matches pre-build script behavior)
-    let env_vars = get_build_env_vars(component, build_context);
-    let env_refs: Vec<(&str, &str)> = env_vars
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    let output = execute_local_command_in_dir(
-        &build_cmd,
-        Some(&local_path_str),
-        if env_refs.is_empty() {
-            None
-        } else {
-            Some(&env_refs)
-        },
-    );
-
-    if output.success {
-        (Some(output.exit_code), None)
-    } else {
-        (
-            Some(output.exit_code),
-            Some(format_build_error(
-                &component.id,
-                &build_cmd,
-                &local_path_str,
-                output.exit_code,
-                &output.stderr,
-                &output.stdout,
-            )),
-        )
+    match execute_build_component(component) {
+        Ok((output, exit_code)) => {
+            if output.success {
+                (Some(exit_code), None)
+            } else {
+                (
+                    Some(exit_code),
+                    Some(format_build_error(
+                        &component.id,
+                        &output.build_command,
+                        &component.local_path,
+                        exit_code,
+                        &output.output.stderr,
+                        &output.output.stdout,
+                    )),
+                )
+            }
+        }
+        Err(e) => (Some(1), Some(e.to_string())),
     }
-}
-
-/// Format a path validation error with build context.
-fn format_path_validation_error(component: &component::Component, error: &Error) -> String {
-    format!(
-        "Build failed for component '{}':\n  {}\n\nHint: Update local_path with:\n  homeboy component set {} --local-path \"/path/to/component\"",
-        component.id,
-        error.message,
-        component.id
-    )
 }
 
 /// Format a build error message with context from stderr/stdout.
@@ -436,32 +389,37 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
     // Fix local permissions before build to ensure zip has correct permissions
     permissions::fix_local_permissions(&local_path_str);
 
-    // Get extension path env vars for build command (matches pre-build script behavior)
-    let env_vars = get_build_env_vars(comp, build_context);
-    let env_refs: Vec<(&str, &str)> = env_vars
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    let cmd_output = execute_local_command_in_dir(
-        &build_cmd,
-        Some(&local_path_str),
-        if env_refs.is_empty() {
-            None
-        } else {
-            Some(&env_refs)
-        },
-    );
+    // Execute via ExtensionRunner — uses the full exec context protocol (settings,
+    // project info, context version) instead of the minimal env var set.
+    let runner_output = if let Some(context) = build_context {
+        extension::ExtensionRunner::for_context(context.clone())
+            .component(comp.clone())
+            .working_dir(&local_path_str)
+            .command_override(build_cmd.clone())
+            // Legacy env var for backward compat with existing build scripts
+            .env("HOMEBOY_PLUGIN_PATH", &comp.local_path)
+            .run()?
+    } else {
+        // LocalScript variant — no extension context, run command directly
+        let context =
+            extension::resolve_execution_context(comp, extension::ExtensionCapability::Build)?;
+        extension::ExtensionRunner::for_context(context)
+            .component(comp.clone())
+            .working_dir(&local_path_str)
+            .command_override(build_cmd.clone())
+            .env("HOMEBOY_PLUGIN_PATH", &comp.local_path)
+            .run()?
+    };
 
     Ok((
         BuildOutput {
             command: "build.run".to_string(),
             component_id: comp.id.clone(),
             build_command: build_cmd,
-            output: CapturedOutput::new(cmd_output.stdout, cmd_output.stderr),
-            success: cmd_output.success,
+            output: CapturedOutput::new(runner_output.stdout, runner_output.stderr),
+            success: runner_output.success,
         },
-        cmd_output.exit_code,
+        runner_output.exit_code,
     ))
 }
 
@@ -513,33 +471,6 @@ fn run_pre_build_scripts(
     }
 
     Ok(None)
-}
-
-/// Get environment variables for build commands (extension path, component path).
-/// Matches the env vars passed to pre-build scripts for consistency.
-fn get_build_env_vars(
-    comp: &Component,
-    build_context: Option<&ExtensionExecutionContext>,
-) -> Vec<(String, String)> {
-    let mut env = Vec::new();
-
-    // Always pass the component ID so build scripts can name artifacts consistently
-    env.push((exec_context::COMPONENT_ID.to_string(), comp.id.clone()));
-
-    if let Some(build_context) = build_context {
-        let extension_path_str = build_context.extension_path.to_string_lossy().to_string();
-        env.push((exec_context::EXTENSION_PATH.to_string(), extension_path_str));
-        env.push((
-            exec_context::COMPONENT_PATH.to_string(),
-            build_context.component.local_path.clone(),
-        ));
-        env.push((
-            "HOMEBOY_PLUGIN_PATH".to_string(),
-            build_context.component.local_path.clone(),
-        ));
-    }
-
-    env
 }
 
 #[cfg(test)]

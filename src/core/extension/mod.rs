@@ -256,9 +256,18 @@ pub fn resolve_execution_context(
     let script_path = match capability {
         ExtensionCapability::Lint => manifest.lint_script(),
         ExtensionCapability::Test => manifest.test_script(),
-        ExtensionCapability::Build => None,
+        ExtensionCapability::Build => manifest.build_script(),
     }
     .map(|s| s.to_string())
+    // Build's extension_script is optional (builds can use local scripts or command templates),
+    // so we allow an empty script_path for Build. Lint/Test require it.
+    .or_else(|| {
+        if capability == ExtensionCapability::Build {
+            Some(String::new())
+        } else {
+            None
+        }
+    })
     .ok_or_else(|| {
         Error::validation_invalid_argument(
             "extension",
