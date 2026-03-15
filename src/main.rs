@@ -110,8 +110,6 @@ enum Commands {
     Api(api::ApiArgs),
     /// Upgrade Homeboy to the latest version
     Upgrade(upgrade::UpgradeArgs),
-    /// Check CLI capability support (command flags and options)
-    Supports(crate::commands::supports::SupportsArgs),
     /// Alias for upgrade
     #[command(hide = true)]
     Update(upgrade::UpgradeArgs),
@@ -136,7 +134,6 @@ fn response_mode(command: &Commands) -> ResponseMode {
             ResponseMode::Raw(RawOutputMode::Markdown)
         }
         Commands::List => ResponseMode::Raw(RawOutputMode::Markdown),
-        Commands::Supports(_) => ResponseMode::Json,
         _ => ResponseMode::Json,
     }
 }

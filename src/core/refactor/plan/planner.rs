@@ -1036,4 +1036,20 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn normalize_sources_orders_known_sources() {
+        let normalized =
+            normalize_sources(&["test".to_string(), "audit".to_string(), "lint".to_string()])
+                .expect("sources should normalize");
+
+        assert_eq!(normalized, vec!["audit", "lint", "test"]);
+    }
+
+    #[test]
+    fn normalize_sources_rejects_unknown_sources() {
+        let err =
+            normalize_sources(&["weird".to_string()]).expect_err("unknown source should fail");
+        assert!(err.to_string().contains("Unknown refactor source"));
+    }
 }

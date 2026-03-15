@@ -149,3 +149,85 @@ pub fn compute_changed_test_scope(
         selected_files,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    #[test]
+    fn compute_changed_test_scope_detects_new_test_file() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("src")).expect("src dir should be created");
+        fs::create_dir_all(root.join("tests")).expect("tests dir should be created");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='scope-test'\nversion='0.1.0'\n",
+        )
+        .expect("Cargo.toml should be written");
+        fs::write(root.join("src/lib.rs"), "pub fn thing() {}\n").expect("lib should be written");
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .expect("git init should run");
+        Command::new("git")
+            .args(["config", "user.email", "tests@example.com"])
+            .current_dir(root)
+            .output()
+            .expect("git config email should run");
+        Command::new("git")
+            .args(["config", "user.name", "Tests"])
+            .current_dir(root)
+            .output()
+            .expect("git config name should run");
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .output()
+            .expect("git add should run");
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(root)
+            .output()
+            .expect("git commit should run");
+
+        fs::write(root.join("tests/scope_test.rs"), "#[test]\nfn smoke(){}\n")
+            .expect("test file should be written");
+        Command::new("git")
+            .args(["add", "tests/scope_test.rs"])
+            .current_dir(root)
+            .output()
+            .expect("git add test file should run");
+        Command::new("git")
+            .args(["commit", "-m", "add test"])
+            .current_dir(root)
+            .output()
+            .expect("git commit test file should run");
+
+        let component = Component::new(
+            "scope-test".to_string(),
+            root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let output = compute_changed_test_scope(&component, "HEAD~1")
+            .expect("scope computation should succeed");
+
+        assert_eq!(output.mode, "changed");
+        assert_eq!(output.changed_since, Some("HEAD~1".to_string()));
+        assert!(
+            output
+                .selected_files
+                .iter()
+                .any(|f| f.ends_with("tests/scope_test.rs")),
+            "expected changed test file to be included"
+        );
+    }
+}
