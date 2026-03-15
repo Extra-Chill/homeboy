@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.6.1] - 2026-03-15
+
+### Fixed
+- scope autofix loop guards to actual loops, not historical totals
+
 ## [1.6.0] - 2026-03-15
 
 ### Added
