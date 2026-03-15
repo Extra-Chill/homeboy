@@ -292,7 +292,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
                     write_mode.write,
                 )
             } else {
-                return Err(homeboy::Error::validation_invalid_argument(
+                Err(homeboy::Error::validation_invalid_argument(
                     "from",
                     "Either --from (with --item) or --file is required",
                     None,
@@ -301,7 +301,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
                             .to_string(),
                         "Move file: refactor move --file src/a.rs --to src/b.rs".to_string(),
                     ]),
-                ));
+                ))
             }
         }
 
@@ -843,12 +843,20 @@ fn run_move_file(
     let root = refactor::move_items::resolve_root(component_id, path)?;
 
     if write {
-        homeboy::engine::undo::UndoSnapshot::capture_and_save(&root, "refactor move --file", [file, to]);
+        homeboy::engine::undo::UndoSnapshot::capture_and_save(
+            &root,
+            "refactor move --file",
+            [file, to],
+        );
     }
 
     let result = refactor::move_items::move_file(file, to, &root, write)?;
 
-    let exit_code = if result.imports_updated > 0 || result.mod_declarations_updated { 0 } else { 1 };
+    let exit_code = if result.imports_updated > 0 || result.mod_declarations_updated {
+        0
+    } else {
+        1
+    };
 
     homeboy::log_status!(
         "refactor",

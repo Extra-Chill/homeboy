@@ -785,7 +785,7 @@ pub struct MoveFileResult {
 pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveFileResult> {
     let source_abs = root.join(from);
     let dest_abs = root.join(to);
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
 
     // Validate source exists
     if !source_abs.exists() {
@@ -833,10 +833,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
             // For a whole-module move, we need to find all files that import
             // anything from the source module. We use the module name as the
             // search term — any file that mentions it might have imports to update.
-            let source_module_leaf = source_module
-                .rsplit("::")
-                .next()
-                .unwrap_or(&source_module);
+            let source_module_leaf = source_module.rsplit("::").next().unwrap_or(&source_module);
 
             let all_files = codebase_scan::walk_files(
                 root,
@@ -879,8 +876,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
                     continue;
                 }
 
-                let file_ext_str =
-                    file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let file_ext_str = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if !ext.handles_file_extension(file_ext_str) {
                     continue;
                 }
@@ -891,8 +887,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
                 };
 
                 // Quick check: does this file mention the source module?
-                let mentions_source =
-                    search_refs.iter().any(|term| file_content.contains(term));
+                let mentions_source = search_refs.iter().any(|term| file_content.contains(term));
                 if !mentions_source {
                     continue;
                 }
@@ -935,10 +930,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
 
         // Move the file
         std::fs::rename(&source_abs, &dest_abs).map_err(|e| {
-            crate::Error::internal_io(
-                e.to_string(),
-                Some(format!("move {} → {}", from, to)),
-            )
+            crate::Error::internal_io(e.to_string(), Some(format!("move {} → {}", from, to)))
         })?;
 
         // Update old parent mod.rs — remove mod declaration
@@ -1076,7 +1068,8 @@ fn add_mod_declaration(content: &str, module_name: &str) -> String {
     let mut insert_after = None;
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with("mod ") || trimmed.starts_with("pub mod ")
+        if trimmed.starts_with("mod ")
+            || trimmed.starts_with("pub mod ")
             || trimmed.starts_with("pub(crate) mod ")
         {
             insert_after = Some(i);
