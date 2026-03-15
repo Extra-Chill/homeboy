@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use homeboy::server::auth::{self, AuthStatus, LoginResult, LogoutResult};
 
 use super::{CmdResult, GlobalArgs};
-use crate::tty::{prompt, prompt_password};
+use crate::commands::utils::tty::{prompt, prompt_password};
 
 #[derive(Args)]
 pub struct AuthArgs {

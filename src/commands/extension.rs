@@ -538,7 +538,7 @@ fn run_extension(
 
     let mode = if no_stream {
         ExtensionExecutionMode::Captured
-    } else if stream || crate::tty::is_stdout_tty() {
+    } else if stream || crate::commands::utils::tty::is_stdout_tty() {
         ExtensionExecutionMode::Interactive
     } else {
         ExtensionExecutionMode::Captured

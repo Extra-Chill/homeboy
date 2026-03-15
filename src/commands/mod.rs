@@ -313,7 +313,7 @@ pub(crate) fn run_markdown(
 /// Dispatch a command to its handler and map result to JSON.
 macro_rules! dispatch {
     ($args:expr, $global:expr, $extension:ident) => {
-        crate::output::map_cmd_result_to_json($extension::run($args, $global))
+        crate::commands::utils::response::map_cmd_result_to_json($extension::run($args, $global))
     };
 }
 
@@ -321,7 +321,7 @@ pub(crate) fn run_json(
     command: crate::Commands,
     global: &GlobalArgs,
 ) -> (homeboy::Result<serde_json::Value>, i32) {
-    crate::tty::status("homeboy is working...");
+    crate::commands::utils::tty::status("homeboy is working...");
 
     match command {
         // All commands use global context
@@ -365,7 +365,7 @@ pub(crate) fn run_json(
                 None,
                 None,
             );
-            crate::output::map_cmd_result_to_json::<serde_json::Value>(Err(err))
+            crate::commands::utils::response::map_cmd_result_to_json::<serde_json::Value>(Err(err))
         }
     }
 }

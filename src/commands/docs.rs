@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::path::Path;
 
-use crate::docs;
+use crate::help_topics;
 use homeboy::code_audit::codebase_map;
 use homeboy::code_audit::docs_audit::AuditResult;
 use homeboy::component;
@@ -101,12 +101,12 @@ pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
     let topic = args.topic.as_deref().unwrap_or("index");
 
     if topic == "list" {
-        let topics = docs::available_topics();
+        let topics = help_topics::available_topics();
         return Ok((topics.join("\n"), 0));
     }
 
     let topic_vec = vec![topic.to_string()];
-    let resolved = docs::resolve(&topic_vec)?;
+    let resolved = help_topics::resolve(&topic_vec)?;
     Ok((resolved.content, 0))
 }
 
