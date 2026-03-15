@@ -1134,8 +1134,13 @@ fn extract_internal_calls(content: &str, skip_calls: &[&str]) -> Vec<String> {
     result
 }
 
+/// Returns true only for truly public visibility — external API.
+///
+/// "pub(crate)" and "pub(super)" are crate-internal and should NOT
+/// appear in `public_api`. Only bare "pub" (mapped to "public" by
+/// `extract_fn_visibility`) is external.
 fn is_public_visibility(vis: &str) -> bool {
-    vis == "public" || vis.starts_with("pub")
+    vis == "public"
 }
 
 // ============================================================================
