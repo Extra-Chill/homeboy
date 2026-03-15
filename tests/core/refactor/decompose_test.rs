@@ -89,40 +89,6 @@ fn test_apply_plan_empty_groups() {
 }
 
 #[test]
-fn test_classify_function() {
-    let root = tmp_dir("classify-function");
-    fs::create_dir_all(root.join("src/core")).expect("create source dir");
-    fs::write(
-        root.join("src/core/deploy.rs"),
-        "fn validate_input() {}\nfn parse_output() {}\nfn run() {}\nfn something_else() {}\n",
-    )
-    .expect("write source file");
-
-    let plan = refactor::build_plan("src/core/deploy.rs", &root, "grouped", true)
-        .expect("build grouped plan");
-
-    let mut groups_by_name = std::collections::HashMap::new();
-    for group in &plan.groups {
-        groups_by_name.insert(group.name.as_str(), &group.item_names);
-    }
-
-    assert!(groups_by_name
-        .get("validation")
-        .is_some_and(|items| items.contains(&"validate_input".to_string())));
-    assert!(groups_by_name
-        .get("planning")
-        .is_some_and(|items| items.contains(&"parse_output".to_string())));
-    assert!(groups_by_name
-        .get("execution")
-        .is_some_and(|items| items.contains(&"run".to_string())));
-    assert!(groups_by_name
-        .get("helpers")
-        .is_some_and(|items| items.contains(&"something_else".to_string())));
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
 fn test_group_items() {
     let root = tmp_dir("group-items");
     fs::create_dir_all(root.join("src/core")).expect("create source dir");

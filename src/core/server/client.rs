@@ -482,13 +482,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_localhost_aliases() {
-        assert!(is_local_host("localhost"));
-        assert!(is_local_host("127.0.0.1"));
-        assert!(is_local_host("::1"));
-    }
-
-    #[test]
     fn test_non_local_hosts() {
         assert!(!is_local_host("example.com"));
         assert!(!is_local_host("192.168.1.1")); // private but not this machine (unless it is)

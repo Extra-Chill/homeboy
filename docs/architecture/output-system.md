@@ -153,7 +153,7 @@ Many command outputs include a `command` string field:
 Commands that execute external processes include captured output in their response
 when running in non-interactive mode.
 
-The `CapturedOutput` primitive (`src/utils/command.rs`) provides:
+The `CapturedOutput` primitive (`src/core/engine/command.rs`) provides:
 - `stdout`: Captured standard output (omitted if empty)
 - `stderr`: Captured standard error (omitted if empty)
 
