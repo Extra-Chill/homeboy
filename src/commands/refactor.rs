@@ -292,7 +292,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
                     write_mode.write,
                 )
             } else {
-                return Err(homeboy::Error::validation_invalid_argument(
+                Err(homeboy::Error::validation_invalid_argument(
                     "from",
                     "Either --from (with --item) or --file is required",
                     None,
@@ -301,7 +301,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
                             .to_string(),
                         "Move file: refactor move --file src/a.rs --to src/b.rs".to_string(),
                     ]),
-                ));
+                ))
             }
         }
 

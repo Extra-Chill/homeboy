@@ -785,7 +785,7 @@ pub struct MoveFileResult {
 pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveFileResult> {
     let source_abs = root.join(from);
     let dest_abs = root.join(to);
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
 
     // Validate source exists
     if !source_abs.exists() {
