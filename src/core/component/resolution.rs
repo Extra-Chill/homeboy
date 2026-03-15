@@ -84,6 +84,36 @@ pub fn detect_from_cwd() -> Option<String> {
     None
 }
 
+/// Check if the CWD (or its git root) is a checkout of the given component.
+///
+/// Returns the CWD-discovered component when the portable `homeboy.json` in the
+/// current directory (or git root) has a matching `id`. This means the user is
+/// standing inside a clone of this component and intends to operate on it,
+/// even if the registered `local_path` points elsewhere (#694).
+fn prefer_cwd_for_component(component_id: &str) -> Option<Component> {
+    let cwd = std::env::current_dir().ok()?;
+
+    // Check CWD directly
+    if let Some(discovered) = discover_from_portable(&cwd) {
+        if discovered.id == component_id {
+            return Some(discovered);
+        }
+    }
+
+    // Check git root if different from CWD
+    if let Some(git_root) = detect_git_root(&cwd) {
+        if git_root != cwd {
+            if let Some(discovered) = discover_from_portable(&git_root) {
+                if discovered.id == component_id {
+                    return Some(discovered);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Find the git root directory for a given path.
 pub(crate) fn detect_git_root(dir: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("git")
@@ -176,6 +206,13 @@ pub fn resolve_effective(
                 })
             }
         } else {
+            // No --path provided. Before falling back to the registry, check
+            // if the CWD (or its git root) is a checkout of this component.
+            // This ensures `homeboy test foo` from a different clone of `foo`
+            // operates on the current checkout, not the registered local_path (#694).
+            if let Some(cwd_component) = prefer_cwd_for_component(id) {
+                return Ok(cwd_component);
+            }
             load(id)
         }
     } else {
