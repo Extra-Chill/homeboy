@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.78.0] - 2026-03-15
+
+### Added
+- refactor move --file for whole-module relocations
+
+### Changed
+- organize refactor module + fix decompose re-exports
+
+### Fixed
+- pub use removal preserves trailing commas + treat decompose side-effects as cascading
+- enable lint autofix in release pipeline + format today's code
+- signature mismatch only flags isolated signatures, not variant families
+- exclude CHANGELOG from docs audit by default
+- remove .homeboy/audit-rules.json dual path — homeboy.json is the single source (#779)
+- lint envelope trust + component path resolution (#696, #694)
+
 ## [0.77.0] - 2026-03-15
 
 ### Added
