@@ -33,6 +33,13 @@ impl Language {
             _ => Language::Unknown,
         }
     }
+
+    pub fn from_path(path: &std::path::Path) -> Self {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(Self::from_extension)
+            .unwrap_or(Self::Unknown)
+    }
 }
 
 /// A discovered convention: a pattern that most files in a group follow.

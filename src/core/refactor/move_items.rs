@@ -220,6 +220,44 @@ fn ext_rewrite_caller_imports(
     serde_json::from_value(result.get("rewrites")?.clone()).ok()
 }
 
+/// Ask an extension to generate module index content (mod declarations + pub use re-exports).
+///
+/// Used after decompose splits a file into submodules — the original file becomes
+/// mod.rs and needs `mod submodule;` declarations plus `pub use submodule::*;`
+/// re-exports so callers can still find the moved items.
+pub fn ext_generate_module_index(
+    file_path: &str,
+    submodules: &[ModuleIndexEntry],
+    remaining_content: &str,
+) -> Option<String> {
+    let ext = find_refactor_extension(file_path)?;
+    let subs: Vec<serde_json::Value> = submodules
+        .iter()
+        .map(|sub| {
+            serde_json::json!({
+                "name": sub.name,
+                "pub_items": sub.pub_items,
+            })
+        })
+        .collect();
+    let cmd = serde_json::json!({
+        "command": "generate_module_index",
+        "submodules": subs,
+        "remaining_content": remaining_content,
+    });
+    let result = extension::run_refactor_script(&ext, &cmd)?;
+    result.get("content")?.as_str().map(|s| s.to_string())
+}
+
+/// A submodule entry for module index generation.
+#[derive(Debug, Clone)]
+pub struct ModuleIndexEntry {
+    /// Module name (e.g., "types", "unreleased").
+    pub name: String,
+    /// Public items that should be re-exported. Empty = glob re-export.
+    pub pub_items: Vec<String>,
+}
+
 /// A single import rewrite in a caller file.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImportRewrite {

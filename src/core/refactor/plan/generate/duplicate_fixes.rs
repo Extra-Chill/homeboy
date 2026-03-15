@@ -1,7 +1,7 @@
 use crate::code_audit::conventions::Language;
 use crate::code_audit::{AuditFinding, CodeAuditResult, DuplicateGroup};
 use crate::core::refactor::auto::{Fix, FixSafetyTier, InsertionKind, NewFile, SkippedFile};
-use crate::core::refactor::shared::detect_language;
+
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
@@ -36,7 +36,7 @@ pub(crate) fn generate_unreferenced_export_fixes(
         };
 
         let abs_path = root.join(&finding.file);
-        let language = detect_language(&abs_path);
+        let language = Language::from_path(&abs_path);
         if !matches!(language, Language::Rust) {
             continue;
         }
@@ -181,7 +181,7 @@ pub(crate) fn generate_duplicate_function_fixes(
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("");
-        let language = detect_language(&canonical_abs);
+        let language = Language::from_path(&canonical_abs);
         let use_extract_shared = matches!(language, Language::Php)
             && !crate::code_audit::is_test_path(&group.canonical_file);
 
