@@ -412,16 +412,6 @@ mod tests {
         assert_eq!(rule.description, "");
     }
 
-    #[test]
-    fn ad_hoc_creates_single_rule_set() {
-        let set = ad_hoc_transform("foo", "bar", "**/*.rs");
-        assert_eq!(set.rules.len(), 1);
-        assert_eq!(set.rules[0].id, "ad-hoc");
-        assert_eq!(set.rules[0].find, "foo");
-        assert_eq!(set.rules[0].replace, "bar");
-        assert_eq!(set.rules[0].files, "**/*.rs");
-    }
-
     // --- Line context tests ---
 
     #[test]

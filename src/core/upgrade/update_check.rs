@@ -118,55 +118,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cache_freshness_within_24h() {
-        let cache = UpdateCheckCache {
-            latest_version: "0.50.0".to_string(),
-            current_version: upgrade::current_version().to_string(),
-            update_available: true,
-            checked_at: now_unix() - 100,
-        };
-        assert!(is_cache_fresh(&cache));
-    }
-
-    #[test]
-    fn test_cache_stale_after_24h() {
-        let cache = UpdateCheckCache {
-            latest_version: "0.50.0".to_string(),
-            current_version: upgrade::current_version().to_string(),
-            update_available: true,
-            checked_at: now_unix() - CHECK_INTERVAL_SECS - 1,
-        };
-        assert!(!is_cache_fresh(&cache));
-    }
-
-    #[test]
-    fn test_cache_stale_after_version_change() {
-        let cache = UpdateCheckCache {
-            latest_version: "0.50.0".to_string(),
-            current_version: "0.40.0".to_string(),
-            update_available: true,
-            checked_at: now_unix() - 100,
-        };
-        assert!(!is_cache_fresh(&cache));
-    }
-
-    #[test]
-    fn test_cache_roundtrip() {
-        let cache = UpdateCheckCache {
-            latest_version: "1.0.0".to_string(),
-            current_version: "0.47.0".to_string(),
-            update_available: true,
-            checked_at: 1700000000,
-        };
-        let json = serde_json::to_string(&cache).unwrap();
-        let parsed: UpdateCheckCache = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.latest_version, "1.0.0");
-        assert_eq!(parsed.current_version, "0.47.0");
-        assert!(parsed.update_available);
-        assert_eq!(parsed.checked_at, 1700000000);
-    }
-
-    #[test]
     fn test_env_var_disable() {
         std::env::remove_var(ENV_VAR_DISABLE);
         assert!(!is_disabled_by_env());

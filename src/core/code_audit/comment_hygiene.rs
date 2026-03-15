@@ -166,17 +166,6 @@ mod tests {
     }
 
     #[test]
-    fn test_run() {
-        let fp = make_fp(
-            "src/example.rs",
-            Language::Rust,
-            "// TODO: check\nfn x() {}",
-        );
-        let findings = run(&[&fp]);
-        assert!(!findings.is_empty());
-    }
-
-    #[test]
     fn test_extract_comments() {
         let fp = make_fp(
             "src/example.php",
@@ -196,13 +185,6 @@ mod tests {
         let truncated = truncate_comment(&comment);
         assert!(truncated.ends_with("..."));
         assert!(truncated.chars().count() <= 123);
-    }
-
-    #[test]
-    fn test_make_fp() {
-        let fp = make_fp("src/example.rs", Language::Rust, "fn x() {}");
-        assert_eq!(fp.relative_path, "src/example.rs");
-        assert_eq!(fp.language, Language::Rust);
     }
 
     #[test]

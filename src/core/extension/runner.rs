@@ -105,7 +105,7 @@ impl ExtensionRunner {
     ///
     /// By default, scripts run relative to the extension path. Use this to
     /// run in a different directory (e.g., the component's `local_path` for builds).
-    pub fn working_dir(mut self, dir: &str) -> Self {
+    pub(crate) fn working_dir(mut self, dir: &str) -> Self {
         self.working_dir = Some(dir.to_string());
         self
     }

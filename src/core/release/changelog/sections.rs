@@ -1,3 +1,11 @@
+mod normalize_heading_label;
+mod types;
+mod unreleased;
+
+pub use normalize_heading_label::*;
+pub use types::*;
+pub use unreleased::*;
+
 use chrono::Local;
 
 use crate::engine::text;
@@ -5,48 +13,6 @@ use crate::engine::validation;
 use crate::error::{Error, Result};
 
 use super::settings::*;
-
-#[derive(Debug, PartialEq)]
-enum SectionContentStatus {
-    Valid,           // Has bullet items (direct or under subsections)
-    SubsectionsOnly, // Has ### headers but no bullets
-    Empty,           // Nothing meaningful
-}
-
-fn validate_section_content(body_lines: &[&str]) -> SectionContentStatus {
-    let mut has_subsection_headers = false;
-    let mut has_bullets = false;
-
-    for line in body_lines {
-        let trimmed = line.trim();
-
-        // Stop at next ## heading
-        if trimmed.starts_with("## ") {
-            break;
-        }
-
-        // Detect subsection headers
-        if KEEP_A_CHANGELOG_SUBSECTIONS
-            .iter()
-            .any(|h| trimmed.starts_with(h))
-        {
-            has_subsection_headers = true;
-        }
-
-        // Detect bullet items (- or *)
-        if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-            has_bullets = true;
-        }
-    }
-
-    if has_bullets {
-        SectionContentStatus::Valid
-    } else if has_subsection_headers {
-        SectionContentStatus::SubsectionsOnly
-    } else {
-        SectionContentStatus::Empty
-    }
-}
 
 pub fn check_next_section_content(
     changelog_content: &str,
@@ -210,24 +176,6 @@ pub fn finalize_with_generated_entries(
     finalize_next_section(&content, aliases, new_version, false)
 }
 
-fn normalize_heading_label(label: &str) -> String {
-    label.trim().trim_matches(['[', ']']).trim().to_string()
-}
-
-fn is_matching_next_section_heading(line: &str, aliases: &[String]) -> bool {
-    let trimmed = line.trim();
-    if !trimmed.starts_with("##") {
-        return false;
-    }
-
-    let raw_label = trimmed.trim_start_matches('#').trim();
-    let normalized = normalize_heading_label(raw_label);
-
-    aliases
-        .iter()
-        .any(|a| normalize_heading_label(a) == normalized)
-}
-
 pub(super) fn find_next_section_start(lines: &[&str], aliases: &[String]) -> Option<usize> {
     lines
         .iter()
@@ -245,52 +193,6 @@ pub(super) fn find_section_end(lines: &[&str], start: usize) -> usize {
         index += 1;
     }
     index
-}
-
-/// Count bullet items in the unreleased section.
-/// Returns 0 if no unreleased section exists or section is empty.
-pub fn count_unreleased_entries(content: &str, aliases: &[String]) -> usize {
-    let lines: Vec<&str> = content.lines().collect();
-    let start = match find_next_section_start(&lines, aliases) {
-        Some(idx) => idx,
-        None => return 0,
-    };
-
-    let end = find_section_end(&lines, start);
-
-    lines[start + 1..end]
-        .iter()
-        .filter(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with("- ") || trimmed.starts_with("* ")
-        })
-        .count()
-}
-
-/// Extract bullet item text from the unreleased section.
-/// Returns normalized bullet content without the leading marker.
-pub fn get_unreleased_entries(content: &str, aliases: &[String]) -> Vec<String> {
-    let lines: Vec<&str> = content.lines().collect();
-    let start = match find_next_section_start(&lines, aliases) {
-        Some(idx) => idx,
-        None => return vec![],
-    };
-
-    let end = find_section_end(&lines, start);
-
-    lines[start + 1..end]
-        .iter()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("- ") {
-                Some(rest.trim().to_string())
-            } else {
-                trimmed
-                    .strip_prefix("* ")
-                    .map(|rest| rest.trim().to_string())
-            }
-        })
-        .collect()
 }
 
 pub(super) fn ensure_next_section(content: &str, aliases: &[String]) -> Result<(String, bool)> {
@@ -349,83 +251,7 @@ pub(super) fn ensure_next_section(content: &str, aliases: &[String]) -> Result<(
     Ok((out, true))
 }
 
-/// Extract semver from changelog heading formats:
-/// - "0.1.0" -> Some("0.1.0")
-/// - "[0.1.0]" -> Some("0.1.0")
-/// - "0.1.0 - 2025-01-14" -> Some("0.1.0")
-/// - "[0.1.0] - 2025-01-14" -> Some("0.1.0")
-/// - "Unreleased" -> None
-fn extract_version_from_heading(label: &str) -> Option<String> {
-    text::extract_first(label, r"\[?(\d+\.\d+\.\d+)\]?")
-}
-
-/// Get the latest finalized version from the changelog (first ## heading that contains a semver).
-/// Supports Keep a Changelog format: `## [X.Y.Z] - YYYY-MM-DD`
-/// Returns None if no version section is found.
-pub fn get_latest_finalized_version(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("## ") {
-            let label = trimmed.trim_start_matches("## ").trim();
-            if let Some(version) = extract_version_from_heading(label) {
-                return Some(version);
-            }
-        }
-    }
-    None
-}
-
-fn extract_date_from_heading(label: &str) -> Option<String> {
-    text::extract_first(label, r"(\d{4}-\d{2}-\d{2})")
-}
-
-fn extract_first_bullet(lines: &[&str], start: usize) -> Option<String> {
-    for line in &lines[start..] {
-        let trimmed = line.trim();
-        if trimmed.starts_with("## ") {
-            break;
-        }
-        if let Some(rest) = trimmed.strip_prefix("- ") {
-            return Some(rest.trim().to_string());
-        }
-        if let Some(rest) = trimmed.strip_prefix("* ") {
-            return Some(rest.trim().to_string());
-        }
-    }
-    None
-}
-
 use super::io::FinalizedReleaseSnapshot;
-
-pub fn extract_last_release_snapshot(content: &str) -> Option<FinalizedReleaseSnapshot> {
-    let lines: Vec<&str> = content.lines().collect();
-
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("## ") {
-            continue;
-        }
-
-        let label = trimmed.trim_start_matches("## ").trim();
-        let normalized = normalize_heading_label(label);
-        if normalized.eq_ignore_ascii_case("unreleased") || normalized.eq_ignore_ascii_case("next")
-        {
-            continue;
-        }
-
-        let Some(tag) = extract_version_from_heading(label) else {
-            continue;
-        };
-
-        return Some(FinalizedReleaseSnapshot {
-            tag: format!("v{}", tag),
-            date: extract_date_from_heading(label),
-            summary: extract_first_bullet(&lines, index + 1),
-        });
-    }
-
-    None
-}
 
 pub fn add_next_section_items(
     changelog_content: &str,
@@ -939,30 +765,6 @@ mod tests {
     }
 
     // === Typed Subsection Tests (--type flag) ===
-
-    #[test]
-    fn validate_entry_type_accepts_valid_types() {
-        assert!(validate_entry_type("added").is_ok());
-        assert!(validate_entry_type("Added").is_ok());
-        assert!(validate_entry_type("FIXED").is_ok());
-        assert!(validate_entry_type("changed").is_ok());
-        assert!(validate_entry_type("deprecated").is_ok());
-        assert!(validate_entry_type("removed").is_ok());
-        assert!(validate_entry_type("security").is_ok());
-        assert!(validate_entry_type("refactored").is_ok());
-        assert!(validate_entry_type("Refactored").is_ok());
-        // "refactor" is accepted as an alias for "refactored"
-        assert!(validate_entry_type("refactor").is_ok());
-        assert!(validate_entry_type("Refactor").is_ok());
-        assert_eq!(validate_entry_type("refactor").unwrap(), "refactored");
-    }
-
-    #[test]
-    fn validate_entry_type_rejects_invalid_types() {
-        assert!(validate_entry_type("invalid").is_err());
-        assert!(validate_entry_type("feature").is_err());
-        assert!(validate_entry_type("bugfix").is_err());
-    }
 
     #[test]
     fn append_item_to_subsection_adds_to_existing() {
