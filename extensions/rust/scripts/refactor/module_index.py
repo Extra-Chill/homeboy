@@ -65,10 +65,30 @@ def generate_module_index(
             lines.append(f"pub use {name}::*;")
 
     # Add remaining content (impl blocks, private items, etc.)
+    # Inner doc comments (//!) must appear before any mod/use declarations
+    # in Rust, so we extract them and prepend them.
     if remaining_content and remaining_content.strip():
-        if lines:
-            lines.append("")  # Blank line separator
-        lines.append(remaining_content.rstrip())
+        remaining_lines = remaining_content.rstrip().split('\n')
+        doc_comments = []
+        other_lines = []
+        in_doc_prefix = True
+        for rline in remaining_lines:
+            stripped = rline.strip()
+            if in_doc_prefix and stripped.startswith("//!"):
+                doc_comments.append(rline)
+            else:
+                in_doc_prefix = False
+                other_lines.append(rline)
+
+        if doc_comments:
+            # Doc comments go at the very top, before mod declarations
+            doc_block = doc_comments + [""]
+            lines = doc_block + lines
+
+        if other_lines and '\n'.join(other_lines).strip():
+            if lines:
+                lines.append("")  # Blank line separator
+            lines.append('\n'.join(other_lines).rstrip())
 
     # Ensure trailing newline
     content = "\n".join(lines)
