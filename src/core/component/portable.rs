@@ -271,13 +271,19 @@ mod tests {
         let result: Value = serde_json::from_str(&content).unwrap();
 
         assert_eq!(
-            result.get("baselines").and_then(|v| v.get("audit")).and_then(|v| v.get("item_count")).and_then(|v| v.as_i64()),
+            result
+                .get("baselines")
+                .and_then(|v| v.get("audit"))
+                .and_then(|v| v.get("item_count"))
+                .and_then(|v| v.as_i64()),
             Some(42),
             "baselines should be preserved"
         );
-        assert_eq!(
-            result.get("transforms").and_then(|v| v.get("rename-foo")).is_some(),
-            true,
+        assert!(
+            result
+                .get("transforms")
+                .and_then(|v| v.get("rename-foo"))
+                .is_some(),
             "transforms should be preserved"
         );
         assert_eq!(
@@ -355,7 +361,10 @@ mod tests {
 
         // discover_from_portable should return None for blank id
         let result = discover_from_portable(dir.path());
-        assert!(result.is_none(), "blank id should cause discover to return None");
+        assert!(
+            result.is_none(),
+            "blank id should cause discover to return None"
+        );
     }
 
     #[test]

@@ -72,11 +72,8 @@ fn annotate_insertion_for_policy(
     }
 
     insertion.preflight = preflight::run_insertion_preflight(file, insertion, context);
-    insertion.auto_apply = should_auto_apply(
-        insertion.safety_tier,
-        insertion.preflight.as_ref(),
-        write,
-    );
+    insertion.auto_apply =
+        should_auto_apply(insertion.safety_tier, insertion.preflight.as_ref(), write);
     insertion.blocked_reason = if insertion.auto_apply {
         None
     } else {
@@ -100,11 +97,8 @@ fn annotate_new_file_for_policy(
     }
 
     new_file.preflight = preflight::run_new_file_preflight(new_file, context);
-    new_file.auto_apply = should_auto_apply(
-        new_file.safety_tier,
-        new_file.preflight.as_ref(),
-        write,
-    );
+    new_file.auto_apply =
+        should_auto_apply(new_file.safety_tier, new_file.preflight.as_ref(), write);
     new_file.blocked_reason = if new_file.auto_apply {
         None
     } else {
@@ -137,11 +131,8 @@ pub fn apply_fix_policy(
 
             // Re-evaluate auto_apply after fix-level preflight
             for insertion in &mut fix.insertions {
-                insertion.auto_apply = should_auto_apply(
-                    insertion.safety_tier,
-                    insertion.preflight.as_ref(),
-                    write,
-                );
+                insertion.auto_apply =
+                    should_auto_apply(insertion.safety_tier, insertion.preflight.as_ref(), write);
                 insertion.blocked_reason = if insertion.auto_apply {
                     None
                 } else {
