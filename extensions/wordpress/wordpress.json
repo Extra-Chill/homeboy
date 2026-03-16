@@ -156,6 +156,7 @@
     }
   },
   "audit": {
+    "setup_references": "scripts/audit/setup-references.sh",
     "ignore_claim_patterns": [
       "/wp-json/**",
       "/*-auth/**",
