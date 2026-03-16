@@ -12,7 +12,13 @@ from typing import Optional
 
 
 def extract_use_names(use_stmt: str) -> list[str]:
-    """Extract terminal name(s) from a Rust use statement."""
+    """Extract terminal name(s) from a Rust use statement.
+
+    For grouped imports with `self` (e.g., `use crate::foo::{self, Bar}`),
+    `self` brings the parent path's last segment into scope as a name.
+    So `use crate::engine::local_files::{self, FileSystem}` makes
+    `local_files` available as a name — we include it.
+    """
     names = []
     body = use_stmt.strip()
     if body.startswith("use "):
@@ -24,15 +30,23 @@ def extract_use_names(use_stmt: str) -> list[str]:
     if brace_start != -1:
         brace_end = body.find('}')
         if brace_end != -1:
+            path_prefix = body[:brace_start].rstrip(':').rstrip()
             inner = body[brace_start + 1:brace_end]
+            has_self = False
             for segment in inner.split(','):
                 name = segment.strip()
                 if name == "self":
+                    has_self = True
                     continue
                 if " as " in name:
                     names.append(name.split(" as ")[1].strip())
                 else:
                     names.append(name)
+            # `self` brings the last path segment into scope as a name
+            if has_self and "::" in path_prefix:
+                module_name = path_prefix.rsplit("::", 1)[-1]
+                if module_name:
+                    names.append(module_name)
     else:
         # Simple import
         last = body.rsplit("::", 1)[-1].strip()
@@ -42,6 +56,40 @@ def extract_use_names(use_stmt: str) -> list[str]:
             names.append(last)
 
     return names
+
+
+def _dest_is_child_of_source(source_path: str, dest_path: str) -> bool:
+    """Check if dest is a child module of source (decompose pattern).
+
+    When decomposing `src/core/big.rs` into `src/core/big/helpers.rs`,
+    the destination is inside the source module's directory. In Rust terms,
+    `super::` from the dest file points to the source module.
+
+    Examples:
+        _dest_is_child_of_source("src/core/big.rs", "src/core/big/helpers.rs") -> True
+        _dest_is_child_of_source("src/core/big.rs", "src/other/helpers.rs") -> False
+    """
+    source_stem = os.path.splitext(source_path)[0]  # "src/core/big"
+    dest_dir = os.path.dirname(dest_path)  # "src/core/big"
+    # Normalize: source_stem should match dest_dir for the decompose case
+    return os.path.normpath(source_stem) == os.path.normpath(dest_dir)
+
+
+def _is_self_group_import(use_stmt: str) -> bool:
+    """Check if a use statement is a grouped import containing `self`."""
+    body = use_stmt.strip().rstrip(';')
+    if not body.startswith("use "):
+        return False
+    path = body[4:].strip()
+    brace_start = path.find('{')
+    if brace_start == -1:
+        return False
+    brace_end = path.find('}')
+    if brace_end == -1:
+        return False
+    inner = path[brace_start + 1:brace_end]
+    items = [s.strip() for s in inner.split(',')]
+    return "self" in items
 
 
 def module_stem(file_path: str) -> str:
@@ -101,8 +149,11 @@ def resolve_super_path(path: str, source_path: str) -> Optional[str]:
 def fix_import_path(use_stmt: str, source_path: str, dest_path: str) -> str:
     """Fix a use statement's path relative to the destination file.
 
-    When both source and dest are in the same parent module, `super::` paths
-    remain correct. When they differ, we need to adjust.
+    Three cases:
+    1. Same parent module — `super::` paths remain correct.
+    2. Decompose (dest is child of source) — `super::` from source becomes
+       `super::super::` from dest (one extra level).
+    3. Different parents — resolve `super::` to absolute `crate::` paths.
     """
     source_parent = module_parent(source_path)
     dest_parent = module_parent(dest_path)
@@ -111,18 +162,25 @@ def fix_import_path(use_stmt: str, source_path: str, dest_path: str) -> str:
         # Same parent — super:: paths are still valid
         return use_stmt
 
-    # Different parents — convert super:: paths to crate:: paths
     trimmed = use_stmt.strip().rstrip(';')
     if not trimmed.startswith("use "):
         return use_stmt
 
     path_part = trimmed[4:].strip()
 
-    if path_part.startswith("super::"):
-        # Resolve the super:: relative to the source file
-        resolved = resolve_super_path(path_part, source_path)
-        if resolved:
-            return f"use {resolved};"
+    if not path_part.startswith("super::"):
+        # Not a super:: path — crate:: paths are always valid
+        return use_stmt
+
+    # Decompose case: dest is one level deeper than source.
+    # `super::X` from source becomes `super::super::X` from dest.
+    if _dest_is_child_of_source(source_path, dest_path):
+        return f"use super::{path_part};"
+
+    # General case: different parents — resolve to absolute crate:: path
+    resolved = resolve_super_path(path_part, source_path)
+    if resolved:
+        return f"use {resolved};"
 
     return use_stmt
 
@@ -189,12 +247,34 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
             # Fix the import path relative to destination (#341)
             fixed = fix_import_path(use_stmt, source_path, dest_path)
             needed.append(fixed)
+        elif _is_self_group_import(use_stmt):
+            # For `use foo::{self, Trait}` where `self` brings a module into scope:
+            # if the module name (from `self`) is used via path syntax (e.g., `local_files::local()`),
+            # carry the ENTIRE grouped import — the trait companions are needed for method dispatch.
+            body = use_stmt.strip()
+            if body.startswith("use "):
+                path = body[4:].rstrip(';').strip()
+                brace_idx = path.find('{')
+                if brace_idx != -1:
+                    prefix = path[:brace_idx].rstrip(':').rstrip()
+                    module_name = prefix.rsplit("::", 1)[-1] if "::" in prefix else prefix
+                    # Check if the module is used as a path qualifier (e.g., `module_name::something`)
+                    if module_name and re.search(r'\b' + re.escape(module_name) + r'::', combined_source):
+                        fixed = fix_import_path(use_stmt, source_path, dest_path)
+                        if fixed not in needed:
+                            needed.append(fixed)
 
     # Phase 2: Add imports for same-module definitions referenced by moved items (#339)
     # This covers types, functions, and constants that were in scope because
     # the moved code lived in the same file.
     source_mod = module_stem(source_path)
-    same_parent = module_parent(source_path) == module_parent(dest_path)
+    source_parent = module_parent(source_path)
+    dest_parent = module_parent(dest_path)
+    same_parent = source_parent == dest_parent
+
+    # Check if dest is a child of source (decompose case: foo.rs -> foo/bar.rs)
+    # In this case, `super::` from dest points to source's module.
+    dest_is_child = _dest_is_child_of_source(source_path, dest_path)
 
     for def_name in source_definitions:
         if def_name in moved_item_names:
@@ -202,7 +282,11 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
         # Check if the moved items reference this definition
         if re.search(r'\b' + re.escape(def_name) + r'\b', combined_source):
             # Need to add an import for this definition
-            if same_parent:
+            if dest_is_child:
+                # Decompose case: dest is inside source's module directory.
+                # `super::` from dest points directly to the source module.
+                import_line = f"use super::{def_name};"
+            elif same_parent:
                 import_line = f"use super::{source_mod}::{def_name};"
             else:
                 # Different parent — use crate-level path
