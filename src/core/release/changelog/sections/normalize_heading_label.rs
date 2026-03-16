@@ -1,9 +1,9 @@
 //! normalize_heading_label — extracted from sections.rs.
 
-use crate::engine::text;
+use super::super::settings::KEEP_A_CHANGELOG_SUBSECTIONS;
 use crate::core::release::changelog::io::FinalizedReleaseSnapshot;
 use crate::core::release::changelog::sections::types::SectionContentStatus;
-
+use crate::engine::text;
 
 pub(crate) fn validate_section_content(body_lines: &[&str]) -> SectionContentStatus {
     let mut has_subsection_headers = false;

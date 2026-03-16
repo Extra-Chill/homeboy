@@ -1,6 +1,5 @@
 //! types — extracted from sections.rs.
 
-
 #[derive(Debug, PartialEq)]
 pub(crate) enum SectionContentStatus {
     Valid,           // Has bullet items (direct or under subsections)

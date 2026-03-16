@@ -8,8 +8,7 @@ use crate::extension::grammar_items;
 use crate::extension::{self, ParsedItem};
 use crate::Result;
 
-use super::move_items::MoveOptions;
-use super::MoveResult;
+use super::move_items::{MoveOptions, MoveResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecomposePlan {
@@ -371,12 +370,17 @@ fn extract_sections(content: &str) -> Vec<Section> {
 }
 
 /// Convert a section header name to a snake_case slug suitable for filenames.
+///
+/// Hyphens are converted to underscores because Rust module names must be
+/// valid identifiers (no hyphens). "Whole-file move" → "whole_file_move".
 fn section_name_to_slug(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '_' || c == '-' {
+            if c.is_alphanumeric() || c == ' ' || c == '_' {
                 c
+            } else if c == '-' {
+                '_'
             } else {
                 ' '
             }
@@ -388,6 +392,35 @@ fn section_name_to_slug(name: &str) -> String {
         .map(|w| w.to_lowercase())
         .collect::<Vec<_>>()
         .join("_")
+}
+
+/// Ensure a group name is a valid Rust module name (identifier).
+///
+/// Rust identifiers allow `[a-zA-Z_][a-zA-Z0-9_]*`. This is a safety net
+/// applied at the final filename construction point — even if earlier stages
+/// produce names with invalid characters (hyphens, dots, etc.), the filename
+/// will be valid.
+fn sanitize_module_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+
+    // Collapse consecutive underscores and trim leading/trailing
+    let mut result = String::new();
+    let mut prev_underscore = false;
+    for c in sanitized.chars() {
+        if c == '_' {
+            if !prev_underscore && !result.is_empty() {
+                result.push('_');
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+            result.push(c);
+        }
+    }
+    result.trim_end_matches('_').to_string()
 }
 
 /// Assign an item to a section based on its line number.
@@ -867,14 +900,17 @@ fn group_items(file: &str, items: &[ParsedItem], content: &str) -> Vec<Decompose
     final_buckets
         .into_iter()
         .filter(|(_, names)| !names.is_empty())
-        .map(|(group, names)| DecomposeGroup {
-            suggested_target: if base_dir.is_empty() {
-                format!("{}/{group}.{ext}", stem)
-            } else {
-                format!("{}/{}/{group}.{ext}", base_dir, stem)
-            },
-            name: group,
-            item_names: names,
+        .map(|(group, names)| {
+            let safe_name = sanitize_module_name(&group);
+            DecomposeGroup {
+                suggested_target: if base_dir.is_empty() {
+                    format!("{}/{safe_name}.{ext}", stem)
+                } else {
+                    format!("{}/{}/{safe_name}.{ext}", base_dir, stem)
+                },
+                name: group,
+                item_names: names,
+            }
         })
         .collect()
 }
@@ -1536,6 +1572,23 @@ fn parse_hunk() {}
             "diff_parsing_extract_structural_changes"
         );
         assert_eq!(section_name_to_slug("Tests"), "tests");
+    }
+
+    #[test]
+    fn section_name_to_slug_converts_hyphens_to_underscores() {
+        // Hyphens are invalid in Rust module names
+        assert_eq!(section_name_to_slug("Whole-file move"), "whole_file_move");
+        assert_eq!(section_name_to_slug("re-export handling"), "re_export_handling");
+        assert_eq!(section_name_to_slug("pre-commit hooks"), "pre_commit_hooks");
+    }
+
+    #[test]
+    fn sanitize_module_name_handles_invalid_chars() {
+        assert_eq!(sanitize_module_name("whole-file_move"), "whole_file_move");
+        assert_eq!(sanitize_module_name("foo.bar"), "foo_bar");
+        assert_eq!(sanitize_module_name("valid_name"), "valid_name");
+        assert_eq!(sanitize_module_name("a--b"), "a_b");
+        assert_eq!(sanitize_module_name("types"), "types");
     }
 
     #[test]

@@ -6,6 +6,8 @@ use std::path::Path;
 
 use glob_match::glob_match;
 
+use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 
@@ -99,51 +101,11 @@ fn analyze_layer_ownership(root: &Path) -> Vec<Finding> {
 }
 
 fn walk_candidate_files(root: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
-    const SKIP_DIRS: &[&str] = &[
-        "node_modules",
-        "vendor",
-        ".git",
-        "build",
-        "dist",
-        "target",
-        ".svn",
-        ".hg",
-        "cache",
-        "tmp",
-    ];
-
-    fn recurse(
-        dir: &Path,
-        skip_dirs: &[&str],
-        files: &mut Vec<std::path::PathBuf>,
-    ) -> std::io::Result<()> {
-        if !dir.is_dir() {
-            return Ok(());
-        }
-
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.is_dir() {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                if !skip_dirs.contains(&name) {
-                    recurse(&path, skip_dirs, files)?;
-                }
-            } else {
-                files.push(path);
-            }
-        }
-
-        Ok(())
-    }
-
-    let mut files = Vec::new();
-    recurse(root, SKIP_DIRS, &mut files)?;
-    Ok(files)
+    let config = ScanConfig {
+        extensions: ExtensionFilter::All,
+        ..Default::default()
+    };
+    Ok(codebase_scan::walk_files(root, &config))
 }
 
 fn load_rules_config(root: &Path) -> Option<AuditRulesConfig> {

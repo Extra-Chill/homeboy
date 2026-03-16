@@ -7,6 +7,8 @@
 use std::fs;
 use std::path::Path;
 
+use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig, WalkEntry};
+
 use super::claims::{Claim, ClaimType};
 
 /// Result of verifying a claim.
@@ -200,62 +202,37 @@ fn verify_class_name(claim: &Claim, source_path: &Path) -> VerifyResult {
 
 /// Recursively search for a class/struct/trait definition in source files.
 fn search_class_in_dir(dir: &Path, class_name: &str) -> bool {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
+    let class_exts: &[&str] = &[
+        "php", "rs", "py", "js", "ts", "go", "java", "rb", "kt", "swift",
+    ];
+    let config = ScanConfig {
+        extensions: ExtensionFilter::Only(class_exts.iter().map(|e| e.to_string()).collect()),
+        skip_hidden: true,
+        ..Default::default()
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
+    let class_patterns = [
+        format!("class {}", class_name),
+        format!("struct {}", class_name),
+        format!("trait {}", class_name),
+        format!("interface {}", class_name),
+        format!("enum {}", class_name),
+    ];
 
-        // Skip hidden dirs, vendor, node_modules, target, etc.
-        if name.starts_with('.')
-            || name == "vendor"
-            || name == "node_modules"
-            || name == "target"
-            || name == "__pycache__"
-        {
-            continue;
-        }
-
-        if path.is_dir() {
-            if search_class_in_dir(&path, class_name) {
-                return true;
-            }
-        } else if path.is_file() {
-            // Only check source files
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if !matches!(
-                ext,
-                "php" | "rs" | "py" | "js" | "ts" | "go" | "java" | "rb" | "kt" | "swift"
-            ) {
-                continue;
-            }
-
-            if let Ok(content) = fs::read_to_string(&path) {
-                // Check for class/struct/trait/interface definitions
-                // PHP: class CacheManager, interface CacheManager, trait CacheManager
-                // Rust: struct CacheManager, enum CacheManager, trait CacheManager
-                // Python: class CacheManager
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if (trimmed.contains(&format!("class {}", class_name))
-                        || trimmed.contains(&format!("struct {}", class_name))
-                        || trimmed.contains(&format!("trait {}", class_name))
-                        || trimmed.contains(&format!("interface {}", class_name))
-                        || trimmed.contains(&format!("enum {}", class_name)))
-                        && !trimmed.starts_with("//")
-                        && !trimmed.starts_with('#')
-                        && !trimmed.starts_with('*')
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    false
+    codebase_scan::any_file_matches(dir, &config, |path| {
+        let Ok(content) = fs::read_to_string(path) else {
+            return false;
+        };
+        content.lines().any(|line| {
+            let trimmed = line.trim();
+            class_patterns
+                .iter()
+                .any(|pat| trimmed.contains(pat.as_str()))
+                && !trimmed.starts_with("//")
+                && !trimmed.starts_with('#')
+                && !trimmed.starts_with('*')
+        })
+    })
 }
 
 /// Verify a code example claim.
@@ -286,8 +263,7 @@ fn find_similar_file(root: &Path, missing_path: &str) -> Option<String> {
         return None;
     }
 
-    let mut matches = Vec::new();
-    collect_files_named(root, root, target_name, &mut matches);
+    let mut matches = collect_files_named(root, target_name);
 
     if matches.len() == 1 {
         return Some(matches.into_iter().next().unwrap());
@@ -312,8 +288,7 @@ fn find_similar_dir(root: &Path, missing_path: &str) -> Option<String> {
     let clean = missing_path.trim_end_matches('/');
     let target_name = Path::new(clean).file_name()?.to_str()?;
 
-    let mut matches = Vec::new();
-    collect_dirs_named(root, root, target_name, &mut matches);
+    let mut matches = collect_dirs_named(root, target_name);
 
     if matches.len() == 1 {
         return Some(format!("{}/", matches.into_iter().next().unwrap()));
@@ -333,62 +308,52 @@ fn find_similar_dir(root: &Path, missing_path: &str) -> Option<String> {
 }
 
 /// Recursively collect files matching a target filename.
-fn collect_files_named(root: &Path, dir: &Path, target: &str, results: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+fn collect_files_named(root: &Path, target: &str) -> Vec<String> {
+    let config = ScanConfig {
+        extensions: ExtensionFilter::All,
+        skip_hidden: true,
+        ..Default::default()
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
+    let target_owned = target.to_string();
+    let entries = codebase_scan::walk_entries(root, &config, |name, is_dir| {
+        !is_dir && name == target_owned
+    });
 
-        if name.starts_with('.')
-            || matches!(
-                name.as_str(),
-                "node_modules" | "vendor" | "target" | "__pycache__" | ".git"
-            )
-        {
-            continue;
-        }
-
-        if path.is_dir() {
-            collect_files_named(root, &path, target, results);
-        } else if path.is_file() && name == target {
-            if let Ok(rel) = path.strip_prefix(root) {
-                results.push(rel.to_string_lossy().to_string());
-            }
-        }
-    }
+    entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            WalkEntry::File(path) => path
+                .strip_prefix(root)
+                .ok()
+                .map(|rel| rel.to_string_lossy().to_string()),
+            WalkEntry::Dir(_) => None,
+        })
+        .collect()
 }
 
 /// Recursively collect directories matching a target name.
-fn collect_dirs_named(root: &Path, dir: &Path, target: &str, results: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+fn collect_dirs_named(root: &Path, target: &str) -> Vec<String> {
+    let config = ScanConfig {
+        extensions: ExtensionFilter::All,
+        skip_hidden: true,
+        ..Default::default()
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
+    let target_owned = target.to_string();
+    let entries =
+        codebase_scan::walk_entries(root, &config, |name, is_dir| is_dir && name == target_owned);
 
-        if name.starts_with('.')
-            || matches!(
-                name.as_str(),
-                "node_modules" | "vendor" | "target" | "__pycache__" | ".git"
-            )
-        {
-            continue;
-        }
-
-        if path.is_dir() {
-            if name == target {
-                if let Ok(rel) = path.strip_prefix(root) {
-                    results.push(rel.to_string_lossy().to_string());
-                }
-            }
-            collect_dirs_named(root, &path, target, results);
-        }
-    }
+    entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            WalkEntry::Dir(path) => path
+                .strip_prefix(root)
+                .ok()
+                .map(|rel| rel.to_string_lossy().to_string()),
+            WalkEntry::File(_) => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 
@@ -21,99 +23,72 @@ const SOURCE_EXTENSIONS: &[&str] = &[
     "cpp", "h",
 ];
 
-/// Directories to skip during structural analysis.
-const SKIP_DIRS: &[&str] = &[
-    "node_modules",
-    "vendor",
-    ".git",
-    "build",
-    "dist",
-    "target",
-    ".svn",
-    ".hg",
-    "cache",
-    "tmp",
-];
-
 /// Run structural analysis on all source files under a root directory.
 ///
 /// Returns findings for files that exceed structural thresholds.
 pub(crate) fn analyze_structure(root: &Path) -> Vec<Finding> {
+    let config = ScanConfig {
+        extensions: ExtensionFilter::Only(
+            SOURCE_EXTENSIONS.iter().map(|e| e.to_string()).collect(),
+        ),
+        ..Default::default()
+    };
+    let files = codebase_scan::walk_files(root, &config);
+
     let mut findings = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
     let mut dir_source_counts: HashMap<String, usize> = HashMap::new();
 
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
+    for path in files {
+        let parent_rel = path
+            .parent()
+            .and_then(|p| p.strip_prefix(root).ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        *dir_source_counts.entry(parent_rel).or_insert(0) += 1;
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
             Err(_) => continue,
         };
 
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-            if path.is_dir() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !SKIP_DIRS.contains(&name) {
-                    stack.push(path);
-                }
-                continue;
-            }
+        let relative = path
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if !SOURCE_EXTENSIONS.contains(&ext) {
-                continue;
-            }
+        // Check line count
+        let line_count = content.lines().count();
+        if line_count > GOD_FILE_LINE_THRESHOLD {
+            let suggestion = "Consider decomposing into focused modules.                      Use `homeboy refactor move` to extract related groups of items.".to_string();
+            findings.push(Finding {
+                convention: "structural".to_string(),
+                severity: Severity::Warning,
+                file: relative.clone(),
+                description: format!(
+                    "File has {} lines (threshold: {})",
+                    line_count, GOD_FILE_LINE_THRESHOLD
+                ),
+                suggestion,
+                kind: AuditFinding::GodFile,
+            });
+        }
 
-            let parent_rel = path
-                .parent()
-                .and_then(|p| p.strip_prefix(root).ok())
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            *dir_source_counts.entry(parent_rel).or_insert(0) += 1;
-
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            let relative = path
-                .strip_prefix(root)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| path.to_string_lossy().to_string());
-
-            // Check line count
-            let line_count = content.lines().count();
-            if line_count > GOD_FILE_LINE_THRESHOLD {
-                let suggestion = "Consider decomposing into focused modules.                      Use `homeboy refactor move` to extract related groups of items.".to_string();
-                findings.push(Finding {
-                    convention: "structural".to_string(),
-                    severity: Severity::Warning,
-                    file: relative.clone(),
-                    description: format!(
-                        "File has {} lines (threshold: {})",
-                        line_count, GOD_FILE_LINE_THRESHOLD
-                    ),
-                    suggestion,
-                    kind: AuditFinding::GodFile,
-                });
-            }
-
-            // Count top-level items (functions, structs, enums, consts, etc.)
-            let item_count = count_top_level_items(&content, ext);
-            if item_count > HIGH_ITEM_COUNT_THRESHOLD {
-                findings.push(Finding {
-                    convention: "structural".to_string(),
-                    severity: Severity::Info,
-                    file: relative,
-                    description: format!(
-                        "File has {} top-level items (threshold: {})",
-                        item_count, HIGH_ITEM_COUNT_THRESHOLD
-                    ),
-                    suggestion: "Group related items and extract into focused modules".to_string(),
-                    kind: AuditFinding::HighItemCount,
-                });
-            }
+        // Count top-level items (functions, structs, enums, consts, etc.)
+        let item_count = count_top_level_items(&content, ext);
+        if item_count > HIGH_ITEM_COUNT_THRESHOLD {
+            findings.push(Finding {
+                convention: "structural".to_string(),
+                severity: Severity::Info,
+                file: relative,
+                description: format!(
+                    "File has {} top-level items (threshold: {})",
+                    item_count, HIGH_ITEM_COUNT_THRESHOLD
+                ),
+                suggestion: "Group related items and extract into focused modules".to_string(),
+                kind: AuditFinding::HighItemCount,
+            });
         }
     }
 

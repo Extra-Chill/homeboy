@@ -8,7 +8,6 @@ pub use unreleased::*;
 
 use chrono::Local;
 
-use crate::engine::text;
 use crate::engine::validation;
 use crate::error::{Error, Result};
 
@@ -251,7 +250,6 @@ pub(super) fn ensure_next_section(content: &str, aliases: &[String]) -> Result<(
     Ok((out, true))
 }
 
-use super::io::FinalizedReleaseSnapshot;
 
 pub fn add_next_section_items(
     changelog_content: &str,

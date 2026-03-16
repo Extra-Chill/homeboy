@@ -11,7 +11,6 @@
 pub(crate) mod claims;
 pub(crate) mod verify;
 
-use std::fs;
 use std::path::Path;
 
 pub use claims::{Claim, ClaimConfidence, ClaimType};
@@ -118,10 +117,10 @@ pub struct AuditResult {
 const DEFAULT_DOC_EXCLUDES: &[&str] = &["changelog.md"];
 
 pub(crate) fn find_doc_files(docs_path: &Path, excluded_targets: &[String]) -> Vec<String> {
-    let mut docs = Vec::new();
+    use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
     if !docs_path.exists() {
-        return docs;
+        return Vec::new();
     }
 
     let mut excluded_filenames: std::collections::HashSet<String> = excluded_targets
@@ -132,45 +131,25 @@ pub(crate) fn find_doc_files(docs_path: &Path, excluded_targets: &[String]) -> V
         .collect();
     excluded_filenames.extend(DEFAULT_DOC_EXCLUDES.iter().map(|s| s.to_string()));
 
-    fn scan_docs(
-        dir: &Path,
-        prefix: &str,
-        docs: &mut Vec<String>,
-        excluded_filenames: &std::collections::HashSet<String>,
-    ) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
+    let config = ScanConfig {
+        extensions: ExtensionFilter::Only(vec!["md".to_string()]),
+        skip_hidden: true,
+        ..Default::default()
+    };
 
-                if name.starts_with('.') {
-                    continue;
-                }
-
-                if path.is_file() && name.ends_with(".md") {
-                    if excluded_filenames.contains(&name.to_lowercase()) {
-                        continue;
-                    }
-
-                    let relative = if prefix.is_empty() {
-                        name
-                    } else {
-                        format!("{}/{}", prefix, name)
-                    };
-                    docs.push(relative);
-                } else if path.is_dir() {
-                    let new_prefix = if prefix.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{}/{}", prefix, name)
-                    };
-                    scan_docs(&path, &new_prefix, docs, excluded_filenames);
-                }
+    let files = codebase_scan::walk_files(docs_path, &config);
+    let mut docs: Vec<String> = files
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?;
+            if excluded_filenames.contains(&name.to_lowercase()) {
+                return None;
             }
-        }
-    }
+            let rel = path.strip_prefix(docs_path).ok()?;
+            Some(rel.to_string_lossy().to_string())
+        })
+        .collect();
 
-    scan_docs(docs_path, "", &mut docs, &excluded_filenames);
     docs.sort();
     docs
 }
@@ -190,6 +169,8 @@ pub(crate) fn collect_extension_ignore_patterns(comp: &component::Component) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
