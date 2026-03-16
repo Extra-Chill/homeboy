@@ -385,6 +385,12 @@ for m in re.finditer(r'\b([a-z_]\w*)\s*\(', content):
                 'extract', 'var_dump', 'print_r', 'var_export'}
     if name not in skip_php and not name.startswith('test'):
         internal_calls.add(name)
+# Hook callbacks are called by WordPress core via the hook system —
+# they ARE referenced, just not by direct function calls in this file.
+# Adding them to internal_calls ensures dead code detection sees them
+# as referenced when the file that registers the hook is fingerprinted.
+internal_calls.update(hook_callbacks)
+
 internal_calls = sorted(internal_calls)
 
 # --- Unused Parameters (#114) ---
