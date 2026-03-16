@@ -281,8 +281,18 @@ print(json.dumps(results))
     if [ -f "$PHPCBF_BIN" ]; then
         echo "Running auto-fix (phpcbf)..."
 
+        # Auto-detect parallelism from available CPU cores
+        PARALLEL_PROCS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "1")
+        # Cap at 8 to avoid overwhelming the system
+        if [ "$PARALLEL_PROCS" -gt 8 ]; then
+            PARALLEL_PROCS=8
+        fi
+
         # Build phpcbf command arguments as array for proper path escaping
         phpcbf_args=(--standard="$PHPCS_CONFIG")
+        if [ "$PARALLEL_PROCS" -gt 1 ]; then
+            phpcbf_args+=(--parallel="$PARALLEL_PROCS")
+        fi
         if [ -n "$TEXT_DOMAIN" ]; then
             phpcbf_args+=(--runtime-set text_domain "$TEXT_DOMAIN")
         fi
@@ -389,6 +399,14 @@ print(json.dumps(results))
         exit 1
     fi
     echo "Syntax OK — all PHP files pass php -l"
+
+    # In fix-only mode, skip the validation pass — the caller will validate separately.
+    # This saves ~35s on large codebases by avoiding a redundant PHPCS scan.
+    if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
+        echo ""
+        echo "Fix-only mode: skipping validation (run 'homeboy lint' separately to validate)"
+        exit 0
+    fi
 fi
 
 # Validation
@@ -396,6 +414,18 @@ echo "Validating with PHPCS..."
 
 # Build base phpcs arguments
 phpcs_base_args=(--standard="$PHPCS_CONFIG")
+
+# Auto-detect parallelism from available CPU cores
+if [ -z "${PARALLEL_PROCS:-}" ]; then
+    PARALLEL_PROCS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "1")
+    if [ "$PARALLEL_PROCS" -gt 8 ]; then
+        PARALLEL_PROCS=8
+    fi
+fi
+if [ "$PARALLEL_PROCS" -gt 1 ]; then
+    phpcs_base_args+=(--parallel="$PARALLEL_PROCS")
+fi
+
 if [ -n "$TEXT_DOMAIN" ]; then
     phpcs_base_args+=(--runtime-set text_domain "$TEXT_DOMAIN")
 fi
