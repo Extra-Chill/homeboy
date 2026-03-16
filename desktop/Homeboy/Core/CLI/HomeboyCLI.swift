@@ -407,17 +407,43 @@ final class HomeboyCLI {
 
 private init() {}
 
-// MARK: - Init Command
+    // MARK: - Init Command
 
-/// Run `homeboy init` to get full context including extensions and components
-/// This is the primary way the desktop app discovers the workspace state
-func initWorkspace(path: String? = nil) async throws -> InitOutput {
-    var args = ["init"]
-    if let p = path {
-        args.append(contentsOf: ["--path", p])
+    /// Run `homeboy init` to get full context including extensions and components
+    /// This is the primary way the desktop app discovers the workspace state
+    func initWorkspace(path: String? = nil) async throws -> InitOutput {
+        var args = ["init"]
+        if let p = path {
+            args.append(contentsOf: ["--path", p])
+        }
+        return try await cli.executeCommand(args, dataType: InitOutput.self, source: "Init", timeout: 30)
     }
-    return try await cli.executeCommand(args, dataType: InitOutput.self, source: "Init", timeout: 30)
-}
+
+    // MARK: - Config Gap Commands
+
+    /// Fix a config gap by executing the command provided by CLI
+    /// The command is parsed from gap.command (e.g., "homeboy component set foo --extension nodejs")
+    func fixConfigGap(_ gap: ConfigGapDetail) async throws -> ComponentOutput {
+        // Parse the command from gap.command
+        // Format: "homeboy component set <id> --<field> <value>" or similar
+        let commandParts = gap.command.split(separator: " ").map(String.init)
+
+        // Remove "homeboy" prefix if present
+        let args = commandParts.first == "homeboy" ? Array(commandParts.dropFirst()) : commandParts
+
+        return try await cli.executeCommand(
+            args,
+            dataType: ComponentOutput.self,
+            source: "Fix Config Gap",
+            timeout: 30
+        )
+    }
+
+    /// Run init to refresh and return current config gaps
+    func refreshConfigGaps() async throws -> [ConfigGapDetail] {
+        let initOutput = try await initWorkspace()
+        return initOutput.status.gapDetails ?? []
+    }
 
 // MARK: - Project Commands
 
