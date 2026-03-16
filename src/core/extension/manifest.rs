@@ -93,6 +93,13 @@ fn default_test_prefix() -> String {
 /// Docs audit: ignore patterns and feature detection patterns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditCapability {
+    /// Shell script that resolves reference dependencies and exports
+    /// `HOMEBOY_AUDIT_REFERENCE_PATHS` (newline-separated directory paths).
+    /// Reference dependencies are fingerprinted for cross-reference analysis
+    /// (dead code detection) but excluded from convention and duplication detection.
+    /// Example: WordPress core + plugin dependencies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_references: Option<String>,
     /// Glob patterns for paths to ignore during docs audit.
     /// Uses `*` for single segment and `**` for multiple segments (e.g., `/wp-json/**`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -373,6 +380,13 @@ impl ExtensionManifest {
             .as_ref()
             .map(|e| e.inputs.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Convenience: get audit reference setup script path (relative to extension dir).
+    pub fn audit_setup_references(&self) -> Option<&str> {
+        self.audit
+            .as_ref()
+            .and_then(|a| a.setup_references.as_deref())
     }
 
     /// Convenience: get audit ignore claim patterns (empty if no audit capability).

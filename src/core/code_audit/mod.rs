@@ -160,6 +160,22 @@ pub fn audit_component(component_id: &str) -> Result<CodeAuditResult> {
     audit_path_with_id(component_id, &comp.local_path)
 }
 
+/// Read reference dependency paths from HOMEBOY_AUDIT_REFERENCE_PATHS env var.
+///
+/// Reference dependencies are external codebases (e.g. WordPress core, plugin
+/// dependencies) whose fingerprints are included in cross-reference analysis
+/// (dead code detection) but excluded from convention discovery and duplication
+/// detection. This eliminates false positives for functions called via framework
+/// hooks, callbacks, or inherited methods.
+fn read_reference_paths_from_env() -> Vec<String> {
+    std::env::var("HOMEBOY_AUDIT_REFERENCE_PATHS")
+        .unwrap_or_default()
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && Path::new(s).is_dir())
+        .collect()
+}
+
 /// Audit a filesystem path directly (no registered component needed).
 pub fn audit_path(path: &str) -> Result<CodeAuditResult> {
     let p = Path::new(path);
@@ -184,7 +200,8 @@ pub fn audit_path(path: &str) -> Result<CodeAuditResult> {
 /// Core audit logic shared by both entry points.
 /// Also available for callers that have a component ID and an overridden path.
 pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAuditResult> {
-    audit_internal(component_id, source_path, None, None)
+    let ref_paths = read_reference_paths_from_env();
+    audit_internal(component_id, source_path, None, None, &ref_paths)
 }
 
 /// Audit only specific files within a component path.
@@ -203,15 +220,21 @@ pub fn audit_path_scoped(
     file_filter: &[String],
     git_ref: Option<&str>,
 ) -> Result<CodeAuditResult> {
-    audit_internal(component_id, source_path, Some(file_filter), git_ref)
+    let ref_paths = read_reference_paths_from_env();
+    audit_internal(component_id, source_path, Some(file_filter), git_ref, &ref_paths)
 }
 
 /// Internal audit implementation supporting optional file scoping and impact tracing.
+///
+/// `reference_paths` are external codebases whose fingerprints are included in
+/// cross-reference analysis (dead code) but excluded from convention discovery,
+/// duplication detection, and structural analysis.
 fn audit_internal(
     component_id: &str,
     source_path: &str,
     file_filter: Option<&[String]>,
     git_ref: Option<&str>,
+    reference_paths: &[String],
 ) -> Result<CodeAuditResult> {
     let root = Path::new(source_path);
 
@@ -362,7 +385,17 @@ fn audit_internal(
     }
 
     // Phase 4e: Dead code detection (unused params, unreferenced exports, orphaned internals)
-    let dead_code_findings = dead_code::analyze_dead_code(&all_fingerprints);
+    //
+    // Reference dependencies (e.g. WordPress core, plugin dependencies) are fingerprinted
+    // and included in the cross-reference set so that functions called via framework hooks,
+    // callbacks, or inherited methods are recognized as referenced.
+    let ref_fingerprints = fingerprint_reference_paths(reference_paths);
+    let all_with_refs: Vec<&fingerprint::FileFingerprint> = all_fingerprints
+        .iter()
+        .copied()
+        .chain(ref_fingerprints.iter())
+        .collect();
+    let dead_code_findings = dead_code::analyze_dead_code(&all_with_refs);
     if !dead_code_findings.is_empty() {
         log_status!(
             "audit",
@@ -738,6 +771,55 @@ fn classify_broken_doc_ref(
             ),
         )
     }
+}
+
+// ============================================================================
+// Reference dependency fingerprinting
+// ============================================================================
+
+/// Fingerprint external reference paths for cross-reference analysis.
+///
+/// Walks each reference path and fingerprints all source files found.
+/// These fingerprints provide the call/import data that dead code detection
+/// uses to determine whether a function is referenced externally (e.g. by
+/// WordPress core calling a hook callback, or a parent plugin importing a class).
+///
+/// Reference fingerprints are NOT used for convention discovery, duplication
+/// detection, or structural analysis — they only enrich the cross-reference set.
+fn fingerprint_reference_paths(reference_paths: &[String]) -> Vec<fingerprint::FileFingerprint> {
+    if reference_paths.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ref_fps = Vec::new();
+    let mut total_files = 0;
+
+    for ref_path in reference_paths {
+        let root = Path::new(ref_path);
+        if !root.is_dir() {
+            continue;
+        }
+
+        if let Ok(walker_iter) = walker::walk_source_files(root) {
+            for path in walker_iter {
+                if let Some(fp) = fingerprint::fingerprint_file(&path, root) {
+                    ref_fps.push(fp);
+                    total_files += 1;
+                }
+            }
+        }
+    }
+
+    if total_files > 0 {
+        log_status!(
+            "audit",
+            "Reference dependencies: {} file(s) fingerprinted from {} path(s)",
+            total_files,
+            reference_paths.len()
+        );
+    }
+
+    ref_fps
 }
 
 // ============================================================================

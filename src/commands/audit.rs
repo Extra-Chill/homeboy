@@ -93,6 +93,11 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
     let only_kinds = parse_finding_kinds(&args.only, "only")?;
     let exclude_kinds = parse_finding_kinds(&args.exclude, "exclude")?;
 
+    // Run extension audit reference setup if configured.
+    // This resolves framework dependencies (e.g. WordPress core) so their
+    // fingerprints are included in cross-reference analysis (dead code detection).
+    run_audit_reference_setup(&args.comp.component);
+
     // Resolve component ID and source path
     let (resolved_id, resolved_path) = if Path::new(&args.comp.component).is_dir() {
         // Bare directory path — no registered component
@@ -147,6 +152,91 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
     })?;
 
     Ok(report::from_main_workflow(workflow))
+}
+
+/// Run the extension's audit reference setup script if configured.
+///
+/// Looks up the component's extension, checks for `audit.setup_references`, and runs it.
+/// The script exports `HOMEBOY_AUDIT_REFERENCE_PATHS` which the audit core reads
+/// to include framework dependencies in cross-reference analysis.
+fn run_audit_reference_setup(component_id_or_path: &str) {
+    // Skip for bare directory paths — no extension to look up
+    if Path::new(component_id_or_path).is_dir() {
+        return;
+    }
+
+    // Load component to find its extensions
+    let comp = match homeboy::component::load(component_id_or_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let extensions = match &comp.extensions {
+        Some(ext) => ext,
+        None => return,
+    };
+
+    for ext_id in extensions.keys() {
+        let ext_manifest = match homeboy::extension::load_extension(ext_id) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let setup_script = match ext_manifest.audit_setup_references() {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // Resolve script path relative to extension directory
+        let ext_path = homeboy::extension::extension_path(ext_id);
+        if !ext_path.is_dir() {
+            continue;
+        }
+        let script_path = ext_path.join(setup_script);
+        if !script_path.is_file() {
+            continue;
+        }
+
+        homeboy::log_status!(
+            "audit",
+            "Running reference setup: {}",
+            script_path.display()
+        );
+
+        // Run the script with --export flag and capture stdout
+        let output = std::process::Command::new("bash")
+            .arg(script_path.to_str().unwrap_or(""))
+            .arg("--export")
+            .env("HOMEBOY_COMPONENT_PATH", &comp.local_path)
+            .current_dir(&comp.local_path)
+            .output();
+
+        if let Ok(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Parse the export line: export HOMEBOY_AUDIT_REFERENCE_PATHS='...'
+            for line in stdout.lines() {
+                if let Some(value) = line
+                    .strip_prefix("export HOMEBOY_AUDIT_REFERENCE_PATHS=")
+                {
+                    // Remove shell quoting (the value may be $'...' or '...' quoted)
+                    let clean = value
+                        .trim_start_matches("$'")
+                        .trim_start_matches('\'')
+                        .trim_end_matches('\'');
+                    std::env::set_var("HOMEBOY_AUDIT_REFERENCE_PATHS", clean);
+                    break;
+                }
+            }
+
+            // Log stderr (the script's informational output)
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            for line in stderr.lines() {
+                if !line.is_empty() {
+                    homeboy::log_status!("audit", "{}", line);
+                }
+            }
+        }
+    }
 }
 
 // Core function tests (finding_fingerprint, score_delta, weighted_finding_score_with,
