@@ -3,6 +3,7 @@
 use crate::engine::text;
 use crate::core::release::changelog::io::FinalizedReleaseSnapshot;
 use crate::core::release::changelog::sections::types::SectionContentStatus;
+use super::super::settings::KEEP_A_CHANGELOG_SUBSECTIONS;
 
 
 pub(crate) fn validate_section_content(body_lines: &[&str]) -> SectionContentStatus {

@@ -1,5 +1,6 @@
 use crate::component::{self, Component, VersionTarget};
 use crate::config::{from_str, set_json_pointer, to_string_pretty};
+use crate::engine::codebase_scan;
 use crate::engine::hooks::{self, HookFailureMode};
 use crate::engine::local_files::{self, FileSystem};
 use crate::engine::text;
@@ -975,7 +976,13 @@ fn replace_since_tag_placeholders(component: &Component, new_version: &str) -> R
     let base_path = Path::new(&component.local_path);
     let mut total_replaced = 0;
 
-    walk_source_files(base_path, &config.extensions, &mut |path| {
+    let scan_config = codebase_scan::ScanConfig {
+        extensions: codebase_scan::ExtensionFilter::Only(config.extensions.clone()),
+        extra_skip_dirs: vec!["tests".to_string()],
+        ..Default::default()
+    };
+
+    codebase_scan::walk_files_with(base_path, &scan_config, &mut |path| {
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => return,
@@ -1000,34 +1007,6 @@ fn replace_since_tag_placeholders(component: &Component, new_version: &str) -> R
     });
 
     Ok(total_replaced)
-}
-
-/// Recursively walk source files matching given extensions, skipping common non-source dirs.
-fn walk_source_files(dir: &Path, extensions: &[String], callback: &mut impl FnMut(&Path)) {
-    let skip_dirs = ["vendor", "node_modules", "build", "dist", ".git", "tests"];
-
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
-            if !skip_dirs.contains(&dir_name.as_ref()) {
-                walk_source_files(&path, extensions, callback);
-            }
-        } else if path.is_file() {
-            let file_name = path.to_string_lossy();
-            if extensions
-                .iter()
-                .any(|ext| file_name.ends_with(ext.as_str()))
-            {
-                callback(&path);
-            }
-        }
-    }
 }
 
 #[cfg(test)]

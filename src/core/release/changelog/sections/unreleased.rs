@@ -1,7 +1,6 @@
 //! unreleased — extracted from sections.rs.
 
-use crate::engine::text;
-
+use super::{find_next_section_start, find_section_end};
 
 /// Count bullet items in the unreleased section.
 /// Returns 0 if no unreleased section exists or section is empty.

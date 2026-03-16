@@ -99,40 +99,11 @@ fn walk_recursive(dir: &Path, root: &Path, config: &ScanConfig, files: &mut Vec<
             .unwrap_or_default();
 
         if path.is_dir() {
-            // Skip hidden directories if configured
-            if config.skip_hidden && name.starts_with('.') {
+            if should_skip_dir(&name, is_root, config) {
                 continue;
             }
-
-            // Always skip VCS/dependency dirs at any depth
-            if ALWAYS_SKIP_DIRS.contains(&name.as_str()) {
-                continue;
-            }
-            if config
-                .extra_skip_dirs
-                .iter()
-                .any(|d| d.as_str() == name.as_str())
-            {
-                continue;
-            }
-
-            // Skip build output dirs only at root level
-            if is_root {
-                if ROOT_ONLY_SKIP_DIRS.contains(&name.as_str()) {
-                    continue;
-                }
-                if config
-                    .extra_root_skip_dirs
-                    .iter()
-                    .any(|d| d.as_str() == name.as_str())
-                {
-                    continue;
-                }
-            }
-
             walk_recursive(&path, root, config, files);
         } else {
-            // Skip hidden files if configured
             if config.skip_hidden && name.starts_with('.') {
                 continue;
             }
@@ -153,6 +124,211 @@ fn matches_extension(path: &Path, filter: &ExtensionFilter) -> bool {
         ExtensionFilter::Except(exts) => !exts.iter().any(|e| e.as_str() == ext),
         ExtensionFilter::SourceDefaults => SOURCE_EXTENSIONS.contains(&ext),
     }
+}
+
+// ============================================================================
+// Callback-based walking
+// ============================================================================
+
+/// Walk a directory tree and call `callback` for each matching file.
+///
+/// Same skip logic as `walk_files`, but avoids collecting into a Vec
+/// when the caller only needs to process files one at a time.
+pub fn walk_files_with<F>(root: &Path, config: &ScanConfig, callback: &mut F)
+where
+    F: FnMut(&Path),
+{
+    walk_recursive_with(root, root, config, callback);
+}
+
+fn walk_recursive_with<F>(dir: &Path, root: &Path, config: &ScanConfig, callback: &mut F)
+where
+    F: FnMut(&Path),
+{
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let is_root = dir == root;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if path.is_dir() {
+            if should_skip_dir(&name, is_root, config) {
+                continue;
+            }
+            walk_recursive_with(&path, root, config, callback);
+        } else {
+            if config.skip_hidden && name.starts_with('.') {
+                continue;
+            }
+            if matches_extension(&path, &config.extensions) {
+                callback(&path);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Search with early return
+// ============================================================================
+
+/// Walk a directory tree and return `true` as soon as `predicate` matches a file.
+///
+/// Useful for existence checks — avoids scanning the entire tree when
+/// only a yes/no answer is needed.
+pub fn any_file_matches<F>(root: &Path, config: &ScanConfig, predicate: F) -> bool
+where
+    F: Fn(&Path) -> bool,
+{
+    any_file_matches_recursive(root, root, config, &predicate)
+}
+
+fn any_file_matches_recursive<F>(
+    dir: &Path,
+    root: &Path,
+    config: &ScanConfig,
+    predicate: &F,
+) -> bool
+where
+    F: Fn(&Path) -> bool,
+{
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+
+    let is_root = dir == root;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if path.is_dir() {
+            if should_skip_dir(&name, is_root, config) {
+                continue;
+            }
+            if any_file_matches_recursive(&path, root, config, predicate) {
+                return true;
+            }
+        } else {
+            if config.skip_hidden && name.starts_with('.') {
+                continue;
+            }
+            if matches_extension(&path, &config.extensions) && predicate(&path) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+// ============================================================================
+// Entry walking (files + directories)
+// ============================================================================
+
+/// A filesystem entry found during walking.
+#[derive(Debug, Clone)]
+pub enum WalkEntry {
+    File(PathBuf),
+    Dir(PathBuf),
+}
+
+/// Walk a directory tree and collect entries matching a name predicate.
+///
+/// Unlike `walk_files`, this can also collect directory paths. The `matcher`
+/// receives the entry name and whether it's a directory, returning `true`
+/// to include it in results.
+pub fn walk_entries<F>(root: &Path, config: &ScanConfig, matcher: F) -> Vec<WalkEntry>
+where
+    F: Fn(&str, bool) -> bool,
+{
+    let mut results = Vec::new();
+    walk_entries_recursive(root, root, config, &matcher, &mut results);
+    results
+}
+
+fn walk_entries_recursive<F>(
+    dir: &Path,
+    root: &Path,
+    config: &ScanConfig,
+    matcher: &F,
+    results: &mut Vec<WalkEntry>,
+) where
+    F: Fn(&str, bool) -> bool,
+{
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let is_root = dir == root;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if path.is_dir() {
+            if should_skip_dir(&name, is_root, config) {
+                continue;
+            }
+            if matcher(&name, true) {
+                results.push(WalkEntry::Dir(path.clone()));
+            }
+            walk_entries_recursive(&path, root, config, matcher, results);
+        } else {
+            if config.skip_hidden && name.starts_with('.') {
+                continue;
+            }
+            if matcher(&name, false) {
+                results.push(WalkEntry::File(path.clone()));
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Shared skip-dir logic
+// ============================================================================
+
+/// Check if a directory should be skipped based on config.
+///
+/// Centralizes the skip-dir decision for all walker variants.
+fn should_skip_dir(name: &str, is_root: bool, config: &ScanConfig) -> bool {
+    // Skip hidden directories if configured
+    if config.skip_hidden && name.starts_with('.') {
+        return true;
+    }
+
+    // Always skip VCS/dependency dirs at any depth
+    if ALWAYS_SKIP_DIRS.contains(&name) {
+        return true;
+    }
+    if config.extra_skip_dirs.iter().any(|d| d.as_str() == name) {
+        return true;
+    }
+
+    // Skip build output dirs only at root level
+    if is_root {
+        if ROOT_ONLY_SKIP_DIRS.contains(&name) {
+            return true;
+        }
+        if config.extra_root_skip_dirs.iter().any(|d| d.as_str() == name) {
+            return true;
+        }
+    }
+
+    false
 }
 
 // ============================================================================

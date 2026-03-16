@@ -595,25 +595,15 @@ fn extract_mod_names(content: &str) -> HashSet<String> {
 }
 
 fn scan_dir_for_reference(dir: &Path, word_re: &Regex) -> bool {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return false,
+    use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+
+    let config = ScanConfig {
+        extensions: ExtensionFilter::Only(vec!["rs".to_string()]),
+        ..Default::default()
     };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if scan_dir_for_reference(&path, word_re) {
-                return true;
-            }
-        } else if path.extension().is_some_and(|ext| ext == "rs")
-            && std::fs::read_to_string(&path)
-                .ok()
-                .is_some_and(|content| word_re.is_match(&content))
-        {
-            return true;
-        }
-    }
-
-    false
+    codebase_scan::any_file_matches(dir, &config, |path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .is_some_and(|content| word_re.is_match(&content))
+    })
 }

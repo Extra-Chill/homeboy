@@ -459,28 +459,17 @@ fn collect_test_files(root: &Path) -> Vec<PathBuf> {
         return Vec::new();
     }
 
-    let mut files = Vec::new();
-    collect_files_recursive(&tests_dir, &mut files);
-    files
+    collect_files_recursive(&tests_dir)
 }
 
-fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
+    use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name == ".git" || name == "node_modules" || name == "vendor" {
-                continue;
-            }
-            collect_files_recursive(&path, files);
-        } else if path.is_file() {
-            files.push(path);
-        }
-    }
+    let config = ScanConfig {
+        extensions: ExtensionFilter::All,
+        ..Default::default()
+    };
+    codebase_scan::walk_files(dir, &config)
 }
 
 /// Scan test files for references to changed production symbols.

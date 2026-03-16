@@ -640,7 +640,7 @@ pub fn scaffold_untested(
     for dir in &source_dirs {
         let dir_path = root.join(dir);
         if dir_path.exists() {
-            collect_source_files(&dir_path, ext, &mut source_files);
+            source_files.extend(collect_source_files(&dir_path, ext));
         }
     }
 
@@ -670,23 +670,14 @@ pub fn scaffold_untested(
     })
 }
 
-fn collect_source_files(dir: &Path, ext: &str, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+fn collect_source_files(dir: &Path, ext: &str) -> Vec<PathBuf> {
+    use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name == ".git" || name == "vendor" || name == "node_modules" || name == "target" {
-                continue;
-            }
-            collect_source_files(&path, ext, files);
-        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
-            files.push(path);
-        }
-    }
+    let config = ScanConfig {
+        extensions: ExtensionFilter::Only(vec![ext.to_string()]),
+        ..Default::default()
+    };
+    codebase_scan::walk_files(dir, &config)
 }
 
 fn to_snake_case(s: &str) -> String {

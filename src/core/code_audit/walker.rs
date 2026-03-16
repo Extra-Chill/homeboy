@@ -1,6 +1,10 @@
 //! walker — extracted from conventions.rs.
+//!
+//! File walking delegated to `crate::engine::codebase_scan` for consistency.
 
 use std::path::Path;
+
+use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
 /// Extension index/entry-point filenames that should be excluded from convention
 /// sibling detection. These files organize other files rather than being
@@ -25,9 +29,7 @@ pub(crate) fn is_index_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Walk source files under a root, skipping common non-source directories
-/// and extension index files.
-/// Collect all file extensions that installed extension extensions can handle.
+/// Collect all file extensions that installed extensions can handle.
 pub(crate) fn extension_provided_file_extensions() -> Vec<String> {
     crate::extension::load_all_extensions()
         .unwrap_or_default()
@@ -36,24 +38,18 @@ pub(crate) fn extension_provided_file_extensions() -> Vec<String> {
         .collect()
 }
 
+/// Walk source files under a root, skipping common non-source directories
+/// and extension index files.
+///
+/// Delegates to `codebase_scan::walk_files` with extension-provided file types.
 pub(crate) fn walk_source_files(root: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
-    let skip_dirs = [
-        "node_modules",
-        "vendor",
-        ".git",
-        "build",
-        "dist",
-        "target",
-        ".svn",
-        ".hg",
-        "cache",
-        "tmp",
-    ];
     let dynamic_extensions = extension_provided_file_extensions();
-    let source_extensions: Vec<&str> = dynamic_extensions.iter().map(|s| s.as_str()).collect();
+    let config = ScanConfig {
+        extensions: ExtensionFilter::Only(dynamic_extensions),
+        ..Default::default()
+    };
 
-    let mut files = Vec::new();
-    walk_recursive(root, &skip_dirs, &source_extensions, &mut files)?;
+    let mut files = codebase_scan::walk_files(root, &config);
 
     // Exclude extension index files from convention sibling detection
     files.retain(|f| !is_index_file(f));
@@ -128,75 +124,19 @@ const COMMON_SOURCE_EXTENSIONS: &[&str] = &[
 /// Count source files that exist in the tree but aren't claimed by any extension.
 /// Used to warn when no extension provides fingerprinting for the dominant language.
 pub(crate) fn count_unclaimed_source_files(root: &Path) -> usize {
-    let skip_dirs = [
-        "node_modules",
-        "vendor",
-        ".git",
-        "build",
-        "dist",
-        "target",
-        ".svn",
-        ".hg",
-        "cache",
-        "tmp",
-    ];
     let claimed = extension_provided_file_extensions();
+    let config = ScanConfig {
+        extensions: ExtensionFilter::Only(
+            COMMON_SOURCE_EXTENSIONS
+                .iter()
+                .filter(|ext| !claimed.iter().any(|c| c.as_str() == **ext))
+                .map(|ext| ext.to_string())
+                .collect(),
+        ),
+        ..Default::default()
+    };
 
-    let mut count = 0;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if !skip_dirs.contains(&name.as_str()) {
-                        stack.push(path);
-                    }
-                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if COMMON_SOURCE_EXTENSIONS.contains(&ext) && !claimed.iter().any(|c| c == ext)
-                    {
-                        count += 1;
-                    }
-                }
-            }
-        }
-    }
-    count
-}
-
-pub(crate) fn walk_recursive(
-    dir: &Path,
-    skip_dirs: &[&str],
-    extensions: &[&str],
-    files: &mut Vec<std::path::PathBuf>,
-) -> std::io::Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if !skip_dirs.contains(&name.as_str()) {
-                walk_recursive(&path, skip_dirs, extensions, files)?;
-            }
-        } else if let Some(ext) = path.extension() {
-            if extensions.contains(&ext.to_str().unwrap_or("")) {
-                files.push(path);
-            }
-        }
-    }
-    Ok(())
+    codebase_scan::walk_files(root, &config).len()
 }
 
 #[cfg(test)]
