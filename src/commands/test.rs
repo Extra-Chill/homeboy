@@ -1,11 +1,12 @@
 use clap::Args;
-use std::path::PathBuf;
 
+use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::extension::test as extension_test;
 use homeboy::extension::test::{
     auto_fix_test_drift, detect_test_drift, report, run_scaffold_workflow, TestCommandOutput,
     TestRunWorkflowArgs,
 };
+use homeboy::extension::ExtensionCapability;
 
 use super::utils::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
@@ -155,14 +156,18 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 }
 
 pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput> {
-    let source_path = args.comp.source_path()?;
-    let component = args.comp.load()?;
+    let ctx = execution_context::resolve(&ResolveOptions::with_capability(
+        args.comp.id(),
+        args.comp.path.clone(),
+        ExtensionCapability::Test,
+        args.setting_args.setting.clone(),
+    ))?;
 
     // Scaffold mode — delegate to core scaffold workflow
     if args.scaffold || args.scaffold_file.is_some() {
         let result = run_scaffold_workflow(
             args.comp.id(),
-            &component,
+            &ctx.component,
             args.scaffold_file.as_deref(),
             args.write,
         )?;
@@ -176,23 +181,23 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
     if args.drift {
         if args.fix {
             let result =
-                auto_fix_test_drift(args.comp.id(), &component, &args.since, args.write, true)?;
+                auto_fix_test_drift(args.comp.id(), &ctx.component, &args.since, args.write, true)?;
             return Ok(report::from_auto_fix_drift_workflow(result));
         }
-        let result = detect_test_drift(args.comp.id(), &component, &args.since)?;
+        let result = detect_test_drift(args.comp.id(), &ctx.component, &args.since)?;
         return Ok(report::from_drift_workflow(result));
     }
 
     // Main test workflow — delegate to core
     let passthrough_args = filter_homeboy_flags(&args.args);
     let workflow = extension_test::run_main_test_workflow(
-        &component,
-        &PathBuf::from(&source_path),
+        &ctx.component,
+        &ctx.source_path,
         TestRunWorkflowArgs {
             component_label: args.comp.component.clone(),
-            component_id: args.comp.id().to_string(),
+            component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
-            settings: args.setting_args.setting.clone(),
+            settings: ctx.settings.clone(),
             skip_lint: args.skip_lint,
             fix: args.fix,
             coverage: args.coverage,
@@ -216,6 +221,7 @@ mod tests {
     use homeboy::component::Component;
     use homeboy::refactor::test_refactor_request;
     use homeboy::refactor::TestSourceOptions;
+    use std::path::PathBuf;
 
     #[test]
     fn filter_strips_boolean_flags() {

@@ -1,6 +1,8 @@
 use clap::Args;
 use homeboy::build;
 use homeboy::component;
+use homeboy::engine::execution_context::{self, ResolveOptions};
+use homeboy::extension::ExtensionCapability;
 use homeboy::project;
 
 use crate::commands::utils::resolve::resolve_project_components;
@@ -40,11 +42,14 @@ pub fn run(
 
     // No target_id: try CWD auto-discovery (registered component or homeboy.json)
     if args.target_id.is_none() && args.component_ids.is_empty() && !args.all {
-        let mut resolved = component::resolve(None)?;
-        if let Some(ref path) = args.path {
-            resolved.local_path = path.clone();
-        }
-        return build::run_component(&resolved);
+        let ctx = execution_context::resolve(&ResolveOptions::with_capability(
+            // Use empty string for CWD auto-discovery — resolve_effective handles this
+            component::resolve(None)?.id.as_str(),
+            args.path.clone(),
+            ExtensionCapability::Build,
+            Vec::new(),
+        ))?;
+        return build::run_component(&ctx.component);
     }
 
     let target_id = args.target_id.as_ref().ok_or_else(|| {

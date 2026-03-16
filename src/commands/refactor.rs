@@ -1,5 +1,6 @@
 use clap::{Args, Subcommand};
 use homeboy::code_audit::{AuditFinding, CodeAuditResult};
+use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::refactor::{
     self, auto, AddResult, MoveResult, RenameScope, RenameSpec, RenameTargeting,
 };
@@ -464,14 +465,16 @@ fn run_refactor_sources(
     let comp = comp.ok_or_else(|| {
         homeboy::Error::validation_missing_argument(vec!["component".to_string()])
     })?;
-    let component = comp.load()?;
-    let root = comp.source_path()?;
+    let ctx = execution_context::resolve(&ResolveOptions::source_only(
+        comp.id(),
+        comp.path.clone(),
+    ))?;
     let requested_sources = from.to_vec();
     let only_findings = parse_audit_findings(only)?;
     let exclude_findings = parse_audit_findings(exclude)?;
     let plan = homeboy::refactor::build_refactor_plan(homeboy::refactor::RefactorPlanRequest {
-        component,
-        root,
+        component: ctx.component,
+        root: ctx.source_path,
         sources: requested_sources,
         changed_since: changed_since.map(ToOwned::to_owned),
         only: only_findings,

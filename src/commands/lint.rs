@@ -1,9 +1,10 @@
 use clap::Args;
-use std::path::PathBuf;
 
+use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::extension::lint::{
     report, run_main_lint_workflow, LintCommandOutput, LintRunWorkflowArgs,
 };
+use homeboy::extension::ExtensionCapability;
 
 use super::utils::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
@@ -64,17 +65,21 @@ pub struct LintArgs {
 }
 
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput> {
-    let component = args.comp.load()?;
-    let source_path = args.comp.source_path()?;
+    let ctx = execution_context::resolve(&ResolveOptions::with_capability(
+        args.comp.id(),
+        args.comp.path.clone(),
+        ExtensionCapability::Lint,
+        args.setting_args.setting.clone(),
+    ))?;
 
     let workflow = run_main_lint_workflow(
-        &component,
-        &PathBuf::from(&source_path),
+        &ctx.component,
+        &ctx.source_path,
         LintRunWorkflowArgs {
             component_label: args.comp.component.clone(),
-            component_id: args.comp.id().to_string(),
+            component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
-            settings: args.setting_args.setting.clone(),
+            settings: ctx.settings.clone(),
             summary: args.summary,
             file: args.file.clone(),
             glob: args.glob.clone(),

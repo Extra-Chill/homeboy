@@ -4,6 +4,7 @@ use std::path::Path;
 use homeboy::code_audit::{
     self, report, run_main_audit_workflow, AuditCommandOutput, AuditRunWorkflowArgs,
 };
+use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::refactor::{AuditConvergenceScoring, AuditVerificationToggles};
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs};
@@ -94,6 +95,7 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
 
     // Resolve component ID and source path
     let (resolved_id, resolved_path) = if Path::new(&args.comp.component).is_dir() {
+        // Bare directory path — no registered component
         let effective = args
             .comp
             .path
@@ -106,10 +108,12 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
             .unwrap_or_else(|| "unknown".to_string());
         (name, effective)
     } else {
-        let comp = args.comp.load()?;
-        homeboy::component::validate_local_path(&comp)?;
-        let expanded = shellexpand::tilde(&comp.local_path).to_string();
-        (comp.id.clone(), expanded)
+        // Registered component — use unified resolver
+        let ctx = execution_context::resolve(&ResolveOptions::source_only(
+            &args.comp.component,
+            args.comp.path.clone(),
+        ))?;
+        (ctx.component_id, ctx.source_path.to_string_lossy().to_string())
     };
 
     let workflow = run_main_audit_workflow(AuditRunWorkflowArgs {
