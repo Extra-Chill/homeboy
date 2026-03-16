@@ -409,14 +409,10 @@ fn audit_internal(
     }
 
     // Cross-file frequency: methods that appear in 3+ files are framework patterns.
-    // These include register*, handle_*, and other callback method names that exist
-    // across many files but aren't per-directory conventions (they may appear in only
-    // 1-2 files per directory, below the convention threshold).
     {
         use std::collections::HashMap;
         let mut method_file_count: HashMap<&str, usize> = HashMap::new();
         for fp in &all_fingerprints {
-            // Count unique methods per file (not per occurrence)
             let mut seen_in_file = std::collections::HashSet::new();
             for method in &fp.methods {
                 if seen_in_file.insert(method.as_str()) {
@@ -427,6 +423,60 @@ fn audit_internal(
         for (method, count) in &method_file_count {
             if *count >= 3 {
                 convention_methods.insert(method.to_string());
+            }
+        }
+    }
+
+    // Naming pattern conventions: detect method prefixes that appear across many
+    // files with many unique method names. For example, register* (registerFoo,
+    // registerBar, etc.) appearing across 5+ files with 5+ unique names indicates
+    // a framework naming convention — not parallel implementation.
+    {
+        use std::collections::HashMap;
+
+        // Extract prefix from camelCase/snake_case method names
+        fn extract_prefix(name: &str) -> Option<&str> {
+            // camelCase: registerFooAbility → "register"
+            if let Some(pos) = name.find(|c: char| c.is_uppercase()) {
+                if pos > 0 {
+                    return Some(&name[..pos]);
+                }
+            }
+            // snake_case: handle_foo → "handle"
+            if let Some(pos) = name.find('_') {
+                if pos > 0 {
+                    return Some(&name[..pos]);
+                }
+            }
+            None
+        }
+
+        // Count unique method names and unique files per prefix
+        let mut prefix_methods: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+        let mut prefix_files: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+
+        for fp in &all_fingerprints {
+            for method in &fp.methods {
+                if let Some(prefix) = extract_prefix(method) {
+                    prefix_methods
+                        .entry(prefix)
+                        .or_default()
+                        .insert(method.as_str());
+                    prefix_files
+                        .entry(prefix)
+                        .or_default()
+                        .insert(fp.relative_path.as_str());
+                }
+            }
+        }
+
+        // If a prefix has 5+ unique method names across 5+ files, it's a naming convention
+        for (prefix, methods) in &prefix_methods {
+            let file_count = prefix_files.get(prefix).map(|f| f.len()).unwrap_or(0);
+            if methods.len() >= 5 && file_count >= 5 {
+                for method in methods {
+                    convention_methods.insert(method.to_string());
+                }
             }
         }
     }
