@@ -956,10 +956,10 @@ pub(crate) fn detect_parallel_implementations(
                 continue;
             }
 
-            // Skip if both methods are convention-expected — their similar call patterns
-            // are by design (they follow the same convention), not parallel implementation.
+            // Skip if either method is convention-expected — its call pattern is shaped
+            // by the convention, so similar patterns with other methods are expected.
             if convention_methods.contains(&a.method)
-                && convention_methods.contains(&b.method)
+                || convention_methods.contains(&b.method)
             {
                 continue;
             }
@@ -1676,16 +1676,16 @@ mod tests {
         );
         assert_eq!(findings.len(), 2, "Should flag without convention context");
 
-        // With both methods as convention-expected: NOT flagged
+        // With EITHER method as convention-expected: NOT flagged
         let conv_methods: std::collections::HashSet<String> =
-            ["registerAbilities", "registerAbility"]
+            ["registerAbilities"] // only one of the two
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
         let findings = detect_parallel_implementations(&[&fp1, &fp2], &conv_methods);
         assert!(
             findings.is_empty(),
-            "Convention methods should not be flagged as parallel, got: {:?}",
+            "Pairs involving convention methods should not be flagged, got: {:?}",
             findings.iter().map(|f| &f.description).collect::<Vec<_>>()
         );
     }
