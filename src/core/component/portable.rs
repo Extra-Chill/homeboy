@@ -127,6 +127,9 @@ where
 }
 
 /// Create a virtual (unregistered) Component from a directory's `homeboy.json`.
+///
+/// If the directory is a git repo and `remote_url` isn't set in the portable config,
+/// auto-detects it from `git remote get-url origin`.
 pub fn discover_from_portable(dir: &Path) -> Option<Component> {
     let portable = read_portable_config(dir).ok()??;
 
@@ -139,6 +142,13 @@ pub fn discover_from_portable(dir: &Path) -> Option<Component> {
         obj.insert("local_path".to_string(), Value::String(local_path));
         obj.entry("remote_path".to_string())
             .or_insert(Value::String(String::new()));
+
+        // Auto-detect remote_url from git if not already set
+        if !obj.contains_key("remote_url") {
+            if let Some(url) = crate::deploy::release_download::detect_remote_url(dir) {
+                obj.insert("remote_url".to_string(), Value::String(url));
+            }
+        }
     }
 
     serde_json::from_value::<Component>(json).ok()

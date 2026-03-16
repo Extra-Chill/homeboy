@@ -1,14 +1,16 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::build;
 use crate::component::Component;
 use crate::context::RemoteProjectContext;
 use crate::error::Result;
 use crate::extension::build::resolve_artifact_path;
+use crate::git;
 use crate::paths as base_path;
 use crate::project::Project;
 
 use super::planning::{calculate_directory_size, format_bytes};
+use super::release_download;
 use super::safety_and_artifact::{deploy_artifact, deploy_via_git, validate_deploy_target};
 use super::types::{ComponentDeployResult, DeployConfig, DeployResult};
 use super::version_overrides::{
@@ -27,8 +29,22 @@ pub(super) fn execute_component_deploy(
 ) -> ComponentDeployResult {
     let is_git_deploy = component.deploy_strategy.as_deref() == Some("git");
 
-    // Build (git-deploy and skip-build skip this step)
-    let (build_exit_code, build_error) = if is_git_deploy || config.skip_build {
+    // Try downloading release artifact from GitHub instead of building locally.
+    // This is the preferred path when the component has remote_url set.
+    let release_artifact: Option<PathBuf> = if !is_git_deploy
+        && !config.skip_build
+        && release_download::supports_release_deploy(component)
+    {
+        try_download_release_artifact(component)
+    } else {
+        None
+    };
+
+    // Build (git-deploy, skip-build, and release-download skip this step)
+    let (build_exit_code, build_error) = if is_git_deploy
+        || config.skip_build
+        || release_artifact.is_some()
+    {
         (Some(0), None)
     } else if artifact_is_fresh(component) {
         log_status!(
@@ -104,6 +120,7 @@ pub(super) fn execute_component_deploy(
         local_version,
         remote_version,
         build_exit_code,
+        release_artifact.as_ref(),
     )
 }
 
@@ -165,6 +182,9 @@ fn execute_git_deploy(
 }
 
 /// Deploy a component via artifact upload (rsync / extension override).
+///
+/// When `downloaded_artifact` is Some, it takes precedence over the local build artifact.
+/// This is used when the artifact was downloaded from a GitHub release.
 #[allow(clippy::too_many_arguments)]
 fn execute_artifact_deploy(
     component: &Component,
@@ -176,41 +196,51 @@ fn execute_artifact_deploy(
     local_version: Option<String>,
     remote_version: Option<String>,
     build_exit_code: Option<i32>,
+    downloaded_artifact: Option<&PathBuf>,
 ) -> ComponentDeployResult {
-    // Resolve artifact path
-    let artifact_pattern = match component.build_artifact.as_ref() {
-        Some(pattern) => pattern,
-        None => {
-            return ComponentDeployResult::failed(
-                component,
-                base_path,
-                local_version,
-                remote_version,
-                format!(
-                    "Component '{}' has no build_artifact configured",
-                    component.id
-                ),
-            )
-            .with_build_exit_code(build_exit_code);
-        }
-    };
+    // Resolve artifact path — prefer downloaded release artifact over local build
+    let artifact_path = if let Some(downloaded) = downloaded_artifact {
+        log_status!(
+            "deploy",
+            "Using downloaded release artifact: {}",
+            downloaded.display()
+        );
+        downloaded.clone()
+    } else {
+        let artifact_pattern = match component.build_artifact.as_ref() {
+            Some(pattern) => pattern,
+            None => {
+                return ComponentDeployResult::failed(
+                    component,
+                    base_path,
+                    local_version,
+                    remote_version,
+                    format!(
+                        "Component '{}' has no build_artifact configured",
+                        component.id
+                    ),
+                )
+                .with_build_exit_code(build_exit_code);
+            }
+        };
 
-    let artifact_path = match resolve_artifact_path(artifact_pattern) {
-        Ok(path) => path,
-        Err(e) => {
-            let error_msg = if config.skip_build {
-                format!("{}. Release build may have failed.", e)
-            } else {
-                format!("{}. Run build first: homeboy build {}", e, component.id)
-            };
-            return ComponentDeployResult::failed(
-                component,
-                base_path,
-                local_version,
-                remote_version,
-                error_msg,
-            )
-            .with_build_exit_code(build_exit_code);
+        match resolve_artifact_path(artifact_pattern) {
+            Ok(path) => path,
+            Err(e) => {
+                let error_msg = if config.skip_build {
+                    format!("{}. Release build may have failed.", e)
+                } else {
+                    format!("{}. Run build first: homeboy build {}", e, component.id)
+                };
+                return ComponentDeployResult::failed(
+                    component,
+                    base_path,
+                    local_version,
+                    remote_version,
+                    error_msg,
+                )
+                .with_build_exit_code(build_exit_code);
+            }
         }
     };
 
@@ -303,6 +333,44 @@ fn execute_artifact_deploy(
         )
         .with_remote_path(install_dir.to_string())
         .with_build_exit_code(build_exit_code),
+    }
+}
+
+// =============================================================================
+// Release Artifact Download
+// =============================================================================
+
+/// Try to download a release artifact from GitHub for the component's latest tag.
+///
+/// Returns `Some(path)` if successful, `None` if anything fails (falls back to local build).
+fn try_download_release_artifact(component: &Component) -> Option<PathBuf> {
+    let remote_url = component.remote_url.as_ref()?;
+    let github = release_download::parse_github_url(remote_url)?;
+    let artifact_name = release_download::resolve_artifact_name(component)?;
+
+    // Get the latest tag from the local clone (already synced by the pipeline)
+    let tag = git::get_latest_tag(&component.local_path)
+        .ok()
+        .flatten()?;
+
+    log_status!(
+        "deploy",
+        "Attempting to download release artifact for '{}' tag {} from GitHub...",
+        component.id,
+        tag
+    );
+
+    match release_download::download_release_artifact(&github, &tag, &artifact_name) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            log_status!(
+                "deploy",
+                "Release download failed for '{}': {} — falling back to local build",
+                component.id,
+                e
+            );
+            None
+        }
     }
 }
 
