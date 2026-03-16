@@ -1,0 +1,15 @@
+{
+  "auto_cleanup": false,
+  "changelog_target": "../CHANGELOG.md",
+  "extensions": {
+    "rust": {}
+  },
+  "id": "rust",
+  "remote_path": "",
+  "version_targets": [
+    {
+      "file": "rust.json",
+      "pattern": "\"version\":\\s*\"([0-9.]+)\""
+    }
+  ]
+}
