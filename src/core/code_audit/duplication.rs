@@ -111,12 +111,25 @@ pub(crate) fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<
 /// Groups functions by their body hash. When two or more files contain a
 /// function with the same name and the same normalized body hash, a finding
 /// is emitted for each location.
-pub(crate) fn detect_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+/// Detect exact function body duplicates across files.
+///
+/// `convention_methods` are excluded — identical implementations across convention-
+/// following files are expected behavior (e.g. `__construct`, `checkPermission`,
+/// interface methods with identical bodies).
+pub(crate) fn detect_duplicates(
+    fingerprints: &[&FileFingerprint],
+    convention_methods: &std::collections::HashSet<String>,
+) -> Vec<Finding> {
     let hash_groups = build_groups(fingerprints);
     let mut findings = Vec::new();
 
     for ((method_name, _hash), locations) in &hash_groups {
         if locations.len() < MIN_DUPLICATE_LOCATIONS {
+            continue;
+        }
+
+        // Skip convention-expected methods — identical implementations are by design.
+        if convention_methods.contains(method_name) {
             continue;
         }
 
@@ -1101,7 +1114,7 @@ mod tests {
             &[("is_zero", "abc123")],
         );
 
-        let findings = detect_duplicates(&[&fp1, &fp2]);
+        let findings = detect_duplicates(&[&fp1, &fp2], &std::collections::HashSet::new());
 
         assert_eq!(findings.len(), 2, "Should emit one finding per location");
         assert!(findings
@@ -1117,7 +1130,7 @@ mod tests {
         let fp1 = make_fingerprint("src/a.rs", &["process"], &[("process", "hash_a")]);
         let fp2 = make_fingerprint("src/b.rs", &["process"], &[("process", "hash_b")]);
 
-        let findings = detect_duplicates(&[&fp1, &fp2]);
+        let findings = detect_duplicates(&[&fp1, &fp2], &std::collections::HashSet::new());
         assert!(
             findings.is_empty(),
             "Different hashes should not flag duplicates"
@@ -1128,7 +1141,7 @@ mod tests {
     fn no_duplicates_single_location() {
         let fp = make_fingerprint("src/only.rs", &["unique_fn"], &[("unique_fn", "abc123")]);
 
-        let findings = detect_duplicates(&[&fp]);
+        let findings = detect_duplicates(&[&fp], &std::collections::HashSet::new());
         assert!(findings.is_empty(), "Single location is not a duplicate");
     }
 
@@ -1138,7 +1151,7 @@ mod tests {
         let fp2 = make_fingerprint("src/b.rs", &["helper"], &[("helper", "same_hash")]);
         let fp3 = make_fingerprint("src/c.rs", &["helper"], &[("helper", "same_hash")]);
 
-        let findings = detect_duplicates(&[&fp1, &fp2, &fp3]);
+        let findings = detect_duplicates(&[&fp1, &fp2, &fp3], &std::collections::HashSet::new());
 
         assert_eq!(findings.len(), 3, "Should flag all 3 locations");
         assert!(findings[0].suggestion.contains("3 files"));
@@ -1149,7 +1162,7 @@ mod tests {
         let fp1 = make_fingerprint("src/a.rs", &["foo", "bar"], &[]);
         let fp2 = make_fingerprint("src/b.rs", &["foo", "bar"], &[]);
 
-        let findings = detect_duplicates(&[&fp1, &fp2]);
+        let findings = detect_duplicates(&[&fp1, &fp2], &std::collections::HashSet::new());
         assert!(
             findings.is_empty(),
             "No hashes means no duplication findings"
@@ -1169,7 +1182,7 @@ mod tests {
             &[("shared", "same"), ("unique_b", "hash_b")],
         );
 
-        let findings = detect_duplicates(&[&fp1, &fp2]);
+        let findings = detect_duplicates(&[&fp1, &fp2], &std::collections::HashSet::new());
 
         assert_eq!(findings.len(), 2, "Only 'shared' should be flagged");
         assert!(findings.iter().all(|f| f.description.contains("shared")));

@@ -339,7 +339,13 @@ fn audit_internal(
         .iter()
         .flat_map(|(_, _, fps)| fps.iter())
         .collect();
-    let duplication_findings = duplication::detect_duplicates(&all_fingerprints);
+
+    // Build convention method set ONCE — used by duplication, near-duplicate, and parallel detectors.
+    // Convention-expected methods are excluded from duplication/parallel findings because identical
+    // or similar implementations across convention-following files are correct behavior.
+    let convention_methods = build_convention_method_set(&discovered_conventions, &all_fingerprints);
+
+    let duplication_findings = duplication::detect_duplicates(&all_fingerprints, &convention_methods);
     let duplicate_groups = duplication::detect_duplicate_groups(&all_fingerprints);
     if !duplication_findings.is_empty() {
         log_status!(
@@ -374,112 +380,6 @@ fn audit_internal(
     }
 
     // Phase 4d2: Parallel implementation detection (similar call patterns across files)
-    // Build set of convention-expected methods to exclude from parallel detection.
-    // Includes both per-directory convention methods AND cross-directory convention
-    // methods (methods that appear across sibling directory conventions).
-    let mut convention_methods: std::collections::HashSet<String> = discovered_conventions
-        .iter()
-        .flat_map(|c| c.expected_methods.iter().cloned())
-        .collect();
-
-    // Cross-directory: find methods shared across 2+ sibling directory conventions.
-    // This catches patterns like registerXxxAbility that appear across inc/Abilities/*
-    // but aren't per-directory conventions individually.
-    {
-        use std::collections::HashMap;
-        let mut method_by_parent: HashMap<String, HashMap<String, usize>> = HashMap::new();
-        for conv in &discovered_conventions {
-            // Extract parent directory from glob (e.g. "inc/Abilities/Flow/*.php" → "inc/Abilities")
-            let parts: Vec<&str> = conv.glob.split('/').collect();
-            if parts.len() >= 3 {
-                let parent = parts[..parts.len() - 2].join("/");
-                let entry = method_by_parent.entry(parent).or_default();
-                for method in &conv.expected_methods {
-                    *entry.entry(method.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-        for (_parent, methods) in &method_by_parent {
-            for (method, count) in methods {
-                if *count >= 2 {
-                    convention_methods.insert(method.clone());
-                }
-            }
-        }
-    }
-
-    // Cross-file frequency: methods that appear in 3+ files are framework patterns.
-    {
-        use std::collections::HashMap;
-        let mut method_file_count: HashMap<&str, usize> = HashMap::new();
-        for fp in &all_fingerprints {
-            let mut seen_in_file = std::collections::HashSet::new();
-            for method in &fp.methods {
-                if seen_in_file.insert(method.as_str()) {
-                    *method_file_count.entry(method.as_str()).or_insert(0) += 1;
-                }
-            }
-        }
-        for (method, count) in &method_file_count {
-            if *count >= 3 {
-                convention_methods.insert(method.to_string());
-            }
-        }
-    }
-
-    // Naming pattern conventions: detect method prefixes that appear across many
-    // files with many unique method names. For example, register* (registerFoo,
-    // registerBar, etc.) appearing across 5+ files with 5+ unique names indicates
-    // a framework naming convention — not parallel implementation.
-    {
-        use std::collections::HashMap;
-
-        // Extract prefix from camelCase/snake_case method names
-        fn extract_prefix(name: &str) -> Option<&str> {
-            // camelCase: registerFooAbility → "register"
-            if let Some(pos) = name.find(|c: char| c.is_uppercase()) {
-                if pos > 0 {
-                    return Some(&name[..pos]);
-                }
-            }
-            // snake_case: handle_foo → "handle"
-            if let Some(pos) = name.find('_') {
-                if pos > 0 {
-                    return Some(&name[..pos]);
-                }
-            }
-            None
-        }
-
-        // Count unique method names and unique files per prefix
-        let mut prefix_methods: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
-        let mut prefix_files: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
-
-        for fp in &all_fingerprints {
-            for method in &fp.methods {
-                if let Some(prefix) = extract_prefix(method) {
-                    prefix_methods
-                        .entry(prefix)
-                        .or_default()
-                        .insert(method.as_str());
-                    prefix_files
-                        .entry(prefix)
-                        .or_default()
-                        .insert(fp.relative_path.as_str());
-                }
-            }
-        }
-
-        // If a prefix has 5+ unique method names across 5+ files, it's a naming convention
-        for (prefix, methods) in &prefix_methods {
-            let file_count = prefix_files.get(prefix).map(|f| f.len()).unwrap_or(0);
-            if methods.len() >= 5 && file_count >= 5 {
-                for method in methods {
-                    convention_methods.insert(method.to_string());
-                }
-            }
-        }
-    }
     let parallel_findings =
         duplication::detect_parallel_implementations(&all_fingerprints, &convention_methods);
     if !parallel_findings.is_empty() {
@@ -879,6 +779,112 @@ fn classify_broken_doc_ref(
 // ============================================================================
 // Reference dependency fingerprinting
 // ============================================================================
+
+/// Build the unified convention method set used by duplication and parallel detectors.
+///
+/// Collects methods from three sources:
+/// 1. Per-directory convention expected_methods
+/// 2. Cross-directory conventions (methods shared across sibling directory conventions)
+/// 3. Cross-file frequency (methods appearing in 3+ files)
+/// 4. Naming pattern conventions (prefixes with 5+ unique names across 5+ files)
+fn build_convention_method_set(
+    discovered_conventions: &[conventions::Convention],
+    all_fingerprints: &[&fingerprint::FileFingerprint],
+) -> std::collections::HashSet<String> {
+    use std::collections::HashMap;
+
+    // 1. Per-directory convention methods
+    let mut methods: std::collections::HashSet<String> = discovered_conventions
+        .iter()
+        .flat_map(|c| c.expected_methods.iter().cloned())
+        .collect();
+
+    // 2. Cross-directory: methods shared across 2+ sibling directory conventions
+    {
+        let mut method_by_parent: HashMap<String, HashMap<String, usize>> = HashMap::new();
+        for conv in discovered_conventions {
+            let parts: Vec<&str> = conv.glob.split('/').collect();
+            if parts.len() >= 3 {
+                let parent = parts[..parts.len() - 2].join("/");
+                let entry = method_by_parent.entry(parent).or_default();
+                for method in &conv.expected_methods {
+                    *entry.entry(method.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        for (_parent, parent_methods) in &method_by_parent {
+            for (method, count) in parent_methods {
+                if *count >= 2 {
+                    methods.insert(method.clone());
+                }
+            }
+        }
+    }
+
+    // 3. Cross-file frequency: methods appearing in 3+ files
+    {
+        let mut method_file_count: HashMap<&str, usize> = HashMap::new();
+        for fp in all_fingerprints {
+            let mut seen_in_file = std::collections::HashSet::new();
+            for method in &fp.methods {
+                if seen_in_file.insert(method.as_str()) {
+                    *method_file_count.entry(method.as_str()).or_insert(0) += 1;
+                }
+            }
+        }
+        for (method, count) in &method_file_count {
+            if *count >= 3 {
+                methods.insert(method.to_string());
+            }
+        }
+    }
+
+    // 4. Naming pattern conventions: prefixes with 5+ unique names across 5+ files
+    {
+        fn extract_prefix(name: &str) -> Option<&str> {
+            if let Some(pos) = name.find(|c: char| c.is_uppercase()) {
+                if pos > 0 {
+                    return Some(&name[..pos]);
+                }
+            }
+            if let Some(pos) = name.find('_') {
+                if pos > 0 {
+                    return Some(&name[..pos]);
+                }
+            }
+            None
+        }
+
+        let mut prefix_methods: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+        let mut prefix_files: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+
+        for fp in all_fingerprints {
+            for method in &fp.methods {
+                if let Some(prefix) = extract_prefix(method) {
+                    prefix_methods
+                        .entry(prefix)
+                        .or_default()
+                        .insert(method.as_str());
+                    prefix_files
+                        .entry(prefix)
+                        .or_default()
+                        .insert(fp.relative_path.as_str());
+                }
+            }
+        }
+
+        for (prefix, prefix_method_set) in &prefix_methods {
+            let file_count = prefix_files.get(prefix).map(|f| f.len()).unwrap_or(0);
+            if prefix_method_set.len() >= 5 && file_count >= 5 {
+                for method in prefix_method_set {
+                    methods.insert(method.to_string());
+                }
+            }
+        }
+    }
+
+    methods
+}
 
 /// Fingerprint external reference paths for cross-reference analysis.
 ///
