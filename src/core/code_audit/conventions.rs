@@ -152,6 +152,9 @@ pub enum AuditFinding {
     UndocumentedFeature,
     /// Documentation exists but references stale paths that have moved.
     StaleDocReference,
+    /// Compiler warning (dead code, unused import, unused variable, etc).
+    /// Detected by running the language compiler/checker (cargo check, tsc, etc).
+    CompilerWarning,
 }
 
 impl AuditFinding {
@@ -189,6 +192,7 @@ impl AuditFinding {
             "broken_doc_reference",
             "undocumented_feature",
             "stale_doc_reference",
+            "compiler_warning",
         ]
     }
 }

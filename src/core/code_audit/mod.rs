@@ -15,6 +15,7 @@ pub mod baseline;
 mod checks;
 pub mod codebase_map;
 mod comment_hygiene;
+mod compiler_warnings;
 pub mod compare;
 pub(crate) mod conventions;
 pub(crate) mod core_fingerprint;
@@ -442,7 +443,19 @@ fn audit_internal(
         all_findings.extend(doc_findings);
     }
 
-    // Phase 4k: Impact-scoped filtering — when auditing changed files only,
+    // Phase 4l: Compiler warnings (dead code, unused imports, unused variables)
+    // Runs cargo check / tsc / go vet and parses warnings into findings.
+    let compiler_findings = compiler_warnings::run(root);
+    if !compiler_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Compiler warnings: {} finding(s) (dead code, unused imports, unused variables)",
+            compiler_findings.len()
+        );
+        all_findings.extend(compiler_findings);
+    }
+
+    // Phase 4m: Impact-scoped filtering — when auditing changed files only,
     // expand scope to include call sites affected by symbol changes, then
     // filter findings to that expanded scope.
     //
