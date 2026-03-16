@@ -177,7 +177,7 @@ pub(crate) fn generate_orphaned_test_fixes(
                 test_method
             ),
         );
-        ins.safety_tier = FixSafetyTier::SafeWithChecks;
+        ins.safety_tier = FixSafetyTier::Safe;
 
         fixes.push(Fix {
             file: finding.file.clone(),

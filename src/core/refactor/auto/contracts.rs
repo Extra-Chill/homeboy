@@ -47,11 +47,24 @@ pub struct Insertion {
     pub description: String,
 }
 
+/// Safety classification for automated code fixes.
+///
+/// Two tiers: `Safe` fixes are auto-applied (with preflight validation when applicable).
+/// `PlanOnly` fixes are preview-only and require human review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum FixSafetyTier {
-    SafeAuto,
-    SafeWithChecks,
+    /// Fix can be auto-applied. Preflight validation runs when applicable.
+    #[serde(
+        rename = "safe",
+        alias = "safe_auto",
+        alias = "safe_with_checks",
+        alias = "Safe",
+        alias = "SafeAuto",
+        alias = "SafeWithChecks"
+    )]
+    Safe,
+    /// Fix requires human review — never auto-applied.
+    #[serde(rename = "plan_only", alias = "PlanOnly")]
     PlanOnly,
 }
 
@@ -137,17 +150,23 @@ pub enum InsertionKind {
 impl InsertionKind {
     pub fn safety_tier(&self) -> FixSafetyTier {
         match self {
-            Self::ImportAdd | Self::DocReferenceUpdate { .. } | Self::DocLineRemoval { .. } => {
-                FixSafetyTier::SafeAuto
-            }
-            Self::RegistrationStub
+            // Safe: all deterministic, mechanical fixes that can be auto-applied.
+            // Preflight validation runs when applicable (registration stubs get
+            // collision checks, visibility changes get simulation checks, etc).
+            Self::ImportAdd
+            | Self::DocReferenceUpdate { .. }
+            | Self::DocLineRemoval { .. }
+            | Self::RegistrationStub
             | Self::ConstructorWithRegistration
             | Self::TypeConformance
             | Self::NamespaceDeclaration
             | Self::VisibilityChange { .. }
-            | Self::ReexportRemoval { .. } => FixSafetyTier::SafeWithChecks,
-            Self::MethodStub => FixSafetyTier::PlanOnly,
-            Self::FunctionRemoval { .. } | Self::TraitUse => FixSafetyTier::PlanOnly,
+            | Self::ReexportRemoval { .. } => FixSafetyTier::Safe,
+
+            // Plan-only: requires human review.
+            Self::MethodStub | Self::FunctionRemoval { .. } | Self::TraitUse => {
+                FixSafetyTier::PlanOnly
+            }
         }
     }
 }
