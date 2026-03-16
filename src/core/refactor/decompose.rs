@@ -8,7 +8,7 @@ use crate::extension::grammar_items;
 use crate::extension::{self, ParsedItem};
 use crate::Result;
 
-use super::move_items::MoveOptions;
+use super::move_options::MoveOptions;
 use super::MoveResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
