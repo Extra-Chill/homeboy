@@ -143,6 +143,41 @@ fn run_fix_workflow(
     let final_policy_summary = refactor_outcome.policy_summary;
     let iterations = refactor_outcome.iterations;
 
+    // Post-fix compilation validation gate
+    if written && final_fix_result.files_modified > 0 {
+        let root = std::path::Path::new(&current_result.source_path);
+        let changed: Vec<std::path::PathBuf> = final_fix_result
+            .fixes
+            .iter()
+            .filter(|f| f.applied)
+            .map(|f| root.join(&f.file))
+            .chain(
+                final_fix_result
+                    .new_files
+                    .iter()
+                    .filter(|f| f.written)
+                    .map(|f| root.join(&f.file)),
+            )
+            .collect();
+        if !changed.is_empty() {
+            match crate::engine::validate_write::validate_only(root, &changed) {
+                Ok(validation) if !validation.success => {
+                    crate::log_status!(
+                        "validate",
+                        "Post-fix compilation check FAILED — applied fixes may have introduced errors"
+                    );
+                    if let Some(ref output) = validation.output {
+                        crate::log_status!("validate", "{}", output);
+                    }
+                }
+                Ok(validation) if validation.command.is_some() => {
+                    crate::log_status!("validate", "Post-fix compilation check passed");
+                }
+                _ => {} // skipped or error — non-fatal
+            }
+        }
+    }
+
     // Ratchet lifecycle
     let ratchet_summary = if args.ratchet && written && !args.ignore_baseline {
         process_ratchet(&current_result, args)?

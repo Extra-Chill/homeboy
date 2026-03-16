@@ -24,4 +24,5 @@ pub mod temp;
 pub mod template;
 pub mod text;
 pub mod undo;
+pub mod validate_write;
 pub mod validation;

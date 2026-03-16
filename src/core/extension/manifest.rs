@@ -204,6 +204,16 @@ pub struct ScriptsConfig {
     /// Receives `{file_path, content}` on stdin and outputs `{artifacts:[...]}` on stdout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topology: Option<String>,
+    /// Script that validates written code compiles/parses correctly.
+    /// Receives `{root, changed_files}` JSON on stdin, exits 0 on success, non-zero with
+    /// compiler output on stderr on failure.
+    ///
+    /// Language examples:
+    /// - Rust: `cargo check`
+    /// - PHP: `php -l` on each changed file
+    /// - TypeScript: `tsc --noEmit`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validate: Option<String>,
 }
 
 /// Unified extension manifest decomposed into capability groups.
@@ -460,6 +470,11 @@ impl ExtensionManifest {
     /// Get the topology script path (relative to extension dir), if configured.
     pub fn topology_script(&self) -> Option<&str> {
         self.scripts.as_ref().and_then(|s| s.topology.as_deref())
+    }
+
+    /// Get the validate script path (relative to extension dir), if configured.
+    pub fn validate_script(&self) -> Option<&str> {
+        self.scripts.as_ref().and_then(|s| s.validate.as_deref())
     }
 }
 

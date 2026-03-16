@@ -776,12 +776,28 @@ fn run_move(
 ) -> CmdResult<RefactorOutput> {
     let root = refactor::move_items::resolve_root(component_id, path)?;
 
+    let mut validation_rollback = homeboy::engine::undo::InMemoryRollback::new();
     if write {
         homeboy::engine::undo::UndoSnapshot::capture_and_save(&root, "refactor move", [from, to]);
+        validation_rollback.capture(&root.join(from));
+        validation_rollback.capture(&root.join(to));
     }
 
     let item_refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
     let result = refactor::move_items(&item_refs, from, to, &root, write)?;
+
+    // Post-write validation gate
+    if write && !result.items_moved.is_empty() {
+        let changed_files = vec![root.join(from), root.join(to)];
+        let validation =
+            homeboy::engine::validate_write::validate_write(&root, &changed_files, &validation_rollback)?;
+        if !validation.success {
+            homeboy::log_status!("validate", "Move output failed validation — changes rolled back");
+            if let Some(ref output) = validation.output {
+                homeboy::log_status!("validate", "{}", output);
+            }
+        }
+    }
 
     let exit_code = if result.items_moved.is_empty() { 1 } else { 0 };
 
@@ -843,15 +859,31 @@ fn run_move_file(
 ) -> CmdResult<RefactorOutput> {
     let root = refactor::move_items::resolve_root(component_id, path)?;
 
+    let mut validation_rollback = homeboy::engine::undo::InMemoryRollback::new();
     if write {
         homeboy::engine::undo::UndoSnapshot::capture_and_save(
             &root,
             "refactor move --file",
             [file, to],
         );
+        validation_rollback.capture(&root.join(file));
+        validation_rollback.capture(&root.join(to));
     }
 
     let result = refactor::move_items::move_file(file, to, &root, write)?;
+
+    // Post-write validation gate
+    if write && (result.imports_updated > 0 || result.mod_declarations_updated) {
+        let changed_files = vec![root.join(file), root.join(to)];
+        let validation =
+            homeboy::engine::validate_write::validate_write(&root, &changed_files, &validation_rollback)?;
+        if !validation.success {
+            homeboy::log_status!("validate", "Move-file output failed validation — changes rolled back");
+            if let Some(ref output) = validation.output {
+                homeboy::log_status!("validate", "{}", output);
+            }
+        }
+    }
 
     let exit_code = if result.imports_updated > 0 || result.mod_declarations_updated {
         0
@@ -1012,6 +1044,7 @@ fn run_transform(
         homeboy::log_status!("info", "{}", set.description);
     }
 
+    let mut validation_rollback = homeboy::engine::undo::InMemoryRollback::new();
     if write {
         // Dry-run to discover affected files for the undo snapshot
         if let Ok(preview) = refactor::apply_transforms(&root, &set_name, &set, false, rule_filter)
@@ -1026,11 +1059,32 @@ fn run_transform(
                 "refactor transform",
                 &affected_files,
             );
+            // Capture for validation rollback
+            for rel_path in &affected_files {
+                validation_rollback.capture(&root.join(rel_path));
+            }
         }
     }
 
     // Apply transforms
     let result = refactor::apply_transforms(&root, &set_name, &set, write, rule_filter)?;
+
+    // Post-write validation gate
+    if write && result.total_replacements > 0 {
+        let changed_files: Vec<std::path::PathBuf> = result
+            .rules
+            .iter()
+            .flat_map(|r| r.matches.iter().map(|m| root.join(&m.file)))
+            .collect();
+        let validation =
+            homeboy::engine::validate_write::validate_write(&root, &changed_files, &validation_rollback)?;
+        if !validation.success {
+            homeboy::log_status!("validate", "Transform output failed validation — changes rolled back");
+            if let Some(ref output) = validation.output {
+                homeboy::log_status!("validate", "{}", output);
+            }
+        }
+    }
 
     // Report results to stderr
     for rule_result in &result.rules {
@@ -1105,6 +1159,8 @@ fn run_decompose(
     let root = refactor::move_items::resolve_root(component_id, path)?;
     let plan = refactor::build_plan(file, &root, strategy)?;
 
+    // Capture rollback state before writes for validation gate
+    let mut validation_rollback = homeboy::engine::undo::InMemoryRollback::new();
     if write {
         let affected: Vec<&str> = std::iter::once(file)
             .chain(plan.groups.iter().map(|g| g.suggested_target.as_str()))
@@ -1112,8 +1168,12 @@ fn run_decompose(
         homeboy::engine::undo::UndoSnapshot::capture_and_save(
             &root,
             "refactor decompose",
-            affected,
+            &affected,
         );
+        // Also capture for in-memory rollback (validation gate)
+        for rel_path in &affected {
+            validation_rollback.capture(&root.join(rel_path));
+        }
     }
 
     let move_results = refactor::apply_plan(&plan, &root, write)?;
@@ -1121,6 +1181,35 @@ fn run_decompose(
         .iter()
         .filter(|result| !result.items_moved.is_empty())
         .count();
+
+    // Post-write validation gate
+    if write && groups_applied > 0 {
+        let changed_files: Vec<std::path::PathBuf> = move_results
+            .iter()
+            .flat_map(|r| {
+                r.items_moved
+                    .iter()
+                    .map(|_| root.join(file))
+                    .chain(std::iter::once(root.join(file)))
+            })
+            .chain(
+                plan.groups
+                    .iter()
+                    .map(|g| root.join(&g.suggested_target)),
+            )
+            .collect();
+        let validation =
+            homeboy::engine::validate_write::validate_write(&root, &changed_files, &validation_rollback)?;
+        if !validation.success {
+            homeboy::log_status!(
+                "validate",
+                "Decompose output failed validation — changes rolled back"
+            );
+            if let Some(ref output) = validation.output {
+                homeboy::log_status!("validate", "{}", output);
+            }
+        }
+    }
 
     homeboy::log_status!(
         "decompose",

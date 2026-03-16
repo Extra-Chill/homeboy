@@ -531,6 +531,7 @@ pub(crate) fn bump_component_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regex::Regex;
 
     #[test]
     fn since_tag_regex_matches_placeholders() {
