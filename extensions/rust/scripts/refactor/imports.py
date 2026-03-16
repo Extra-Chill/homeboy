@@ -142,19 +142,34 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
     # Collect all use statements from source
     source_uses = [l.strip() for l in source_lines if l.strip().startswith("use ")]
 
-    # Collect all type definitions in source file (for same-module type refs)
-    source_types = set()
+    # Collect all definitions in source file (types, functions, constants).
+    # These are items that were in scope for the moved code when it lived
+    # in the source file — the destination file needs imports for any it references.
+    source_definitions = set()
     for line in source_lines:
         trimmed = line.strip()
-        for prefix in ("pub struct ", "pub(crate) struct ", "struct ",
-                        "pub enum ", "pub(crate) enum ", "enum ",
-                        "pub type ", "pub(crate) type ", "type ",
-                        "pub trait ", "pub(crate) trait ", "trait "):
-            if trimmed.startswith(prefix):
-                rest = trimmed[len(prefix):]
-                name = re.split(r'[{(<;:\s]', rest)[0].strip()
+        # Strip visibility
+        rest = trimmed
+        for vis in ("pub(crate) ", "pub(super) ", "pub "):
+            if rest.startswith(vis):
+                rest = rest[len(vis):]
+                break
+        # Strip function modifiers (async, unsafe) but NOT const —
+        # const can be both a modifier (`const fn`) and a keyword (`const X`).
+        for modifier in ("async ", "unsafe "):
+            if rest.startswith(modifier):
+                rest = rest[len(modifier):]
+        for keyword in ("struct ", "enum ", "type ", "trait ", "fn ",
+                        "const ", "static "):
+            if rest.startswith(keyword):
+                after = rest[len(keyword):]
+                # For `const fn`, extract the function name after `fn`
+                if keyword == "const " and after.startswith("fn "):
+                    after = after[3:]
+                name = re.split(r'[{(<;:\s]', after)[0].strip()
                 if name:
-                    source_types.add(name)
+                    source_definitions.add(name)
+                break
 
     # Combined source of all moved items
     combined_source = '\n'.join(item.get("source", "") for item in moved_items)
@@ -175,25 +190,62 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
             fixed = fix_import_path(use_stmt, source_path, dest_path)
             needed.append(fixed)
 
-    # Phase 2: Add imports for same-module types referenced by moved items (#339)
+    # Phase 2: Add imports for same-module definitions referenced by moved items (#339)
+    # This covers types, functions, and constants that were in scope because
+    # the moved code lived in the same file.
     source_mod = module_stem(source_path)
     same_parent = module_parent(source_path) == module_parent(dest_path)
 
-    for type_name in source_types:
-        if type_name in moved_item_names:
-            continue  # Type is being moved too, no import needed
-        # Check if the moved items reference this type
-        if re.search(r'\b' + re.escape(type_name) + r'\b', combined_source):
-            # Need to add an import for this type
+    for def_name in source_definitions:
+        if def_name in moved_item_names:
+            continue  # Item is being moved too, no import needed
+        # Check if the moved items reference this definition
+        if re.search(r'\b' + re.escape(def_name) + r'\b', combined_source):
+            # Need to add an import for this definition
             if same_parent:
-                import_line = f"use super::{source_mod}::{type_name};"
+                import_line = f"use super::{source_mod}::{def_name};"
             else:
                 # Different parent — use crate-level path
                 source_mod_path = file_to_module_path(source_path)
-                import_line = f"use crate::{source_mod_path}::{type_name};"
+                import_line = f"use crate::{source_mod_path}::{def_name};"
             # Check it's not already covered by existing use statements
-            already_covered = any(type_name in extract_use_names(u) for u in needed)
+            already_covered = any(def_name in extract_use_names(u) for u in needed)
             if not already_covered:
                 needed.append(import_line)
+
+    # Phase 3: Carry forward glob imports when moved code has unresolved references.
+    # When the source has `use foo::*;`, we can't statically resolve what symbols
+    # it provides. But if the moved code references identifiers that aren't covered
+    # by Phase 1 (explicit use statements) or Phase 2 (same-module definitions),
+    # the glob import is likely providing them.
+    glob_uses = [u for u in source_uses if u.rstrip(';').strip().endswith("::*")]
+    if glob_uses:
+        # Collect all names already covered by Phase 1 + Phase 2
+        covered_names = set()
+        for use_stmt in needed:
+            covered_names.update(extract_use_names(use_stmt))
+        covered_names.update(moved_item_names)
+        covered_names.update(source_definitions)
+
+        # Find identifiers in the moved code that look like they could be
+        # unresolved references (uppercase constants or PascalCase types
+        # are the most common glob-provided symbols)
+        all_idents = set(re.findall(r'\b([A-Z][A-Z_0-9]+|[A-Z][a-zA-Z0-9]+)\b', combined_source))
+        # Remove Rust keywords and known types
+        rust_builtins = {"Some", "None", "Ok", "Err", "Self", "Vec", "String",
+                         "Option", "Result", "Box", "Arc", "Rc", "HashMap",
+                         "HashSet", "Path", "PathBuf", "BTreeMap", "BTreeSet",
+                         "Cow", "Pin", "Future", "Iterator", "Display", "Debug",
+                         "Default", "Clone", "Copy", "Send", "Sync", "Sized",
+                         "From", "Into", "AsRef", "AsMut", "Deref", "Drop",
+                         "Fn", "FnMut", "FnOnce", "ToOwned", "ToString",
+                         "TRUE", "FALSE", "NULL"}
+        unresolved = all_idents - covered_names - rust_builtins
+
+        if unresolved:
+            for glob_use in glob_uses:
+                fixed = fix_import_path(glob_use, source_path, dest_path)
+                if fixed not in needed:
+                    needed.append(fixed)
 
     return {"needed_imports": needed, "warnings": warnings}
