@@ -222,41 +222,22 @@ pub fn run_fix_preflight(fix: &mut Fix, context: &PreflightContext<'_>, write: b
         ));
     }
 
+    // Append fix-level checks (required_methods, required_registrations) to all
+    // Safe-tier insertions that have preflight reports.
     for insertion in &mut fix.insertions {
-        if insertion.safety_tier != FixSafetyTier::SafeWithChecks {
+        if insertion.safety_tier == FixSafetyTier::PlanOnly {
             continue;
         }
 
         if let Some(report) = &mut insertion.preflight {
-            report.checks.extend(extra_checks.clone());
-            *report = finalize_report(report.checks.clone());
+            if !extra_checks.is_empty() {
+                report.checks.extend(extra_checks.clone());
+                *report = finalize_report(report.checks.clone());
+            }
         }
-
-        insertion.auto_apply = if !write {
-            true
-        } else {
-            insertion.preflight.as_ref().is_some_and(|report| {
-                matches!(
-                    report.status,
-                    PreflightStatus::Passed | PreflightStatus::NotApplicable
-                )
-            })
-        };
-
-        insertion.blocked_reason = if insertion.auto_apply {
-            None
-        } else {
-            Some(
-                insertion
-                    .preflight
-                    .as_ref()
-                    .and_then(blocked_reason_from_preflight)
-                    .unwrap_or_else(|| {
-                        "Blocked: requires preflight validation before auto-write".to_string()
-                    }),
-            )
-        };
     }
+    // Note: auto_apply is re-evaluated by the caller (apply_fix_policy)
+    // after this function returns — we only mutate preflight reports here.
 }
 
 pub fn run_new_file_preflight(

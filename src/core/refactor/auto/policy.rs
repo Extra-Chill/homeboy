@@ -22,6 +22,44 @@ fn finding_allowed(finding: &AuditFinding, policy: &FixPolicy) -> bool {
     included && !policy.exclude.contains(finding)
 }
 
+/// Determine if an insertion should be auto-applied.
+///
+/// Safe tier: auto-apply if preflight passes (or no preflight applicable).
+/// PlanOnly: never auto-apply.
+/// In dry-run mode (write=false): everything is "auto-apply" for preview purposes.
+fn should_auto_apply(
+    tier: FixSafetyTier,
+    preflight: Option<&PreflightReport>,
+    write: bool,
+) -> bool {
+    if !write {
+        return true;
+    }
+    match tier {
+        FixSafetyTier::Safe => preflight
+            .map(|report| {
+                matches!(
+                    report.status,
+                    PreflightStatus::Passed | PreflightStatus::NotApplicable
+                )
+            })
+            .unwrap_or(true), // No preflight report → auto-apply (simple fix)
+        FixSafetyTier::PlanOnly => false,
+    }
+}
+
+/// Determine the blocked reason for a non-auto-applied fix.
+fn blocked_reason(tier: FixSafetyTier, preflight: Option<&PreflightReport>) -> String {
+    match tier {
+        FixSafetyTier::Safe => preflight
+            .and_then(blocked_reason_from_preflight)
+            .unwrap_or_else(|| "Blocked by preflight validation".to_string()),
+        FixSafetyTier::PlanOnly => {
+            "Blocked: plan-only fix, not eligible for auto-write".to_string()
+        }
+    }
+}
+
 fn annotate_insertion_for_policy(
     file: &str,
     insertion: &mut Insertion,
@@ -34,38 +72,18 @@ fn annotate_insertion_for_policy(
     }
 
     insertion.preflight = preflight::run_insertion_preflight(file, insertion, context);
-
-    insertion.auto_apply = if !write {
-        true
-    } else {
-        match insertion.safety_tier {
-            FixSafetyTier::SafeAuto => true,
-            FixSafetyTier::SafeWithChecks => insertion.preflight.as_ref().is_some_and(|report| {
-                matches!(
-                    report.status,
-                    PreflightStatus::Passed | PreflightStatus::NotApplicable
-                )
-            }),
-            FixSafetyTier::PlanOnly => false,
-        }
-    };
-
+    insertion.auto_apply = should_auto_apply(
+        insertion.safety_tier,
+        insertion.preflight.as_ref(),
+        write,
+    );
     insertion.blocked_reason = if insertion.auto_apply {
         None
     } else {
-        Some(match insertion.safety_tier {
-            FixSafetyTier::SafeAuto => "Blocked by current write policy".to_string(),
-            FixSafetyTier::SafeWithChecks => insertion
-                .preflight
-                .as_ref()
-                .and_then(blocked_reason_from_preflight)
-                .unwrap_or_else(|| {
-                    "Blocked: requires preflight validation before auto-write".to_string()
-                }),
-            FixSafetyTier::PlanOnly => {
-                "Blocked: plan-only fix, not eligible for auto-write".to_string()
-            }
-        })
+        Some(blocked_reason(
+            insertion.safety_tier,
+            insertion.preflight.as_ref(),
+        ))
     };
 
     true
@@ -82,38 +100,18 @@ fn annotate_new_file_for_policy(
     }
 
     new_file.preflight = preflight::run_new_file_preflight(new_file, context);
-
-    new_file.auto_apply = if !write {
-        true
-    } else {
-        match new_file.safety_tier {
-            FixSafetyTier::SafeAuto => true,
-            FixSafetyTier::SafeWithChecks => new_file.preflight.as_ref().is_some_and(|report| {
-                matches!(
-                    report.status,
-                    PreflightStatus::Passed | PreflightStatus::NotApplicable
-                )
-            }),
-            FixSafetyTier::PlanOnly => false,
-        }
-    };
-
+    new_file.auto_apply = should_auto_apply(
+        new_file.safety_tier,
+        new_file.preflight.as_ref(),
+        write,
+    );
     new_file.blocked_reason = if new_file.auto_apply {
         None
     } else {
-        Some(match new_file.safety_tier {
-            FixSafetyTier::SafeAuto => "Blocked by current write policy".to_string(),
-            FixSafetyTier::SafeWithChecks => new_file
-                .preflight
-                .as_ref()
-                .and_then(blocked_reason_from_preflight)
-                .unwrap_or_else(|| {
-                    "Blocked: requires preflight validation before auto-write".to_string()
-                }),
-            FixSafetyTier::PlanOnly => {
-                "Blocked: plan-only fix, not eligible for auto-write".to_string()
-            }
-        })
+        Some(blocked_reason(
+            new_file.safety_tier,
+            new_file.preflight.as_ref(),
+        ))
     };
 
     true
@@ -137,41 +135,20 @@ pub fn apply_fix_policy(
 
             preflight::run_fix_preflight(&mut fix, context, write);
 
+            // Re-evaluate auto_apply after fix-level preflight
             for insertion in &mut fix.insertions {
-                insertion.auto_apply = if !write {
-                    true
-                } else {
-                    match insertion.safety_tier {
-                        FixSafetyTier::SafeAuto => true,
-                        FixSafetyTier::SafeWithChecks => {
-                            insertion.preflight.as_ref().is_some_and(|report| {
-                                matches!(
-                                    report.status,
-                                    PreflightStatus::Passed | PreflightStatus::NotApplicable
-                                )
-                            })
-                        }
-                        FixSafetyTier::PlanOnly => false,
-                    }
-                };
-
+                insertion.auto_apply = should_auto_apply(
+                    insertion.safety_tier,
+                    insertion.preflight.as_ref(),
+                    write,
+                );
                 insertion.blocked_reason = if insertion.auto_apply {
                     None
                 } else {
-                    Some(match insertion.safety_tier {
-                        FixSafetyTier::SafeAuto => "Blocked by current write policy".to_string(),
-                        FixSafetyTier::SafeWithChecks => insertion
-                            .preflight
-                            .as_ref()
-                            .and_then(blocked_reason_from_preflight)
-                            .unwrap_or_else(|| {
-                                "Blocked: requires preflight validation before auto-write"
-                                    .to_string()
-                            }),
-                        FixSafetyTier::PlanOnly => {
-                            "Blocked: plan-only fix, not eligible for auto-write".to_string()
-                        }
-                    })
+                    Some(blocked_reason(
+                        insertion.safety_tier,
+                        insertion.preflight.as_ref(),
+                    ))
                 };
 
                 summary.visible_insertions += 1;

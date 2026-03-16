@@ -138,10 +138,8 @@ pub struct AuditFixPolicySummary {
 pub struct AuditFixability {
     /// Total findings that have any kind of automated fix.
     pub fixable_count: usize,
-    /// Findings with `SafeAuto` tier — can be applied without checks.
-    pub auto_fixable_count: usize,
-    /// Findings with `SafeWithChecks` tier — require preflight validation.
-    pub guarded_fixable_count: usize,
+    /// Findings with `Safe` tier — can be auto-applied (preflight runs when applicable).
+    pub safe_count: usize,
     /// Findings with `PlanOnly` tier — preview only, needs manual review.
     pub plan_only_count: usize,
     /// Breakdown by finding kind.
@@ -153,8 +151,7 @@ pub struct AuditFixability {
 #[derive(Debug, Serialize)]
 pub struct FixabilityKindBreakdown {
     pub total: usize,
-    pub auto: usize,
-    pub guarded: usize,
+    pub safe: usize,
     pub plan_only: usize,
 }
 
@@ -224,21 +221,21 @@ pub fn build_fix_hints(written: bool, summary: &PolicySummary) -> Vec<String> {
 
     if !written && summary.has_blocked_items() {
         hints.push(format!(
-            "{} fix(es) are visible but would be blocked on --write because they are safe_with_checks or plan_only.",
+            "{} fix(es) are visible but would be blocked on --write (preflight failed or plan-only).",
             summary.blocked_insertions + summary.blocked_new_files
         ));
     }
 
     if summary.preflight_failures > 0 {
         hints.push(format!(
-            "{} fix(es) failed deterministic preflight checks and will stay preview-only until their validator passes.",
+            "{} fix(es) failed preflight checks and will stay preview-only until their validator passes.",
             summary.preflight_failures
         ));
     }
 
     if written && summary.has_blocked_items() {
         hints.push(format!(
-            "Applied only safe_auto fixes. {} fix(es) were left as preview because they need checks or manual review.",
+            "Applied safe fixes. {} fix(es) were left as preview (preflight failed or plan-only).",
             summary.blocked_insertions + summary.blocked_new_files
         ));
     }
@@ -273,8 +270,7 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
     crate::refactor::auto::apply_fix_policy(&mut fix_result, false, &policy, &context);
 
     // Count by safety tier
-    let mut auto_fixable = 0usize;
-    let mut guarded = 0usize;
+    let mut safe_count = 0usize;
     let mut plan_only = 0usize;
     let mut by_kind: BTreeMap<String, FixabilityKindBreakdown> = BTreeMap::new();
 
@@ -283,20 +279,15 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
             let kind_key = format!("{:?}", insertion.finding).to_lowercase();
             let entry = by_kind.entry(kind_key).or_insert(FixabilityKindBreakdown {
                 total: 0,
-                auto: 0,
-                guarded: 0,
+                safe: 0,
                 plan_only: 0,
             });
             entry.total += 1;
 
             match insertion.safety_tier {
-                FixSafetyTier::SafeAuto => {
-                    auto_fixable += 1;
-                    entry.auto += 1;
-                }
-                FixSafetyTier::SafeWithChecks => {
-                    guarded += 1;
-                    entry.guarded += 1;
+                FixSafetyTier::Safe => {
+                    safe_count += 1;
+                    entry.safe += 1;
                 }
                 FixSafetyTier::PlanOnly => {
                     plan_only += 1;
@@ -310,20 +301,15 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
         let kind_key = format!("{:?}", new_file.finding).to_lowercase();
         let entry = by_kind.entry(kind_key).or_insert(FixabilityKindBreakdown {
             total: 0,
-            auto: 0,
-            guarded: 0,
+            safe: 0,
             plan_only: 0,
         });
         entry.total += 1;
 
         match new_file.safety_tier {
-            FixSafetyTier::SafeAuto => {
-                auto_fixable += 1;
-                entry.auto += 1;
-            }
-            FixSafetyTier::SafeWithChecks => {
-                guarded += 1;
-                entry.guarded += 1;
+            FixSafetyTier::Safe => {
+                safe_count += 1;
+                entry.safe += 1;
             }
             FixSafetyTier::PlanOnly => {
                 plan_only += 1;
@@ -332,12 +318,11 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
         }
     }
 
-    let fixable_count = auto_fixable + guarded + plan_only;
+    let fixable_count = safe_count + plan_only;
 
     Some(AuditFixability {
         fixable_count,
-        auto_fixable_count: auto_fixable,
-        guarded_fixable_count: guarded,
+        safe_count,
         plan_only_count: plan_only,
         by_kind,
     })

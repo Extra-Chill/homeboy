@@ -119,8 +119,7 @@ Runs the project's test suite. Supports test drift detection — when source sym
 
 Structural improvements with safety tiers:
 
-- **SafeAuto** — import additions, doc reference updates (always auto-applied)
-- **SafeWithChecks** — registration stubs, namespace fixes (auto-applied after preflight validation)
+- **Safe** — deterministic fixes auto-applied with preflight validation (imports, registrations, namespace fixes, visibility changes, doc updates)
 - **PlanOnly** — method stubs, function removals (human review required)
 
 ## The Autofix Loop

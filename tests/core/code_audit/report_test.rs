@@ -114,7 +114,7 @@ fn test_build_fix_hints_written_with_blocked() {
     };
     let hints = build_fix_hints(true, &policy);
     assert_eq!(hints.len(), 1);
-    assert!(hints[0].contains("Applied only safe_auto"));
+    assert!(hints[0].contains("Applied safe fixes"));
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn test_build_fix_hints_preflight_failures() {
     };
     let hints = build_fix_hints(false, &policy);
     assert_eq!(hints.len(), 1);
-    assert!(hints[0].contains("3 fix(es) failed deterministic preflight"));
+    assert!(hints[0].contains("3 fix(es) failed preflight"));
 }
 
 #[test]
@@ -219,10 +219,10 @@ fn test_compute_fixability_counts_fixes_from_real_audit() {
     // Should have at least some fixable findings (the missing method outlier)
     if let Some(fix) = fixability {
         assert!(fix.fixable_count > 0, "expected at least one fixable finding");
-        // auto_fixable + guarded + plan_only should equal fixable_count
+        // safe + plan_only should equal fixable_count
         assert_eq!(
             fix.fixable_count,
-            fix.auto_fixable_count + fix.guarded_fixable_count + fix.plan_only_count
+            fix.safe_count + fix.plan_only_count
         );
         // by_kind should not be empty
         assert!(!fix.by_kind.is_empty(), "expected per-kind breakdown");
