@@ -11,32 +11,47 @@ pub(crate) struct MethodSignature {
     /// The language this was extracted from.
     #[allow(dead_code)]
     pub(crate) language: Language,
+    /// Full method body (between braces), extracted from the conforming file.
+    /// None if the body couldn't be extracted.
+    pub(crate) body: Option<String>,
 }
 
 pub(crate) fn generate_method_stub(sig: &MethodSignature) -> String {
-    let body = stub_body(&sig.name, &sig.language);
+    // Use the real body from a conforming peer when available.
+    // Only fall back to a placeholder when no body could be extracted.
+    let body = if let Some(ref real_body) = sig.body {
+        real_body.clone()
+    } else {
+        fallback_body(&sig.name, &sig.language)
+    };
+
+    // Strip trailing `{` from signature — we add our own.
+    let clean_sig = sig.signature.trim_end().trim_end_matches('{').trim_end();
+
     match sig.language {
-        Language::Php => format!("\n    {} {{\n{}\n    }}\n", sig.signature, body),
-        Language::Rust => format!("\n    {} {{\n{}\n    }}\n", sig.signature, body),
+        Language::Php => format!("\n    {} {{\n{}\n    }}\n", clean_sig, body),
+        Language::Rust => format!("\n    {} {{\n{}\n    }}\n", clean_sig, body),
         Language::JavaScript | Language::TypeScript => {
-            format!("\n    {} {{\n{}\n    }}\n", sig.signature, body)
+            format!("\n    {} {{\n{}\n    }}\n", clean_sig, body)
         }
         Language::Unknown => String::new(),
     }
 }
 
-fn stub_body(method_name: &str, language: &Language) -> String {
+/// Last-resort fallback body when no conforming peer could provide one.
+/// Produces a clear marker that the method needs implementation.
+fn fallback_body(method_name: &str, language: &Language) -> String {
     match language {
         Language::Php => {
             format!(
-                "        throw new \\RuntimeException('Not implemented: {}');",
+                "        // TODO: Implement {} — see conforming peers for reference.",
                 method_name
             )
         }
         Language::Rust => format!("        todo!(\"{}\")", method_name),
         Language::JavaScript | Language::TypeScript => {
             format!(
-                "        throw new Error('Not implemented: {}');",
+                "        // TODO: Implement {} — see conforming peers for reference.",
                 method_name
             )
         }
@@ -106,6 +121,7 @@ pub(crate) fn generate_fallback_signature(
         name: method_name.to_string(),
         signature,
         language: language.clone(),
+        body: None,
     }
 }
 
@@ -175,13 +191,55 @@ pub(crate) fn extract_signatures_from_items(
                 .filter(|line| !line.is_empty())
                 .unwrap_or_else(|| name.clone());
 
+            let body = extract_method_body(&lines, line_idx);
+
             Some(MethodSignature {
                 name,
                 signature,
                 language: language.clone(),
+                body,
             })
         })
         .collect()
+}
+
+/// Extract the body of a method from source lines, starting from the
+/// declaration line. Finds the opening `{` and walks to the matching `}`,
+/// returning the lines between them (the body content).
+fn extract_method_body(lines: &[&str], start_line: usize) -> Option<String> {
+    let mut brace_depth = 0i32;
+    let mut found_open = false;
+    let mut body_start_line = start_line + 1;
+
+    for i in start_line..lines.len() {
+        let line = lines[i];
+        for ch in line.chars() {
+            if ch == '{' {
+                if !found_open {
+                    found_open = true;
+                    // Body starts on the NEXT line after the opening brace.
+                    body_start_line = i + 1;
+                }
+                brace_depth += 1;
+            } else if ch == '}' {
+                brace_depth -= 1;
+                if found_open && brace_depth == 0 {
+                    // Collect body lines (between opening { line and closing } line).
+                    if body_start_line > i {
+                        return None; // empty body: `{ }`
+                    }
+                    let body_lines = &lines[body_start_line..i];
+                    let body = body_lines.join("\n");
+                    if body.trim().is_empty() {
+                        return None;
+                    }
+                    return Some(body);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 pub(crate) fn extract_signatures(content: &str, language: &Language) -> Vec<MethodSignature> {
