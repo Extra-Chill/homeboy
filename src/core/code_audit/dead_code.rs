@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use super::walker::is_test_path;
 
 /// Analyze fingerprints for dead code patterns.
 ///
@@ -81,6 +82,9 @@ pub(crate) fn analyze_dead_code(
 
         // Check 3: Unreferenced exports
         // A public function that no other file imports or calls.
+        // Skip test files — test methods are invoked by the test runner via
+        // reflection/convention, not by direct calls from other source files.
+        if !is_test_path(&fp.relative_path) {
         for export in &fp.public_api {
             // Check if any OTHER file (owned or reference) references this export.
             let referenced_elsewhere = owned.iter().chain(reference.iter()).any(|other| {
@@ -125,6 +129,7 @@ pub(crate) fn analyze_dead_code(
                 });
             }
         }
+        } // end if !is_test_path
 
         // Check 4: Orphaned internals
         // Private functions that are never called within the same file.
