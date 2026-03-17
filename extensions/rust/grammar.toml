@@ -165,6 +165,8 @@ skip_strings = true
 # ===========================================================================
 
 [contract]
+# Return type separator in function declarations (Rust: "->")
+return_type_separator = "->"
 
 # Side effect detection patterns. Keys are effect kinds from engine::contract::Effect.
 # Each effect kind maps to a list of regex patterns matched against function body lines.
