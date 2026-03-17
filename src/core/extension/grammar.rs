@@ -108,6 +108,29 @@ pub struct ContractGrammar {
     /// This is what makes test output language-specific without any language code in core.
     #[serde(default)]
     pub test_templates: HashMap<String, String>,
+
+    /// Type-to-default-value mappings for test input construction.
+    /// Keys are regex patterns matched against parameter types.
+    /// Values are code expressions that produce a valid zero/default value.
+    ///
+    /// Example (Rust): `"&str" → "\"\"", "&Path" → "Path::new(\"\")"`.
+    ///
+    /// Patterns are tried in order; first match wins. The fallback for
+    /// unmatched types is `Default::default()` (Rust) or language equivalent.
+    #[serde(default)]
+    pub type_defaults: Vec<TypeDefault>,
+}
+
+/// A single type-to-default-value mapping for test input construction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeDefault {
+    /// Regex pattern to match against the parameter type string.
+    pub pattern: String,
+    /// Code expression that produces a valid default value for matched types.
+    pub value: String,
+    /// Optional extra `use` imports required by this default value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<String>,
 }
 
 /// Language identification metadata.

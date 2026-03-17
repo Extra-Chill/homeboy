@@ -623,6 +623,7 @@ mod tests {
                 r"\.unwrap\(\)".to_string(),
             ],
             test_templates: HashMap::new(),
+            type_defaults: vec![],
         }
     }
 
