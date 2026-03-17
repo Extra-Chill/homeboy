@@ -45,6 +45,8 @@ pub struct ProjectComponentAttachment {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectComponentOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub build_artifact: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_command: Option<String>,

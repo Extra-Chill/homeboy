@@ -10,6 +10,9 @@ pub fn apply_component_overrides(
 
     let mut merged = component.clone();
 
+    if let Some(remote_path) = &overrides.remote_path {
+        merged.remote_path = remote_path.clone();
+    }
     if let Some(build_artifact) = &overrides.build_artifact {
         merged.build_artifact = Some(build_artifact.clone());
     }
