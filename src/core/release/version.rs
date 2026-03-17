@@ -178,6 +178,7 @@ fn pre_validate_version_targets(
             pattern: version_pattern,
             full_path,
             match_count: versions.len(),
+            warning: None,
         });
     }
 

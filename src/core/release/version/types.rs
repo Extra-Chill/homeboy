@@ -5,12 +5,14 @@ use serde::Serialize;
 
 /// Information about a version target after reading
 #[derive(Debug, Clone, Serialize)]
-
 pub struct VersionTargetInfo {
     pub file: String,
     pub pattern: String,
     pub full_path: String,
     pub match_count: usize,
+    /// Warning message when target exists but didn't match or had issues
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Result of reading a component's version

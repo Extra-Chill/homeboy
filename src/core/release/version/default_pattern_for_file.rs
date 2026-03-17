@@ -139,6 +139,7 @@ pub fn read_component_version(component: &Component) -> Result<ComponentVersionI
         pattern: primary_pattern,
         full_path: primary_full_path,
         match_count: versions.len(),
+        warning: None,
     }];
 
     // Add info for all remaining targets
@@ -155,11 +156,27 @@ pub fn read_component_version(component: &Component) -> Result<ComponentVersionI
             )
         })?;
 
+        let warning = if target_versions.is_empty() {
+            log_status!(
+                "warning",
+                "Version target {}: pattern '{}' did not match any content",
+                target.file,
+                pattern
+            );
+            Some(format!(
+                "Pattern did not match any content in {}",
+                target.file
+            ))
+        } else {
+            None
+        };
+
         target_infos.push(VersionTargetInfo {
             file: target.file.clone(),
             pattern,
             full_path,
             match_count: target_versions.len(),
+            warning,
         });
     }
 

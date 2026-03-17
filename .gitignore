@@ -19,3 +19,4 @@ dist-manifest.json
 .release-last-failed
 
 # Keep Cargo.lock for reproducible builds
+.phpunit.result.cache
