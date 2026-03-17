@@ -249,7 +249,6 @@ pub mod api;
 pub mod audit;
 pub mod auth;
 pub mod build;
-pub mod validate;
 pub mod changelog;
 pub mod changes;
 pub mod cli;
@@ -276,6 +275,7 @@ pub mod transfer;
 pub mod undo;
 pub mod upgrade;
 pub mod utils;
+pub mod validate;
 pub mod version;
 
 pub(crate) fn run_markdown(
