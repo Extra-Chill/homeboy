@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.7.0] - 2026-03-17
+
+### Added
+- include finding categories in autofix PR body and commit message
+
+### Fixed
+- baseline update bypasses autofix commit cap (#815)
+
 ## [1.6.1] - 2026-03-15
 
 ### Fixed
