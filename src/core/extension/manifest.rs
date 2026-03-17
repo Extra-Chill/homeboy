@@ -231,6 +231,13 @@ pub struct ScriptsConfig {
     /// - PHP: `vendor/bin/phpcbf`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// Script that extracts function contracts from source files.
+    /// Receives `{file, content}` JSON on stdin, outputs `{file, contracts: [...]}` JSON on stdout.
+    /// Each contract describes a function's signature, control flow branches, effects, and calls.
+    ///
+    /// Used by the test generator, doc generator, and refactor safety checker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<String>,
 }
 
 /// Unified extension manifest decomposed into capability groups.
@@ -504,6 +511,11 @@ impl ExtensionManifest {
     /// Get the format script path (relative to extension dir), if configured.
     pub fn format_script(&self) -> Option<&str> {
         self.scripts.as_ref().and_then(|s| s.format.as_deref())
+    }
+
+    /// Get the contract script path (relative to extension dir), if configured.
+    pub fn contract_script(&self) -> Option<&str> {
+        self.scripts.as_ref().and_then(|s| s.contract.as_deref())
     }
 }
 

@@ -11,6 +11,7 @@ pub mod baseline;
 pub mod cli_tool;
 pub mod codebase_scan;
 pub mod command;
+pub mod contract;
 pub mod execution_context;
 pub mod executor;
 pub mod format_write;
