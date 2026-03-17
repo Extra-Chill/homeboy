@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.80.0] - 2026-03-17
+
+### Added
+- refactor transform — case transforms, multi-line matching, docs
+- add `homeboy version bump` as alias for `homeboy release`
+- auto-discover misplaced tests + FileMove autofix
+- orphaned test fixer tries rename before deletion
+- test_templates in ContractGrammar + end-to-end generate_tests_for_file
+- test plan generator — contract to test cases, template-rendered
+- FunctionContract — language-agnostic code comprehension primitive
+- run project formatter after refactor --write applies code
+
+### Fixed
+- version show warns on non-matching targets instead of silently dropping
+- auto-resolve remote_path at component resolution time
+- post-release hooks run even with --skip-publish
+
 ## [0.79.0] - 2026-03-17
 
 ### Added
