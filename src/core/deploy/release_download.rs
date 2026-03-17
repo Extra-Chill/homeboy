@@ -24,7 +24,7 @@ pub struct GitHubRepo {
 
 impl GitHubRepo {
     /// Construct a release artifact download URL.
-    pub fn release_artifact_url(&self, tag: &str, artifact_name: &str) -> String {
+    pub(crate) fn release_artifact_url(&self, tag: &str, artifact_name: &str) -> String {
         format!(
             "https://github.com/{}/{}/releases/download/{}/{}",
             self.owner, self.repo, tag, artifact_name

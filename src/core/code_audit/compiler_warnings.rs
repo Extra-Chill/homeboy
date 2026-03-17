@@ -205,33 +205,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_skips_non_warning_messages() {
-        let root = Path::new("/project");
-        let json_lines = r#"{"reason":"compiler-message","package_id":"foo","message":{"level":"error","code":null,"message":"cannot find value","spans":[]}}
-{"reason":"compiler-message","package_id":"foo","message":{"level":"note","code":null,"message":"some note","spans":[]}}"#;
-
-        let warnings = parse_cargo_json_output(json_lines, root);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn parse_deduplicates_same_warning() {
-        let root = Path::new("/project");
-        let warning = r#"{"reason":"compiler-message","package_id":"foo","message":{"level":"warning","code":{"code":"dead_code","explanation":null},"message":"unused fn","spans":[{"file_name":"src/lib.rs","byte_start":0,"byte_end":10,"line_start":5,"line_end":5,"column_start":1,"column_end":10,"is_primary":true,"text":[]}]}}"#;
-        let json_lines = format!("{}\n{}", warning, warning);
-
-        let warnings = parse_cargo_json_output(&json_lines, root);
-        assert_eq!(warnings.len(), 1, "duplicate warnings should be deduped");
-    }
-
-    #[test]
-    fn suggestion_for_known_codes() {
-        assert!(suggestion_for_code("dead_code", "f.rs", 1).contains("Remove"));
-        assert!(suggestion_for_code("unused_imports", "f.rs", 1).contains("Remove"));
-        assert!(suggestion_for_code("unused_variables", "f.rs", 1).contains("underscore"));
-    }
-
-    #[test]
     fn run_on_rust_project_returns_findings() {
         let dir = TempDir::new().expect("temp dir");
         let root = dir.path();

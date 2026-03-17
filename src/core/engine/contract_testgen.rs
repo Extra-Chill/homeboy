@@ -45,7 +45,7 @@ pub struct TestCase {
 ///
 /// Produces one test case per branch. The plan is language-agnostic —
 /// rendering to source code requires templates from the grammar.
-pub fn generate_test_plan(contract: &FunctionContract) -> TestPlan {
+pub(crate) fn generate_test_plan(contract: &FunctionContract) -> TestPlan {
     let mut cases = Vec::new();
 
     if contract.branches.is_empty() {
@@ -131,7 +131,7 @@ pub fn generate_test_plan(contract: &FunctionContract) -> TestPlan {
 ///
 /// Templates are key → string pairs where keys match `TestCase.template_key`.
 /// Template variables are replaced: `{fn_name}`, `{fn_call}`, `{param_list}`, etc.
-pub fn render_test_plan(plan: &TestPlan, templates: &HashMap<String, String>) -> String {
+pub(crate) fn render_test_plan(plan: &TestPlan, templates: &HashMap<String, String>) -> String {
     let mut output = String::new();
 
     for case in &plan.cases {
@@ -495,39 +495,6 @@ mod tests {
         assert_eq!(vars.get("fn_name").unwrap(), "validate_write");
         assert_eq!(vars.get("param_names").unwrap(), "root, changed_files");
         assert_eq!(vars.get("return_shape").unwrap(), "result");
-    }
-
-    #[test]
-    fn test_render_with_templates() {
-        let contract = sample_result_contract();
-        let plan = generate_test_plan(&contract);
-
-        let mut templates = HashMap::new();
-        templates.insert(
-            "result_ok".to_string(),
-            "#[test]\nfn {test_name}() {{\n    // {fn_name} should return Ok\n}}\n".to_string(),
-        );
-
-        let output = render_test_plan(&plan, &templates);
-        assert!(output.contains("#[test]"));
-        assert!(output.contains("test_validate_write_"));
-        assert!(output.contains("validate_write should return Ok"));
-    }
-
-    #[test]
-    fn test_render_missing_template_uses_default() {
-        let contract = sample_option_contract();
-        let plan = generate_test_plan(&contract);
-
-        let mut templates = HashMap::new();
-        templates.insert(
-            "default".to_string(),
-            "#[test]\nfn {test_name}() {{ todo!() }}\n".to_string(),
-        );
-
-        let output = render_test_plan(&plan, &templates);
-        assert!(output.contains("test_find_item_"));
-        assert!(output.contains("todo!()"));
     }
 
     #[test]

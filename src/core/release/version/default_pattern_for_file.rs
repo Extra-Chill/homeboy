@@ -205,7 +205,7 @@ pub fn read_version(component_id: Option<&str>) -> Result<ComponentVersionInfo> 
     read_component_version(&component)
 }
 
-pub fn read_component_snapshot(component: &Component) -> Result<ComponentVersionSnapshot> {
+pub(crate) fn read_component_snapshot(component: &Component) -> Result<ComponentVersionSnapshot> {
     let info = read_component_version(component)?;
     Ok(ComponentVersionSnapshot {
         component_id: component.id.clone(),
@@ -214,7 +214,7 @@ pub fn read_component_snapshot(component: &Component) -> Result<ComponentVersion
     })
 }
 
-pub fn build_init_warnings(component: &Component) -> Vec<String> {
+pub(crate) fn build_init_warnings(component: &Component) -> Vec<String> {
     let mut warnings = Vec::new();
 
     if let Some(targets) = &component.version_targets {
@@ -247,7 +247,7 @@ pub fn build_init_warnings(component: &Component) -> Vec<String> {
 
 /// Detect additional version patterns that exist in PHP files but aren't configured.
 /// Returns patterns that are found in the file but NOT in the configured version targets.
-pub fn detect_unconfigured_patterns(component: &Component) -> Vec<UnconfiguredPattern> {
+pub(crate) fn detect_unconfigured_patterns(component: &Component) -> Vec<UnconfiguredPattern> {
     let mut unconfigured = Vec::new();
     let base_path = &component.local_path;
 

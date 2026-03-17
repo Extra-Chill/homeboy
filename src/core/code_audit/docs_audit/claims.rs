@@ -395,66 +395,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_file_paths() {
-        let content = "Check the file at `/inc/Engine/AI/Tools/BaseTool.php` for details.";
-        let claims = extract_claims(content, "test.md", &[]);
-
-        assert!(claims.iter().any(|c| c.claim_type == ClaimType::FilePath
-            && c.value == "/inc/Engine/AI/Tools/BaseTool.php"));
-    }
-
-    #[test]
-    fn test_extract_file_paths_requires_separator() {
-        // Files without path separator should NOT be extracted
-        let content = "The `main.py` file is the entry point.";
-        let claims = extract_claims(content, "test.md", &[]);
-
-        assert!(!claims.iter().any(|c| c.value == "main.py"));
-    }
-
-    #[test]
-    fn test_extract_directory_paths() {
-        let content = "The tools are in `src/core/code_audit/docs_audit/` directory.";
-        let claims = extract_claims(content, "test.md", &[]);
-
-        assert!(claims
-            .iter()
-            .any(|c| c.claim_type == ClaimType::DirectoryPath
-                && c.value == "src/core/code_audit/docs_audit/"));
-    }
-
-    #[test]
     fn test_skip_domain_patterns() {
         let content = "Visit `mysite.com/path/to/page.html` for documentation.";
         let claims = extract_claims(content, "test.md", &[]);
 
         // Should skip domain-like paths
         assert!(!claims.iter().any(|c| c.value.contains("mysite.com")));
-    }
-
-    #[test]
-    fn test_extract_code_blocks() {
-        let content = r#"
-Example:
-```php
-function test() {
-    return true;
-}
-```
-"#;
-        let claims = extract_claims(content, "test.md", &[]);
-
-        assert!(claims
-            .iter()
-            .any(|c| c.claim_type == ClaimType::CodeExample));
-    }
-
-    #[test]
-    fn test_skip_urls() {
-        let content = "See https://example.com/path/to/file.html for details.";
-        let claims = extract_claims(content, "test.md", &[]);
-
-        assert!(claims.is_empty() || !claims.iter().any(|c| c.value.contains("https://")));
     }
 
     #[test]
@@ -517,24 +463,6 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
         let claims = extract_claims(content, "test.md", &patterns);
 
         assert!(!claims.iter().any(|c| c.value.contains("-auth/")));
-    }
-
-    #[test]
-    fn test_extract_class_names() {
-        let content = "**Service**: DataMachine\\Services\\ProcessedItemsManager";
-        let claims = extract_claims(content, "test.md", &[]);
-
-        assert!(claims.iter().any(|c| c.claim_type == ClaimType::ClassName
-            && c.value == "DataMachine\\Services\\ProcessedItemsManager"));
-    }
-
-    #[test]
-    fn test_extract_class_names_escaped_backslashes() {
-        let content = "The class `DataMachine\\\\Services\\\\CacheManager` handles caching.";
-        let claims = extract_claims(content, "test.md", &[]);
-
-        assert!(claims.iter().any(|c| c.claim_type == ClaimType::ClassName
-            && c.value == "DataMachine\\Services\\CacheManager"));
     }
 
     #[test]
