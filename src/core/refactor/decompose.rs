@@ -721,7 +721,7 @@ fn is_stop_word(word: &str) -> bool {
 
 fn group_items(file: &str, items: &[ParsedItem], content: &str) -> Vec<DecomposeGroup> {
     let source = PathBuf::from(file);
-    let stem = source
+    let raw_stem = source
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("module")
@@ -730,6 +730,17 @@ fn group_items(file: &str, items: &[ParsedItem], content: &str) -> Vec<Decompose
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
+
+    // When the source file is mod.rs, submodules go in the same directory
+    // (they're siblings of mod.rs, not children of a "mod/" subdirectory).
+    // e.g., src/core/code_audit/mod.rs → src/core/code_audit/types.rs
+    //   NOT src/core/code_audit/mod/types.rs
+    let (stem, effective_base) = if raw_stem == "mod" {
+        // mod.rs: use parent dir as the target directory, no extra nesting
+        (String::new(), base_dir.clone())
+    } else {
+        (raw_stem, base_dir.clone())
+    };
 
     // Phase 1: Separate by kind
     let mut type_items: Vec<&ParsedItem> = Vec::new();
@@ -909,10 +920,17 @@ fn group_items(file: &str, items: &[ParsedItem], content: &str) -> Vec<Decompose
         .map(|(group, names)| {
             let safe_name = sanitize_module_name(&group);
             DecomposeGroup {
-                suggested_target: if base_dir.is_empty() {
-                    format!("{}/{safe_name}.{ext}", stem)
+                suggested_target: if stem.is_empty() {
+                    // mod.rs: submodules go in the same directory
+                    if effective_base.is_empty() {
+                        format!("{safe_name}.{ext}")
+                    } else {
+                        format!("{effective_base}/{safe_name}.{ext}")
+                    }
+                } else if effective_base.is_empty() {
+                    format!("{stem}/{safe_name}.{ext}")
                 } else {
-                    format!("{}/{}/{safe_name}.{ext}", base_dir, stem)
+                    format!("{effective_base}/{stem}/{safe_name}.{ext}")
                 },
                 name: group,
                 item_names: names,
@@ -1630,5 +1648,54 @@ fn parse_hunk() {}
             "parse_* pair should cluster together"
         );
         assert!(parse_cluster.unwrap().1.contains(&"parse_body"));
+    }
+
+    #[test]
+    fn group_items_mod_rs_uses_parent_dir_not_mod_subdir() {
+        // When source is mod.rs, submodules should go in the same directory,
+        // not in a "mod/" subdirectory. This is how Rust module resolution works.
+        let items = vec![
+            item("foo", "function"),
+            item("bar", "function"),
+            item("baz", "function"),
+        ];
+
+        let groups = group_items("src/core/code_audit/mod.rs", &items, "");
+        for g in &groups {
+            assert!(
+                g.suggested_target.starts_with("src/core/code_audit/"),
+                "Target should be in parent dir, not mod/ subdir: {}",
+                g.suggested_target
+            );
+            assert!(
+                !g.suggested_target.contains("/mod/"),
+                "Target must NOT contain /mod/ directory: {}",
+                g.suggested_target
+            );
+            assert!(
+                g.suggested_target.ends_with(".rs"),
+                "Should have .rs extension: {}",
+                g.suggested_target
+            );
+        }
+    }
+
+    #[test]
+    fn group_items_regular_file_uses_stem_subdir() {
+        // Regular files (not mod.rs) should use the stem as a subdirectory
+        let items = vec![
+            item("foo", "function"),
+            item("bar", "function"),
+            item("baz", "function"),
+        ];
+
+        let groups = group_items("src/core/operations.rs", &items, "");
+        for g in &groups {
+            assert!(
+                g.suggested_target.starts_with("src/core/operations/"),
+                "Regular file should use stem as subdir: {}",
+                g.suggested_target
+            );
+        }
     }
 }
