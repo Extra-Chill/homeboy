@@ -280,6 +280,62 @@ fn slugify(s: &str) -> String {
         .collect()
 }
 
+// ── End-to-end API ──
+
+/// Generate test source code for all functions in a source file.
+///
+/// This is the full pipeline: grammar → contracts → test plans → rendered source.
+/// Returns `None` if the grammar has no contract or test_templates section.
+pub fn generate_tests_for_file(
+    content: &str,
+    file_path: &str,
+    grammar: &crate::extension::grammar::Grammar,
+) -> Option<String> {
+    let contract_grammar = grammar.contract.as_ref()?;
+
+    // Must have test templates to render
+    if contract_grammar.test_templates.is_empty() {
+        return None;
+    }
+
+    // Extract contracts
+    let contracts =
+        super::contract_extract::extract_contracts_from_grammar(content, file_path, grammar)?;
+
+    if contracts.is_empty() {
+        return None;
+    }
+
+    // Generate and render test plans
+    let mut output = String::new();
+
+    for contract in &contracts {
+        // Skip test functions, private functions, and trivial functions
+        if contract.name.starts_with("test_") {
+            continue;
+        }
+        if !contract.signature.is_public {
+            continue;
+        }
+
+        let plan = generate_test_plan(contract);
+        if plan.cases.is_empty() {
+            continue;
+        }
+
+        let rendered = render_test_plan(&plan, &contract_grammar.test_templates);
+        if !rendered.trim().is_empty() {
+            output.push_str(&rendered);
+        }
+    }
+
+    if output.trim().is_empty() {
+        None
+    } else {
+        Some(output)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

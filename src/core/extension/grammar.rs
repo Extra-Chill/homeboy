@@ -100,6 +100,14 @@ pub struct ContractGrammar {
     /// Patterns for detecting panic/abort/unreachable paths.
     #[serde(default)]
     pub panic_patterns: Vec<String>,
+
+    /// Test code templates keyed by template name (e.g., "result_ok", "option_none").
+    /// Templates contain variables like `{fn_name}`, `{param_names}`, `{test_name}`,
+    /// `{condition}`, etc. that are replaced by the test plan renderer.
+    ///
+    /// This is what makes test output language-specific without any language code in core.
+    #[serde(default)]
+    pub test_templates: HashMap<String, String>,
 }
 
 /// Language identification metadata.

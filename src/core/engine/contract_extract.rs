@@ -624,6 +624,7 @@ mod tests {
                 r"unreachable!\s*\(".to_string(),
                 r"\.unwrap\(\)".to_string(),
             ],
+            test_templates: HashMap::new(),
         }
     }
 
