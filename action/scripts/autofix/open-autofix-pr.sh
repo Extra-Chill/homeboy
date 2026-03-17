@@ -42,9 +42,15 @@ elif [ -n "${AUTOFIX_FILE_COUNT:-}" ]; then
   AUTOFIX_DETAIL="- **${AUTOFIX_FILE_COUNT}** file(s) fixed"
 fi
 
+FINDING_DETAIL=""
+if [ -n "${AUTOFIX_FINDING_TYPES:-}" ]; then
+  FINDING_DETAIL="- **Finding categories:** ${AUTOFIX_FINDING_TYPES}"
+fi
+
 cat > "${BODY_FILE}" <<EOF
 ## Summary
 ${AUTOFIX_DETAIL:+${AUTOFIX_DETAIL}
+}${FINDING_DETAIL:+${FINDING_DETAIL}
 }- Rerun after autofix passed for configured command set.
 - Generated automatically by Homeboy Action.
 
