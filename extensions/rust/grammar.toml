@@ -255,3 +255,126 @@ panic_patterns = [
   '\.expect\(',
   'unimplemented!\s*\(',
 ]
+
+# ===========================================================================
+# Test templates — Rust source code templates for test plan rendering.
+# Variables: {test_name}, {fn_name}, {param_names}, {return_shape},
+#            {variant}, {expected_value}, {ok_type}, {err_type},
+#            {some_type}, {condition}, {is_method}, {is_pure}
+# ===========================================================================
+
+[contract.test_templates]
+
+# Result<T,E> — Ok branch
+result_ok = """
+    #[test]
+    fn {test_name}() {
+        // Branch: {condition}
+        // Expected: Ok({expected_value})
+        let result = {fn_name}({param_names});
+        assert!(result.is_ok(), "expected Ok for: {condition}");
+    }
+"""
+
+# Result<T,E> — Err branch
+result_err = """
+    #[test]
+    fn {test_name}() {
+        // Branch: {condition}
+        // Expected: Err
+        let result = {fn_name}({param_names});
+        assert!(result.is_err(), "expected Err for: {condition}");
+    }
+"""
+
+# Option<T> — Some branch
+option_some = """
+    #[test]
+    fn {test_name}() {
+        // Branch: {condition}
+        // Expected: Some({expected_value})
+        let result = {fn_name}({param_names});
+        assert!(result.is_some(), "expected Some for: {condition}");
+    }
+"""
+
+# Option<T> — None branch
+option_none = """
+    #[test]
+    fn {test_name}() {
+        // Branch: {condition}
+        // Expected: None
+        let result = {fn_name}({param_names});
+        assert!(result.is_none(), "expected None for: {condition}");
+    }
+"""
+
+# bool — true branch
+bool_true = """
+    #[test]
+    fn {test_name}() {
+        // Branch: {condition}
+        let result = {fn_name}({param_names});
+        assert!(result, "expected true for: {condition}");
+    }
+"""
+
+# bool — false branch
+bool_false = """
+    #[test]
+    fn {test_name}() {
+        // Branch: {condition}
+        let result = {fn_name}({param_names});
+        assert!(!result, "expected false for: {condition}");
+    }
+"""
+
+# Unit return — just verify it doesn't panic
+unit = """
+    #[test]
+    fn {test_name}() {
+        // Should not panic
+        {fn_name}({param_names});
+    }
+"""
+
+# No branches detected — basic no-panic test
+no_panic = """
+    #[test]
+    fn {test_name}() {
+        // No branches detected — verify basic invocation doesn't panic.
+        // TODO: add specific assertions once contract extraction improves.
+        let _ = {fn_name}({param_names});
+    }
+"""
+
+# Effect verification — documents expected side effects
+effects = """
+    #[test]
+    fn {test_name}() {
+        // Verify expected effects: {effects}
+        // This test documents the function's side effects.
+        // TODO: add effect-specific assertions (mock fs, capture output, etc.)
+        let _ = {fn_name}({param_names});
+    }
+"""
+
+# Collection return — verify non-empty or specific length
+collection = """
+    #[test]
+    fn {test_name}() {
+        // Branch: {condition}
+        let result = {fn_name}({param_names});
+        assert!(!result.is_empty(), "expected non-empty collection for: {condition}");
+    }
+"""
+
+# Generic value return — fallback
+default = """
+    #[test]
+    fn {test_name}() {
+        // Branch: {condition}
+        let _result = {fn_name}({param_names});
+        // TODO: add specific assertion for return value
+    }
+"""
