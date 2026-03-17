@@ -9,9 +9,11 @@
 
 use std::collections::HashMap;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::contract::*;
+use crate::extension::grammar::TypeDefault;
 
 /// A plan for generating tests for a single function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +47,10 @@ pub struct TestCase {
 ///
 /// Produces one test case per branch. The plan is language-agnostic —
 /// rendering to source code requires templates from the grammar.
-pub(crate) fn generate_test_plan(contract: &FunctionContract) -> TestPlan {
+///
+/// `type_defaults` from the grammar are used to generate valid input
+/// construction for each parameter.
+pub(crate) fn generate_test_plan(contract: &FunctionContract, type_defaults: &[TypeDefault]) -> TestPlan {
     let mut cases = Vec::new();
 
     if contract.branches.is_empty() {
@@ -56,7 +61,7 @@ pub(crate) fn generate_test_plan(contract: &FunctionContract) -> TestPlan {
             expected_variant: "no_panic".to_string(),
             expected_value: None,
             template_key: "no_panic".to_string(),
-            variables: build_variables(contract, None),
+            variables: build_variables(contract, None, type_defaults),
         });
     } else {
         for (i, branch) in contract.branches.iter().enumerate() {
@@ -74,7 +79,7 @@ pub(crate) fn generate_test_plan(contract: &FunctionContract) -> TestPlan {
             let template_key =
                 derive_template_key(&contract.signature.return_type, &branch.returns);
 
-            let mut vars = build_variables(contract, Some(branch));
+            let mut vars = build_variables(contract, Some(branch), type_defaults);
             vars.insert("condition".to_string(), branch.condition.clone());
             vars.insert("condition_slug".to_string(), slugify(&branch.condition));
 
@@ -107,7 +112,7 @@ pub(crate) fn generate_test_plan(contract: &FunctionContract) -> TestPlan {
             })
             .collect();
 
-        let mut vars = build_variables(contract, None);
+        let mut vars = build_variables(contract, None, type_defaults);
         vars.insert("effects".to_string(), effect_names.join(", "));
 
         cases.push(TestCase {
@@ -164,6 +169,7 @@ pub(crate) fn render_test_plan(plan: &TestPlan, templates: &HashMap<String, Stri
 fn build_variables(
     contract: &FunctionContract,
     branch: Option<&Branch>,
+    type_defaults: &[TypeDefault],
 ) -> HashMap<String, String> {
     let mut vars = HashMap::new();
 
@@ -194,6 +200,13 @@ fn build_variables(
         "param_count".to_string(),
         contract.signature.params.len().to_string(),
     );
+
+    // Build param setup lines and call args using type_defaults
+    let (setup_lines, call_args, extra_imports) =
+        build_param_inputs(&contract.signature.params, type_defaults);
+    vars.insert("param_setup".to_string(), setup_lines);
+    vars.insert("param_args".to_string(), call_args);
+    vars.insert("extra_imports".to_string(), extra_imports);
 
     // Return type info
     match &contract.signature.return_type {
@@ -244,6 +257,75 @@ fn build_variables(
     vars
 }
 
+/// Resolve a default value expression for a parameter type using type_defaults patterns.
+///
+/// Returns `(value_expr, call_arg_expr, imports)` where:
+/// - `value_expr` is the `let` binding right-hand side (e.g., `String::new()`)
+/// - `call_arg_expr` is what to pass in the function call (e.g., `&name` for `&str` params)
+/// - `imports` are any extra `use` statements needed
+fn resolve_type_default<'a>(
+    param_type: &str,
+    type_defaults: &'a [TypeDefault],
+) -> (String, Option<String>, Vec<&'a str>) {
+    for td in type_defaults {
+        if let Ok(re) = Regex::new(&td.pattern) {
+            if re.is_match(param_type) {
+                let imports: Vec<&str> = td.imports.iter().map(|s| s.as_str()).collect();
+                return (td.value.clone(), None, imports);
+            }
+        }
+    }
+    // Fallback: Default::default()
+    ("Default::default()".to_string(), None, vec![])
+}
+
+/// Build parameter setup lines, call arguments, and extra imports from type_defaults.
+///
+/// Returns `(setup_lines, call_args, extra_imports)` where:
+/// - `setup_lines` is newline-separated `let` bindings
+/// - `call_args` is comma-separated arguments for the function call
+/// - `extra_imports` is newline-separated `use` statements
+fn build_param_inputs(params: &[Param], type_defaults: &[TypeDefault]) -> (String, String, String) {
+    if params.is_empty() {
+        return (String::new(), String::new(), String::new());
+    }
+
+    let mut setup_lines = Vec::new();
+    let mut call_args = Vec::new();
+    let mut all_imports: Vec<String> = Vec::new();
+
+    for param in params {
+        let (value_expr, call_override, imports) =
+            resolve_type_default(&param.param_type, type_defaults);
+
+        // Build the let binding
+        setup_lines.push(format!("        let {} = {};", param.name, value_expr));
+
+        // Build the call argument — if the type is a reference, borrow the variable
+        let call_arg = call_override.unwrap_or_else(|| {
+            let trimmed = param.param_type.trim();
+            if trimmed.starts_with('&') {
+                format!("&{}", param.name)
+            } else {
+                param.name.clone()
+            }
+        });
+        call_args.push(call_arg);
+
+        for imp in imports {
+            let imp_string = imp.to_string();
+            if !all_imports.contains(&imp_string) {
+                all_imports.push(imp_string);
+            }
+        }
+    }
+
+    let setup = setup_lines.join("\n");
+    let args = call_args.join(", ");
+    let imports = all_imports.join("\n");
+    (setup, args, imports)
+}
+
 /// Derive the template key from the return type shape and the branch's return variant.
 fn derive_template_key(return_type: &ReturnShape, returns: &ReturnValue) -> String {
     match return_type {
@@ -282,6 +364,16 @@ fn slugify(s: &str) -> String {
 
 // ── End-to-end API ──
 
+/// Generated test output with source code and metadata.
+pub struct GeneratedTestOutput {
+    /// The rendered test source code (test functions only, no module wrapper).
+    pub test_source: String,
+    /// Extra `use` imports needed by the generated default values.
+    pub extra_imports: Vec<String>,
+    /// The function names that tests were generated for.
+    pub tested_functions: Vec<String>,
+}
+
 /// Generate test source code for all functions in a source file.
 ///
 /// This is the full pipeline: grammar → contracts → test plans → rendered source.
@@ -290,7 +382,7 @@ pub fn generate_tests_for_file(
     content: &str,
     file_path: &str,
     grammar: &crate::extension::grammar::Grammar,
-) -> Option<String> {
+) -> Option<GeneratedTestOutput> {
     let contract_grammar = grammar.contract.as_ref()?;
 
     // Must have test templates to render
@@ -307,7 +399,9 @@ pub fn generate_tests_for_file(
     }
 
     // Generate and render test plans
-    let mut output = String::new();
+    let mut test_source = String::new();
+    let mut all_extra_imports: Vec<String> = Vec::new();
+    let mut tested_functions = Vec::new();
 
     for contract in &contracts {
         // Skip test functions, private functions, and trivial functions
@@ -318,21 +412,38 @@ pub fn generate_tests_for_file(
             continue;
         }
 
-        let plan = generate_test_plan(contract);
+        let plan = generate_test_plan(contract, &contract_grammar.type_defaults);
         if plan.cases.is_empty() {
             continue;
         }
 
+        // Collect extra imports from case variables
+        for case in &plan.cases {
+            if let Some(imports_str) = case.variables.get("extra_imports") {
+                for imp in imports_str.lines() {
+                    let imp = imp.trim().to_string();
+                    if !imp.is_empty() && !all_extra_imports.contains(&imp) {
+                        all_extra_imports.push(imp);
+                    }
+                }
+            }
+        }
+
         let rendered = render_test_plan(&plan, &contract_grammar.test_templates);
         if !rendered.trim().is_empty() {
-            output.push_str(&rendered);
+            tested_functions.push(contract.name.clone());
+            test_source.push_str(&rendered);
         }
     }
 
-    if output.trim().is_empty() {
+    if test_source.trim().is_empty() {
         None
     } else {
-        Some(output)
+        Some(GeneratedTestOutput {
+            test_source,
+            extra_imports: all_extra_imports,
+            tested_functions,
+        })
     }
 }
 
@@ -445,10 +556,30 @@ mod tests {
         }
     }
 
+    fn sample_type_defaults() -> Vec<TypeDefault> {
+        vec![
+            TypeDefault {
+                pattern: r"^&str$".to_string(),
+                value: r#""""#.to_string(),
+                imports: vec![],
+            },
+            TypeDefault {
+                pattern: r"^&Path$".to_string(),
+                value: r#"Path::new("")"#.to_string(),
+                imports: vec!["use std::path::Path;".to_string()],
+            },
+            TypeDefault {
+                pattern: r"^&\[.*\]$".to_string(),
+                value: "Vec::new()".to_string(),
+                imports: vec![],
+            },
+        ]
+    }
+
     #[test]
     fn test_plan_generates_one_case_per_branch() {
         let contract = sample_result_contract();
-        let plan = generate_test_plan(&contract);
+        let plan = generate_test_plan(&contract, &[]);
         // 2 branches + 1 effect test
         assert_eq!(plan.cases.len(), 3);
         assert_eq!(plan.function_name, "validate_write");
@@ -457,7 +588,7 @@ mod tests {
     #[test]
     fn test_plan_names_are_descriptive() {
         let contract = sample_result_contract();
-        let plan = generate_test_plan(&contract);
+        let plan = generate_test_plan(&contract, &[]);
         assert!(plan.cases[0].test_name.starts_with("test_validate_write_"));
         assert!(plan.cases[0].test_name.contains("empty"));
     }
@@ -465,7 +596,7 @@ mod tests {
     #[test]
     fn test_plan_template_keys_match_return_shape() {
         let contract = sample_result_contract();
-        let plan = generate_test_plan(&contract);
+        let plan = generate_test_plan(&contract, &[]);
         assert_eq!(plan.cases[0].template_key, "result_ok");
         assert_eq!(plan.cases[1].template_key, "result_ok");
     }
@@ -473,7 +604,7 @@ mod tests {
     #[test]
     fn test_plan_for_option_type() {
         let contract = sample_option_contract();
-        let plan = generate_test_plan(&contract);
+        let plan = generate_test_plan(&contract, &[]);
         assert_eq!(plan.cases.len(), 2);
         assert_eq!(plan.cases[0].template_key, "option_some");
         assert_eq!(plan.cases[1].template_key, "option_none");
@@ -482,7 +613,7 @@ mod tests {
     #[test]
     fn test_plan_pure_function_no_effect_test() {
         let contract = sample_option_contract();
-        let plan = generate_test_plan(&contract);
+        let plan = generate_test_plan(&contract, &[]);
         // Pure function — no effect test case
         assert!(plan.cases.iter().all(|c| c.template_key != "effects"));
     }
@@ -490,11 +621,86 @@ mod tests {
     #[test]
     fn test_plan_variables_contain_fn_info() {
         let contract = sample_result_contract();
-        let plan = generate_test_plan(&contract);
+        let plan = generate_test_plan(&contract, &[]);
         let vars = &plan.cases[0].variables;
         assert_eq!(vars.get("fn_name").unwrap(), "validate_write");
         assert_eq!(vars.get("param_names").unwrap(), "root, changed_files");
         assert_eq!(vars.get("return_shape").unwrap(), "result");
+    }
+
+    #[test]
+    fn test_plan_with_type_defaults_generates_param_setup() {
+        let contract = sample_result_contract();
+        let type_defaults = sample_type_defaults();
+        let plan = generate_test_plan(&contract, &type_defaults);
+        let vars = &plan.cases[0].variables;
+
+        let param_setup = vars.get("param_setup").unwrap();
+        assert!(
+            param_setup.contains("let root ="),
+            "should have root binding"
+        );
+        assert!(
+            param_setup.contains("let changed_files ="),
+            "should have changed_files binding"
+        );
+        assert!(
+            param_setup.contains("Path::new"),
+            "should use Path::new for &Path"
+        );
+        assert!(
+            param_setup.contains("Vec::new()"),
+            "should use Vec::new() for &[PathBuf]"
+        );
+
+        let param_args = vars.get("param_args").unwrap();
+        assert!(
+            param_args.contains("&root"),
+            "should borrow root for &Path param"
+        );
+        assert!(
+            param_args.contains("&changed_files"),
+            "should borrow changed_files for &[PathBuf] param"
+        );
+
+        let extra_imports = vars.get("extra_imports").unwrap();
+        assert!(
+            extra_imports.contains("use std::path::Path;"),
+            "should include Path import"
+        );
+    }
+
+    #[test]
+    fn test_render_with_templates() {
+        let contract = sample_result_contract();
+        let plan = generate_test_plan(&contract, &[]);
+
+        let mut templates = HashMap::new();
+        templates.insert(
+            "result_ok".to_string(),
+            "#[test]\nfn {test_name}() {{\n    // {fn_name} should return Ok\n}}\n".to_string(),
+        );
+
+        let output = render_test_plan(&plan, &templates);
+        assert!(output.contains("#[test]"));
+        assert!(output.contains("test_validate_write_"));
+        assert!(output.contains("validate_write should return Ok"));
+    }
+
+    #[test]
+    fn test_render_missing_template_uses_default() {
+        let contract = sample_option_contract();
+        let plan = generate_test_plan(&contract, &[]);
+
+        let mut templates = HashMap::new();
+        templates.insert(
+            "default".to_string(),
+            "#[test]\nfn {test_name}() {{ todo!() }}\n".to_string(),
+        );
+
+        let output = render_test_plan(&plan, &templates);
+        assert!(output.contains("test_find_item_"));
+        assert!(output.contains("todo!()"));
     }
 
     #[test]
@@ -515,7 +721,7 @@ mod tests {
         let mut contract = sample_result_contract();
         contract.branches.clear();
         contract.effects.clear();
-        let plan = generate_test_plan(&contract);
+        let plan = generate_test_plan(&contract, &[]);
         assert_eq!(plan.cases.len(), 1);
         assert_eq!(plan.cases[0].template_key, "no_panic");
     }

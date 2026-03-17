@@ -12,7 +12,7 @@ use std::path::Path;
 
 use regex::Regex;
 
-use crate::code_audit::{AuditFinding, CodeAuditResult, Finding};
+use crate::code_audit::{AuditFinding, CodeAuditResult};
 use crate::refactor::auto::{Fix, Insertion, InsertionKind, SkippedFile};
 
 /// Generate parameter removal fixes for truly unused parameters.
@@ -90,7 +90,7 @@ pub(crate) fn generate_parameter_fixes(
 /// parameter at the given position, and generates a replacement.
 fn build_param_removal(
     content: &str,
-    file: &str,
+    _file: &str,
     fn_name: &str,
     param_name: &str,
     position: usize,
