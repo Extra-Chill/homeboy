@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.8.0] - 2026-03-17
+
+### Added
+- detailed autofix commit messages with per-category fix counts
+
+### Changed
+- remove action-side validation — homeboy validates internally
+
 ## [1.7.1] - 2026-03-17
 
 ### Changed
