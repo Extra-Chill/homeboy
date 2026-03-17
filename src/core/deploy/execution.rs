@@ -70,11 +70,7 @@ pub(super) fn execute_component_deploy(
     // Plugins deploy to wp-content/plugins/{id}, themes to wp-content/themes/{id}.
     let effective_remote_path = if component.remote_path.trim().is_empty() {
         if let Some(resolved) = auto_resolve_wordpress_remote_path(component) {
-            log_status!(
-                "deploy",
-                "Auto-resolved remote path: {}",
-                resolved
-            );
+            log_status!("deploy", "Auto-resolved remote path: {}", resolved);
             resolved
         } else {
             component.remote_path.clone()

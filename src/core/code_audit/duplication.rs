@@ -971,9 +971,7 @@ pub(crate) fn detect_parallel_implementations(
 
             // Skip if either method is convention-expected — its call pattern is shaped
             // by the convention, so similar patterns with other methods are expected.
-            if convention_methods.contains(&a.method)
-                || convention_methods.contains(&b.method)
-            {
+            if convention_methods.contains(&a.method) || convention_methods.contains(&b.method) {
                 continue;
             }
 
@@ -1542,7 +1540,8 @@ mod tests {
             "fn upgrade_on_server() {\n    validate_component();\n    build_artifact();\n    upload_to_host();\n    run_post_hooks();\n    send_notification();\n}",
         );
 
-        let findings = detect_parallel_implementations(&[&fp1, &fp2], &std::collections::HashSet::new());
+        let findings =
+            detect_parallel_implementations(&[&fp1, &fp2], &std::collections::HashSet::new());
 
         assert_eq!(findings.len(), 2, "Should emit one finding per file");
         assert!(findings
@@ -1565,7 +1564,8 @@ mod tests {
             "fn parse_config() {\n    read_file();\n    tokenize();\n    parse_ast();\n    validate_schema();\n}",
         );
 
-        let findings = detect_parallel_implementations(&[&fp1, &fp2], &std::collections::HashSet::new());
+        let findings =
+            detect_parallel_implementations(&[&fp1, &fp2], &std::collections::HashSet::new());
         assert!(
             findings.is_empty(),
             "Completely different call sets should not flag"
@@ -1600,7 +1600,8 @@ mod tests {
             "fn small_b() {\n    foo();\n    bar();\n}",
         );
 
-        let findings = detect_parallel_implementations(&[&fp1, &fp2], &std::collections::HashSet::new());
+        let findings =
+            detect_parallel_implementations(&[&fp1, &fp2], &std::collections::HashSet::new());
         assert!(
             findings.is_empty(),
             "Methods with < MIN_CALL_COUNT calls should be skipped"
@@ -1622,7 +1623,8 @@ mod tests {
         );
 
         // "run" is skipped, so only one method in the pool — no pair to compare
-        let findings = detect_parallel_implementations(&[&fp1, &fp2], &std::collections::HashSet::new());
+        let findings =
+            detect_parallel_implementations(&[&fp1, &fp2], &std::collections::HashSet::new());
         // Only fp2's "execute" has a valid call sequence; fp1's "run" is filtered
         // So there's only 1 candidate, no pair → no findings
         assert!(findings.is_empty(), "Generic names should be filtered out");
@@ -1683,18 +1685,15 @@ mod tests {
         );
 
         // Without convention methods: flagged
-        let findings = detect_parallel_implementations(
-            &[&fp1, &fp2],
-            &std::collections::HashSet::new(),
-        );
+        let findings =
+            detect_parallel_implementations(&[&fp1, &fp2], &std::collections::HashSet::new());
         assert_eq!(findings.len(), 2, "Should flag without convention context");
 
         // With EITHER method as convention-expected: NOT flagged
-        let conv_methods: std::collections::HashSet<String> =
-            ["registerAbilities"] // only one of the two
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+        let conv_methods: std::collections::HashSet<String> = ["registerAbilities"] // only one of the two
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let findings = detect_parallel_implementations(&[&fp1, &fp2], &conv_methods);
         assert!(
             findings.is_empty(),

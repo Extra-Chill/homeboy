@@ -122,10 +122,7 @@ fn parse_cargo_json_output(stdout: &str, root: &Path) -> Vec<CompilerWarning> {
                 .and_then(|f| f.as_str())
                 .unwrap_or("")
                 .to_string();
-            let line_start = span
-                .get("line_start")
-                .and_then(|l| l.as_u64())
-                .unwrap_or(0) as usize;
+            let line_start = span.get("line_start").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
 
             // Make path relative to root
             let relative = file_name
@@ -166,13 +163,18 @@ fn parse_cargo_json_output(stdout: &str, root: &Path) -> Vec<CompilerWarning> {
 /// Generate a fix suggestion based on the warning code.
 fn suggestion_for_code(code: &str, _file: &str, _line: usize) -> String {
     match code {
-        "dead_code" => "Remove the unused item or add `#[allow(dead_code)]` if intentionally reserved".to_string(),
+        "dead_code" => {
+            "Remove the unused item or add `#[allow(dead_code)]` if intentionally reserved"
+                .to_string()
+        }
         "unused_imports" => "Remove the unused import".to_string(),
         "unused_variables" => "Prefix with underscore `_` or remove the variable".to_string(),
         "unused_assignments" => "Remove the unnecessary assignment".to_string(),
         "unused_mut" => "Remove the `mut` qualifier".to_string(),
         "unreachable_code" => "Remove or refactor the unreachable code path".to_string(),
-        "unused_must_use" => "Handle the return value or explicitly ignore with `let _ = ...`".to_string(),
+        "unused_must_use" => {
+            "Handle the return value or explicitly ignore with `let _ = ...`".to_string()
+        }
         _ => format!("Address compiler warning: {}", code),
     }
 }

@@ -215,9 +215,7 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
             let stdout = String::from_utf8_lossy(&output.stdout);
             // Parse the export line: export HOMEBOY_AUDIT_REFERENCE_PATHS='...'
             for line in stdout.lines() {
-                if let Some(value) = line
-                    .strip_prefix("export HOMEBOY_AUDIT_REFERENCE_PATHS=")
-                {
+                if let Some(value) = line.strip_prefix("export HOMEBOY_AUDIT_REFERENCE_PATHS=") {
                     // Remove shell quoting (the value may be $'...' or '...' quoted)
                     let clean = value
                         .trim_start_matches("$'")

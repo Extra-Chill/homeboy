@@ -85,36 +85,36 @@ pub(crate) fn analyze_dead_code(
         // Skip test files — test methods are invoked by the test runner via
         // reflection/convention, not by direct calls from other source files.
         if !is_test_path(&fp.relative_path) {
-        for export in &fp.public_api {
-            // Check if any OTHER file (owned or reference) references this export.
-            let referenced_elsewhere = owned.iter().chain(reference.iter()).any(|other| {
-                // Skip self
-                if other.relative_path == fp.relative_path {
-                    return false;
-                }
-                // Check if the other file calls this function
-                if other.internal_calls.contains(export) {
-                    return true;
-                }
-                // Check if the other file imports something that matches
-                // (import paths may contain the type/module name, not the function name directly)
-                let type_name = fp.type_name.as_deref().unwrap_or("");
-                other.imports.iter().any(|imp| {
-                    // Direct function name match in import
-                    imp.contains(export.as_str())
+            for export in &fp.public_api {
+                // Check if any OTHER file (owned or reference) references this export.
+                let referenced_elsewhere = owned.iter().chain(reference.iter()).any(|other| {
+                    // Skip self
+                    if other.relative_path == fp.relative_path {
+                        return false;
+                    }
+                    // Check if the other file calls this function
+                    if other.internal_calls.contains(export) {
+                        return true;
+                    }
+                    // Check if the other file imports something that matches
+                    // (import paths may contain the type/module name, not the function name directly)
+                    let type_name = fp.type_name.as_deref().unwrap_or("");
+                    other.imports.iter().any(|imp| {
+                        // Direct function name match in import
+                        imp.contains(export.as_str())
                     // Or imports the type that contains this method
                     || (!type_name.is_empty() && imp.contains(type_name))
-                })
-            });
+                    })
+                });
 
-            if !referenced_elsewhere {
-                // Skip common entry points and framework methods that are called
-                // by the runtime, not by other source files.
-                if is_framework_entry_point(export, fp) {
-                    continue;
-                }
+                if !referenced_elsewhere {
+                    // Skip common entry points and framework methods that are called
+                    // by the runtime, not by other source files.
+                    if is_framework_entry_point(export, fp) {
+                        continue;
+                    }
 
-                findings.push(Finding {
+                    findings.push(Finding {
                     convention: "dead_code".to_string(),
                     severity: Severity::Info,
                     file: fp.relative_path.clone(),
@@ -127,8 +127,8 @@ pub(crate) fn analyze_dead_code(
                             .to_string(),
                     kind: AuditFinding::UnreferencedExport,
                 });
+                }
             }
-        }
         } // end if !is_test_path
 
         // Check 4: Orphaned internals
@@ -507,7 +507,11 @@ mod tests {
             .iter()
             .filter(|f| f.kind == AuditFinding::UnreferencedExport)
             .collect();
-        assert_eq!(unreferenced.len(), 1, "Should be flagged without references");
+        assert_eq!(
+            unreferenced.len(),
+            1,
+            "Should be flagged without references"
+        );
 
         // Framework calls "on_save" via a hook
         let framework_fp = make_fingerprint(
@@ -527,7 +531,10 @@ mod tests {
         assert!(
             unreferenced.is_empty(),
             "Should not be flagged when referenced by framework, got: {:?}",
-            unreferenced.iter().map(|f| &f.description).collect::<Vec<_>>()
+            unreferenced
+                .iter()
+                .map(|f| &f.description)
+                .collect::<Vec<_>>()
         );
     }
 

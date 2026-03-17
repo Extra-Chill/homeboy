@@ -254,8 +254,14 @@ pub fn discover_conventions(
     // Test lifecycle methods are excluded — they're optional overrides inherited
     // from test base classes (PHPUnit, WP_UnitTestCase), not convention-specific.
     let test_lifecycle: &[&str] = &[
-        "set_up", "tear_down", "set_up_before_class", "tear_down_after_class",
-        "setUp", "tearDown", "setUpBeforeClass", "tearDownAfterClass",
+        "set_up",
+        "tear_down",
+        "set_up_before_class",
+        "tear_down_after_class",
+        "setUp",
+        "tearDown",
+        "setUpBeforeClass",
+        "tearDownAfterClass",
     ];
     let is_test_group = super::walker::is_test_path(glob_pattern);
     let expected_methods: Vec<String> = method_counts
