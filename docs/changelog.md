@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.81.0] - 2026-03-17
+
+### Added
+- parameter removal autofix for truly unused params (#824 Phase 2)
+- call-site-aware unused parameter detection (#824)
+- add `homeboy validate` CLI command
+
+### Fixed
+- validate_write on all refactor write paths (#832)
+- decompose mod.rs targets use parent dir, not mod/ subdir (#832)
+
 ## [0.80.0] - 2026-03-17
 
 ### Added
