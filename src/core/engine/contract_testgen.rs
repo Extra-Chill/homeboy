@@ -447,6 +447,74 @@ pub fn generate_tests_for_file(
     }
 }
 
+/// Generate test source code for specific methods in a source file.
+///
+/// Like `generate_tests_for_file`, but only generates tests for functions
+/// whose names are in `method_names`. Used for MissingTestMethod findings
+/// where the test file exists but specific methods lack coverage.
+pub fn generate_tests_for_methods(
+    content: &str,
+    file_path: &str,
+    grammar: &crate::extension::grammar::Grammar,
+    method_names: &[&str],
+) -> Option<GeneratedTestOutput> {
+    let contract_grammar = grammar.contract.as_ref()?;
+
+    if contract_grammar.test_templates.is_empty() {
+        return None;
+    }
+
+    let contracts =
+        super::contract_extract::extract_contracts_from_grammar(content, file_path, grammar)?;
+
+    if contracts.is_empty() {
+        return None;
+    }
+
+    let mut test_source = String::new();
+    let mut all_extra_imports: Vec<String> = Vec::new();
+    let mut tested_functions = Vec::new();
+
+    for contract in &contracts {
+        // Only generate tests for the requested methods
+        if !method_names.contains(&contract.name.as_str()) {
+            continue;
+        }
+
+        let plan = generate_test_plan(contract, &contract_grammar.type_defaults);
+        if plan.cases.is_empty() {
+            continue;
+        }
+
+        for case in &plan.cases {
+            if let Some(imports_str) = case.variables.get("extra_imports") {
+                for imp in imports_str.lines() {
+                    let imp = imp.trim().to_string();
+                    if !imp.is_empty() && !all_extra_imports.contains(&imp) {
+                        all_extra_imports.push(imp);
+                    }
+                }
+            }
+        }
+
+        let rendered = render_test_plan(&plan, &contract_grammar.test_templates);
+        if !rendered.trim().is_empty() {
+            tested_functions.push(contract.name.clone());
+            test_source.push_str(&rendered);
+        }
+    }
+
+    if test_source.trim().is_empty() {
+        None
+    } else {
+        Some(GeneratedTestOutput {
+            test_source,
+            extra_imports: all_extra_imports,
+            tested_functions,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
