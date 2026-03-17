@@ -37,10 +37,18 @@ else
     fi
   done < <(git log --format=%s -n "$((AUTOFIX_MAX_COMMITS + 1))" 2>/dev/null)
 fi
+# When the cap is hit, code fixes are skipped but baseline updates still run
+# (non-PR only — PR context skips baseline in maybe_update_baseline).
+AUTOFIX_CAP_HIT=false
 if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
-  echo "Skipping autofix: ${AUTOFIX_COMMIT_COUNT} autofix commits on this branch (max ${AUTOFIX_MAX_COMMITS})"
-  echo "committed=false" >> "${GITHUB_OUTPUT}"
-  exit 0
+  echo "Autofix cap reached: ${AUTOFIX_COMMIT_COUNT} autofix commits on this branch (max ${AUTOFIX_MAX_COMMITS})"
+  if [ "$(scope_context)" = "pr" ]; then
+    echo "Skipping autofix entirely (PR context — baseline updates also skip on PRs)"
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
+  echo "Skipping code fixes but will still attempt baseline update (non-PR context)"
+  AUTOFIX_CAP_HIT=true
 fi
 
 if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ] || [ "${GITHUB_ACTOR:-}" = "homeboy-ci[bot]" ]; then
@@ -136,31 +144,48 @@ stage_autofix_changes() {
 
 commit_autofix_changes() {
   AUTOFIX_FILE_COUNT=$(git diff --cached --name-only | wc -l | xargs)
+  AUTOFIX_CHANGED_FILES="$(git diff --cached --name-only | sort)"
   AUTOFIX_FIX_TYPES=""
   AUTOFIX_FINDING_TYPES=""
 
-  for FIX_CMD in "${FIX_ARRAY[@]}"; do
-    FIX_CMD=$(echo "${FIX_CMD}" | xargs)
-    BASE=$(echo "${FIX_CMD}" | awk '{print $1}')
-    if [ -n "${AUTOFIX_FIX_TYPES}" ]; then
-      AUTOFIX_FIX_TYPES+=", "
+  # Detect baseline-only changes: only homeboy.json modified while cap was hit
+  local baseline_only=false
+  if [ "${AUTOFIX_CAP_HIT}" = true ]; then
+    if echo "${AUTOFIX_CHANGED_FILES}" | grep -qx "homeboy.json" && [ "${AUTOFIX_FILE_COUNT}" -eq 1 ]; then
+      baseline_only=true
     fi
-    AUTOFIX_FIX_TYPES+="${BASE}"
-  done
-
-  if [ -n "${HOMEBOY_OUTPUT_DIR:-}" ] && [ -d "${HOMEBOY_OUTPUT_DIR}" ]; then
-    AUTOFIX_FINDING_TYPES="$(jq -r '
-      [
-        .. | .fix_summary? // empty | .rules? // empty | .[]? | .rule? // empty
-      ]
-      | map(select(type == "string" and length > 0))
-      | unique
-      | sort
-      | join(", ")
-    ' "${HOMEBOY_OUTPUT_DIR}"/*.json 2>/dev/null | tail -n 1)"
   fi
 
-  COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_FINDING_TYPES}")"
+  if [ "${baseline_only}" = true ]; then
+    # Use a distinct commit prefix so it doesn't count toward the autofix cap
+    COMMIT_MSG="chore(ci): update audit baseline
+
+Baseline-only update (autofix cap reached, code fixes skipped).
+homeboy.json"
+  else
+    for FIX_CMD in "${FIX_ARRAY[@]}"; do
+      FIX_CMD=$(echo "${FIX_CMD}" | xargs)
+      BASE=$(echo "${FIX_CMD}" | awk '{print $1}')
+      if [ -n "${AUTOFIX_FIX_TYPES}" ]; then
+        AUTOFIX_FIX_TYPES+=", "
+      fi
+      AUTOFIX_FIX_TYPES+="${BASE}"
+    done
+
+    if [ -n "${HOMEBOY_OUTPUT_DIR:-}" ] && [ -d "${HOMEBOY_OUTPUT_DIR}" ]; then
+      AUTOFIX_FINDING_TYPES="$(jq -r '
+        [
+          .. | .fix_summary? // empty | .rules? // empty | .[]? | .rule? // empty
+        ]
+        | map(select(type == "string" and length > 0))
+        | unique
+        | sort
+        | join(", ")
+      ' "${HOMEBOY_OUTPUT_DIR}"/*.json 2>/dev/null | tail -n 1)"
+    fi
+
+    COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_FINDING_TYPES}")"
+  fi
 
   BOT_NAME="homeboy-ci[bot]"
   BOT_EMAIL="266378653+homeboy-ci[bot]@users.noreply.github.com"
@@ -231,7 +256,12 @@ while [ "${PUSH_ATTEMPT}" -le "${AUTOFIX_PUSH_ATTEMPTS}" ]; do
     reset_to_target_head
   fi
 
-  run_autofixes
+  # Run code fixes only when under the cap
+  if [ "${AUTOFIX_CAP_HIT}" = false ]; then
+    run_autofixes
+  else
+    echo "Skipping code fixes (autofix cap reached)"
+  fi
   maybe_update_baseline
 
   if ! stage_autofix_changes; then

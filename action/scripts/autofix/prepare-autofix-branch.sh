@@ -14,6 +14,8 @@ fi
 # any human merge. The old approach (count all autofix commits since last tag)
 # permanently tripped the guard after N total historical autofix commits across
 # all PRs, blocking all future autofix even after human intervention.
+# When the cap is hit, code fixes are skipped but baseline updates still run —
+# baseline updates use a distinct commit prefix and don't count toward the cap.
 AUTOFIX_COMMIT_COUNT=0
 while IFS= read -r subject; do
   if [[ "${subject}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
@@ -22,12 +24,15 @@ while IFS= read -r subject; do
     break
   fi
 done < <(git log --format=%s -n "$((AUTOFIX_MAX_COMMITS + 1))" 2>/dev/null)
+AUTOFIX_CAP_HIT=false
 if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
-  echo "Skipping non-PR autofix: ${AUTOFIX_COMMIT_COUNT} consecutive autofix commits at HEAD (max ${AUTOFIX_MAX_COMMITS})"
-  echo "committed=false" >> "${GITHUB_OUTPUT}"
-  exit 0
+  echo "Autofix cap reached: ${AUTOFIX_COMMIT_COUNT} consecutive autofix commits at HEAD (max ${AUTOFIX_MAX_COMMITS})"
+  echo "Skipping code fixes but will still attempt baseline update"
+  AUTOFIX_CAP_HIT=true
 fi
 
+# Hard guards — these always exit (no baseline bypass). Bot actors and autofix
+# branches risk infinite loops, so bail entirely.
 if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ] || [ "${GITHUB_ACTOR:-}" = "homeboy-ci[bot]" ]; then
   echo "Skipping non-PR autofix: workflow actor is ${GITHUB_ACTOR} (bot loop guard)"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
@@ -78,28 +83,35 @@ git checkout -b "${AUTOFIX_BRANCH}"
 
 AUTOFIX_OUTPUT_DIR=$(mktemp -d)
 
-echo "Applying non-PR autofixes..."
-FIX_INDEX=0
-for FIX_CMD in "${FIX_ARRAY[@]}"; do
-  FIX_CMD=$(echo "${FIX_CMD}" | xargs)
-  OUTPUT_FILE="${AUTOFIX_OUTPUT_DIR}/fix-${FIX_INDEX}.json"
-  BASE_CMD="$(build_autofix_command "${FIX_CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_FILE}")"
+# Run code fixes only when under the cap
+if [ "${AUTOFIX_CAP_HIT}" = false ]; then
+  echo "Applying non-PR autofixes..."
+  FIX_INDEX=0
+  for FIX_CMD in "${FIX_ARRAY[@]}"; do
+    FIX_CMD=$(echo "${FIX_CMD}" | xargs)
+    OUTPUT_FILE="${AUTOFIX_OUTPUT_DIR}/fix-${FIX_INDEX}.json"
+    BASE_CMD="$(build_autofix_command "${FIX_CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_FILE}")"
 
-  echo "Running autofix: ${BASE_CMD}"
-  set +e
-  eval "${BASE_CMD}"
-  FIX_EXIT=$?
-  set -e
+    echo "Running autofix: ${BASE_CMD}"
+    set +e
+    eval "${BASE_CMD}"
+    FIX_EXIT=$?
+    set -e
 
-  if [ "${FIX_EXIT}" -ne 0 ]; then
-    echo "Autofix command exited non-zero (${FIX_EXIT}), continuing to inspect generated changes"
-  fi
-  FIX_INDEX=$((FIX_INDEX + 1))
-done
+    if [ "${FIX_EXIT}" -ne 0 ]; then
+      echo "Autofix command exited non-zero (${FIX_EXIT}), continuing to inspect generated changes"
+    fi
+    FIX_INDEX=$((FIX_INDEX + 1))
+  done
+else
+  echo "Skipping code fixes (autofix cap reached)"
+fi
 
 # Update baseline so it stays current when this commit merges to main.
 # Full (unscoped) audit ensures the baseline reflects the entire codebase,
 # not just changed files. Tolerate failure — baseline update is best-effort.
+# This runs even when the autofix cap is hit — baseline updates use a distinct
+# commit prefix and don't count toward the cap.
 echo "Updating audit baseline..."
 set +e
 homeboy audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
@@ -128,33 +140,51 @@ fi
 
 # Capture autofix summary: file count, fix commands, and finding categories
 AUTOFIX_FILE_COUNT=$(git diff --cached --name-only | wc -l | xargs)
-AUTOFIX_FIX_TYPES=""
-for FIX_CMD in "${FIX_ARRAY[@]}"; do
-  FIX_CMD=$(echo "${FIX_CMD}" | xargs)
-  BASE=$(echo "${FIX_CMD}" | awk '{print $1}')
-  if [ -n "${AUTOFIX_FIX_TYPES}" ]; then
-    AUTOFIX_FIX_TYPES+=", "
-  fi
-  AUTOFIX_FIX_TYPES+="${BASE}"
-done
+AUTOFIX_CHANGED_FILES="$(git diff --cached --name-only | sort)"
 
-# Extract finding categories from autofix JSON output.
-# Looks for fix_summary.rules[].rule or data.findings[].kind in the output files.
-AUTOFIX_FINDING_TYPES=""
-if [ -d "${AUTOFIX_OUTPUT_DIR}" ]; then
-  AUTOFIX_FINDING_TYPES="$(jq -r '
-    [
-      .. | .fix_summary? // empty | .rules? // empty | .[]? | .rule? // empty
-    ]
-    | map(select(type == "string" and length > 0))
-    | unique
-    | sort
-    | join(", ")
-  ' "${AUTOFIX_OUTPUT_DIR}"/*.json 2>/dev/null | tail -n 1)"
+# Detect baseline-only changes: only homeboy.json modified while cap was hit
+BASELINE_ONLY=false
+if [ "${AUTOFIX_CAP_HIT}" = true ]; then
+  if echo "${AUTOFIX_CHANGED_FILES}" | grep -qx "homeboy.json" && [ "${AUTOFIX_FILE_COUNT}" -eq 1 ]; then
+    BASELINE_ONLY=true
+  fi
+fi
+
+if [ "${BASELINE_ONLY}" = true ]; then
+  # Use a distinct commit prefix so it doesn't count toward the autofix cap
+  COMMIT_MSG="chore(ci): update audit baseline
+
+Baseline-only update (autofix cap reached, code fixes skipped).
+homeboy.json"
+else
+  AUTOFIX_FIX_TYPES=""
+  for FIX_CMD in "${FIX_ARRAY[@]}"; do
+    FIX_CMD=$(echo "${FIX_CMD}" | xargs)
+    BASE=$(echo "${FIX_CMD}" | awk '{print $1}')
+    if [ -n "${AUTOFIX_FIX_TYPES}" ]; then
+      AUTOFIX_FIX_TYPES+=", "
+    fi
+    AUTOFIX_FIX_TYPES+="${BASE}"
+  done
+
+  # Extract finding categories from autofix JSON output.
+  # Looks for fix_summary.rules[].rule or data.findings[].kind in the output files.
+  AUTOFIX_FINDING_TYPES=""
+  if [ -d "${AUTOFIX_OUTPUT_DIR}" ]; then
+    AUTOFIX_FINDING_TYPES="$(jq -r '
+      [
+        .. | .fix_summary? // empty | .rules? // empty | .[]? | .rule? // empty
+      ]
+      | map(select(type == "string" and length > 0))
+      | unique
+      | sort
+      | join(", ")
+    ' "${AUTOFIX_OUTPUT_DIR}"/*.json 2>/dev/null | tail -n 1)"
+  fi
+
+  COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_FINDING_TYPES}")"
 fi
 rm -rf "${AUTOFIX_OUTPUT_DIR}"
-
-COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_FINDING_TYPES}")"
 
 BOT_NAME="homeboy-ci[bot]"
 BOT_EMAIL="266378653+homeboy-ci[bot]@users.noreply.github.com"
@@ -181,5 +211,5 @@ fi
 echo "committed=true" >> "${GITHUB_OUTPUT}"
 echo "autofix-branch=${AUTOFIX_BRANCH}" >> "${GITHUB_OUTPUT}"
 echo "autofix-file-count=${AUTOFIX_FILE_COUNT}" >> "${GITHUB_OUTPUT}"
-echo "autofix-fix-types=${AUTOFIX_FIX_TYPES}" >> "${GITHUB_OUTPUT}"
-echo "autofix-finding-types=${AUTOFIX_FINDING_TYPES}" >> "${GITHUB_OUTPUT}"
+echo "autofix-fix-types=${AUTOFIX_FIX_TYPES:-}" >> "${GITHUB_OUTPUT}"
+echo "autofix-finding-types=${AUTOFIX_FINDING_TYPES:-}" >> "${GITHUB_OUTPUT}"
