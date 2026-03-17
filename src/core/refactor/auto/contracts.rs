@@ -156,6 +156,14 @@ pub enum InsertionKind {
         /// Replacement text.
         new_text: String,
     },
+    /// Move a file to a new path. Creates parent directories as needed.
+    /// Used for relocating misplaced test files to match source structure.
+    FileMove {
+        /// Current file path (relative to root).
+        from: String,
+        /// Target file path (relative to root).
+        to: String,
+    },
 }
 
 impl InsertionKind {
@@ -173,7 +181,8 @@ impl InsertionKind {
             | Self::NamespaceDeclaration
             | Self::VisibilityChange { .. }
             | Self::ReexportRemoval { .. }
-            | Self::LineReplacement { .. } => FixSafetyTier::Safe,
+            | Self::LineReplacement { .. }
+            | Self::FileMove { .. } => FixSafetyTier::Safe,
 
             // Plan-only: requires human review.
             Self::MethodStub | Self::FunctionRemoval { .. } | Self::TraitUse => {

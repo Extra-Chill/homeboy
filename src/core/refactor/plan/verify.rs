@@ -472,6 +472,25 @@ fn run_fix_iteration(
         fix_result.chunk_results.extend(decompose_chunk_results);
     }
 
+    // Apply file moves (e.g., misplaced test files → correct paths).
+    // Runs after content fixes so moved files contain updated content.
+    {
+        let move_results = fixer::apply_file_moves(&auto_apply_result.fixes, root);
+        let move_count: usize = move_results
+            .iter()
+            .filter(|c| matches!(c.status, fixer::ChunkStatus::Applied))
+            .map(|c| c.applied_files)
+            .sum();
+        if move_count > 0 {
+            total_modified += move_count;
+            applied_chunks += move_results
+                .iter()
+                .filter(|c| matches!(c.status, fixer::ChunkStatus::Applied))
+                .count();
+        }
+        fix_result.chunk_results.extend(move_results);
+    }
+
     for applied_fix in auto_apply_result.fixes {
         if let Some(original) = fix_result
             .fixes

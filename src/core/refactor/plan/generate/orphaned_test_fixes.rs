@@ -6,6 +6,17 @@ use std::path::Path;
 
 use super::insertion;
 
+/// Extract the correct test path from a misplaced test finding description.
+///
+/// Expected format: "Test file is misplaced — source moved to '...' (expected test at 'correct/path')"
+fn extract_correct_test_path(description: &str) -> Option<String> {
+    let needle = "expected test at '";
+    let start = description.find(needle)? + needle.len();
+    let rest = &description[start..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
 /// Extract the test method name from an orphaned-test finding description.
 ///
 /// Expected format: "Test method 'test_foo' references 'foo' which no longer exists in the source"
@@ -200,6 +211,35 @@ pub(crate) fn generate_orphaned_test_fixes(
 ) {
     for finding in &result.findings {
         if finding.kind != AuditFinding::OrphanedTest {
+            continue;
+        }
+
+        // Handle file-level misplaced tests — generate FileMove fixes.
+        // Description format: "Test file is misplaced — source moved to '...' (expected test at '...')"
+        if finding.description.contains("is misplaced") {
+            if let Some(correct_path) = extract_correct_test_path(&finding.description) {
+                let mut ins = insertion(
+                    InsertionKind::FileMove {
+                        from: finding.file.clone(),
+                        to: correct_path.clone(),
+                    },
+                    AuditFinding::OrphanedTest,
+                    String::new(),
+                    format!(
+                        "Move misplaced test '{}' → '{}'",
+                        finding.file, correct_path
+                    ),
+                );
+                ins.safety_tier = FixSafetyTier::Safe;
+
+                fixes.push(Fix {
+                    file: finding.file.clone(),
+                    required_methods: vec![],
+                    required_registrations: vec![],
+                    insertions: vec![ins],
+                    applied: false,
+                });
+            }
             continue;
         }
 

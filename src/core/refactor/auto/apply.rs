@@ -63,6 +63,9 @@ pub(crate) fn apply_insertions_to_content(
                 old_text,
                 new_text,
             } => line_replacements.push((*line, old_text.as_str(), new_text.as_str())),
+            InsertionKind::FileMove { .. } => {
+                // File moves are handled by apply_file_moves(), not content transformation.
+            }
         }
     }
 
@@ -985,4 +988,98 @@ mod tests {
         remove_from_pub_use_block(&mut lines, "baz");
         assert_eq!(lines[0], "pub use other::{foo, bar};");
     }
+}
+
+/// Apply file move operations from fixes.
+///
+/// Extracts all `InsertionKind::FileMove` from fixes, executes them via
+/// `refactor move --file`, and returns the number of files moved.
+///
+/// Runs after content fixes so moved files contain their updated content.
+pub fn apply_file_moves(fixes: &[Fix], root: &Path) -> Vec<ApplyChunkResult> {
+    let mut results = Vec::new();
+
+    for fix in fixes {
+        for insertion in &fix.insertions {
+            if let InsertionKind::FileMove { from, to } = &insertion.kind {
+                let from_abs = root.join(from);
+                let to_abs = root.join(to);
+
+                // Validate source exists
+                if !from_abs.exists() {
+                    results.push(ApplyChunkResult {
+                        chunk_id: format!("file_move:{}", from),
+                        files: vec![from.clone(), to.clone()],
+                        status: ChunkStatus::Reverted,
+                        applied_files: 0,
+                        reverted_files: 0,
+                        verification: None,
+                        error: Some(format!("Source file does not exist: {}", from)),
+                    });
+                    continue;
+                }
+
+                // Skip if destination already exists
+                if to_abs.exists() {
+                    results.push(ApplyChunkResult {
+                        chunk_id: format!("file_move:{}", from),
+                        files: vec![from.clone(), to.clone()],
+                        status: ChunkStatus::Reverted,
+                        applied_files: 0,
+                        reverted_files: 0,
+                        verification: None,
+                        error: Some(format!("Destination already exists: {}", to)),
+                    });
+                    continue;
+                }
+
+                // Create parent directories
+                if let Some(parent) = to_abs.parent() {
+                    if !parent.exists() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            results.push(ApplyChunkResult {
+                                chunk_id: format!("file_move:{}", from),
+                                files: vec![from.clone(), to.clone()],
+                                status: ChunkStatus::Reverted,
+                                applied_files: 0,
+                                reverted_files: 0,
+                                verification: None,
+                                error: Some(format!("Failed to create directory: {}", e)),
+                            });
+                            continue;
+                        }
+                    }
+                }
+
+                // Execute the move
+                match std::fs::rename(&from_abs, &to_abs) {
+                    Ok(_) => {
+                        crate::log_status!("move", "Moved {} → {}", from, to);
+                        results.push(ApplyChunkResult {
+                            chunk_id: format!("file_move:{}", from),
+                            files: vec![from.clone(), to.clone()],
+                            status: ChunkStatus::Applied,
+                            applied_files: 1,
+                            reverted_files: 0,
+                            verification: None,
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        results.push(ApplyChunkResult {
+                            chunk_id: format!("file_move:{}", from),
+                            files: vec![from.clone(), to.clone()],
+                            status: ChunkStatus::Reverted,
+                            applied_files: 0,
+                            reverted_files: 0,
+                            verification: None,
+                            error: Some(format!("Move failed: {}", e)),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    results
 }

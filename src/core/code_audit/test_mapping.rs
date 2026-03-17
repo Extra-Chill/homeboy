@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::fingerprint::FileFingerprint;
@@ -20,6 +21,93 @@ pub fn partition_fingerprints<'a>(
     }
 
     (source, test)
+}
+
+/// Build a class/stem name → test file path index from test fingerprints.
+///
+/// This enables auto-discovery: when a template-based match fails, we can
+/// find the test file by class name regardless of directory structure.
+pub fn build_test_name_index<'a>(test_fps: &[&'a FileFingerprint]) -> HashMap<String, &'a str> {
+    let mut index = HashMap::new();
+    for fp in test_fps {
+        if let Some(stem) = extract_test_stem(&fp.relative_path) {
+            index.insert(stem.to_lowercase(), fp.relative_path.as_str());
+        }
+    }
+    index
+}
+
+/// Build a class/stem name → source file path index from source fingerprints.
+pub fn build_source_name_index<'a>(source_fps: &[&'a FileFingerprint]) -> HashMap<String, &'a str> {
+    let mut index = HashMap::new();
+    for fp in source_fps {
+        if let Some(stem) = extract_file_stem(&fp.relative_path) {
+            index.insert(stem.to_lowercase(), fp.relative_path.as_str());
+        }
+    }
+    index
+}
+
+/// Discover a test file for a source file by class name, falling back from template matching.
+///
+/// Tries template first (fast, exact). On failure, falls back to name-based auto-discovery
+/// by searching the test name index for a matching class name.
+pub fn discover_test_file<'a>(
+    source_path: &str,
+    config: &TestMappingConfig,
+    test_file_map: &HashMap<&str, &'a FileFingerprint>,
+    test_name_index: &HashMap<String, &'a str>,
+) -> Option<&'a str> {
+    // Tier 1: Template match (existing behavior)
+    if let Some(template_path) = source_to_test_path(source_path, config) {
+        if test_file_map.contains_key(template_path.as_str()) {
+            return Some(test_file_map[template_path.as_str()].relative_path.as_str());
+        }
+    }
+
+    // Tier 2: Name-based auto-discovery
+    let stem = extract_file_stem(source_path)?;
+    let test_key = format!("{}test", stem.to_lowercase());
+    test_name_index.get(&test_key).copied()
+}
+
+/// Discover a source file for a test file by class name, falling back from template matching.
+pub fn discover_source_file<'a>(
+    test_path: &str,
+    config: &TestMappingConfig,
+    source_name_index: &HashMap<String, &'a str>,
+) -> Option<&'a str> {
+    // Tier 1: Template match (existing behavior)
+    if let Some(template_path) = test_to_source_path(test_path, config) {
+        if let Some(&source_path) =
+            source_name_index.get(&extract_file_stem(&template_path)?.to_lowercase())
+        {
+            if source_path == template_path {
+                return Some(source_path);
+            }
+        }
+    }
+
+    // Tier 2: Name-based auto-discovery
+    let test_stem = extract_test_stem(test_path)?;
+    source_name_index.get(&test_stem.to_lowercase()).copied()
+}
+
+/// Extract the file stem (class name) from a path, e.g., "inc/Foo/Bar.php" → "Bar"
+fn extract_file_stem(path: &str) -> Option<&str> {
+    Path::new(path).file_stem()?.to_str()
+}
+
+/// Extract the source class name from a test file path.
+/// "tests/Unit/Foo/BarTest.php" → "bar" (lowercased, "Test" suffix stripped)
+fn extract_test_stem(path: &str) -> Option<String> {
+    let stem = Path::new(path).file_stem()?.to_str()?;
+    // Strip common test suffixes
+    let base = stem
+        .strip_suffix("Test")
+        .or_else(|| stem.strip_suffix("_test"))
+        .unwrap_or(stem);
+    Some(base.to_string())
 }
 
 /// Check if a file path is within one of the configured source directories.

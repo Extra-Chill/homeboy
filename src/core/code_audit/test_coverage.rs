@@ -19,7 +19,9 @@ use regex::Regex;
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
-use super::test_mapping::{partition_fingerprints, source_to_test_path, test_to_source_path};
+use super::test_mapping::{
+    build_source_name_index, partition_fingerprints, source_to_test_path, test_to_source_path,
+};
 use crate::extension::TestMappingConfig;
 
 /// Analyze test coverage gaps given source fingerprints and a test mapping config.
@@ -266,11 +268,20 @@ pub(crate) fn analyze_test_coverage(
         }
     }
 
-    // Check 3: Orphaned tests — test files with no corresponding source file
+    // Check 3: Orphaned tests — test files with no corresponding source file.
+    //
+    // Uses two-tier matching:
+    // - Tier 1: template-based path matching (existing behavior)
+    // - Tier 2: name-based auto-discovery (finds source files that moved)
+    //
+    // When a test file's source is found by name at a different path, the test
+    // is "misplaced" not "orphaned" — the suggestion is to move it.
     let source_paths: HashSet<&str> = source_fps
         .iter()
         .map(|fp| fp.relative_path.as_str())
         .collect();
+
+    let source_name_index = build_source_name_index(&source_fps);
 
     for test_fp in &test_fps {
         let expected_source_path = test_to_source_path(&test_fp.relative_path, config);
@@ -280,17 +291,48 @@ pub(crate) fn analyze_test_coverage(
                 source_paths.contains(source_path.as_str()) || root.join(source_path).exists();
 
             if !source_exists {
-                findings.push(Finding {
-                    convention: "test_coverage".to_string(),
-                    severity: Severity::Info,
-                    file: test_fp.relative_path.clone(),
-                    description: format!(
-                        "Test file has no corresponding source file (expected '{}')",
-                        source_path
-                    ),
-                    suggestion: "Remove the orphaned test or create the source file".to_string(),
-                    kind: AuditFinding::OrphanedTest,
-                });
+                // Tier 2: Try name-based discovery — maybe the source moved
+                let discovered = super::test_mapping::discover_source_file(
+                    &test_fp.relative_path,
+                    config,
+                    &source_name_index,
+                );
+
+                if let Some(actual_source_path) = discovered {
+                    // Source exists at a different path — this is a misplaced test, not orphaned.
+                    // Compute where the test SHOULD be based on the actual source location.
+                    let correct_test_path =
+                        source_to_test_path(actual_source_path, config).unwrap_or_default();
+
+                    findings.push(Finding {
+                        convention: "test_coverage".to_string(),
+                        severity: Severity::Info,
+                        file: test_fp.relative_path.clone(),
+                        description: format!(
+                            "Test file is misplaced — source moved to '{}' (expected test at '{}')",
+                            actual_source_path, correct_test_path
+                        ),
+                        suggestion: format!(
+                            "Move test file to '{}' to match source structure",
+                            correct_test_path
+                        ),
+                        kind: AuditFinding::OrphanedTest,
+                    });
+                } else {
+                    // Truly orphaned — no source found anywhere
+                    findings.push(Finding {
+                        convention: "test_coverage".to_string(),
+                        severity: Severity::Info,
+                        file: test_fp.relative_path.clone(),
+                        description: format!(
+                            "Test file has no corresponding source file (expected '{}')",
+                            source_path
+                        ),
+                        suggestion: "Remove the orphaned test or create the source file"
+                            .to_string(),
+                        kind: AuditFinding::OrphanedTest,
+                    });
+                }
             }
         }
     }
