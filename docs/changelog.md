@@ -4,6 +4,42 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.79.0] - 2026-03-17
+
+### Added
+- naming pattern convention detection for parallel filtering
+- cross-file frequency filter for parallel detection
+- include cross-directory convention methods in parallel detection filter
+- convention-aware parallel implementation detection
+- audit reference dependencies — include framework source in cross-reference analysis
+- surface compiler warnings as audit findings
+- post-write compilation validation gate
+- post-write compilation validation gate for all code-modifying commands
+- expose fixability counts in standard audit output
+- deploy from GitHub release artifacts
+- centralize execution context resolution
+- deploy from GitHub release artifacts — skip local builds when remote_url is set
+- centralize execution context resolution for lint/test/build/audit/refactor commands
+
+### Changed
+- cargo fmt — fix formatting from autofix commits
+- batch verification for audit --fix --write
+- unify convention method set, apply to duplicate detection
+- merge SafeAuto + SafeWithChecks into single Safe tier
+- retrigger with updated extension import resolver v2
+- Revert "chore(ci): homeboy autofix — refactor [duplicatefunction, orphanedtest] (11 files)"
+- consolidate 11 directory walkers into codebase_scan
+
+### Fixed
+- exclude test lifecycle methods from convention expectations
+- audit autofix generates real method bodies from conforming peers
+- skip parallel findings when either method is convention-expected
+- skip unreferenced export check for test files
+- reference fingerprints must not be checked for dead code themselves
+- prevent homeboy.json corruption during component operations
+- repair broken autofix decompositions — imports, module names, doc comment placement
+- decompose slug sanitization — hyphens produce invalid Rust module names
+
 ## [0.78.0] - 2026-03-15
 
 ### Added
