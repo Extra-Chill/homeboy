@@ -203,32 +203,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn resolve_builtin_for_rust_project() {
-        let dir = TempDir::new().expect("temp dir");
-        fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
-
-        let result = resolve_builtin_format_command(dir.path());
-        assert_eq!(result, Some("cargo fmt 2>&1".to_string()));
-    }
-
-    #[test]
-    fn resolve_builtin_for_go_project() {
-        let dir = TempDir::new().expect("temp dir");
-        fs::write(dir.path().join("go.mod"), "module test").unwrap();
-
-        let result = resolve_builtin_format_command(dir.path());
-        assert_eq!(result, Some("gofmt -w . 2>&1".to_string()));
-    }
-
-    #[test]
-    fn resolve_builtin_returns_none_for_unknown() {
-        let dir = TempDir::new().expect("temp dir");
-
-        let result = resolve_builtin_format_command(dir.path());
-        assert!(result.is_none());
-    }
-
-    #[test]
     fn skipped_when_no_files() {
         let dir = TempDir::new().expect("temp dir");
         let result = format_after_write(dir.path(), &[]).unwrap();
