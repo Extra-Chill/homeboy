@@ -1,5 +1,7 @@
 use crate::code_audit::{AuditFinding, CodeAuditResult};
+use crate::core::code_audit::fingerprint;
 use crate::core::refactor::auto::{Fix, FixSafetyTier, InsertionKind, SkippedFile};
+use crate::engine::text::levenshtein;
 use std::path::Path;
 
 use super::insertion;
@@ -13,6 +15,85 @@ fn extract_test_method_name(description: &str) -> Option<String> {
     let rest = &description[start..];
     let end = rest.find('\'')?;
     Some(rest[..end].to_string())
+}
+
+/// Extract the expected source method name from an orphaned-test finding description.
+///
+/// Expected format: "Test method 'test_foo' references 'foo' which no longer exists in the source"
+fn extract_expected_source_name(description: &str) -> Option<String> {
+    let needle = "references '";
+    let start = description.find(needle)? + needle.len();
+    let rest = &description[start..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
+/// Compute normalized similarity between two strings (0.0 = no match, 1.0 = identical).
+/// Uses levenshtein distance normalized by the longer string's length.
+fn normalized_similarity(a: &str, b: &str) -> f64 {
+    if a == b {
+        return 1.0;
+    }
+    let max_len = a.len().max(b.len());
+    if max_len == 0 {
+        return 1.0;
+    }
+    let dist = levenshtein(a, b);
+    1.0 - (dist as f64 / max_len as f64)
+}
+
+/// Try to find a renamed source method that matches the orphaned test's expected name.
+///
+/// Resolves the source file from the test file path using Rust naming conventions,
+/// fingerprints it to get current methods, and fuzzy-matches.
+///
+/// Returns `Some(new_method_name)` if a high-confidence rename candidate is found.
+fn find_rename_candidate(root: &Path, test_file: &str, expected_source: &str) -> Option<String> {
+    // Derive source file path from test file path using Rust conventions:
+    // tests/core/foo_test.rs → src/core/foo.rs
+    let source_path = test_file_to_source_path(test_file)?;
+    let abs_source = root.join(&source_path);
+
+    if !abs_source.exists() {
+        return None;
+    }
+
+    // Fingerprint the source file to get current methods
+    let fp = fingerprint::fingerprint_file(&abs_source, root)?;
+
+    // Find the best fuzzy match among current source methods
+    let mut best_match: Option<(&str, f64)> = None;
+    for method in &fp.methods {
+        let sim = normalized_similarity(expected_source, method);
+        if sim > best_match.map_or(0.0, |(_, s)| s) {
+            best_match = Some((method, sim));
+        }
+    }
+
+    // Require ≥0.5 similarity for a rename candidate.
+    // This catches common renames like:
+    //   build_report → generate_report (0.6+)
+    //   parse → parse_url (0.5+)
+    //   validate_write → validate_only (0.5+)
+    // But rejects unrelated names like:
+    //   parse → deploy (0.2)
+    if let Some((name, sim)) = best_match {
+        if sim >= 0.5 && sim < 1.0 {
+            return Some(name.to_string());
+        }
+    }
+
+    None
+}
+
+/// Convert a test file path to its expected source file path using Rust conventions.
+///
+/// `tests/core/foo_test.rs` → `src/core/foo.rs`
+/// `tests/core/code_audit/bar_test.rs` → `src/core/code_audit/bar.rs`
+fn test_file_to_source_path(test_path: &str) -> Option<String> {
+    let path = test_path.strip_prefix("tests/")?;
+    let path = path.strip_suffix("_test.rs")?;
+    Some(format!("src/{}.rs", path))
 }
 
 /// Returns true if this is a method-level orphaned test (not a file-level orphan).
@@ -165,6 +246,93 @@ pub(crate) fn generate_orphaned_test_fixes(
             continue;
         };
 
+        // Try to find a renamed source method before falling back to deletion.
+        // If the source method was renamed (e.g., build_report → generate_report),
+        // rename the test to match instead of deleting it.
+        let expected_source = extract_expected_source_name(&finding.description);
+        let rename_candidate = expected_source
+            .as_deref()
+            .and_then(|src| find_rename_candidate(root, &finding.file, src));
+
+        if let Some(new_source_name) = rename_candidate {
+            // Generate a test rename fix instead of deletion.
+            // The test method prefix convention: test_<source_name>...
+            // We replace the old source name with the new one in the test function name.
+            let old_test_name = &test_method;
+            let new_test_name = if let Some(src) = expected_source.as_deref() {
+                old_test_name.replacen(src, &new_source_name, 1)
+            } else {
+                continue;
+            };
+
+            // Find the declaration line and build a text replacement
+            let lines: Vec<&str> = content.lines().collect();
+            let decl_line_idx = (start_line - 1..end_line).find(|&i| {
+                let trimmed = lines.get(i).map_or("", |l| l.trim());
+                trimmed.contains(&format!("fn {}(", old_test_name))
+                    || trimmed.contains(&format!("fn {} (", old_test_name))
+                    || {
+                        // Also check for the stripped prefix variant
+                        if let Some(stripped) = old_test_name.strip_prefix("test_") {
+                            trimmed.contains(&format!("fn {}(", stripped))
+                                || trimmed.contains(&format!("fn {} (", stripped))
+                        } else {
+                            false
+                        }
+                    }
+            });
+
+            if let Some(decl_idx) = decl_line_idx {
+                let old_line = lines[decl_idx];
+                // Determine the actual function name in the file (may not have test_ prefix)
+                let actual_old_name = if old_line.contains(&format!("fn {}(", old_test_name))
+                    || old_line.contains(&format!("fn {} (", old_test_name))
+                {
+                    old_test_name.clone()
+                } else if let Some(stripped) = old_test_name.strip_prefix("test_") {
+                    stripped.to_string()
+                } else {
+                    old_test_name.clone()
+                };
+
+                let actual_new_name = if let Some(src) = expected_source.as_deref() {
+                    actual_old_name.replacen(src, &new_source_name, 1)
+                } else {
+                    continue;
+                };
+
+                let new_line = old_line.replacen(&actual_old_name, &actual_new_name, 1);
+
+                let mut ins = insertion(
+                    InsertionKind::LineReplacement {
+                        line: decl_idx + 1, // 1-indexed
+                        old_text: old_line.to_string(),
+                        new_text: new_line,
+                    },
+                    AuditFinding::OrphanedTest,
+                    String::new(),
+                    format!(
+                        "Rename orphaned test `{}` → `{}` (source method renamed: `{}` → `{}`)",
+                        actual_old_name,
+                        actual_new_name,
+                        expected_source.as_deref().unwrap_or("?"),
+                        new_source_name
+                    ),
+                );
+                ins.safety_tier = FixSafetyTier::Safe;
+
+                fixes.push(Fix {
+                    file: finding.file.clone(),
+                    required_methods: vec![],
+                    required_registrations: vec![],
+                    insertions: vec![ins],
+                    applied: false,
+                });
+                continue;
+            }
+        }
+
+        // Fallback: delete the orphaned test if no rename candidate found
         let mut ins = insertion(
             InsertionKind::FunctionRemoval {
                 start_line,
@@ -319,5 +487,53 @@ mod tests {
         let (_start, end) = range.unwrap();
         // The closing } of test_complex is on line 11
         assert_eq!(end, 11);
+    }
+
+    #[test]
+    fn test_extract_expected_source_name() {
+        let desc = "Test method 'test_build_report' references 'build_report' which no longer exists in the source";
+        assert_eq!(
+            extract_expected_source_name(desc),
+            Some("build_report".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_expected_source_name_no_match() {
+        let desc = "Test file has no corresponding source file";
+        assert_eq!(extract_expected_source_name(desc), None);
+    }
+
+    #[test]
+    fn test_normalized_similarity_identical() {
+        assert_eq!(normalized_similarity("foo", "foo"), 1.0);
+    }
+
+    #[test]
+    fn test_normalized_similarity_similar() {
+        // Typical renames: validate_write → validate_only, save_baseline → save_baseline_scoped
+        let sim = normalized_similarity("validate_write", "validate_only");
+        assert!(sim > 0.5, "Expected >0.5, got {}", sim);
+        let sim2 = normalized_similarity("save_baseline", "save_baseline_scoped");
+        assert!(sim2 > 0.5, "Expected >0.5, got {}", sim2);
+    }
+
+    #[test]
+    fn test_normalized_similarity_unrelated() {
+        let sim = normalized_similarity("parse", "deploy");
+        assert!(sim < 0.5, "Expected <0.5, got {}", sim);
+    }
+
+    #[test]
+    fn test_test_file_to_source_path() {
+        assert_eq!(
+            test_file_to_source_path("tests/core/foo_test.rs"),
+            Some("src/core/foo.rs".to_string())
+        );
+        assert_eq!(
+            test_file_to_source_path("tests/core/code_audit/bar_test.rs"),
+            Some("src/core/code_audit/bar.rs".to_string())
+        );
+        assert_eq!(test_file_to_source_path("src/foo.rs"), None);
     }
 }

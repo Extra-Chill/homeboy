@@ -145,6 +145,17 @@ pub enum InsertionKind {
         /// 1-indexed line number to remove.
         line: usize,
     },
+    /// Generic line-level text replacement.
+    /// Finds `old_text` on the specified line and replaces with `new_text`.
+    /// Used for test method renames and similar targeted edits.
+    LineReplacement {
+        /// 1-indexed line number where the replacement should be applied.
+        line: usize,
+        /// Text to find on that line.
+        old_text: String,
+        /// Replacement text.
+        new_text: String,
+    },
 }
 
 impl InsertionKind {
@@ -161,7 +172,8 @@ impl InsertionKind {
             | Self::TypeConformance
             | Self::NamespaceDeclaration
             | Self::VisibilityChange { .. }
-            | Self::ReexportRemoval { .. } => FixSafetyTier::Safe,
+            | Self::ReexportRemoval { .. }
+            | Self::LineReplacement { .. } => FixSafetyTier::Safe,
 
             // Plan-only: requires human review.
             Self::MethodStub | Self::FunctionRemoval { .. } | Self::TraitUse => {

@@ -31,6 +31,7 @@ pub(crate) fn apply_insertions_to_content(
     let mut doc_ref_updates: Vec<(usize, &str, &str)> = Vec::new();
     let mut doc_line_removals: Vec<usize> = Vec::new();
     let mut reexport_removals: Vec<&str> = Vec::new();
+    let mut line_replacements: Vec<(usize, &str, &str)> = Vec::new();
 
     for insertion in insertions {
         match &insertion.kind {
@@ -57,6 +58,11 @@ pub(crate) fn apply_insertions_to_content(
             InsertionKind::ReexportRemoval { fn_name } => {
                 reexport_removals.push(fn_name.as_str());
             }
+            InsertionKind::LineReplacement {
+                line,
+                old_text,
+                new_text,
+            } => line_replacements.push((*line, old_text.as_str(), new_text.as_str())),
         }
     }
 
@@ -66,6 +72,20 @@ pub(crate) fn apply_insertions_to_content(
             let idx = line_num.saturating_sub(1);
             if idx < lines.len() {
                 lines[idx] = lines[idx].replacen(from, to, 1);
+            }
+        }
+        result = lines.join("\n");
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
+
+    if !line_replacements.is_empty() {
+        let mut lines: Vec<String> = result.lines().map(String::from).collect();
+        for (line_num, old_text, new_text) in &line_replacements {
+            let idx = line_num.saturating_sub(1);
+            if idx < lines.len() {
+                lines[idx] = lines[idx].replacen(old_text, new_text, 1);
             }
         }
         result = lines.join("\n");
