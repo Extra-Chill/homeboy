@@ -187,68 +187,6 @@ command_output_stem() {
   printf '%s\n' "${stem}"
 }
 
-# Validate that staged autofix changes compile.
-#
-# Ideally this would use the component's extension validate script (scripts.validate
-# in the extension manifest), but there's no `homeboy validate` CLI command yet.
-# As a pragmatic fallback, detect the project type from workspace files and run
-# the appropriate compiler check. This is a safety net — the proper fix is to wire
-# validate_write into the refactor pipeline's chunk verifier.
-#
-# Returns 0 if valid (or no validator found), 1 if compilation fails.
-validate_autofix_compilation() {
-  local workspace="${1:-.}"
-  local component_id="${2:-}"
-
-  # Try homeboy's own build command first (uses extension configuration)
-  if [ -n "${component_id}" ] && command -v homeboy &> /dev/null; then
-    echo "Validating autofix changes via homeboy build..."
-    set +e
-    homeboy build "${component_id}" --path "${workspace}" 2>&1 | tail -30
-    local hb_exit=${PIPESTATUS[0]}
-    set -e
-
-    if [ "${hb_exit}" -ne 0 ]; then
-      echo "::error::Autofix changes do not compile (homeboy build exit ${hb_exit})"
-      return 1
-    fi
-    echo "Autofix changes compile successfully (homeboy build)"
-    return 0
-  fi
-
-  # Fallback: detect project type from workspace files
-  local validate_cmd=""
-  if [ -f "${workspace}/Cargo.toml" ]; then
-    validate_cmd="cargo check --manifest-path ${workspace}/Cargo.toml"
-  elif [ -f "${workspace}/tsconfig.json" ]; then
-    validate_cmd="npx tsc --noEmit --project ${workspace}/tsconfig.json"
-  elif [ -f "${workspace}/composer.json" ]; then
-    # PHP: check syntax on changed files
-    validate_cmd="git diff --cached --name-only --diff-filter=ACMR -- '*.php' | xargs -r -n1 php -l"
-  elif [ -f "${workspace}/go.mod" ]; then
-    validate_cmd="go vet ./..."
-  fi
-
-  if [ -z "${validate_cmd}" ]; then
-    echo "No compilation validator detected — skipping"
-    return 0
-  fi
-
-  echo "Validating autofix changes compile: ${validate_cmd}"
-  set +e
-  eval "${validate_cmd}" 2>&1 | tail -30
-  local exit_code=${PIPESTATUS[0]}
-  set -e
-
-  if [ "${exit_code}" -ne 0 ]; then
-    echo "::error::Autofix changes do not compile (exit ${exit_code})"
-    return 1
-  fi
-
-  echo "Autofix changes compile successfully"
-  return 0
-}
-
 build_autofix_command() {
   local fix_cmd="$1"
   local component_id="$2"
