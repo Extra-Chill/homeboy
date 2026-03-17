@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.81.1] - 2026-03-17
+
+### Fixed
+- const/static boundary detection handles multi-line array initializers (#841)
+
 ## [0.81.0] - 2026-03-17
 
 ### Added
