@@ -295,6 +295,23 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
         }
 
         copy_changed_files(working_root.path(), &request.root, &changed_files)?;
+
+        // Run the project's formatter on written files so generated code matches style.
+        // Non-fatal: formatting failure logs a warning but doesn't block the refactor.
+        let abs_changed: Vec<std::path::PathBuf> =
+            changed_files.iter().map(|f| request.root.join(f)).collect();
+        match crate::engine::format_write::format_after_write(&request.root, &abs_changed) {
+            Ok(fmt) => {
+                if let Some(cmd) = &fmt.command {
+                    if !fmt.success {
+                        warnings.push(format!("Formatter ({}) exited non-zero", cmd));
+                    }
+                }
+            }
+            Err(e) => {
+                crate::log_status!("format", "Warning: post-write format failed: {}", e);
+            }
+        }
     }
 
     for stage in &mut stage_summaries {

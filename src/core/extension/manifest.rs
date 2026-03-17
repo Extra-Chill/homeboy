@@ -221,6 +221,16 @@ pub struct ScriptsConfig {
     /// - TypeScript: `tsc --noEmit`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validate: Option<String>,
+    /// Script that formats source code after automated writes.
+    /// Runs from the project root. Exit 0 on success, non-zero on failure.
+    /// Formatting failure is non-fatal — it logs a warning but never rolls back.
+    ///
+    /// Language examples:
+    /// - Rust: `cargo fmt`
+    /// - TypeScript: `npx prettier --write .`
+    /// - PHP: `vendor/bin/phpcbf`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
 }
 
 /// Unified extension manifest decomposed into capability groups.
@@ -489,6 +499,11 @@ impl ExtensionManifest {
     /// Get the validate script path (relative to extension dir), if configured.
     pub fn validate_script(&self) -> Option<&str> {
         self.scripts.as_ref().and_then(|s| s.validate.as_deref())
+    }
+
+    /// Get the format script path (relative to extension dir), if configured.
+    pub fn format_script(&self) -> Option<&str> {
+        self.scripts.as_ref().and_then(|s| s.format.as_deref())
     }
 }
 

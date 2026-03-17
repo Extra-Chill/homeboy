@@ -13,6 +13,7 @@ pub mod codebase_scan;
 pub mod command;
 pub mod execution_context;
 pub mod executor;
+pub mod format_write;
 pub mod hooks;
 pub mod identifier;
 pub(crate) mod local_files;
