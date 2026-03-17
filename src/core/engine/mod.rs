@@ -13,6 +13,7 @@ pub mod codebase_scan;
 pub mod command;
 pub mod contract;
 pub mod contract_extract;
+pub mod contract_testgen;
 pub mod execution_context;
 pub mod executor;
 pub mod format_write;
