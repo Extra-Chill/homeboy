@@ -1,6 +1,7 @@
 import Foundation
 
 /// Represents a extension's manifest (extension.json)
+/// Updated for grouped capability structure (executable/platform)
 struct ExtensionManifest: Codable, Identifiable {
     let id: String
     let name: String
@@ -9,16 +10,53 @@ struct ExtensionManifest: Codable, Identifiable {
     let description: String
     let author: String
     let homepage: String?
-    
-    let runtime: RuntimeConfig?
-    let inputs: [InputConfig]?
-    let output: OutputConfig?
+
+    // Grouped capabilities (NEW structure)
+    let executable: ExecutableConfig?      // Was: runtime, inputs, output
+    let platform: PlatformConfig?          // Was: config_schema, pinned files/logs, database, discovery, commands
+
+    // Top-level capabilities (unchanged)
+    let cli: CLITaskConfig?
+    let build: CLITaskConfig?
+    let lint: CLITaskConfig?
+    let test: CLITaskConfig?
     let actions: [ActionConfig]?
+    let hooks: HooksConfig?
     let settings: [SettingConfig]?
     let requires: RequirementsConfig?
-    
+    let extra: [String: String]?
+
     /// Path to the extension directory (set after loading, not from JSON)
     var extensionPath: String?
+
+    // MARK: - Backward compatibility accessors
+
+    /// Runtime config (from executable group)
+    var runtime: RuntimeConfig? { executable?.runtime }
+
+    /// Inputs (from executable group)
+    var inputs: [InputConfig]? { executable?.inputs }
+
+    /// Output (from executable group)
+    var output: OutputConfig? { executable?.output }
+
+    /// Config schema (from platform group)
+    var configSchema: [String: ConfigSchemaItem]? { platform?.configSchema }
+
+    /// Default pinned files (from platform group)
+    var defaultPinnedFiles: [String]? { platform?.defaultPinnedFiles }
+
+    /// Default pinned logs (from platform group)
+    var defaultPinnedLogs: [String]? { platform?.defaultPinnedLogs }
+
+    /// Database config (from platform group)
+    var database: DatabaseConfig? { platform?.database }
+
+    /// Discovery config (from platform group)
+    var discovery: DiscoveryConfig? { platform?.discovery }
+
+    /// Platform commands (from platform group)
+    var commands: [PlatformCommand]? { platform?.commands }
 }
 
 // MARK: - Requirements Configuration
@@ -292,4 +330,81 @@ enum AnyCodableValue: Codable, Equatable {
         case .null: return ""
         }
     }
+}
+
+// MARK: - Grouped Capability Configurations (NEW)
+
+/// Executable extensions: Python/shell scripts with inputs and outputs
+struct ExecutableConfig: Codable {
+    let runtime: RuntimeConfig
+    let inputs: [InputConfig]?
+    let output: OutputConfig?
+}
+
+/// Platform extensions: WordPress/Node.js projects with discovery and commands
+struct PlatformConfig: Codable {
+    let configSchema: [String: ConfigSchemaItem]?
+    let defaultPinnedFiles: [String]?
+    let defaultPinnedLogs: [String]?
+    let database: DatabaseConfig?
+    let discovery: DiscoveryConfig?
+    let commands: [PlatformCommand]?
+}
+
+/// Config schema item for platform extensions
+struct ConfigSchemaItem: Codable {
+    let type: String
+    let description: String?
+    let `default`: String?
+    let required: Bool?
+}
+
+/// Database configuration for platform extensions
+struct DatabaseConfig: Codable {
+    let tables: [DatabaseTableConfig]?
+    let views: [DatabaseViewConfig]?
+}
+
+struct DatabaseTableConfig: Codable {
+    let name: String
+    let description: String?
+    let columns: [DatabaseColumnConfig]?
+}
+
+struct DatabaseViewConfig: Codable {
+    let name: String
+    let query: String
+}
+
+struct DatabaseColumnConfig: Codable {
+    let name: String
+    let type: String
+    let description: String?
+}
+
+/// Discovery configuration for finding projects
+struct DiscoveryConfig: Codable {
+    let type: String  // e.g., "wordpress", "nodejs"
+    let indicators: [String]?  // Files that indicate this project type
+}
+
+/// Platform-specific commands
+struct PlatformCommand: Codable, Identifiable {
+    let id: String
+    let name: String
+    let description: String?
+    let command: String
+}
+
+/// CLI task configuration (build, lint, test)
+struct CLITaskConfig: Codable {
+    let command: String?
+    let args: [String]?
+    let timeout: Int?
+}
+
+/// Hooks configuration
+struct HooksConfig: Codable {
+    let preRun: [String]?
+    let postRun: [String]?
 }
