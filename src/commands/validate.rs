@@ -25,10 +25,7 @@ pub struct ValidateOutput {
     result: ValidationResult,
 }
 
-pub fn run(
-    args: ValidateArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<ValidateOutput> {
+pub fn run(args: ValidateArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ValidateOutput> {
     let comp =
         component::resolve_effective(args.component_id.as_deref(), args.path.as_deref(), None)?;
 

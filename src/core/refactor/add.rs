@@ -67,11 +67,8 @@ pub fn fixes_from_audit(audit: &CodeAuditResult, write: bool) -> Result<FixResul
 
         // Validate written code compiles
         if applied > 0 {
-            let validation = crate::engine::validate_write::validate_write(
-                root,
-                &affected_files,
-                &rollback,
-            )?;
+            let validation =
+                crate::engine::validate_write::validate_write(root, &affected_files, &rollback)?;
             if !validation.success {
                 crate::log_status!(
                     "validate",
@@ -161,11 +158,8 @@ pub fn add_import(
 
         // Validate written code compiles
         if files_modified > 0 {
-            let validation = crate::engine::validate_write::validate_write(
-                &root,
-                &affected_files,
-                &rollback,
-            )?;
+            let validation =
+                crate::engine::validate_write::validate_write(&root, &affected_files, &rollback)?;
             if !validation.success {
                 crate::log_status!(
                     "validate",

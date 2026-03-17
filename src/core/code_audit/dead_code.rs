@@ -81,8 +81,7 @@ pub(crate) fn analyze_dead_code(
     for fp in owned {
         // Check 1: Unused parameters — with call-site-aware classification (#824)
         for unused in &fp.unused_parameters {
-            let (kind, description, suggestion) =
-                classify_unused_param(unused, &caller_map);
+            let (kind, description, suggestion) = classify_unused_param(unused, &caller_map);
 
             findings.push(Finding {
                 convention: "dead_code".to_string(),

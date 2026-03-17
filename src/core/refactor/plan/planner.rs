@@ -322,11 +322,8 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
 
         // Validate that written code compiles. If validation fails, roll back
         // all changes and report as dry-run (no files modified).
-        let validation = validate_write::validate_write(
-            &request.root,
-            &abs_changed,
-            &validation_rollback,
-        )?;
+        let validation =
+            validate_write::validate_write(&request.root, &abs_changed, &validation_rollback)?;
         if !validation.success {
             crate::log_status!(
                 "validate",
