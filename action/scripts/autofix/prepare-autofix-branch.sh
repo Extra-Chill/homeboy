@@ -138,6 +138,22 @@ if git diff --cached --quiet; then
   exit 0
 fi
 
+# Validate that autofix changes compile before committing.
+# The validate_write gate catches this locally, but CI autofix runs through
+# a different path. This prevents shipping broken decompositions (#832).
+if [ "${BASELINE_ONLY}" != true ]; then
+  if ! validate_autofix_compilation "${WORKSPACE}" "${COMP_ID}"; then
+    echo "Aborting autofix commit — rolling back staged changes"
+    git reset HEAD -- .
+    git checkout -- .
+    git clean -fd 2>/dev/null || true
+    git checkout -
+    git branch -D "${AUTOFIX_BRANCH}"
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
+fi
+
 # Capture autofix summary: file count, fix commands, and finding categories
 AUTOFIX_FILE_COUNT=$(git diff --cached --name-only | wc -l | xargs)
 AUTOFIX_CHANGED_FILES="$(git diff --cached --name-only | sort)"

@@ -271,6 +271,17 @@ while [ "${PUSH_ATTEMPT}" -le "${AUTOFIX_PUSH_ATTEMPTS}" ]; do
     exit 0
   fi
 
+  # Validate that autofix changes compile before committing (#832).
+  if ! validate_autofix_compilation "${WORKSPACE}" "${COMP_ID}"; then
+    echo "Aborting autofix commit — changes do not compile"
+    git reset HEAD -- .
+    git checkout -- .
+    git clean -fd 2>/dev/null || true
+    echo "status=validation-failed" >> "${GITHUB_OUTPUT}"
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
+
   commit_autofix_changes
 
   if push_autofix_commit; then
