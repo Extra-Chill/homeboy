@@ -50,7 +50,10 @@ pub struct TestCase {
 ///
 /// `type_defaults` from the grammar are used to generate valid input
 /// construction for each parameter.
-pub(crate) fn generate_test_plan(contract: &FunctionContract, type_defaults: &[TypeDefault]) -> TestPlan {
+pub(crate) fn generate_test_plan(
+    contract: &FunctionContract,
+    type_defaults: &[TypeDefault],
+) -> TestPlan {
     let mut cases = Vec::new();
 
     if contract.branches.is_empty() {
