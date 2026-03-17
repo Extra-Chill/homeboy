@@ -456,6 +456,94 @@ for m in re.finditer(r'^function\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*[\w\\\\|?]+)?\s*
     if body and len(body) > 2:
         check_unused_params(fn_name, params_str, body)
 
+def count_call_args(text):
+    # Count arguments in a function call starting with '('.
+    # Track paren depth, count commas at depth 1.
+    # Returns None if parens don't balance on this line (multi-line call).
+    if not text or text[0] != '(':
+        return None
+    depth = 0
+    commas = 0
+    has_content = False
+    in_string_sq = False
+    in_string_dq = False
+    for i, ch in enumerate(text):
+        if in_string_sq:
+            if ch == chr(39) and (i == 0 or text[i-1] != chr(92)):
+                in_string_sq = False
+            continue
+        if in_string_dq:
+            if ch == chr(34) and (i == 0 or text[i-1] != chr(92)):
+                in_string_dq = False
+            continue
+        if ch == chr(39):
+            in_string_sq = True
+            has_content = True
+            continue
+        if ch == chr(34):
+            in_string_dq = True
+            has_content = True
+            continue
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return commas + 1 if has_content else 0
+        elif ch == ',' and depth == 1:
+            commas += 1
+        elif depth == 1 and ch not in (' ', '\t', '\n', '\r'):
+            has_content = True
+    return None  # unbalanced — multi-line call, skip
+
+# --- Call Sites ---
+# Extract function/method call sites with argument counts.
+# For each call, record: target function name, line number, arg count.
+# Used by core for cross-file parameter analysis (#824).
+call_sites = []
+call_sites_seen = set()  # (target, line) dedup — method+free patterns can overlap
+lines_list = content.split('\n')
+for line_idx, line_text in enumerate(lines_list, 1):
+    # Skip function/method declaration lines — we want calls, not signatures
+    stripped_line = line_text.strip()
+    if re.match(r'(?:public|protected|private|static|abstract|final|\s)*function\s', stripped_line):
+        continue
+
+    # Method calls: (dollar)this->method(...), self::method(...), ClassName::method(...)
+    for cm in re.finditer(r'(?:' + dollar_esc + r'this->|self::|static::|[A-Z]\w*::)(\w+)\s*\(', line_text):
+        call_name = cm.group(1)
+        if call_name.startswith('test'):
+            continue
+        paren_start = cm.end() - 1
+        remaining = line_text[paren_start:]
+        arg_count = count_call_args(remaining)
+        if arg_count is not None:
+            key = (call_name, line_idx)
+            if key not in call_sites_seen:
+                call_sites_seen.add(key)
+                call_sites.append({'target': call_name, 'line': line_idx, 'arg_count': arg_count})
+
+    # Free function calls: function_name(...)
+    for cm in re.finditer(r'\b([a-z_]\w*)\s*\(', line_text):
+        call_name = cm.group(1)
+        skip_php_calls = {'if', 'while', 'for', 'foreach', 'switch', 'match', 'catch',
+                    'return', 'echo', 'print', 'isset', 'unset', 'empty', 'list',
+                    'array', 'function', 'class', 'interface', 'trait', 'new',
+                    'require', 'require_once', 'include', 'include_once',
+                    'define', 'defined', 'die', 'exit', 'eval', 'compact',
+                    'extract', 'var_dump', 'print_r', 'var_export'}
+        if call_name in skip_php_calls or call_name.startswith('test'):
+            continue
+        key = (call_name, line_idx)
+        if key in call_sites_seen:
+            continue  # already captured by method-call pattern
+        paren_start = cm.end() - 1
+        remaining = line_text[paren_start:]
+        arg_count = count_call_args(remaining)
+        if arg_count is not None:
+            call_sites_seen.add(key)
+            call_sites.append({'target': call_name, 'line': line_idx, 'arg_count': arg_count})
+
 # --- Dead Code Markers ---
 # Find @codeCoverageIgnore, @phpstan-ignore, and similar suppression markers.
 dead_code_markers = []
@@ -505,6 +593,7 @@ result = {
     'unused_parameters': unused_parameters,
     'dead_code_markers': dead_code_markers,
     'internal_calls': internal_calls,
+    'call_sites': call_sites,
     'public_api': public_api,
     'uses_global_classes': uses_global_classes,
 }
