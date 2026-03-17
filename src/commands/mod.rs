@@ -249,6 +249,7 @@ pub mod api;
 pub mod audit;
 pub mod auth;
 pub mod build;
+pub mod validate;
 pub mod changelog;
 pub mod changes;
 pub mod cli;
@@ -329,6 +330,7 @@ pub(crate) fn run_json(
         crate::Commands::Git(args) => dispatch!(args, global, git),
         crate::Commands::Version(args) => dispatch!(args, global, version),
         crate::Commands::Build(args) => dispatch!(args, global, build),
+        crate::Commands::Validate(args) => dispatch!(args, global, validate),
         crate::Commands::Changes(args) => dispatch!(args, global, changes),
         crate::Commands::Release(args) => dispatch!(args, global, release),
         crate::Commands::Audit(args) => dispatch!(args, global, audit),

@@ -22,7 +22,7 @@ use commands::utils::{args, entity_suggest, response as output, tty};
 use commands::{
     api, audit, auth, build, changelog, changes, cli, component, config, db, deploy, extension,
     file, fleet, git, init, lint, logs, project, refactor, release, server, ssh, status, test,
-    transfer, undo, upgrade, version,
+    transfer, undo, upgrade, validate, version,
 };
 use homeboy::extension::load_all_extensions;
 
@@ -92,6 +92,8 @@ enum Commands {
     Version(version::VersionArgs),
     /// Build a component
     Build(build::BuildArgs),
+    /// Validate that code compiles/parses (runs extension scripts.validate)
+    Validate(validate::ValidateArgs),
     /// Show changes since last version tag
     Changes(changes::ChangesArgs),
     /// Plan release workflows
