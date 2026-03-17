@@ -579,6 +579,7 @@ fn detect_calls(body_lines: &[(usize, &str)], params: &[Param]) -> Vec<FunctionC
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn make_contract_grammar() -> ContractGrammar {
         let mut effects = HashMap::new();

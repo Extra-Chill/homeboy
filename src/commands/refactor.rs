@@ -158,6 +158,10 @@ enum RefactorCommand {
     ///
     /// Named:  `refactor transform wp69_migration --component data-machine`
     /// Ad-hoc: `refactor transform --find "old" --replace "new" --files "**/*.php" --component C`
+    ///
+    /// Replacement templates support capture group refs ($1, $2, ${name}),
+    /// case transforms ($1:lower, $1:upper, $1:kebab, $1:snake, $1:pascal, $1:camel),
+    /// and literal $ via $$ (important for PHP code where every variable starts with $).
     Transform {
         /// Transform set name (from homeboy.json transforms key)
         #[arg(value_name = "NAME")]
@@ -167,7 +171,10 @@ enum RefactorCommand {
         #[arg(long, value_name = "REGEX")]
         find: Option<String>,
 
-        /// Replacement template with $1, $2 capture group refs (ad-hoc mode)
+        /// Replacement template (ad-hoc mode).
+        /// Supports $1, $2 capture group refs, ${name} named groups,
+        /// $1:lower/:upper/:kebab/:snake/:pascal/:camel case transforms,
+        /// and $$ for a literal dollar sign.
         #[arg(long, value_name = "TEMPLATE")]
         replace: Option<String>,
 

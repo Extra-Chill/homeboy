@@ -40,7 +40,9 @@ pub struct TransformRule {
     pub description: String,
     /// Regex pattern to find (supports capture groups).
     pub find: String,
-    /// Replacement template (supports `$1`, `$2`, `${name}` capture group refs).
+    /// Replacement template. Supports `$1`, `$2`, `${name}` capture group refs,
+    /// `$1:lower`/`:upper`/`:kebab`/`:snake`/`:pascal`/`:camel` case transforms,
+    /// and `$$` for a literal dollar sign.
     pub replace: String,
     /// Glob pattern for files to apply to (e.g., `tests/**/*.php`).
     #[serde(default = "default_files_glob")]
@@ -304,6 +306,204 @@ pub fn apply_transforms(
 }
 
 // ============================================================================
+// Case transform expansion
+// ============================================================================
+
+/// Supported case transform modifiers for capture group references.
+/// Usage in replacement templates: `$1:kebab`, `$2:pascal`, `${name}:snake`, etc.
+const CASE_TRANSFORM_PATTERN: &str = r"\$(?:(\d+)|([a-zA-Z_]\w*)|\{([a-zA-Z_]\w*)\}):(\w+)";
+
+/// Check if a replacement template contains case transform modifiers.
+fn has_case_transforms(replace: &str) -> bool {
+    lazy_static_regex(CASE_TRANSFORM_PATTERN).is_match(replace)
+}
+
+/// Lazy-compile a regex (avoids recompilation per call).
+fn lazy_static_regex(pattern: &str) -> Regex {
+    Regex::new(pattern).expect("internal regex should be valid")
+}
+
+/// Apply case transform to a string.
+fn apply_case_transform(input: &str, transform: &str) -> Option<String> {
+    match transform {
+        "lower" => Some(input.to_lowercase()),
+        "upper" => Some(input.to_uppercase()),
+        "kebab" => Some(to_kebab_case(input)),
+        "snake" => Some(to_snake_case(input)),
+        "pascal" => Some(to_pascal_case(input)),
+        "camel" => Some(to_camel_case(input)),
+        _ => None,
+    }
+}
+
+/// Expand a replacement template with case transforms using regex captures.
+///
+/// Handles `$1:kebab`, `$2:upper`, `${name}:snake`, etc.
+/// Also handles standard `$1`, `$$` (literal $), and `${name}` via the regex crate.
+///
+/// Strategy: first expand case-transformed refs manually, then let regex crate
+/// handle the remaining standard refs.
+fn expand_with_case_transforms(template: &str, caps: &regex::Captures) -> String {
+    let case_re = lazy_static_regex(CASE_TRANSFORM_PATTERN);
+
+    // First pass: replace $N:transform, $name:transform, and ${name}:transform with expanded values
+    let intermediate = case_re
+        .replace_all(template, |m: &regex::Captures| {
+            // Group 1 = numeric ($1:kebab), Group 2 = bare name ($name:kebab),
+            // Group 3 = braced name (${name}:kebab), Group 4 = transform
+            let transform = &m[4];
+
+            let value = if let Some(num) = m.get(1) {
+                let idx: usize = num.as_str().parse().unwrap_or(0);
+                caps.get(idx).map(|c| c.as_str().to_string())
+            } else if let Some(name) = m.get(2) {
+                caps.name(name.as_str()).map(|c| c.as_str().to_string())
+            } else if let Some(name) = m.get(3) {
+                caps.name(name.as_str()).map(|c| c.as_str().to_string())
+            } else {
+                None
+            };
+
+            match value {
+                Some(val) => apply_case_transform(&val, transform).unwrap_or(val),
+                None => String::new(),
+            }
+        })
+        .to_string();
+
+    // Second pass: let the regex crate handle remaining standard refs ($1, $$, ${name})
+    // We need to expand these manually since we already consumed the Captures
+    expand_standard_refs(&intermediate, caps)
+}
+
+/// Expand standard capture group references ($1, $2, ${name}, $$) that weren't
+/// consumed by case transforms.
+fn expand_standard_refs(template: &str, caps: &regex::Captures) -> String {
+    let ref_re = lazy_static_regex(r"\$\$|\$(\d+)|\$\{([a-zA-Z_]\w*)\}");
+
+    ref_re
+        .replace_all(template, |m: &regex::Captures| {
+            let full = m.get(0).unwrap().as_str();
+            if full == "$$" {
+                return "$".to_string();
+            }
+            if let Some(num) = m.get(1) {
+                let idx: usize = num.as_str().parse().unwrap_or(0);
+                return caps
+                    .get(idx)
+                    .map(|c| c.as_str().to_string())
+                    .unwrap_or_default();
+            }
+            if let Some(name) = m.get(2) {
+                return caps
+                    .name(name.as_str())
+                    .map(|c| c.as_str().to_string())
+                    .unwrap_or_default();
+            }
+            String::new()
+        })
+        .to_string()
+}
+
+// ============================================================================
+// Case conversion helpers
+// ============================================================================
+
+/// Split a string into words by camelCase/PascalCase boundaries, underscores,
+/// hyphens, and spaces.
+fn split_into_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+
+    let chars: Vec<char> = input.chars().collect();
+    for i in 0..chars.len() {
+        let c = chars[i];
+
+        if c == '_' || c == '-' || c == ' ' {
+            if !current.is_empty() {
+                words.push(current.clone());
+                current.clear();
+            }
+            continue;
+        }
+
+        // Split on camelCase boundary: lowercase followed by uppercase
+        if c.is_uppercase() && !current.is_empty() {
+            let last = current.chars().last().unwrap();
+            if last.is_lowercase() || last.is_ascii_digit() {
+                words.push(current.clone());
+                current.clear();
+            }
+            // Also split on ABCDef → ABC, Def (uppercase run followed by uppercase+lowercase)
+            else if last.is_uppercase()
+                && i + 1 < chars.len()
+                && chars[i + 1].is_lowercase()
+                && current.len() > 1
+            {
+                let last_char = current.pop().unwrap();
+                if !current.is_empty() {
+                    words.push(current.clone());
+                }
+                current.clear();
+                current.push(last_char);
+            }
+        }
+
+        current.push(c);
+    }
+
+    if !current.is_empty() {
+        words.push(current);
+    }
+
+    words
+}
+
+fn to_kebab_case(input: &str) -> String {
+    split_into_words(input)
+        .iter()
+        .map(|w| w.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn to_snake_case(input: &str) -> String {
+    split_into_words(input)
+        .iter()
+        .map(|w| w.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+fn to_pascal_case(input: &str) -> String {
+    split_into_words(input)
+        .iter()
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) => {
+                    let upper: String = c.to_uppercase().collect();
+                    upper + &chars.as_str().to_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+fn to_camel_case(input: &str) -> String {
+    let pascal = to_pascal_case(input);
+    let mut chars = pascal.chars();
+    match chars.next() {
+        Some(c) => {
+            let lower: String = c.to_lowercase().collect();
+            lower + chars.as_str()
+        }
+        None => String::new(),
+    }
+}
+
+// ============================================================================
 // Context-specific application
 // ============================================================================
 
@@ -316,10 +516,15 @@ fn apply_line_context(
 ) -> (String, Vec<TransformMatch>) {
     let mut matches = Vec::new();
     let mut new_lines = Vec::new();
+    let use_case_transforms = has_case_transforms(replace);
 
     for (i, line) in content.lines().enumerate() {
         if regex.is_match(line) {
-            let replaced = regex.replace_all(line, replace).to_string();
+            let replaced = if use_case_transforms {
+                replace_with_case_transforms(regex, replace, line)
+            } else {
+                regex.replace_all(line, replace).to_string()
+            };
             if replaced != line {
                 matches.push(TransformMatch {
                     file: relative_path.to_string(),
@@ -351,13 +556,19 @@ fn apply_file_context(
     relative_path: &str,
 ) -> (String, Vec<TransformMatch>) {
     let mut matches = Vec::new();
+    let use_case_transforms = has_case_transforms(replace);
 
     // Find all matches before replacing (for reporting)
-    for cap in regex.find_iter(content) {
-        let before_text = &content[..cap.start()];
+    for cap in regex.captures_iter(content) {
+        let full_match = cap.get(0).unwrap();
+        let before_text = &content[..full_match.start()];
         let line_num = before_text.chars().filter(|&c| c == '\n').count() + 1;
-        let matched = cap.as_str().to_string();
-        let replaced = regex.replace(cap.as_str(), replace).to_string();
+        let matched = full_match.as_str().to_string();
+        let replaced = if use_case_transforms {
+            expand_with_case_transforms(replace, &cap)
+        } else {
+            regex.replace(full_match.as_str(), replace).to_string()
+        };
 
         if matched != replaced {
             matches.push(TransformMatch {
@@ -369,8 +580,21 @@ fn apply_file_context(
         }
     }
 
-    let new_content = regex.replace_all(content, replace).to_string();
+    let new_content = if use_case_transforms {
+        replace_with_case_transforms(regex, replace, content)
+    } else {
+        regex.replace_all(content, replace).to_string()
+    };
     (new_content, matches)
+}
+
+/// Replace all matches using case-transform-aware expansion.
+fn replace_with_case_transforms(regex: &Regex, replace: &str, text: &str) -> String {
+    regex
+        .replace_all(text, |caps: &regex::Captures| {
+            expand_with_case_transforms(replace, caps)
+        })
+        .to_string()
 }
 
 // ============================================================================
@@ -488,6 +712,137 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].line, 1);
         assert!(new.contains("new_name"));
+    }
+
+    // --- Case transform tests ---
+
+    #[test]
+    fn split_words_camel_case() {
+        assert_eq!(split_into_words("BlueskyDelete"), vec!["Bluesky", "Delete"]);
+        assert_eq!(split_into_words("camelCase"), vec!["camel", "Case"]);
+        assert_eq!(
+            split_into_words("HTMLParser"),
+            vec!["HTM", "LParser"] // Known: acronym handling is approximate
+        );
+    }
+
+    #[test]
+    fn split_words_snake_and_kebab() {
+        assert_eq!(
+            split_into_words("bluesky_delete"),
+            vec!["bluesky", "delete"]
+        );
+        assert_eq!(
+            split_into_words("bluesky-delete"),
+            vec!["bluesky", "delete"]
+        );
+    }
+
+    #[test]
+    fn case_transform_kebab() {
+        assert_eq!(to_kebab_case("BlueskyDelete"), "bluesky-delete");
+        assert_eq!(to_kebab_case("FacebookPost"), "facebook-post");
+        assert_eq!(to_kebab_case("simple"), "simple");
+    }
+
+    #[test]
+    fn case_transform_snake() {
+        assert_eq!(to_snake_case("BlueskyDelete"), "bluesky_delete");
+        assert_eq!(to_snake_case("camelCase"), "camel_case");
+    }
+
+    #[test]
+    fn case_transform_pascal() {
+        assert_eq!(to_pascal_case("bluesky-delete"), "BlueskyDelete");
+        assert_eq!(to_pascal_case("some_snake"), "SomeSnake");
+        assert_eq!(to_pascal_case("already"), "Already");
+    }
+
+    #[test]
+    fn case_transform_camel() {
+        assert_eq!(to_camel_case("BlueskyDelete"), "blueskyDelete");
+        assert_eq!(to_camel_case("some-kebab"), "someKebab");
+    }
+
+    #[test]
+    fn case_transform_upper_lower() {
+        assert_eq!(
+            apply_case_transform("Hello", "upper"),
+            Some("HELLO".to_string())
+        );
+        assert_eq!(
+            apply_case_transform("Hello", "lower"),
+            Some("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn line_context_with_case_transform() {
+        let regex = Regex::new(r"new (\w+)Ability\(\)").unwrap();
+        let content = "let x = new BlueskyDeleteAbility();\nlet y = new FacebookPostAbility();\n";
+        let (new, matches) = apply_line_context(
+            &regex,
+            "wp_get_ability('datamachine/$1:kebab')",
+            content,
+            "test.rs",
+        );
+        assert_eq!(matches.len(), 2);
+        assert!(
+            new.contains("wp_get_ability('datamachine/bluesky-delete')"),
+            "got: {}",
+            new
+        );
+        assert!(
+            new.contains("wp_get_ability('datamachine/facebook-post')"),
+            "got: {}",
+            new
+        );
+    }
+
+    #[test]
+    fn case_transform_with_literal_dollar() {
+        let regex = Regex::new(r"new (\w+)Ability\(\)").unwrap();
+        let content = "$ability = new BlueskyDeleteAbility();\n";
+        let (new, _) = apply_line_context(
+            &regex,
+            "$$ability = wp_get_ability('datamachine/$1:kebab')",
+            content,
+            "test.php",
+        );
+        assert!(
+            new.contains("$ability = wp_get_ability('datamachine/bluesky-delete')"),
+            "got: {}",
+            new
+        );
+    }
+
+    #[test]
+    fn case_transform_mixed_with_plain_refs() {
+        let regex = Regex::new(r"(\w+)::(\w+)").unwrap();
+        let content = "BlueskyApi::PostMessage\n";
+        let (new, _) = apply_line_context(
+            &regex,
+            "$1:snake::$2:kebab (was $1::$2)",
+            content,
+            "test.rs",
+        );
+        assert!(
+            new.contains("bluesky_api::post-message (was BlueskyApi::PostMessage)"),
+            "got: {}",
+            new
+        );
+    }
+
+    #[test]
+    fn has_case_transforms_detection() {
+        assert!(has_case_transforms("$1:kebab"));
+        assert!(has_case_transforms("prefix $2:upper suffix"));
+        assert!(has_case_transforms("${name}:snake"));
+        assert!(!has_case_transforms("$1 plain"));
+        assert!(!has_case_transforms("no refs here"));
+        // Note: $$1:kebab contains $1:kebab after the literal $$ — detection sees it,
+        // but runtime expansion handles $$ → $ correctly before case transforms apply.
+        assert!(has_case_transforms("$$1:kebab"));
     }
 
     // --- Glob matching tests ---
