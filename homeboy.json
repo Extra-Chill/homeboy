@@ -4,7 +4,7 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-03-17T00:50:04Z",
-      "item_count": 686,
+      "item_count": 687,
       "known_fingerprints": [
         "Commands::src/commands/build.rs::MissingMethod",
         "Commands::src/commands/changelog.rs::MissingMethod",
@@ -13,6 +13,7 @@
         "Commands::src/commands/deploy.rs::MissingMethod",
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "Commands::src/commands/extension.rs::MissingMethod",
+        "Undo::src/core/engine/undo/rollback.rs::SignatureMismatch",
         "Undo::src/core/engine/undo/snapshot.rs::SignatureMismatch",
         "compiler::src/commands/utils/args.rs::CompilerWarning",
         "compiler::src/core/git/operations.rs::CompilerWarning",
