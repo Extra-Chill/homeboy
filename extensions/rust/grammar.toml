@@ -257,8 +257,101 @@ panic_patterns = [
 ]
 
 # ===========================================================================
+# Type defaults — zero/default value expressions for test input construction.
+# Each entry has: pattern (regex matched against param type), value (code expr),
+# and optional imports (extra `use` statements needed by the value).
+# Patterns are tried in order; first match wins.
+# ===========================================================================
+
+[[contract.type_defaults]]
+pattern = '^&str$'
+value = '""'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^&\[u8\]$'
+value = 'Vec::<u8>::new()'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^&\[.*\]$'
+value = 'Vec::new()'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^&Path$'
+value = 'Path::new("")'
+imports = ['use std::path::Path;']
+
+[[contract.type_defaults]]
+pattern = '^&PathBuf$'
+value = 'PathBuf::new()'
+imports = ['use std::path::PathBuf;']
+
+[[contract.type_defaults]]
+pattern = '^PathBuf$'
+value = 'PathBuf::new()'
+imports = ['use std::path::PathBuf;']
+
+[[contract.type_defaults]]
+pattern = '^String$'
+value = 'String::new()'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^&String$'
+value = 'String::new()'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^bool$'
+value = 'false'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^usize$|^u8$|^u16$|^u32$|^u64$|^u128$'
+value = '0'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^isize$|^i8$|^i16$|^i32$|^i64$|^i128$'
+value = '0'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^f32$|^f64$'
+value = '0.0'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^char$'
+value = "'a'"
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^Vec<.*>$'
+value = 'Vec::new()'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^HashMap<.*>$'
+value = 'HashMap::new()'
+imports = ['use std::collections::HashMap;']
+
+[[contract.type_defaults]]
+pattern = '^HashSet<.*>$'
+value = 'HashSet::new()'
+imports = ['use std::collections::HashSet;']
+
+[[contract.type_defaults]]
+pattern = '^Option<.*>$'
+value = 'None'
+imports = []
+
+# ===========================================================================
 # Test templates — Rust source code templates for test plan rendering.
-# Variables: {test_name}, {fn_name}, {param_names}, {return_shape},
+# Variables: {test_name}, {fn_name}, {param_setup}, {param_args},
+#            {param_names}, {return_shape}, {extra_imports},
 #            {variant}, {expected_value}, {ok_type}, {err_type},
 #            {some_type}, {condition}, {is_method}, {is_pure}
 # ===========================================================================
@@ -269,9 +362,8 @@ panic_patterns = [
 result_ok = """
     #[test]
     fn {test_name}() {
-        // Branch: {condition}
-        // Expected: Ok({expected_value})
-        let result = {fn_name}({param_names});
+{param_setup}
+        let result = {fn_name}({param_args});
         assert!(result.is_ok(), "expected Ok for: {condition}");
     }
 """
@@ -280,9 +372,8 @@ result_ok = """
 result_err = """
     #[test]
     fn {test_name}() {
-        // Branch: {condition}
-        // Expected: Err
-        let result = {fn_name}({param_names});
+{param_setup}
+        let result = {fn_name}({param_args});
         assert!(result.is_err(), "expected Err for: {condition}");
     }
 """
@@ -291,9 +382,8 @@ result_err = """
 option_some = """
     #[test]
     fn {test_name}() {
-        // Branch: {condition}
-        // Expected: Some({expected_value})
-        let result = {fn_name}({param_names});
+{param_setup}
+        let result = {fn_name}({param_args});
         assert!(result.is_some(), "expected Some for: {condition}");
     }
 """
@@ -302,9 +392,8 @@ option_some = """
 option_none = """
     #[test]
     fn {test_name}() {
-        // Branch: {condition}
-        // Expected: None
-        let result = {fn_name}({param_names});
+{param_setup}
+        let result = {fn_name}({param_args});
         assert!(result.is_none(), "expected None for: {condition}");
     }
 """
@@ -313,8 +402,8 @@ option_none = """
 bool_true = """
     #[test]
     fn {test_name}() {
-        // Branch: {condition}
-        let result = {fn_name}({param_names});
+{param_setup}
+        let result = {fn_name}({param_args});
         assert!(result, "expected true for: {condition}");
     }
 """
@@ -323,8 +412,8 @@ bool_true = """
 bool_false = """
     #[test]
     fn {test_name}() {
-        // Branch: {condition}
-        let result = {fn_name}({param_names});
+{param_setup}
+        let result = {fn_name}({param_args});
         assert!(!result, "expected false for: {condition}");
     }
 """
@@ -333,8 +422,8 @@ bool_false = """
 unit = """
     #[test]
     fn {test_name}() {
-        // Should not panic
-        {fn_name}({param_names});
+{param_setup}
+        {fn_name}({param_args});
     }
 """
 
@@ -342,9 +431,8 @@ unit = """
 no_panic = """
     #[test]
     fn {test_name}() {
-        // No branches detected — verify basic invocation doesn't panic.
-        // TODO: add specific assertions once contract extraction improves.
-        let _ = {fn_name}({param_names});
+{param_setup}
+        let _ = {fn_name}({param_args});
     }
 """
 
@@ -352,10 +440,9 @@ no_panic = """
 effects = """
     #[test]
     fn {test_name}() {
-        // Verify expected effects: {effects}
-        // This test documents the function's side effects.
-        // TODO: add effect-specific assertions (mock fs, capture output, etc.)
-        let _ = {fn_name}({param_names});
+        // Expected effects: {effects}
+{param_setup}
+        let _ = {fn_name}({param_args});
     }
 """
 
@@ -363,8 +450,8 @@ effects = """
 collection = """
     #[test]
     fn {test_name}() {
-        // Branch: {condition}
-        let result = {fn_name}({param_names});
+{param_setup}
+        let result = {fn_name}({param_args});
         assert!(!result.is_empty(), "expected non-empty collection for: {condition}");
     }
 """
@@ -373,8 +460,7 @@ collection = """
 default = """
     #[test]
     fn {test_name}() {
-        // Branch: {condition}
-        let _result = {fn_name}({param_names});
-        // TODO: add specific assertion for return value
+{param_setup}
+        let _result = {fn_name}({param_args});
     }
 """
