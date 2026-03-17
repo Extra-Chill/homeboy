@@ -11,26 +11,104 @@ source "${SCRIPT_DIR}/../scope/flags.sh"
 AUTOFIX_COMMIT_PREFIX="chore(ci): homeboy autofix"
 
 # Build an informative autofix commit message.
-# Subject: chore(ci): homeboy autofix — audit, lint (7 files)
-# Body: list of changed files for traceability.
+# Subject: chore(ci): homeboy autofix — audit (7 files, 33 fixes)
+# Body: per-category fix counts with affected files.
 build_autofix_commit_message() {
   local fix_types="$1"
   local file_count="$2"
-  local finding_types="${3:-}"
+  local fix_details="${3:-}"
+  local total_fixes="${4:-}"
 
   local subject="${AUTOFIX_COMMIT_PREFIX}"
   if [ -n "${fix_types}" ]; then
     subject="${subject} — ${fix_types}"
   fi
-  if [ -n "${finding_types}" ]; then
-    subject="${subject} [${finding_types}]"
+  subject="${subject} (${file_count} files"
+  if [ -n "${total_fixes}" ] && [ "${total_fixes}" != "0" ]; then
+    subject="${subject}, ${total_fixes} fixes"
   fi
-  subject="${subject} (${file_count} files)"
+  subject="${subject})"
 
-  local body
-  body="$(git diff --cached --name-only | sort)"
+  local body=""
+  if [ -n "${fix_details}" ]; then
+    body="${fix_details}"
+  else
+    body="$(git diff --cached --name-only | sort)"
+  fi
 
   printf '%s\n\n%s\n' "${subject}" "${body}"
+}
+
+# Extract a detailed fix breakdown from homeboy JSON output files.
+# Reads FixResult JSON and produces a human-readable summary grouped by fix category.
+# First line: total fix count. Remaining lines: per-category breakdown.
+extract_fix_details_from_output() {
+  local output_dir="$1"
+
+  # Find all JSON output files
+  local json_files
+  json_files=$(find "${output_dir}" -name '*.json' -type f 2>/dev/null)
+  if [ -z "${json_files}" ]; then
+    return
+  fi
+
+  # Use jq to aggregate fix details across all output files.
+  # Insertion kinds can be strings ("import_add") or objects ({"visibility_change": {...}}).
+  # We normalize to the top-level key name and map to human-readable labels.
+  # shellcheck disable=SC2086
+  jq -rs '
+    [.[] | .data // . ] | map(select(type == "object")) |
+
+    # Normalize insertion kind to a category string
+    def category:
+      if type == "string" then .
+      elif type == "object" then (keys[0] // "unknown")
+      else "unknown"
+      end;
+
+    # Human-readable category names
+    def humanize:
+      {
+        "function_removal": "Orphaned tests removed",
+        "visibility_change": "Visibility narrowed (pub → pub(crate))",
+        "reexport_removal": "Unused re-exports removed",
+        "import_add": "Missing imports added",
+        "method_stub": "Method stubs added",
+        "file_move": "Files moved",
+        "line_replacement": "Lines replaced",
+        "line_removal": "Lines removed",
+        "missing_test_file": "Test files generated"
+      }[.] // .;
+
+    # Collect insertions with normalized category
+    [.[].fixes // [] | .[] | .file as $file |
+      .insertions[]? | {cat: (.kind | category), file: $file}
+    ] as $insertions |
+
+    # Collect new files
+    [.[].new_files // [] | .[] | {cat: .finding, file}] as $new_files |
+
+    # Combine and group by category
+    ($insertions + $new_files) | group_by(.cat) |
+    map({
+      cat: .[0].cat,
+      count: length,
+      files: [.[].file] | unique | map(
+        split("/") | if length > 1 and .[-1] == "mod.rs"
+          then [.[-2], .[-1]] | join("/")
+          else .[-1]
+        end
+      ) | unique | sort
+    }) |
+    sort_by(-.count) |
+
+    # Total
+    (map(.count) | add // 0) as $total |
+
+    # Format: first line is total, rest is breakdown
+    "\($total)\n" +
+    (map("\(.cat | humanize): \(.count)\n  \(.files | join(", "))") | join("\n"))
+  ' ${json_files} 2>/dev/null || true
 }
 
 resolve_component_id() {
