@@ -820,7 +820,7 @@ fn build_convention_method_set(
                 }
             }
         }
-        for (_parent, parent_methods) in &method_by_parent {
+        for parent_methods in method_by_parent.values() {
             for (method, count) in parent_methods {
                 if *count >= 2 {
                     methods.insert(method.clone());

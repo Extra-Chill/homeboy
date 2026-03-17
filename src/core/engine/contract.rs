@@ -384,7 +384,7 @@ impl FunctionContract {
                 .signature
                 .receiver
                 .as_ref()
-                .map_or(true, |r| !matches!(r, Receiver::MutRef))
+                .is_none_or(|r| !matches!(r, Receiver::MutRef))
             && !self.signature.params.iter().any(|p| p.mutable)
     }
 

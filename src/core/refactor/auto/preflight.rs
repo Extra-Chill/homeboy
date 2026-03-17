@@ -2,7 +2,6 @@ use crate::code_audit::conventions::{AuditFinding, Language};
 use crate::core::refactor::plan::generate::extract_signatures_from_items;
 
 use crate::refactor::auto::apply::apply_insertions_to_content;
-use crate::refactor::auto::policy::blocked_reason_from_preflight;
 use crate::refactor::auto::{
     Fix, FixSafetyTier, Insertion, InsertionKind, NewFile, PreflightCheck, PreflightContext,
     PreflightReport, PreflightStatus,
@@ -195,7 +194,7 @@ pub fn run_insertion_preflight(
     }
 }
 
-pub fn run_fix_preflight(fix: &mut Fix, context: &PreflightContext<'_>, write: bool) {
+pub fn run_fix_preflight(fix: &mut Fix, context: &PreflightContext<'_>, _write: bool) {
     if fix.insertions.is_empty() {
         return;
     }

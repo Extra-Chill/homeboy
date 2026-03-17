@@ -279,12 +279,11 @@ mod tests {
             Some(42),
             "baselines should be preserved"
         );
-        assert_eq!(
+        assert!(
             result
                 .get("transforms")
                 .and_then(|v| v.get("rename-foo"))
                 .is_some(),
-            true,
             "transforms should be preserved"
         );
         assert_eq!(

@@ -187,10 +187,8 @@ fn resolve_builtin_format_command(root: &Path) -> Option<String> {
     }
 
     // PHP: composer.json + phpcbf
-    if root.join("composer.json").exists() {
-        if root.join("vendor/bin/phpcbf").exists() {
-            return Some("vendor/bin/phpcbf 2>&1".to_string());
-        }
+    if root.join("composer.json").exists() && root.join("vendor/bin/phpcbf").exists() {
+        return Some("vendor/bin/phpcbf 2>&1".to_string());
     }
 
     None
