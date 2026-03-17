@@ -197,7 +197,7 @@ fn resolve_builtin_format_command(root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+
     use tempfile::TempDir;
 
     #[test]

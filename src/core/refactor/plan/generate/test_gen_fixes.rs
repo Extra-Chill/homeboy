@@ -14,7 +14,9 @@ use crate::core::engine::contract_testgen::{
     generate_tests_for_file, generate_tests_for_methods, GeneratedTestOutput,
 };
 use crate::core::engine::symbol_graph::module_path_from_file;
-use crate::core::refactor::auto::{Fix, FixSafetyTier, Insertion, InsertionKind, NewFile, SkippedFile};
+use crate::core::refactor::auto::{
+    Fix, FixSafetyTier, Insertion, InsertionKind, NewFile, SkippedFile,
+};
 
 /// Generate new test files for `MissingTestFile` findings.
 ///
@@ -226,19 +228,20 @@ pub(crate) fn generate_test_method_fixes(
 
         // Generate tests for only the missing methods
         let method_refs: Vec<&str> = missing_methods.iter().map(|s| s.as_str()).collect();
-        let generated = match generate_tests_for_methods(&content, source_file, &grammar, &method_refs) {
-            Some(g) => g,
-            None => {
-                skipped.push(SkippedFile {
-                    file: source_file.clone(),
-                    reason: format!(
-                        "Could not generate tests for methods: {}",
-                        missing_methods.join(", ")
-                    ),
-                });
-                continue;
-            }
-        };
+        let generated =
+            match generate_tests_for_methods(&content, source_file, &grammar, &method_refs) {
+                Some(g) => g,
+                None => {
+                    skipped.push(SkippedFile {
+                        file: source_file.clone(),
+                        reason: format!(
+                            "Could not generate tests for methods: {}",
+                            missing_methods.join(", ")
+                        ),
+                    });
+                    continue;
+                }
+            };
 
         // Determine target file and build insertion code
         let (target_file, append_code) = match &test_location {
@@ -432,7 +435,8 @@ mod tests {
 
     #[test]
     fn extract_method_name_from_typical_description() {
-        let desc = "Method 'validate_write' has no corresponding test (expected 'test_validate_write')";
+        let desc =
+            "Method 'validate_write' has no corresponding test (expected 'test_validate_write')";
         assert_eq!(
             extract_method_name_from_description(desc),
             Some("validate_write".to_string())
