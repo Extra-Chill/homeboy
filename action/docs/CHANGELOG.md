@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.7.1] - 2026-03-17
+
+### Changed
+- remove action-side validation — homeboy validates internally
+
+### Fixed
+- validate autofix changes compile before committing (#832)
+
 ## [1.7.0] - 2026-03-17
 
 ### Added
