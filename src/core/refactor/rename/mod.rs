@@ -6,6 +6,23 @@
 //! 3. Generates file content edits and file/directory renames
 //! 4. Applies changes to disk (or returns a dry-run preview)
 
+mod case_utilities;
+mod cross_separator_join_functions;
+mod rename_generation;
+mod rename_scope;
+mod rename_spec;
+mod rename_targeting;
+mod types;
+
+pub use case_utilities::*;
+pub use cross_separator_join_functions::*;
+pub use rename_generation::*;
+pub use rename_scope::*;
+pub use rename_spec::*;
+pub use rename_targeting::*;
+pub use types::*;
+
+
 use crate::engine::codebase_scan::{
     self, find_boundary_matches, find_case_insensitive_matches, find_literal_matches,
     ExtensionFilter, ScanConfig,
@@ -18,17 +35,6 @@ use std::path::{Path, PathBuf};
 // ============================================================================
 // Types
 // ============================================================================
-
-/// What scope to apply renames to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RenameScope {
-    /// Source files only.
-    Code,
-    /// Config files only (homeboy.json, component configs).
-    Config,
-    /// Everything.
-    All,
-}
 
 impl RenameScope {
     #[allow(clippy::should_implement_trait)]
@@ -43,46 +49,6 @@ impl RenameScope {
                 None,
                 None,
             )),
-        }
-    }
-}
-
-/// A case variant of a rename term.
-#[derive(Debug, Clone, Serialize)]
-pub struct CaseVariant {
-    pub from: String,
-    pub to: String,
-    pub label: String,
-}
-
-/// A rename specification with all generated case variants.
-#[derive(Debug, Clone)]
-pub struct RenameSpec {
-    pub from: String,
-    pub to: String,
-    pub scope: RenameScope,
-    pub variants: Vec<CaseVariant>,
-    /// When true, use exact string matching (no boundary detection).
-    pub literal: bool,
-}
-
-/// Optional file-targeting controls for rename operations.
-#[derive(Debug, Clone)]
-pub struct RenameTargeting {
-    /// Include only files matching at least one glob. Empty = include all.
-    pub include_globs: Vec<String>,
-    /// Exclude files matching any glob.
-    pub exclude_globs: Vec<String>,
-    /// Whether file/directory renames should be generated/applied.
-    pub rename_files: bool,
-}
-
-impl Default for RenameTargeting {
-    fn default() -> Self {
-        Self {
-            include_globs: Vec::new(),
-            exclude_globs: Vec::new(),
-            rename_files: true,
         }
     }
 }
@@ -200,216 +166,17 @@ impl RenameSpec {
     }
 }
 
-/// A single reference found in the codebase.
-#[derive(Debug, Clone, Serialize)]
-pub struct Reference {
-    /// File path relative to root.
-    pub file: String,
-    /// Line number (1-indexed).
-    pub line: usize,
-    /// Column number (1-indexed).
-    pub column: usize,
-    /// The matched text.
-    pub matched: String,
-    /// What it would be replaced with.
-    pub replacement: String,
-    /// The case variant label.
-    pub variant: String,
-    /// The full line content for context.
-    pub context: String,
-}
-
-/// An edit to apply to a file's content.
-#[derive(Debug, Clone, Serialize)]
-pub struct FileEdit {
-    /// File path relative to root.
-    pub file: String,
-    /// Number of replacements in this file.
-    pub replacements: usize,
-    /// New content after all replacements.
-    #[serde(skip)]
-    pub new_content: String,
-}
-
-/// A file or directory rename.
-#[derive(Debug, Clone, Serialize)]
-pub struct FileRename {
-    /// Original path relative to root.
-    pub from: String,
-    /// New path relative to root.
-    pub to: String,
-}
-
-/// A warning about a potential collision or issue.
-#[derive(Debug, Clone, Serialize)]
-pub struct RenameWarning {
-    /// Warning category.
-    pub kind: String,
-    /// File path relative to root.
-    pub file: String,
-    /// Line number (if applicable).
-    pub line: Option<usize>,
-    /// Human-readable description.
-    pub message: String,
-}
-
-/// The full result of a rename operation.
-#[derive(Debug, Clone, Serialize)]
-pub struct RenameResult {
-    /// Case variants that were searched.
-    pub variants: Vec<CaseVariant>,
-    /// All references found.
-    pub references: Vec<Reference>,
-    /// File content edits to apply.
-    pub edits: Vec<FileEdit>,
-    /// File/directory renames to apply.
-    pub file_renames: Vec<FileRename>,
-    /// Warnings about potential collisions or issues.
-    pub warnings: Vec<RenameWarning>,
-    /// Total reference count.
-    pub total_references: usize,
-    /// Total files affected.
-    pub total_files: usize,
-    /// Whether changes were written to disk.
-    pub applied: bool,
-}
-
 // ============================================================================
 // Case utilities
 // ============================================================================
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-    }
-}
-
-fn pluralize(s: &str) -> String {
-    if s.ends_with('s') || s.ends_with('x') || s.ends_with("sh") || s.ends_with("ch") {
-        format!("{}es", s)
-    } else if s.ends_with('y') && !s.ends_with("ey") && !s.ends_with("oy") && !s.ends_with("ay") {
-        format!("{}ies", &s[..s.len() - 1])
-    } else {
-        format!("{}s", s)
-    }
-}
 
 // ============================================================================
 // Word splitting — decompose any naming convention into constituent words
 // ============================================================================
 
-/// Split a term into its constituent words, regardless of naming convention.
-///
-/// Handles:
-/// - `kebab-case` → `["kebab", "case"]`
-/// - `snake_case` → `["snake", "case"]`
-/// - `camelCase` → `["camel", "case"]`
-/// - `PascalCase` → `["pascal", "case"]`
-/// - `UPPER_SNAKE` → `["upper", "snake"]`
-/// - `WPAgent` → `["wp", "agent"]` (consecutive uppercase → separate word)
-/// - `XMLParser` → `["xml", "parser"]`
-/// - `data-machine-agent` → `["data", "machine", "agent"]`
-/// - Mixed: `my_WPAgent-thing` → `["my", "wp", "agent", "thing"]`
-///
-/// All returned words are lowercase.
-fn split_words(term: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-
-    let chars: Vec<char> = term.chars().collect();
-    let len = chars.len();
-
-    for i in 0..len {
-        let c = chars[i];
-
-        // Separators: hyphens, underscores, spaces, dots
-        if c == '-' || c == '_' || c == ' ' || c == '.' {
-            if !current.is_empty() {
-                words.push(current.to_lowercase());
-                current.clear();
-            }
-            continue;
-        }
-
-        if c.is_uppercase() && !current.is_empty() {
-            let prev = chars[i - 1];
-            // Split on camelCase boundary (lowercase/digit → uppercase)
-            // or consecutive-uppercase boundary (uppercase → uppercase+lowercase)
-            let is_camel_boundary = prev.is_lowercase() || prev.is_ascii_digit();
-            let is_acronym_boundary =
-                prev.is_uppercase() && i + 1 < len && chars[i + 1].is_lowercase();
-
-            if is_camel_boundary || is_acronym_boundary {
-                words.push(current.to_lowercase());
-                current.clear();
-            }
-        }
-
-        current.push(c);
-    }
-
-    if !current.is_empty() {
-        words.push(current.to_lowercase());
-    }
-
-    words
-}
-
 // ============================================================================
 // Cross-separator join functions
 // ============================================================================
-
-/// Join words as kebab-case: `["data", "machine", "agent"]` → `"data-machine-agent"`
-fn join_kebab(words: &[String]) -> String {
-    words.join("-")
-}
-
-/// Join words as snake_case: `["data", "machine", "agent"]` → `"data_machine_agent"`
-fn join_snake(words: &[String]) -> String {
-    words.join("_")
-}
-
-/// Join words as UPPER_SNAKE: `["data", "machine", "agent"]` → `"DATA_MACHINE_AGENT"`
-fn join_upper_snake(words: &[String]) -> String {
-    words
-        .iter()
-        .map(|w| w.to_uppercase())
-        .collect::<Vec<_>>()
-        .join("_")
-}
-
-/// Join words as PascalCase: `["data", "machine", "agent"]` → `"DataMachineAgent"`
-fn join_pascal(words: &[String]) -> String {
-    words
-        .iter()
-        .map(|w| capitalize(w))
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// Join words as camelCase: `["data", "machine", "agent"]` → `"dataMachineAgent"`
-fn join_camel(words: &[String]) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for (i, w) in words.iter().enumerate() {
-        if i == 0 {
-            parts.push(w.to_lowercase());
-        } else {
-            parts.push(capitalize(w));
-        }
-    }
-    parts.join("")
-}
-
-/// Join words as display name: `["data", "machine", "agent"]` → `"Data Machine Agent"`
-fn join_display(words: &[String]) -> String {
-    words
-        .iter()
-        .map(|w| capitalize(w))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
 
 // Boundary matching and literal matching are provided by crate::engine::codebase_scan.
 // See: find_boundary_matches(), find_literal_matches()
@@ -418,41 +185,9 @@ fn join_display(words: &[String]) -> String {
 // File walking — delegates to crate::engine::codebase_scan
 // ============================================================================
 
-/// Build a ScanConfig appropriate for rename operations.
-fn scan_config_for_scope(scope: &RenameScope) -> ScanConfig {
-    let extensions = match scope {
-        RenameScope::Code => ExtensionFilter::Except(vec![
-            "json".to_string(),
-            "toml".to_string(),
-            "yaml".to_string(),
-            "yml".to_string(),
-        ]),
-        RenameScope::Config => ExtensionFilter::Only(vec![
-            "json".to_string(),
-            "toml".to_string(),
-            "yaml".to_string(),
-            "yml".to_string(),
-        ]),
-        RenameScope::All => ExtensionFilter::SourceDefaults,
-    };
-
-    ScanConfig {
-        extensions,
-        ..ScanConfig::default()
-    }
-}
-
 // ============================================================================
 // Reference finding
 // ============================================================================
-
-/// Find all references to the rename term across the codebase.
-///
-/// After the initial pass, discovers additional case variants that exist in the
-/// codebase but weren't generated (e.g., `WPAgent` when `WpAgent` was generated).
-pub fn find_references(spec: &RenameSpec, root: &Path) -> Vec<Reference> {
-    find_references_with_targeting(spec, root, &RenameTargeting::default())
-}
 
 /// Find references using optional include/exclude targeting controls.
 pub fn find_references_with_targeting(
@@ -597,11 +332,6 @@ fn discover_casing_in_files(
 // Rename generation
 // ============================================================================
 
-/// Generate file edits and file renames from found references.
-pub fn generate_renames(spec: &RenameSpec, root: &Path) -> RenameResult {
-    generate_renames_with_targeting(spec, root, &RenameTargeting::default())
-}
-
 /// Generate renames using optional include/exclude targeting controls.
 pub fn generate_renames_with_targeting(
     spec: &RenameSpec,
@@ -718,38 +448,6 @@ pub fn generate_renames_with_targeting(
     }
 }
 
-fn target_files(files: Vec<PathBuf>, root: &Path, targeting: &RenameTargeting) -> Vec<PathBuf> {
-    files
-        .into_iter()
-        .filter(|file| {
-            let relative = file
-                .strip_prefix(root)
-                .unwrap_or(file)
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            if !targeting.include_globs.is_empty()
-                && !targeting
-                    .include_globs
-                    .iter()
-                    .any(|glob| glob_match::glob_match(glob, &relative))
-            {
-                return false;
-            }
-
-            if targeting
-                .exclude_globs
-                .iter()
-                .any(|glob| glob_match::glob_match(glob, &relative))
-            {
-                return false;
-            }
-
-            true
-        })
-        .collect()
-}
-
 // ============================================================================
 // Collision detection
 // ============================================================================
@@ -789,71 +487,6 @@ fn detect_collisions(
     }
 
     warnings
-}
-
-/// Scan edited content for lines at the same indentation that introduce
-/// duplicate field/identifier names. This catches the case where renaming
-/// `modules` → `extensions` creates a collision with an existing `extensions` field.
-fn detect_duplicate_identifiers(file: &str, content: &str, warnings: &mut Vec<RenameWarning>) {
-    let lines: Vec<&str> = content.lines().collect();
-
-    // Group lines by indentation level, looking for struct-like blocks
-    // (lines with the same leading whitespace that contain identifier patterns)
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        let trimmed = line.trim();
-
-        // Look for struct/enum/block openers
-        if trimmed.ends_with('{') || trimmed.ends_with("{{") {
-            let block_indent = leading_spaces(lines.get(i + 1).unwrap_or(&""));
-            if block_indent == 0 {
-                i += 1;
-                continue;
-            }
-
-            // Collect identifiers at this indent level until block closes
-            let mut seen: HashMap<String, usize> = HashMap::new();
-            let mut j = i + 1;
-
-            while j < lines.len() {
-                let block_line = lines[j];
-                let block_trimmed = block_line.trim();
-
-                // Block ended
-                if block_trimmed == "}" || block_trimmed == "}," {
-                    break;
-                }
-
-                // Only check lines at this exact indent level
-                if leading_spaces(block_line) == block_indent {
-                    if let Some(ident) = extract_field_identifier(block_trimmed) {
-                        if let Some(&first_line) = seen.get(&ident) {
-                            warnings.push(RenameWarning {
-                                kind: "duplicate_identifier".to_string(),
-                                file: file.to_string(),
-                                line: Some(j + 1),
-                                message: format!(
-                                    "Duplicate identifier '{}' at line {} (first at line {})",
-                                    ident,
-                                    j + 1,
-                                    first_line
-                                ),
-                            });
-                        } else {
-                            seen.insert(ident, j + 1);
-                        }
-                    }
-                }
-
-                j += 1;
-            }
-
-            i = j;
-        } else {
-            i += 1;
-        }
-    }
 }
 
 /// Count leading spaces on a line.
