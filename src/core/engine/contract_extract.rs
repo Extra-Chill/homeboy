@@ -7,9 +7,6 @@
 //! This is the primary extraction path. The `scripts/contract.sh` extension
 //! hook exists as a fallback for languages that need full AST parsing.
 
-use std::collections::HashMap;
-use std::path::Path;
-
 use regex::Regex;
 
 use super::contract::*;
@@ -55,7 +52,7 @@ pub fn extract_contracts_from_grammar(
         // Extract signature info
         let params_str = sym.get("params").unwrap_or("");
         let visibility = sym.get("visibility").map(|v| v.trim());
-        let is_public = visibility.map_or(false, |v| v.starts_with("pub"));
+        let is_public = visibility.is_some_and(|v| v.starts_with("pub"));
 
         // Detect return type from the declaration line(s)
         let decl_text = raw_lines
