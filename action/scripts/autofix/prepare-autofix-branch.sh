@@ -167,22 +167,18 @@ else
     AUTOFIX_FIX_TYPES+="${BASE}"
   done
 
-  # Extract finding categories from autofix JSON output.
-  # Looks for fix_summary.rules[].rule or data.findings[].kind in the output files.
-  AUTOFIX_FINDING_TYPES=""
+  AUTOFIX_DETAILS=""
+  AUTOFIX_TOTAL_FIXES=""
   if [ -d "${AUTOFIX_OUTPUT_DIR}" ]; then
-    AUTOFIX_FINDING_TYPES="$(jq -r '
-      [
-        .. | .fix_summary? // empty | .rules? // empty | .[]? | .rule? // empty
-      ]
-      | map(select(type == "string" and length > 0))
-      | unique
-      | sort
-      | join(", ")
-    ' "${AUTOFIX_OUTPUT_DIR}"/*.json 2>/dev/null | tail -n 1)"
+    local raw_details
+    raw_details="$(extract_fix_details_from_output "${AUTOFIX_OUTPUT_DIR}")"
+    if [ -n "${raw_details}" ]; then
+      AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
+      AUTOFIX_DETAILS="$(echo "${raw_details}" | tail -n +2)"
+    fi
   fi
 
-  COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_FINDING_TYPES}")"
+  COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_DETAILS}" "${AUTOFIX_TOTAL_FIXES}")"
 fi
 rm -rf "${AUTOFIX_OUTPUT_DIR}"
 
