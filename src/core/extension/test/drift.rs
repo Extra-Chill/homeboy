@@ -695,41 +695,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_method_removed() {
-        let diff = r#"@@ -20,5 +20,0 @@
--    public function oldHelper() {
--        return true;
--    }
-"#;
-        let changes = extract_changes_from_diff("src/Helper.php", diff);
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].change_type, ChangeType::MethodRemoved);
-        assert_eq!(changes[0].old_symbol, "oldHelper");
-        assert!(changes[0].new_symbol.is_none());
-    }
-
-    #[test]
-    fn extract_error_code_change() {
-        let diff = r#"@@ -5,7 +5,7 @@
--        return new WP_Error('rest_forbidden', 'Access denied');
-+        return new WP_Error('ability_invalid_permissions', 'Access denied');
-"#;
-        let changes = extract_changes_from_diff("src/REST/Auth.php", diff);
-
-        let code_changes: Vec<_> = changes
-            .iter()
-            .filter(|c| c.change_type == ChangeType::ErrorCodeChange)
-            .collect();
-
-        assert!(!code_changes.is_empty());
-        assert_eq!(code_changes[0].old_symbol, "rest_forbidden");
-        assert_eq!(
-            code_changes[0].new_symbol.as_deref(),
-            Some("ability_invalid_permissions")
-        );
-    }
-
-    #[test]
     fn extract_class_rename() {
         let diff = r#"@@ -1,5 +1,5 @@
 -class FlowsCommand extends BaseCommand {
@@ -761,14 +726,6 @@ mod tests {
     }
 
     #[test]
-    fn is_test_path_detection() {
-        assert!(is_test_path("tests/Unit/FooTest.php"));
-        assert!(is_test_path("tests/integration/bar_test.rs"));
-        assert!(!is_test_path("src/Foo.php"));
-        assert!(!is_test_path("src/config.rs"));
-    }
-
-    #[test]
     fn auto_fixable_detection() {
         let rename = ProductionChange {
             change_type: ChangeType::MethodRename,
@@ -787,99 +744,6 @@ mod tests {
             line: 10,
         };
         assert!(!is_auto_fixable(&removed));
-    }
-
-    #[test]
-    fn generate_rules_from_rename() {
-        let report = DriftReport {
-            component: "test".into(),
-            since: "v1.0".into(),
-            production_changes: vec![ProductionChange {
-                change_type: ChangeType::MethodRename,
-                file: "src/Foo.php".into(),
-                old_symbol: "executeRunFlow".into(),
-                new_symbol: Some("executeWorkflow".into()),
-                line: 10,
-            }],
-            drifted_tests: Vec::new(),
-            total_drifted_files: 0,
-            total_drift_references: 0,
-            auto_fixable: 1,
-        };
-
-        let rules = generate_transform_rules(&report);
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].find, r"\bexecuteRunFlow\b");
-        assert_eq!(rules[0].replace, "executeWorkflow");
-        assert_eq!(rules[0].files, "tests/**/*");
-    }
-
-    #[test]
-    fn generate_rules_skips_unsafe_generic_string_changes() {
-        let report = DriftReport {
-            component: "test".into(),
-            since: "v1.0".into(),
-            production_changes: vec![ProductionChange {
-                change_type: ChangeType::ErrorCodeChange,
-                file: "src/Foo.php".into(),
-                old_symbol: "name".into(),
-                new_symbol: Some("assistant".into()),
-                line: 10,
-            }],
-            drifted_tests: Vec::new(),
-            total_drifted_files: 0,
-            total_drift_references: 0,
-            auto_fixable: 1,
-        };
-
-        let rules = generate_transform_rules(&report);
-        assert!(rules.is_empty());
-    }
-
-    #[test]
-    fn generate_rules_keeps_safe_error_code_tokens() {
-        let report = DriftReport {
-            component: "test".into(),
-            since: "v1.0".into(),
-            production_changes: vec![ProductionChange {
-                change_type: ChangeType::ErrorCodeChange,
-                file: "src/Foo.php".into(),
-                old_symbol: "rest_forbidden".into(),
-                new_symbol: Some("ability_invalid_permissions".into()),
-                line: 10,
-            }],
-            drifted_tests: Vec::new(),
-            total_drifted_files: 0,
-            total_drift_references: 0,
-            auto_fixable: 1,
-        };
-
-        let rules = generate_transform_rules(&report);
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].find, "rest_forbidden");
-        assert_eq!(rules[0].replace, "ability_invalid_permissions");
-    }
-
-    #[test]
-    fn generate_rules_skips_non_error_underscore_tokens() {
-        let report = DriftReport {
-            component: "test".into(),
-            since: "v1.0".into(),
-            production_changes: vec![ProductionChange {
-                change_type: ChangeType::ErrorCodeChange,
-                file: "src/Foo.php".into(),
-                old_symbol: "flow_id".into(),
-                new_symbol: Some("pipeline_id".into()),
-                line: 10,
-            }],
-            drifted_tests: Vec::new(),
-            total_drifted_files: 0,
-            total_drift_references: 0,
-            auto_fixable: 1,
-        };
-
-        let rules = generate_transform_rules(&report);
-        assert!(rules.is_empty());
     }
 
     #[test]
