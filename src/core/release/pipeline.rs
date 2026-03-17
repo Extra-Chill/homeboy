@@ -883,11 +883,14 @@ fn build_release_steps(
         log_status!("release", "Skipping publish/package steps (--skip-publish)");
     }
 
-    // === POST-RELEASE STEP (optional, runs after everything else, skipped with --skip-publish) ===
+    // === POST-RELEASE STEP (optional, runs after everything else) ===
+    // Always runs when hooks are configured — NOT gated on --skip-publish.
+    // Post-release hooks (e.g., moving floating tags) are distinct from publish
+    // targets (crates.io, npm, etc.). --skip-publish only skips publish/package steps.
     let post_release_hooks =
         crate::engine::hooks::resolve_hooks(component, crate::engine::hooks::events::POST_RELEASE);
-    if !post_release_hooks.is_empty() && !options.skip_publish {
-        let post_release_needs = if !publish_targets.is_empty() {
+    if !post_release_hooks.is_empty() {
+        let post_release_needs = if !options.skip_publish && !publish_targets.is_empty() {
             vec!["cleanup".to_string()]
         } else {
             vec!["git.push".to_string()]
