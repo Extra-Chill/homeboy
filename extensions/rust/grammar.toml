@@ -158,3 +158,100 @@ regex = '#\[allow\(dead_code\)\]'
 context = "any"
 skip_comments = true
 skip_strings = true
+
+# ===========================================================================
+# Contract — patterns for function body analysis (control flow, effects, etc.)
+# Used by: engine::contract_extract for test generation, doc generation, etc.
+# ===========================================================================
+
+[contract]
+
+# Side effect detection patterns. Keys are effect kinds from engine::contract::Effect.
+# Each effect kind maps to a list of regex patterns matched against function body lines.
+[contract.effects]
+file_read = [
+  'std::fs::read',
+  'fs::read_to_string',
+  'File::open',
+  'BufReader::new',
+]
+file_write = [
+  'std::fs::write',
+  'fs::write',
+  'File::create',
+  'BufWriter::new',
+]
+file_delete = [
+  'std::fs::remove_file',
+  'std::fs::remove_dir',
+  'fs::remove_file',
+  'fs::remove_dir',
+]
+process_spawn = [
+  'Command::new\("?([^")\s]+)',
+  'std::process::Command',
+]
+mutation = [
+  '\.push\(',
+  '\.insert\(',
+  '\.extend\(',
+  '\.remove\(',
+  '\.clear\(',
+  '\.set_',
+  '\.replace\(',
+]
+network = [
+  'TcpStream::connect',
+  'reqwest::',
+  'hyper::',
+  'ureq::',
+]
+logging = [
+  'log_status!',
+  'println!\(',
+  'eprintln!\(',
+  'tracing::',
+  'log::',
+]
+
+# Guard clause patterns — lines with conditional early returns.
+guard_patterns = [
+  'if\s+.*\{\s*return\s+',
+  'if\s+.*\.is_empty\(\)',
+  'if\s+.*\.is_none\(\)',
+  'let\s+.*=\s+match\s+.*\{\s*None\s*=>\s*return',
+]
+
+# Return variant patterns — identify which return shape variant a return statement produces.
+# Keys match ReturnValue.variant in engine::contract::Branch.
+[contract.return_patterns]
+ok = ['Ok\((.+?)\)']
+err = ['Err\((.+?)\)']
+some = ['Some\((.+?)\)']
+none = ['\breturn\s+None\b', '^(\s*)None\s*$']
+true = ['\breturn\s+true\b']
+false = ['\breturn\s+false\b']
+
+# Error propagation patterns — lines that propagate errors to callers.
+error_propagation = [
+  '\?\s*;',
+  '\?\s*$',
+]
+
+# Return type shape detection — matched against the function signature's return type.
+# Keys match ReturnShape variants in engine::contract.
+[contract.return_shapes]
+result = ['Result\s*<']
+option = ['Option\s*<']
+bool = ['^\s*bool\s*$']
+collection = ['Vec\s*<', 'HashMap\s*<', 'HashSet\s*<', 'BTreeMap\s*<']
+
+# Panic path patterns — lines that may panic/abort.
+panic_patterns = [
+  'panic!\s*\((.+?)\)',
+  'unreachable!\s*\(',
+  'todo!\s*\(',
+  '\.unwrap\(\)',
+  '\.expect\(',
+  'unimplemented!\s*\(',
+]
