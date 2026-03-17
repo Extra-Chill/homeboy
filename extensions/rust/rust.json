@@ -10,7 +10,8 @@
   },
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
-    "refactor": "scripts/refactor.sh"
+    "refactor": "scripts/refactor.sh",
+    "format": "scripts/format.sh"
   },
   "lint": {
     "extension_script": "scripts/lint-runner.sh"

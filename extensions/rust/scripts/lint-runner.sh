@@ -270,5 +270,40 @@ else
     echo "Skipping cargo clippy (step filter)"
 fi
 
+# ── Step 3: cargo fix (compiler warnings) ──
+# Only in fix mode — applies compiler suggestions for dead_code, unused_imports,
+# unused_variables, etc. These are the warnings that `cargo check` reports.
+if should_run_step "fix"; then
+    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+        echo ""
+        echo "Running cargo fix (compiler warnings)..."
+
+        set +e
+        FIX_OUTPUT=$(cargo fix \
+            --manifest-path "${PROJECT_PATH}/Cargo.toml" \
+            --allow-dirty --allow-staged \
+            --lib --bins 2>&1)
+        FIX_EXIT=$?
+        set -e
+
+        if [ $FIX_EXIT -eq 0 ]; then
+            echo "cargo fix: applied compiler warning fixes"
+        else
+            # cargo fix failure is non-fatal in fix mode — some warnings
+            # can't be auto-fixed (e.g., dead_code on pub items).
+            echo "cargo fix: exited non-zero (${FIX_EXIT}), continuing"
+            if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+                echo "DEBUG: cargo fix output:"
+                echo "$FIX_OUTPUT"
+            fi
+        fi
+    else
+        echo ""
+        echo "Skipping cargo fix (only runs in fix mode)"
+    fi
+else
+    echo "Skipping cargo fix (step filter)"
+fi
+
 echo ""
 echo "Rust lint checks passed"
