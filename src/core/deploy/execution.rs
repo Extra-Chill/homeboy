@@ -67,9 +67,11 @@ pub(super) fn execute_component_deploy(
     }
 
     // Auto-resolve remote_path for WordPress components when not explicitly set.
-    // Plugins deploy to wp-content/plugins/{id}, themes to wp-content/themes/{id}.
+    // This is a deploy-time safety net; the primary resolution happens in
+    // resolve_project_component (#812). Plugins deploy to wp-content/plugins/{id},
+    // themes to wp-content/themes/{id}.
     let effective_remote_path = if component.remote_path.trim().is_empty() {
-        if let Some(resolved) = auto_resolve_wordpress_remote_path(component) {
+        if let Some(resolved) = component.auto_resolve_remote_path() {
             log_status!("deploy", "Auto-resolved remote path: {}", resolved);
             resolved
         } else {
@@ -481,39 +483,4 @@ fn cleanup_build_dependencies(
     }
 }
 
-/// Auto-resolve `remote_path` for WordPress components based on project type.
-///
-/// If a component has the `wordpress` extension and no explicit `remote_path`,
-/// detect whether it's a plugin or theme from the source files and return the
-/// canonical WordPress path (`wp-content/plugins/{id}` or `wp-content/themes/{id}`).
-fn auto_resolve_wordpress_remote_path(component: &Component) -> Option<String> {
-    // Only applies to components with the wordpress extension.
-    let extensions = component.extensions.as_ref()?;
-    if !extensions.contains_key("wordpress") {
-        return None;
-    }
 
-    let local = Path::new(&component.local_path);
-
-    // Check for plugin: {id}.php with "Plugin Name:" header
-    let plugin_file = local.join(format!("{}.php", component.id));
-    if plugin_file.exists() {
-        if let Ok(content) = std::fs::read_to_string(&plugin_file) {
-            if content.contains("Plugin Name:") {
-                return Some(format!("wp-content/plugins/{}", component.id));
-            }
-        }
-    }
-
-    // Check for theme: style.css with "Theme Name:" header
-    let style_file = local.join("style.css");
-    if style_file.exists() {
-        if let Ok(content) = std::fs::read_to_string(&style_file) {
-            if content.contains("Theme Name:") {
-                return Some(format!("wp-content/themes/{}", component.id));
-            }
-        }
-    }
-
-    None
-}

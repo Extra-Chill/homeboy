@@ -300,6 +300,57 @@ impl Component {
             scopes: None,
         }
     }
+
+    /// Auto-resolve `remote_path` for WordPress components when not explicitly set.
+    ///
+    /// If the component has the `wordpress` extension and `remote_path` is empty,
+    /// detect whether it's a plugin or theme from source files and return the
+    /// canonical WordPress path (`wp-content/plugins/{id}` or `wp-content/themes/{id}`).
+    ///
+    /// Returns `Some(path)` if auto-resolved, `None` if not applicable or not detectable.
+    pub fn auto_resolve_remote_path(&self) -> Option<String> {
+        // Only applies to components with the wordpress extension.
+        let extensions = self.extensions.as_ref()?;
+        if !extensions.contains_key("wordpress") {
+            return None;
+        }
+
+        let local = std::path::Path::new(&self.local_path);
+
+        // Check for plugin: {id}.php with "Plugin Name:" header
+        let plugin_file = local.join(format!("{}.php", self.id));
+        if plugin_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&plugin_file) {
+                if content.contains("Plugin Name:") {
+                    return Some(format!("wp-content/plugins/{}", self.id));
+                }
+            }
+        }
+
+        // Check for theme: style.css with "Theme Name:" header
+        let style_file = local.join("style.css");
+        if style_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&style_file) {
+                if content.contains("Theme Name:") {
+                    return Some(format!("wp-content/themes/{}", self.id));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Ensure `remote_path` is populated. If empty, attempt auto-resolution.
+    ///
+    /// This should be called after all config layers (repo portable, project overrides)
+    /// have been applied. It fills in `remote_path` only if still empty.
+    pub fn resolve_remote_path(&mut self) {
+        if self.remote_path.trim().is_empty() {
+            if let Some(resolved) = self.auto_resolve_remote_path() {
+                self.remote_path = resolved;
+            }
+        }
+    }
 }
 
 /// Normalize empty strings to None. Treats "", null, and field omission identically for consistent validation.
@@ -439,6 +490,109 @@ mod tests {
             result[0].pattern.as_ref().unwrap(),
             r"Version:\s*(\d+\.\d+\.\d+)"
         );
+    }
+
+    // ========================================================================
+    // Auto-resolve remote_path tests
+    // ========================================================================
+
+    #[test]
+    fn auto_resolve_remote_path_detects_wordpress_plugin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        // Create a WordPress plugin file
+        std::fs::write(
+            dir.join("my-plugin.php"),
+            "<?php\n/**\n * Plugin Name: My Plugin\n */\n",
+        )
+        .unwrap();
+
+        let component = Component {
+            id: "my-plugin".to_string(),
+            local_path: dir.to_string_lossy().to_string(),
+            extensions: Some(HashMap::from([("wordpress".to_string(), ScopedExtensionConfig::default())])),
+            ..Component::default()
+        };
+
+        assert_eq!(
+            component.auto_resolve_remote_path(),
+            Some("wp-content/plugins/my-plugin".to_string()),
+        );
+    }
+
+    #[test]
+    fn auto_resolve_remote_path_detects_wordpress_theme() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        // Create a WordPress theme style.css
+        std::fs::write(
+            dir.join("style.css"),
+            "/*\nTheme Name: My Theme\n*/\n",
+        )
+        .unwrap();
+
+        let component = Component {
+            id: "my-theme".to_string(),
+            local_path: dir.to_string_lossy().to_string(),
+            extensions: Some(HashMap::from([("wordpress".to_string(), ScopedExtensionConfig::default())])),
+            ..Component::default()
+        };
+
+        assert_eq!(
+            component.auto_resolve_remote_path(),
+            Some("wp-content/themes/my-theme".to_string()),
+        );
+    }
+
+    #[test]
+    fn auto_resolve_remote_path_returns_none_without_wordpress_extension() {
+        let component = Component {
+            id: "my-crate".to_string(),
+            local_path: "/tmp".to_string(),
+            extensions: Some(HashMap::from([("rust".to_string(), ScopedExtensionConfig::default())])),
+            ..Component::default()
+        };
+
+        assert_eq!(component.auto_resolve_remote_path(), None);
+    }
+
+    #[test]
+    fn resolve_remote_path_fills_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        std::fs::write(
+            dir.join("my-plugin.php"),
+            "<?php\n/**\n * Plugin Name: My Plugin\n */\n",
+        )
+        .unwrap();
+
+        let mut component = Component {
+            id: "my-plugin".to_string(),
+            local_path: dir.to_string_lossy().to_string(),
+            remote_path: String::new(),
+            extensions: Some(HashMap::from([("wordpress".to_string(), ScopedExtensionConfig::default())])),
+            ..Component::default()
+        };
+
+        component.resolve_remote_path();
+        assert_eq!(component.remote_path, "wp-content/plugins/my-plugin");
+    }
+
+    #[test]
+    fn resolve_remote_path_preserves_explicit_value() {
+        let mut component = Component {
+            id: "my-plugin".to_string(),
+            local_path: "/tmp".to_string(),
+            remote_path: "custom/deploy/path".to_string(),
+            extensions: Some(HashMap::from([("wordpress".to_string(), ScopedExtensionConfig::default())])),
+            ..Component::default()
+        };
+
+        component.resolve_remote_path();
+        assert_eq!(component.remote_path, "custom/deploy/path");
     }
 
     // ========================================================================

@@ -194,6 +194,7 @@ pub fn resolve_effective(
             if let Some(mut discovered) = discover_from_portable(Path::new(path)) {
                 discovered.id = id.to_string();
                 discovered.local_path = path.to_string();
+                discovered.resolve_remote_path();
                 Ok(discovered)
             } else {
                 // Fallback: create a synthetic component when --path is

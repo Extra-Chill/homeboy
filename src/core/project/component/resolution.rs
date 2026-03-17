@@ -38,7 +38,14 @@ pub fn resolve_project_component(
         ));
     };
 
-    Ok(apply_component_overrides(&component, project))
+    let mut resolved = apply_component_overrides(&component, project);
+
+    // Auto-resolve remote_path if still empty after all config layers.
+    // Repo homeboy.json intentionally omits remote_path (it's deploy config),
+    // so auto-detect it from source files when possible (#812).
+    resolved.resolve_remote_path();
+
+    Ok(resolved)
 }
 
 pub fn resolve_project_components(project: &Project) -> Result<Vec<crate::component::Component>> {
