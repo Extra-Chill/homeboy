@@ -216,3 +216,333 @@ skip_strings = false
 
 [patterns.add_shortcode.captures]
 name = 1
+
+# ===========================================================================
+# Contract — function body analysis for test generation & effect detection
+# ===========================================================================
+
+[contract]
+# PHP return type separator: function foo(): ReturnType
+return_type_separator = ":"
+# PHP parameter format: Type $name (or just $name for untyped)
+param_format = "type_dollar_name"
+
+# Side effect detection patterns
+[contract.effects]
+file_read = [
+  'file_get_contents\s*\(',
+  'fopen\s*\(',
+  'fread\s*\(',
+  'file\s*\(',
+  'readfile\s*\(',
+  'wp_filesystem',
+  'get_option\s*\(',
+  'get_transient\s*\(',
+  'get_post_meta\s*\(',
+  'get_user_meta\s*\(',
+]
+file_write = [
+  'file_put_contents\s*\(',
+  'fwrite\s*\(',
+  'fclose\s*\(',
+  'update_option\s*\(',
+  'set_transient\s*\(',
+  'update_post_meta\s*\(',
+  'update_user_meta\s*\(',
+  'wp_insert_post\s*\(',
+  'wp_update_post\s*\(',
+  '\$wpdb->insert\s*\(',
+  '\$wpdb->update\s*\(',
+  '\$wpdb->replace\s*\(',
+]
+file_delete = [
+  'unlink\s*\(',
+  'rmdir\s*\(',
+  'delete_option\s*\(',
+  'delete_transient\s*\(',
+  'delete_post_meta\s*\(',
+  'wp_delete_post\s*\(',
+  '\$wpdb->delete\s*\(',
+]
+process_spawn = [
+  'exec\s*\(',
+  'shell_exec\s*\(',
+  'system\s*\(',
+  'passthru\s*\(',
+  'proc_open\s*\(',
+  'WP_CLI::runcommand\s*\(',
+]
+mutation = [
+  '->save\s*\(',
+  '->store\s*\(',
+  '->persist\s*\(',
+  '\[\]\s*=',
+  'array_push\s*\(',
+  'array_splice\s*\(',
+  'unset\s*\(',
+]
+network = [
+  'wp_remote_get\s*\(',
+  'wp_remote_post\s*\(',
+  'wp_remote_request\s*\(',
+  'wp_safe_remote_get\s*\(',
+  'wp_safe_remote_post\s*\(',
+  'curl_exec\s*\(',
+  'curl_init\s*\(',
+  '\$http->',
+]
+logging = [
+  'error_log\s*\(',
+  'wp_die\s*\(',
+  'trigger_error\s*\(',
+  'WP_CLI::log\s*\(',
+  'WP_CLI::success\s*\(',
+  'WP_CLI::warning\s*\(',
+  'WP_CLI::error\s*\(',
+]
+
+# Guard clause patterns
+guard_patterns = [
+  'if\s*\(.*\)\s*\{\s*return\s+',
+  'if\s*\(\s*empty\s*\(',
+  'if\s*\(\s*!\s*\$',
+  'if\s*\(\s*is_wp_error\s*\(',
+  'if\s*\(\s*!\s*is_',
+  'if\s*\(\s*null\s*===',
+  'if\s*\(\s*\$\w+\s*===\s*null',
+]
+
+# Return variant patterns
+[contract.return_patterns]
+ok = ['return\s+new\s+WP_REST_Response\b']
+err = ['return\s+new\s+WP_Error\b', 'throw\s+new\s+\\\\?Exception', 'throw\s+new\s+\\\\?\w+Exception']
+some = ['return\s+\$\w+\s*;']
+none = ['\breturn\s+null\s*;']
+true = ['\breturn\s+true\s*;']
+false = ['\breturn\s+false\s*;']
+
+# Error propagation patterns
+error_propagation = [
+  'throw\s+',
+  'wp_die\s*\(',
+]
+
+# Return type shape detection (matched against the return type after ":")
+[contract.return_shapes]
+bool = ['^\s*bool\s*$']
+collection = ['^\s*array\s*$', '^\s*iterable\s*$', 'Collection']
+option = ['^\s*\?', '^\s*null\|', '\|null\s*$']
+result = ['WP_Error\s*\|', '\|\s*WP_Error', 'WP_REST_Response']
+
+# Panic path patterns
+panic_patterns = [
+  'wp_die\s*\(',
+  'exit\s*[\(;]',
+  'die\s*\(',
+  'throw\s+new\s+',
+  'trigger_error\s*\(.+E_USER_ERROR',
+]
+
+# ===========================================================================
+# Type defaults — zero/default value expressions for PHP test input construction
+# ===========================================================================
+
+[[contract.type_defaults]]
+pattern = '^string$'
+value = "''"
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^\?string$'
+value = 'null'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^int$'
+value = '0'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^\?int$'
+value = 'null'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^float$'
+value = '0.0'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^bool$'
+value = 'false'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^array$'
+value = '[]'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^\?array$'
+value = 'null'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^void$'
+value = ''
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^callable$'
+value = "function() {}"
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^\\\\?Closure$'
+value = "function() {}"
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^mixed$'
+value = 'null'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^\?object$'
+value = 'null'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^object$'
+value = 'new \\stdClass()'
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^\\\\?WP_REST_Request$'
+value = "new \\WP_REST_Request()"
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^\\\\?WP_Post$'
+value = "get_post( self::factory()->post->create() )"
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^\\\\?WP_User$'
+value = "get_userdata( self::factory()->user->create() )"
+imports = []
+
+[[contract.type_defaults]]
+pattern = '^\?'
+value = 'null'
+imports = []
+
+# ===========================================================================
+# Test templates — PHPUnit source code templates for test plan rendering
+# Variables: {test_name}, {fn_name}, {param_setup}, {param_args},
+#            {param_names}, {return_shape}, {extra_imports},
+#            {variant}, {expected_value}, {condition}, {is_method}
+# ===========================================================================
+
+[contract.test_templates]
+
+# Return true branch
+bool_true = """
+    public function {test_name}() {
+{param_setup}
+        $result = $this->instance->{fn_name}({param_args});
+        $this->assertTrue( $result, 'Expected true for: {condition}' );
+    }
+"""
+
+# Return false branch
+bool_false = """
+    public function {test_name}() {
+{param_setup}
+        $result = $this->instance->{fn_name}({param_args});
+        $this->assertFalse( $result, 'Expected false for: {condition}' );
+    }
+"""
+
+# Nullable — Some/non-null branch
+option_some = """
+    public function {test_name}() {
+{param_setup}
+        $result = $this->instance->{fn_name}({param_args});
+        $this->assertNotNull( $result, 'Expected non-null for: {condition}' );
+    }
+"""
+
+# Nullable — null branch
+option_none = """
+    public function {test_name}() {
+{param_setup}
+        $result = $this->instance->{fn_name}({param_args});
+        $this->assertNull( $result, 'Expected null for: {condition}' );
+    }
+"""
+
+# WP_Error / exception — success branch
+result_ok = """
+    public function {test_name}() {
+{param_setup}
+        $result = $this->instance->{fn_name}({param_args});
+        $this->assertNotWPError( $result, 'Expected success for: {condition}' );
+    }
+"""
+
+# WP_Error / exception — error branch
+result_err = """
+    public function {test_name}() {
+{param_setup}
+        $result = $this->instance->{fn_name}({param_args});
+        $this->assertWPError( $result, 'Expected WP_Error for: {condition}' );
+    }
+"""
+
+# Unit/void return — just verify no exception
+unit = """
+    public function {test_name}() {
+{param_setup}
+        $this->instance->{fn_name}({param_args});
+        $this->addToAssertionCount(1);
+    }
+"""
+
+# No branches detected — basic invocation test
+no_panic = """
+    public function {test_name}() {
+{param_setup}
+        $result = $this->instance->{fn_name}({param_args});
+        $this->assertNotNull( $result );
+    }
+"""
+
+# Effect verification
+effects = """
+    public function {test_name}() {
+        // Expected effects: {effects}
+{param_setup}
+        $this->instance->{fn_name}({param_args});
+        $this->addToAssertionCount(1);
+    }
+"""
+
+# Collection return
+collection = """
+    public function {test_name}() {
+{param_setup}
+        $result = $this->instance->{fn_name}({param_args});
+        $this->assertIsArray( $result, 'Expected array for: {condition}' );
+        $this->assertNotEmpty( $result, 'Expected non-empty array for: {condition}' );
+    }
+"""
+
+# Generic value return — fallback
+default = """
+    public function {test_name}() {
+{param_setup}
+        $result = $this->instance->{fn_name}({param_args});
+        $this->assertNotNull( $result );
+    }
+"""
