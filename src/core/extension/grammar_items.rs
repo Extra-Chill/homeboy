@@ -211,11 +211,20 @@ fn find_prefix_start(lines: &[&str], decl_line: usize) -> usize {
 /// Find the end line of an item using grammar-aware brace matching.
 #[allow(clippy::needless_range_loop)]
 fn find_item_end(lines: &[&str], decl_line: usize, kind: &str, grammar: &Grammar) -> usize {
-    // For const, static, type_alias — scan for semicolon
+    // For const, static, type_alias — find the terminating semicolon.
+    // Must handle multi-line initializers: `const X: [&str; 8] = [ ... ];`
+    // The semicolon inside a type annotation like `[&str; 8]` is NOT the
+    // terminating one — we need depth-aware scanning.
     if kind == "const" || kind == "static" || kind == "type_alias" {
+        let mut depth: i32 = 0; // tracks [] and {} nesting
         for i in decl_line..lines.len() {
-            if lines[i].contains(';') {
-                return i;
+            for ch in lines[i].chars() {
+                match ch {
+                    '[' | '{' | '(' => depth += 1,
+                    ']' | '}' | ')' => depth -= 1,
+                    ';' if depth <= 0 => return i,
+                    _ => {}
+                }
             }
         }
         return decl_line;
@@ -832,6 +841,74 @@ pub fn process() {}";
         assert_eq!(items[1].kind, "type_alias");
         assert_eq!(items[2].name, "process");
         assert_eq!(items[2].kind, "function");
+    }
+
+    #[test]
+    fn parse_items_const_array_multiline() {
+        // Regression test for #841: const arrays with type annotations containing
+        // semicolons (e.g., `[&str; 8]`) were terminated at the type annotation
+        // instead of the actual closing `];`.
+        let content = "\
+const NOISY_DIRS: [&str; 4] = [
+    \"node_modules\",
+    \"dist\",
+    \"vendor\",
+    \"target\",
+];
+
+pub fn after() {}";
+        let grammar = full_rust_grammar();
+        let items = parse_items(content, &grammar);
+
+        assert_eq!(
+            items.len(),
+            2,
+            "Should find const + function, got: {:?}",
+            items
+                .iter()
+                .map(|i| (&i.name, &i.kind, i.start_line, i.end_line))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(items[0].name, "NOISY_DIRS");
+        assert_eq!(items[0].kind, "const");
+        assert_eq!(items[0].start_line, 1);
+        assert_eq!(
+            items[0].end_line, 6,
+            "const array should end at `];` line (6), not at type annotation line (1)"
+        );
+        assert!(
+            items[0].source.contains("\"target\""),
+            "source should include all array elements"
+        );
+        assert!(
+            items[0].source.ends_with("];"),
+            "source should end with `];`, got: ...{}",
+            &items[0].source[items[0].source.len().saturating_sub(20)..]
+        );
+        assert_eq!(items[1].name, "after");
+        assert_eq!(items[1].kind, "function");
+    }
+
+    #[test]
+    fn parse_items_const_with_braces() {
+        // Const with brace-delimited initializer (e.g., HashMap literal via macro)
+        let content = "\
+pub static DEFAULTS: phf::Map<&str, i32> = phf::phf_map! {
+    \"a\" => 1,
+    \"b\" => 2,
+};
+
+pub fn after() {}";
+        let grammar = full_rust_grammar();
+        let items = parse_items(content, &grammar);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "DEFAULTS");
+        assert_eq!(items[0].kind, "static");
+        assert_eq!(
+            items[0].end_line, 4,
+            "static with braces should end at closing line"
+        );
     }
 
     #[test]
