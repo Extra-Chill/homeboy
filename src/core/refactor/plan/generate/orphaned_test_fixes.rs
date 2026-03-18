@@ -169,28 +169,43 @@ fn find_test_function_range(content: &str, fn_name: &str) -> Option<(usize, usiz
         }
     }
 
-    // Walk forward to find the matching closing brace using simple brace counting.
-    // This is sufficient for Rust test functions which have straightforward bodies.
+    // Walk forward to find the matching closing brace using string-aware brace
+    // counting. We must skip braces inside string literals (e.g., regex patterns
+    // in `r"...\{..."`) to avoid miscounting and producing broken removals.
     let mut depth: i32 = 0;
     let mut found_open = false;
     let mut end_idx = decl_idx;
 
     for i in decl_idx..lines.len() {
+        let mut in_string: Option<char> = None;
+        let mut prev_char = '\0';
+
         for ch in lines[i].chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    found_open = true;
+            if let Some(quote) = in_string {
+                // Inside a string — look for the closing quote (unescaped).
+                if ch == quote && prev_char != '\\' {
+                    in_string = None;
                 }
-                '}' => {
-                    depth -= 1;
-                    if found_open && depth == 0 {
-                        end_idx = i;
-                        return Some((start_idx + 1, end_idx + 1)); // 1-indexed
+            } else {
+                match ch {
+                    '"' | '\'' => {
+                        in_string = Some(ch);
                     }
+                    '{' => {
+                        depth += 1;
+                        found_open = true;
+                    }
+                    '}' => {
+                        depth -= 1;
+                        if found_open && depth == 0 {
+                            end_idx = i;
+                            return Some((start_idx + 1, end_idx + 1)); // 1-indexed
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+            prev_char = ch;
         }
     }
 
@@ -562,6 +577,72 @@ mod tests {
     fn test_normalized_similarity_unrelated() {
         let sim = normalized_similarity("parse", "deploy");
         assert!(sim < 0.5, "Expected <0.5, got {}", sim);
+    }
+
+    #[test]
+    fn test_find_test_function_range_with_braces_in_strings() {
+        // Regression test: braces inside string literals (e.g., regex patterns)
+        // should not affect brace depth counting. Previously, the naive counter
+        // would miscount and produce wrong function boundaries.
+        let content = r#"
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn helper_with_regex_strings() -> Grammar {
+        Grammar {
+            regex: r"use\s+([\w:]+(?:::\{[^}]+\})?);".to_string(),
+            other: "{nested}".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_actual() {
+        assert!(true);
+    }
+}
+"#;
+        // The helper function spans lines 6-10
+        let range = find_test_function_range(content, "test_helper_with_regex_strings");
+        assert!(range.is_some(), "Should find the helper function");
+        let (start, end) = range.unwrap();
+        // The function body has braces in strings — make sure we find the right closing brace
+        assert_eq!(start, 6);
+        assert_eq!(end, 11);
+
+        // The test function at line 14 should also be findable
+        let range2 = find_test_function_range(content, "test_actual");
+        assert!(range2.is_some(), "Should find test_actual");
+        let (start2, end2) = range2.unwrap();
+        assert_eq!(start2, 13); // #[test] attribute
+        assert_eq!(end2, 16);
+    }
+
+    #[test]
+    fn test_find_test_function_range_unbalanced_braces_in_string() {
+        // Regression: raw strings can have unbalanced braces like r"\{[^}]+\}"
+        // which has 1 open and 2 close braces as chars. A naive counter would
+        // exit the function too early (depth drops below zero).
+        let content = r#"
+#[cfg(test)]
+mod tests {
+    fn build_grammar() -> Grammar {
+        Grammar {
+            regex: r"(?:::\{[^}]+\})?".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_something() {
+        assert!(true);
+    }
+}
+"#;
+        let range = find_test_function_range(content, "test_build_grammar");
+        assert!(range.is_some(), "Should find build_grammar via test_ prefix strip");
+        let (start, end) = range.unwrap();
+        assert_eq!(start, 4);
+        assert_eq!(end, 8);
     }
 
     #[test]
