@@ -576,7 +576,137 @@ private init() {}
         )
     }
 
-    // MARK: - Component Commands
+    // MARK: - Fleet Commands
+
+    /// List all fleets
+    func fleetList() async throws -> [Fleet] {
+        let output: FleetListOutput = try await cli.executeCommand(
+            ["fleet", "list"],
+            dataType: FleetListOutput.self,
+            source: "Fleet List"
+        )
+        return output.fleets ?? []
+    }
+
+    /// Show fleet details
+    func fleetShow(id: String) async throws -> Fleet {
+        let output: FleetOutput = try await cli.executeCommand(
+            ["fleet", "show", id],
+            dataType: FleetOutput.self,
+            source: "Fleet Show"
+        )
+        guard let fleet = output.fleet else {
+            throw CLIBridgeError.invalidResponse("Fleet not found: \(id)")
+        }
+        return fleet
+    }
+
+    /// Create a new fleet
+    func fleetCreate(id: String, description: String? = nil, projectIds: [String] = []) async throws -> Fleet {
+        var args = ["fleet", "create", id]
+        if let desc = description {
+            args += ["--description", desc]
+        }
+        for pid in projectIds {
+            args += ["--project", pid]
+        }
+        let output: FleetOutput = try await cli.executeCommand(
+            args,
+            dataType: FleetOutput.self,
+            source: "Fleet Create"
+        )
+        guard let fleet = output.fleet else {
+            throw CLIBridgeError.invalidResponse("Failed to create fleet")
+        }
+        return fleet
+    }
+
+    /// Delete a fleet
+    func fleetDelete(id: String) async throws {
+        _ = try await cli.executeCommand(
+            ["fleet", "delete", id],
+            dataType: FleetOutput.self,
+            source: "Fleet Delete"
+        )
+    }
+
+    /// Add project to fleet
+    func fleetAddProject(fleetId: String, projectId: String) async throws -> Fleet {
+        let output: FleetOutput = try await cli.executeCommand(
+            ["fleet", "add", fleetId, projectId],
+            dataType: FleetOutput.self,
+            source: "Fleet Add Project"
+        )
+        guard let fleet = output.fleet else {
+            throw CLIBridgeError.invalidResponse("Failed to add project to fleet")
+        }
+        return fleet
+    }
+
+    /// Remove project from fleet
+    func fleetRemoveProject(fleetId: String, projectId: String) async throws -> Fleet {
+        let output: FleetOutput = try await cli.executeCommand(
+            ["fleet", "remove", fleetId, projectId],
+            dataType: FleetOutput.self,
+            source: "Fleet Remove Project"
+        )
+        guard let fleet = output.fleet else {
+            throw CLIBridgeError.invalidResponse("Failed to remove project from fleet")
+        }
+        return fleet
+    }
+
+    /// Get projects in fleet
+    func fleetProjects(fleetId: String) async throws -> [ProjectListItem] {
+        let output: FleetProjectsOutput = try await cli.executeCommand(
+            ["fleet", "projects", fleetId],
+            dataType: FleetProjectsOutput.self,
+            source: "Fleet Projects"
+        )
+        return output.projects ?? []
+    }
+
+    /// Get component usage across fleet
+    func fleetComponents(fleetId: String) async throws -> [String: [String]] {
+        let output: FleetComponentsOutput = try await cli.executeCommand(
+            ["fleet", "components", fleetId],
+            dataType: FleetComponentsOutput.self,
+            source: "Fleet Components"
+        )
+        return output.components ?? [:]
+    }
+
+    /// Check fleet status (versions and health)
+    func fleetStatus(fleetId: String) async throws -> FleetStatusOutput {
+        try await cli.executeCommand(
+            ["fleet", "status", fleetId],
+            dataType: FleetStatusOutput.self,
+            source: "Fleet Status",
+            timeout: 60
+        )
+    }
+
+    /// Check component drift across fleet
+    func fleetCheck(fleetId: String) async throws -> FleetCheckOutput {
+        try await cli.executeCommand(
+            ["fleet", "check", fleetId],
+            dataType: FleetCheckOutput.self,
+            source: "Fleet Check",
+            timeout: 60
+        )
+    }
+
+    /// Execute command across all projects in fleet
+    func fleetExec(fleetId: String, command: String) async throws -> FleetExecOutput {
+        try await cli.executeCommand(
+            ["fleet", "exec", fleetId, "--", command],
+            dataType: FleetExecOutput.self,
+            source: "Fleet Exec",
+            timeout: 120
+        )
+    }
+
+// MARK: - Component Commands
 
     func componentList() async throws -> [ComponentListItemCLI] {
         let output: ComponentOutput = try await cli.executeCommand(
@@ -1062,4 +1192,92 @@ struct UndoSnapshot: Decodable, Identifiable {
     let timestamp: String
     let componentId: String?
     let description: String?
+}
+
+// MARK: - Fleet Output Types
+
+/// Fleet struct from CLI
+struct Fleet: Codable, Identifiable {
+    let id: String
+    let projectIds: [String]
+    let description: String?
+}
+
+/// Output from fleet list command
+struct FleetListOutput: Decodable {
+    let command: String
+    let fleets: [Fleet]?
+}
+
+/// Output from fleet show/create/delete/add/remove commands
+struct FleetOutput: Decodable {
+    let command: String
+    let id: String?
+    let fleet: Fleet?
+    let message: String?
+}
+
+/// Output from fleet projects command
+struct FleetProjectsOutput: Decodable {
+    let command: String
+    let fleetId: String?
+    let projects: [ProjectListItem]?
+}
+
+/// Output from fleet components command
+struct FleetComponentsOutput: Decodable {
+    let command: String
+    let fleetId: String?
+    let components: [String: [String]]?  // component_id -> [project_id]
+}
+
+/// Output from fleet status command
+struct FleetStatusOutput: Decodable {
+    let command: String
+    let fleetId: String
+    let status: [FleetProjectStatus]
+}
+
+struct FleetProjectStatus: Decodable, Identifiable {
+    let projectId: String
+    let componentVersions: [String: String]?  // component_id -> version
+    let health: FleetHealthStatus?
+
+    var id: String { projectId }
+}
+
+struct FleetHealthStatus: Decodable {
+    let services: [String: String]?  // service name -> status
+}
+
+/// Output from fleet check command
+struct FleetCheckOutput: Decodable {
+    let command: String
+    let fleetId: String
+    let drift: [FleetComponentDrift]?
+}
+
+struct FleetComponentDrift: Decodable, Identifiable {
+    let componentId: String
+    let localVersion: String
+    let remoteVersions: [String: String]  // project_id -> version
+    let drifted: Bool
+
+    var id: String { componentId }
+}
+
+/// Output from fleet exec command
+struct FleetExecOutput: Decodable {
+    let command: String
+    let fleetId: String
+    let results: [FleetExecResult]
+}
+
+struct FleetExecResult: Decodable, Identifiable {
+    let projectId: String
+    let success: Bool
+    let output: String?
+    let error: String?
+
+    var id: String { projectId }
 }
