@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.9.0] - 2026-03-18
+
+### Added
+- extend categorized auto-issues to cover lint and test findings
+
 ## [1.8.0] - 2026-03-17
 
 ### Added
