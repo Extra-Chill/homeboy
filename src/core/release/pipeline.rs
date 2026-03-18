@@ -870,15 +870,20 @@ fn build_release_steps(
         }
 
         // 7. Cleanup step (runs after all publish steps)
-        steps.push(ReleasePlanStep {
-            id: "cleanup".to_string(),
-            step_type: "cleanup".to_string(),
-            label: Some("Clean up release artifacts".to_string()),
-            needs: publish_step_ids,
-            config: std::collections::HashMap::new(),
-            status: ReleasePlanStatus::Ready,
-            missing: vec![],
-        });
+        // Skip cleanup when --deploy is pending — the deploy step needs the
+        // build artifact (ZIP) that cleanup would delete. Cleanup runs after
+        // deployment completes instead.
+        if !options.deploy {
+            steps.push(ReleasePlanStep {
+                id: "cleanup".to_string(),
+                step_type: "cleanup".to_string(),
+                label: Some("Clean up release artifacts".to_string()),
+                needs: publish_step_ids,
+                config: std::collections::HashMap::new(),
+                status: ReleasePlanStatus::Ready,
+                missing: vec![],
+            });
+        }
     } else if options.skip_publish && !publish_targets.is_empty() {
         log_status!("release", "Skipping publish/package steps (--skip-publish)");
     }
