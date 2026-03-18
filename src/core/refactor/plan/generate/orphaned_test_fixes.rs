@@ -174,7 +174,6 @@ fn find_test_function_range(content: &str, fn_name: &str) -> Option<(usize, usiz
     // in `r"...\{..."`) to avoid miscounting and producing broken removals.
     let mut depth: i32 = 0;
     let mut found_open = false;
-    let mut end_idx = decl_idx;
 
     for i in decl_idx..lines.len() {
         let mut in_string: Option<char> = None;
@@ -198,8 +197,7 @@ fn find_test_function_range(content: &str, fn_name: &str) -> Option<(usize, usiz
                     '}' => {
                         depth -= 1;
                         if found_open && depth == 0 {
-                            end_idx = i;
-                            return Some((start_idx + 1, end_idx + 1)); // 1-indexed
+                            return Some((start_idx + 1, i + 1)); // 1-indexed
                         }
                     }
                     _ => {}

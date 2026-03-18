@@ -3,7 +3,7 @@ mod types;
 mod unreleased;
 
 pub use normalize_heading_label::*;
-pub use types::*;
+pub(crate) use types::*;
 pub use unreleased::*;
 
 use chrono::Local;

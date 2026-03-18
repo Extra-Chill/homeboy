@@ -17,7 +17,7 @@ mod move_options;
 mod types;
 mod whole_file_move;
 
-pub use extension_integration::*;
+pub(crate) use extension_integration::*;
 pub use item_kind::*;
 pub use move_options::*;
 pub use types::*;

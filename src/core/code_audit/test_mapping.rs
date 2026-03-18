@@ -23,20 +23,6 @@ pub fn partition_fingerprints<'a>(
     (source, test)
 }
 
-/// Build a class/stem name → test file path index from test fingerprints.
-///
-/// This enables auto-discovery: when a template-based match fails, we can
-/// find the test file by class name regardless of directory structure.
-pub fn build_test_name_index<'a>(test_fps: &[&'a FileFingerprint]) -> HashMap<String, &'a str> {
-    let mut index = HashMap::new();
-    for fp in test_fps {
-        if let Some(stem) = extract_test_stem(&fp.relative_path) {
-            index.insert(stem.to_lowercase(), fp.relative_path.as_str());
-        }
-    }
-    index
-}
-
 /// Build a class/stem name → source file path index from source fingerprints.
 pub fn build_source_name_index<'a>(source_fps: &[&'a FileFingerprint]) -> HashMap<String, &'a str> {
     let mut index = HashMap::new();
@@ -46,29 +32,6 @@ pub fn build_source_name_index<'a>(source_fps: &[&'a FileFingerprint]) -> HashMa
         }
     }
     index
-}
-
-/// Discover a test file for a source file by class name, falling back from template matching.
-///
-/// Tries template first (fast, exact). On failure, falls back to name-based auto-discovery
-/// by searching the test name index for a matching class name.
-pub fn discover_test_file<'a>(
-    source_path: &str,
-    config: &TestMappingConfig,
-    test_file_map: &HashMap<&str, &'a FileFingerprint>,
-    test_name_index: &HashMap<String, &'a str>,
-) -> Option<&'a str> {
-    // Tier 1: Template match (existing behavior)
-    if let Some(template_path) = source_to_test_path(source_path, config) {
-        if test_file_map.contains_key(template_path.as_str()) {
-            return Some(test_file_map[template_path.as_str()].relative_path.as_str());
-        }
-    }
-
-    // Tier 2: Name-based auto-discovery
-    let stem = extract_file_stem(source_path)?;
-    let test_key = format!("{}test", stem.to_lowercase());
-    test_name_index.get(&test_key).copied()
 }
 
 /// Discover a source file for a test file by class name, falling back from template matching.

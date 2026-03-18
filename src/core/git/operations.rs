@@ -130,12 +130,6 @@ pub struct BaselineInfo {
     pub warning: Option<String>,
 }
 
-/// Detect baseline for a path (public wrapper).
-/// For version-aware baseline detection, use detect_baseline_with_version().
-pub(crate) fn detect_baseline_for_path(path: &str) -> Result<BaselineInfo> {
-    detect_baseline_with_version(path, None)
-}
-
 pub fn build_repo_baseline_snapshot(
     path: &str,
     current_version: Option<&str>,

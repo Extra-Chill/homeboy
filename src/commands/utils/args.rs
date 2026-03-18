@@ -312,22 +312,13 @@ pub struct PositionalComponentArgs {
 }
 
 impl PositionalComponentArgs {
+    #[cfg(test)]
     pub fn load(&self) -> homeboy::Result<Component> {
         component::resolve_effective(Some(&self.component), self.path.as_deref(), None)
     }
 
     pub fn id(&self) -> &str {
         &self.component
-    }
-
-    pub fn source_path(&self) -> homeboy::Result<PathBuf> {
-        if let Some(ref path) = self.path {
-            Ok(PathBuf::from(path))
-        } else {
-            let comp = component::resolve_effective(Some(&self.component), None, None)?;
-            let expanded = shellexpand::tilde(&comp.local_path);
-            Ok(PathBuf::from(expanded.as_ref()))
-        }
     }
 }
 
