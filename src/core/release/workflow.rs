@@ -88,6 +88,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         path_override: input.path_override,
         skip_checks: input.skip_checks,
         skip_publish: input.skip_publish,
+        deploy: input.deploy,
     };
 
     if options.dry_run {
@@ -124,7 +125,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         0
     };
     let (deployment, deploy_exit_code) = if input.deploy {
-        execute_deployment(&input.component_id)
+        execute_deployment(&input.component_id, &component.local_path)
     } else {
         (None, 0)
     };
@@ -251,7 +252,7 @@ fn plan_deployment(component_id: &str) -> ReleaseDeploymentResult {
     }
 }
 
-fn execute_deployment(component_id: &str) -> (Option<ReleaseDeploymentResult>, i32) {
+fn execute_deployment(component_id: &str, local_path: &str) -> (Option<ReleaseDeploymentResult>, i32) {
     let projects = component::projects_using(component_id).unwrap_or_default();
 
     if projects.is_empty() {
@@ -339,6 +340,18 @@ fn execute_deployment(component_id: &str) -> (Option<ReleaseDeploymentResult>, i
 
     let total = project_results.len() as u32;
     let exit_code = if failed > 0 { 1 } else { 0 };
+
+    // Clean up build artifacts now that deployment is complete.
+    // The release pipeline skipped cleanup when --deploy was set so the
+    // deploy step could find the ZIP artifact.
+    let distrib_path = format!("{}/target/distrib", local_path);
+    if std::path::Path::new(&distrib_path).exists() {
+        if let Err(e) = std::fs::remove_dir_all(&distrib_path) {
+            log_status!("release", "Warning: failed to clean up {}: {}", distrib_path, e);
+        } else {
+            log_status!("release", "Cleaned up {}", distrib_path);
+        }
+    }
 
     (
         Some(ReleaseDeploymentResult {

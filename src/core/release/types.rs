@@ -153,6 +153,9 @@ pub struct ReleaseOptions {
     /// Use when CI handles publishing after the tag is pushed.
     #[serde(default)]
     pub skip_publish: bool,
+    /// Deploy after release — defers artifact cleanup until after deployment.
+    #[serde(default)]
+    pub deploy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
