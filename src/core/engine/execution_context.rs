@@ -47,7 +47,7 @@ pub struct ExecutionContext {
     pub extension_path: Option<PathBuf>,
 
     /// Merged settings (manifest defaults → component → overrides).
-    pub settings: Vec<(String, String)>,
+    pub settings: Vec<(String, serde_json::Value)>,
 }
 
 /// What to resolve when building an execution context.
@@ -132,11 +132,11 @@ pub fn resolve(options: &ResolveOptions) -> Result<ExecutionContext> {
     let (extension_id, extension_path, settings) = if let Some(capability) = options.capability {
         let ext_context = extension::resolve_execution_context(&component, capability)?;
         let mut settings = ext_context.settings.clone();
-        // Merge CLI overrides on top
+        // Merge CLI overrides on top (CLI values are always strings)
         for (key, value) in &options.settings_overrides {
             // Remove existing key if present (override semantics)
             settings.retain(|(k, _)| k != key);
-            settings.push((key.clone(), value.clone()));
+            settings.push((key.clone(), serde_json::Value::String(value.clone())));
         }
         (
             Some(ext_context.extension_id.clone()),
@@ -144,7 +144,13 @@ pub fn resolve(options: &ResolveOptions) -> Result<ExecutionContext> {
             settings,
         )
     } else {
-        (None, None, options.settings_overrides.clone())
+        // No extension context — only CLI overrides, wrapped as JSON strings.
+        let settings = options
+            .settings_overrides
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        (None, None, settings)
     };
 
     Ok(ExecutionContext {

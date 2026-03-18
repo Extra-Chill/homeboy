@@ -409,34 +409,33 @@ pub(crate) fn load_extension_manifest_from_dir(extension_path: &Path) -> Result<
 
 pub(crate) fn build_settings_json_from_manifest(
     manifest: &serde_json::Value,
-    extension_settings: &[(String, String)],
+    extension_settings: &[(String, serde_json::Value)],
     settings_overrides: &[(String, String)],
 ) -> Result<String> {
     let mut settings = serde_json::json!({});
 
+    // Load defaults from manifest — preserve original JSON types.
     if let Some(manifest_settings) = manifest.get("settings") {
         if let Some(settings_array) = manifest_settings.as_array() {
             if let serde_json::Value::Object(ref mut obj) = settings {
                 for setting in settings_array {
-                    if let (Some(id), Some(default)) = (
-                        setting.get("id").and_then(|v| v.as_str()),
-                        setting.get("default").and_then(|v| v.as_str()),
-                    ) {
-                        obj.insert(
-                            id.to_string(),
-                            serde_json::Value::String(default.to_string()),
-                        );
+                    if let Some(id) = setting.get("id").and_then(|v| v.as_str()) {
+                        if let Some(default) = setting.get("default") {
+                            obj.insert(id.to_string(), default.clone());
+                        }
                     }
                 }
             }
         }
     }
 
+    // Apply component/project extension settings — preserves arrays, objects, etc.
     if let serde_json::Value::Object(ref mut obj) = settings {
         for (key, value) in extension_settings {
-            obj.insert(key.clone(), serde_json::Value::String(value.clone()));
+            obj.insert(key.clone(), value.clone());
         }
 
+        // CLI overrides are always strings (from --setting key=value).
         for (key, value) in settings_overrides {
             obj.insert(key.clone(), serde_json::Value::String(value.clone()));
         }
@@ -1071,6 +1070,68 @@ mod tests {
 
         assert!(helper.is_some());
         assert!(helper.unwrap().ends_with("runner-steps.sh"));
+    }
+
+    #[test]
+    fn build_settings_json_preserves_array_values() {
+        // Regression test for #844: array values in extension settings
+        // were serialized as empty strings.
+        let manifest = serde_json::json!({
+            "settings": [
+                { "id": "string_setting", "default": "hello" },
+                { "id": "array_default", "default": ["a", "b"] }
+            ]
+        });
+
+        let extension_settings: Vec<(String, serde_json::Value)> = vec![
+            (
+                "validation_dependencies".to_string(),
+                serde_json::json!(["data-machine"]),
+            ),
+            (
+                "plain_string".to_string(),
+                serde_json::Value::String("value".to_string()),
+            ),
+        ];
+
+        let overrides: Vec<(String, String)> = vec![];
+
+        let json = build_settings_json_from_manifest(&manifest, &extension_settings, &overrides)
+            .expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
+
+        // Array from extension settings is preserved
+        assert_eq!(
+            parsed["validation_dependencies"],
+            serde_json::json!(["data-machine"]),
+            "Array setting should be preserved, not flattened to empty string"
+        );
+
+        // String from extension settings is preserved
+        assert_eq!(parsed["plain_string"], serde_json::json!("value"));
+
+        // String default from manifest is preserved
+        assert_eq!(parsed["string_setting"], serde_json::json!("hello"));
+
+        // Array default from manifest is preserved
+        assert_eq!(parsed["array_default"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn build_settings_json_cli_overrides_replace_values() {
+        let manifest = serde_json::json!({});
+        let extension_settings: Vec<(String, serde_json::Value)> = vec![(
+            "key".to_string(),
+            serde_json::json!(["original"]),
+        )];
+        let overrides = vec![("key".to_string(), "override_value".to_string())];
+
+        let json = build_settings_json_from_manifest(&manifest, &extension_settings, &overrides)
+            .expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
+
+        // CLI override replaces the array value with a string
+        assert_eq!(parsed["key"], serde_json::json!("override_value"));
     }
 
     #[test]

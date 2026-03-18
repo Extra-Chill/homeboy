@@ -202,7 +202,19 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             component_label: args.comp.component.clone(),
             component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
-            settings: ctx.settings.clone(),
+            settings: ctx
+                .settings
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        },
+                    )
+                })
+                .collect(),
             skip_lint: args.skip_lint,
             fix: args.fix,
             coverage: args.coverage,

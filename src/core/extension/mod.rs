@@ -126,7 +126,7 @@ pub struct ExtensionExecutionContext {
     pub extension_id: String,
     pub extension_path: PathBuf,
     pub script_path: String,
-    pub settings: Vec<(String, String)>,
+    pub settings: Vec<(String, serde_json::Value)>,
 }
 
 fn no_extensions_error(component: &Component) -> Error {
@@ -210,7 +210,7 @@ fn linked_extensions(
 pub fn extract_component_extension_settings(
     component: &Component,
     extension_id: &str,
-) -> Vec<(String, String)> {
+) -> Vec<(String, serde_json::Value)> {
     component
         .extensions
         .as_ref()
@@ -219,7 +219,7 @@ pub fn extract_component_extension_settings(
             extension_config
                 .settings
                 .iter()
-                .filter_map(|(key, value)| value.as_str().map(|v| (key.clone(), v.to_string())))
+                .map(|(key, value)| (key.clone(), value.clone()))
                 .collect()
         })
         .unwrap_or_default()
