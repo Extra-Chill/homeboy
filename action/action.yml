@@ -407,9 +407,9 @@ runs:
         COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title }}
       run: bash ${{ github.action_path }}/scripts/pr/post-pr-comment.sh
 
-    - name: Auto-file categorized audit issues
+    - name: Auto-file categorized issues
       id: categorized-issues
-      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(inputs.commands, 'audit') && steps.autofix-open-pr.outputs.created != 'true'
+      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && steps.autofix-open-pr.outputs.created != 'true'
       continue-on-error: true
       shell: bash
       env:
