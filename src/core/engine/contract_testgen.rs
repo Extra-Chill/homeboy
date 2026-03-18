@@ -742,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_with_templates() {
+    fn test_render_test_plan_with_templates() {
         let contract = sample_result_contract();
         let plan = generate_test_plan(&contract, &[]);
 
@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_missing_template_uses_default() {
+    fn test_render_test_plan_missing_template_uses_default() {
         let contract = sample_option_contract();
         let plan = generate_test_plan(&contract, &[]);
 

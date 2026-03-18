@@ -420,7 +420,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_test_path_from_typical_description() {
+    fn test_extract_test_path_from_description_typical() {
         let desc = "No test file found (expected 'tests/core/engine/validate_write_test.rs') and no inline tests";
         assert_eq!(
             extract_test_path_from_description(desc),
@@ -429,12 +429,12 @@ mod tests {
     }
 
     #[test]
-    fn extract_test_path_returns_none_for_bad_format() {
+    fn test_extract_test_path_from_description_bad_format() {
         assert_eq!(extract_test_path_from_description("no test file"), None);
     }
 
     #[test]
-    fn extract_method_name_from_typical_description() {
+    fn test_extract_method_name_from_description_typical() {
         let desc =
             "Method 'validate_write' has no corresponding test (expected 'test_validate_write')";
         assert_eq!(
@@ -444,12 +444,12 @@ mod tests {
     }
 
     #[test]
-    fn extract_method_name_returns_none_for_bad_format() {
+    fn test_extract_method_name_from_description_bad_format() {
         assert_eq!(extract_method_name_from_description("no method info"), None);
     }
 
     #[test]
-    fn find_test_file_basic_convention() {
+    fn test_find_test_location_basic_convention() {
         // This tests the path logic, not file existence
         let expected = "tests/core/engine/foo_test.rs";
         let result = {

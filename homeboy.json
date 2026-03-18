@@ -3,8 +3,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-03-17T12:34:41Z",
-      "item_count": 685,
+      "created_at": "2026-03-18T15:10:41Z",
+      "item_count": 681,
       "known_fingerprints": [
         "Commands (Tests)::tests/commands/deploy_test.rs::MissingMethod",
         "Commands (Tests)::tests/commands/deploy_test.rs::MissingMethod",
@@ -15,7 +15,7 @@
         "Commands::src/commands/deploy.rs::MissingMethod",
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "Commands::src/commands/extension.rs::MissingMethod",
-        "Undo::src/core/engine/undo/rollback.rs::SignatureMismatch",
+        "Undo::src/core/engine/undo/snapshot.rs::SignatureMismatch",
         "compiler::src/commands/utils/args.rs::CompilerWarning",
         "compiler::src/core/code_audit/test_mapping.rs::CompilerWarning",
         "compiler::src/core/code_audit/test_mapping.rs::CompilerWarning",
@@ -24,8 +24,6 @@
         "compiler::src/core/refactor/auto/contracts.rs::CompilerWarning",
         "compiler::src/core/refactor/move_items.rs::CompilerWarning",
         "compiler::src/core/refactor/plan/generate/orphaned_test_fixes.rs::CompilerWarning",
-        "compiler::src/core/refactor/plan/generate/parameter_fixes.rs::CompilerWarning",
-        "compiler::src/core/refactor/plan/generate/parameter_fixes.rs::CompilerWarning",
         "compiler::src/core/release/changelog/sections.rs::CompilerWarning",
         "dead_code::src/commands/utils/entity_suggest.rs::UnreferencedExport",
         "dead_code::src/commands/utils/response.rs::UnreferencedExport",
@@ -100,7 +98,6 @@
         "intra-method-duplication::src/core/engine/cli_tool.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/engine/codebase_scan.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/engine/contract.rs::IntraMethodDuplicate",
-        "intra-method-duplication::src/core/engine/contract_extract.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/engine/local_files.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/extension/execution.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/extension/grammar.rs::IntraMethodDuplicate",
@@ -350,7 +347,6 @@
         "test_coverage::src/core/engine/contract.rs::MissingTestMethod",
         "test_coverage::src/core/engine/contract.rs::MissingTestMethod",
         "test_coverage::src/core/engine/contract.rs::OrphanedTest",
-        "test_coverage::src/core/engine/contract_testgen.rs::MissingTestMethod",
         "test_coverage::src/core/engine/contract_testgen.rs::MissingTestMethod",
         "test_coverage::src/core/engine/execution_context.rs::MissingTestMethod",
         "test_coverage::src/core/engine/execution_context.rs::MissingTestMethod",
@@ -695,15 +691,15 @@
       "metadata": {
         "alignment_score": 0.7631579041481018,
         "known_outliers": [
-          "src/commands/docs.rs",
           "src/commands/extension.rs",
-          "src/commands/changelog.rs",
-          "src/commands/component.rs",
+          "src/commands/docs.rs",
           "src/commands/build.rs",
           "src/commands/changes.rs",
+          "src/commands/changelog.rs",
           "src/commands/deploy.rs",
+          "src/commands/component.rs",
           "tests/commands/deploy_test.rs",
-          "src/core/engine/undo/rollback.rs"
+          "src/core/engine/undo/snapshot.rs"
         ],
         "outliers_count": 9
       }
