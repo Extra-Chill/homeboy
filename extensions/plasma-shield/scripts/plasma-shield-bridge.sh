@@ -4,143 +4,32 @@
 
 set -e
 
-CONFIG_DIR="$HOME/.config/homeboy/plasma-shield"
-ROUTERS_FILE="$CONFIG_DIR/routers.json"
-DEFAULT_ROUTER="local"
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-# Ensure config directory exists
-ensure_config() {
-    if [[ ! -d "$CONFIG_DIR" ]]; then
-        mkdir -p "$CONFIG_DIR"
-    fi
-
-    if [[ ! -f "$ROUTERS_FILE" ]]; then
-        echo '{
+# Configure bridge framework
+BRIDGE_NAME="plasma-shield"
+BRIDGE_ENTITY="router"
+BRIDGE_URL_FIELD="api_url"
+BRIDGE_AUTH_FIELD="api_key"
+BRIDGE_AUTH_HEADER="X-API-Key:"
+BRIDGE_DEFAULT_ID="local"
+BRIDGE_DEFAULT_CONFIG='{
   "local": {
     "api_url": "http://127.0.0.1:9000",
     "api_key": null,
     "description": "Local development shield"
   }
-}' > "$ROUTERS_FILE"
-    fi
-}
+}'
 
-# Get router URL from config
-get_router_url() {
-    local router_id="$1"
-    ensure_config
+# Source shared bridge framework
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FRAMEWORK="${SCRIPT_DIR}/../../lib/bridge-framework.sh"
+if [[ ! -f "$FRAMEWORK" ]]; then
+    echo "Error: bridge-framework.sh not found at $FRAMEWORK" >&2
+    exit 1
+fi
+source "$FRAMEWORK"
 
-    if ! command -v jq &> /dev/null; then
-        echo -e "${RED}Error: jq is required but not installed${NC}" >&2
-        exit 1
-    fi
+# --- Plasma Shield-specific commands ---
 
-    local url
-    url=$(jq -r --arg id "$router_id" '.[$id].api_url // empty' "$ROUTERS_FILE")
-
-    if [[ -z "$url" ]]; then
-        echo -e "${RED}Error: Router '$router_id' not found${NC}" >&2
-        echo -e "Available routers:" >&2
-        jq -r 'keys[]' "$ROUTERS_FILE" >&2
-        exit 1
-    fi
-
-    echo "$url"
-}
-
-# Get router API key from config
-get_router_key() {
-    local router_id="$1"
-    jq -r --arg id "$router_id" '.[$id].api_key // empty' "$ROUTERS_FILE"
-}
-
-# Make API request to shield router
-api_request() {
-    local method="$1"
-    local router_url="$2"
-    local path="$3"
-    local data="$4"
-    local api_key="$5"
-
-    local curl_args=(-s -X "$method")
-
-    if [[ -n "$api_key" && "$api_key" != "null" ]]; then
-        curl_args+=(-H "X-API-Key: $api_key")
-    fi
-
-    curl_args+=(-H "Content-Type: application/json")
-
-    if [[ -n "$data" ]]; then
-        curl_args+=(-d "$data")
-    fi
-
-    curl "${curl_args[@]}" "${router_url}${path}" 2>/dev/null
-}
-
-# List configured routers
-cmd_routers() {
-    ensure_config
-    echo -e "${BLUE}Configured Shield Routers${NC}"
-    echo "=========================="
-    jq -r 'to_entries[] | "\(.key): \(.value.api_url) - \(.value.description // "No description")"' "$ROUTERS_FILE"
-}
-
-# Add new router
-cmd_router_add() {
-    local id="$1"
-    local url="$2"
-    local desc="${3:-}"
-    local key="${4:-}"
-
-    if [[ -z "$id" || -z "$url" ]]; then
-        echo -e "${RED}Usage: homeboy plasma router add <id> <api-url> [description] [api-key]${NC}"
-        exit 1
-    fi
-
-    ensure_config
-
-    local key_json="null"
-    if [[ -n "$key" ]]; then
-        key_json="\"$key\""
-    fi
-
-    local tmp_file
-    tmp_file=$(mktemp)
-    jq --arg id "$id" --arg url "$url" --arg desc "$desc" --argjson key "$key_json" \
-        '.[$id] = {"api_url": $url, "description": $desc, "api_key": $key}' "$ROUTERS_FILE" > "$tmp_file"
-    mv "$tmp_file" "$ROUTERS_FILE"
-
-    echo -e "${GREEN}Added router '$id' -> $url${NC}"
-}
-
-# Remove router
-cmd_router_remove() {
-    local id="$1"
-
-    if [[ -z "$id" ]]; then
-        echo -e "${RED}Usage: homeboy plasma router remove <id>${NC}"
-        exit 1
-    fi
-
-    ensure_config
-
-    local tmp_file
-    tmp_file=$(mktemp)
-    jq --arg id "$id" 'del(.[$id])' "$ROUTERS_FILE" > "$tmp_file"
-    mv "$tmp_file" "$ROUTERS_FILE"
-
-    echo -e "${GREEN}Removed router '$id'${NC}"
-}
-
-# Get shield status
 cmd_status() {
     local router_url="$1"
     local api_key="$2"
@@ -148,9 +37,8 @@ cmd_status() {
     echo -e "${BLUE}Plasma Shield Status${NC}"
     echo "====================="
 
-    # Health check
     local health
-    health=$(api_request GET "$router_url" "/health" "" "$api_key")
+    health=$(bridge_api_request GET "$router_url" "/health" "" "$api_key")
     if [[ "$health" == "OK" ]]; then
         echo -e "Health: ${GREEN}OK${NC}"
     else
@@ -158,58 +46,47 @@ cmd_status() {
         exit 1
     fi
 
-    # Mode
     local mode_response
-    mode_response=$(api_request GET "$router_url" "/mode" "" "$api_key")
+    mode_response=$(bridge_api_request GET "$router_url" "/mode" "" "$api_key")
     local global_mode
     global_mode=$(echo "$mode_response" | jq -r '.global_mode // "unknown"')
-    
+
     case "$global_mode" in
-        enforce)
-            echo -e "Mode: ${GREEN}ENFORCE${NC} (blocking enabled)"
-            ;;
-        audit)
-            echo -e "Mode: ${YELLOW}AUDIT${NC} (logging only)"
-            ;;
-        lockdown)
-            echo -e "Mode: ${RED}LOCKDOWN${NC} (all traffic blocked)"
-            ;;
-        *)
-            echo -e "Mode: ${CYAN}$global_mode${NC}"
-            ;;
+        enforce)  echo -e "Mode: ${GREEN}ENFORCE${NC} (blocking enabled)" ;;
+        audit)    echo -e "Mode: ${YELLOW}AUDIT${NC} (logging only)" ;;
+        lockdown) echo -e "Mode: ${RED}LOCKDOWN${NC} (all traffic blocked)" ;;
+        *)        echo -e "Mode: ${CYAN}$global_mode${NC}" ;;
     esac
 
-    # Agent overrides
     local agent_modes
     agent_modes=$(echo "$mode_response" | jq -r '.agent_modes // {}')
     local override_count
     override_count=$(echo "$agent_modes" | jq 'length')
-    
+
     if [[ "$override_count" -gt 0 ]]; then
         echo -e "\nAgent Overrides:"
         echo "$agent_modes" | jq -r 'to_entries[] | "  \(.key): \(.value)"'
     fi
 }
 
-# List agents (from mode data)
 cmd_agents() {
     local router_url="$1"
     local api_key="$2"
 
     local response
-    response=$(api_request GET "$router_url" "/mode" "" "$api_key")
+    response=$(bridge_api_request GET "$router_url" "/mode" "" "$api_key")
 
     echo -e "${BLUE}Agents${NC}"
     echo "======="
-    
+
     local global_mode
     global_mode=$(echo "$response" | jq -r '.global_mode // "unknown"')
     echo -e "Global mode: ${CYAN}$global_mode${NC}"
-    
+
     echo -e "\nPer-agent modes:"
     local agent_modes
     agent_modes=$(echo "$response" | jq -r '.agent_modes // {}')
-    
+
     if [[ $(echo "$agent_modes" | jq 'length') -eq 0 ]]; then
         echo "  (no agent-specific overrides)"
     else
@@ -217,25 +94,21 @@ cmd_agents() {
     fi
 }
 
-# Get/set global mode
 cmd_mode() {
     local router_url="$1"
     local api_key="$2"
     local new_mode="$3"
 
     if [[ -z "$new_mode" ]]; then
-        # Get current mode
         local response
-        response=$(api_request GET "$router_url" "/mode" "" "$api_key")
+        response=$(bridge_api_request GET "$router_url" "/mode" "" "$api_key")
         local mode
         mode=$(echo "$response" | jq -r '.global_mode // "unknown"')
         echo "Current mode: $mode"
     else
-        # Set new mode
         case "$new_mode" in
             enforce|audit|lockdown)
-                local response
-                response=$(api_request PUT "$router_url" "/mode" "{\"mode\": \"$new_mode\"}" "$api_key")
+                bridge_api_request PUT "$router_url" "/mode" "{\"mode\": \"$new_mode\"}" "$api_key" > /dev/null
                 echo -e "${GREEN}Mode set to: $new_mode${NC}"
                 ;;
             *)
@@ -247,7 +120,6 @@ cmd_mode() {
     fi
 }
 
-# Agent-specific operations
 cmd_agent() {
     local router_url="$1"
     local api_key="$2"
@@ -262,13 +134,11 @@ cmd_agent() {
 
     case "$action" in
         enforce|audit|lockdown)
-            local response
-            response=$(api_request PUT "$router_url" "/agent/$agent_id/mode" "{\"mode\": \"$action\"}" "$api_key")
+            bridge_api_request PUT "$router_url" "/agent/$agent_id/mode" "{\"mode\": \"$action\"}" "$api_key" > /dev/null
             echo -e "${GREEN}Agent '$agent_id' set to: $action${NC}"
             ;;
         clear)
-            local response
-            response=$(api_request DELETE "$router_url" "/agent/$agent_id/mode" "" "$api_key")
+            bridge_api_request DELETE "$router_url" "/agent/$agent_id/mode" "" "$api_key" > /dev/null
             echo -e "${GREEN}Agent '$agent_id' cleared (using global mode)${NC}"
             ;;
         *)
@@ -279,7 +149,6 @@ cmd_agent() {
     esac
 }
 
-# View traffic logs
 cmd_logs() {
     local router_url="$1"
     local api_key="$2"
@@ -291,21 +160,10 @@ cmd_logs() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --limit|-l)
-                limit="$2"
-                shift 2
-                ;;
-            --follow|-f)
-                follow=true
-                shift
-                ;;
-            --agent|-a)
-                agent="$2"
-                shift 2
-                ;;
-            *)
-                shift
-                ;;
+            --limit|-l) limit="$2"; shift 2 ;;
+            --follow|-f) follow=true; shift ;;
+            --agent|-a) agent="$2"; shift 2 ;;
+            *) shift ;;
         esac
     done
 
@@ -321,20 +179,19 @@ cmd_logs() {
 
         while true; do
             local response
-            response=$(api_request GET "$router_url" "$path" "" "$api_key")
+            response=$(bridge_api_request GET "$router_url" "$path" "" "$api_key")
             echo "$response" | jq -r '.[] | "\(.timestamp) [\(.action)] \(.domain) - \(.reason // "")"' 2>/dev/null || echo "$response"
             sleep 2
         done
     else
         local response
-        response=$(api_request GET "$router_url" "$path" "" "$api_key")
+        response=$(bridge_api_request GET "$router_url" "$path" "" "$api_key")
         echo -e "${BLUE}Traffic Logs${NC} (last $limit)"
         echo "============="
         echo "$response" | jq -r '.[] | "\(.timestamp) [\(.action)] \(.domain) - \(.reason // "")"' 2>/dev/null || echo "$response"
     fi
 }
 
-# List rules
 cmd_rules() {
     local router_url="$1"
     local api_key="$2"
@@ -344,13 +201,12 @@ cmd_rules() {
     case "$action" in
         list|"")
             local response
-            response=$(api_request GET "$router_url" "/rules" "" "$api_key")
+            response=$(bridge_api_request GET "$router_url" "/rules" "" "$api_key")
             echo -e "${BLUE}Blocking Rules${NC}"
             echo "==============="
             echo "$response" | jq -r '.rules[] | "[\(.id)] \(.domain // .pattern) -> \(.action) (\(.description // "no description"))"' 2>/dev/null || echo "$response"
             ;;
         add)
-            # homeboy plasma rules add --domain evil.com --action block --desc "Block evil"
             local domain="" pattern="" rule_action="block" desc=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -361,7 +217,7 @@ cmd_rules() {
                     *) shift ;;
                 esac
             done
-            
+
             local payload="{\"action\": \"$rule_action\", \"description\": \"$desc\""
             if [[ -n "$domain" ]]; then
                 payload="$payload, \"domain\": \"$domain\"}"
@@ -371,9 +227,9 @@ cmd_rules() {
                 echo -e "${RED}Must specify --domain or --pattern${NC}"
                 exit 1
             fi
-            
+
             local response
-            response=$(api_request POST "$router_url" "/rules" "$payload" "$api_key")
+            response=$(bridge_api_request POST "$router_url" "/rules" "$payload" "$api_key")
             echo -e "${GREEN}Rule added${NC}"
             echo "$response" | jq .
             ;;
@@ -383,8 +239,7 @@ cmd_rules() {
                 echo -e "${RED}Usage: homeboy plasma rules remove <rule-id>${NC}"
                 exit 1
             fi
-            local response
-            response=$(api_request DELETE "$router_url" "/rules/$rule_id" "" "$api_key")
+            bridge_api_request DELETE "$router_url" "/rules/$rule_id" "" "$api_key" > /dev/null
             echo -e "${GREEN}Rule '$rule_id' removed${NC}"
             ;;
         *)
@@ -395,7 +250,6 @@ cmd_rules() {
     esac
 }
 
-# Show help
 show_help() {
     echo "Plasma Shield - Network security control for AI agent fleets"
     echo ""
@@ -423,91 +277,48 @@ show_help() {
     echo "  homeboy plasma prod status"
 }
 
-# Determine if first argument is a router or a command
-is_router() {
-    local arg="$1"
-    ensure_config
-    jq -e --arg id "$arg" '.[$id]' "$ROUTERS_FILE" > /dev/null 2>&1
-}
+# --- Main entry point ---
 
-# Main entry point
 main() {
     if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" || "$1" == "help" ]]; then
         show_help
         exit 0
     fi
 
-    ensure_config
+    bridge_ensure_config
 
-    # Handle router management commands first
+    # Handle entity management commands
     case "$1" in
         routers)
-            cmd_routers
+            bridge_cmd_list
             exit 0
             ;;
         router)
             case "$2" in
-                add)
-                    cmd_router_add "$3" "$4" "$5" "$6"
-                    exit 0
-                    ;;
-                remove)
-                    cmd_router_remove "$3"
-                    exit 0
-                    ;;
-                *)
-                    echo -e "${RED}Unknown router command: $2${NC}"
-                    exit 1
-                    ;;
+                add)    bridge_cmd_add "$3" "$4" "$5"; exit 0 ;;
+                remove) bridge_cmd_remove "$3"; exit 0 ;;
+                *)      echo -e "${RED}Unknown router command: $2${NC}"; exit 1 ;;
             esac
             ;;
     esac
 
-    # Determine router and command
-    local router_id="$DEFAULT_ROUTER"
-    local cmd=""
-    local args=()
+    # Resolve router from args
+    local args=("$@")
+    bridge_resolve_entity args
+    set -- "${args[@]}"
 
-    if is_router "$1"; then
-        router_id="$1"
-        shift
-    fi
-
-    cmd="$1"
+    local cmd="$1"
     shift
-    args=("$@")
-
-    # Get router configuration
-    local router_url
-    router_url=$(get_router_url "$router_id")
-    local api_key
-    api_key=$(get_router_key "$router_id")
 
     # Route to command handler
     case "$cmd" in
-        status)
-            cmd_status "$router_url" "$api_key"
-            ;;
-        agents)
-            cmd_agents "$router_url" "$api_key"
-            ;;
-        mode)
-            cmd_mode "$router_url" "$api_key" "${args[0]}"
-            ;;
-        agent)
-            cmd_agent "$router_url" "$api_key" "${args[@]}"
-            ;;
-        logs)
-            cmd_logs "$router_url" "$api_key" "${args[@]}"
-            ;;
-        rules)
-            cmd_rules "$router_url" "$api_key" "${args[@]}"
-            ;;
-        *)
-            echo -e "${RED}Unknown command: $cmd${NC}"
-            show_help
-            exit 1
-            ;;
+        status)  cmd_status "$BRIDGE_RESOLVED_URL" "$BRIDGE_RESOLVED_AUTH" ;;
+        agents)  cmd_agents "$BRIDGE_RESOLVED_URL" "$BRIDGE_RESOLVED_AUTH" ;;
+        mode)    cmd_mode "$BRIDGE_RESOLVED_URL" "$BRIDGE_RESOLVED_AUTH" "${1:-}" ;;
+        agent)   cmd_agent "$BRIDGE_RESOLVED_URL" "$BRIDGE_RESOLVED_AUTH" "$@" ;;
+        logs)    cmd_logs "$BRIDGE_RESOLVED_URL" "$BRIDGE_RESOLVED_AUTH" "$@" ;;
+        rules)   cmd_rules "$BRIDGE_RESOLVED_URL" "$BRIDGE_RESOLVED_AUTH" "$@" ;;
+        *)       echo -e "${RED}Unknown command: $cmd${NC}"; show_help; exit 1 ;;
     esac
 }
 
