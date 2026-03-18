@@ -252,7 +252,10 @@ fn plan_deployment(component_id: &str) -> ReleaseDeploymentResult {
     }
 }
 
-fn execute_deployment(component_id: &str, local_path: &str) -> (Option<ReleaseDeploymentResult>, i32) {
+fn execute_deployment(
+    component_id: &str,
+    local_path: &str,
+) -> (Option<ReleaseDeploymentResult>, i32) {
     let projects = component::projects_using(component_id).unwrap_or_default();
 
     if projects.is_empty() {
@@ -347,7 +350,12 @@ fn execute_deployment(component_id: &str, local_path: &str) -> (Option<ReleaseDe
     let distrib_path = format!("{}/target/distrib", local_path);
     if std::path::Path::new(&distrib_path).exists() {
         if let Err(e) = std::fs::remove_dir_all(&distrib_path) {
-            log_status!("release", "Warning: failed to clean up {}: {}", distrib_path, e);
+            log_status!(
+                "release",
+                "Warning: failed to clean up {}: {}",
+                distrib_path,
+                e
+            );
         } else {
             log_status!("release", "Cleaned up {}", distrib_path);
         }

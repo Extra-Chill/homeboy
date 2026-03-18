@@ -302,11 +302,7 @@ fn parse_params(params_str: &str, param_format: &str) -> Vec<Param> {
             _ => {
                 // Rust/default format: `name: Type`, `&self`, `mut name: Type`
                 // Skip self/receiver params
-                if part == "self"
-                    || part == "&self"
-                    || part == "&mut self"
-                    || part == "mut self"
-                {
+                if part == "self" || part == "&self" || part == "&mut self" || part == "mut self" {
                     continue;
                 }
 
@@ -316,8 +312,7 @@ fn parse_params(params_str: &str, param_format: &str) -> Vec<Param> {
                         .trim_start_matches("mut ")
                         .to_string();
                     let param_type = part[colon_pos + 1..].trim().to_string();
-                    let mutable =
-                        part.starts_with("mut ") || param_type.starts_with("&mut ");
+                    let mutable = part.starts_with("mut ") || param_type.starts_with("&mut ");
                     params.push(Param {
                         name,
                         param_type,
