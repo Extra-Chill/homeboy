@@ -1120,10 +1120,8 @@ mod tests {
     #[test]
     fn build_settings_json_cli_overrides_replace_values() {
         let manifest = serde_json::json!({});
-        let extension_settings: Vec<(String, serde_json::Value)> = vec![(
-            "key".to_string(),
-            serde_json::json!(["original"]),
-        )];
+        let extension_settings: Vec<(String, serde_json::Value)> =
+            vec![("key".to_string(), serde_json::json!(["original"]))];
         let overrides = vec![("key".to_string(), "override_value".to_string())];
 
         let json = build_settings_json_from_manifest(&manifest, &extension_settings, &overrides)

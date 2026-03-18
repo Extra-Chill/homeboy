@@ -1,4 +1,3 @@
-use crate::code_audit::run::default_audit_exit_code;
 use crate::code_audit::{AuditSummary, CodeAuditResult, Finding, Severity};
 
 fn empty_result() -> CodeAuditResult {
