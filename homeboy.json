@@ -3,8 +3,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-03-18T16:01:08Z",
-      "item_count": 673,
+      "created_at": "2026-03-18T16:09:58Z",
+      "item_count": 669,
       "known_fingerprints": [
         "Commands (Tests)::tests/commands/deploy_test.rs::MissingMethod",
         "Commands (Tests)::tests/commands/deploy_test.rs::MissingMethod",
@@ -56,10 +56,6 @@
         "dead_code::src/core/refactor/plan/planner.rs::UnreferencedExport",
         "dead_code::src/core/refactor/plan/planner.rs::UnreferencedExport",
         "dead_code::src/core/release/utils.rs::UnreferencedExport",
-        "duplication::tests/core/code_audit/report_test.rs::DuplicateFunction",
-        "duplication::tests/core/code_audit/report_test.rs::DuplicateFunction",
-        "duplication::tests/core/code_audit/run_test.rs::DuplicateFunction",
-        "duplication::tests/core/code_audit/run_test.rs::DuplicateFunction",
         "intra-method-duplication::src/commands/component.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/commands/config.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/commands/refactor.rs::IntraMethodDuplicate",
