@@ -851,11 +851,8 @@ pub fn build_exec_env(
         env.push((exec_context::EXTENSION_PATH.to_string(), mp.to_string()));
     }
 
-    if let Ok(helper_path) = runtime_helper::ensure_runner_steps_helper() {
-        env.push((
-            runtime_helper::RUNNER_STEPS_ENV.to_string(),
-            helper_path.to_string_lossy().to_string(),
-        ));
+    if let Ok(helper_pairs) = runtime_helper::ensure_all_helpers() {
+        env.extend(helper_pairs);
     }
 
     if let Some(pbp) = project_base_path {
