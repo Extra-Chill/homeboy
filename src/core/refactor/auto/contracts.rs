@@ -341,8 +341,6 @@ impl PolicySummary {
     }
 }
 
-
-
 fn is_zero_usize(value: &usize) -> bool {
     *value == 0
 }

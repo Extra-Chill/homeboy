@@ -637,7 +637,10 @@ mod tests {
 }
 "#;
         let range = find_test_function_range(content, "test_build_grammar");
-        assert!(range.is_some(), "Should find build_grammar via test_ prefix strip");
+        assert!(
+            range.is_some(),
+            "Should find build_grammar via test_ prefix strip"
+        );
         let (start, end) = range.unwrap();
         assert_eq!(start, 4);
         assert_eq!(end, 8);
