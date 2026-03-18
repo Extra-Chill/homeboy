@@ -516,6 +516,66 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
             }
         ' "$PLUGIN_PATH" "${HOMEBOY_ANNOTATIONS_DIR}" 2>/dev/null || true
     fi
+
+    # Write lint findings sidecar for homeboy baseline and categorized issues.
+    # Transforms PHPCS JSON report into the LintFinding format homeboy expects:
+    #   [{id: "file::source::line", message: "...", category: "..."}]
+    # Category is derived from the top-level PHPCS source namespace.
+    if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
+        echo "$json_output" | php -r '
+            $json = json_decode(file_get_contents("php://stdin"), true);
+            if (!$json || empty($json["files"])) {
+                file_put_contents($argv[2], "[]");
+                exit;
+            }
+            $componentPath = $argv[1] ?? "";
+            $categoryMap = [
+                "WordPress.Security" => "security",
+                "WordPress.WP.I18n" => "i18n",
+                "WordPress.PHP.YodaConditions" => "yoda",
+                "WordPress.WhiteSpace" => "whitespace",
+                "WordPress.DB" => "database",
+                "WordPress.WP.AlternativeFunctions" => "wp-alternatives",
+                "WordPress.WP.GlobalVariablesOverride" => "globals",
+                "WordPress.CodeAnalysis" => "code-analysis",
+                "WordPress.NamingConventions" => "naming",
+                "WordPress.PHP.StrictComparisons" => "strict-comparisons",
+                "WordPress.PHP.StrictInArray" => "strict-comparisons",
+                "Generic.CodeAnalysis" => "code-analysis",
+                "Generic.PHP" => "php",
+                "Generic.Formatting" => "formatting",
+                "Squiz" => "formatting",
+                "PEAR" => "formatting",
+                "PSR" => "formatting",
+                "PHPCompatibility" => "compatibility",
+            ];
+            $findings = [];
+            foreach ($json["files"] as $filePath => $data) {
+                $relPath = $filePath;
+                if ($componentPath && strpos($filePath, $componentPath) === 0) {
+                    $relPath = ltrim(substr($filePath, strlen($componentPath)), "/");
+                }
+                foreach ($data["messages"] ?? [] as $msg) {
+                    $source = $msg["source"] ?? "unknown";
+                    $line = $msg["line"] ?? 0;
+                    // Derive category from source namespace
+                    $category = "other";
+                    foreach ($categoryMap as $prefix => $cat) {
+                        if (strpos($source, $prefix) === 0) {
+                            $category = $cat;
+                            break;
+                        }
+                    }
+                    $findings[] = [
+                        "id" => $relPath . "::" . $source . "::" . $line,
+                        "message" => ($msg["message"] ?? "Unknown") . " (" . $source . ")",
+                        "category" => $category,
+                    ];
+                }
+            }
+            file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");
+        ' "$PLUGIN_PATH" "${HOMEBOY_LINT_FINDINGS_FILE}" 2>/dev/null || true
+    fi
 fi
 
 # Summary mode: show summary header + top violations, skip full report
