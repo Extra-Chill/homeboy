@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.82.0] - 2026-03-19
+
+### Added
+- add failure-trap and write-test-results runtime helpers
+- compiler warning autofixer — auto-remove unused imports, dead code, unused mut
+- language-configurable param format and return type separator for contract extraction
+- generate tests for MissingTestMethod findings
+- wire test generation into audit fix pipeline
+
+### Fixed
+- add missing newline to empty test file to unblock release
+- extract duplicate test helpers to shared module
+- preserve array/object values in extension settings JSON
+- defer artifact cleanup when --deploy follows release
+- rename orphaned tests and update baseline to unblock release
+- string-aware brace counting in find_test_function_range
+
 ## [0.81.1] - 2026-03-17
 
 ### Fixed
