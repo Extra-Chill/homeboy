@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.10.0] - 2026-03-19
+
+### Added
+- render per-kind autofix status in categorized issue bodies
+
 ## [1.9.1] - 2026-03-19
 
 ### Fixed
