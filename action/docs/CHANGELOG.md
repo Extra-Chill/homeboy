@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.9.1] - 2026-03-19
+
+### Fixed
+- remove `local` keyword outside function in prepare-autofix-branch.sh
+
 ## [1.9.0] - 2026-03-18
 
 ### Added
