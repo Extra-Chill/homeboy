@@ -75,10 +75,23 @@ for f in findings:
         'description': f.get('description', ''),
         'suggestion': f.get('suggestion', '')
     })
+
+# Extract per-kind fixability from audit output
+fixability_by_kind = {}
+fixability = data.get('fixability') or {}
+if fixability:
+    for kind_key, breakdown in fixability.get('by_kind', {}).items():
+        fixability_by_kind[kind_key] = {
+            'total': breakdown.get('total', 0),
+            'safe': breakdown.get('safe', 0),
+            'plan_only': breakdown.get('plan_only', 0),
+        }
+
 print(json.dumps({
     'groups': {k: v for k, v in sorted(groups.items(), key=lambda x: -len(x[1]))},
     'component_id': component,
-    'total_findings': len(findings)
+    'total_findings': len(findings),
+    'fixability': fixability_by_kind,
 }))
 " "${json_file}" 2>/dev/null
 }
@@ -271,6 +284,85 @@ print(json.dumps({
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# build_autofix_status_section CMD_TYPE KIND COMP_ID COUNT FINDINGS_JSON
+#
+# Build the autofix status markdown section for an issue body.
+# Returns the section on stdout (empty string if no fixability data).
+# ─────────────────────────────────────────────────────────────────────────────
+
+build_autofix_status_section() {
+  local cmd_type="$1"
+  local kind="$2"
+  local comp_id="$3"
+  local count="$4"
+  local findings_json="$5"
+
+  # Only audit issues have per-kind fixability data
+  if [ "${cmd_type}" != "audit" ]; then
+    return
+  fi
+
+  # Extract fixability for this kind
+  local fix_data
+  fix_data=$(echo "${findings_json}" | jq -c --arg k "${kind}" '.fixability[$k] // empty' 2>/dev/null || true)
+
+  if [ -z "${fix_data}" ] || [ "${fix_data}" = "null" ]; then
+    # No fixer available for this category
+    local kind_label
+    kind_label=$(echo "${kind}" | tr '_' ' ')
+    cat <<NOFIXEOF
+
+### Autofix status
+
+❌ No fixer available for \`${kind}\`
+NOFIXEOF
+    return
+  fi
+
+  local fix_total fix_safe fix_plan_only
+  fix_total=$(echo "${fix_data}" | jq -r '.total // 0')
+  fix_safe=$(echo "${fix_data}" | jq -r '.safe // 0')
+  fix_plan_only=$(echo "${fix_data}" | jq -r '.plan_only // 0')
+
+  if [ "${fix_total}" -eq 0 ]; then
+    local kind_label
+    kind_label=$(echo "${kind}" | tr '_' ' ')
+    cat <<NOFIXEOF
+
+### Autofix status
+
+❌ No fixer available for \`${kind}\`
+NOFIXEOF
+    return
+  fi
+
+  local status_icon status_text
+  if [ "${fix_total}" -ge "${count}" ]; then
+    status_icon="✅"
+    status_text="${fix_total}/${count} findings auto-fixable"
+  elif [ "${fix_total}" -gt 0 ]; then
+    local skipped=$((count - fix_total))
+    status_icon="⚠️"
+    status_text="${fix_total}/${count} findings auto-fixable (${skipped} require manual fix)"
+  fi
+
+  local tier_note=""
+  if [ "${fix_safe}" -gt 0 ] && [ "${fix_plan_only}" -gt 0 ]; then
+    tier_note=$'\n'"- **${fix_safe}** safe (auto-applied) · **${fix_plan_only}** plan-only (needs review)"
+  elif [ "${fix_plan_only}" -gt 0 ]; then
+    tier_note=$'\n'"- All fixes are **plan-only** (preview, needs human review)"
+  fi
+
+  cat <<FIXEOF
+
+### Autofix status
+
+${status_icon} ${status_text}${tier_note}
+Run: \`homeboy audit ${comp_id} --fix --write --only ${kind}\`
+FIXEOF
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # close_resolved_issues CMD_TYPE COMP_ID CURRENT_KINDS_TEXT
 #
 # Close issues for categories that no longer have findings.
@@ -454,6 +546,13 @@ ${truncated_note}
 TABLEEOF
       fi
 
+      # Add autofix status section
+      local autofix_section
+      autofix_section=$(build_autofix_status_section "${cmd_type}" "${KIND}" "${comp_id}" "${count}" "${findings_json}")
+      if [ -n "${autofix_section}" ]; then
+        echo "${autofix_section}" >> "${body_file}"
+      fi
+
       cat >> "${body_file}" <<'UPDATEFOOTEREOF'
 
 ---
@@ -496,7 +595,12 @@ ${truncated_note}
 TABLEEOF
       fi
 
-      if [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
+      # Add autofix status section (per-kind fixability from audit data)
+      local autofix_section
+      autofix_section=$(build_autofix_status_section "${cmd_type}" "${KIND}" "${comp_id}" "${count}" "${findings_json}")
+      if [ -n "${autofix_section}" ]; then
+        echo "${autofix_section}" >> "${body_file}"
+      elif [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
         cat >> "${body_file}" <<'AUTOFIXEOF'
 
 ### Autofix status
