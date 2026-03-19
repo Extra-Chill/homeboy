@@ -170,7 +170,6 @@ else
   AUTOFIX_DETAILS=""
   AUTOFIX_TOTAL_FIXES=""
   if [ -d "${AUTOFIX_OUTPUT_DIR}" ]; then
-    local raw_details
     raw_details="$(extract_fix_details_from_output "${AUTOFIX_OUTPUT_DIR}")"
     if [ -n "${raw_details}" ]; then
       AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
