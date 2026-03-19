@@ -51,7 +51,12 @@ pub struct AuditSummaryFinding {
 #[serde(tag = "command")]
 pub enum AuditCommandOutput {
     #[serde(rename = "audit")]
-    Full(CodeAuditResult),
+    Full {
+        #[serde(flatten)]
+        result: CodeAuditResult,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fixability: Option<AuditFixability>,
+    },
 
     #[serde(rename = "audit.conventions")]
     Conventions {
