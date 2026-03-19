@@ -6,12 +6,13 @@
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
-    "capabilities": ["fingerprint", "refactor", "crossref"]
+    "capabilities": ["fingerprint", "refactor", "crossref", "validate"]
   },
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.py",
-    "crossref": "scripts/test/crossref.php"
+    "crossref": "scripts/test/crossref.php",
+    "validate": "scripts/validation/validate-syntax.sh"
   },
   "platform": {
     "config_schema": "wordpress",
