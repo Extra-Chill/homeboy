@@ -54,22 +54,25 @@ pub fn run_main_audit_workflow(
         Some(r) => r,
         None => {
             return Ok(AuditRunWorkflowResult {
-                output: AuditCommandOutput::Full(CodeAuditResult {
-                    component_id: args.component_id,
-                    source_path: args.source_path,
-                    summary: code_audit::AuditSummary {
-                        files_scanned: 0,
-                        conventions_detected: 0,
-                        outliers_found: 0,
-                        alignment_score: None,
-                        files_skipped: 0,
-                        warnings: vec![],
+                output: AuditCommandOutput::Full {
+                    result: CodeAuditResult {
+                        component_id: args.component_id,
+                        source_path: args.source_path,
+                        summary: code_audit::AuditSummary {
+                            files_scanned: 0,
+                            conventions_detected: 0,
+                            outliers_found: 0,
+                            alignment_score: None,
+                            files_skipped: 0,
+                            warnings: vec![],
+                        },
+                        conventions: vec![],
+                        directory_conventions: vec![],
+                        findings: vec![],
+                        duplicate_groups: vec![],
                     },
-                    conventions: vec![],
-                    directory_conventions: vec![],
-                    findings: vec![],
-                    duplicate_groups: vec![],
-                }),
+                    fixability: None,
+                },
                 exit_code: 0,
             });
         }
@@ -390,8 +393,12 @@ fn run_comparison_workflow(
             exit_code,
         })
     } else {
+        let fixability = report::compute_fixability(&result);
         Ok(AuditRunWorkflowResult {
-            output: AuditCommandOutput::Full(result),
+            output: AuditCommandOutput::Full {
+                result,
+                fixability,
+            },
             exit_code,
         })
     }
