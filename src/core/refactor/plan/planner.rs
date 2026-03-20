@@ -254,6 +254,13 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
             _ => unreachable!("sources are normalized before planning"),
         };
 
+        // Format generated/modified files in the sandbox so subsequent stages
+        // (especially lint) see properly formatted code. Without this, auto-generated
+        // test files cause `cargo fmt --check` to fail during the lint stage.
+        if stage.summary.files_modified > 0 {
+            format_sandbox(working_root.path(), &stage.summary.changed_files, &mut warnings);
+        }
+
         accumulator.extend(stage.fix_results.clone());
         planned_stages.push(stage);
     }
@@ -438,6 +445,53 @@ pub fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
     }
 
     Ok(ordered)
+}
+
+/// Format modified files inside the sandbox between refactor stages.
+///
+/// This ensures generated code (test files, refactored sources) is properly
+/// formatted before subsequent stages run. Without this, the lint stage's
+/// `cargo fmt --check` fails on unformatted auto-generated code — blocking
+/// the pipeline on problems it didn't create.
+///
+/// Uses the same `format_after_write` as the post-write step. Non-fatal:
+/// if formatting fails, it logs a warning and continues.
+fn format_sandbox(sandbox_root: &Path, changed_files: &[String], warnings: &mut Vec<String>) {
+    if changed_files.is_empty() {
+        return;
+    }
+
+    let abs_changed: Vec<PathBuf> = changed_files
+        .iter()
+        .map(|f| sandbox_root.join(f))
+        .collect();
+
+    match crate::engine::format_write::format_after_write(sandbox_root, &abs_changed) {
+        Ok(fmt) => {
+            if let Some(cmd) = &fmt.command {
+                if fmt.success {
+                    crate::log_status!(
+                        "format",
+                        "Formatted {} sandbox file(s) via {}",
+                        abs_changed.len(),
+                        cmd
+                    );
+                } else {
+                    warnings.push(format!(
+                        "Sandbox formatter ({}) exited non-zero (continuing)",
+                        cmd
+                    ));
+                }
+            }
+        }
+        Err(e) => {
+            crate::log_status!(
+                "format",
+                "Warning: sandbox format failed (continuing): {}",
+                e
+            );
+        }
+    }
 }
 
 fn collect_fix_proposals(stages: &[PlannedStage]) -> Vec<FixProposal> {
