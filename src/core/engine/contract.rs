@@ -42,6 +42,10 @@ pub struct FunctionContract {
     pub effects: Vec<Effect>,
     /// Functions called within this function.
     pub calls: Vec<FunctionCall>,
+    /// The type this method belongs to (from the impl block).
+    /// `None` for free functions. `Some("Foo")` for `impl Foo { fn bar(&self) }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impl_type: Option<String>,
 }
 
 /// Function signature: params, return type, receiver.
@@ -626,6 +630,7 @@ mod tests {
                     forwards: vec![],
                 },
             ],
+            impl_type: None,
         }
     }
 

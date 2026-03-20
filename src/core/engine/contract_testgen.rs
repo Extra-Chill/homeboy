@@ -362,11 +362,42 @@ fn build_variables(
     }
 
     // Is it a method (has receiver)?
-    vars.insert(
-        "is_method".to_string(),
-        contract.signature.receiver.is_some().to_string(),
-    );
+    let is_method = contract.signature.receiver.is_some();
+    vars.insert("is_method".to_string(), is_method.to_string());
     vars.insert("is_pure".to_string(), contract.is_pure().to_string());
+
+    // Method receiver support: impl_type and receiver construction
+    if let Some(ref impl_type) = contract.impl_type {
+        vars.insert("impl_type".to_string(), impl_type.clone());
+
+        // Determine receiver mutability for the let binding
+        let receiver_mut = match &contract.signature.receiver {
+            Some(Receiver::MutRef) => "mut ",
+            _ => "",
+        };
+        vars.insert("receiver_mut".to_string(), receiver_mut.to_string());
+
+        // Build receiver setup line using fallback_default as the construction expr.
+        // The grammar's fallback_default (e.g., "Default::default()") is used to
+        // construct the instance. Extensions can override via type_constructors.
+        let receiver_setup = format!(
+            "        let {}instance = {}::{};",
+            receiver_mut, impl_type, fallback_default
+        );
+        vars.insert("receiver_setup".to_string(), receiver_setup.clone());
+
+        // Override param_setup to include receiver construction
+        let existing_setup = vars.get("param_setup").cloned().unwrap_or_default();
+        let combined_setup = if existing_setup.trim().is_empty() {
+            receiver_setup.clone()
+        } else {
+            format!("{}\n{}", receiver_setup, existing_setup)
+        };
+        vars.insert("param_setup".to_string(), combined_setup);
+
+        // Override fn_name to use method call syntax: instance.method_name
+        vars.insert("fn_name".to_string(), format!("instance.{}", contract.name));
+    };
     vars.insert(
         "branch_count".to_string(),
         contract.branch_count().to_string(),
@@ -1611,6 +1642,7 @@ mod tests {
                 command: Some("sh".to_string()),
             }],
             calls: vec![],
+            impl_type: None,
         }
     }
 
@@ -1657,6 +1689,7 @@ mod tests {
             early_returns: 0,
             effects: vec![],
             calls: vec![],
+            impl_type: None,
         }
     }
 

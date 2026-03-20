@@ -26,11 +26,25 @@ pub fn extract_contracts_from_grammar(
     let lines = grammar::walk_lines(content, grammar);
     let raw_lines: Vec<&str> = content.lines().collect();
 
-    // Step 2: Extract function symbols to find function boundaries
-    let function_symbols = grammar::extract(content, grammar)
-        .into_iter()
+    // Step 2: Extract all symbols
+    let all_symbols = grammar::extract(content, grammar);
+    let function_symbols: Vec<_> = all_symbols
+        .iter()
         .filter(|s| s.concept == "function")
-        .collect::<Vec<_>>();
+        .collect();
+
+    // Build impl block line ranges for correlating methods with their parent types.
+    // Each impl block symbol has a line number and a type_name capture.
+    // We correlate by depth: functions at depth > 0 whose line falls after an impl
+    // block declaration belong to that impl's type.
+    let impl_blocks: Vec<(usize, String)> = all_symbols
+        .iter()
+        .filter(|s| s.concept == "impl_block")
+        .filter_map(|s| {
+            let type_name = s.get("type_name")?.to_string();
+            Some((s.line, type_name))
+        })
+        .collect();
 
     let mut contracts = Vec::new();
 
@@ -88,6 +102,18 @@ pub fn extract_contracts_from_grammar(
         // Detect async
         let is_async = decl_text.contains("async ");
 
+        // Determine the impl type for methods (functions with a receiver at depth > 0).
+        // Find the nearest impl_block that starts before this function's line.
+        let impl_type = if receiver.is_some() && fn_depth > 0 {
+            impl_blocks
+                .iter()
+                .rev()
+                .find(|(impl_line, _)| *impl_line < fn_line)
+                .map(|(_, type_name)| type_name.clone())
+        } else {
+            None
+        };
+
         contracts.push(FunctionContract {
             name: fn_name,
             file: file_path.to_string(),
@@ -104,6 +130,7 @@ pub fn extract_contracts_from_grammar(
             early_returns,
             effects,
             calls,
+            impl_type,
         });
     }
 
