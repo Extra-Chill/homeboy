@@ -186,12 +186,14 @@ pub(crate) fn generate_test_plan_with_types(
             );
 
             // If we have type info and the assertion has a TODO placeholder,
-            // enrich it with field-level hints from the type registry.
+            // replace it with real field-level assertions using type defaults.
             let assertion = enrich_assertion_with_fields(
                 &assertion,
                 &branch.returns,
                 &contract.signature.return_type,
                 type_registry,
+                type_defaults,
+                &contract_grammar.fallback_default,
             );
             vars.insert("assertion_code".to_string(), assertion);
 
@@ -885,23 +887,27 @@ fn resolve_assertion(
     }
 }
 
-/// Enrich an assertion string with field-level hints from the type registry.
+/// Replace assertion TODO placeholders with real field-level assertions.
 ///
-/// When the assertion contains a TODO placeholder (`// TODO: assert specific value`)
-/// and we know the return type's struct fields, we append commented-out field
-/// assertions that the developer can uncomment and customize.
+/// When the return type is a known struct, generates `assert_eq!` for each
+/// public field using the field's type-default value as the expected value.
+/// This produces tests that actually **assert behavior**, not just document
+/// what fields exist.
 ///
-/// This turns:
+/// Turns:
 ///   `let _ = inner; // TODO: assert specific value for "skipped"`
 /// Into:
-///   `// inner has fields: success (bool), command (Option<String>), output (Option<String>), ...`
-///   `// assert_eq!(inner.success, true);`
-///   `// assert_eq!(inner.command, None);`
+///   `assert_eq!(inner.success, false);`
+///   `assert_eq!(inner.command, None);`
+///   `assert_eq!(inner.rolled_back, false);`
+///   `assert_eq!(inner.files_checked, 0);`
 fn enrich_assertion_with_fields(
     assertion: &str,
     returns: &ReturnValue,
     return_type: &ReturnShape,
     type_registry: &HashMap<String, TypeDefinition>,
+    type_defaults: &[TypeDefault],
+    fallback_default: &str,
 ) -> String {
     // Only enrich if the assertion has a TODO placeholder
     if !assertion.contains("TODO:") {
@@ -914,7 +920,7 @@ fn enrich_assertion_with_fields(
             if returns.variant == "ok" {
                 Some(ok_type.as_str())
             } else {
-                None // Err types are usually just error strings
+                None
             }
         }
         ReturnShape::OptionType { some_type } => {
@@ -933,76 +939,104 @@ fn enrich_assertion_with_fields(
         None => return assertion.to_string(),
     };
 
-    // Strip reference/wrapper syntax to get the base type name
     let base_name = type_name
         .trim_start_matches('&')
         .trim_start_matches("mut ")
         .trim();
 
-    // Look up in registry
     let type_def = match type_registry.get(base_name) {
         Some(td) => td,
         None => return assertion.to_string(),
     };
 
-    if type_def.fields.is_empty() {
+    let public_fields: Vec<&FieldDef> = type_def.fields.iter().filter(|f| f.is_public).collect();
+    if public_fields.is_empty() {
         return assertion.to_string();
     }
 
     let indent = "        ";
 
-    // Build field hint lines
-    let field_names: Vec<String> = type_def
-        .fields
-        .iter()
-        .filter(|f| f.is_public)
-        .map(|f| format!("{} ({})", f.name, f.field_type))
-        .collect();
+    // Find the TODO line and everything after it (including the `let _ = inner;` line before it)
+    let todo_pos = match assertion.find("// TODO:") {
+        Some(pos) => pos,
+        None => return assertion.to_string(),
+    };
 
-    if field_names.is_empty() {
-        return assertion.to_string();
-    }
+    // Find the start of the line containing the `let _ =` before the TODO
+    // We want to replace both the `let _ = inner;` line AND the TODO line
+    let search_region = &assertion[..todo_pos];
+    let let_underscore_pos = search_region.rfind("let _ = ");
+    let replace_start = if let Some(lpos) = let_underscore_pos {
+        // Find the line start before `let _ =`
+        assertion[..lpos].rfind('\n').map(|p| p + 1).unwrap_or(0)
+    } else {
+        // No `let _ =` found, just replace from the TODO line start
+        assertion[..todo_pos].rfind('\n').map(|p| p + 1).unwrap_or(0)
+    };
 
-    // Replace the TODO line with field-level assertion hints
-    let mut enriched = assertion.to_string();
+    let replace_end = assertion[todo_pos..]
+        .find('\n')
+        .map(|p| todo_pos + p + 1)
+        .unwrap_or(assertion.len());
 
-    // Remove the `let _ = inner;` or `let _ = err_msg;` placeholder line
-    let todo_line_start = enriched.find("// TODO:");
-    if let Some(pos) = todo_line_start {
-        // Find the start of the line containing TODO
-        let line_start = enriched[..pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
-        let line_end = enriched[pos..]
-            .find('\n')
-            .map(|p| pos + p + 1)
-            .unwrap_or(enriched.len());
-
-        // Replace the TODO line with field assertions
-        let mut field_assertions = String::new();
-        field_assertions.push_str(&format!(
-            "{indent}// {base_name} has fields: {}\n",
-            field_names.join(", ")
+    // Build real field assertions
+    let mut field_assertions = Vec::new();
+    for field in &public_fields {
+        let expected = default_for_field_type(&field.field_type, type_defaults, fallback_default);
+        field_assertions.push(format!(
+            "{indent}assert_eq!(inner.{}, {});",
+            field.name, expected
         ));
-        for field in &type_def.fields {
-            if !field.is_public {
-                continue;
-            }
-            field_assertions.push_str(&format!(
-                "{indent}// assert_eq!(inner.{}, ...);\n",
-                field.name
-            ));
-        }
-        // Trim the trailing newline from our additions
-        let field_assertions = field_assertions.trim_end_matches('\n');
-
-        enriched = format!(
-            "{}{}{}",
-            &enriched[..line_start],
-            field_assertions,
-            &enriched[line_end..]
-        );
     }
 
-    enriched
+    format!(
+        "{}{}{}",
+        &assertion[..replace_start],
+        field_assertions.join("\n"),
+        &assertion[replace_end..],
+    )
+}
+
+/// Resolve a default/zero value for a field type to use as expected assertion value.
+///
+/// Uses the grammar's type_defaults first, then falls back to common patterns.
+fn default_for_field_type(
+    field_type: &str,
+    type_defaults: &[TypeDefault],
+    fallback_default: &str,
+) -> String {
+    let trimmed = field_type.trim();
+
+    // Try grammar type_defaults first
+    for td in type_defaults {
+        if let Ok(re) = Regex::new(&td.pattern) {
+            if re.is_match(trimmed) {
+                return td.value.clone();
+            }
+        }
+    }
+
+    // Common fallbacks for types that might not be in type_defaults
+    if trimmed == "bool" {
+        return "false".to_string();
+    }
+    if trimmed == "usize" || trimmed == "u32" || trimmed == "u64" || trimmed == "i32" || trimmed == "i64" {
+        return "0".to_string();
+    }
+    if trimmed.starts_with("Option<") || trimmed.starts_with("Option ") {
+        return "None".to_string();
+    }
+    if trimmed.starts_with("Vec<") {
+        return "vec![]".to_string();
+    }
+    if trimmed == "String" {
+        return "String::new()".to_string();
+    }
+    if trimmed == "&str" {
+        return r#""""#.to_string();
+    }
+
+    fallback_default.to_string()
 }
 
 /// Build complement hints for a branch by examining what other branches require.
@@ -2439,31 +2473,40 @@ pub struct ValidationResult {
             value: Some("skipped".to_string()),
         };
 
+        let type_defaults = sample_type_defaults();
         let enriched = enrich_assertion_with_fields(
             assertion,
             &returns,
             &return_type,
             &type_registry,
+            &type_defaults,
+            "Default::default()",
         );
 
+        // Should generate real assert_eq! statements, not comments
         assert!(
-            enriched.contains("ValidationResult has fields"),
-            "should list the struct's fields, got:\n{}",
+            enriched.contains("assert_eq!(inner.success, false)"),
+            "should assert success field equals false, got:\n{}",
             enriched
         );
         assert!(
-            enriched.contains("inner.success"),
-            "should reference the success field, got:\n{}",
+            enriched.contains("assert_eq!(inner.command, None)"),
+            "should assert command field equals None, got:\n{}",
             enriched
         );
         assert!(
-            enriched.contains("inner.command"),
-            "should reference the command field, got:\n{}",
+            enriched.contains("assert_eq!(inner.rolled_back, false)"),
+            "should assert rolled_back field equals false, got:\n{}",
             enriched
         );
         assert!(
             !enriched.contains("TODO:"),
             "should replace the TODO placeholder, got:\n{}",
+            enriched
+        );
+        assert!(
+            !enriched.contains("let _ = inner"),
+            "should remove the let _ = inner placeholder, got:\n{}",
             enriched
         );
     }
@@ -2487,6 +2530,8 @@ pub struct ValidationResult {
             &returns,
             &return_type,
             &type_registry,
+            &[],
+            "Default::default()",
         );
 
         assert_eq!(
