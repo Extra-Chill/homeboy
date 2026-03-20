@@ -213,24 +213,10 @@ push_autofix_commit() {
 if [ -n "${AUTOFIX_COMMANDS:-}" ]; then
   IFS=',' read -ra FIX_ARRAY <<< "${AUTOFIX_COMMANDS}"
 else
-  # Derive refactor sources from the command list, but enforce canonical order:
-  # audit → lint → test. In Homeboy, fix = refactor, so the action should call
-  # canonical refactor source passes instead of command-specific fix modes.
-  HAS_AUDIT=false HAS_LINT=false HAS_TEST=false
-  IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
-  for CMD in "${CMD_ARRAY[@]}"; do
-    CMD=$(echo "${CMD}" | xargs)
-    BASE_CMD=$(printf '%s' "${CMD}" | awk '{print $1}')
-    case "${BASE_CMD}" in
-      audit) HAS_AUDIT=true ;;
-      lint)  HAS_LINT=true ;;
-      test)  HAS_TEST=true ;;
-    esac
-  done
-  FIX_ARRAY=()
-  [ "${HAS_AUDIT}" = true ] && FIX_ARRAY+=("refactor --from audit --write")
-  [ "${HAS_LINT}" = true ]  && FIX_ARRAY+=("refactor --from lint --write")
-  [ "${HAS_TEST}" = true ]  && FIX_ARRAY+=("refactor --from test --write")
+  # The refactor command is the single source of truth for all code fixes.
+  # --from all runs audit → lint → test sources sequentially in one invocation,
+  # so later stages see earlier stages' modifications.
+  FIX_ARRAY=("refactor --from all --write")
 fi
 
 if [ ${#FIX_ARRAY[@]} -eq 0 ]; then

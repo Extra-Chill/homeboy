@@ -358,7 +358,7 @@ NOFIXEOF
 ### Autofix status
 
 ${status_icon} ${status_text}${tier_note}
-Run: \`homeboy audit ${comp_id} --fix --write --only ${kind}\`
+Run: \`homeboy refactor ${comp_id} --from audit --write --only ${kind}\`
 FIXEOF
 }
 
