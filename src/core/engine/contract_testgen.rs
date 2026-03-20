@@ -26,7 +26,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::contract::*;
-use crate::extension::grammar::TypeDefault;
+use crate::extension::grammar::{ContractGrammar, TypeConstructor, TypeDefault};
 
 /// A plan for generating tests for a single function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,15 +62,20 @@ pub struct TestCase {
 /// The plan is language-agnostic — rendering to source code requires
 /// templates from the grammar.
 ///
-/// `type_defaults` from the grammar are used to generate valid input
-/// construction for each parameter. Branch conditions and return values
-/// are analyzed to derive condition-specific setup overrides and targeted
-/// assertions.
+/// The `contract_grammar` provides all language-specific knowledge:
+/// - `type_defaults` — zero/default values for parameter types
+/// - `type_constructors` — behavioral constructors for condition-specific inputs
+/// - `assertion_templates` — language-specific assertion code patterns
+/// - `fallback_default` — fallback expression when nothing else matches
+///
+/// Core analyzes conditions and returns to produce **semantic hints**, then
+/// resolves those hints through the grammar to get language-specific code.
 pub(crate) fn generate_test_plan(
     contract: &FunctionContract,
-    type_defaults: &[TypeDefault],
+    contract_grammar: &ContractGrammar,
 ) -> TestPlan {
     let mut cases = Vec::new();
+    let type_defaults = &contract_grammar.type_defaults;
 
     if contract.branches.is_empty() {
         // No branches detected — generate a basic "does not panic" test
@@ -80,7 +85,7 @@ pub(crate) fn generate_test_plan(
             expected_variant: "no_panic".to_string(),
             expected_value: None,
             template_key: "no_panic".to_string(),
-            variables: build_variables(contract, None, type_defaults),
+            variables: build_variables(contract, None, type_defaults, &contract_grammar.fallback_default),
         });
     } else {
         for (i, branch) in contract.branches.iter().enumerate() {
@@ -98,32 +103,39 @@ pub(crate) fn generate_test_plan(
             let template_key =
                 derive_template_key(&contract.signature.return_type, &branch.returns);
 
-            let mut vars = build_variables(contract, Some(branch), type_defaults);
+            let mut vars = build_variables(contract, Some(branch), type_defaults, &contract_grammar.fallback_default);
             vars.insert("condition".to_string(), branch.condition.clone());
             vars.insert("condition_slug".to_string(), slugify(&branch.condition));
 
-            // Behavioral inference: derive setup overrides from branch condition
+            // Behavioral inference: derive setup overrides from branch condition.
+            // Core produces semantic hints; grammar provides language-specific code.
             let setup_override = infer_setup_from_condition(
                 &branch.condition,
                 &contract.signature.params,
                 type_defaults,
+                &contract_grammar.type_constructors,
+                &contract_grammar.fallback_default,
             );
             if let Some(ref so) = setup_override {
                 vars.insert("param_setup".to_string(), so.setup_lines.clone());
                 vars.insert("param_args".to_string(), so.call_args.clone());
-                // Merge any additional imports
                 if !so.extra_imports.is_empty() {
-                    let existing = vars.get("extra_imports").cloned().unwrap_or_default();
+                    let existing = vars
+                        .get("extra_imports")
+                        .cloned()
+                        .unwrap_or_default();
                     let merged = merge_imports(&existing, &so.extra_imports);
                     vars.insert("extra_imports".to_string(), merged);
                 }
             }
 
-            // Behavioral inference: derive assertion from branch return
-            let assertion = infer_assertion(
+            // Behavioral inference: derive assertion from branch return.
+            // Core selects an assertion key; grammar provides the template.
+            let assertion = resolve_assertion(
                 &branch.returns,
                 &contract.signature.return_type,
                 &branch.condition,
+                &contract_grammar.assertion_templates,
             );
             vars.insert("assertion_code".to_string(), assertion);
 
@@ -156,7 +168,7 @@ pub(crate) fn generate_test_plan(
             })
             .collect();
 
-        let mut vars = build_variables(contract, None, type_defaults);
+        let mut vars = build_variables(contract, None, type_defaults, &contract_grammar.fallback_default);
         vars.insert("effects".to_string(), effect_names.join(", "));
 
         cases.push(TestCase {
@@ -214,6 +226,7 @@ fn build_variables(
     contract: &FunctionContract,
     branch: Option<&Branch>,
     type_defaults: &[TypeDefault],
+    fallback_default: &str,
 ) -> HashMap<String, String> {
     let mut vars = HashMap::new();
 
@@ -247,7 +260,7 @@ fn build_variables(
 
     // Build param setup lines and call args using type_defaults
     let (setup_lines, call_args, extra_imports) =
-        build_param_inputs(&contract.signature.params, type_defaults);
+        build_param_inputs(&contract.signature.params, type_defaults, fallback_default);
     vars.insert("param_setup".to_string(), setup_lines);
     vars.insert("param_args".to_string(), call_args);
     vars.insert("extra_imports".to_string(), extra_imports);
@@ -310,6 +323,7 @@ fn build_variables(
 fn resolve_type_default<'a>(
     param_type: &str,
     type_defaults: &'a [TypeDefault],
+    fallback_default: &str,
 ) -> (String, Option<String>, Vec<&'a str>) {
     for td in type_defaults {
         if let Ok(re) = Regex::new(&td.pattern) {
@@ -319,8 +333,8 @@ fn resolve_type_default<'a>(
             }
         }
     }
-    // Fallback: Default::default()
-    ("Default::default()".to_string(), None, vec![])
+    // Fallback: language-specific default from grammar
+    (fallback_default.to_string(), None, vec![])
 }
 
 /// Build parameter setup lines, call arguments, and extra imports from type_defaults.
@@ -329,7 +343,11 @@ fn resolve_type_default<'a>(
 /// - `setup_lines` is newline-separated `let` bindings
 /// - `call_args` is comma-separated arguments for the function call
 /// - `extra_imports` is newline-separated `use` statements
-fn build_param_inputs(params: &[Param], type_defaults: &[TypeDefault]) -> (String, String, String) {
+fn build_param_inputs(
+    params: &[Param],
+    type_defaults: &[TypeDefault],
+    fallback_default: &str,
+) -> (String, String, String) {
     if params.is_empty() {
         return (String::new(), String::new(), String::new());
     }
@@ -340,7 +358,7 @@ fn build_param_inputs(params: &[Param], type_defaults: &[TypeDefault]) -> (Strin
 
     for param in params {
         let (value_expr, call_override, imports) =
-            resolve_type_default(&param.param_type, type_defaults);
+            resolve_type_default(&param.param_type, type_defaults, fallback_default);
 
         // Build the let binding
         setup_lines.push(format!("        let {} = {};", param.name, value_expr));
@@ -408,9 +426,32 @@ fn slugify(s: &str) -> String {
 
 // ── Behavioral inference ──
 //
-// These functions analyze branch conditions and return values to produce
-// setup code and assertions that exercise specific behavior, not just
-// smoke-test that the function compiles.
+// Core analyzes branch conditions to produce **semantic hints** — language-agnostic
+// descriptions of what a parameter value should be (e.g., "empty", "none",
+// "nonexistent_path"). The grammar's `type_constructors` section then maps
+// each (hint, type_pattern) pair to a language-specific code expression.
+//
+// This keeps core completely language-agnostic. Adding a new language is just
+// adding a new grammar file — no core changes needed.
+
+/// Well-known semantic hints that core can produce from condition analysis.
+/// These are the "vocabulary" between core and grammar extensions.
+///
+/// Extensions define `[[contract.type_constructors]]` entries with `hint` fields
+/// matching these strings. Extensions may also define custom hints.
+mod hints {
+    pub const EMPTY: &str = "empty";
+    pub const NON_EMPTY: &str = "non_empty";
+    pub const NONE: &str = "none";
+    pub const SOME_DEFAULT: &str = "some_default";
+    pub const NONEXISTENT_PATH: &str = "nonexistent_path";
+    pub const EXISTENT_PATH: &str = "existent_path";
+    pub const TRUE: &str = "true";
+    pub const FALSE: &str = "false";
+    pub const ZERO: &str = "zero";
+    pub const POSITIVE: &str = "positive";
+    pub const CONTAINS: &str = "contains";
+}
 
 /// Overridden setup derived from a branch condition.
 struct SetupOverride {
@@ -424,60 +465,55 @@ struct SetupOverride {
 
 /// Infer parameter setup code from a branch condition string.
 ///
-/// Pattern-matches the condition against known idioms to produce inputs
-/// that actually trigger the branch. Returns `None` if no condition-specific
-/// setup can be inferred (falling back to generic type_defaults).
+/// Core analyzes the condition to produce semantic hints for each parameter,
+/// then resolves those hints through the grammar's `type_constructors` to get
+/// language-specific code. Returns `None` if no condition-specific setup can
+/// be inferred (falling back to generic type_defaults).
 fn infer_setup_from_condition(
     condition: &str,
     params: &[Param],
     type_defaults: &[TypeDefault],
+    type_constructors: &[TypeConstructor],
+    fallback_default: &str,
 ) -> Option<SetupOverride> {
-    // Build baseline setup, then try to override specific params based on condition
     let condition_lower = condition.to_lowercase();
 
-    // Try to find a condition-specific override for at least one parameter
-    let mut overrides: HashMap<String, ConditionParamOverride> = HashMap::new();
-
+    // Step 1: Produce semantic hints for each parameter
+    let mut param_hints: HashMap<String, String> = HashMap::new();
     for param in params {
-        if let Some(ovr) = match_condition_to_param(condition, &condition_lower, param) {
-            overrides.insert(param.name.clone(), ovr);
+        if let Some(hint) = infer_hint_for_param(condition, &condition_lower, param) {
+            param_hints.insert(param.name.clone(), hint);
         }
     }
 
-    if overrides.is_empty() {
+    if param_hints.is_empty() {
         return None;
     }
 
-    // Rebuild param setup with overrides applied
+    // Step 2: Resolve hints through grammar constructors
     let mut setup_lines = Vec::new();
     let mut call_args = Vec::new();
     let mut all_imports: Vec<String> = Vec::new();
 
     for param in params {
-        let (value_expr, call_arg, imports) = if let Some(ovr) = overrides.get(&param.name) {
-            (
-                ovr.value_expr.clone(),
-                ovr.call_arg.clone().unwrap_or_else(|| {
-                    if param.param_type.trim().starts_with('&') {
-                        format!("&{}", param.name)
-                    } else {
-                        param.name.clone()
-                    }
-                }),
-                ovr.imports.clone(),
-            )
-        } else {
-            let (val, call_override, imps) = resolve_type_default(&param.param_type, type_defaults);
-            let call = call_override.unwrap_or_else(|| {
-                if param.param_type.trim().starts_with('&') {
-                    format!("&{}", param.name)
-                } else {
-                    param.name.clone()
-                }
-            });
-            let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
-            (val, call, imp_strs)
-        };
+        let (value_expr, call_arg, imports) =
+            if let Some(hint) = param_hints.get(&param.name) {
+                resolve_constructor(
+                    hint,
+                    &param.name,
+                    &param.param_type,
+                    type_constructors,
+                    type_defaults,
+                    fallback_default,
+                )
+            } else {
+                // No hint for this param — use type_defaults
+                let (val, call_override, imps) =
+                    resolve_type_default(&param.param_type, type_defaults, fallback_default);
+                let call = call_override.unwrap_or_else(|| default_call_arg(&param.name, &param.param_type));
+                let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
+                (val, call, imp_strs)
+            };
 
         setup_lines.push(format!("        let {} = {};", param.name, value_expr));
         call_args.push(call_arg);
@@ -496,159 +532,173 @@ fn infer_setup_from_condition(
     })
 }
 
-/// A condition-derived override for a single parameter's setup.
-struct ConditionParamOverride {
-    /// The value expression to use in the `let` binding.
-    value_expr: String,
-    /// Optional override for the call argument (if different from `&name` / `name`).
-    call_arg: Option<String>,
-    /// Extra imports needed.
-    imports: Vec<String>,
+/// Produce the default call argument for a parameter based on its type.
+fn default_call_arg(name: &str, param_type: &str) -> String {
+    if param_type.trim().starts_with('&') {
+        format!("&{}", name)
+    } else {
+        name.to_string()
+    }
 }
 
-/// Try to match a branch condition to a specific parameter and derive a
-/// value that triggers the condition.
+/// Analyze a branch condition to produce a semantic hint for a parameter.
 ///
-/// This is the heart of behavioral inference. It pattern-matches known
-/// condition idioms (`.is_empty()`, `.exists()`, `.is_some()`, etc.)
-/// against the parameter's name and type to produce a value that makes
-/// the condition true.
-fn match_condition_to_param(
+/// This is the core of behavioral inference — it recognizes common condition
+/// patterns and maps them to language-agnostic hints. The hints are then
+/// resolved through the grammar's `type_constructors` to get actual code.
+///
+/// Returns `None` if no hint can be inferred for this parameter.
+fn infer_hint_for_param(
     condition: &str,
     condition_lower: &str,
     param: &Param,
-) -> Option<ConditionParamOverride> {
+) -> Option<String> {
     let pname = &param.name;
     let ptype = &param.param_type;
 
-    // ── Pattern: negated emptiness — "!param.is_empty()" or "not empty" ──
-    // Check negated BEFORE non-negated to avoid false matches
+    // ── Negated emptiness — check BEFORE non-negated to avoid false matches ──
     if condition_contains_negated_method(condition, pname, "is_empty") {
-        return Some(make_non_empty_value(pname, ptype));
+        return Some(hints::NON_EMPTY.to_string());
     }
 
-    // ── Pattern: "param.is_empty()" or "param is empty" ──
-    // Applies to Vec, slice, String, &str, HashMap, HashSet
+    // ── Emptiness: "param.is_empty()" ──
     if condition_contains_param_method(condition_lower, pname, "is_empty") {
-        return Some(make_empty_value(ptype));
+        return Some(hints::EMPTY.to_string());
     }
 
-    // ── Pattern: "param.is_none()" or "param is None" ──
-    if (condition_contains_param_method(condition_lower, pname, "is_none")
-        || (condition_lower.contains(&pname.to_lowercase()) && condition_lower.contains("none")))
-        && ptype.starts_with("Option")
+    // ── Option: "param.is_none()" ──
+    if condition_contains_param_method(condition_lower, pname, "is_none")
+        || (condition_lower.contains(&pname.to_lowercase())
+            && condition_lower.contains("none"))
     {
-        return Some(ConditionParamOverride {
-            value_expr: "None".to_string(),
-            call_arg: None,
-            imports: vec![],
-        });
+        if ptype.starts_with("Option") {
+            return Some(hints::NONE.to_string());
+        }
     }
 
-    // ── Pattern: "param.is_some()" or "param is Some" ──
-    if (condition_contains_param_method(condition_lower, pname, "is_some")
-        || (condition_lower.contains(&pname.to_lowercase()) && condition_lower.contains("some")))
-        && ptype.starts_with("Option")
+    // ── Option: "param.is_some()" ──
+    if condition_contains_param_method(condition_lower, pname, "is_some")
+        || (condition_lower.contains(&pname.to_lowercase())
+            && condition_lower.contains("some"))
     {
-        return Some(ConditionParamOverride {
-            value_expr: "Some(Default::default())".to_string(),
-            call_arg: None,
-            imports: vec![],
-        });
+        if ptype.starts_with("Option") {
+            return Some(hints::SOME_DEFAULT.to_string());
+        }
     }
 
-    // ── Pattern: path existence — "path doesn't exist", "not exists", "!path.exists()" ──
-    if is_path_type(ptype) {
+    // ── Path existence ──
+    if is_path_like(ptype) {
         if condition_lower.contains("doesn't exist")
             || condition_lower.contains("does not exist")
             || condition_lower.contains("not exist")
             || condition_contains_negated_method(condition, pname, "exists")
         {
-            return Some(ConditionParamOverride {
-                value_expr: r#"Path::new("/tmp/nonexistent_test_path_818")"#.to_string(),
-                call_arg: None,
-                imports: vec!["use std::path::Path;".to_string()],
-            });
+            return Some(hints::NONEXISTENT_PATH.to_string());
         }
         if condition_contains_param_method(condition_lower, pname, "exists")
             && !condition_lower.contains("not")
             && !condition.contains('!')
         {
-            // Path must exist — use a temp dir
-            return Some(ConditionParamOverride {
-                value_expr: "tempfile::tempdir().unwrap()".to_string(),
-                call_arg: Some(format!("{}.path()", pname)),
-                imports: vec![],
-            });
+            return Some(hints::EXISTENT_PATH.to_string());
         }
     }
 
-    // ── Pattern: boolean params — "param" or "!param" or "param == true/false" ──
+    // ── Boolean params ──
     if ptype.trim() == "bool" {
         if condition_lower.contains(&format!("!{}", pname.to_lowercase()))
             || condition_lower.contains(&format!("{} == false", pname.to_lowercase()))
             || condition_lower.contains(&format!("{} is false", pname.to_lowercase()))
         {
-            return Some(ConditionParamOverride {
-                value_expr: "false".to_string(),
-                call_arg: None,
-                imports: vec![],
-            });
+            return Some(hints::FALSE.to_string());
         }
         if condition_lower == pname.to_lowercase()
             || condition_lower.contains(&format!("{} == true", pname.to_lowercase()))
             || condition_lower.contains(&format!("{} is true", pname.to_lowercase()))
         {
-            return Some(ConditionParamOverride {
-                value_expr: "true".to_string(),
-                call_arg: None,
-                imports: vec![],
-            });
+            return Some(hints::TRUE.to_string());
         }
     }
 
-    // ── Pattern: numeric comparisons — "param > 0", "param == 0", "param.len() > X" ──
-    if is_numeric_type(ptype) {
+    // ── Numeric comparisons ──
+    if is_numeric_like(ptype) {
         if condition_lower.contains(&format!("{} == 0", pname.to_lowercase()))
             || condition_lower.contains(&format!("{} < 1", pname.to_lowercase()))
         {
-            return Some(ConditionParamOverride {
-                value_expr: "0".to_string(),
-                call_arg: None,
-                imports: vec![],
-            });
+            return Some(hints::ZERO.to_string());
         }
         if condition_lower.contains(&format!("{} > 0", pname.to_lowercase()))
             || condition_lower.contains(&format!("{} >= 1", pname.to_lowercase()))
         {
-            return Some(ConditionParamOverride {
-                value_expr: "1".to_string(),
-                call_arg: None,
-                imports: vec![],
-            });
+            return Some(hints::POSITIVE.to_string());
         }
     }
 
-    // ── Pattern: string content — "param.contains(X)" or "param.starts_with(X)" ──
-    if is_string_type(ptype) {
-        // Extract the literal from contains/starts_with if possible
-        if let Some(literal) = extract_method_string_arg(condition, pname, "contains") {
-            return Some(ConditionParamOverride {
-                value_expr: format!("\"{}\"", literal),
-                call_arg: None,
-                imports: vec![],
-            });
-        }
-        if let Some(literal) = extract_method_string_arg(condition, pname, "starts_with") {
-            return Some(ConditionParamOverride {
-                value_expr: format!("\"{}\"", literal),
-                call_arg: None,
-                imports: vec![],
-            });
-        }
+    // ── String content: ".contains(X)" or ".starts_with(X)" ──
+    if let Some(literal) = extract_method_string_arg(condition, pname, "contains") {
+        // Store the literal in the hint using a separator
+        return Some(format!("{}:{}", hints::CONTAINS, literal));
+    }
+    if let Some(literal) = extract_method_string_arg(condition, pname, "starts_with") {
+        return Some(format!("{}:{}", hints::CONTAINS, literal));
     }
 
     None
+}
+
+/// Resolve a semantic hint + param type through the grammar's type_constructors.
+///
+/// Tries constructors in order; first match on both `hint` and `pattern` wins.
+/// Falls back to `type_defaults` if no constructor matches, then to `fallback_default`.
+///
+/// The `{param_name}` placeholder in constructor values is replaced with the
+/// actual parameter name.
+fn resolve_constructor(
+    hint: &str,
+    param_name: &str,
+    param_type: &str,
+    constructors: &[TypeConstructor],
+    type_defaults: &[TypeDefault],
+    fallback_default: &str,
+) -> (String, String, Vec<String>) {
+    // Split compound hints like "contains:foo" into base hint + argument
+    let (base_hint, hint_arg) = if let Some(colon_pos) = hint.find(':') {
+        (&hint[..colon_pos], Some(&hint[colon_pos + 1..]))
+    } else {
+        (hint, None)
+    };
+
+    // Try type_constructors first
+    for tc in constructors {
+        if tc.hint != base_hint {
+            continue;
+        }
+        if let Ok(re) = Regex::new(&tc.pattern) {
+            if re.is_match(param_type) {
+                // Found a match — apply parameter name substitution
+                let mut value = tc.value.replace("{param_name}", param_name);
+                // For "contains" hints, also substitute the literal argument
+                if let Some(arg) = hint_arg {
+                    value = value.replace("{hint_arg}", arg);
+                }
+
+                let call_arg = tc
+                    .call_arg
+                    .as_ref()
+                    .map(|c| c.replace("{param_name}", param_name))
+                    .unwrap_or_else(|| default_call_arg(param_name, param_type));
+
+                let imports: Vec<String> = tc.imports.iter().cloned().collect();
+                return (value, call_arg, imports);
+            }
+        }
+    }
+
+    // No constructor matched — fall back to type_defaults
+    let (val, call_override, imps) =
+        resolve_type_default(param_type, type_defaults, fallback_default);
+    let call = call_override.unwrap_or_else(|| default_call_arg(param_name, param_type));
+    let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
+    (val, call, imp_strs)
 }
 
 /// Check if condition contains `param.method()` (case-insensitive).
@@ -663,99 +713,23 @@ fn condition_contains_negated_method(condition: &str, param: &str, method: &str)
     condition.contains(&pattern)
 }
 
-/// Produce a value that makes `.is_empty()` return true for the given type.
-fn make_empty_value(ptype: &str) -> ConditionParamOverride {
-    let trimmed = ptype.trim();
-    if trimmed.starts_with("&[") || trimmed.starts_with("Vec<") {
-        ConditionParamOverride {
-            value_expr: "Vec::new()".to_string(),
-            call_arg: None,
-            imports: vec![],
-        }
-    } else if trimmed == "&str" || trimmed == "String" || trimmed == "&String" {
-        ConditionParamOverride {
-            value_expr: r#""""#.to_string(),
-            call_arg: None,
-            imports: vec![],
-        }
-    } else if trimmed.starts_with("HashMap") {
-        ConditionParamOverride {
-            value_expr: "HashMap::new()".to_string(),
-            call_arg: None,
-            imports: vec!["use std::collections::HashMap;".to_string()],
-        }
-    } else if trimmed.starts_with("HashSet") {
-        ConditionParamOverride {
-            value_expr: "HashSet::new()".to_string(),
-            call_arg: None,
-            imports: vec!["use std::collections::HashSet;".to_string()],
-        }
-    } else {
-        // Generic fallback for empty collections
-        ConditionParamOverride {
-            value_expr: "Default::default()".to_string(),
-            call_arg: None,
-            imports: vec![],
-        }
-    }
+/// Check if a type looks like a filesystem path (language-agnostic heuristic).
+fn is_path_like(ptype: &str) -> bool {
+    let t = ptype.trim().to_lowercase();
+    t.contains("path")
 }
 
-/// Produce a value that makes `.is_empty()` return false for the given type.
-fn make_non_empty_value(pname: &str, ptype: &str) -> ConditionParamOverride {
-    let trimmed = ptype.trim();
-    if trimmed.starts_with("&[") || trimmed.starts_with("Vec<") {
-        ConditionParamOverride {
-            value_expr: "vec![Default::default()]".to_string(),
-            call_arg: None,
-            imports: vec![],
-        }
-    } else if trimmed == "&str" || trimmed == "String" || trimmed == "&String" {
-        ConditionParamOverride {
-            value_expr: format!("\"test_{}\"", pname),
-            call_arg: None,
-            imports: vec![],
-        }
-    } else {
-        ConditionParamOverride {
-            value_expr: "Default::default()".to_string(),
-            call_arg: None,
-            imports: vec![],
-        }
-    }
-}
-
-/// Check if a type represents a filesystem path.
-fn is_path_type(ptype: &str) -> bool {
+/// Check if a type looks like a numeric type (language-agnostic heuristic).
+fn is_numeric_like(ptype: &str) -> bool {
     let t = ptype.trim();
-    t == "&Path" || t == "&PathBuf" || t == "PathBuf" || t == "&std::path::Path"
-}
-
-/// Check if a type is numeric.
-fn is_numeric_type(ptype: &str) -> bool {
-    let t = ptype.trim();
+    // Common numeric type patterns across languages
     matches!(
         t,
-        "usize"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "u128"
-            | "isize"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "i128"
-            | "f32"
-            | "f64"
+        "usize" | "u8" | "u16" | "u32" | "u64" | "u128"
+            | "isize" | "i8" | "i16" | "i32" | "i64" | "i128"
+            | "f32" | "f64"
+            | "int" | "float" | "double" | "number"
     )
-}
-
-/// Check if a type is string-like.
-fn is_string_type(ptype: &str) -> bool {
-    let t = ptype.trim();
-    t == "&str" || t == "String" || t == "&String"
 }
 
 /// Extract a string literal argument from a method call in a condition.
@@ -780,87 +754,70 @@ fn extract_method_string_arg(condition: &str, param: &str, method: &str) -> Opti
     None
 }
 
-/// Infer an assertion code string from the branch return and function return type.
+/// Resolve an assertion for a branch return using grammar-defined assertion templates.
 ///
-/// Produces assertion code that checks the actual return value, not just the
-/// type variant. Falls back to the standard `is_ok()`/`is_err()` checks when
-/// no more specific assertion can be derived.
-fn infer_assertion(returns: &ReturnValue, return_type: &ReturnShape, condition: &str) -> String {
+/// Core selects an assertion key based on the return type and variant. The grammar's
+/// `assertion_templates` section provides language-specific assertion code for each key.
+/// Falls back to simple variant-check assertions if no template is found.
+fn resolve_assertion(
+    returns: &ReturnValue,
+    return_type: &ReturnShape,
+    condition: &str,
+    assertion_templates: &HashMap<String, String>,
+) -> String {
     let indent = "        ";
 
-    match return_type {
+    // Determine the assertion key based on return type + variant + whether we have a value
+    let has_value = returns.value.is_some();
+    let variant = returns.variant.as_str();
+
+    let key = match return_type {
         ReturnShape::ResultType { .. } => {
-            match returns.variant.as_str() {
-                "ok" => {
-                    if let Some(ref val) = returns.value {
-                        // We know the Ok value description — assert it
-                        format!(
-                            "{indent}let inner = result.unwrap();\n\
-                             {indent}// Branch returns Ok({val}) when: {condition}\n\
-                             {indent}let _ = inner; // TODO: assert specific value for \"{val}\"",
-                        )
-                    } else {
-                        format!(
-                            "{indent}assert!(result.is_ok(), \"expected Ok for: {condition}\");",
-                        )
-                    }
-                }
-                "err" => {
-                    if let Some(ref val) = returns.value {
-                        format!(
-                            "{indent}let err = result.unwrap_err();\n\
-                             {indent}// Branch returns Err({val}) when: {condition}\n\
-                             {indent}let err_msg = format!(\"{{:?}}\", err);\n\
-                             {indent}let _ = err_msg; // TODO: assert error contains \"{val}\"",
-                        )
-                    } else {
-                        format!(
-                            "{indent}assert!(result.is_err(), \"expected Err for: {condition}\");",
-                        )
-                    }
-                }
-                _ => format!("{indent}let _ = result; // variant: {}", returns.variant),
-            }
-        }
-        ReturnShape::OptionType { .. } => match returns.variant.as_str() {
-            "some" => {
-                if let Some(ref val) = returns.value {
-                    format!(
-                        "{indent}let inner = result.expect(\"expected Some for: {condition}\");\n\
-                             {indent}// Branch returns Some({val})\n\
-                             {indent}let _ = inner; // TODO: assert value matches \"{val}\"",
-                    )
-                } else {
-                    format!(
-                        "{indent}assert!(result.is_some(), \"expected Some for: {condition}\");",
-                    )
-                }
-            }
-            "none" => {
-                format!("{indent}assert!(result.is_none(), \"expected None for: {condition}\");",)
-            }
-            _ => format!("{indent}let _ = result; // variant: {}", returns.variant),
-        },
-        ReturnShape::Bool => match returns.variant.as_str() {
-            "true" => format!("{indent}assert!(result, \"expected true when: {condition}\");",),
-            "false" => format!("{indent}assert!(!result, \"expected false when: {condition}\");",),
-            _ => format!("{indent}let _ = result;"),
-        },
-        ReturnShape::Collection { .. } => {
-            // For collections, check emptiness based on condition
-            if condition.contains("empty") || condition.contains("is_empty") {
-                format!(
-                    "{indent}assert!(result.is_empty(), \"expected empty collection for: {condition}\");",
-                )
+            if has_value {
+                format!("result_{}_value", variant)
             } else {
-                format!(
-                    "{indent}assert!(!result.is_empty(), \"expected non-empty collection for: {condition}\");",
-                )
+                format!("result_{}", variant)
             }
         }
-        _ => {
-            format!("{indent}let _ = result;")
+        ReturnShape::OptionType { .. } => {
+            if has_value {
+                format!("option_{}_value", variant)
+            } else {
+                format!("option_{}", variant)
+            }
         }
+        ReturnShape::Bool => format!("bool_{}", variant),
+        ReturnShape::Collection { .. } => {
+            if condition.contains("empty") || condition.contains("is_empty") {
+                "collection_empty".to_string()
+            } else {
+                "collection_non_empty".to_string()
+            }
+        }
+        _ => "value_default".to_string(),
+    };
+
+    // Try the specific key first, then fall back to the base key (without _value)
+    let template = assertion_templates
+        .get(&key)
+        .or_else(|| {
+            // Fall back: result_ok_value → result_ok
+            let base = key.rsplit_once('_').map(|(base, _)| base.to_string());
+            base.and_then(|b| assertion_templates.get(&b))
+        });
+
+    if let Some(tmpl) = template {
+        // Substitute variables in the assertion template
+        let mut rendered = tmpl.clone();
+        rendered = rendered.replace("{condition}", condition);
+        if let Some(ref val) = returns.value {
+            rendered = rendered.replace("{expected_value}", val);
+        }
+        rendered = rendered.replace("{variant}", variant);
+        rendered
+    } else {
+        // No grammar template — produce a minimal language-agnostic placeholder
+        format!("{indent}let _ = result; // {variant}: {condition}")
     }
 }
 
@@ -926,7 +883,7 @@ pub fn generate_tests_for_file(
             continue;
         }
 
-        let plan = generate_test_plan(contract, &contract_grammar.type_defaults);
+        let plan = generate_test_plan(contract, contract_grammar);
         if plan.cases.is_empty() {
             continue;
         }
@@ -995,7 +952,7 @@ pub fn generate_tests_for_methods(
             continue;
         }
 
-        let plan = generate_test_plan(contract, &contract_grammar.type_defaults);
+        let plan = generate_test_plan(contract, contract_grammar);
         if plan.cases.is_empty() {
             continue;
         }
@@ -1158,10 +1115,168 @@ mod tests {
         ]
     }
 
+    /// Build a minimal ContractGrammar for testing.
+    fn empty_grammar() -> ContractGrammar {
+        ContractGrammar::default()
+    }
+
+    /// Build a ContractGrammar with type_defaults populated.
+    fn grammar_with_defaults() -> ContractGrammar {
+        ContractGrammar {
+            type_defaults: sample_type_defaults(),
+            ..Default::default()
+        }
+    }
+
+    /// Build a ContractGrammar with type_defaults + type_constructors + assertion_templates.
+    fn full_grammar() -> ContractGrammar {
+        ContractGrammar {
+            type_defaults: sample_type_defaults(),
+            type_constructors: sample_type_constructors(),
+            assertion_templates: sample_assertion_templates(),
+            ..Default::default()
+        }
+    }
+
+    fn sample_type_constructors() -> Vec<TypeConstructor> {
+        vec![
+            TypeConstructor {
+                hint: "empty".to_string(),
+                pattern: r"^&?\[.*\]$|^Vec<.*>$".to_string(),
+                value: "Vec::new()".to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+            TypeConstructor {
+                hint: "empty".to_string(),
+                pattern: r"^&str$|^String$|^&String$".to_string(),
+                value: r#""""#.to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+            TypeConstructor {
+                hint: "non_empty".to_string(),
+                pattern: r"^&?\[.*\]$|^Vec<.*>$".to_string(),
+                value: "vec![Default::default()]".to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+            TypeConstructor {
+                hint: "non_empty".to_string(),
+                pattern: r"^&str$|^String$|^&String$".to_string(),
+                value: "\"test_{param_name}\"".to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+            TypeConstructor {
+                hint: "nonexistent_path".to_string(),
+                pattern: r"(?i)path".to_string(),
+                value: r#"Path::new("/tmp/nonexistent_test_path_818")"#.to_string(),
+                call_arg: None,
+                imports: vec!["use std::path::Path;".to_string()],
+            },
+            TypeConstructor {
+                hint: "none".to_string(),
+                pattern: r"^Option<.*>$".to_string(),
+                value: "None".to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+            TypeConstructor {
+                hint: "some_default".to_string(),
+                pattern: r"^Option<.*>$".to_string(),
+                value: "Some(Default::default())".to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+            TypeConstructor {
+                hint: "true".to_string(),
+                pattern: r"^bool$".to_string(),
+                value: "true".to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+            TypeConstructor {
+                hint: "false".to_string(),
+                pattern: r"^bool$".to_string(),
+                value: "false".to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+            TypeConstructor {
+                hint: "zero".to_string(),
+                pattern: r"^u\w+$|^i\w+$|^f\w+$".to_string(),
+                value: "0".to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+            TypeConstructor {
+                hint: "positive".to_string(),
+                pattern: r"^u\w+$|^i\w+$|^f\w+$".to_string(),
+                value: "1".to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+            TypeConstructor {
+                hint: "contains".to_string(),
+                pattern: r"^&str$|^String$|^&String$".to_string(),
+                value: "\"{hint_arg}\"".to_string(),
+                call_arg: None,
+                imports: vec![],
+            },
+        ]
+    }
+
+    fn sample_assertion_templates() -> HashMap<String, String> {
+        let indent = "        ";
+        let mut m = HashMap::new();
+        m.insert("result_ok".to_string(), format!(
+            "{indent}assert!(result.is_ok(), \"expected Ok for: {{condition}}\");"
+        ));
+        m.insert("result_ok_value".to_string(), format!(
+            "{indent}let inner = result.unwrap();\n\
+             {indent}// Branch returns Ok({{expected_value}}) when: {{condition}}\n\
+             {indent}let _ = inner; // TODO: assert specific value for \"{{expected_value}}\""
+        ));
+        m.insert("result_err".to_string(), format!(
+            "{indent}assert!(result.is_err(), \"expected Err for: {{condition}}\");"
+        ));
+        m.insert("result_err_value".to_string(), format!(
+            "{indent}let err = result.unwrap_err();\n\
+             {indent}// Branch returns Err({{expected_value}}) when: {{condition}}\n\
+             {indent}let err_msg = format!(\"{{{{:?}}}}\", err);\n\
+             {indent}let _ = err_msg; // TODO: assert error contains \"{{expected_value}}\""
+        ));
+        m.insert("option_some".to_string(), format!(
+            "{indent}assert!(result.is_some(), \"expected Some for: {{condition}}\");"
+        ));
+        m.insert("option_some_value".to_string(), format!(
+            "{indent}let inner = result.expect(\"expected Some for: {{condition}}\");\n\
+             {indent}// Branch returns Some({{expected_value}})\n\
+             {indent}let _ = inner; // TODO: assert value matches \"{{expected_value}}\""
+        ));
+        m.insert("option_none".to_string(), format!(
+            "{indent}assert!(result.is_none(), \"expected None for: {{condition}}\");"
+        ));
+        m.insert("bool_true".to_string(), format!(
+            "{indent}assert!(result, \"expected true when: {{condition}}\");"
+        ));
+        m.insert("bool_false".to_string(), format!(
+            "{indent}assert!(!result, \"expected false when: {{condition}}\");"
+        ));
+        m.insert("collection_empty".to_string(), format!(
+            "{indent}assert!(result.is_empty(), \"expected empty collection for: {{condition}}\");"
+        ));
+        m.insert("collection_non_empty".to_string(), format!(
+            "{indent}assert!(!result.is_empty(), \"expected non-empty collection for: {{condition}}\");"
+        ));
+        m
+    }
+
     #[test]
     fn test_plan_generates_one_case_per_branch() {
         let contract = sample_result_contract();
-        let plan = generate_test_plan(&contract, &[]);
+        let plan = generate_test_plan(&contract, &empty_grammar());
         // 2 branches + 1 effect test
         assert_eq!(plan.cases.len(), 3);
         assert_eq!(plan.function_name, "validate_write");
@@ -1170,7 +1285,7 @@ mod tests {
     #[test]
     fn test_plan_names_are_descriptive() {
         let contract = sample_result_contract();
-        let plan = generate_test_plan(&contract, &[]);
+        let plan = generate_test_plan(&contract, &empty_grammar());
         assert!(plan.cases[0].test_name.starts_with("test_validate_write_"));
         assert!(plan.cases[0].test_name.contains("empty"));
     }
@@ -1178,7 +1293,7 @@ mod tests {
     #[test]
     fn test_plan_template_keys_match_return_shape() {
         let contract = sample_result_contract();
-        let plan = generate_test_plan(&contract, &[]);
+        let plan = generate_test_plan(&contract, &empty_grammar());
         assert_eq!(plan.cases[0].template_key, "result_ok");
         assert_eq!(plan.cases[1].template_key, "result_ok");
     }
@@ -1186,7 +1301,7 @@ mod tests {
     #[test]
     fn test_plan_for_option_type() {
         let contract = sample_option_contract();
-        let plan = generate_test_plan(&contract, &[]);
+        let plan = generate_test_plan(&contract, &empty_grammar());
         assert_eq!(plan.cases.len(), 2);
         assert_eq!(plan.cases[0].template_key, "option_some");
         assert_eq!(plan.cases[1].template_key, "option_none");
@@ -1195,7 +1310,7 @@ mod tests {
     #[test]
     fn test_plan_pure_function_no_effect_test() {
         let contract = sample_option_contract();
-        let plan = generate_test_plan(&contract, &[]);
+        let plan = generate_test_plan(&contract, &empty_grammar());
         // Pure function — no effect test case
         assert!(plan.cases.iter().all(|c| c.template_key != "effects"));
     }
@@ -1203,7 +1318,7 @@ mod tests {
     #[test]
     fn test_plan_variables_contain_fn_info() {
         let contract = sample_result_contract();
-        let plan = generate_test_plan(&contract, &[]);
+        let plan = generate_test_plan(&contract, &empty_grammar());
         let vars = &plan.cases[0].variables;
         assert_eq!(vars.get("fn_name").unwrap(), "validate_write");
         assert_eq!(vars.get("param_names").unwrap(), "root, changed_files");
@@ -1213,8 +1328,8 @@ mod tests {
     #[test]
     fn test_plan_with_type_defaults_generates_param_setup() {
         let contract = sample_result_contract();
-        let type_defaults = sample_type_defaults();
-        let plan = generate_test_plan(&contract, &type_defaults);
+        let grammar = grammar_with_defaults();
+        let plan = generate_test_plan(&contract, &grammar);
         let vars = &plan.cases[0].variables;
 
         let param_setup = vars.get("param_setup").unwrap();
@@ -1255,7 +1370,7 @@ mod tests {
     #[test]
     fn test_render_test_plan_with_templates() {
         let contract = sample_result_contract();
-        let plan = generate_test_plan(&contract, &[]);
+        let plan = generate_test_plan(&contract, &empty_grammar());
 
         let mut templates = HashMap::new();
         templates.insert(
@@ -1272,7 +1387,7 @@ mod tests {
     #[test]
     fn test_render_test_plan_missing_template_uses_default() {
         let contract = sample_option_contract();
-        let plan = generate_test_plan(&contract, &[]);
+        let plan = generate_test_plan(&contract, &empty_grammar());
 
         let mut templates = HashMap::new();
         templates.insert(
@@ -1303,7 +1418,7 @@ mod tests {
         let mut contract = sample_result_contract();
         contract.branches.clear();
         contract.effects.clear();
-        let plan = generate_test_plan(&contract, &[]);
+        let plan = generate_test_plan(&contract, &empty_grammar());
         assert_eq!(plan.cases.len(), 1);
         assert_eq!(plan.cases[0].template_key, "no_panic");
     }
@@ -1318,7 +1433,7 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("items.is_empty()", &params, &[]);
+        let result = infer_setup_from_condition("items.is_empty()", &params, &[], &sample_type_constructors(), "Default::default()");
         assert!(result.is_some(), "should infer setup for is_empty");
         let so = result.unwrap();
         assert!(
@@ -1336,7 +1451,7 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("changed_files.is_empty()", &params, &[]);
+        let result = infer_setup_from_condition("changed_files.is_empty()", &params, &[], &sample_type_constructors(), "Default::default()");
         assert!(result.is_some(), "should infer setup for slice is_empty");
         let so = result.unwrap();
         assert!(
@@ -1354,7 +1469,7 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("!commits.is_empty()", &params, &[]);
+        let result = infer_setup_from_condition("!commits.is_empty()", &params, &[], &sample_type_constructors(), "Default::default()");
         assert!(result.is_some(), "should infer setup for negated is_empty");
         let so = result.unwrap();
         assert!(
@@ -1372,7 +1487,8 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("path doesn't exist", &params, &[]);
+        let result =
+            infer_setup_from_condition("path doesn't exist", &params, &[], &sample_type_constructors(), "Default::default()");
         assert!(result.is_some(), "should infer setup for nonexistent path");
         let so = result.unwrap();
         assert!(
@@ -1390,7 +1506,7 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("config.is_none()", &params, &[]);
+        let result = infer_setup_from_condition("config.is_none()", &params, &[], &sample_type_constructors(), "Default::default()");
         assert!(result.is_some(), "should infer setup for is_none");
         let so = result.unwrap();
         assert!(
@@ -1408,7 +1524,7 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("config.is_some()", &params, &[]);
+        let result = infer_setup_from_condition("config.is_some()", &params, &[], &sample_type_constructors(), "Default::default()");
         assert!(result.is_some(), "should infer setup for is_some");
         let so = result.unwrap();
         assert!(
@@ -1426,7 +1542,7 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("some random condition", &params, &[]);
+        let result = infer_setup_from_condition("some random condition", &params, &[], &sample_type_constructors(), "Default::default()");
         assert!(
             result.is_none(),
             "should return None for unrecognized condition"
@@ -1451,7 +1567,8 @@ mod tests {
             },
         ];
         // Condition only targets items, root should keep its type_default
-        let result = infer_setup_from_condition("items.is_empty()", &params, &type_defaults);
+        let result =
+            infer_setup_from_condition("items.is_empty()", &params, &type_defaults, &sample_type_constructors(), "Default::default()");
         assert!(result.is_some());
         let so = result.unwrap();
         assert!(
@@ -1476,7 +1593,7 @@ mod tests {
             ok_type: "ValidationResult".to_string(),
             err_type: "Error".to_string(),
         };
-        let assertion = infer_assertion(&returns, &return_type, "items.is_empty()");
+        let assertion = resolve_assertion(&returns, &return_type, "items.is_empty()", &sample_assertion_templates());
         assert!(
             assertion.contains("unwrap()"),
             "should unwrap Ok value, got: {}",
@@ -1499,7 +1616,7 @@ mod tests {
             ok_type: "String".to_string(),
             err_type: "Error".to_string(),
         };
-        let assertion = infer_assertion(&returns, &return_type, "path doesn't exist");
+        let assertion = resolve_assertion(&returns, &return_type, "path doesn't exist", &sample_assertion_templates());
         assert!(
             assertion.contains("unwrap_err()"),
             "should unwrap Err, got: {}",
@@ -1522,7 +1639,7 @@ mod tests {
             ok_type: "()".to_string(),
             err_type: "Error".to_string(),
         };
-        let assertion = infer_assertion(&returns, &return_type, "default path");
+        let assertion = resolve_assertion(&returns, &return_type, "default path", &sample_assertion_templates());
         assert!(
             assertion.contains("is_ok()"),
             "should fall back to is_ok(), got: {}",
@@ -1539,7 +1656,7 @@ mod tests {
         let return_type = ReturnShape::OptionType {
             some_type: "Item".to_string(),
         };
-        let assertion = infer_assertion(&returns, &return_type, "key not found");
+        let assertion = resolve_assertion(&returns, &return_type, "key not found", &sample_assertion_templates());
         assert!(
             assertion.contains("is_none()"),
             "should assert is_none(), got: {}",
@@ -1554,7 +1671,7 @@ mod tests {
             value: None,
         };
         let return_type = ReturnShape::Bool;
-        let assertion = infer_assertion(&returns, &return_type, "input is valid");
+        let assertion = resolve_assertion(&returns, &return_type, "input is valid", &sample_assertion_templates());
         assert!(
             assertion.contains("assert!(result"),
             "should assert true, got: {}",
@@ -1576,7 +1693,7 @@ mod tests {
         let return_type = ReturnShape::Collection {
             element_type: "String".to_string(),
         };
-        let assertion = infer_assertion(&returns, &return_type, "input.is_empty()");
+        let assertion = resolve_assertion(&returns, &return_type, "input.is_empty()", &sample_assertion_templates());
         assert!(
             assertion.contains("is_empty()"),
             "should assert emptiness, got: {}",
@@ -1587,8 +1704,8 @@ mod tests {
     #[test]
     fn test_behavioral_plan_overrides_setup_for_is_empty_branch() {
         let contract = sample_result_contract();
-        let type_defaults = sample_type_defaults();
-        let plan = generate_test_plan(&contract, &type_defaults);
+        let grammar = full_grammar();
+        let plan = generate_test_plan(&contract, &grammar);
 
         // First branch: changed_files.is_empty()
         let vars = &plan.cases[0].variables;
@@ -1609,8 +1726,8 @@ mod tests {
     #[test]
     fn test_behavioral_plan_generates_assertion_code() {
         let contract = sample_result_contract();
-        let type_defaults = sample_type_defaults();
-        let plan = generate_test_plan(&contract, &type_defaults);
+        let grammar = full_grammar();
+        let plan = generate_test_plan(&contract, &grammar);
 
         // First branch returns Ok("skipped") — should have rich assertion
         let vars = &plan.cases[0].variables;
@@ -1630,7 +1747,7 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("verbose == true", &params, &[]);
+        let result = infer_setup_from_condition("verbose == true", &params, &[], &sample_type_constructors(), "Default::default()");
         assert!(result.is_some());
         let so = result.unwrap();
         assert!(
@@ -1648,7 +1765,7 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("count == 0", &params, &[]);
+        let result = infer_setup_from_condition("count == 0", &params, &[], &sample_type_constructors(), "Default::default()");
         assert!(result.is_some());
         let so = result.unwrap();
         assert!(
@@ -1666,7 +1783,8 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("name.contains(\"test\")", &params, &[]);
+        let result =
+            infer_setup_from_condition("name.contains(\"test\")", &params, &[], &sample_type_constructors(), "Default::default()");
         assert!(result.is_some());
         let so = result.unwrap();
         assert!(

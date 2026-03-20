@@ -131,6 +131,41 @@ pub struct ContractGrammar {
     /// unmatched types is `Default::default()` (Rust) or language equivalent.
     #[serde(default)]
     pub type_defaults: Vec<TypeDefault>,
+
+    /// Behavioral constructors for condition-specific test inputs.
+    ///
+    /// Maps a `(semantic_hint, type_pattern)` pair to a code expression.
+    /// Core analyzes branch conditions to produce semantic hints like
+    /// `"empty"`, `"non_empty"`, `"nonexistent_path"`, `"none"`, etc.
+    /// The grammar then provides the language-specific code that
+    /// produces a value satisfying that hint for the matched type.
+    ///
+    /// This keeps core language-agnostic: core recognizes *what* the
+    /// condition needs, the grammar provides *how* to express it.
+    #[serde(default)]
+    pub type_constructors: Vec<TypeConstructor>,
+
+    /// Assertion templates for behavioral test assertions.
+    ///
+    /// Maps an assertion key (e.g., `"result_ok_value"`, `"result_err_value"`,
+    /// `"option_none"`, `"bool_true"`) to a template string containing
+    /// variables like `{condition}`, `{expected_value}`.
+    ///
+    /// Core selects the assertion key based on the branch return; the grammar
+    /// provides the language-specific assertion code. This avoids hardcoding
+    /// `unwrap()` or `is_ok()` in core.
+    #[serde(default)]
+    pub assertion_templates: HashMap<String, String>,
+
+    /// Fallback default expression when no type_default or type_constructor
+    /// matches. Language-specific (e.g., `"Default::default()"` for Rust,
+    /// `"null"` for PHP).
+    #[serde(default = "default_fallback_default")]
+    pub fallback_default: String,
+}
+
+fn default_fallback_default() -> String {
+    "Default::default()".to_string()
 }
 
 fn default_return_type_separator() -> String {
@@ -149,6 +184,33 @@ pub struct TypeDefault {
     /// Code expression that produces a valid default value for matched types.
     pub value: String,
     /// Optional extra `use` imports required by this default value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<String>,
+}
+
+/// A behavioral constructor mapping a semantic hint + type pattern to a code expression.
+///
+/// Core produces semantic hints from branch conditions (e.g., `"empty"` from
+/// `items.is_empty()`). The grammar maps each `(hint, type_pattern)` pair to
+/// the language-specific expression that produces a value satisfying that hint.
+///
+/// The `hint` field is matched exactly. The `pattern` field is a regex matched
+/// against the parameter type. First match wins (entries are tried in order).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeConstructor {
+    /// Semantic hint from behavioral inference (e.g., "empty", "non_empty",
+    /// "nonexistent_path", "none", "some_default", "true", "false", "zero",
+    /// "positive", "contains").
+    pub hint: String,
+    /// Regex pattern to match against the parameter type string.
+    pub pattern: String,
+    /// Code expression that produces a value satisfying the hint for this type.
+    /// May contain `{param_name}` which is replaced with the actual param name.
+    pub value: String,
+    /// Optional override for the call argument (e.g., `"{param_name}.path()"` for tempdir).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_arg: Option<String>,
+    /// Optional extra `use` imports required by this value.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub imports: Vec<String>,
 }
