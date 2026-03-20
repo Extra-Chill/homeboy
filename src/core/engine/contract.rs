@@ -240,6 +240,118 @@ pub struct FileContracts {
     pub contracts: Vec<FunctionContract>,
 }
 
+// ── Type definitions ──
+
+/// A type definition extracted from source code (struct, enum, class).
+///
+/// Language-agnostic representation of a type's structure. Used by the test
+/// generator to resolve return types to their fields, enabling field-level
+/// assertions instead of opaque `let _ = inner;` placeholders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeDefinition {
+    /// Type name (e.g., "ValidationResult", "Config").
+    pub name: String,
+    /// Kind: "struct", "enum", "class".
+    pub kind: String,
+    /// File where this type is defined (relative path).
+    pub file: String,
+    /// 1-indexed line number of the definition.
+    pub line: usize,
+    /// Fields/properties of this type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<FieldDef>,
+    /// Whether the type is public.
+    #[serde(default)]
+    pub is_public: bool,
+}
+
+/// A single field/property within a type definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldDef {
+    /// Field name.
+    pub name: String,
+    /// Field type as written in source.
+    #[serde(rename = "type")]
+    pub field_type: String,
+    /// Whether the field is public.
+    #[serde(default)]
+    pub is_public: bool,
+}
+
+/// Parse field definitions from a struct/class source body using a regex pattern.
+///
+/// The `field_pattern` is a regex with two capture groups:
+///   - Group 1: field name
+///   - Group 2: field type
+///
+/// `visibility_pattern` optionally matches a visibility prefix (e.g., `pub`).
+///
+/// This is language-agnostic: the grammar provides the regex patterns.
+pub fn parse_fields_from_source(
+    source: &str,
+    field_pattern: &str,
+    visibility_pattern: Option<&str>,
+) -> Vec<FieldDef> {
+    let field_re = match regex::Regex::new(field_pattern) {
+        Ok(re) => re,
+        Err(_) => return vec![],
+    };
+    let vis_re = visibility_pattern.and_then(|p| regex::Regex::new(p).ok());
+
+    let mut fields = Vec::new();
+    // Skip the first line (struct declaration) and last line (closing brace)
+    let lines: Vec<&str> = source.lines().collect();
+    for line in &lines {
+        let trimmed = line.trim();
+        // Skip empty lines, comments, attributes
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with('{')
+            || trimmed == "}"
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with('*')
+        {
+            continue;
+        }
+        // Skip the struct/class declaration line itself
+        if trimmed.contains("struct ")
+            || trimmed.contains("class ")
+            || trimmed.contains("enum ")
+        {
+            continue;
+        }
+
+        if let Some(caps) = field_re.captures(trimmed) {
+            let name = caps
+                .get(1)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
+            let field_type = caps
+                .get(2)
+                .map(|m| m.as_str().trim_end_matches(',').trim().to_string())
+                .unwrap_or_default();
+
+            if name.is_empty() || field_type.is_empty() {
+                continue;
+            }
+
+            let is_public = vis_re
+                .as_ref()
+                .map(|re| re.is_match(trimmed))
+                .unwrap_or(false);
+
+            fields.push(FieldDef {
+                name,
+                field_type,
+                is_public,
+            });
+        }
+    }
+
+    fields
+}
+
 // ── Extraction API ──
 
 /// Extract function contracts from a source file.

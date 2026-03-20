@@ -162,6 +162,22 @@ pub struct ContractGrammar {
     /// `"null"` for PHP).
     #[serde(default = "default_fallback_default")]
     pub fallback_default: String,
+
+    /// Regex pattern for extracting struct/class field declarations.
+    /// Must have two capture groups: (1) field name, (2) field type.
+    /// Applied to each line inside a struct/class body.
+    ///
+    /// Rust example: `"^\s*(?:pub\s+)?(\w+)\s*:\s*(.+?),?\s*$"`
+    /// PHP example: `"(?:public|protected|private)\s+(?:\?\w+\s+)?(\$\w+)\s*;"`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_pattern: Option<String>,
+
+    /// Regex pattern that identifies public visibility on a field line.
+    /// Used to set `FieldDef.is_public`.
+    ///
+    /// Rust: `"^\s*pub\b"`, PHP: `"^\s*public\b"`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_visibility_pattern: Option<String>,
 }
 
 fn default_fallback_default() -> String {
