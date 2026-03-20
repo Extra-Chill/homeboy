@@ -317,10 +317,7 @@ pub fn parse_fields_from_source(
             continue;
         }
         // Skip the struct/class declaration line itself
-        if trimmed.contains("struct ")
-            || trimmed.contains("class ")
-            || trimmed.contains("enum ")
-        {
+        if trimmed.contains("struct ") || trimmed.contains("class ") || trimmed.contains("enum ") {
             continue;
         }
 

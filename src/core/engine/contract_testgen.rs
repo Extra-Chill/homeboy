@@ -118,9 +118,7 @@ pub(crate) fn generate_test_plan_with_types(
                 let cond_lower = b.condition.to_lowercase();
                 let mut hints_for_branch = HashMap::new();
                 for param in &contract.signature.params {
-                    if let Some(hint) =
-                        infer_hint_for_param(&b.condition, &cond_lower, param)
-                    {
+                    if let Some(hint) = infer_hint_for_param(&b.condition, &cond_lower, param) {
                         hints_for_branch.insert(param.name.clone(), hint);
                     }
                 }
@@ -154,8 +152,7 @@ pub(crate) fn generate_test_plan_with_types(
 
             // Behavioral inference: derive setup overrides from branch condition,
             // with cross-branch complement hints for unmatched params.
-            let complement_hints =
-                build_complement_hints(i, &all_branch_hints);
+            let complement_hints = build_complement_hints(i, &all_branch_hints);
             let setup_override = infer_setup_with_complements(
                 &branch.condition,
                 &contract.signature.params,
@@ -979,7 +976,10 @@ fn enrich_assertion_with_fields(
         assertion[..lpos].rfind('\n').map(|p| p + 1).unwrap_or(0)
     } else {
         // No `let _ =` found, just replace from the TODO line start
-        assertion[..todo_pos].rfind('\n').map(|p| p + 1).unwrap_or(0)
+        assertion[..todo_pos]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0)
     };
 
     let replace_end = assertion[todo_pos..]
@@ -1118,24 +1118,23 @@ fn infer_setup_with_complements(
     let mut all_imports: Vec<String> = Vec::new();
 
     for param in params {
-        let (value_expr, call_arg, imports) =
-            if let Some(hint) = param_hints.get(&param.name) {
-                resolve_constructor(
-                    hint,
-                    &param.name,
-                    &param.param_type,
-                    type_constructors,
-                    type_defaults,
-                    fallback_default,
-                )
-            } else {
-                let (val, call_override, imps) =
-                    resolve_type_default(&param.param_type, type_defaults, fallback_default);
-                let call =
-                    call_override.unwrap_or_else(|| default_call_arg(&param.name, &param.param_type));
-                let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
-                (val, call, imp_strs)
-            };
+        let (value_expr, call_arg, imports) = if let Some(hint) = param_hints.get(&param.name) {
+            resolve_constructor(
+                hint,
+                &param.name,
+                &param.param_type,
+                type_constructors,
+                type_defaults,
+                fallback_default,
+            )
+        } else {
+            let (val, call_override, imps) =
+                resolve_type_default(&param.param_type, type_defaults, fallback_default);
+            let call =
+                call_override.unwrap_or_else(|| default_call_arg(&param.name, &param.param_type));
+            let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
+            (val, call, imp_strs)
+        };
 
         setup_lines.push(format!("        let {} = {};", param.name, value_expr));
         call_args.push(call_arg);
@@ -1247,6 +1246,114 @@ fn build_type_registry(
     registry
 }
 
+/// Build a project-wide type registry by scanning all source files.
+///
+/// Walks the project tree via `codebase_scan`, extracts struct/class
+/// definitions from each file using grammar items, and parses their fields.
+/// Returns a map from type name to `TypeDefinition` spanning the entire project.
+///
+/// This enables cross-file type resolution: when `validate_write()` returns
+/// `Result<ValidationResult, Error>` and `ValidationResult` is defined in a
+/// different file, the registry still finds it.
+pub fn build_project_type_registry(
+    root: &std::path::Path,
+    _grammar: &crate::extension::grammar::Grammar,
+    contract_grammar: &ContractGrammar,
+) -> HashMap<String, TypeDefinition> {
+    let mut registry = HashMap::new();
+
+    let field_pattern = match &contract_grammar.field_pattern {
+        Some(p) => p.clone(),
+        None => return registry,
+    };
+
+    // Determine file extensions to scan from the grammar
+    let scan_config = crate::engine::codebase_scan::ScanConfig {
+        extensions: crate::engine::codebase_scan::ExtensionFilter::All,
+        skip_hidden: true,
+        ..Default::default()
+    };
+
+    let files = crate::engine::codebase_scan::walk_files(root, &scan_config);
+
+    for file_path in &files {
+        let content = match std::fs::read_to_string(file_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let rel_path = file_path
+            .strip_prefix(root)
+            .unwrap_or(file_path)
+            .to_string_lossy()
+            .to_string();
+
+        // Check if this file's extension has a matching grammar
+        let ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        let file_grammar = match crate::code_audit::core_fingerprint::load_grammar_for_ext(ext) {
+            Some(g) => g,
+            None => continue,
+        };
+
+        // Use the file's own grammar for item extraction (handles multi-language projects)
+        let items = crate::extension::grammar_items::parse_items(&content, &file_grammar);
+        let symbols = crate::extension::grammar::extract(&content, &file_grammar);
+
+        let mut item_source: HashMap<String, String> = HashMap::new();
+        for item in &items {
+            if item.kind == "struct" || item.kind == "enum" || item.kind == "class" {
+                item_source.insert(item.name.clone(), item.source.clone());
+            }
+        }
+
+        for sym in &symbols {
+            if sym.concept != "struct" && sym.concept != "class" {
+                continue;
+            }
+            let name: String = match sym.name() {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let source = match item_source.get(&name) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // Use the contract_grammar's field pattern (from the target language)
+            let fields = parse_fields_from_source(
+                source,
+                &field_pattern,
+                contract_grammar.field_visibility_pattern.as_deref(),
+                contract_grammar.field_name_group,
+                contract_grammar.field_type_group,
+            );
+
+            let is_public = sym
+                .captures
+                .get("visibility")
+                .map(|v: &String| v.contains("pub"))
+                .unwrap_or(false);
+
+            registry.insert(
+                name.clone(),
+                TypeDefinition {
+                    name,
+                    kind: sym.concept.clone(),
+                    file: rel_path.clone(),
+                    line: sym.line,
+                    fields,
+                    is_public,
+                },
+            );
+        }
+    }
+
+    registry
+}
+
 // ── End-to-end API ──
 
 /// Generated test output with source code and metadata.
@@ -1264,12 +1371,23 @@ pub struct GeneratedTestOutput {
 /// This is the full pipeline: grammar → contracts → test plans → rendered source.
 /// Returns `None` if the grammar has no contract or test_templates section.
 ///
-/// When the grammar has `field_pattern`, struct definitions in the file are
-/// parsed into a type registry, enabling field-level assertions in generated tests.
+/// When `project_type_registry` is provided, return types from any file in the
+/// project can be resolved to their struct fields. When `None`, falls back to
+/// a per-file registry (only finds types defined in the same file).
 pub fn generate_tests_for_file(
     content: &str,
     file_path: &str,
     grammar: &crate::extension::grammar::Grammar,
+) -> Option<GeneratedTestOutput> {
+    generate_tests_for_file_with_types(content, file_path, grammar, None)
+}
+
+/// Generate test source with access to a project-wide type registry.
+pub fn generate_tests_for_file_with_types(
+    content: &str,
+    file_path: &str,
+    grammar: &crate::extension::grammar::Grammar,
+    project_type_registry: Option<&HashMap<String, TypeDefinition>>,
 ) -> Option<GeneratedTestOutput> {
     let contract_grammar = grammar.contract.as_ref()?;
 
@@ -1286,8 +1404,15 @@ pub fn generate_tests_for_file(
         return None;
     }
 
-    // Build type registry from struct definitions in this file
-    let type_registry = build_type_registry(content, file_path, grammar, contract_grammar);
+    // Use project-wide registry if available, otherwise build per-file
+    let local_registry;
+    let type_registry = match project_type_registry {
+        Some(reg) => reg,
+        None => {
+            local_registry = build_type_registry(content, file_path, grammar, contract_grammar);
+            &local_registry
+        }
+    };
 
     // Generate and render test plans
     let mut test_source = String::new();
@@ -1303,7 +1428,7 @@ pub fn generate_tests_for_file(
             continue;
         }
 
-        let plan = generate_test_plan_with_types(contract, contract_grammar, &type_registry);
+        let plan = generate_test_plan_with_types(contract, contract_grammar, type_registry);
         if plan.cases.is_empty() {
             continue;
         }
@@ -1349,6 +1474,17 @@ pub fn generate_tests_for_methods(
     grammar: &crate::extension::grammar::Grammar,
     method_names: &[&str],
 ) -> Option<GeneratedTestOutput> {
+    generate_tests_for_methods_with_types(content, file_path, grammar, method_names, None)
+}
+
+/// Generate tests for specific methods with access to a project-wide type registry.
+pub fn generate_tests_for_methods_with_types(
+    content: &str,
+    file_path: &str,
+    grammar: &crate::extension::grammar::Grammar,
+    method_names: &[&str],
+    project_type_registry: Option<&HashMap<String, TypeDefinition>>,
+) -> Option<GeneratedTestOutput> {
     let contract_grammar = grammar.contract.as_ref()?;
 
     if contract_grammar.test_templates.is_empty() {
@@ -1362,7 +1498,14 @@ pub fn generate_tests_for_methods(
         return None;
     }
 
-    let type_registry = build_type_registry(content, file_path, grammar, contract_grammar);
+    let local_registry;
+    let type_registry = match project_type_registry {
+        Some(reg) => reg,
+        None => {
+            local_registry = build_type_registry(content, file_path, grammar, contract_grammar);
+            &local_registry
+        }
+    };
 
     let mut test_source = String::new();
     let mut all_extra_imports: Vec<String> = Vec::new();
@@ -1374,7 +1517,7 @@ pub fn generate_tests_for_methods(
             continue;
         }
 
-        let plan = generate_test_plan_with_types(contract, contract_grammar, &type_registry);
+        let plan = generate_test_plan_with_types(contract, contract_grammar, type_registry);
         if plan.cases.is_empty() {
             continue;
         }
@@ -2370,7 +2513,7 @@ mod tests {
         assert!(
             so.setup_lines.contains("\"test\""),
             "should use the literal from contains(), got: {}",
-             so.setup_lines
+            so.setup_lines
         );
     }
 
@@ -2468,7 +2611,12 @@ class AbilityResult {
             1, // type_group (PHP has type in group 1)
         );
 
-        assert_eq!(fields.len(), 5, "should find 5 PHP properties, got {:?}", fields);
+        assert_eq!(
+            fields.len(),
+            5,
+            "should find 5 PHP properties, got {:?}",
+            fields
+        );
         assert_eq!(fields[0].name, "status");
         assert_eq!(fields[0].field_type, "string");
         assert!(fields[0].is_public, "status should be public");
@@ -2476,7 +2624,10 @@ class AbilityResult {
         assert_eq!(fields[1].field_type, "?array");
         assert_eq!(fields[2].name, "code");
         assert_eq!(fields[2].field_type, "int");
-        assert!(!fields[2].is_public, "code should not be public (protected)");
+        assert!(
+            !fields[2].is_public,
+            "code should not be public (protected)"
+        );
         assert_eq!(fields[4].name, "success");
         assert!(fields[4].is_public, "success should be public");
     }

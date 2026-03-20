@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::code_audit::core_fingerprint::load_grammar_for_ext;
 use crate::code_audit::{AuditFinding, CodeAuditResult};
 use crate::core::engine::contract_testgen::{
-    generate_tests_for_file, generate_tests_for_methods, GeneratedTestOutput,
+    generate_tests_for_file_with_types, generate_tests_for_methods_with_types, GeneratedTestOutput,
 };
 use crate::core::engine::symbol_graph::module_path_from_file;
 use crate::core::refactor::auto::{
@@ -39,6 +39,10 @@ pub(crate) fn generate_test_file_fixes(
     if missing_test_findings.is_empty() {
         return;
     }
+
+    // Build a project-wide type registry once for cross-file struct resolution.
+    // This enables field-level assertions when return types are defined in other files.
+    let project_registry = build_project_registry_for_findings(&missing_test_findings, root);
 
     for finding in &missing_test_findings {
         let source_file = &finding.file;
@@ -91,8 +95,13 @@ pub(crate) fn generate_test_file_fixes(
             }
         };
 
-        // Generate tests
-        let generated = match generate_tests_for_file(&content, source_file, &grammar) {
+        // Generate tests with cross-file type resolution
+        let generated = match generate_tests_for_file_with_types(
+            &content,
+            source_file,
+            &grammar,
+            Some(&project_registry),
+        ) {
             Some(g) => g,
             None => {
                 skipped.push(SkippedFile {
@@ -192,6 +201,14 @@ pub(crate) fn generate_test_method_fixes(
         return;
     }
 
+    // Build project registry once for all method findings
+    let method_findings: Vec<_> = result
+        .findings
+        .iter()
+        .filter(|f| f.kind == AuditFinding::MissingTestMethod)
+        .collect();
+    let project_registry = build_project_registry_for_findings(&method_findings, root);
+
     for (source_file, missing_methods) in &by_source_file {
         // Determine file extension and load grammar
         let ext = match Path::new(source_file).extension().and_then(|e| e.to_str()) {
@@ -226,22 +243,27 @@ pub(crate) fn generate_test_method_fixes(
             }
         };
 
-        // Generate tests for only the missing methods
+        // Generate tests for only the missing methods with cross-file type resolution
         let method_refs: Vec<&str> = missing_methods.iter().map(|s| s.as_str()).collect();
-        let generated =
-            match generate_tests_for_methods(&content, source_file, &grammar, &method_refs) {
-                Some(g) => g,
-                None => {
-                    skipped.push(SkippedFile {
-                        file: source_file.clone(),
-                        reason: format!(
-                            "Could not generate tests for methods: {}",
-                            missing_methods.join(", ")
-                        ),
-                    });
-                    continue;
-                }
-            };
+        let generated = match generate_tests_for_methods_with_types(
+            &content,
+            source_file,
+            &grammar,
+            &method_refs,
+            Some(&project_registry),
+        ) {
+            Some(g) => g,
+            None => {
+                skipped.push(SkippedFile {
+                    file: source_file.clone(),
+                    reason: format!(
+                        "Could not generate tests for methods: {}",
+                        missing_methods.join(", ")
+                    ),
+                });
+                continue;
+            }
+        };
 
         // Determine target file and build insertion code
         let (target_file, append_code) = match &test_location {
@@ -413,6 +435,48 @@ fn extract_test_path_from_description(description: &str) -> Option<String> {
     let after_quote = &description[start + "expected '".len()..];
     let end = after_quote.find('\'')?;
     Some(after_quote[..end].to_string())
+}
+
+/// Build a project-wide type registry for a set of audit findings.
+///
+/// Determines the dominant file extension from the findings, loads the
+/// corresponding grammar, and scans the project for all type definitions.
+/// This is called once per autofix batch to avoid scanning the project tree
+/// per-finding.
+fn build_project_registry_for_findings(
+    findings: &[&crate::code_audit::Finding],
+    root: &Path,
+) -> HashMap<String, crate::core::engine::contract::TypeDefinition> {
+    let ext = findings
+        .iter()
+        .filter_map(|f| {
+            Path::new(&f.file)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_string())
+        })
+        .next();
+
+    let ext = match ext {
+        Some(e) => e,
+        None => return HashMap::new(),
+    };
+
+    let grammar = match load_grammar_for_ext(&ext) {
+        Some(g) => g,
+        None => return HashMap::new(),
+    };
+
+    let contract_grammar = match grammar.contract.as_ref() {
+        Some(cg) => cg,
+        None => return HashMap::new(),
+    };
+
+    crate::core::engine::contract_testgen::build_project_type_registry(
+        root,
+        &grammar,
+        contract_grammar,
+    )
 }
 
 #[cfg(test)]

@@ -258,7 +258,11 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
         // (especially lint) see properly formatted code. Without this, auto-generated
         // test files cause `cargo fmt --check` to fail during the lint stage.
         if stage.summary.files_modified > 0 {
-            format_sandbox(working_root.path(), &stage.summary.changed_files, &mut warnings);
+            format_sandbox(
+                working_root.path(),
+                &stage.summary.changed_files,
+                &mut warnings,
+            );
         }
 
         accumulator.extend(stage.fix_results.clone());
@@ -461,10 +465,7 @@ fn format_sandbox(sandbox_root: &Path, changed_files: &[String], warnings: &mut 
         return;
     }
 
-    let abs_changed: Vec<PathBuf> = changed_files
-        .iter()
-        .map(|f| sandbox_root.join(f))
-        .collect();
+    let abs_changed: Vec<PathBuf> = changed_files.iter().map(|f| sandbox_root.join(f)).collect();
 
     match crate::engine::format_write::format_after_write(sandbox_root, &abs_changed) {
         Ok(fmt) => {
