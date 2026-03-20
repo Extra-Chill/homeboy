@@ -61,11 +61,9 @@ jobs:
 
       - name: Dry-run release check
         id: release-check
-        uses: Extra-Chill/homeboy-action@v1
+        uses: Extra-Chill/homeboy-action@v2
         with:
           source: '.'
-          extension: rust
-          component: homeboy
           commands: release
           release-dry-run: 'true'
 
@@ -160,15 +158,10 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           binary-path: .homeboy-bin/homeboy
-          extension: rust
-          component: homeboy
           commands: audit
-          auto-issue: 'true'
-          autofix: 'true'
-          autofix-commands: 'audit --fix --write'
           autofix-open-pr: 'true'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
@@ -200,15 +193,10 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           binary-path: .homeboy-bin/homeboy
-          extension: rust
-          component: homeboy
           commands: lint
-          autofix: 'true'
-          autofix-commands: 'lint --fix'
-          autofix-open-pr: 'true'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
@@ -239,13 +227,10 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           binary-path: .homeboy-bin/homeboy
-          extension: rust
-          component: homeboy
           commands: test
-          autofix: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   gate-refactor:
@@ -276,15 +261,11 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           binary-path: .homeboy-bin/homeboy
-          extension: rust
-          component: homeboy
           commands: 'refactor --from all'
-          autofix: 'true'
           autofix-mode: 'always'
-          autofix-open-pr: 'true'
           autofix-commands: 'refactor --from all --write'
           autofix-max-commits: '3'
           comment-section-title: 'Auto-refactor'
@@ -324,12 +305,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         id: release
         with:
           source: '.'
-          extension: rust
-          component: homeboy
           commands: release
           release-dry-run: ${{ inputs.dry-run || 'false' }}
           app-token: ${{ steps.app-token.outputs.token || '' }}

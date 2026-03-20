@@ -84,13 +84,10 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           binary-path: .homeboy-bin/homeboy
-          extension: rust
-          component: homeboy
           commands: audit
-          autofix: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Stage 2: Lint ──
@@ -119,13 +116,10 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           binary-path: .homeboy-bin/homeboy
-          extension: rust
-          component: homeboy
           commands: lint
-          autofix: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Stage 3: Test ──
@@ -154,13 +148,10 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           binary-path: .homeboy-bin/homeboy
-          extension: rust
-          component: homeboy
           commands: test
-          autofix: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Stage 4: Auto-refactor ──
@@ -191,15 +182,12 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           binary-path: .homeboy-bin/homeboy
-          extension: rust
-          component: homeboy
           commands: 'refactor --from all'
           autofix: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
           autofix-mode: 'on-failure'
-          autofix-commands: 'refactor --from all --write'
           autofix-max-commits: '3'
           comment-section-title: 'Auto-refactor'
           app-token: ${{ steps.app-token.outputs.token || '' }}
