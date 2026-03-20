@@ -358,6 +358,12 @@ imports = []
 
 fallback_default = 'Default::default()'
 
+# Struct field extraction — enables field-level assertions in generated tests.
+# field_pattern: regex with two captures: (1) field name, (2) field type
+# field_visibility_pattern: regex that matches public field declarations
+field_pattern = '^\s*(?:pub(?:\(crate\))?\s+)?(\w+)\s*:\s*(.+?),?\s*$'
+field_visibility_pattern = '^\s*pub\b'
+
 # ── empty: produce a value where .is_empty() == true ──
 [[contract.type_constructors]]
 hint = 'empty'

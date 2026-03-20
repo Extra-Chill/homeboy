@@ -445,6 +445,18 @@ imports = []
 
 fallback_default = 'null'
 
+# Class property extraction — enables field-level assertions in generated tests.
+# Matches PHP property declarations like:
+#   public string $name;
+#   protected ?int $count = 0;
+#   private array $items = [];
+# PHP has type before name: capture group 1 = type, group 2 = name
+# field_name_group / field_type_group tell core which group is which
+field_pattern = '^\s*(?:public|protected|private)\s+(?:readonly\s+)?(\??\w+)\s+\$(\w+)'
+field_name_group = 2
+field_type_group = 1
+field_visibility_pattern = '^\s*public\b'
+
 # ── empty: produce a value where empty($x) == true ──
 [[contract.type_constructors]]
 hint = 'empty'
