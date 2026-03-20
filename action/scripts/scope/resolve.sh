@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 
-# Unified scope resolver — replaces determine-pr-base-ref.sh + resolve-test-scope.sh.
-# Runs once per action invocation, detects execution context, computes all scope state.
+# Unified scope resolver — detects execution context and computes scope state.
+#
+# v2: Scope is always context-driven. PRs use changed-file scope automatically.
+# Non-PR events always use full scope. No user input needed.
 #
 # Inputs (env vars):
 #   GITHUB_EVENT_NAME  — pull_request, schedule, workflow_dispatch, push
 #   BASE_SHA           — PR base commit (from github.event.pull_request.base.sha)
-#   SCOPE_INPUT        — unified scope input: "changed" (default) or "full"
 #   PR_HEAD_REPO       — full_name of PR head repo (fork detection)
 #   GITHUB_REPOSITORY  — full_name of the base repo
 #
@@ -15,13 +16,8 @@
 #   SCOPE_BASE_REF     — merge base SHA (empty for non-PR or full scope)
 #   SCOPE_MODE         — changed | full
 #   SCOPE_IS_FORK      — true | false
-#
-# Backward compat (GITHUB_ENV, one release cycle):
-#   HOMEBOY_CHANGED_SINCE — same as SCOPE_BASE_REF
 
 set -euo pipefail
-
-SCOPE_INPUT="${SCOPE_INPUT:-changed}"
 
 # ── Step 1: Determine execution context ──
 
@@ -59,10 +55,7 @@ SCOPE_BASE_REF=""
 SCOPE_MODE="full"
 
 if [ "${SCOPE_CONTEXT}" = "pr" ]; then
-  if [ "${SCOPE_INPUT}" = "full" ]; then
-    SCOPE_MODE="full"
-    echo "Scope forced to full by input"
-  elif [ -n "${BASE_SHA:-}" ]; then
+  if [ -n "${BASE_SHA:-}" ]; then
     # Fetch enough ancestry for three-dot diff (base...HEAD) to find the merge base.
     # GitHub's default checkout is --depth=1 (shallow), which only has the tip commits.
     echo "Fetching base ancestry for scoped diffs (${BASE_SHA:0:8})..."
@@ -109,8 +102,5 @@ echo "scope-context=${SCOPE_CONTEXT}" >> "${GITHUB_OUTPUT}"
 echo "scope-base-ref=${SCOPE_BASE_REF}" >> "${GITHUB_OUTPUT}"
 echo "scope-mode=${SCOPE_MODE}" >> "${GITHUB_OUTPUT}"
 echo "scope-is-fork=${SCOPE_IS_FORK}" >> "${GITHUB_OUTPUT}"
-
-# Backward compat: HOMEBOY_CHANGED_SINCE (consumed by older workflow files)
-echo "HOMEBOY_CHANGED_SINCE=${SCOPE_BASE_REF}" >> "${GITHUB_ENV}"
 
 echo "Scope resolved: context=${SCOPE_CONTEXT} mode=${SCOPE_MODE} fork=${SCOPE_IS_FORK} base_ref=${SCOPE_BASE_REF:-(none)}"

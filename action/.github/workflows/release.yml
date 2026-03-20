@@ -4,7 +4,7 @@
 # conventional commits since the last tag. If found:
 #   1. Version bump + changelog generation
 #   2. Tag + push
-#   3. Post-release hook moves the floating v1 tag
+#   3. Post-release hook moves the floating v2 tag
 #
 # No binary builds, no extensions needed — homeboy reads homeboy.json
 # directly for version targets and hooks.
@@ -53,9 +53,8 @@ jobs:
 
       - name: Dry-run release check
         id: release-check
-        uses: Extra-Chill/homeboy-action@v1
+        uses: Extra-Chill/homeboy-action@v2
         with:
-          component: homeboy-action
           commands: release
           release-dry-run: 'true'
 
@@ -104,10 +103,9 @@ jobs:
           persist-credentials: false
           token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         id: release
         with:
-          component: homeboy-action
           commands: release
           release-dry-run: ${{ inputs.dry-run || 'false' }}
           app-token: ${{ steps.app-token.outputs.token || '' }}

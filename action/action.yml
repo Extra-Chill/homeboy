@@ -1,5 +1,5 @@
 name: 'Homeboy'
-description: 'Run Homeboy lint, test, audit, and release commands in CI. Works with any Homeboy extension.'
+description: 'Convention-driven CI with Homeboy. Reads homeboy.json for project config, infers commands from event context, auto-sets up the environment.'
 author: 'Extra Chill'
 
 branding:
@@ -7,139 +7,138 @@ branding:
   color: 'blue'
 
 inputs:
+  # ── Binary acquisition (pick one, or let it download latest) ──
   version:
-    description: 'Homeboy version to install (e.g. "0.52.0", "latest"). Ignored when source is set.'
+    description: 'Homeboy version to install (e.g. "0.52.0", "latest"). Ignored when source or binary-path is set.'
     required: false
     default: 'latest'
   source:
-    description: 'Path to build homeboy from source (e.g. "."). Falls back to release binary on build failure. Ignored when binary-path is set.'
+    description: 'Path to build homeboy from source (e.g. "."). Falls back to release binary on build failure.'
     required: false
     default: ''
   binary-path:
-    description: 'Path to a pre-built homeboy binary. Skips source build and release download. Use with build-once CI patterns where a prior job uploads the binary as an artifact.'
+    description: 'Path to a pre-built homeboy binary. Skips source build and release download.'
     required: false
     default: ''
   rust-toolchain:
-    description: 'Rust toolchain for source builds (default: stable). Ignored when source is empty.'
+    description: 'Rust toolchain for source builds (default: stable).'
     required: false
     default: 'stable'
+
+  # ── Extension ──
   extension:
-    description: 'Extension ID to install (e.g. "wordpress", "rust", "node")'
+    description: 'Extension ID override. Auto-inferred from homeboy.json extensions if not set.'
     required: false
     default: ''
   extension-source:
-    description: 'Git URL or path to install the extension from'
+    description: 'Git URL or path to install the extension from.'
     required: false
     default: 'https://github.com/Extra-Chill/homeboy-extensions'
+
+  # ── Commands ──
   commands:
-    description: 'Comma-separated list of commands to run (e.g. "audit,lint,test"). Commands are automatically ordered: audit → lint → test, regardless of input order.'
+    description: 'Override commands to run. If empty, inferred from event context: PR/push/manual → audit,lint,test; cron → release.'
     required: false
-    default: 'lint,test'
+    default: ''
   component:
-    description: 'Component name (auto-detected from repo name if not specified)'
+    description: 'Component name override. Auto-detected from homeboy.json if not set.'
     required: false
     default: ''
   args:
-    description: 'Additional arguments to pass to each command (e.g. "--skip-lint", "--errors-only")'
+    description: 'Additional arguments to pass to each command.'
     required: false
     default: ''
-  settings:
-    description: 'Deprecated: use homeboy.json for extension settings and project config'
+
+  # ── Environment setup ──
+  auto-setup:
+    description: 'Auto-install PHP/Composer/Node dependencies based on extension type. Set false to handle setup yourself.'
     required: false
-    default: ''
+    default: 'true'
   php-version:
-    description: 'PHP version to set up (skipped if empty — use with shivammathur/setup-php separately)'
+    description: 'PHP version override. Auto-detected from homeboy.json or composer.json if not set.'
     required: false
     default: ''
   node-version:
-    description: 'Node.js version to set up (skipped if empty — use with actions/setup-node separately)'
+    description: 'Node.js version override. Auto-detected from homeboy.json or package.json if not set.'
     required: false
     default: ''
-  scope:
-    description: 'Execution scope: "changed" (default for PRs — scope to affected files) or "full" (entire codebase). Non-PR events always use full regardless of this setting.'
-    required: false
-    default: 'changed'
-  lint-changed-only:
-    description: 'Deprecated: use "scope" input instead. Kept for backward compatibility.'
-    required: false
-    default: 'true'
-  test-scope:
-    description: 'Deprecated: use "scope" input instead. Kept for backward compatibility.'
-    required: false
-    default: 'changed'
-  auto-issue:
-    description: 'Automatically file a GitHub issue on non-PR failures (default: false)'
-    required: false
-    default: 'false'
+
+  # ── Autofix ──
   autofix:
-    description: 'If true, attempt safe autofixes, commit, push, and re-run commands'
+    description: 'Override autofix behavior. Default: auto-enabled when app-token is provided.'
     required: false
-    default: 'false'
+    default: ''
   autofix-mode:
-    description: 'When to run autofix: "on-failure" (only when commands fail) or "always" (every run, for baseline auto-ratchet)'
+    description: 'When to run autofix: "on-failure" (default) or "always" (for baseline auto-ratchet).'
     required: false
     default: 'on-failure'
   autofix-open-pr:
-    description: 'If true, non-PR failures can open an autofix PR when rerun passes after fixes'
+    description: 'Override non-PR autofix PR creation. Default: auto-enabled when app-token is provided on non-PR events.'
     required: false
-    default: 'false'
+    default: ''
   autofix-max-commits:
-    description: 'Maximum autofix commits allowed per branch before stopping (loop safety)'
+    description: 'Maximum autofix commits per branch (loop safety).'
     required: false
     default: '2'
   autofix-commands:
-    description: 'Comma-separated autofix commands to run when autofix is enabled (e.g. "lint --fix,test --fix")'
+    description: 'Override autofix commands (e.g. "lint --fix,audit --fix --write").'
     required: false
     default: ''
   autofix-label:
-    description: 'Optional PR label required to allow autofix (e.g. "autofix")'
+    description: 'PR label required to allow autofix.'
     required: false
     default: ''
+
+  # ── GitHub integration ──
   app-token:
-    description: 'GitHub App token for autofix pushes. Pushes from a GitHub App trigger workflow re-runs (GITHUB_TOKEN pushes do not). Generate with actions/create-github-app-token.'
+    description: 'GitHub App token. Enables autofix pushes, auto-issue filing, and workflow re-triggers. Generate with actions/create-github-app-token.'
     required: false
     default: ''
+  auto-issue:
+    description: 'Override auto-issue filing. Default: auto-enabled on non-PR events.'
+    required: false
+    default: ''
+
+  # ── PR comments ──
   comment-key:
-    description: 'Optional shared PR comment key. Defaults to workflow + component so separate jobs aggregate into one comment.'
+    description: 'Shared PR comment key. Defaults to workflow + component.'
     required: false
     default: ''
   comment-section-key:
-    description: 'Optional section key within the shared PR comment. Defaults to the single command or current job id.'
+    description: 'Section key within the shared PR comment.'
     required: false
     default: ''
   comment-section-title:
-    description: 'Optional section title within the shared PR comment. Defaults to a humanized command or job id.'
+    description: 'Section title within the shared PR comment.'
     required: false
     default: ''
+
+  # ── Release ──
   release-dry-run:
-    description: 'If true, preview the release without making changes'
+    description: 'Preview the release without making changes.'
     required: false
     default: 'false'
   release-branch:
-    description: 'Branch that releases are allowed from (default: main)'
+    description: 'Branch that releases are allowed from.'
     required: false
     default: 'main'
-  release-skip-changelog:
-    description: 'Deprecated: changelog generation is now handled by homeboy core. This input is ignored.'
-    required: false
-    default: 'false'
 
 outputs:
   results:
     description: 'JSON object with pass/fail results for each command'
     value: ${{ steps.select-results.outputs.results }}
   binary-source:
-    description: 'How the binary was obtained: "source", "fallback", or "release"'
+    description: 'How the binary was obtained: "prebuilt", "source", "fallback", or "release"'
     value: ${{ steps.resolve-binary.outputs.binary-source }}
+  scope-context:
+    description: 'Execution context: "pr", "push", "cron", or "manual"'
+    value: ${{ steps.resolve-scope.outputs.scope-context }}
   scope-effective:
     description: 'Effective execution scope: "changed" or "full"'
     value: ${{ steps.resolve-scope.outputs.scope-mode }}
   scope-is-fork:
     description: 'Whether the PR is from a fork (true/false)'
     value: ${{ steps.resolve-scope.outputs.scope-is-fork }}
-  test-scope-effective:
-    description: 'Deprecated: use scope-effective instead. Effective test scope used by the action (full or changed)'
-    value: ${{ steps.resolve-scope.outputs.scope-mode }}
   released:
     description: 'Whether a release was created (true/false)'
     value: ${{ steps.release.outputs.released }}
@@ -156,20 +155,57 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    # ── Phase 1: Read project config ──
+
+    - name: Read portable config
+      id: read-config
+      shell: bash
+      env:
+        EXTENSION_INPUT: ${{ inputs.extension }}
+        PHP_INPUT: ${{ inputs.php-version }}
+        NODE_INPUT: ${{ inputs.node-version }}
+      run: bash ${{ github.action_path }}/scripts/setup/read-portable-config.sh
+
+    # ── Phase 2: Resolve execution context ──
+
+    - name: Resolve execution scope
+      id: resolve-scope
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      run: bash ${{ github.action_path }}/scripts/scope/resolve.sh
+
+    - name: Resolve commands
+      id: resolve-commands
+      shell: bash
+      env:
+        COMMANDS_INPUT: ${{ inputs.commands }}
+      run: bash ${{ github.action_path }}/scripts/core/resolve-commands.sh
+
+    # ── Phase 3: Environment setup ──
+
     - name: Setup PHP
-      if: inputs.php-version != ''
+      if: steps.read-config.outputs.portable-php != ''
       uses: shivammathur/setup-php@v2
       with:
-        php-version: ${{ inputs.php-version }}
+        php-version: ${{ steps.read-config.outputs.portable-php }}
         extensions: mbstring, intl, pdo_sqlite, mysqli
         tools: composer:v2
         coverage: none
 
     - name: Setup Node.js
-      if: inputs.node-version != ''
+      if: steps.read-config.outputs.portable-node != ''
       uses: actions/setup-node@v4
       with:
-        node-version: ${{ inputs.node-version }}
+        node-version: ${{ steps.read-config.outputs.portable-node }}
+
+    - name: Auto-setup environment
+      if: inputs.auto-setup == 'true'
+      shell: bash
+      run: bash ${{ github.action_path }}/scripts/setup/auto-setup-environment.sh
+
+    # ── Phase 4: Install Homeboy ──
 
     - name: Install pre-built binary
       id: install-prebuilt
@@ -227,7 +263,7 @@ runs:
         path: |
           /usr/local/bin/homeboy
           ~/.config/homeboy/extensions/
-        key: homeboy-${{ steps.resolve-version.outputs.resolved-version }}-${{ inputs.extension }}-${{ runner.os }}-${{ runner.arch }}
+        key: homeboy-${{ steps.resolve-version.outputs.resolved-version }}-${{ steps.read-config.outputs.portable-extension }}-${{ runner.os }}-${{ runner.arch }}
 
     - name: Install Homeboy
       if: inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true') && steps.cache-homeboy.outputs.cache-hit != 'true'
@@ -247,53 +283,49 @@ runs:
       run: bash ${{ github.action_path }}/scripts/setup/resolve-binary-source.sh
 
     - name: Install extension
-      if: inputs.extension != '' && (inputs.binary-path != '' || steps.cache-homeboy.outputs.cache-hit != 'true' || steps.source-build.outputs.built == 'true')
+      if: steps.read-config.outputs.portable-extension != '' && (inputs.binary-path != '' || steps.cache-homeboy.outputs.cache-hit != 'true' || steps.source-build.outputs.built == 'true')
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        EXTENSION_ID: ${{ inputs.extension }}
+        EXTENSION_ID: ${{ steps.read-config.outputs.portable-extension }}
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
       run: bash ${{ github.action_path }}/scripts/setup/install-extension.sh
 
     - name: Capture tooling metadata
       shell: bash
       env:
-        EXTENSION_ID: ${{ inputs.extension }}
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
         ACTION_REF: ${{ github.action_ref }}
         ACTION_REPOSITORY: ${{ github.action_repository }}
       run: bash ${{ github.action_path }}/scripts/setup/capture-tooling-metadata.sh
 
-    - name: Verify portable config
-      shell: bash
-      run: bash ${{ github.action_path }}/scripts/setup/verify-portable-config.sh
-
-    - name: Resolve execution scope
-      id: resolve-scope
-      shell: bash
-      env:
-        BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        SCOPE_INPUT: ${{ inputs.scope }}
-        PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-      run: bash ${{ github.action_path }}/scripts/scope/resolve.sh
+    # ── Phase 5: Run commands ──
 
     - name: Run Homeboy commands
       id: run-commands
       continue-on-error: true
       shell: bash
       env:
-        COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
         RUN_GROUP_PREFIX: homeboy
       run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
 
+    # ── Phase 6: Autofix ──
+    # Autofix defaults: enabled when app-token is provided.
+    # Explicit input overrides the default.
+
     - name: Apply autofix commit
       id: autofix-commit
-      if: always() && github.event_name == 'pull_request' && inputs.autofix == 'true' && steps.run-commands.outputs.results != '' && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
+      if: |
+        always()
+        && github.event_name == 'pull_request'
+        && steps.run-commands.outputs.results != ''
+        && (inputs.autofix == 'true' || (inputs.autofix == '' && inputs.app-token != ''))
+        && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
       shell: bash
       env:
-        COMMANDS: ${{ inputs.commands }}
+        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
@@ -307,10 +339,16 @@ runs:
 
     - name: Prepare non-PR autofix branch
       id: autofix-prepare-nonpr
-      if: always() && github.event_name != 'pull_request' && inputs.autofix == 'true' && inputs.autofix-open-pr == 'true' && steps.run-commands.outputs.results != '' && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
+      if: |
+        always()
+        && github.event_name != 'pull_request'
+        && steps.run-commands.outputs.results != ''
+        && (inputs.autofix == 'true' || (inputs.autofix == '' && inputs.app-token != ''))
+        && (inputs.autofix-open-pr == 'true' || (inputs.autofix-open-pr == '' && inputs.app-token != ''))
+        && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
       shell: bash
       env:
-        COMMANDS: ${{ inputs.commands }}
+        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
@@ -324,7 +362,6 @@ runs:
       if: (github.event_name == 'pull_request' && steps.autofix-commit.outputs.committed == 'true') || (github.event_name != 'pull_request' && steps.autofix-prepare-nonpr.outputs.committed == 'true')
       shell: bash
       env:
-        COMMANDS: ${{ inputs.commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
         RUN_GROUP_PREFIX: homeboy rerun
@@ -344,6 +381,8 @@ runs:
         AUTOFIX_FINDING_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-finding-types }}
       run: bash ${{ github.action_path }}/scripts/autofix/open-autofix-pr.sh
 
+    # ── Phase 7: Results and reporting ──
+
     - name: Select final results
       id: select-results
       if: always()
@@ -358,8 +397,8 @@ runs:
       shell: bash
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}
-        COMMANDS: ${{ inputs.commands }}
-        AUTOFIX_ENABLED: ${{ inputs.autofix }}
+        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
+        AUTOFIX_ENABLED: ${{ inputs.autofix == 'true' || (inputs.autofix == '' && inputs.app-token != '') }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-commit.outputs.committed == 'true' || steps.autofix-prepare-nonpr.outputs.committed == 'true' }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
       run: bash ${{ github.action_path }}/scripts/digest/generate-failure-digest.sh
@@ -370,12 +409,12 @@ runs:
       shell: bash
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}
-        COMMANDS: ${{ inputs.commands }}
+        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
       run: bash ${{ github.action_path }}/scripts/core/enforce-final-status.sh
 
     - name: Run release
       id: release
-      if: contains(inputs.commands, 'release') && github.event_name != 'pull_request'
+      if: contains(steps.resolve-commands.outputs.resolved-commands, 'release') && github.event_name != 'pull_request'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token || github.token }}
@@ -389,12 +428,12 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token || github.token }}
-        COMMANDS: ${{ inputs.commands }}
+        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         RESULTS: ${{ steps.select-results.outputs.results }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
-        AUTOFIX_ENABLED: ${{ inputs.autofix }}
+        AUTOFIX_ENABLED: ${{ inputs.autofix == 'true' || (inputs.autofix == '' && inputs.app-token != '') }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-commit.outputs.attempted }}
         AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
         AUTOFIX_STATUS: ${{ steps.autofix-commit.outputs.status }}
@@ -407,15 +446,23 @@ runs:
         COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title }}
       run: bash ${{ github.action_path }}/scripts/pr/post-pr-comment.sh
 
+    # ── Phase 8: Auto-issue filing ──
+    # Default: enabled on non-PR events (auto when input is empty).
+
     - name: Auto-file categorized issues
       id: categorized-issues
-      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && steps.autofix-open-pr.outputs.created != 'true'
+      if: |
+        always()
+        && github.event_name != 'pull_request'
+        && steps.select-results.outputs.results != ''
+        && steps.autofix-open-pr.outputs.created != 'true'
+        && (inputs.auto-issue == 'true' || (inputs.auto-issue == '' && github.event_name != 'pull_request'))
       continue-on-error: true
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token || github.token }}
         RESULTS: ${{ steps.select-results.outputs.results }}
-        COMMANDS: ${{ inputs.commands }}
+        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-prepare-nonpr.outputs.committed }}
@@ -423,12 +470,19 @@ runs:
       run: bash ${{ github.action_path }}/scripts/issues/auto-file-categorized-issues.sh
 
     - name: Auto-file issue on failure
-      if: always() && inputs.auto-issue == 'true' && github.event_name != 'pull_request' && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"') && steps.autofix-open-pr.outputs.created != 'true' && steps.categorized-issues.outcome != 'success'
+      if: |
+        always()
+        && github.event_name != 'pull_request'
+        && steps.select-results.outputs.results != ''
+        && contains(steps.select-results.outputs.results, '"fail"')
+        && steps.autofix-open-pr.outputs.created != 'true'
+        && steps.categorized-issues.outcome != 'success'
+        && (inputs.auto-issue == 'true' || (inputs.auto-issue == '' && github.event_name != 'pull_request'))
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token || github.token }}
         RESULTS: ${{ steps.select-results.outputs.results }}
-        COMMANDS: ${{ inputs.commands }}
+        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-prepare-nonpr.outputs.committed }}

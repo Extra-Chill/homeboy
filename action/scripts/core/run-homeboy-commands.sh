@@ -10,6 +10,9 @@ RESULTS='{}'
 OVERALL_EXIT=0
 GROUP_PREFIX="${RUN_GROUP_PREFIX:-homeboy}"
 
+# v2: prefer RESOLVED_COMMANDS (from resolve-commands.sh), fall back to COMMANDS for compat
+EFFECTIVE_COMMANDS="${RESOLVED_COMMANDS:-${COMMANDS:-audit,lint,test}}"
+
 HOMEBOY_OUTPUT_DIR=$(mktemp -d)
 echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "${GITHUB_ENV}"
 
@@ -18,9 +21,9 @@ echo "HOMEBOY_ANNOTATIONS_DIR=${HOMEBOY_ANNOTATIONS_DIR}" >> "${GITHUB_ENV}"
 export HOMEBOY_ANNOTATIONS_DIR
 
 # Enforce canonical order: audit → lint → test
-ORDERED_COMMANDS="$(canonicalize_commands "${COMMANDS}")"
+ORDERED_COMMANDS="$(canonicalize_commands "${EFFECTIVE_COMMANDS}")"
 IFS=',' read -ra CMD_ARRAY <<< "${ORDERED_COMMANDS}"
-HAS_LINT_COMMAND="$(has_lint_command "${COMMANDS}")"
+HAS_LINT_COMMAND="$(has_lint_command "${EFFECTIVE_COMMANDS}")"
 
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD=$(echo "${CMD}" | xargs)

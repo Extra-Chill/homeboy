@@ -18,17 +18,15 @@ if [ -d ".git" ]; then
   fi
 fi
 
-if [ -n "${EXTENSION_ID:-}" ]; then
-  EXTENSION_ID_EFFECTIVE="${EXTENSION_ID}"
-else
-  EXTENSION_ID_EFFECTIVE="auto"
-fi
+# v2: use PORTABLE_EXTENSION (inferred from homeboy.json) as primary,
+# fall back to EXTENSION_ID input for backward compat
+EXTENSION_ID_EFFECTIVE="${PORTABLE_EXTENSION:-${EXTENSION_ID:-auto}}"
 
 EXTENSION_SOURCE_EFFECTIVE="${EXTENSION_SOURCE:-auto}"
 EXTENSION_REVISION="unknown"
 
-if [ -n "${EXTENSION_ID:-}" ]; then
-  EXT_DIR="${HOME}/.config/homeboy/extensions/${EXTENSION_ID}"
+if [ -n "${EXTENSION_ID_EFFECTIVE}" ] && [ "${EXTENSION_ID_EFFECTIVE}" != "auto" ]; then
+  EXT_DIR="${HOME}/.config/homeboy/extensions/${EXTENSION_ID_EFFECTIVE}"
   if [ -d "${EXT_DIR}/.git" ]; then
     EXTENSION_REVISION="$(git -C "${EXT_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
   fi
