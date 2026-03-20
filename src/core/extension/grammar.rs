@@ -164,13 +164,24 @@ pub struct ContractGrammar {
     pub fallback_default: String,
 
     /// Regex pattern for extracting struct/class field declarations.
-    /// Must have two capture groups: (1) field name, (2) field type.
+    /// Must have two capture groups for field name and field type.
     /// Applied to each line inside a struct/class body.
     ///
-    /// Rust example: `"^\s*(?:pub\s+)?(\w+)\s*:\s*(.+?),?\s*$"`
-    /// PHP example: `"(?:public|protected|private)\s+(?:\?\w+\s+)?(\$\w+)\s*;"`
+    /// Which capture group is name vs type is controlled by `field_name_group`
+    /// and `field_type_group` (default: group 1 = name, group 2 = type).
+    ///
+    /// Rust: `"^\s*(?:pub\s+)?(\w+)\s*:\s*(.+?),?\s*$"` — name:1, type:2
+    /// PHP:  `"^\s*(?:public|protected|private)\s+(?:readonly\s+)?(\??\w+)\s+\$(\w+)"` — type:1, name:2
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_pattern: Option<String>,
+
+    /// Which capture group in `field_pattern` contains the field name. Default: 1.
+    #[serde(default = "default_group_1")]
+    pub field_name_group: usize,
+
+    /// Which capture group in `field_pattern` contains the field type. Default: 2.
+    #[serde(default = "default_group_2")]
+    pub field_type_group: usize,
 
     /// Regex pattern that identifies public visibility on a field line.
     /// Used to set `FieldDef.is_public`.
@@ -182,6 +193,14 @@ pub struct ContractGrammar {
 
 fn default_fallback_default() -> String {
     "Default::default()".to_string()
+}
+
+fn default_group_1() -> usize {
+    1
+}
+
+fn default_group_2() -> usize {
+    2
 }
 
 fn default_return_type_separator() -> String {

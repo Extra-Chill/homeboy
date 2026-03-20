@@ -1232,6 +1232,8 @@ fn build_type_registry(
             source,
             field_pattern,
             contract_grammar.field_visibility_pattern.as_deref(),
+            contract_grammar.field_name_group,
+            contract_grammar.field_type_group,
         );
 
         let is_public = sym
@@ -2420,6 +2422,8 @@ pub struct ValidationResult {
             source,
             r"^\s*(?:pub\s+)?(\w+)\s*:\s*(.+?),?\s*$",
             Some(r"^\s*pub\b"),
+            1, // name_group
+            2, // type_group
         );
 
         assert_eq!(fields.len(), 5, "should find 5 fields");
@@ -2430,6 +2434,39 @@ pub struct ValidationResult {
         assert_eq!(fields[1].field_type, "Option<String>");
         assert_eq!(fields[4].name, "files_checked");
         assert!(!fields[4].is_public, "files_checked should be private");
+    }
+
+    #[test]
+    fn test_parse_fields_from_php_class_source() {
+        let source = r#"
+class AbilityResult {
+    public string $status;
+    public ?array $data;
+    protected int $code;
+    private string $internal_key;
+    public bool $success;
+}
+"#;
+        // PHP: type is group 1, name is group 2
+        let fields = parse_fields_from_source(
+            source,
+            r"^\s*(?:public|protected|private)\s+(?:readonly\s+)?(\??\w+)\s+\$(\w+)",
+            Some(r"^\s*public\b"),
+            2, // name_group (PHP has name in group 2)
+            1, // type_group (PHP has type in group 1)
+        );
+
+        assert_eq!(fields.len(), 5, "should find 5 PHP properties, got {:?}", fields);
+        assert_eq!(fields[0].name, "status");
+        assert_eq!(fields[0].field_type, "string");
+        assert!(fields[0].is_public, "status should be public");
+        assert_eq!(fields[1].name, "data");
+        assert_eq!(fields[1].field_type, "?array");
+        assert_eq!(fields[2].name, "code");
+        assert_eq!(fields[2].field_type, "int");
+        assert!(!fields[2].is_public, "code should not be public (protected)");
+        assert_eq!(fields[4].name, "success");
+        assert!(fields[4].is_public, "success should be public");
     }
 
     #[test]

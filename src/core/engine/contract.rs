@@ -280,17 +280,19 @@ pub struct FieldDef {
 
 /// Parse field definitions from a struct/class source body using a regex pattern.
 ///
-/// The `field_pattern` is a regex with two capture groups:
-///   - Group 1: field name
-///   - Group 2: field type
+/// The `field_pattern` is a regex with capture groups for field name and type.
+/// `name_group` and `type_group` specify which capture groups to use (1-indexed).
 ///
 /// `visibility_pattern` optionally matches a visibility prefix (e.g., `pub`).
 ///
-/// This is language-agnostic: the grammar provides the regex patterns.
+/// This is language-agnostic: the grammar provides the regex patterns and
+/// capture group assignments.
 pub fn parse_fields_from_source(
     source: &str,
     field_pattern: &str,
     visibility_pattern: Option<&str>,
+    name_group: usize,
+    type_group: usize,
 ) -> Vec<FieldDef> {
     let field_re = match regex::Regex::new(field_pattern) {
         Ok(re) => re,
@@ -324,11 +326,11 @@ pub fn parse_fields_from_source(
 
         if let Some(caps) = field_re.captures(trimmed) {
             let name = caps
-                .get(1)
+                .get(name_group)
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default();
             let field_type = caps
-                .get(2)
+                .get(type_group)
                 .map(|m| m.as_str().trim_end_matches(',').trim().to_string())
                 .unwrap_or_default();
 
