@@ -1,137 +1,16 @@
 use chrono::Local;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::Path;
 
 use crate::component;
-use crate::config::read_json_spec_to_string;
 use crate::core::release::version;
 use crate::engine::local_files::{self, FileSystem};
-use crate::engine::validation;
 use crate::error::{Error, Result};
 use crate::paths::resolve_path;
 
 use super::io::*;
 use super::sections::*;
 use super::settings::*;
-
-// === Bulk Operations with JSON Spec ===
-
-#[derive(Debug, Clone, Serialize)]
-
-pub struct AddItemsOutput {
-    pub component_id: String,
-    pub changelog_path: String,
-    pub next_section_label: String,
-    pub messages: Vec<String>,
-    pub items_added: usize,
-    pub changed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subsection_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(into = "NormalizedAddItemsInput")]
-struct AddItemsInput {
-    component_id: String,
-    #[serde(default)]
-    messages: Vec<String>,
-    #[serde(default, alias = "message")]
-    message: Option<String>,
-}
-
-#[derive(Debug)]
-struct NormalizedAddItemsInput {
-    component_id: String,
-    messages: Vec<String>,
-}
-
-impl From<AddItemsInput> for NormalizedAddItemsInput {
-    fn from(input: AddItemsInput) -> Self {
-        let messages = if input.message.is_some() {
-            input.message.into_iter().collect()
-        } else {
-            input.messages
-        };
-        Self {
-            component_id: input.component_id,
-            messages,
-        }
-    }
-}
-
-/// Add changelog items from a JSON spec.
-pub fn add_items_bulk(json_spec: &str) -> Result<AddItemsOutput> {
-    let raw = read_json_spec_to_string(json_spec)?;
-
-    let input: AddItemsInput = serde_json::from_str(&raw).map_err(|e| {
-        Error::validation_invalid_json(
-            e,
-            Some("parse changelog add input".to_string()),
-            Some(raw.chars().take(200).collect::<String>()),
-        )
-        .with_hint(r#"Example: {"component_id": "my-component", "messages": ["Fixed: bug"]}"#)
-    })?;
-
-    let normalized: NormalizedAddItemsInput = input.into();
-    add_items(Some(&normalized.component_id), &normalized.messages, None)
-}
-
-/// Add changelog items to a component. Auto-detects JSON in component_id.
-/// If entry_type is provided, items are placed under the corresponding Keep a Changelog subsection.
-pub fn add_items(
-    component_id: Option<&str>,
-    messages: &[String],
-    entry_type: Option<&str>,
-) -> Result<AddItemsOutput> {
-    // Auto-detect JSON in component_id
-    if let Some(input) = component_id {
-        if crate::config::is_json_input(input) {
-            return add_items_bulk(input);
-        }
-    }
-
-    let id = validation::require_with_hints(
-        component_id,
-        "componentId",
-        "Missing componentId",
-        vec![
-            "Provide a component ID: homeboy changelog add <component-id> -m \"message\""
-                .to_string(),
-            "List available components: homeboy component list".to_string(),
-        ],
-    )?;
-
-    if messages.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "message",
-            "Missing message",
-            None,
-            None,
-        ));
-    }
-
-    // Validate entry type if provided
-    let validated_type = entry_type.map(validate_entry_type).transpose()?;
-
-    let component = component::resolve_effective(Some(id), None, None)?;
-    let settings = resolve_effective_settings(Some(&component));
-
-    let (path, changed, items_added) = if let Some(ref entry_type_val) = validated_type {
-        read_and_add_next_section_items_typed(&component, &settings, messages, entry_type_val)?
-    } else {
-        read_and_add_next_section_items(&component, &settings, messages)?
-    };
-
-    Ok(AddItemsOutput {
-        component_id: id.to_string(),
-        changelog_path: path.to_string_lossy().to_string(),
-        next_section_label: settings.next_section_label,
-        messages: messages.to_vec(),
-        items_added,
-        changed,
-        subsection_type: validated_type,
-    })
-}
 
 // === Changelog Show Operations ===
 

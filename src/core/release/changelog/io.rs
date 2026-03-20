@@ -37,69 +37,6 @@ fn resolve_target_path(local_path: &str, file: &str) -> Result<PathBuf> {
     Ok(resolve_path(local_path, file))
 }
 
-pub fn read_and_add_next_section_items(
-    component: &Component,
-    settings: &EffectiveChangelogSettings,
-    messages: &[String],
-) -> Result<(PathBuf, bool, usize)> {
-    let path = resolve_changelog_path(component)?;
-    let content = local_files::read_file(&path, "read changelog")?;
-
-    let (new_content, changed, items_added) =
-        add_next_section_items(&content, &settings.next_section_aliases, messages)?;
-
-    if changed {
-        local_files::write_file(&path, &new_content, "write changelog")?;
-    }
-
-    Ok((path, changed, items_added))
-}
-
-pub fn read_and_add_next_section_items_typed(
-    component: &Component,
-    settings: &EffectiveChangelogSettings,
-    messages: &[String],
-    entry_type: &str,
-) -> Result<(PathBuf, bool, usize)> {
-    let path = resolve_changelog_path(component)?;
-    let content = local_files::read_file(&path, "read changelog")?;
-
-    let (with_section, _) = ensure_next_section(&content, &settings.next_section_aliases)?;
-    let mut current_content = with_section;
-    let mut items_added = 0;
-    let mut changed = false;
-
-    for message in messages {
-        let trimmed_message = message.trim();
-        if trimmed_message.is_empty() {
-            return Err(crate::error::Error::validation_invalid_argument(
-                "messages",
-                "Changelog messages cannot include empty values",
-                None,
-                None,
-            ));
-        }
-
-        let (new_content, item_changed) = append_item_to_subsection(
-            &current_content,
-            &settings.next_section_aliases,
-            trimmed_message,
-            entry_type,
-        )?;
-        if item_changed {
-            items_added += 1;
-            changed = true;
-        }
-        current_content = new_content;
-    }
-
-    if changed {
-        local_files::write_file(&path, &current_content, "write changelog")?;
-    }
-
-    Ok((path, changed, items_added))
-}
-
 #[derive(Debug, Clone)]
 pub struct ChangelogSnapshotData {
     pub path: String,

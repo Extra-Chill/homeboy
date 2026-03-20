@@ -38,42 +38,6 @@ pub(crate) fn normalize_version_show(args: Vec<String>) -> Vec<String> {
     result
 }
 
-/// Normalize changelog add --component flag to positional form.
-pub(crate) fn normalize_changelog_component(args: Vec<String>) -> Vec<String> {
-    let is_changelog_add = args.len() >= 4
-        && args.get(1).map(|s| s == "changelog").unwrap_or(false)
-        && args.get(2).map(|s| s == "add").unwrap_or(false);
-
-    if !is_changelog_add {
-        return args;
-    }
-
-    let component_pos = args.iter().position(|s| s == "--component");
-    let Some(component_pos) = component_pos else {
-        return args;
-    };
-
-    let Some(component_value) = args.get(component_pos + 1) else {
-        return args;
-    };
-
-    let mut result = vec![
-        args[0].clone(),
-        args[1].clone(),
-        args[2].clone(),
-        component_value.clone(),
-    ];
-
-    for (i, arg) in args.iter().enumerate().skip(3) {
-        if i == component_pos || i == component_pos + 1 {
-            continue;
-        }
-        result.push(arg.clone());
-    }
-
-    result
-}
-
 /// Auto-insert '--' separator before unknown flags for trailing_var_arg commands.
 pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
     let commands: &[(&str, &str, &[&str])] = &[
@@ -257,7 +221,6 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
 /// Apply all argument normalizations in sequence.
 pub fn normalize(args: Vec<String>) -> Vec<String> {
     let args = normalize_version_show(args);
-    let args = normalize_changelog_component(args);
     normalize_trailing_flags(args)
 }
 

@@ -13,16 +13,6 @@ pub(super) const KEEP_A_CHANGELOG_SUBSECTIONS: &[&str] = &[
     "### Security",
 ];
 
-pub(super) const VALID_ENTRY_TYPES: &[&str] = &[
-    "added",
-    "changed",
-    "deprecated",
-    "removed",
-    "fixed",
-    "security",
-    "refactored",
-];
-
 #[derive(Debug, Clone)]
 pub struct EffectiveChangelogSettings {
     pub next_section_label: String,
@@ -80,35 +70,6 @@ pub fn resolve_effective_settings(component: Option<&Component>) -> EffectiveCha
     EffectiveChangelogSettings {
         next_section_label,
         next_section_aliases,
-    }
-}
-
-pub(super) fn validate_entry_type(entry_type: &str) -> crate::error::Result<String> {
-    use crate::error::Error;
-    let normalized = entry_type.to_lowercase();
-    // Accept "refactor" as alias for "refactored"
-    let normalized = if normalized == "refactor" {
-        "refactored".to_string()
-    } else {
-        normalized
-    };
-    if VALID_ENTRY_TYPES.contains(&normalized.as_str()) {
-        Ok(normalized)
-    } else {
-        Err(Error::validation_invalid_argument(
-            "type",
-            format!(
-                "Invalid changelog entry type '{}'. Valid types: Added, Changed, Deprecated, Removed, Fixed, Security, Refactored",
-                entry_type
-            ),
-            None,
-            Some(vec![
-                "Use --type added for new features".to_string(),
-                "Use --type fixed for bug fixes".to_string(),
-                "Use --type changed for modifications".to_string(),
-                "Use --type refactored for code restructuring".to_string(),
-            ]),
-        ))
     }
 }
 

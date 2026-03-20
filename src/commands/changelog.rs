@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use super::CmdResult;
-use homeboy::changelog::{self, AddItemsOutput, InitOutput, ShowOutput};
+use homeboy::changelog::{self, InitOutput, ShowOutput};
 
 #[derive(Args)]
 pub struct ChangelogArgs {
@@ -20,50 +20,6 @@ pub enum ChangelogCommand {
     Show {
         /// Component ID to show changelog for
         component_id: Option<String>,
-    },
-
-    /// Add changelog items to the configured "next" section
-    ///
-    /// Examples:
-    ///   homeboy changelog add my-plugin "Fixed login bug"
-    ///   homeboy changelog add my-plugin "Removed legacy API" --type Removed
-    ///   homeboy changelog add my-plugin -m "Added search" -m "Added filters"
-    #[command(after_long_help = "\
-EXAMPLES:
-  Add a simple entry:
-    homeboy changelog add my-plugin \"Fixed login bug\"
-
-  Add with a type (Added, Changed, Removed, Fixed, etc.):
-    homeboy changelog add my-plugin \"Removed legacy API\" --type Removed
-
-  Add multiple entries at once:
-    homeboy changelog add my-plugin -m \"Added search\" -m \"Added filters\"
-
-  Add with type and multiple messages:
-    homeboy changelog add my-plugin -m \"New auth flow\" -m \"New API keys\" --type Added
-")]
-    Add {
-        /// JSON input spec for batch operations.
-        ///
-        /// Use "-" to read from stdin, "@file.json" to read from a file, or an inline JSON string.
-        #[arg(long)]
-        json: Option<String>,
-
-        /// Component ID (non-JSON mode)
-        #[arg(index = 1)]
-        component_id: Option<String>,
-
-        /// Changelog item content (positional, for backward compatibility)
-        #[arg(index = 2)]
-        positional_message: Option<String>,
-
-        /// Changelog message (repeatable: -m "first" -m "second")
-        #[arg(short = 'm', long = "message", action = clap::ArgAction::Append)]
-        messages: Vec<String>,
-
-        /// Changelog subsection type (Added, Changed, Deprecated, Removed, Fixed, Security, Refactored)
-        #[arg(short = 't', long = "type")]
-        entry_type: Option<String>,
     },
 
     /// Initialize a new changelog file
@@ -95,8 +51,6 @@ pub enum ChangelogOutput {
 
     ShowComponent(ShowOutput),
 
-    Add(AddItemsOutput),
-
     Init(InitOutput),
 }
 
@@ -110,16 +64,15 @@ pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
         }
         (None, false) => Err(homeboy::Error::validation_invalid_argument(
             "command",
-            "No subcommand provided. Use a subcommand (add, init, show) or --self to view Homeboy's changelog",
+            "No subcommand provided. Use a subcommand (init, show) or --self to view Homeboy's changelog",
             None,
             Some(vec![
-                "homeboy changelog add <component_id> <message>".to_string(),
                 "homeboy changelog init <component_id>".to_string(),
                 "homeboy changelog show".to_string(),
                 "homeboy changelog show <component_id>".to_string(),
             ]),
         )),
-        (Some(ChangelogCommand::Add { .. }) | Some(ChangelogCommand::Init { .. }), _) => {
+        (Some(ChangelogCommand::Init { .. }), _) => {
             Err(homeboy::Error::validation_invalid_argument(
                 "command",
                 "Markdown output is only supported for 'changelog show'",
@@ -154,40 +107,14 @@ pub fn run(
         }
         (None, false) => Err(homeboy::Error::validation_invalid_argument(
             "command",
-            "No subcommand provided. Use a subcommand (add, init, show) or --self to view Homeboy's changelog",
+            "No subcommand provided. Use a subcommand (init, show) or --self to view Homeboy's changelog",
             None,
             Some(vec![
-                "homeboy changelog add <component_id> <message>".to_string(),
                 "homeboy changelog init <component_id>".to_string(),
                 "homeboy changelog show".to_string(),
                 "homeboy changelog show <component_id>".to_string(),
             ]),
         )),
-        (Some(ChangelogCommand::Add {
-            json,
-            component_id,
-            positional_message,
-            messages,
-            entry_type,
-        }), _) => {
-            // Priority: --json > component_id (auto-detects JSON)
-            // Merge positional message with -m flags (positional goes first)
-            let mut all_messages: Vec<String> = Vec::new();
-            if let Some(msg) = positional_message {
-                all_messages.push(msg.clone());
-            }
-            all_messages.extend(messages.iter().cloned());
-
-            // Explicit --json takes precedence
-            if let Some(spec) = json.as_deref() {
-                let output = changelog::add_items_bulk(spec)?;
-                return Ok((ChangelogOutput::Add(output), 0));
-            }
-
-            // Core handles auto-detection of JSON in component_id
-            let output = changelog::add_items(component_id.as_deref(), &all_messages, entry_type.as_deref())?;
-            Ok((ChangelogOutput::Add(output), 0))
-        }
         (Some(ChangelogCommand::Init {
             path,
             configure,
