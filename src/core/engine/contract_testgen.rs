@@ -1144,14 +1144,38 @@ mod tests {
         }
     }
 
-    /// Build a ContractGrammar with type_defaults + type_constructors + assertion_templates.
+    /// Build a ContractGrammar with type_defaults + type_constructors + assertion_templates + test_templates.
     fn full_grammar() -> ContractGrammar {
         ContractGrammar {
             type_defaults: sample_type_defaults(),
             type_constructors: sample_type_constructors(),
             assertion_templates: sample_assertion_templates(),
+            test_templates: sample_test_templates(),
             ..Default::default()
         }
+    }
+
+    fn sample_test_templates() -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert("result_ok".to_string(),
+            "    #[test]\n    fn {test_name}() {{\n{param_setup}\n        let result = {fn_name}({param_args});\n{assertion_code}\n    }}\n".to_string());
+        m.insert("result_err".to_string(),
+            "    #[test]\n    fn {test_name}() {{\n{param_setup}\n        let result = {fn_name}({param_args});\n{assertion_code}\n    }}\n".to_string());
+        m.insert("option_some".to_string(),
+            "    #[test]\n    fn {test_name}() {{\n{param_setup}\n        let result = {fn_name}({param_args});\n{assertion_code}\n    }}\n".to_string());
+        m.insert("option_none".to_string(),
+            "    #[test]\n    fn {test_name}() {{\n{param_setup}\n        let result = {fn_name}({param_args});\n{assertion_code}\n    }}\n".to_string());
+        m.insert("bool_true".to_string(),
+            "    #[test]\n    fn {test_name}() {{\n{param_setup}\n        let result = {fn_name}({param_args});\n{assertion_code}\n    }}\n".to_string());
+        m.insert("bool_false".to_string(),
+            "    #[test]\n    fn {test_name}() {{\n{param_setup}\n        let result = {fn_name}({param_args});\n{assertion_code}\n    }}\n".to_string());
+        m.insert("no_panic".to_string(),
+            "    #[test]\n    fn {test_name}() {{\n{param_setup}\n        let _ = {fn_name}({param_args});\n    }}\n".to_string());
+        m.insert("effects".to_string(),
+            "    #[test]\n    fn {test_name}() {{\n        // Expected effects: {effects}\n{param_setup}\n        let _ = {fn_name}({param_args});\n    }}\n".to_string());
+        m.insert("default".to_string(),
+            "    #[test]\n    fn {test_name}() {{\n{param_setup}\n        let _result = {fn_name}({param_args});\n    }}\n".to_string());
+        m
     }
 
     fn sample_type_constructors() -> Vec<TypeConstructor> {
@@ -1917,7 +1941,31 @@ mod tests {
         assert!(
             so.setup_lines.contains("\"test\""),
             "should use the literal from contains(), got: {}",
-            so.setup_lines
+             so.setup_lines
+        );
+    }
+
+    #[test]
+    fn test_full_pipeline_renders_with_behavioral_assertions() {
+        let contract = sample_result_contract();
+        let grammar = full_grammar();
+        let plan = generate_test_plan(&contract, &grammar);
+        let rendered = render_test_plan(&plan, &grammar.test_templates);
+
+        // Should produce output
+        assert!(!rendered.is_empty(), "rendered output should not be empty");
+
+        // First branch (changed_files.is_empty()) should unwrap the Ok value
+        assert!(
+            rendered.contains("result.unwrap()"),
+            "should unwrap Ok value instead of just is_ok(), got:\n{}",
+            rendered
+        );
+        // Should mention the expected value from the contract
+        assert!(
+            rendered.contains("skipped"),
+            "should reference the expected return value 'skipped', got:\n{}",
+            rendered
         );
     }
 }
