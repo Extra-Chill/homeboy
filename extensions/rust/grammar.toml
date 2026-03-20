@@ -351,17 +351,221 @@ value = 'None'
 imports = []
 
 # ===========================================================================
+# Type constructors — behavioral value expressions for condition-driven setup.
+# Core produces semantic hints (e.g., "empty", "nonexistent_path"); this section
+# maps (hint, type_pattern) → language-specific code expression.
+# ===========================================================================
+
+fallback_default = 'Default::default()'
+
+# ── empty: produce a value where .is_empty() == true ──
+[[contract.type_constructors]]
+hint = 'empty'
+pattern = '^&?\[.*\]$|^Vec<.*>$'
+value = 'Vec::new()'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'empty'
+pattern = '^&str$|^String$|^&String$'
+value = '""'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'empty'
+pattern = '^HashMap<.*>$'
+value = 'HashMap::new()'
+imports = ['use std::collections::HashMap;']
+
+[[contract.type_constructors]]
+hint = 'empty'
+pattern = '^HashSet<.*>$'
+value = 'HashSet::new()'
+imports = ['use std::collections::HashSet;']
+
+# ── non_empty: produce a value where .is_empty() == false ──
+[[contract.type_constructors]]
+hint = 'non_empty'
+pattern = '^&?\[.*\]$|^Vec<.*>$'
+value = 'vec![Default::default()]'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'non_empty'
+pattern = '^&str$|^String$|^&String$'
+value = '"test_{param_name}"'
+imports = []
+
+# ── none / some_default: Option variants ──
+[[contract.type_constructors]]
+hint = 'none'
+pattern = '^Option<.*>$'
+value = 'None'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'some_default'
+pattern = '^Option<.*>$'
+value = 'Some(Default::default())'
+imports = []
+
+# ── path existence ──
+[[contract.type_constructors]]
+hint = 'nonexistent_path'
+pattern = '(?i)path'
+value = 'Path::new("/tmp/nonexistent_test_path")'
+imports = ['use std::path::Path;']
+
+[[contract.type_constructors]]
+hint = 'existent_path'
+pattern = '(?i)path'
+value = 'tempfile::tempdir().unwrap()'
+call_arg = '{param_name}.path()'
+imports = []
+
+# ── boolean values ──
+[[contract.type_constructors]]
+hint = 'true'
+pattern = '^bool$'
+value = 'true'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'false'
+pattern = '^bool$'
+value = 'false'
+imports = []
+
+# ── numeric values ──
+[[contract.type_constructors]]
+hint = 'zero'
+pattern = '^u\w+$|^i\w+$|^f\w+$'
+value = '0'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'positive'
+pattern = '^u\w+$|^i\w+$|^f\w+$'
+value = '1'
+imports = []
+
+# ── string content (contains/starts_with) ──
+[[contract.type_constructors]]
+hint = 'contains'
+pattern = '^&str$|^String$|^&String$'
+value = '"{hint_arg}"'
+imports = []
+
+# ===========================================================================
+# Assertion templates — language-specific assertion code for behavioral tests.
+# Core selects an assertion key; this section provides the code template.
+# Variables: {condition}, {expected_value}, {variant}
+# ===========================================================================
+
+[contract.assertion_templates]
+result_ok = '        assert!(result.is_ok(), "expected Ok for: {condition}");'
+result_ok_value = """        let inner = result.unwrap();
+        // Branch returns Ok({expected_value}) when: {condition}
+        let _ = inner; // TODO: assert specific value for "{expected_value}\""""
+result_err = '        assert!(result.is_err(), "expected Err for: {condition}");'
+result_err_value = """        let err = result.unwrap_err();
+        // Branch returns Err({expected_value}) when: {condition}
+        let err_msg = format!("{:?}", err);
+        let _ = err_msg; // TODO: assert error contains "{expected_value}\""""
+option_some = '        assert!(result.is_some(), "expected Some for: {condition}");'
+option_some_value = """        let inner = result.expect("expected Some for: {condition}");
+        // Branch returns Some({expected_value})
+        let _ = inner; // TODO: assert value matches "{expected_value}\""""
+option_none = '        assert!(result.is_none(), "expected None for: {condition}");'
+bool_true = '        assert!(result, "expected true when: {condition}");'
+bool_false = '        assert!(!result, "expected false when: {condition}");'
+collection_empty = '        assert!(result.is_empty(), "expected empty collection for: {condition}");'
+collection_non_empty = '        assert!(!result.is_empty(), "expected non-empty collection for: {condition}");'
+
+# ===========================================================================
 # Test templates — Rust source code templates for test plan rendering.
-# Variables: {test_name}, {fn_name}, {param_setup}, {param_args},
-#            {param_names}, {return_shape}, {extra_imports},
-#            {variant}, {expected_value}, {ok_type}, {err_type},
-#            {some_type}, {condition}, {is_method}, {is_pure}
+#
+# Variables:
+#   {test_name}      — generated test function name
+#   {fn_name}        — function under test
+#   {param_setup}    — `let` bindings for each parameter (condition-aware)
+#   {param_args}     — comma-separated call arguments (condition-aware)
+#   {param_names}    — comma-separated parameter names (raw)
+#   {assertion_code} — behavioral assertion derived from branch return + condition
+#   {return_shape}   — result, option, bool, unit, collection, etc.
+#   {extra_imports}  — use statements needed by parameter defaults
+#   {variant}        — return variant: ok, err, some, none, true, false
+#   {expected_value} — description of branch return value
+#   {ok_type}, {err_type}, {some_type} — generic type parameters
+#   {condition}      — human-readable branch condition
+#   {is_method}      — true if function has a receiver
+#   {is_pure}        — true if function has no side effects
 # ===========================================================================
 
 [contract.test_templates]
 
-# Result<T,E> — Ok branch
+# Result<T,E> — Ok branch (uses behavioral assertion)
 result_ok = """
+    #[test]
+    fn {test_name}() {
+{param_setup}
+        let result = {fn_name}({param_args});
+{assertion_code}
+    }
+"""
+
+# Result<T,E> — Err branch (uses behavioral assertion)
+result_err = """
+    #[test]
+    fn {test_name}() {
+{param_setup}
+        let result = {fn_name}({param_args});
+{assertion_code}
+    }
+"""
+
+# Option<T> — Some branch (uses behavioral assertion)
+option_some = """
+    #[test]
+    fn {test_name}() {
+{param_setup}
+        let result = {fn_name}({param_args});
+{assertion_code}
+    }
+"""
+
+# Option<T> — None branch (uses behavioral assertion)
+option_none = """
+    #[test]
+    fn {test_name}() {
+{param_setup}
+        let result = {fn_name}({param_args});
+{assertion_code}
+    }
+"""
+
+# bool — true branch (uses behavioral assertion)
+bool_true = """
+    #[test]
+    fn {test_name}() {
+{param_setup}
+        let result = {fn_name}({param_args});
+{assertion_code}
+    }
+"""
+
+# bool — false branch (uses behavioral assertion)
+bool_false = """
+    #[test]
+    fn {test_name}() {
+{param_setup}
+        let result = {fn_name}({param_args});
+{assertion_code}
+    }
+"""
+
+# Unit return — just verify it doesn't panic
+unit = """
     #[test]
     fn {test_name}() {
 {param_setup}

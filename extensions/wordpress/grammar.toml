@@ -438,65 +438,203 @@ value = 'null'
 imports = []
 
 # ===========================================================================
+# Type constructors — behavioral value expressions for condition-driven setup.
+# Core produces semantic hints (e.g., "empty", "nonexistent_path"); this section
+# maps (hint, type_pattern) → PHP-specific code expression.
+# ===========================================================================
+
+fallback_default = 'null'
+
+# ── empty: produce a value where empty($x) == true ──
+[[contract.type_constructors]]
+hint = 'empty'
+pattern = '^array$|^\?array$'
+value = '[]'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'empty'
+pattern = '^string$|^\?string$'
+value = "''"
+imports = []
+
+# ── non_empty: produce a value where !empty($x) ──
+[[contract.type_constructors]]
+hint = 'non_empty'
+pattern = '^array$|^\?array$'
+value = "[ 'test_value' ]"
+imports = []
+
+[[contract.type_constructors]]
+hint = 'non_empty'
+pattern = '^string$|^\?string$'
+value = "'test_{param_name}'"
+imports = []
+
+# ── none / some_default: nullable variants ──
+[[contract.type_constructors]]
+hint = 'none'
+pattern = '^\?'
+value = 'null'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'some_default'
+pattern = '^\?string$'
+value = "'test_value'"
+imports = []
+
+[[contract.type_constructors]]
+hint = 'some_default'
+pattern = '^\?int$'
+value = '1'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'some_default'
+pattern = '^\?array$'
+value = "[ 'test' ]"
+imports = []
+
+[[contract.type_constructors]]
+hint = 'some_default'
+pattern = '^\?'
+value = 'new \stdClass()'
+imports = []
+
+# ── path existence ──
+[[contract.type_constructors]]
+hint = 'nonexistent_path'
+pattern = '^string$|^\?string$'
+value = "'/tmp/nonexistent_test_path'"
+imports = []
+
+[[contract.type_constructors]]
+hint = 'existent_path'
+pattern = '^string$|^\?string$'
+value = "sys_get_temp_dir() . '/homeboy_test_' . uniqid()"
+imports = []
+
+# ── boolean values ──
+[[contract.type_constructors]]
+hint = 'true'
+pattern = '^bool$'
+value = 'true'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'false'
+pattern = '^bool$'
+value = 'false'
+imports = []
+
+# ── numeric values ──
+[[contract.type_constructors]]
+hint = 'zero'
+pattern = '^int$|^\?int$|^float$|^\?float$'
+value = '0'
+imports = []
+
+[[contract.type_constructors]]
+hint = 'positive'
+pattern = '^int$|^\?int$|^float$|^\?float$'
+value = '1'
+imports = []
+
+# ── string content ──
+[[contract.type_constructors]]
+hint = 'contains'
+pattern = '^string$|^\?string$'
+value = "'{hint_arg}'"
+imports = []
+
+# ===========================================================================
+# Assertion templates — PHPUnit-specific assertion code for behavioral tests.
+# Variables: {condition}, {expected_value}, {variant}
+# ===========================================================================
+
+[contract.assertion_templates]
+result_ok = "        $this->assertNotWPError( $result, 'Expected success for: {condition}' );"
+result_ok_value = """        $this->assertNotWPError( $result, 'Expected success for: {condition}' );
+        // Branch returns success ({expected_value}) when: {condition}"""
+result_err = "        $this->assertWPError( $result, 'Expected WP_Error for: {condition}' );"
+result_err_value = """        $this->assertWPError( $result, 'Expected WP_Error for: {condition}' );
+        // Branch returns error ({expected_value}) when: {condition}
+        $this->assertSame( '{expected_value}', $result->get_error_code() );"""
+option_some = "        $this->assertNotNull( $result, 'Expected non-null for: {condition}' );"
+option_some_value = """        $this->assertNotNull( $result, 'Expected non-null for: {condition}' );
+        // Branch returns ({expected_value}) when: {condition}"""
+option_none = "        $this->assertNull( $result, 'Expected null for: {condition}' );"
+bool_true = "        $this->assertTrue( $result, 'Expected true when: {condition}' );"
+bool_false = "        $this->assertFalse( $result, 'Expected false when: {condition}' );"
+collection_empty = "        $this->assertIsArray( $result );\n        $this->assertEmpty( $result, 'Expected empty array for: {condition}' );"
+collection_non_empty = "        $this->assertIsArray( $result );\n        $this->assertNotEmpty( $result, 'Expected non-empty array for: {condition}' );"
+
+# ===========================================================================
 # Test templates — PHPUnit source code templates for test plan rendering
-# Variables: {test_name}, {fn_name}, {param_setup}, {param_args},
-#            {param_names}, {return_shape}, {extra_imports},
-#            {variant}, {expected_value}, {condition}, {is_method}
+#
+# Variables:
+#   {test_name}      — generated test method name
+#   {fn_name}        — method under test
+#   {param_setup}    — variable assignments (condition-aware)
+#   {param_args}     — comma-separated call arguments (condition-aware)
+#   {assertion_code} — behavioral assertion from assertion_templates
+#   {return_shape}, {variant}, {expected_value}, {condition}, {is_method}
 # ===========================================================================
 
 [contract.test_templates]
 
-# Return true branch
+# Return true branch (uses behavioral assertion)
 bool_true = """
     public function {test_name}() {
 {param_setup}
         $result = $this->instance->{fn_name}({param_args});
-        $this->assertTrue( $result, 'Expected true for: {condition}' );
+{assertion_code}
     }
 """
 
-# Return false branch
+# Return false branch (uses behavioral assertion)
 bool_false = """
     public function {test_name}() {
 {param_setup}
         $result = $this->instance->{fn_name}({param_args});
-        $this->assertFalse( $result, 'Expected false for: {condition}' );
+{assertion_code}
     }
 """
 
-# Nullable — Some/non-null branch
+# Nullable — Some/non-null branch (uses behavioral assertion)
 option_some = """
     public function {test_name}() {
 {param_setup}
         $result = $this->instance->{fn_name}({param_args});
-        $this->assertNotNull( $result, 'Expected non-null for: {condition}' );
+{assertion_code}
     }
 """
 
-# Nullable — null branch
+# Nullable — null branch (uses behavioral assertion)
 option_none = """
     public function {test_name}() {
 {param_setup}
         $result = $this->instance->{fn_name}({param_args});
-        $this->assertNull( $result, 'Expected null for: {condition}' );
+{assertion_code}
     }
 """
 
-# WP_Error / exception — success branch
+# WP_Error / exception — success branch (uses behavioral assertion)
 result_ok = """
     public function {test_name}() {
 {param_setup}
         $result = $this->instance->{fn_name}({param_args});
-        $this->assertNotWPError( $result, 'Expected success for: {condition}' );
+{assertion_code}
     }
 """
 
-# WP_Error / exception — error branch
+# WP_Error / exception — error branch (uses behavioral assertion)
 result_err = """
     public function {test_name}() {
 {param_setup}
         $result = $this->instance->{fn_name}({param_args});
-        $this->assertWPError( $result, 'Expected WP_Error for: {condition}' );
+{assertion_code}
     }
 """
 
@@ -528,13 +666,12 @@ effects = """
     }
 """
 
-# Collection return
+# Collection return (uses behavioral assertion)
 collection = """
     public function {test_name}() {
 {param_setup}
         $result = $this->instance->{fn_name}({param_args});
-        $this->assertIsArray( $result, 'Expected array for: {condition}' );
-        $this->assertNotEmpty( $result, 'Expected non-empty array for: {condition}' );
+{assertion_code}
     }
 """
 
