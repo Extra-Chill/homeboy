@@ -363,6 +363,7 @@ fallback_default = 'Default::default()'
 # field_visibility_pattern: regex that matches public field declarations
 field_pattern = '^\s*(?:pub(?:\(crate\))?\s+)?(\w+)\s*:\s*(.+?),?\s*$'
 field_visibility_pattern = '^\s*pub\b'
+field_assertion_template = '{indent}assert_eq!(inner.{field_name}, {expected_value});'
 
 # ── empty: produce a value where .is_empty() == true ──
 [[contract.type_constructors]]
