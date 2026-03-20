@@ -93,6 +93,26 @@ pub(crate) fn generate_test_plan(
             ),
         });
     } else {
+        // First pass: collect hints from all branches so we can infer complements.
+        // If branch 1 says param X should be "empty", branches that don't mention X
+        // should use "non_empty" to reach a different code path.
+        let all_branch_hints: Vec<HashMap<String, String>> = contract
+            .branches
+            .iter()
+            .map(|b| {
+                let cond_lower = b.condition.to_lowercase();
+                let mut hints_for_branch = HashMap::new();
+                for param in &contract.signature.params {
+                    if let Some(hint) =
+                        infer_hint_for_param(&b.condition, &cond_lower, param)
+                    {
+                        hints_for_branch.insert(param.name.clone(), hint);
+                    }
+                }
+                hints_for_branch
+            })
+            .collect();
+
         for (i, branch) in contract.branches.iter().enumerate() {
             let condition_slug = slugify(&branch.condition);
             let test_name = format!(
@@ -117,14 +137,17 @@ pub(crate) fn generate_test_plan(
             vars.insert("condition".to_string(), branch.condition.clone());
             vars.insert("condition_slug".to_string(), slugify(&branch.condition));
 
-            // Behavioral inference: derive setup overrides from branch condition.
-            // Core produces semantic hints; grammar provides language-specific code.
-            let setup_override = infer_setup_from_condition(
+            // Behavioral inference: derive setup overrides from branch condition,
+            // with cross-branch complement hints for unmatched params.
+            let complement_hints =
+                build_complement_hints(i, &all_branch_hints);
+            let setup_override = infer_setup_with_complements(
                 &branch.condition,
                 &contract.signature.params,
                 type_defaults,
                 &contract_grammar.type_constructors,
                 &contract_grammar.fallback_default,
+                &complement_hints,
             );
             if let Some(ref so) = setup_override {
                 vars.insert("param_setup".to_string(), so.setup_lines.clone());
@@ -475,12 +498,11 @@ struct SetupOverride {
     extra_imports: String,
 }
 
-/// Infer parameter setup code from a branch condition string.
+/// Infer parameter setup code from a branch condition string (without cross-branch complements).
 ///
-/// Core analyzes the condition to produce semantic hints for each parameter,
-/// then resolves those hints through the grammar's `type_constructors` to get
-/// language-specific code. Returns `None` if no condition-specific setup can
-/// be inferred (falling back to generic type_defaults).
+/// Delegates to `infer_setup_with_complements` with no complement hints.
+/// Used in tests and simple single-branch scenarios.
+#[cfg(test)]
 fn infer_setup_from_condition(
     condition: &str,
     params: &[Param],
@@ -835,6 +857,132 @@ fn resolve_assertion(
         // No grammar template — produce a minimal language-agnostic placeholder
         format!("{indent}let _ = result; // {variant}: {condition}")
     }
+}
+
+/// Build complement hints for a branch by examining what other branches require.
+///
+/// If branch 1 says param X needs hint `"empty"`, then branches that don't
+/// mention param X should use `"non_empty"` to reach a different code path.
+/// This ensures each branch's test uses inputs that actually trigger that branch.
+fn build_complement_hints(
+    branch_index: usize,
+    all_branch_hints: &[HashMap<String, String>],
+) -> HashMap<String, String> {
+    let mut complements = HashMap::new();
+    let my_hints = &all_branch_hints[branch_index];
+
+    for (j, other_hints) in all_branch_hints.iter().enumerate() {
+        if j == branch_index {
+            continue;
+        }
+        for (param_name, hint) in other_hints {
+            // Only provide a complement if this branch doesn't have its own hint
+            if my_hints.contains_key(param_name) || complements.contains_key(param_name) {
+                continue;
+            }
+            if let Some(complement) = complement_hint(hint) {
+                complements.insert(param_name.clone(), complement);
+            }
+        }
+    }
+
+    complements
+}
+
+/// Return the opposite hint for a given hint.
+///
+/// This allows branches that don't mention a param to use the inverse
+/// of what another branch requires, ensuring the test reaches the right path.
+fn complement_hint(hint: &str) -> Option<String> {
+    // Split compound hints like "contains:foo"
+    let base = hint.split(':').next().unwrap_or(hint);
+
+    match base {
+        "empty" => Some(hints::NON_EMPTY.to_string()),
+        "non_empty" => Some(hints::EMPTY.to_string()),
+        "none" => Some(hints::SOME_DEFAULT.to_string()),
+        "some_default" => Some(hints::NONE.to_string()),
+        "true" => Some(hints::FALSE.to_string()),
+        "false" => Some(hints::TRUE.to_string()),
+        "zero" => Some(hints::POSITIVE.to_string()),
+        "positive" => Some(hints::ZERO.to_string()),
+        "nonexistent_path" => Some(hints::EXISTENT_PATH.to_string()),
+        "existent_path" => Some(hints::NONEXISTENT_PATH.to_string()),
+        _ => None,
+    }
+}
+
+/// Like `infer_setup_from_condition` but also applies complement hints
+/// for params that aren't matched by the current condition.
+fn infer_setup_with_complements(
+    condition: &str,
+    params: &[Param],
+    type_defaults: &[TypeDefault],
+    type_constructors: &[TypeConstructor],
+    fallback_default: &str,
+    complement_hints: &HashMap<String, String>,
+) -> Option<SetupOverride> {
+    let condition_lower = condition.to_lowercase();
+
+    // Step 1: Produce direct hints from this branch's condition
+    let mut param_hints: HashMap<String, String> = HashMap::new();
+    for param in params {
+        if let Some(hint) = infer_hint_for_param(condition, &condition_lower, param) {
+            param_hints.insert(param.name.clone(), hint);
+        }
+    }
+
+    // Step 2: Apply complement hints for params not directly matched
+    for (param_name, complement) in complement_hints {
+        if !param_hints.contains_key(param_name) {
+            param_hints.insert(param_name.clone(), complement.clone());
+        }
+    }
+
+    if param_hints.is_empty() {
+        return None;
+    }
+
+    // Step 3: Resolve all hints through grammar constructors
+    let mut setup_lines = Vec::new();
+    let mut call_args = Vec::new();
+    let mut all_imports: Vec<String> = Vec::new();
+
+    for param in params {
+        let (value_expr, call_arg, imports) =
+            if let Some(hint) = param_hints.get(&param.name) {
+                resolve_constructor(
+                    hint,
+                    &param.name,
+                    &param.param_type,
+                    type_constructors,
+                    type_defaults,
+                    fallback_default,
+                )
+            } else {
+                let (val, call_override, imps) =
+                    resolve_type_default(&param.param_type, type_defaults, fallback_default);
+                let call =
+                    call_override.unwrap_or_else(|| default_call_arg(&param.name, &param.param_type));
+                let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
+                (val, call, imp_strs)
+            };
+
+        setup_lines.push(format!("        let {} = {};", param.name, value_expr));
+        call_args.push(call_arg);
+
+        for imp in imports {
+            if !all_imports.contains(&imp) {
+                all_imports.push(imp);
+            }
+        }
+    }
+
+    Some(SetupOverride {
+        setup_lines: setup_lines.join("\n"),
+        call_args: call_args.join(", "),
+        extra_imports: all_imports.join("\n"),
+    })
 }
 
 /// Merge new import lines into existing imports, deduplicating.
@@ -1942,6 +2090,27 @@ mod tests {
             so.setup_lines.contains("\"test\""),
             "should use the literal from contains(), got: {}",
              so.setup_lines
+        );
+    }
+
+    #[test]
+    fn test_cross_branch_complement_gives_non_empty_to_other_branch() {
+        // Branch 1: changed_files.is_empty() → hint "empty"
+        // Branch 2: "validation command fails" → no hint for changed_files
+        // Branch 2 should get the COMPLEMENT: "non_empty" for changed_files
+        let contract = sample_result_contract();
+        let grammar = full_grammar();
+        let plan = generate_test_plan(&contract, &grammar);
+
+        // Branch 2 (index 1): "validation command fails"
+        let vars = &plan.cases[1].variables;
+        let setup = vars.get("param_setup").unwrap();
+        assert!(
+            setup.contains("vec![Default::default()]")
+                || setup.contains("vec![")
+                || !setup.contains("Vec::new()"),
+            "branch 2 should get non-empty changed_files (complement of branch 1's 'empty'), got:\n{}",
+            setup
         );
     }
 
