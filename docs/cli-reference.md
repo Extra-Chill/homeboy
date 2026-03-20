@@ -15,8 +15,6 @@
 
 - `component_id` — Component ID or direct filesystem path to audit
 - `conventions` — Only show discovered conventions (skip findings)
-- `fix` — Generate fix stubs for outlier files (dry run by default)
-- `write` — Apply fixes to disk (requires --fix)
 - `baseline` — Save current audit state as baseline for future comparisons
 - `ignore_baseline` — Skip baseline comparison even if a baseline exists
 
@@ -116,7 +114,6 @@
 ### `LintArgs`
 
 - `component` — Component name to lint
-- `fix` — Auto-fix formatting issues before validating
 - `summary` — Show compact summary instead of full output
 - `file` — Lint only a single file (path relative to component root)
 - `glob` — Lint only files matching glob pattern (e.g., "inc/**/*.php")
@@ -186,7 +183,6 @@
 
 - `component` — Component name to test
 - `skip_lint` — Skip linting before running tests
-- `fix` — Auto-fix linting issues before running tests
 - `setting` — Override settings as key=value pairs
 - `path` — Override local_path for this test run (use a workspace clone or temp checkout)
 - `args` — Additional arguments to pass to the test runner (after --)

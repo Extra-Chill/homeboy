@@ -18,7 +18,6 @@ The `lint` command runs code style validation for a component using the linting 
 
 ## Options
 
-- `--fix`: Auto-fix formatting issues before validating (uses PHPCBF for WordPress)
 - `--baseline`: Save current lint findings as baseline for future comparisons
 - `--ignore-baseline`: Skip baseline comparison even if baseline exists
 - `--file <path>`: Lint only a single file (path relative to component root)
@@ -34,8 +33,8 @@ The `lint` command runs code style validation for a component using the linting 
 # Lint a WordPress component
 homeboy lint extrachill-api
 
-# Auto-fix formatting issues then validate
-homeboy lint extrachill-api --fix
+# Auto-fix formatting issues
+homeboy refactor extrachill-api --from lint --write
 
 # Lint only modified files in the working tree
 homeboy lint extrachill-api --changed-only
@@ -64,7 +63,7 @@ The following environment variables are set for lint runners:
 - `HOMEBOY_MODULE_PATH`: Absolute path to extension directory
 - `HOMEBOY_COMPONENT_PATH`: Absolute path to component directory
 - `HOMEBOY_PLUGIN_PATH`: Same as component path
-- `HOMEBOY_AUTO_FIX`: Set to `1` when `--fix` flag is used
+- `HOMEBOY_AUTO_FIX`: Set to `1` when running via `refactor --from lint --write`
 - `HOMEBOY_SUMMARY_MODE`: Set to `1` when `--summary` flag is used
 - `HOMEBOY_LINT_FILE`: Single file path when `--file` is used
 - `HOMEBOY_LINT_GLOB`: Glob pattern when `--glob` or `--changed-only` is used
@@ -82,11 +81,11 @@ Returns JSON with lint results:
   "component": "component-name",
   "output": "lint output...",
   "exit_code": 0,
-  "hints": ["Run 'homeboy lint <component> --fix' to auto-fix..."]
+  "hints": ["Auto-fix: homeboy refactor <component> --from lint --write"]
 }
 ```
 
-The `hints` field appears when linting fails without `--fix`, suggesting the auto-fix option.
+The `hints` field appears when linting fails, suggesting the refactor command for auto-fixing.
 
 When extensions write `HOMEBOY_LINT_FINDINGS_FILE`, Homeboy exposes `lint_findings` in JSON output and
 supports baseline ratchet checks (`--baseline`, `--ignore-baseline`).

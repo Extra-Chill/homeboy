@@ -7,10 +7,7 @@ use crate::extension::test::{
     parse_failures_file, parse_test_results_file, parse_test_results_text, CoverageOutput,
     TestScopeOutput, TestSummaryOutput,
 };
-use crate::refactor::{
-    auto::{self, AutofixMode},
-    run_test_refactor, AppliedRefactor, TestSourceOptions,
-};
+use crate::refactor::AppliedRefactor;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -21,7 +18,6 @@ pub struct TestRunWorkflowArgs {
     pub path_override: Option<String>,
     pub settings: Vec<(String, String)>,
     pub skip_lint: bool,
-    pub fix: bool,
     pub coverage: bool,
     pub coverage_min: Option<f64>,
     pub analyze: bool,
@@ -68,34 +64,6 @@ pub fn run_main_test_workflow(
     let results_file = temp::runtime_temp_file("homeboy-test-results", ".json")?;
     let failures_file = if args.analyze {
         Some(temp::runtime_temp_file("homeboy-test-failures", ".json")?)
-    } else {
-        None
-    };
-
-    let planned_autofix = if args.fix {
-        let selected_files = changed_scope
-            .as_ref()
-            .map(|scope| scope.selected_files.clone());
-        let plan = run_test_refactor(
-            component.clone(),
-            source_path.clone(),
-            args.settings.clone(),
-            TestSourceOptions {
-                selected_files,
-                skip_lint: args.skip_lint,
-                script_args: args.passthrough_args.clone(),
-            },
-            true,
-        )?;
-
-        let outcome = auto::standard_outcome(
-            AutofixMode::Write,
-            plan.files_modified,
-            Some(format!("homeboy test {} --analyze", args.component_id)),
-            plan.hints.clone(),
-        );
-
-        Some((plan, outcome))
     } else {
         None
     };
@@ -164,9 +132,8 @@ pub fn run_main_test_workflow(
         parse_test_results_file(&results_file).or_else(|| parse_test_results_text(&output.stdout));
     let _ = std::fs::remove_file(&results_file);
 
-    let test_autofix = planned_autofix
-        .as_ref()
-        .map(|(plan, outcome)| AppliedRefactor::from_plan(plan, outcome.rerun_recommended));
+    // Autofix is owned by `refactor --from test --write`; the test command is read-only.
+    let test_autofix: Option<AppliedRefactor> = None;
 
     let status = if let Some(ref counts) = test_counts {
         if counts.failed == 0 {
@@ -246,9 +213,6 @@ pub fn run_main_test_workflow(
     }
 
     let mut hints = Vec::new();
-    if let Some((_, outcome)) = &planned_autofix {
-        hints.extend(outcome.hints.clone());
-    }
 
     if status == "failed" && args.passthrough_args.is_empty() {
         hints.push(format!(
@@ -257,9 +221,9 @@ pub fn run_main_test_workflow(
         ));
     }
 
-    if !args.skip_lint && !args.fix {
+    if !args.skip_lint {
         hints.push(format!(
-            "Auto-fix lint issues: homeboy test {} --fix",
+            "Auto-fix lint issues: homeboy refactor {} --from lint --write",
             args.component_id
         ));
     }

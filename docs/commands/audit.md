@@ -19,8 +19,6 @@ Works with registered components (by ID) or raw filesystem paths.
 ## Options
 
 - `--conventions`: Only show discovered conventions (skip findings)
-- `--fix`: Generate fix stubs for outlier files (dry run by default)
-- `--write`: Apply fixes to disk (requires `--fix`)
 - `--baseline`: Save current audit state as baseline for future comparisons
 - `--ignore-baseline`: Skip baseline comparison even if a baseline exists
 - `--path <PATH>`: Override `local_path` for this audit run (use a workspace clone or temp checkout)
@@ -73,19 +71,20 @@ When a baseline exists, the audit exit code reflects drift:
 - `0`: No drift increase (same or improved)
 - `1`: Drift increased (new findings since baseline)
 
-## Fix Stubs
+## Fixing Findings
 
-The `--fix` flag generates mechanical fixes for convention outliers:
+The audit command is read-only — it finds problems but does not fix them. To apply automated fixes, use the refactor command:
 
 ```sh
-# Preview fixes (dry run)
-homeboy audit my-component --fix
+# Preview audit fixes (dry run)
+homeboy refactor my-component --from audit
 
-# Apply fixes to disk
-homeboy audit my-component --fix --write
+# Apply audit fixes to disk
+homeboy refactor my-component --from audit --write
+
+# Fix all sources (audit + lint + test) in one pass
+homeboy refactor my-component --from all --write
 ```
-
-Fix stubs insert missing method declarations, registration calls, and interface implementations that the convention expects.
 
 ## Examples
 

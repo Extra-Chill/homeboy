@@ -151,7 +151,6 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
             "",
             &[
                 "--skip-lint",
-                "--fix",
                 "--coverage",
                 "--coverage-min",
                 "--baseline",
@@ -189,7 +188,6 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
             "lint",
             "",
             &[
-                "--fix",
                 "--baseline",
                 "--ignore-baseline",
                 "--summary",

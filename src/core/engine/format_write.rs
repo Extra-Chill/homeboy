@@ -1,6 +1,6 @@
 //! Post-write formatting for code-modifying commands.
 //!
-//! Any command that writes source code (`refactor`, `audit --fix --write`) should
+//! Any command that writes source code (`refactor --write`) should
 //! call `format_after_write()` after writing files. This runs the project's
 //! language-specific formatter (e.g., `cargo fmt` for Rust, `prettier --write`
 //! for TypeScript) to ensure generated code matches project style.

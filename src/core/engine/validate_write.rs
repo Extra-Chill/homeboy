@@ -1,7 +1,7 @@
 //! Post-write compilation validation gate for code-modifying commands.
 //!
 //! Any command that writes source code (`refactor decompose`, `refactor move`,
-//! `refactor transform`, `audit --fix --write`) should call `validate_write()`
+//! `refactor transform`, `refactor --from audit --write`) should call `validate_write()`
 //! after writing files and before reporting success. If validation fails,
 //! the changed files are rolled back to their pre-write state.
 //!

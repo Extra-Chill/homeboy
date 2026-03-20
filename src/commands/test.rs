@@ -3,8 +3,7 @@ use clap::Args;
 use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::extension::test as extension_test;
 use homeboy::extension::test::{
-    auto_fix_test_drift, detect_test_drift, report, run_scaffold_workflow, TestCommandOutput,
-    TestRunWorkflowArgs,
+    detect_test_drift, report, run_scaffold_workflow, TestCommandOutput, TestRunWorkflowArgs,
 };
 use homeboy::extension::ExtensionCapability;
 
@@ -19,10 +18,6 @@ pub struct TestArgs {
     /// Skip linting before running tests
     #[arg(long)]
     skip_lint: bool,
-
-    /// Auto-fix linting issues before running tests
-    #[arg(long)]
-    fix: bool,
 
     /// Collect code coverage (requires xdebug/pcov for PHP, cargo-tarpaulin for Rust)
     #[arg(long)]
@@ -104,7 +99,6 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
         "--ignore-baseline",
         "--ratchet",
         "--skip-lint",
-        "--fix",
         "--coverage",
         "--json",
     ];
@@ -177,18 +171,9 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         ));
     }
 
-    // Drift detection mode — delegate to core drift workflows
+    // Drift detection mode — delegate to core drift workflow (read-only)
+    // Fixes are owned by `homeboy refactor --from test --write`.
     if args.drift {
-        if args.fix {
-            let result = auto_fix_test_drift(
-                args.comp.id(),
-                &ctx.component,
-                &args.since,
-                args.write,
-                true,
-            )?;
-            return Ok(report::from_auto_fix_drift_workflow(result));
-        }
         let result = detect_test_drift(args.comp.id(), &ctx.component, &args.since)?;
         return Ok(report::from_drift_workflow(result));
     }
@@ -216,7 +201,6 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
                 })
                 .collect(),
             skip_lint: args.skip_lint,
-            fix: args.fix,
             coverage: args.coverage,
             coverage_min: args.coverage_min,
             analyze: args.analyze,
@@ -257,7 +241,6 @@ mod tests {
             "--ignore-baseline".to_string(),
             "--ratchet".to_string(),
             "--skip-lint".to_string(),
-            "--fix".to_string(),
             "--coverage".to_string(),
             "--write".to_string(),
             "--json".to_string(),

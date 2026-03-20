@@ -9,10 +9,7 @@ use crate::engine::temp;
 use crate::extension::lint::baseline::{self as lint_baseline, LintFinding};
 use crate::extension::lint::build_lint_runner;
 use crate::git;
-use crate::refactor::{
-    auto::{self, AutofixMode},
-    run_lint_refactor, AppliedRefactor, LintSourceOptions,
-};
+use crate::refactor::AppliedRefactor;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -32,7 +29,6 @@ pub struct LintRunWorkflowArgs {
     pub sniffs: Option<String>,
     pub exclude_sniffs: Option<String>,
     pub category: Option<String>,
-    pub fix: bool,
     pub baseline: bool,
     pub ignore_baseline: bool,
 }
@@ -76,18 +72,6 @@ pub fn run_main_lint_workflow(
         }
     }
 
-    // Autofix planning (--fix)
-    let planned_autofix = if args.fix {
-        Some(plan_autofix(
-            component,
-            source_path,
-            &args,
-            effective_glob.as_deref(),
-        )?)
-    } else {
-        None
-    };
-
     // Run lint
     let lint_findings_file = temp::runtime_temp_file("homeboy-lint-findings", ".json")?;
     let findings_file_str = lint_findings_file.to_string_lossy().to_string();
@@ -123,32 +107,19 @@ pub fn run_main_lint_workflow(
         "failed"
     }
     .to_string();
-    let autofix = planned_autofix
-        .as_ref()
-        .map(|(plan, outcome)| AppliedRefactor::from_plan(plan, outcome.rerun_recommended));
 
     let mut hints = Vec::new();
 
     let lint_clean = lint_findings.is_empty() && output.success;
 
-    if let Some((plan, outcome)) = &planned_autofix {
-        if lint_clean && outcome.status == "auto_fixed" {
-            status = outcome.status.clone();
-        }
-        hints.extend(outcome.hints.clone());
-        if plan.files_modified == 0 && lint_clean {
-            status = "passed".to_string();
-        }
-    }
-
     // Baseline lifecycle
     let (baseline_comparison, baseline_exit_override) =
         process_baseline(source_path, &args, &lint_findings)?;
 
-    // Hint assembly
-    if !lint_clean && !args.fix {
+    // Hint assembly — point to refactor for fixes
+    if !lint_clean {
         hints.push(format!(
-            "Run 'homeboy lint {} --fix' to auto-fix formatting issues",
+            "Auto-fix: homeboy refactor {} --from lint --write",
             args.component_label
         ));
         hints.push("Some issues may require manual fixes".to_string());
@@ -183,7 +154,7 @@ pub fn run_main_lint_workflow(
         status,
         component: args.component_label,
         exit_code,
-        autofix,
+        autofix: None,
         hints,
         baseline_comparison,
         lint_findings: Some(lint_findings),
@@ -242,55 +213,6 @@ fn resolve_effective_glob(
     } else {
         Ok(args.glob.clone())
     }
-}
-
-/// Plan autofix — run lint refactor in write mode, produce outcome.
-fn plan_autofix(
-    component: &Component,
-    source_path: &PathBuf,
-    args: &LintRunWorkflowArgs,
-    effective_glob: Option<&str>,
-) -> crate::Result<(crate::refactor::RefactorPlan, auto::AutofixOutcome)> {
-    let changed_files = if args.changed_only {
-        let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
-        let mut changed_files: Vec<String> = Vec::new();
-        changed_files.extend(uncommitted.staged);
-        changed_files.extend(uncommitted.unstaged);
-        changed_files.extend(uncommitted.untracked);
-        Some(changed_files)
-    } else if let Some(ref git_ref) = args.changed_since {
-        Some(git::get_files_changed_since(
-            &component.local_path,
-            git_ref,
-        )?)
-    } else {
-        None
-    };
-
-    let plan = run_lint_refactor(
-        component.clone(),
-        source_path.clone(),
-        args.settings.clone(),
-        LintSourceOptions {
-            selected_files: changed_files,
-            file: args.file.clone(),
-            glob: effective_glob.map(String::from),
-            errors_only: args.errors_only,
-            sniffs: args.sniffs.clone(),
-            exclude_sniffs: args.exclude_sniffs.clone(),
-            category: args.category.clone(),
-        },
-        true,
-    )?;
-
-    let outcome = auto::standard_outcome(
-        AutofixMode::Write,
-        plan.files_modified,
-        Some(format!("homeboy test {} --analyze", args.component_label)),
-        plan.hints.clone(),
-    );
-
-    Ok((plan, outcome))
 }
 
 /// Process baseline lifecycle — save, load, compare.

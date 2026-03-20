@@ -5,25 +5,19 @@
 
 use crate::code_audit::{self, baseline, CodeAuditResult};
 use crate::git;
-use crate::refactor::{
-    auto::{self, AutofixMode},
-    run_audit_refactor, AuditConvergenceScoring, AuditVerificationToggles,
-};
 use std::path::Path;
 
-use super::report::{self, AuditCommandOutput, AutoRatchetSummary};
+use super::report::{self, AuditCommandOutput};
 
 /// Arguments for the main audit workflow — populated by the command layer from CLI flags.
+///
+/// Fixes are owned by `homeboy refactor --from audit --write`.
+/// The audit command is read-only: it finds problems but does not fix them.
 #[derive(Debug, Clone)]
 pub struct AuditRunWorkflowArgs {
     pub component_id: String,
     pub source_path: String,
     pub conventions: bool,
-    pub fix: bool,
-    pub write: bool,
-    pub max_iterations: usize,
-    pub scoring: AuditConvergenceScoring,
-    pub verification: AuditVerificationToggles,
     pub only_kinds: Vec<code_audit::AuditFinding>,
     pub exclude_kinds: Vec<code_audit::AuditFinding>,
     pub only_labels: Vec<String>,
@@ -33,7 +27,6 @@ pub struct AuditRunWorkflowArgs {
     pub ignore_baseline: bool,
     pub changed_since: Option<String>,
     pub json_summary: bool,
-    pub preview: bool,
 }
 
 /// Result of the main audit workflow — ready for report assembly.
@@ -90,11 +83,6 @@ pub fn run_main_audit_workflow(
         });
     }
 
-    // --fix: generate stubs
-    if args.fix {
-        return run_fix_workflow(result, &args);
-    }
-
     // --baseline: save current state
     if args.baseline {
         return run_baseline_save(result, &args);
@@ -123,177 +111,6 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::Result<Option<CodeAuditResul
             &args.component_id,
             &args.source_path,
         )?))
-    }
-}
-
-/// Fix workflow — run audit refactor, handle ratchet, build output.
-fn run_fix_workflow(
-    result: CodeAuditResult,
-    args: &AuditRunWorkflowArgs,
-) -> crate::Result<AuditRunWorkflowResult> {
-    let written = args.write;
-    let refactor_outcome = run_audit_refactor(
-        result,
-        &args.only_kinds,
-        &args.exclude_kinds,
-        args.scoring,
-        args.verification,
-        args.max_iterations,
-        written,
-    )?;
-    let current_result = refactor_outcome.current_result;
-    let mut final_fix_result = refactor_outcome.fix_result;
-    let final_policy_summary = refactor_outcome.policy_summary;
-    let iterations = refactor_outcome.iterations;
-
-    // Post-fix compilation validation gate
-    if written && final_fix_result.files_modified > 0 {
-        let root = std::path::Path::new(&current_result.source_path);
-        let changed: Vec<std::path::PathBuf> = final_fix_result
-            .fixes
-            .iter()
-            .filter(|f| f.applied)
-            .map(|f| root.join(&f.file))
-            .chain(
-                final_fix_result
-                    .new_files
-                    .iter()
-                    .filter(|f| f.written)
-                    .map(|f| root.join(&f.file)),
-            )
-            .collect();
-        if !changed.is_empty() {
-            match crate::engine::validate_write::validate_only(root, &changed) {
-                Ok(validation) if !validation.success => {
-                    crate::log_status!(
-                        "validate",
-                        "Post-fix compilation check FAILED — applied fixes may have introduced errors"
-                    );
-                    if let Some(ref output) = validation.output {
-                        crate::log_status!("validate", "{}", output);
-                    }
-                }
-                Ok(validation) if validation.command.is_some() => {
-                    crate::log_status!("validate", "Post-fix compilation check passed");
-                }
-                _ => {} // skipped or error — non-fatal
-            }
-        }
-    }
-
-    // Ratchet lifecycle
-    let ratchet_summary = if args.ratchet && written && !args.ignore_baseline {
-        process_ratchet(&current_result, args)?
-    } else {
-        None
-    };
-
-    let outcome = auto::standard_outcome(
-        if written {
-            AutofixMode::Write
-        } else {
-            AutofixMode::DryRun
-        },
-        final_fix_result.total_insertions,
-        Some(format!("homeboy audit {}", current_result.component_id)),
-        report::build_fix_hints(written, &final_policy_summary),
-    );
-
-    let exit_code = if final_fix_result.total_insertions > 0 {
-        1
-    } else {
-        0
-    };
-
-    // Print human-readable summary to stderr
-    report::log_fix_summary(&final_fix_result, &final_policy_summary, written);
-
-    // Bridge to universal fix summary (before strip_code mutates the data)
-    let fix_summary = if written && final_fix_result.files_modified > 0 {
-        Some(auto::summarize_audit_fix_result(&final_fix_result))
-    } else {
-        None
-    };
-
-    // Strip generated code from JSON output unless --preview is set
-    if !args.preview {
-        final_fix_result.strip_code();
-    }
-
-    let policy_summary = report::build_fix_policy_summary(
-        &final_policy_summary,
-        args.only_labels.clone(),
-        args.exclude_labels.clone(),
-    );
-
-    Ok(AuditRunWorkflowResult {
-        output: AuditCommandOutput::Fix {
-            component_id: current_result.component_id,
-            source_path: current_result.source_path,
-            status: outcome.status,
-            fix_result: final_fix_result,
-            fix_summary,
-            policy_summary,
-            iterations,
-            written,
-            hints: outcome.hints,
-            ratchet_summary,
-        },
-        exit_code,
-    })
-}
-
-/// Process ratchet lifecycle — update baseline when findings are resolved.
-fn process_ratchet(
-    current_result: &CodeAuditResult,
-    args: &AuditRunWorkflowArgs,
-) -> crate::Result<Option<AutoRatchetSummary>> {
-    let existing_baseline = baseline::load_baseline(Path::new(&current_result.source_path));
-    let Some(existing_baseline) = existing_baseline else {
-        return Ok(None);
-    };
-
-    let comparison = baseline::compare(current_result, &existing_baseline);
-    if comparison.resolved_fingerprints.is_empty() {
-        if comparison.new_items.is_empty() {
-            crate::log_status!(
-                "ratchet",
-                "No findings resolved — baseline unchanged ({} findings)",
-                existing_baseline.item_count
-            );
-        }
-        return Ok(None);
-    }
-
-    // Findings were eliminated — save updated baseline
-    let save_result = if let Some(ref git_ref) = args.changed_since {
-        let changed =
-            git::get_files_changed_since(&current_result.source_path, git_ref).unwrap_or_default();
-        baseline::save_baseline_scoped(current_result, &changed)
-    } else {
-        baseline::save_baseline(current_result)
-    };
-
-    match save_result {
-        Ok(_path) => {
-            crate::log_status!(
-                "ratchet",
-                "Auto-updated baseline: {} finding(s) resolved ({} → {})",
-                comparison.resolved_fingerprints.len(),
-                existing_baseline.item_count,
-                current_result.findings.len()
-            );
-            Ok(Some(AutoRatchetSummary {
-                resolved_count: comparison.resolved_fingerprints.len(),
-                previous_count: existing_baseline.item_count,
-                current_count: current_result.findings.len(),
-                baseline_updated: true,
-            }))
-        }
-        Err(e) => {
-            crate::log_status!("ratchet", "Warning: failed to auto-update baseline: {}", e);
-            Ok(None)
-        }
     }
 }
 

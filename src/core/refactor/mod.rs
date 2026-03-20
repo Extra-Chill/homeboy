@@ -16,11 +16,11 @@ mod rename;
 mod sandbox;
 pub mod transform;
 
-/// Shared output for detector-triggered refactors/fixes.
+/// Shared output for refactors/fixes.
 ///
-/// Commands like `lint --fix` and `test --fix` are detector-driven entrypoints,
-/// but the write path is still a refactor. Keep the applied-change reporting in
-/// refactor so commands don't invent parallel output models.
+/// `refactor --from lint/test/audit --write` are the entrypoints for fixes.
+/// Keep the applied-change reporting in refactor so commands don't invent
+/// parallel output models.
 #[derive(Debug, Clone, Serialize)]
 pub struct AppliedRefactor {
     pub files_modified: usize,

@@ -47,7 +47,7 @@ cron trigger (every 15 minutes)
 
 The key mechanism is the autofix loop. When a stage fails:
 
-1. The stage runs fix commands (`homeboy lint --fix`, `homeboy audit --fix --write`)
+1. The stage runs fix commands (`homeboy refactor --from all --write`)
 2. If fixes produce file changes, they're committed as `chore(ci): apply homeboy autofixes`
 3. The commit is pushed using a GitHub App token (this triggers a CI re-run, unlike `GITHUB_TOKEN` which doesn't)
 4. The full pipeline re-runs and verifies the fixes
@@ -76,7 +76,7 @@ Runs language-specific formatting and static analysis checks.
 - `cargo fmt` — code formatting
 - `cargo clippy` — lint warnings and errors
 
-**Autofix:** `homeboy lint --fix` runs `cargo fmt` (unscoped) and `cargo clippy --fix`.
+**Autofix:** `homeboy refactor --from lint --write` runs the extension's fixer (e.g., `cargo fmt` + `cargo clippy --fix` for Rust, `phpcbf` for WordPress).
 
 ### Test
 
@@ -85,7 +85,7 @@ Runs the project's test suite.
 **Rust example:**
 - `cargo test` — unit and integration tests
 
-**Autofix:** `homeboy test --fix` runs language-specific test fixers (e.g., auto-updating test snapshots).
+**Autofix:** `homeboy refactor --from test --write` runs language-specific test fixers (e.g., auto-updating test snapshots).
 
 ### Audit
 
@@ -99,7 +99,7 @@ Homeboy's convention-based code quality analysis. Unlike traditional linters tha
 - **Structural health** — god files, high item counts
 - **Documentation** — broken references, stale claims, missing feature docs
 
-**Autofix:** `homeboy audit --fix --write` generates test scaffolds, narrows visibility, adds missing imports, and more. Findings that can't be auto-fixed are filed as GitHub issues.
+**Autofix:** `homeboy refactor --from audit --write` generates test scaffolds, narrows visibility, adds missing imports, and more. Findings that can't be auto-fixed are filed as GitHub issues.
 
 ### Release
 
@@ -224,7 +224,7 @@ jobs:
           commands: audit
           autofix: 'true'
           autofix-mode: 'always'
-          autofix-commands: 'audit --fix --write'
+          autofix-commands: 'refactor --from audit --write'
           autofix-max-commits: '3'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 ```

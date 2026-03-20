@@ -14,10 +14,6 @@ pub struct LintArgs {
     #[command(flatten)]
     comp: PositionalComponentArgs,
 
-    /// Auto-fix formatting issues before validating
-    #[arg(long)]
-    fix: bool,
-
     /// Show compact summary instead of full output
     #[arg(long)]
     summary: bool,
@@ -101,7 +97,6 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             sniffs: args.sniffs.clone(),
             exclude_sniffs: args.exclude_sniffs.clone(),
             category: args.category.clone(),
-            fix: args.fix,
             baseline: args.baseline_args.baseline,
             ignore_baseline: args.baseline_args.ignore_baseline,
         },

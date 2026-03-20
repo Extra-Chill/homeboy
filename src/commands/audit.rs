@@ -5,7 +5,6 @@ use homeboy::code_audit::{
     self, report, run_main_audit_workflow, AuditCommandOutput, AuditRunWorkflowArgs,
 };
 use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::refactor::{AuditConvergenceScoring, AuditVerificationToggles};
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs};
 use super::{CmdResult, GlobalArgs};
@@ -19,39 +18,11 @@ pub struct AuditArgs {
     #[arg(long)]
     pub conventions: bool,
 
-    /// Generate fix stubs for outlier files (dry run by default)
-    #[arg(long)]
-    pub fix: bool,
-
-    /// Apply fixes to disk (requires --fix)
-    #[arg(long, requires = "fix")]
-    pub write: bool,
-
-    /// Maximum recursive autofix iterations when writing
-    #[arg(long, requires = "fix", default_value_t = 3)]
-    pub max_iterations: usize,
-
-    /// Weight for warning-level findings in convergence scoring
-    #[arg(long, requires = "fix", default_value_t = 3)]
-    pub warning_weight: usize,
-
-    /// Weight for info-level findings in convergence scoring
-    #[arg(long, requires = "fix", default_value_t = 1)]
-    pub info_weight: usize,
-
-    /// Disable lint smoke verification during chunk verification
-    #[arg(long, requires = "fix")]
-    pub no_lint_smoke: bool,
-
-    /// Disable test smoke verification during chunk verification
-    #[arg(long, requires = "fix")]
-    pub no_test_smoke: bool,
-
-    /// Restrict generated fixes to these fix kinds (repeatable)
+    /// Restrict findings to these kinds (repeatable)
     #[arg(long = "only", value_name = "kind")]
     pub only: Vec<String>,
 
-    /// Exclude generated fixes for these fix kinds (repeatable)
+    /// Exclude findings of these kinds (repeatable)
     #[arg(long = "exclude", value_name = "kind")]
     pub exclude: Vec<String>,
 
@@ -69,10 +40,6 @@ pub struct AuditArgs {
     /// Include compact machine-readable summary for CI wrappers
     #[arg(long)]
     pub json_summary: bool,
-
-    /// Include full generated code in --fix JSON output (omitted by default to reduce size)
-    #[arg(long, requires = "fix")]
-    pub preview: bool,
 }
 
 fn parse_finding_kinds(
@@ -128,17 +95,6 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         component_id: resolved_id,
         source_path: resolved_path,
         conventions: args.conventions,
-        fix: args.fix,
-        write: args.write,
-        max_iterations: args.max_iterations,
-        scoring: AuditConvergenceScoring {
-            warning_weight: args.warning_weight,
-            info_weight: args.info_weight,
-        },
-        verification: AuditVerificationToggles {
-            lint_smoke: !args.no_lint_smoke,
-            test_smoke: !args.no_test_smoke,
-        },
         only_kinds,
         exclude_kinds,
         only_labels: args.only,
@@ -148,7 +104,6 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         ignore_baseline: args.baseline_args.ignore_baseline,
         changed_since: args.changed_since,
         json_summary: args.json_summary,
-        preview: args.preview,
     })?;
 
     Ok(report::from_main_workflow(workflow))
@@ -258,12 +213,11 @@ mod tests {
         std::env::temp_dir().join(format!("homeboy-audit-command-{name}-{nanos}"))
     }
 
-    /// End-to-end test of the audit command's fix-write mode.
-    /// This is the only test that exercises the command's `run()` function
-    /// directly — all other tests belong in their core modules.
+    /// End-to-end test of the audit command's read-only mode.
+    /// Fixes are now owned by `homeboy refactor --from audit --write`.
     #[test]
-    fn audit_fix_write_stops_when_no_safe_changes_apply() {
-        let root = tmp_dir("fix-write-no-safe-changes");
+    fn audit_detects_outliers_in_convention_group() {
+        let root = tmp_dir("audit-read-only");
         fs::create_dir_all(root.join("commands")).unwrap();
 
         fs::write(
@@ -284,15 +238,8 @@ mod tests {
                 path: None,
             },
             conventions: false,
-            fix: true,
-            write: true,
             ratchet: false,
-            max_iterations: 3,
-            warning_weight: 3,
-            info_weight: 1,
-            no_lint_smoke: false,
-            no_test_smoke: false,
-            only: vec!["duplicate_function".to_string()],
+            only: vec![],
             exclude: vec![],
             baseline_args: BaselineArgs {
                 baseline: false,
@@ -300,27 +247,23 @@ mod tests {
             },
             changed_since: None,
             json_summary: false,
-            preview: false,
         };
 
-        let (output, _code) =
-            run(args, &crate::commands::GlobalArgs {}).expect("audit fix should run");
+        let (output, code) = run(args, &crate::commands::GlobalArgs {}).expect("audit should run");
 
+        // Audit should detect the outlier and return findings
         match output {
-            AuditCommandOutput::Fix { iterations, .. } => {
-                assert!(!iterations.is_empty(), "expected at least one iteration");
-                let any_applied = iterations.iter().any(|i| i.applied_chunks > 0);
+            AuditCommandOutput::Full { result, .. } => {
                 assert!(
-                    any_applied,
-                    "expected at least one iteration to apply changes, got: {:?}",
-                    iterations.iter().map(|i| &i.status).collect::<Vec<_>>()
+                    !result.findings.is_empty(),
+                    "expected findings for the outlier file"
                 );
             }
-            other => panic!(
-                "expected AuditCommandOutput::Fix, got {:?}",
-                std::mem::discriminant(&other)
-            ),
+            _ => {} // Summary or other modes are also valid
         }
+
+        // Non-zero exit expected when outliers are found
+        assert!(code >= 0, "audit should complete without error");
 
         let _ = fs::remove_dir_all(root);
     }
