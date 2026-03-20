@@ -22,7 +22,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         },
     )?;
 
-    let (bump_type, releasable_count) = match resolve_bump(&component.local_path)? {
+    let (mut bump_type, releasable_count) = match resolve_bump(&component.local_path)? {
         Some(result) => result,
         None => {
             log_status!(
@@ -46,6 +46,25 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             ));
         }
     };
+
+    // Pre-1.0 semver: breaking changes bump minor, not major.
+    // In semver, 0.x.y signals "initial development" where the public API is
+    // not stable. Breaking changes are expected and land as minor bumps.
+    // A major bump to 1.0.0 should only happen when the author explicitly
+    // decides the API is stable (via --major).
+    if bump_type == "major" {
+        let current_version = super::version::read_version(Some(&input.component_id))
+            .ok()
+            .and_then(|v| v.version.split('.').next().map(String::from))
+            .unwrap_or_default();
+        if current_version == "0" {
+            log_status!(
+                "release",
+                "Pre-1.0: downgrading major → minor (breaking changes are minor bumps in 0.x)"
+            );
+            bump_type = "minor".to_string();
+        }
+    }
 
     if bump_type == "major" && !input.major {
         log_status!(
