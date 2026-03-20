@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.84.0] - 2026-03-20
+
+### Added
+- auto-fix HighItemCount findings via decompose pipeline
+
 ## [0.83.0] - 2026-03-20
 
 ### Added
