@@ -678,6 +678,7 @@ mod tests {
             param_format: "name_colon_type".to_string(),
             test_templates: HashMap::new(),
             type_defaults: vec![],
+            ..Default::default()
         }
     }
 
