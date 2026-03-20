@@ -249,8 +249,7 @@ mod tests {
             json_summary: false,
         };
 
-        let (output, code) =
-            run(args, &crate::commands::GlobalArgs {}).expect("audit should run");
+        let (output, code) = run(args, &crate::commands::GlobalArgs {}).expect("audit should run");
 
         // Audit should detect the outlier and return findings
         match output {
