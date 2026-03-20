@@ -194,6 +194,7 @@ pub(crate) fn generate_test_plan_with_types(
                 type_registry,
                 type_defaults,
                 &contract_grammar.fallback_default,
+                contract_grammar.field_assertion_template.as_deref(),
             );
             vars.insert("assertion_code".to_string(), assertion);
 
@@ -908,6 +909,7 @@ fn enrich_assertion_with_fields(
     type_registry: &HashMap<String, TypeDefinition>,
     type_defaults: &[TypeDefault],
     fallback_default: &str,
+    field_assertion_template: Option<&str>,
 ) -> String {
     // Only enrich if the assertion has a TODO placeholder
     if !assertion.contains("TODO:") {
@@ -954,6 +956,12 @@ fn enrich_assertion_with_fields(
         return assertion.to_string();
     }
 
+    // Must have a field assertion template from the grammar to generate assertions
+    let template = match field_assertion_template {
+        Some(t) => t,
+        None => return assertion.to_string(),
+    };
+
     let indent = "        ";
 
     // Find the TODO line and everything after it (including the `let _ = inner;` line before it)
@@ -979,14 +987,15 @@ fn enrich_assertion_with_fields(
         .map(|p| todo_pos + p + 1)
         .unwrap_or(assertion.len());
 
-    // Build real field assertions
+    // Build real field assertions using the grammar's field_assertion_template
     let mut field_assertions = Vec::new();
     for field in &public_fields {
         let expected = default_for_field_type(&field.field_type, type_defaults, fallback_default);
-        field_assertions.push(format!(
-            "{indent}assert_eq!(inner.{}, {});",
-            field.name, expected
-        ));
+        let rendered = template
+            .replace("{indent}", indent)
+            .replace("{field_name}", &field.name)
+            .replace("{expected_value}", &expected);
+        field_assertions.push(rendered);
     }
 
     format!(
@@ -999,7 +1008,8 @@ fn enrich_assertion_with_fields(
 
 /// Resolve a default/zero value for a field type to use as expected assertion value.
 ///
-/// Uses the grammar's type_defaults first, then falls back to common patterns.
+/// Uses the grammar's `type_defaults` exclusively — no language-specific fallbacks
+/// in core. If no `type_default` matches, uses `fallback_default` from the grammar.
 fn default_for_field_type(
     field_type: &str,
     type_defaults: &[TypeDefault],
@@ -1007,33 +1017,12 @@ fn default_for_field_type(
 ) -> String {
     let trimmed = field_type.trim();
 
-    // Try grammar type_defaults first
     for td in type_defaults {
         if let Ok(re) = Regex::new(&td.pattern) {
             if re.is_match(trimmed) {
                 return td.value.clone();
             }
         }
-    }
-
-    // Common fallbacks for types that might not be in type_defaults
-    if trimmed == "bool" {
-        return "false".to_string();
-    }
-    if trimmed == "usize" || trimmed == "u32" || trimmed == "u64" || trimmed == "i32" || trimmed == "i64" {
-        return "0".to_string();
-    }
-    if trimmed.starts_with("Option<") || trimmed.starts_with("Option ") {
-        return "None".to_string();
-    }
-    if trimmed.starts_with("Vec<") {
-        return "vec![]".to_string();
-    }
-    if trimmed == "String" {
-        return "String::new()".to_string();
-    }
-    if trimmed == "&str" {
-        return r#""""#.to_string();
     }
 
     fallback_default.to_string()
@@ -1545,6 +1534,26 @@ mod tests {
                 value: "Vec::new()".to_string(),
                 imports: vec![],
             },
+            TypeDefault {
+                pattern: r"^bool$".to_string(),
+                value: "false".to_string(),
+                imports: vec![],
+            },
+            TypeDefault {
+                pattern: r"^Option<.*>$".to_string(),
+                value: "None".to_string(),
+                imports: vec![],
+            },
+            TypeDefault {
+                pattern: r"^usize$|^u\d+$|^i\d+$".to_string(),
+                value: "0".to_string(),
+                imports: vec![],
+            },
+            TypeDefault {
+                pattern: r"^String$".to_string(),
+                value: "String::new()".to_string(),
+                imports: vec![],
+            },
         ]
     }
 
@@ -1568,6 +1577,9 @@ mod tests {
             type_constructors: sample_type_constructors(),
             assertion_templates: sample_assertion_templates(),
             test_templates: sample_test_templates(),
+            field_assertion_template: Some(
+                "{indent}assert_eq!(inner.{field_name}, {expected_value});".to_string(),
+            ),
             ..Default::default()
         }
     }
@@ -2518,6 +2530,7 @@ class AbilityResult {
             &type_registry,
             &type_defaults,
             "Default::default()",
+            Some("{indent}assert_eq!(inner.{field_name}, {expected_value});"),
         );
 
         // Should generate real assert_eq! statements, not comments
@@ -2569,6 +2582,7 @@ class AbilityResult {
             &type_registry,
             &[],
             "Default::default()",
+            Some("{indent}assert_eq!(inner.{field_name}, {expected_value});"),
         );
 
         assert_eq!(

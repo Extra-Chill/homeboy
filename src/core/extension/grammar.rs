@@ -189,6 +189,16 @@ pub struct ContractGrammar {
     /// Rust: `"^\s*pub\b"`, PHP: `"^\s*public\b"`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_visibility_pattern: Option<String>,
+
+    /// Template for asserting a single struct field in a generated test.
+    /// Variables: `{field_name}`, `{expected_value}`, `{indent}`.
+    ///
+    /// Rust:  `"{indent}assert_eq!(inner.{field_name}, {expected_value});"`
+    /// PHP:   `"{indent}$this->assertSame( {expected_value}, $result->{field_name} );"`
+    ///
+    /// If not set, field-level assertions are not generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_assertion_template: Option<String>,
 }
 
 fn default_fallback_default() -> String {
