@@ -85,7 +85,12 @@ pub(crate) fn generate_test_plan(
             expected_variant: "no_panic".to_string(),
             expected_value: None,
             template_key: "no_panic".to_string(),
-            variables: build_variables(contract, None, type_defaults, &contract_grammar.fallback_default),
+            variables: build_variables(
+                contract,
+                None,
+                type_defaults,
+                &contract_grammar.fallback_default,
+            ),
         });
     } else {
         for (i, branch) in contract.branches.iter().enumerate() {
@@ -103,7 +108,12 @@ pub(crate) fn generate_test_plan(
             let template_key =
                 derive_template_key(&contract.signature.return_type, &branch.returns);
 
-            let mut vars = build_variables(contract, Some(branch), type_defaults, &contract_grammar.fallback_default);
+            let mut vars = build_variables(
+                contract,
+                Some(branch),
+                type_defaults,
+                &contract_grammar.fallback_default,
+            );
             vars.insert("condition".to_string(), branch.condition.clone());
             vars.insert("condition_slug".to_string(), slugify(&branch.condition));
 
@@ -120,10 +130,7 @@ pub(crate) fn generate_test_plan(
                 vars.insert("param_setup".to_string(), so.setup_lines.clone());
                 vars.insert("param_args".to_string(), so.call_args.clone());
                 if !so.extra_imports.is_empty() {
-                    let existing = vars
-                        .get("extra_imports")
-                        .cloned()
-                        .unwrap_or_default();
+                    let existing = vars.get("extra_imports").cloned().unwrap_or_default();
                     let merged = merge_imports(&existing, &so.extra_imports);
                     vars.insert("extra_imports".to_string(), merged);
                 }
@@ -168,7 +175,12 @@ pub(crate) fn generate_test_plan(
             })
             .collect();
 
-        let mut vars = build_variables(contract, None, type_defaults, &contract_grammar.fallback_default);
+        let mut vars = build_variables(
+            contract,
+            None,
+            type_defaults,
+            &contract_grammar.fallback_default,
+        );
         vars.insert("effects".to_string(), effect_names.join(", "));
 
         cases.push(TestCase {
@@ -496,24 +508,24 @@ fn infer_setup_from_condition(
     let mut all_imports: Vec<String> = Vec::new();
 
     for param in params {
-        let (value_expr, call_arg, imports) =
-            if let Some(hint) = param_hints.get(&param.name) {
-                resolve_constructor(
-                    hint,
-                    &param.name,
-                    &param.param_type,
-                    type_constructors,
-                    type_defaults,
-                    fallback_default,
-                )
-            } else {
-                // No hint for this param — use type_defaults
-                let (val, call_override, imps) =
-                    resolve_type_default(&param.param_type, type_defaults, fallback_default);
-                let call = call_override.unwrap_or_else(|| default_call_arg(&param.name, &param.param_type));
-                let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
-                (val, call, imp_strs)
-            };
+        let (value_expr, call_arg, imports) = if let Some(hint) = param_hints.get(&param.name) {
+            resolve_constructor(
+                hint,
+                &param.name,
+                &param.param_type,
+                type_constructors,
+                type_defaults,
+                fallback_default,
+            )
+        } else {
+            // No hint for this param — use type_defaults
+            let (val, call_override, imps) =
+                resolve_type_default(&param.param_type, type_defaults, fallback_default);
+            let call =
+                call_override.unwrap_or_else(|| default_call_arg(&param.name, &param.param_type));
+            let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
+            (val, call, imp_strs)
+        };
 
         setup_lines.push(format!("        let {} = {};", param.name, value_expr));
         call_args.push(call_arg);
@@ -548,11 +560,7 @@ fn default_call_arg(name: &str, param_type: &str) -> String {
 /// resolved through the grammar's `type_constructors` to get actual code.
 ///
 /// Returns `None` if no hint can be inferred for this parameter.
-fn infer_hint_for_param(
-    condition: &str,
-    condition_lower: &str,
-    param: &Param,
-) -> Option<String> {
+fn infer_hint_for_param(condition: &str, condition_lower: &str, param: &Param) -> Option<String> {
     let pname = &param.name;
     let ptype = &param.param_type;
 
@@ -567,23 +575,19 @@ fn infer_hint_for_param(
     }
 
     // ── Option: "param.is_none()" ──
-    if condition_contains_param_method(condition_lower, pname, "is_none")
-        || (condition_lower.contains(&pname.to_lowercase())
-            && condition_lower.contains("none"))
+    if (condition_contains_param_method(condition_lower, pname, "is_none")
+        || (condition_lower.contains(&pname.to_lowercase()) && condition_lower.contains("none")))
+        && ptype.starts_with("Option")
     {
-        if ptype.starts_with("Option") {
-            return Some(hints::NONE.to_string());
-        }
+        return Some(hints::NONE.to_string());
     }
 
     // ── Option: "param.is_some()" ──
-    if condition_contains_param_method(condition_lower, pname, "is_some")
-        || (condition_lower.contains(&pname.to_lowercase())
-            && condition_lower.contains("some"))
+    if (condition_contains_param_method(condition_lower, pname, "is_some")
+        || (condition_lower.contains(&pname.to_lowercase()) && condition_lower.contains("some")))
+        && ptype.starts_with("Option")
     {
-        if ptype.starts_with("Option") {
-            return Some(hints::SOME_DEFAULT.to_string());
-        }
+        return Some(hints::SOME_DEFAULT.to_string());
     }
 
     // ── Path existence ──
@@ -687,7 +691,7 @@ fn resolve_constructor(
                     .map(|c| c.replace("{param_name}", param_name))
                     .unwrap_or_else(|| default_call_arg(param_name, param_type));
 
-                let imports: Vec<String> = tc.imports.iter().cloned().collect();
+                let imports: Vec<String> = tc.imports.to_vec();
                 return (value, call_arg, imports);
             }
         }
@@ -725,10 +729,24 @@ fn is_numeric_like(ptype: &str) -> bool {
     // Common numeric type patterns across languages
     matches!(
         t,
-        "usize" | "u8" | "u16" | "u32" | "u64" | "u128"
-            | "isize" | "i8" | "i16" | "i32" | "i64" | "i128"
-            | "f32" | "f64"
-            | "int" | "float" | "double" | "number"
+        "usize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "isize"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "f32"
+            | "f64"
+            | "int"
+            | "float"
+            | "double"
+            | "number"
     )
 }
 
@@ -798,13 +816,11 @@ fn resolve_assertion(
     };
 
     // Try the specific key first, then fall back to the base key (without _value)
-    let template = assertion_templates
-        .get(&key)
-        .or_else(|| {
-            // Fall back: result_ok_value → result_ok
-            let base = key.rsplit_once('_').map(|(base, _)| base.to_string());
-            base.and_then(|b| assertion_templates.get(&b))
-        });
+    let template = assertion_templates.get(&key).or_else(|| {
+        // Fall back: result_ok_value → result_ok
+        let base = key.rsplit_once('_').map(|(base, _)| base.to_string());
+        base.and_then(|b| assertion_templates.get(&b))
+    });
 
     if let Some(tmpl) = template {
         // Substitute variables in the assertion template
@@ -1230,43 +1246,61 @@ mod tests {
     fn sample_assertion_templates() -> HashMap<String, String> {
         let indent = "        ";
         let mut m = HashMap::new();
-        m.insert("result_ok".to_string(), format!(
-            "{indent}assert!(result.is_ok(), \"expected Ok for: {{condition}}\");"
-        ));
-        m.insert("result_ok_value".to_string(), format!(
-            "{indent}let inner = result.unwrap();\n\
+        m.insert(
+            "result_ok".to_string(),
+            format!("{indent}assert!(result.is_ok(), \"expected Ok for: {{condition}}\");"),
+        );
+        m.insert(
+            "result_ok_value".to_string(),
+            format!(
+                "{indent}let inner = result.unwrap();\n\
              {indent}// Branch returns Ok({{expected_value}}) when: {{condition}}\n\
              {indent}let _ = inner; // TODO: assert specific value for \"{{expected_value}}\""
-        ));
-        m.insert("result_err".to_string(), format!(
-            "{indent}assert!(result.is_err(), \"expected Err for: {{condition}}\");"
-        ));
-        m.insert("result_err_value".to_string(), format!(
-            "{indent}let err = result.unwrap_err();\n\
+            ),
+        );
+        m.insert(
+            "result_err".to_string(),
+            format!("{indent}assert!(result.is_err(), \"expected Err for: {{condition}}\");"),
+        );
+        m.insert(
+            "result_err_value".to_string(),
+            format!(
+                "{indent}let err = result.unwrap_err();\n\
              {indent}// Branch returns Err({{expected_value}}) when: {{condition}}\n\
              {indent}let err_msg = format!(\"{{{{:?}}}}\", err);\n\
              {indent}let _ = err_msg; // TODO: assert error contains \"{{expected_value}}\""
-        ));
-        m.insert("option_some".to_string(), format!(
-            "{indent}assert!(result.is_some(), \"expected Some for: {{condition}}\");"
-        ));
-        m.insert("option_some_value".to_string(), format!(
-            "{indent}let inner = result.expect(\"expected Some for: {{condition}}\");\n\
+            ),
+        );
+        m.insert(
+            "option_some".to_string(),
+            format!("{indent}assert!(result.is_some(), \"expected Some for: {{condition}}\");"),
+        );
+        m.insert(
+            "option_some_value".to_string(),
+            format!(
+                "{indent}let inner = result.expect(\"expected Some for: {{condition}}\");\n\
              {indent}// Branch returns Some({{expected_value}})\n\
              {indent}let _ = inner; // TODO: assert value matches \"{{expected_value}}\""
-        ));
-        m.insert("option_none".to_string(), format!(
-            "{indent}assert!(result.is_none(), \"expected None for: {{condition}}\");"
-        ));
-        m.insert("bool_true".to_string(), format!(
-            "{indent}assert!(result, \"expected true when: {{condition}}\");"
-        ));
-        m.insert("bool_false".to_string(), format!(
-            "{indent}assert!(!result, \"expected false when: {{condition}}\");"
-        ));
-        m.insert("collection_empty".to_string(), format!(
+            ),
+        );
+        m.insert(
+            "option_none".to_string(),
+            format!("{indent}assert!(result.is_none(), \"expected None for: {{condition}}\");"),
+        );
+        m.insert(
+            "bool_true".to_string(),
+            format!("{indent}assert!(result, \"expected true when: {{condition}}\");"),
+        );
+        m.insert(
+            "bool_false".to_string(),
+            format!("{indent}assert!(!result, \"expected false when: {{condition}}\");"),
+        );
+        m.insert(
+            "collection_empty".to_string(),
+            format!(
             "{indent}assert!(result.is_empty(), \"expected empty collection for: {{condition}}\");"
-        ));
+        ),
+        );
         m.insert("collection_non_empty".to_string(), format!(
             "{indent}assert!(!result.is_empty(), \"expected non-empty collection for: {{condition}}\");"
         ));
@@ -1433,7 +1467,13 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("items.is_empty()", &params, &[], &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "items.is_empty()",
+            &params,
+            &[],
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(result.is_some(), "should infer setup for is_empty");
         let so = result.unwrap();
         assert!(
@@ -1451,7 +1491,13 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("changed_files.is_empty()", &params, &[], &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "changed_files.is_empty()",
+            &params,
+            &[],
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(result.is_some(), "should infer setup for slice is_empty");
         let so = result.unwrap();
         assert!(
@@ -1469,7 +1515,13 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("!commits.is_empty()", &params, &[], &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "!commits.is_empty()",
+            &params,
+            &[],
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(result.is_some(), "should infer setup for negated is_empty");
         let so = result.unwrap();
         assert!(
@@ -1487,8 +1539,13 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result =
-            infer_setup_from_condition("path doesn't exist", &params, &[], &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "path doesn't exist",
+            &params,
+            &[],
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(result.is_some(), "should infer setup for nonexistent path");
         let so = result.unwrap();
         assert!(
@@ -1506,7 +1563,13 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("config.is_none()", &params, &[], &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "config.is_none()",
+            &params,
+            &[],
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(result.is_some(), "should infer setup for is_none");
         let so = result.unwrap();
         assert!(
@@ -1524,7 +1587,13 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("config.is_some()", &params, &[], &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "config.is_some()",
+            &params,
+            &[],
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(result.is_some(), "should infer setup for is_some");
         let so = result.unwrap();
         assert!(
@@ -1542,7 +1611,13 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("some random condition", &params, &[], &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "some random condition",
+            &params,
+            &[],
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(
             result.is_none(),
             "should return None for unrecognized condition"
@@ -1567,8 +1642,13 @@ mod tests {
             },
         ];
         // Condition only targets items, root should keep its type_default
-        let result =
-            infer_setup_from_condition("items.is_empty()", &params, &type_defaults, &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "items.is_empty()",
+            &params,
+            &type_defaults,
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(result.is_some());
         let so = result.unwrap();
         assert!(
@@ -1593,7 +1673,12 @@ mod tests {
             ok_type: "ValidationResult".to_string(),
             err_type: "Error".to_string(),
         };
-        let assertion = resolve_assertion(&returns, &return_type, "items.is_empty()", &sample_assertion_templates());
+        let assertion = resolve_assertion(
+            &returns,
+            &return_type,
+            "items.is_empty()",
+            &sample_assertion_templates(),
+        );
         assert!(
             assertion.contains("unwrap()"),
             "should unwrap Ok value, got: {}",
@@ -1616,7 +1701,12 @@ mod tests {
             ok_type: "String".to_string(),
             err_type: "Error".to_string(),
         };
-        let assertion = resolve_assertion(&returns, &return_type, "path doesn't exist", &sample_assertion_templates());
+        let assertion = resolve_assertion(
+            &returns,
+            &return_type,
+            "path doesn't exist",
+            &sample_assertion_templates(),
+        );
         assert!(
             assertion.contains("unwrap_err()"),
             "should unwrap Err, got: {}",
@@ -1639,7 +1729,12 @@ mod tests {
             ok_type: "()".to_string(),
             err_type: "Error".to_string(),
         };
-        let assertion = resolve_assertion(&returns, &return_type, "default path", &sample_assertion_templates());
+        let assertion = resolve_assertion(
+            &returns,
+            &return_type,
+            "default path",
+            &sample_assertion_templates(),
+        );
         assert!(
             assertion.contains("is_ok()"),
             "should fall back to is_ok(), got: {}",
@@ -1656,7 +1751,12 @@ mod tests {
         let return_type = ReturnShape::OptionType {
             some_type: "Item".to_string(),
         };
-        let assertion = resolve_assertion(&returns, &return_type, "key not found", &sample_assertion_templates());
+        let assertion = resolve_assertion(
+            &returns,
+            &return_type,
+            "key not found",
+            &sample_assertion_templates(),
+        );
         assert!(
             assertion.contains("is_none()"),
             "should assert is_none(), got: {}",
@@ -1671,7 +1771,12 @@ mod tests {
             value: None,
         };
         let return_type = ReturnShape::Bool;
-        let assertion = resolve_assertion(&returns, &return_type, "input is valid", &sample_assertion_templates());
+        let assertion = resolve_assertion(
+            &returns,
+            &return_type,
+            "input is valid",
+            &sample_assertion_templates(),
+        );
         assert!(
             assertion.contains("assert!(result"),
             "should assert true, got: {}",
@@ -1693,7 +1798,12 @@ mod tests {
         let return_type = ReturnShape::Collection {
             element_type: "String".to_string(),
         };
-        let assertion = resolve_assertion(&returns, &return_type, "input.is_empty()", &sample_assertion_templates());
+        let assertion = resolve_assertion(
+            &returns,
+            &return_type,
+            "input.is_empty()",
+            &sample_assertion_templates(),
+        );
         assert!(
             assertion.contains("is_empty()"),
             "should assert emptiness, got: {}",
@@ -1747,7 +1857,13 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("verbose == true", &params, &[], &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "verbose == true",
+            &params,
+            &[],
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(result.is_some());
         let so = result.unwrap();
         assert!(
@@ -1765,7 +1881,13 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result = infer_setup_from_condition("count == 0", &params, &[], &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "count == 0",
+            &params,
+            &[],
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(result.is_some());
         let so = result.unwrap();
         assert!(
@@ -1783,8 +1905,13 @@ mod tests {
             mutable: false,
             has_default: false,
         }];
-        let result =
-            infer_setup_from_condition("name.contains(\"test\")", &params, &[], &sample_type_constructors(), "Default::default()");
+        let result = infer_setup_from_condition(
+            "name.contains(\"test\")",
+            &params,
+            &[],
+            &sample_type_constructors(),
+            "Default::default()",
+        );
         assert!(result.is_some());
         let so = result.unwrap();
         assert!(
