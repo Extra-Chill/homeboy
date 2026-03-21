@@ -2,6 +2,8 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## Unreleased
+
 ## [2.9.0] - 2026-03-21
 
 ### Added
