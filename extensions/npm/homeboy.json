@@ -1,0 +1,10 @@
+{
+  "id": "npm",
+  "changelog_target": "docs/CHANGELOG.md",
+  "version_targets": [
+    {
+      "file": "npm.json",
+      "pattern": "\"version\":\\s*\"([0-9.]+)\""
+    }
+  ]
+}
