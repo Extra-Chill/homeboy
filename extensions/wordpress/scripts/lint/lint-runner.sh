@@ -68,6 +68,32 @@ RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context
 
+# Merge additional findings (e.g. PHPStan) into the HOMEBOY_LINT_FINDINGS_FILE.
+# Appends entries from a JSON array file into the existing findings sidecar,
+# so the identity-based baseline ratchet sees findings from all linters.
+merge_findings_into_sidecar() {
+    local extra_file="$1"
+    local target="${HOMEBOY_LINT_FINDINGS_FILE:-}"
+    [ -z "$target" ] && return 0
+    [ ! -f "$extra_file" ] && return 0
+
+    # If the target doesn't exist yet, just copy the extra file
+    if [ ! -f "$target" ]; then
+        cp "$extra_file" "$target"
+        return 0
+    fi
+
+    # Merge both JSON arrays into one
+    if command -v php &> /dev/null; then
+        php -r '
+            $existing = json_decode(file_get_contents($argv[1]), true) ?: [];
+            $extra = json_decode(file_get_contents($argv[2]), true) ?: [];
+            $merged = array_merge($existing, $extra);
+            file_put_contents($argv[1], json_encode($merged, JSON_UNESCAPED_SLASHES) . "\n");
+        ' "$target" "$extra_file" 2>/dev/null || true
+    fi
+}
+
 # Determine lint target (file, glob, or full component)
 # Use array to properly handle paths with spaces
 LINT_FILES=("$PLUGIN_PATH")
@@ -666,7 +692,8 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
 
         echo ""
         set +e
-        HOMEBOY_SUMMARY_MODE=1 bash "$phpstan_runner"
+        _HOMEBOY_PHPSTAN_FINDINGS_FILE="${_PHPSTAN_FINDINGS_TMPFILE:-}" \
+            HOMEBOY_SUMMARY_MODE=1 bash "$phpstan_runner"
         local phpstan_exit=$?
         set -e
 
@@ -676,9 +703,23 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         return 0
     }
 
+    # Create temp file for PHPStan findings if baseline sidecar is active
+    _PHPSTAN_FINDINGS_TMPFILE=""
+    if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
+        _PHPSTAN_FINDINGS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/phpstan-findings-XXXXXX.json")
+    fi
+
     # Run PHPStan (warn-only - does not affect exit code)
     PHPSTAN_PASSED=1
     run_phpstan_summary || PHPSTAN_PASSED=0
+
+    # Merge PHPCS + PHPStan findings into the final baseline sidecar.
+    # PHPCS writes directly to HOMEBOY_LINT_FINDINGS_FILE; PHPStan writes
+    # to the temp file. Merge both so the identity-based ratchet sees all errors.
+    if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ] && [ -n "$_PHPSTAN_FINDINGS_TMPFILE" ] && [ -f "$_PHPSTAN_FINDINGS_TMPFILE" ]; then
+        merge_findings_into_sidecar "$_PHPSTAN_FINDINGS_TMPFILE"
+        rm -f "$_PHPSTAN_FINDINGS_TMPFILE"
+    fi
 
     # Always exit 0 (warn-only mode) - lint issues are warnings, not failures
     if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ] && [ "$PHPSTAN_PASSED" -eq 1 ]; then
@@ -740,7 +781,8 @@ run_phpstan() {
 
     echo ""
     set +e
-    HOMEBOY_SUMMARY_MODE=1 bash "$phpstan_runner"
+    _HOMEBOY_PHPSTAN_FINDINGS_FILE="${_PHPSTAN_FINDINGS_TMPFILE:-}" \
+        HOMEBOY_SUMMARY_MODE=1 bash "$phpstan_runner"
     local phpstan_exit=$?
     set -e
 
@@ -751,9 +793,21 @@ run_phpstan() {
     return 0
 }
 
+# Create temp file for PHPStan findings if baseline sidecar is active
+_PHPSTAN_FINDINGS_TMPFILE=""
+if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
+    _PHPSTAN_FINDINGS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/phpstan-findings-XXXXXX.json")
+fi
+
 # Run PHPStan (warn-only - does not affect exit code)
 PHPSTAN_PASSED=1
 run_phpstan || PHPSTAN_PASSED=0
+
+# Merge PHPCS + PHPStan findings into the final baseline sidecar
+if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ] && [ -n "$_PHPSTAN_FINDINGS_TMPFILE" ] && [ -f "$_PHPSTAN_FINDINGS_TMPFILE" ]; then
+    merge_findings_into_sidecar "$_PHPSTAN_FINDINGS_TMPFILE"
+    rm -f "$_PHPSTAN_FINDINGS_TMPFILE"
+fi
 
 # Always exit 0 (warn-only mode) - lint issues are warnings, not failures
 if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ] && [ "$PHPSTAN_PASSED" -eq 1 ]; then

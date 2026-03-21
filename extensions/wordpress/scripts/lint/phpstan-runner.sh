@@ -472,6 +472,39 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         ' "$PLUGIN_PATH" "$PHPSTAN_LEVEL" "${HOMEBOY_ANNOTATIONS_DIR}" 2>/dev/null || true
     fi
 
+    # Write PHPStan lint findings sidecar for homeboy baseline ratchet.
+    # Transforms PHPStan JSON into the same LintFinding format PHPCS uses:
+    #   [{id: "file::identifier::line", message: "...", category: "phpstan"}]
+    # The lint-runner merges these with PHPCS findings into the final baseline.
+    if [ -n "${_HOMEBOY_PHPSTAN_FINDINGS_FILE:-}" ] && [ -n "$json_output" ]; then
+        echo "$json_output" | php -r '
+            $json = json_decode(file_get_contents("php://stdin"), true);
+            if (!$json || empty($json["files"])) {
+                file_put_contents($argv[2], "[]");
+                exit;
+            }
+            $componentPath = $argv[1] ?? "";
+            $findings = [];
+            foreach ($json["files"] as $filePath => $data) {
+                $relPath = $filePath;
+                if ($componentPath && strpos($filePath, $componentPath) === 0) {
+                    $relPath = ltrim(substr($filePath, strlen($componentPath)), "/");
+                }
+                foreach ($data["messages"] ?? [] as $msg) {
+                    $identifier = $msg["identifier"] ?? "unknown";
+                    $line = $msg["line"] ?? 0;
+                    $message = $msg["message"] ?? "Unknown";
+                    $findings[] = [
+                        "id" => $relPath . "::phpstan." . $identifier . "::" . $line,
+                        "message" => $message . " (phpstan." . $identifier . ")",
+                        "category" => "phpstan",
+                    ];
+                }
+            }
+            file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");
+        ' "$PLUGIN_PATH" "${_HOMEBOY_PHPSTAN_FINDINGS_FILE}" 2>/dev/null || true
+    fi
+
     # Fallback: show stderr if PHPStan failed without producing JSON
     if [ "$json_exit" -ne 0 ] && [ -z "$json_output" ] && [ -n "$stderr_output" ]; then
         echo ""
