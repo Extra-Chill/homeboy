@@ -2,7 +2,25 @@
 
 All notable changes to the **github** extension will be documented in this file.
 
-## Unreleased
+## [1.2.0] - 2026-03-21
+
+### Added
+- independent component versioning and continuous release for each extension
+- make GitHub and crates.io publish scripts idempotent
+- add package/publish module actions
+
+### Changed
+- v1.1.0
+- rename modules to extensions across repo
+- remove CLI wrapper, focus on release publishing
+- convert module configs to snake_case keys
+- Initial commit
+
+### Fixed
+- seed changelogs with current versions for homeboy release
+- fixed wordpress build script to handle nested blocks, also updated modules providing cli tools to support direct execution
+- fixing bugs and updating things
+- broadcast action pattern and path quoting
 
 ## [1.1.0] - 2026-03-21
 
