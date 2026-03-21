@@ -130,7 +130,15 @@ resolve_component_id() {
 }
 
 resolve_workspace() {
-  pwd
+  # When running in a multi-component repo, COMPONENT_DIR points to the
+  # subdirectory containing the component's homeboy.json. Homeboy core
+  # uses --path to read config and scope operations to this directory.
+  local component_dir="${COMPONENT_DIR:-}"
+  if [ -n "${component_dir}" ] && [ "${component_dir}" != "." ]; then
+    printf '%s/%s\n' "$(pwd)" "${component_dir}"
+  else
+    pwd
+  fi
 }
 
 resolve_pr_target_repo() {

@@ -20,9 +20,16 @@
 
 set -euo pipefail
 
-WORKSPACE="${GITHUB_WORKSPACE:-.}"
 RELEASE_BRANCH="${RELEASE_BRANCH:-main}"
 DRY_RUN="${RELEASE_DRY_RUN:-false}"
+
+# Resolve workspace — use component subdirectory when set
+COMPONENT_DIR="${COMPONENT_DIR:-.}"
+if [ -n "${COMPONENT_DIR}" ] && [ "${COMPONENT_DIR}" != "." ]; then
+  WORKSPACE="${GITHUB_WORKSPACE:-.}/${COMPONENT_DIR}"
+else
+  WORKSPACE="${GITHUB_WORKSPACE:-.}"
+fi
 
 json_field() {
   local file_path="$1"

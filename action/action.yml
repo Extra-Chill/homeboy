@@ -161,6 +161,7 @@ runs:
       id: read-config
       shell: bash
       env:
+        COMPONENT_NAME: ${{ inputs.component }}
         EXTENSION_INPUT: ${{ inputs.extension }}
         PHP_INPUT: ${{ inputs.php-version }}
         NODE_INPUT: ${{ inputs.node-version }}
