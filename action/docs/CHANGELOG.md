@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.11.0] - 2026-03-21
+
+### Added
+- multi-component support via component subdirectory resolution
+
 ## [1.10.1] - 2026-03-21
 
 ### Fixed
