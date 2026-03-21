@@ -258,12 +258,30 @@ install_frontend_dependencies() {
 }
 
 # Build frontend assets (Gutenberg blocks via @wordpress/scripts, Vite, or generic npm build)
+#
+# Frontend builds are non-fatal for PHP-primary plugins. If node/npm is
+# unavailable or the build fails, the script warns but continues — the PHP
+# plugin still works without built JS assets. Set HOMEBOY_REQUIRE_FRONTEND=1
+# to make frontend builds fatal (for JS-heavy projects where the build IS
+# the deliverable).
 build_frontend_assets() {
     print_status "Checking for frontend build requirements..."
+
+    REQUIRE_FRONTEND="${HOMEBOY_REQUIRE_FRONTEND:-0}"
 
     # Check if package.json exists
     if [ ! -f "package.json" ]; then
         print_status "No package.json found, skipping frontend build"
+        return 0
+    fi
+
+    # Check if node/npm are available
+    if ! command -v node &> /dev/null || ! command -v npm &> /dev/null; then
+        if [ "$REQUIRE_FRONTEND" = "1" ]; then
+            print_error "node/npm not available but HOMEBOY_REQUIRE_FRONTEND=1"
+            exit 1
+        fi
+        print_warning "node/npm not available, skipping frontend build (PHP-only artifact)"
         return 0
     fi
 
@@ -288,13 +306,16 @@ build_frontend_assets() {
 
     # Run the build command
     print_status "Building frontend assets..."
-    npm run build --quiet 2>&1
-
-    if [ $? -eq 0 ]; then
+    if npm run build --quiet 2>&1; then
         print_success "Frontend assets built successfully ($build_tool)"
     else
-        print_error "Frontend build failed"
-        exit 1
+        if [ "$REQUIRE_FRONTEND" = "1" ]; then
+            print_error "Frontend build failed (fatal: HOMEBOY_REQUIRE_FRONTEND=1)"
+            exit 1
+        fi
+        print_warning "Frontend build failed — continuing with PHP-only artifact"
+        print_warning "The plugin will work without JS assets. Fix the frontend build to include them."
+        FRONTEND_BUILD_FAILED=1
     fi
 }
 
@@ -345,9 +366,13 @@ build_nested_packages() {
             if npm run build --silent 2>&1; then
                 print_success "  Built $pkg_dir successfully"
             else
-                print_error "  Build failed for $pkg_dir"
-                cd - > /dev/null
-                exit 1
+                if [ "$REQUIRE_FRONTEND" = "1" ]; then
+                    print_error "  Build failed for $pkg_dir (fatal: HOMEBOY_REQUIRE_FRONTEND=1)"
+                    cd - > /dev/null
+                    exit 1
+                fi
+                print_warning "  Build failed for $pkg_dir — continuing without it"
+                FRONTEND_BUILD_FAILED=1
             fi
         else
             print_status "  No build script found in $pkg_dir, skipping"
@@ -615,13 +640,25 @@ main() {
     print_status "================================="
     echo ""
 
+    FRONTEND_BUILD_FAILED=0
+
     check_dependencies
     detect_project
     extract_metadata
     build_project
 
-    echo ""
-    print_status "Build complete!"
+    if [ "$FRONTEND_BUILD_FAILED" = "1" ]; then
+        echo ""
+        print_warning "=========================================="
+        print_warning "Build completed with frontend warnings"
+        print_warning "PHP artifact was created successfully."
+        print_warning "Frontend assets were NOT included."
+        print_warning "Fix the frontend build to include JS/CSS."
+        print_warning "=========================================="
+    else
+        echo ""
+        print_status "Build complete!"
+    fi
     echo ""
 }
 
