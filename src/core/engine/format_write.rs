@@ -99,6 +99,47 @@ pub fn format_after_write(root: &Path, changed_files: &[PathBuf]) -> Result<Form
         return Ok(FormatResult::passed(format_command, changed_files.len()));
     }
 
+    // cargo fmt failed — try rustfmt directly on individual files.
+    // This handles sandbox/clean-clone environments where cargo fmt needs
+    // target/ for module resolution but it's excluded from the sandbox.
+    if format_command.starts_with("cargo fmt") {
+        let rust_files: Vec<&PathBuf> = changed_files
+            .iter()
+            .filter(|f| f.extension().and_then(|e| e.to_str()) == Some("rs"))
+            .collect();
+
+        if !rust_files.is_empty() {
+            crate::log_status!(
+                "format",
+                "cargo fmt failed, falling back to rustfmt on {} file(s)",
+                rust_files.len()
+            );
+
+            let mut all_succeeded = true;
+            for file in &rust_files {
+                let rustfmt_output = std::process::Command::new("rustfmt")
+                    .arg(file)
+                    .current_dir(root)
+                    .output();
+
+                match rustfmt_output {
+                    Ok(o) if o.status.success() => {}
+                    _ => {
+                        all_succeeded = false;
+                    }
+                }
+            }
+
+            if all_succeeded {
+                crate::log_status!("format", "rustfmt fallback complete");
+                return Ok(FormatResult::passed(
+                    "rustfmt (fallback)".to_string(),
+                    changed_files.len(),
+                ));
+            }
+        }
+    }
+
     // Formatting failed — log warning but do NOT rollback
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
