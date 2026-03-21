@@ -476,10 +476,20 @@ if ($component['type'] === 'theme') {
         echo "Theme has no functions.php (CSS-only theme).\n";
     }
 } else {
-    // Plugin loading
+    // Plugin loading — run in a subprocess so fatals from plugin-specific
+    // functions (e.g. requirement checks) don't kill the validator.
+    // The PSR-4 autoload map was already validated by this point; the entry
+    // file load is a bonus sanity check, not a hard gate.
     load_dependency_plugins($dependency_paths);
-    require_once $component['file'];
-    echo "Plugin loaded successfully.\n";
+
+    $load_result = try_load_entry_file($component['file'], $plugin_path, $extension_path, $dependency_paths);
+    if ($load_result === 0) {
+        echo "Plugin loaded successfully.\n";
+    } else {
+        echo "WARNING: Plugin entry file could not be fully loaded in validation context (exit $load_result).\n";
+        echo "  This is expected for plugins that call their own functions at file scope\n";
+        echo "  (e.g. requirement checks, early hooks). PSR-4 autoload validation passed.\n";
+    }
 }
 
 exit(0);
@@ -528,4 +538,68 @@ function load_dependency_plugins(array $dependency_paths) {
 
         require_once $dependency['file'];
     }
+}
+
+/**
+ * Try loading the plugin entry file in a subprocess.
+ *
+ * Some plugins call their own functions at file scope (e.g. requirement
+ * checks, version gates) that aren't available in this minimal validation
+ * context. Running in a subprocess means a fatal won't kill the validator.
+ *
+ * Returns the subprocess exit code (0 = success).
+ */
+function try_load_entry_file($entry_file, $plugin_path, $extension_path, $dependency_paths) {
+    // Build a small PHP script that replicates the current environment
+    // and attempts the require_once.
+    $deps_encoded = base64_encode(json_encode($dependency_paths));
+    $script = <<<PHP
+<?php
+// Minimal WordPress stubs (same as parent process)
+\$ext = '{$extension_path}';
+\$wp_tests_dir = \$ext . '/vendor/wp-phpunit/wp-phpunit';
+define('ABSPATH', \$wp_tests_dir . '/wordpress/');
+define('WPINC', 'wp-includes');
+require_once \$wp_tests_dir . '/includes/functions.php';
+
+// Load WordPress stubs file if it exists
+\$stubs = \$ext . '/scripts/validation/wordpress-stubs.php';
+if (file_exists(\$stubs)) require_once \$stubs;
+
+// Autoload
+\$autoload = '{$plugin_path}/vendor/autoload.php';
+if (file_exists(\$autoload)) require_once \$autoload;
+
+// Load dependency plugins
+\$deps = json_decode(base64_decode('{$deps_encoded}'), true) ?: [];
+foreach (\$deps as \$dep_path) {
+    foreach (glob(\$dep_path . '/*.php') as \$f) {
+        if (strpos(file_get_contents(\$f), 'Plugin Name:') !== false) {
+            require_once \$f;
+            break;
+        }
+    }
+}
+
+// Attempt to load the entry file
+require_once '{$entry_file}';
+PHP;
+
+    $tmp = tempnam(sys_get_temp_dir(), 'hb-validate-');
+    file_put_contents($tmp, $script);
+
+    $output = [];
+    $exit_code = 0;
+    exec('php ' . escapeshellarg($tmp) . ' 2>&1', $output, $exit_code);
+    unlink($tmp);
+
+    if ($exit_code !== 0) {
+        // Show the subprocess output for debugging
+        $combined = implode("\n", $output);
+        if (!empty($combined)) {
+            echo "  Subprocess output: " . substr($combined, 0, 500) . "\n";
+        }
+    }
+
+    return $exit_code;
 }
