@@ -227,6 +227,22 @@ return_type_separator = ":"
 # PHP parameter format: Type $name (or just $name for untyped)
 param_format = "type_dollar_name"
 
+# Fallback default expression when no type_default or type_constructor matches.
+fallback_default = 'null'
+
+# Class property extraction — enables field-level assertions in generated tests.
+# Matches PHP property declarations like:
+#   public string $name;
+#   protected ?int $count = 0;
+#   private array $items = [];
+# PHP has type before name: capture group 1 = type, group 2 = name
+# field_name_group / field_type_group tell core which group is which
+field_pattern = '^\s*(?:public|protected|private)\s+(?:readonly\s+)?(\??\w+)\s+\$(\w+)'
+field_name_group = 2
+field_type_group = 1
+field_visibility_pattern = '^\s*public\b'
+field_assertion_template = "{indent}$this->assertSame( {expected_value}, $result->{field_name} );"
+
 # Side effect detection patterns
 [contract.effects]
 file_read = [
@@ -442,21 +458,6 @@ imports = []
 # Core produces semantic hints (e.g., "empty", "nonexistent_path"); this section
 # maps (hint, type_pattern) → PHP-specific code expression.
 # ===========================================================================
-
-fallback_default = 'null'
-
-# Class property extraction — enables field-level assertions in generated tests.
-# Matches PHP property declarations like:
-#   public string $name;
-#   protected ?int $count = 0;
-#   private array $items = [];
-# PHP has type before name: capture group 1 = type, group 2 = name
-# field_name_group / field_type_group tell core which group is which
-field_pattern = '^\s*(?:public|protected|private)\s+(?:readonly\s+)?(\??\w+)\s+\$(\w+)'
-field_name_group = 2
-field_type_group = 1
-field_visibility_pattern = '^\s*public\b'
-field_assertion_template = "{indent}$this->assertSame( {expected_value}, $result->{field_name} );"
 
 # ── empty: produce a value where empty($x) == true ──
 [[contract.type_constructors]]

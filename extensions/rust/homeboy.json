@@ -1,11 +1,9 @@
 {
-  "auto_cleanup": false,
-  "changelog_target": "../CHANGELOG.md",
+  "id": "rust",
+  "changelog_target": "docs/CHANGELOG.md",
   "extensions": {
     "rust": {}
   },
-  "id": "rust",
-  "remote_path": "",
   "version_targets": [
     {
       "file": "rust.json",

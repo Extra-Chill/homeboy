@@ -168,6 +168,16 @@ skip_strings = true
 # Return type separator in function declarations (Rust: "->")
 return_type_separator = "->"
 
+# Fallback default expression when no type_default or type_constructor matches.
+fallback_default = 'Default::default()'
+
+# Struct field extraction — enables field-level assertions in generated tests.
+# field_pattern: regex with two captures: (1) field name, (2) field type
+# field_visibility_pattern: regex that matches public field declarations
+field_pattern = '^\s*(?:pub(?:\(crate\))?\s+)?(\w+)\s*:\s*(.+?),?\s*$'
+field_visibility_pattern = '^\s*pub\b'
+field_assertion_template = '{indent}assert_eq!(inner.{field_name}, {expected_value});'
+
 # Side effect detection patterns. Keys are effect kinds from engine::contract::Effect.
 # Each effect kind maps to a list of regex patterns matched against function body lines.
 [contract.effects]
@@ -355,15 +365,6 @@ imports = []
 # Core produces semantic hints (e.g., "empty", "nonexistent_path"); this section
 # maps (hint, type_pattern) → language-specific code expression.
 # ===========================================================================
-
-fallback_default = 'Default::default()'
-
-# Struct field extraction — enables field-level assertions in generated tests.
-# field_pattern: regex with two captures: (1) field name, (2) field type
-# field_visibility_pattern: regex that matches public field declarations
-field_pattern = '^\s*(?:pub(?:\(crate\))?\s+)?(\w+)\s*:\s*(.+?),?\s*$'
-field_visibility_pattern = '^\s*pub\b'
-field_assertion_template = '{indent}assert_eq!(inner.{field_name}, {expected_value});'
 
 # ── empty: produce a value where .is_empty() == true ──
 [[contract.type_constructors]]
@@ -581,62 +582,23 @@ unit = """
     }
 """
 
-# Result<T,E> — Err branch
-result_err = """
+# Collection — non-empty branch
+collection_non_empty = """
     #[test]
     fn {test_name}() {
 {param_setup}
         let result = {fn_name}({param_args});
-        assert!(result.is_err(), "expected Err for: {condition}");
+{assertion_code}
     }
 """
 
-# Option<T> — Some branch
-option_some = """
+# Collection — empty branch
+collection_empty = """
     #[test]
     fn {test_name}() {
 {param_setup}
         let result = {fn_name}({param_args});
-        assert!(result.is_some(), "expected Some for: {condition}");
-    }
-"""
-
-# Option<T> — None branch
-option_none = """
-    #[test]
-    fn {test_name}() {
-{param_setup}
-        let result = {fn_name}({param_args});
-        assert!(result.is_none(), "expected None for: {condition}");
-    }
-"""
-
-# bool — true branch
-bool_true = """
-    #[test]
-    fn {test_name}() {
-{param_setup}
-        let result = {fn_name}({param_args});
-        assert!(result, "expected true for: {condition}");
-    }
-"""
-
-# bool — false branch
-bool_false = """
-    #[test]
-    fn {test_name}() {
-{param_setup}
-        let result = {fn_name}({param_args});
-        assert!(!result, "expected false for: {condition}");
-    }
-"""
-
-# Unit return — just verify it doesn't panic
-unit = """
-    #[test]
-    fn {test_name}() {
-{param_setup}
-        {fn_name}({param_args});
+{assertion_code}
     }
 """
 

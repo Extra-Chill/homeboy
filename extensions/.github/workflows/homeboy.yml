@@ -1,0 +1,48 @@
+name: Homeboy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  homeboy:
+    name: Release ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - github
+          - homebrew
+          - kimaki
+          - nodejs
+          - openclaw
+          - plasma-shield
+          - rust
+          - sweatpants
+          - swift
+          - wordpress
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: Extra-Chill/homeboy-action@v2
+        with:
+          component: ${{ matrix.component }}
+          commands: release
+          app-token: ${{ steps.app-token.outputs.token || '' }}
