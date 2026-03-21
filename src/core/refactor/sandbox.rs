@@ -1,6 +1,6 @@
 use crate::engine::temp;
 use crate::Error;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 pub struct SandboxDir {
@@ -19,9 +19,36 @@ impl Drop for SandboxDir {
     }
 }
 
-pub fn clone_tree(src: &Path) -> crate::Result<SandboxDir> {
+/// Resolve build artifact exclusion paths from a component's linked extensions.
+///
+/// Reads `build.cleanup_paths` from each extension manifest (e.g., `["target"]`
+/// for Rust, `["vendor", "node_modules"]` for PHP). These paths are relative
+/// directory names that should be excluded from sandbox operations.
+pub fn resolve_build_exclusions(component: &crate::component::Component) -> Vec<String> {
+    // Always exclude .git
+    let mut exclusions = vec![".git".to_string()];
+
+    if let Some(ref extensions) = component.extensions {
+        for extension_id in extensions.keys() {
+            if let Ok(manifest) = crate::extension::load_extension(extension_id) {
+                if let Some(ref build) = manifest.build {
+                    for path in &build.cleanup_paths {
+                        if !exclusions.contains(path) {
+                            exclusions.push(path.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    exclusions
+}
+
+pub fn clone_tree(src: &Path, exclusions: &[String]) -> crate::Result<SandboxDir> {
     let temp = temp::runtime_temp_dir("homeboy-refactor-ci")?;
-    copy_dir_recursive(src, &temp)?;
+    let exclude_set: HashSet<&str> = exclusions.iter().map(|s| s.as_str()).collect();
+    copy_dir_recursive(src, &temp, &exclude_set)?;
     Ok(SandboxDir { path: temp })
 }
 
@@ -48,10 +75,14 @@ pub fn copy_changed_files(
     Ok(())
 }
 
-pub fn snapshot_tree(root: &str) -> crate::Result<BTreeMap<String, u64>> {
+pub fn snapshot_tree(
+    root: &str,
+    exclusions: &[String],
+) -> crate::Result<BTreeMap<String, u64>> {
     let root_path = Path::new(root);
+    let exclude_set: HashSet<&str> = exclusions.iter().map(|s| s.as_str()).collect();
     let mut files = BTreeMap::new();
-    snapshot_tree_recursive(root_path, root_path, &mut files)?;
+    snapshot_tree_recursive(root_path, root_path, &exclude_set, &mut files)?;
     Ok(files)
 }
 
@@ -79,6 +110,7 @@ pub fn diff_tree_snapshots(
 fn snapshot_tree_recursive(
     root: &Path,
     dir: &Path,
+    exclusions: &HashSet<&str>,
     files: &mut BTreeMap<String, u64>,
 ) -> crate::Result<()> {
     for entry in std::fs::read_dir(dir)
@@ -90,7 +122,10 @@ fn snapshot_tree_recursive(
         let path = entry.path();
 
         if path.is_dir() {
-            snapshot_tree_recursive(root, &path, files)?;
+            if exclusions.contains(entry.file_name().to_string_lossy().as_ref()) {
+                continue;
+            }
+            snapshot_tree_recursive(root, &path, exclusions, files)?;
             continue;
         }
 
@@ -110,7 +145,7 @@ fn snapshot_tree_recursive(
     Ok(())
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> crate::Result<()> {
+fn copy_dir_recursive(src: &Path, dst: &Path, exclusions: &HashSet<&str>) -> crate::Result<()> {
     std::fs::create_dir_all(dst)
         .map_err(|e| Error::internal_io(e.to_string(), Some("create sandbox dir".to_string())))?;
 
@@ -123,10 +158,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> crate::Result<()> {
         let dst_path = dst.join(entry.file_name());
 
         if src_path.is_dir() {
-            if entry.file_name() == ".git" {
+            if exclusions.contains(entry.file_name().to_string_lossy().as_ref()) {
                 continue;
             }
-            copy_dir_recursive(&src_path, &dst_path)?;
+            copy_dir_recursive(&src_path, &dst_path, exclusions)?;
         } else {
             std::fs::copy(&src_path, &dst_path).map_err(|e| {
                 Error::internal_io(e.to_string(), Some("copy sandbox file".to_string()))

@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use super::verify::{AuditConvergenceScoring, AuditVerificationToggles};
 use crate::refactor::sandbox::{
-    clone_tree, copy_changed_files, diff_tree_snapshots, snapshot_tree, SandboxDir,
+    clone_tree, copy_changed_files, diff_tree_snapshots, resolve_build_exclusions, snapshot_tree,
+    SandboxDir,
 };
 
 pub const KNOWN_PLAN_SOURCES: &[&str] = &["audit", "lint", "test"];
@@ -223,7 +224,8 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
     let mut warnings = vec![format!("Deterministic merge order: {}", merge_order)];
     let mut accumulator = FixAccumulator::default();
 
-    let working_root = clone_tree(&request.root)?;
+    let build_exclusions = resolve_build_exclusions(&request.component);
+    let working_root = clone_tree(&request.root, &build_exclusions)?;
 
     for source in &sources {
         let stage = match source.as_str() {
@@ -242,6 +244,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 &request.lint,
                 scoped_changed_files.as_deref(),
                 true,
+                &build_exclusions,
             )?,
             "test" => run_test_stage(
                 &request.component,
@@ -250,6 +253,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 &request.test,
                 scoped_test_files.as_deref(),
                 true,
+                &build_exclusions,
             )?,
             _ => unreachable!("sources are normalized before planning"),
         };
@@ -664,13 +668,14 @@ fn run_lint_stage(
     options: &LintSourceOptions,
     changed_files: Option<&[String]>,
     plan_mode: bool,
+    build_exclusions: &[String],
 ) -> crate::Result<PlannedStage> {
     let mut sandbox_component = component.clone();
     sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
     let findings_file = temp::runtime_temp_file("homeboy-lint-findings", ".json")?;
     let fix_sidecars = auto::AutofixSidecarFiles::for_plan();
     let before_fix = if plan_mode {
-        Some(snapshot_tree(&sandbox_component.local_path)?)
+        Some(snapshot_tree(&sandbox_component.local_path, build_exclusions)?)
     } else {
         None
     };
@@ -727,7 +732,7 @@ fn run_lint_stage(
     runner.run()?;
 
     let changed_files = if plan_mode {
-        let after_fix = snapshot_tree(&sandbox_component.local_path)?;
+        let after_fix = snapshot_tree(&sandbox_component.local_path, build_exclusions)?;
         before_fix
             .as_ref()
             .map(|before| diff_tree_snapshots(before, &after_fix))
@@ -766,13 +771,14 @@ fn run_test_stage(
     options: &TestSourceOptions,
     changed_test_files: Option<&[String]>,
     plan_mode: bool,
+    build_exclusions: &[String],
 ) -> crate::Result<PlannedStage> {
     let mut sandbox_component = component.clone();
     sandbox_component.local_path = sandbox.path().to_string_lossy().to_string();
     let results_file = temp::runtime_temp_file("homeboy-test-results", ".json")?;
     let fix_sidecars = auto::AutofixSidecarFiles::for_plan();
     let before_fix = if plan_mode {
-        Some(snapshot_tree(&sandbox_component.local_path)?)
+        Some(snapshot_tree(&sandbox_component.local_path, build_exclusions)?)
     } else {
         None
     };
@@ -815,7 +821,7 @@ fn run_test_stage(
     runner.run()?;
 
     let changed_files = if plan_mode {
-        let after_fix = snapshot_tree(&sandbox_component.local_path)?;
+        let after_fix = snapshot_tree(&sandbox_component.local_path, build_exclusions)?;
         before_fix
             .as_ref()
             .map(|before| diff_tree_snapshots(before, &after_fix))
