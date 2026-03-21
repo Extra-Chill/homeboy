@@ -63,7 +63,21 @@ if [ ${#FIX_ARRAY[@]} -eq 0 ]; then
   exit 0
 fi
 
-AUTOFIX_BRANCH="ci/autofix/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+# Stable branch name: reuse across cron runs so open-autofix-pr.sh dedup works.
+# Old behavior used GITHUB_RUN_ID which created a new branch (and PR) every run.
+if [[ "${GITHUB_REF:-}" == refs/heads/* ]]; then
+  BASE_BRANCH="${GITHUB_REF#refs/heads/}"
+else
+  BASE_BRANCH="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch' 2>/dev/null || echo 'main')"
+fi
+AUTOFIX_BRANCH="ci/autofix/${COMP_ID}/${BASE_BRANCH}"
+
+# If the branch already exists remotely (from a previous cron run), delete it
+# and start fresh from HEAD. The old branch may be stale or conflict with
+# current main. Force-pushing a fresh branch is simpler and safer than rebasing.
+if git ls-remote --exit-code --heads origin "${AUTOFIX_BRANCH}" >/dev/null 2>&1; then
+  echo "Remote branch ${AUTOFIX_BRANCH} already exists; will force-push fresh changes"
+fi
 
 echo "Creating autofix branch: ${AUTOFIX_BRANCH}"
 git checkout -b "${AUTOFIX_BRANCH}"
@@ -180,14 +194,16 @@ GIT_COMMITTER_EMAIL="${BOT_EMAIL}" \
 
 # Use GitHub App token for push if available — pushes from a GitHub App
 # trigger workflow re-runs, while GITHUB_TOKEN pushes do not.
+# Force-push because the stable branch name may already exist from a previous
+# cron run. The fresh commit replaces the stale one.
 if [ -n "${APP_TOKEN:-}" ]; then
   echo "Pushing with GitHub App token (will trigger CI re-run)"
   git -c "http.https://github.com/.extraheader=" \
-    push "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+    push --force "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
     "${AUTOFIX_BRANCH}"
 else
   echo "Pushing with default token (will NOT trigger CI re-run)"
-  git push origin "${AUTOFIX_BRANCH}"
+  git push --force origin "${AUTOFIX_BRANCH}"
 fi
 
 echo "committed=true" >> "${GITHUB_OUTPUT}"
