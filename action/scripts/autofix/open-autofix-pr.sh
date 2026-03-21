@@ -27,6 +27,49 @@ EXISTING_PR_URL=$(gh pr list \
 
 if [ -n "${EXISTING_PR_URL}" ]; then
   echo "Autofix PR already exists: ${EXISTING_PR_URL}"
+
+  # Update the PR body with the latest run context (branch was force-pushed
+  # with fresh autofix changes, so the old workflow run link is stale).
+  EXISTING_PR_NUMBER=$(gh pr list \
+    --state open \
+    --base "${BASE_BRANCH}" \
+    --head "${AUTOFIX_BRANCH}" \
+    --json number \
+    --jq '.[0].number // empty' 2>/dev/null || true)
+
+  if [ -n "${EXISTING_PR_NUMBER}" ]; then
+    UPDATE_BODY_FILE="$(mktemp)"
+
+    AUTOFIX_DETAIL=""
+    if [ -n "${AUTOFIX_FILE_COUNT:-}" ] && [ -n "${AUTOFIX_FIX_TYPES:-}" ]; then
+      AUTOFIX_DETAIL="- **${AUTOFIX_FILE_COUNT}** file(s) fixed via **${AUTOFIX_FIX_TYPES}**"
+    elif [ -n "${AUTOFIX_FILE_COUNT:-}" ]; then
+      AUTOFIX_DETAIL="- **${AUTOFIX_FILE_COUNT}** file(s) fixed"
+    fi
+
+    FINDING_DETAIL=""
+    if [ -n "${AUTOFIX_FINDING_TYPES:-}" ]; then
+      FINDING_DETAIL="- **Finding categories:** ${AUTOFIX_FINDING_TYPES}"
+    fi
+
+    cat > "${UPDATE_BODY_FILE}" <<UPDATEBODY
+## Summary
+${AUTOFIX_DETAIL:+${AUTOFIX_DETAIL}
+}${FINDING_DETAIL:+${FINDING_DETAIL}
+}- Rerun after autofix passed for configured command set.
+- Generated automatically by Homeboy Action.
+
+## Context
+- Workflow run: ${RUN_URL}
+- Branch: ${AUTOFIX_BRANCH}
+- Base: ${BASE_BRANCH}
+UPDATEBODY
+
+    gh pr edit "${EXISTING_PR_NUMBER}" --body-file "${UPDATE_BODY_FILE}" 2>/dev/null || true
+    rm -f "${UPDATE_BODY_FILE}"
+    echo "Updated PR #${EXISTING_PR_NUMBER} body with latest run context"
+  fi
+
   echo "created=true" >> "${GITHUB_OUTPUT}"
   echo "url=${EXISTING_PR_URL}" >> "${GITHUB_OUTPUT}"
   exit 0
