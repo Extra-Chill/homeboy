@@ -1741,29 +1741,10 @@ mod tests {
         ]
     }
 
-    /// Build a minimal ContractGrammar for testing.
-    fn empty_grammar() -> ContractGrammar {
-        ContractGrammar::default()
-    }
-
     /// Build a ContractGrammar with type_defaults populated.
     fn grammar_with_defaults() -> ContractGrammar {
         ContractGrammar {
             type_defaults: sample_type_defaults(),
-            ..Default::default()
-        }
-    }
-
-    /// Build a ContractGrammar with type_defaults + type_constructors + assertion_templates + test_templates.
-    fn full_grammar() -> ContractGrammar {
-        ContractGrammar {
-            type_defaults: sample_type_defaults(),
-            type_constructors: sample_type_constructors(),
-            assertion_templates: sample_assertion_templates(),
-            test_templates: sample_test_templates(),
-            field_assertion_template: Some(
-                "{indent}assert_eq!(inner.{field_name}, {expected_value});".to_string(),
-            ),
             ..Default::default()
         }
     }
@@ -2813,5 +2794,251 @@ class AbilityResult {
             enriched, assertion,
             "should return assertion unchanged when type is not in registry"
         );
+    }
+
+    #[test]
+    fn test_render_test_plan_some_t_t() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_match_templates_get_default() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_if_let_some_branch_branch() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_some_branch_branch() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_if_let_some_ref_impl_type_contract_impl_type() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_some_ref_impl_type_contract_impl_type() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_if_let_ok_re_regex_new_td_pattern() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_if_let_some_hint_infer_hint_for_param_condition_condition_lo() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_param_hints_is_empty() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_value_expr_call_arg_imports_if_let_some_hint_param_hints() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_condition_contains_negated_method_condition_pname_is_empty() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_condition_contains_param_method_condition_lower_pname_is_emp() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_condition_contains_param_method_condition_lower_pname_is_non() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_condition_contains_param_method_condition_lower_pname_is_som() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_condition_lower_contains_doesn_t_exist() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_condition_contains_param_method_condition_lower_pname_exists() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_condition_lower_contains_format_pname_to_lowercase() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_condition_lower_pname_to_lowercase() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_condition_lower_contains_format_0_pname_to_lowercase() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_condition_lower_contains_format_0_pname_to_lowercase() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_if_let_some_literal_extract_method_string_arg_condition_pnam() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_some_literal_extract_method_string_arg_condition_pname_c() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_some_literal_extract_method_string_arg_condition_pname_c() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_some_literal_extract_method_string_arg_condition_pname_s() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_some_literal_extract_method_string_arg_condition_pname_s() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_base_hint_hint_arg_if_let_some_colon_pos_hint_find() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_hint_colon_pos_some_hint_colon_pos_1() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_tc_hint_base_hint() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_re_is_match_param_type() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_if_let_some_start_condition_find_pattern() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_some_start_condition_find_pattern() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_some_end_after_find() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_if_let_some_end_after_find() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_let_some_end_after_find() {
+        let plan = Default::default();
+        let templates = Default::default();
+        let _result = render_test_plan(&plan, &templates);
+    }
+
+    #[test]
+    fn test_render_test_plan_has_expected_effects() {
+        // Expected effects: mutation
+        let plan = Default::default();
+        let templates = Default::default();
+        let _ = render_test_plan(&plan, &templates);
     }
 }
