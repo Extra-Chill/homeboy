@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.1] - 2026-03-21
+
+### Fixed
+- rename extracted zip folder to match remote_path basename (fixes #176)
+
 ## [2.10.0] - 2026-03-21
 
 ### Added
