@@ -1,6 +1,6 @@
 {
   "name": "OpenClaw",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "icon": "antenna.radiowaves.left.and.right",
   "description": "AI agent platform -- view config, workspace, memory, and agent status",
   "author": "Extra Chill",
