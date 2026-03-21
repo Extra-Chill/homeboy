@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.10.1] - 2026-03-21
+
+### Fixed
+- use stable branch name for non-PR autofix to prevent duplicate PRs
+
 ## [1.10.0] - 2026-03-19
 
 ### Added
