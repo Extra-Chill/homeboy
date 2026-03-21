@@ -158,10 +158,19 @@ pub fn apply_fix_policy(
             }
 
             if fix.insertions.is_empty() {
-                None
-            } else {
-                Some(fix)
+                return None;
             }
+
+            // In write mode, drop fixes where no insertion is auto-applicable.
+            // PlanOnly fixes are useful in dry-run/preview mode but waste time
+            // in CI autofix pipelines — they go through chunk verification and
+            // JSON output without ever being written.
+            if write && !fix.insertions.iter().any(|ins| ins.auto_apply) {
+                summary.dropped_plan_only += 1;
+                return None;
+            }
+
+            Some(fix)
         })
         .collect();
 
@@ -184,6 +193,12 @@ pub fn apply_fix_policy(
                     .is_some_and(|report| report.status == PreflightStatus::Failed)
                 {
                     summary.preflight_failures += 1;
+                }
+
+                // In write mode, drop non-auto-applicable new files.
+                if write {
+                    summary.dropped_plan_only += 1;
+                    return None;
                 }
             }
 
