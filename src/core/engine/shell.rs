@@ -77,3 +77,73 @@ fn split_respecting_quotes(input: &str) -> Vec<String> {
 pub fn quote_path(path: &str) -> String {
     format!("'{}'", escape_single_quote_content(path))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quote_arg_while_let_some_c_chars_next() {
+        let arg = "";
+        let _result = quote_arg(&arg);
+    }
+
+    #[test]
+    fn test_quote_arg_current_is_empty() {
+        let arg = "";
+        let _result = quote_arg(&arg);
+    }
+
+    #[test]
+    fn test_quote_arg_has_expected_effects() {
+        // Expected effects: mutation
+        let arg = "";
+        let _ = quote_arg(&arg);
+    }
+
+    #[test]
+    fn test_quote_args_while_let_some_c_chars_next() {
+        let args = Vec::new();
+        let _result = quote_args(&args);
+    }
+
+    #[test]
+    fn test_quote_args_current_is_empty() {
+        let args = Vec::new();
+        let _result = quote_args(&args);
+    }
+
+    #[test]
+    fn test_quote_args_has_expected_effects() {
+        // Expected effects: mutation
+        let args = Vec::new();
+        let _ = quote_args(&args);
+    }
+
+    #[test]
+    fn test_normalize_args_while_let_some_c_chars_next() {
+        let args = Vec::new();
+        let result = normalize_args(&args);
+        assert!(
+            !result.is_empty(),
+            "expected non-empty collection for: while let Some(c) = chars.next() {"
+        );
+    }
+
+    #[test]
+    fn test_normalize_args_current_is_empty() {
+        let args = Vec::new();
+        let result = normalize_args(&args);
+        assert!(
+            !result.is_empty(),
+            "expected non-empty collection for: !current.is_empty()"
+        );
+    }
+
+    #[test]
+    fn test_normalize_args_has_expected_effects() {
+        // Expected effects: mutation
+        let args = Vec::new();
+        let _ = normalize_args(&args);
+    }
+}

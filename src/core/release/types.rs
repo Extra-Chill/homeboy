@@ -223,3 +223,15 @@ pub struct ReleaseCommandResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment: Option<ReleaseDeploymentResult>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_str_default_path() {
+        let instance = ReleaseStepType::default();
+        let s = "";
+        let _result = instance.from_str(&s);
+    }
+}

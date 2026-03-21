@@ -75,10 +75,7 @@ pub fn copy_changed_files(
     Ok(())
 }
 
-pub fn snapshot_tree(
-    root: &str,
-    exclusions: &[String],
-) -> crate::Result<BTreeMap<String, u64>> {
+pub fn snapshot_tree(root: &str, exclusions: &[String]) -> crate::Result<BTreeMap<String, u64>> {
     let root_path = Path::new(root);
     let exclude_set: HashSet<&str> = exclusions.iter().map(|s| s.as_str()).collect();
     let mut files = BTreeMap::new();
@@ -170,4 +167,15 @@ fn copy_dir_recursive(src: &Path, dst: &Path, exclusions: &HashSet<&str>) -> cra
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_path_default_path() {
+        let instance = SandboxDir::default();
+        let _result = instance.path();
+    }
 }

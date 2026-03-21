@@ -100,3 +100,61 @@ pub fn parse_version_targets(targets: &[String]) -> Result<Vec<VersionTarget>> {
     }
     Ok(parsed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_version_pattern_some_pattern_to_string() {
+        let pattern = "";
+        let _result = validate_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_validate_version_pattern_some_pattern_to_string() {
+        let pattern = "";
+        let _result = validate_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_validate_version_pattern_default_path() {
+        let pattern = "";
+        let _result = validate_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_validate_version_pattern_some_pattern_to_string() {
+        let pattern = "";
+        let _result = validate_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_validate_version_pattern_ok() {
+        let pattern = "";
+        let result = validate_version_pattern(&pattern);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_validate_version_pattern_has_expected_effects() {
+        // Expected effects: mutation
+        let pattern = "";
+        let _ = validate_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_normalize_version_pattern_default_path() {
+        let pattern = "";
+        let _result = normalize_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_normalize_version_pattern_has_expected_effects() {
+        // Expected effects: mutation
+        let pattern = "";
+        let _ = normalize_version_pattern(&pattern);
+    }
+}

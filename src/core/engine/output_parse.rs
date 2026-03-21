@@ -104,3 +104,19 @@ fn evaluate_expr(expr: &str, values: &HashMap<String, f64>) -> f64 {
 
     total
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_default_path() {
+        let instance = ParseSpec::default();
+        let text = "";
+        let result = instance.parse(&text);
+        assert!(
+            !result.is_empty(),
+            "expected non-empty collection for: default path"
+        );
+    }
+}

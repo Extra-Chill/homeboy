@@ -110,3 +110,22 @@ impl CapturedOutput {
         self.stdout.is_empty() && self.stderr.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_default_path() {
+        let instance = CapturedOutput::default();
+        let stdout = String::new();
+        let stderr = String::new();
+        let _result = instance.new(stdout, stderr);
+    }
+
+    #[test]
+    fn test_is_empty_default_path() {
+        let instance = CapturedOutput::default();
+        let _result = instance.is_empty();
+    }
+}

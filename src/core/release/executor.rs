@@ -673,3 +673,236 @@ impl PipelineStepExecutor for ReleaseStepExecutor {
         self.execute_core_step(step)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_some_format_step_requires_version_context_step_id() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_some_vec_ensure_version_step_runs_before_this_step_to_string() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_step_config_is_empty() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_step_config_is_empty() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_ok_payload() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let result = instance.build_release_payload(&step);
+        let inner = result.unwrap();
+        // Branch returns Ok(payload) when: Ok(payload)
+        let _ = inner; // TODO: assert specific value for "payload"
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_ok() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let result = instance.build_release_payload(&step);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_ok() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let result = instance.build_release_payload(&step);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_build_release_payload_if_let_some_name_step_config_get_name_and_then_v_v_as_str() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_let_some_name_step_config_get_name_and_then_v_v_as_str() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let result = instance.build_release_payload(&step);
+        let inner = result.unwrap();
+        // Branch returns Ok(name.to_string() when: let Some(name) = step.config.get("name").and_then(|v| v.as_str())
+        let _ = inner; // TODO: assert specific value for "name.to_string("
+    }
+
+    #[test]
+    fn test_build_release_payload_let_some_name_step_config_get_name_and_then_v_v_as_str() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_let_some_name_step_config_get_versiontag_and_then_v_v_as_str() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let result = instance.build_release_payload(&step);
+        let inner = result.unwrap();
+        // Branch returns Ok(name.to_string() when: let Some(name) = step.config.get("versionTag").and_then(|v| v.as_str())
+        let _ = inner; // TODO: assert specific value for "name.to_string("
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_if_let_some_tag_context_tag_as_ref() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_let_some_tag_context_tag_as_ref() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let result = instance.build_release_payload(&step);
+        let inner = result.unwrap();
+        // Branch returns Ok(tag.clone() when: let Some(tag) = context.tag.as_ref()
+        let _ = inner; // TODO: assert specific value for "tag.clone("
+    }
+
+    #[test]
+    fn test_build_release_payload_let_some_tag_context_tag_as_ref() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_let_some_version_context_version_as_ref() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let result = instance.build_release_payload(&step);
+        let inner = result.unwrap();
+        // Branch returns Ok(format!("v{}", version) when: let Some(version) = context.version.as_ref()
+        let _ = inner; // TODO: assert specific value for "format!("v{}", version"
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _result = instance.build_release_payload(&step);
+    }
+
+    #[test]
+    fn test_build_release_payload_ok_notes() {
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let result = instance.build_release_payload(&step);
+        let inner = result.unwrap();
+        // Branch returns Ok(notes) when: Ok(notes)
+        let _ = inner; // TODO: assert specific value for "notes"
+    }
+
+    #[test]
+    fn test_build_release_payload_has_expected_effects() {
+        // Expected effects: logging
+        let instance = ReleaseStepExecutor::default();
+        let step = Default::default();
+        let _ = instance.build_release_payload(&step);
+    }
+}

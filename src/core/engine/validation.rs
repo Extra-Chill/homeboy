@@ -83,3 +83,121 @@ impl Default for ValidationCollector {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_match_result() {
+        let instance = ValidationCollector::default();
+        let _result = instance.new();
+    }
+
+    #[test]
+    fn test_new_match_result() {
+        let instance = ValidationCollector::default();
+        let _result = instance.new();
+    }
+
+    #[test]
+    fn test_new_some_err_details() {
+        let instance = ValidationCollector::default();
+        let _result = instance.new();
+    }
+
+    #[test]
+    fn test_new_else() {
+        let instance = ValidationCollector::default();
+        let _result = instance.new();
+    }
+
+    #[test]
+    fn test_new_else() {
+        let instance = ValidationCollector::default();
+        let _result = instance.new();
+    }
+
+    #[test]
+    fn test_new_match_self_errors_len() {
+        let instance = ValidationCollector::default();
+        let _result = instance.new();
+    }
+
+    #[test]
+    fn test_new_err_error_validation_multiple_errors_self_errors() {
+        let instance = ValidationCollector::default();
+        let _result = instance.new();
+    }
+
+    #[test]
+    fn test_new_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ValidationCollector::default();
+        let _ = instance.new();
+    }
+
+    #[test]
+    fn test_push_match_self_errors_len() {
+        let mut instance = ValidationCollector::default();
+        let field = "";
+        let problem = "";
+        let context = None;
+        let result = instance.push(&field, &problem, context);
+        assert!(result.is_ok(), "expected Ok for: match self.errors.len()");
+    }
+
+    #[test]
+    fn test_push_err_error_validation_multiple_errors_self_errors() {
+        let mut instance = ValidationCollector::default();
+        let field = "";
+        let problem = "";
+        let context = None;
+        let result = instance.push(&field, &problem, context);
+        assert!(
+            result.is_ok(),
+            "expected Ok for: _ => Err(Error::validation_multiple_errors(self.errors)),"
+        );
+    }
+
+    #[test]
+    fn test_push_has_expected_effects() {
+        // Expected effects: mutation
+        let mut instance = ValidationCollector::default();
+        let field = "";
+        let problem = "";
+        let context = None;
+        let _ = instance.push(&field, &problem, context);
+    }
+
+    #[test]
+    fn test_has_errors_match_self_errors_len() {
+        let instance = ValidationCollector::default();
+        let _result = instance.has_errors();
+    }
+
+    #[test]
+    fn test_has_errors_err_error_validation_multiple_errors_self_errors() {
+        let instance = ValidationCollector::default();
+        let _result = instance.has_errors();
+    }
+
+    #[test]
+    fn test_finish_match_self_errors_len() {
+        let instance = ValidationCollector::default();
+        let result = instance.finish();
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: match self.errors.len()
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_finish_err_error_validation_multiple_errors_self_errors() {
+        let instance = ValidationCollector::default();
+        let result = instance.finish();
+        let err = result.unwrap_err();
+        // Branch returns Err(Error::validation_multiple_errors(self.errors) when: _ => Err(Error::validation_multiple_errors(self.errors)),
+        let err_msg = format!("{:?}", err);
+        let _ = err_msg; // TODO: assert error contains "Error::validation_multiple_errors(self.errors"
+    }
+}

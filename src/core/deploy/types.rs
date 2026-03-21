@@ -303,3 +303,20 @@ pub struct DeployOrchestrationResult {
     pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_status_default_path() {
+        let instance = ReleaseState::default();
+        let _result = instance.status();
+    }
+
+    #[test]
+    fn test_as_str_default_path() {
+        let instance = ReleaseStateStatus::default();
+        let _result = instance.as_str();
+    }
+}

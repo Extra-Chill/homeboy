@@ -91,3 +91,15 @@ pub(crate) fn resolve_extensions(
 
     Ok(extensions)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_default_path() {
+        let instance = ReleaseCapabilityResolver::default();
+        let extensions = Vec::new();
+        let _result = instance.new(extensions);
+    }
+}

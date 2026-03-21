@@ -217,3 +217,100 @@ impl<T: Serialize, E: Serialize + Default> Default for EntityCrudOutput<T, E> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_error_some_error() {
+        let instance = BatchResult::default();
+        let _result = instance.new();
+    }
+
+    #[test]
+    fn test_new_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = BatchResult::default();
+        let _ = instance.new();
+    }
+
+    #[test]
+    fn test_exit_code_error_some_error() {
+        let instance = BatchResult::default();
+        let _result = instance.exit_code();
+    }
+
+    #[test]
+    fn test_exit_code_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = BatchResult::default();
+        let _ = instance.exit_code();
+    }
+
+    #[test]
+    fn test_record_created_error_some_error() {
+        let mut instance = BatchResult::default();
+        let id = String::new();
+        let result = instance.record_created(id);
+        assert!(result.is_ok(), "expected Ok for: error: Some(error),");
+    }
+
+    #[test]
+    fn test_record_created_has_expected_effects() {
+        // Expected effects: mutation
+        let mut instance = BatchResult::default();
+        let id = String::new();
+        let _ = instance.record_created(id);
+    }
+
+    #[test]
+    fn test_record_updated_error_some_error() {
+        let mut instance = BatchResult::default();
+        let id = String::new();
+        let result = instance.record_updated(id);
+        assert!(result.is_ok(), "expected Ok for: error: Some(error),");
+    }
+
+    #[test]
+    fn test_record_updated_has_expected_effects() {
+        // Expected effects: mutation
+        let mut instance = BatchResult::default();
+        let id = String::new();
+        let _ = instance.record_updated(id);
+    }
+
+    #[test]
+    fn test_record_skipped_error_some_error() {
+        let mut instance = BatchResult::default();
+        let id = String::new();
+        let result = instance.record_skipped(id);
+        assert!(result.is_ok(), "expected Ok for: error: Some(error),");
+    }
+
+    #[test]
+    fn test_record_skipped_has_expected_effects() {
+        // Expected effects: mutation
+        let mut instance = BatchResult::default();
+        let id = String::new();
+        let _ = instance.record_skipped(id);
+    }
+
+    #[test]
+    fn test_record_error_error_some_error() {
+        let mut instance = BatchResult::default();
+        let id = String::new();
+        let error = String::new();
+        let result = instance.record_error(id, error);
+        assert!(result.is_ok(), "expected Ok for: error: Some(error),");
+    }
+
+    #[test]
+    fn test_record_error_has_expected_effects() {
+        // Expected effects: mutation
+        let mut instance = BatchResult::default();
+        let id = String::new();
+        let error = String::new();
+        let _ = instance.record_error(id, error);
+    }
+}

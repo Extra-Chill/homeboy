@@ -675,7 +675,10 @@ fn run_lint_stage(
     let findings_file = temp::runtime_temp_file("homeboy-lint-findings", ".json")?;
     let fix_sidecars = auto::AutofixSidecarFiles::for_plan();
     let before_fix = if plan_mode {
-        Some(snapshot_tree(&sandbox_component.local_path, build_exclusions)?)
+        Some(snapshot_tree(
+            &sandbox_component.local_path,
+            build_exclusions,
+        )?)
     } else {
         None
     };
@@ -778,7 +781,10 @@ fn run_test_stage(
     let results_file = temp::runtime_temp_file("homeboy-test-results", ".json")?;
     let fix_sidecars = auto::AutofixSidecarFiles::for_plan();
     let before_fix = if plan_mode {
-        Some(snapshot_tree(&sandbox_component.local_path, build_exclusions)?)
+        Some(snapshot_tree(
+            &sandbox_component.local_path,
+            build_exclusions,
+        )?)
     } else {
         None
     };

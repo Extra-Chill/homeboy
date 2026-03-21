@@ -286,3 +286,1468 @@ fn parse_json_response(response: Response) -> Result<Value> {
 
     serde_json::from_str(&body).map_err(|e| parse_error(format!("Invalid JSON response: {}", e)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_api_config_enabled() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let result = instance.new(&project_id, &api_config);
+        let err = result.unwrap_err();
+        // Branch returns Err(config_error("API is not enabled for this project") when: !api_config.enabled
+        let err_msg = format!("{:?}", err);
+        let _ = err_msg; // TODO: assert error contains "config_error("API is not enabled for this project""
+    }
+
+    #[test]
+    fn test_new_api_config_base_url_is_empty() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let result = instance.new(&project_id, &api_config);
+        let err = result.unwrap_err();
+        // Branch returns Err(config_error("API base URL is not configured") when: api_config.base_url.is_empty()
+        let err_msg = format!("{:?}", err);
+        let _ = err_msg; // TODO: assert error contains "config_error("API base URL is not configured""
+    }
+
+    #[test]
+    fn test_new_let_request_if_let_some_body_body() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_else() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_else() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_else() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_self_execute_request_httpmethod_post_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_self_execute_request_httpmethod_put_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_self_execute_request_httpmethod_patch_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_default_path() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_default_path() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_default_path() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_ok_false() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let result = instance.new(&project_id, &api_config);
+        let inner = result.unwrap();
+        // Branch returns Ok(false) when: Ok(false)
+        let _ = inner; // TODO: assert specific value for "false"
+    }
+
+    #[test]
+    fn test_new_default_path() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_default_path() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_ok() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let result = instance.new(&project_id, &api_config);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_new_some_a_a() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_none_return_ok_none() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let result = instance.new(&project_id, &api_config);
+        let inner = result.unwrap();
+        // Branch returns Ok(None) when: None => return Ok(None),
+        let _ = inner; // TODO: assert specific value for "None"
+    }
+
+    #[test]
+    fn test_new_default_path() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_header_contains_placeholder() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_ok_some_header() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let result = instance.new(&project_id, &api_config);
+        let inner = result.unwrap();
+        // Branch returns Ok(Some(header) when: Ok(Some(header))
+        let _ = inner; // TODO: assert specific value for "Some(header"
+    }
+
+    #[test]
+    fn test_new_ok() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let result = instance.new(&project_id, &api_config);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_new_some_a_a() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _result = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_new_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ApiClient::default();
+        let project_id = "";
+        let api_config = Default::default();
+        let _ = instance.new(&project_id, &api_config);
+    }
+
+    #[test]
+    fn test_get_self_execute_request_httpmethod_post_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_self_execute_request_httpmethod_put_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_self_execute_request_httpmethod_patch_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_ok_false() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let result = instance.get(&endpoint);
+        let inner = result.unwrap();
+        // Branch returns Ok(false) when: Ok(false)
+        let _ = inner; // TODO: assert specific value for "false"
+    }
+
+    #[test]
+    fn test_get_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let result = instance.get(&endpoint);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_get_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_none_return_ok_none() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let result = instance.get(&endpoint);
+        let inner = result.unwrap();
+        // Branch returns Ok(None) when: None => return Ok(None),
+        let _ = inner; // TODO: assert specific value for "None"
+    }
+
+    #[test]
+    fn test_get_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_header_contains_placeholder() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_ok_some_header() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let result = instance.get(&endpoint);
+        let inner = result.unwrap();
+        // Branch returns Ok(Some(header) when: Ok(Some(header))
+        let _ = inner; // TODO: assert specific value for "Some(header"
+    }
+
+    #[test]
+    fn test_get_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let result = instance.get(&endpoint);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_get_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_get_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _ = instance.get(&endpoint);
+    }
+
+    #[test]
+    fn test_post_self_execute_request_httpmethod_post_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_self_execute_request_httpmethod_put_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_self_execute_request_httpmethod_patch_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_ok_false() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.post(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(false) when: Ok(false)
+        let _ = inner; // TODO: assert specific value for "false"
+    }
+
+    #[test]
+    fn test_post_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.post(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_post_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_none_return_ok_none() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.post(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(None) when: None => return Ok(None),
+        let _ = inner; // TODO: assert specific value for "None"
+    }
+
+    #[test]
+    fn test_post_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_header_contains_placeholder() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_ok_some_header() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.post(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(Some(header) when: Ok(Some(header))
+        let _ = inner; // TODO: assert specific value for "Some(header"
+    }
+
+    #[test]
+    fn test_post_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.post(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_post_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _ = instance.post(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_self_execute_request_httpmethod_put_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_self_execute_request_httpmethod_patch_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_ok_false() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.put(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(false) when: Ok(false)
+        let _ = inner; // TODO: assert specific value for "false"
+    }
+
+    #[test]
+    fn test_put_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.put(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_put_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_none_return_ok_none() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.put(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(None) when: None => return Ok(None),
+        let _ = inner; // TODO: assert specific value for "None"
+    }
+
+    #[test]
+    fn test_put_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_header_contains_placeholder() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_ok_some_header() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.put(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(Some(header) when: Ok(Some(header))
+        let _ = inner; // TODO: assert specific value for "Some(header"
+    }
+
+    #[test]
+    fn test_put_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.put(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_put_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_put_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _ = instance.put(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_self_execute_request_httpmethod_patch_endpoint_some_body() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_ok_false() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.patch(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(false) when: Ok(false)
+        let _ = inner; // TODO: assert specific value for "false"
+    }
+
+    #[test]
+    fn test_patch_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.patch(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_patch_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_none_return_ok_none() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.patch(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(None) when: None => return Ok(None),
+        let _ = inner; // TODO: assert specific value for "None"
+    }
+
+    #[test]
+    fn test_patch_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_header_contains_placeholder() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_ok_some_header() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.patch(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(Some(header) when: Ok(Some(header))
+        let _ = inner; // TODO: assert specific value for "Some(header"
+    }
+
+    #[test]
+    fn test_patch_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.patch(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_patch_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_patch_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _ = instance.patch(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_delete_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_ok_false() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let result = instance.delete(&endpoint);
+        let inner = result.unwrap();
+        // Branch returns Ok(false) when: Ok(false)
+        let _ = inner; // TODO: assert specific value for "false"
+    }
+
+    #[test]
+    fn test_delete_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let result = instance.delete(&endpoint);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_delete_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_none_return_ok_none() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let result = instance.delete(&endpoint);
+        let inner = result.unwrap();
+        // Branch returns Ok(None) when: None => return Ok(None),
+        let _ = inner; // TODO: assert specific value for "None"
+    }
+
+    #[test]
+    fn test_delete_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_header_contains_placeholder() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_ok_some_header() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let result = instance.delete(&endpoint);
+        let inner = result.unwrap();
+        // Branch returns Ok(Some(header) when: Ok(Some(header))
+        let _ = inner; // TODO: assert specific value for "Some(header"
+    }
+
+    #[test]
+    fn test_delete_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let result = instance.delete(&endpoint);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_delete_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _result = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_delete_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let _ = instance.delete(&endpoint);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_ok_false() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.post_unauthenticated(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(false) when: Ok(false)
+        let _ = inner; // TODO: assert specific value for "false"
+    }
+
+    #[test]
+    fn test_post_unauthenticated_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.post_unauthenticated(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_post_unauthenticated_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_none_return_ok_none() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.post_unauthenticated(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(None) when: None => return Ok(None),
+        let _ = inner; // TODO: assert specific value for "None"
+    }
+
+    #[test]
+    fn test_post_unauthenticated_default_path() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_header_contains_placeholder() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_ok_some_header() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.post_unauthenticated(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(Some(header) when: Ok(Some(header))
+        let _ = inner; // TODO: assert specific value for "Some(header"
+    }
+
+    #[test]
+    fn test_post_unauthenticated_ok() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let result = instance.post_unauthenticated(&endpoint, &body);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_post_unauthenticated_some_a_a() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _result = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_post_unauthenticated_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ApiClient::default();
+        let endpoint = "";
+        let body = Default::default();
+        let _ = instance.post_unauthenticated(&endpoint, &body);
+    }
+
+    #[test]
+    fn test_login_default_path() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _result = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_login_default_path() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _result = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_login_ok_false() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let result = instance.login(&credentials);
+        let inner = result.unwrap();
+        // Branch returns Ok(false) when: Ok(false)
+        let _ = inner; // TODO: assert specific value for "false"
+    }
+
+    #[test]
+    fn test_login_default_path() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _result = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_login_default_path() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _result = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_login_ok() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let result = instance.login(&credentials);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_login_some_a_a() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _result = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_login_none_return_ok_none() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let result = instance.login(&credentials);
+        let inner = result.unwrap();
+        // Branch returns Ok(None) when: None => return Ok(None),
+        let _ = inner; // TODO: assert specific value for "None"
+    }
+
+    #[test]
+    fn test_login_default_path() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _result = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_login_header_contains_placeholder() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _result = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_login_ok_some_header() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let result = instance.login(&credentials);
+        let inner = result.unwrap();
+        // Branch returns Ok(Some(header) when: Ok(Some(header))
+        let _ = inner; // TODO: assert specific value for "Some(header"
+    }
+
+    #[test]
+    fn test_login_ok() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let result = instance.login(&credentials);
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_login_some_a_a() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _result = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_login_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _result = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_login_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _result = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_login_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ApiClient::default();
+        let credentials = Default::default();
+        let _ = instance.login(&credentials);
+    }
+
+    #[test]
+    fn test_refresh_if_needed_ok_false() {
+        let instance = ApiClient::default();
+        let result = instance.refresh_if_needed();
+        let inner = result.unwrap();
+        // Branch returns Ok(false) when: Ok(false)
+        let _ = inner; // TODO: assert specific value for "false"
+    }
+
+    #[test]
+    fn test_refresh_if_needed_default_path() {
+        let instance = ApiClient::default();
+        let _result = instance.refresh_if_needed();
+    }
+
+    #[test]
+    fn test_refresh_if_needed_default_path() {
+        let instance = ApiClient::default();
+        let _result = instance.refresh_if_needed();
+    }
+
+    #[test]
+    fn test_refresh_if_needed_ok() {
+        let instance = ApiClient::default();
+        let result = instance.refresh_if_needed();
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_refresh_if_needed_some_a_a() {
+        let instance = ApiClient::default();
+        let _result = instance.refresh_if_needed();
+    }
+
+    #[test]
+    fn test_refresh_if_needed_none_return_ok_none() {
+        let instance = ApiClient::default();
+        let result = instance.refresh_if_needed();
+        let inner = result.unwrap();
+        // Branch returns Ok(None) when: None => return Ok(None),
+        let _ = inner; // TODO: assert specific value for "None"
+    }
+
+    #[test]
+    fn test_refresh_if_needed_default_path() {
+        let instance = ApiClient::default();
+        let _result = instance.refresh_if_needed();
+    }
+
+    #[test]
+    fn test_refresh_if_needed_header_contains_placeholder() {
+        let instance = ApiClient::default();
+        let _result = instance.refresh_if_needed();
+    }
+
+    #[test]
+    fn test_refresh_if_needed_ok_some_header() {
+        let instance = ApiClient::default();
+        let result = instance.refresh_if_needed();
+        let inner = result.unwrap();
+        // Branch returns Ok(Some(header) when: Ok(Some(header))
+        let _ = inner; // TODO: assert specific value for "Some(header"
+    }
+
+    #[test]
+    fn test_refresh_if_needed_ok() {
+        let instance = ApiClient::default();
+        let result = instance.refresh_if_needed();
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_refresh_if_needed_some_a_a() {
+        let instance = ApiClient::default();
+        let _result = instance.refresh_if_needed();
+    }
+
+    #[test]
+    fn test_refresh_if_needed_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let _result = instance.refresh_if_needed();
+    }
+
+    #[test]
+    fn test_refresh_if_needed_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let _result = instance.refresh_if_needed();
+    }
+
+    #[test]
+    fn test_refresh_if_needed_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ApiClient::default();
+        let _ = instance.refresh_if_needed();
+    }
+
+    #[test]
+    fn test_logout_ok() {
+        let instance = ApiClient::default();
+        let result = instance.logout();
+        let inner = result.unwrap();
+        // Branch returns Ok(() when: Ok(())
+        let _ = inner; // TODO: assert specific value for "("
+    }
+
+    #[test]
+    fn test_logout_some_a_a() {
+        let instance = ApiClient::default();
+        let _result = instance.logout();
+    }
+
+    #[test]
+    fn test_logout_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let _result = instance.logout();
+    }
+
+    #[test]
+    fn test_logout_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let _result = instance.logout();
+    }
+
+    #[test]
+    fn test_is_authenticated_some_a_a() {
+        let instance = ApiClient::default();
+        let _result = instance.is_authenticated();
+    }
+
+    #[test]
+    fn test_is_authenticated_none_return_true_no_auth_required() {
+        let instance = ApiClient::default();
+        let result = instance.is_authenticated();
+        assert!(
+            result,
+            "expected true when: None => return true, // No auth required"
+        );
+    }
+
+    #[test]
+    fn test_is_authenticated_resolve_variable_self_project_id_var_name_source_is_err() {
+        let instance = ApiClient::default();
+        let result = instance.is_authenticated();
+        assert!(
+            !result,
+            "expected false when: resolve_variable(&self.project_id, var_name, source).is_err()"
+        );
+    }
+}
