@@ -906,17 +906,21 @@ fn resolve_assertion(
     });
 
     if let Some(tmpl) = template {
-        // Substitute variables in the assertion template
+        // Substitute variables in the assertion template.
+        // Escape double quotes since these values may contain source-level quotes
+        // (e.g. match arms like `Some("changed")`) and they get embedded inside
+        // string literals in the generated test code.
         let mut rendered = tmpl.clone();
-        rendered = rendered.replace("{condition}", condition);
+        rendered = rendered.replace("{condition}", &condition.replace('"', "\\\""));
         if let Some(ref val) = returns.value {
-            rendered = rendered.replace("{expected_value}", val);
+            rendered = rendered.replace("{expected_value}", &val.replace('"', "\\\""));
         }
         rendered = rendered.replace("{variant}", variant);
         rendered
     } else {
         // No grammar template — produce a minimal language-agnostic placeholder
-        format!("{indent}let _ = result; // {variant}: {condition}")
+        let escaped_condition = condition.replace('"', "\\\"");
+        format!("{indent}let _ = result; // {variant}: {escaped_condition}")
     }
 }
 
@@ -1029,7 +1033,7 @@ fn enrich_assertion_with_fields(
         let rendered = template
             .replace("{indent}", indent)
             .replace("{field_name}", &field.name)
-            .replace("{expected_value}", &expected);
+            .replace("{expected_value}", &expected.replace('"', "\\\""));
         field_assertions.push(rendered);
     }
 
@@ -2393,6 +2397,38 @@ mod tests {
         assert!(
             assertion.contains("is_none()"),
             "should assert is_none(), got: {}",
+            assertion
+        );
+    }
+
+    #[test]
+    fn test_assertion_escapes_inner_quotes_in_condition() {
+        // Regression: conditions like `Some("changed")` contain double quotes
+        // that must be escaped when embedded inside generated string literals.
+        let returns = ReturnValue {
+            variant: "some".to_string(),
+            value: Some("changed".to_string()),
+        };
+        let return_type = ReturnShape::OptionType {
+            some_type: "String".to_string(),
+        };
+        let assertion = resolve_assertion(
+            &returns,
+            &return_type,
+            r#"CommitCategory::Other => Some("changed"),"#,
+            &sample_assertion_templates(),
+        );
+        // The generated code must not contain unescaped inner quotes that would
+        // break compilation. Raw `"changed"` inside a string literal is invalid.
+        assert!(
+            !assertion.contains(r#"Some("changed")"#),
+            "inner quotes must be escaped in generated code, got:\n{}",
+            assertion
+        );
+        // Escaped form should be present instead
+        assert!(
+            assertion.contains(r#"Some(\"changed\")"#),
+            "should contain escaped quotes, got:\n{}",
             assertion
         );
     }
