@@ -701,6 +701,13 @@ pub fn apply_fixes_chunked(
 
         match std::fs::write(&abs_path, &modified) {
             Ok(_) => {
+                // Format the written file before verification so lint smoke
+                // checks pass on generated code (e.g., test modules).
+                let _ = crate::engine::format_write::format_after_write(
+                    root,
+                    &[abs_path.clone()],
+                );
+
                 let mut chunk = ApplyChunkResult {
                     chunk_id: format!("fix:{}", index + 1),
                     files: vec![fix.file.clone()],
