@@ -703,10 +703,7 @@ pub fn apply_fixes_chunked(
             Ok(_) => {
                 // Format the written file before verification so lint smoke
                 // checks pass on generated code (e.g., test modules).
-                let _ = crate::engine::format_write::format_after_write(
-                    root,
-                    &[abs_path.clone()],
-                );
+                let _ = crate::engine::format_write::format_after_write(root, &[abs_path.clone()]);
 
                 let mut chunk = ApplyChunkResult {
                     chunk_id: format!("fix:{}", index + 1),
@@ -956,54 +953,6 @@ pub fn apply_decompose_plans(
     results
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn remove_from_single_line_pub_use() {
-        let mut lines: Vec<String> = vec![
-            "pub use planner::{analyze_stage_overlaps, build_refactor_plan, normalize_sources};"
-                .into(),
-        ];
-        remove_from_pub_use_block(&mut lines, "analyze_stage_overlaps");
-        assert_eq!(lines.len(), 1);
-        assert!(!lines[0].contains("analyze_stage_overlaps"));
-        assert!(lines[0].contains("build_refactor_plan"));
-        assert!(lines[0].contains("normalize_sources"));
-    }
-
-    #[test]
-    fn remove_last_item_deletes_entire_line() {
-        let mut lines: Vec<String> = vec!["pub use planner::{only_function};".into()];
-        remove_from_pub_use_block(&mut lines, "only_function");
-        assert!(lines.is_empty(), "Empty pub use should be removed entirely");
-    }
-
-    #[test]
-    fn remove_from_multiline_pub_use() {
-        let mut lines: Vec<String> = vec![
-            "pub use module::{".into(),
-            "    alpha,".into(),
-            "    beta,".into(),
-            "    gamma,".into(),
-            "};".into(),
-        ];
-        remove_from_pub_use_block(&mut lines, "beta");
-        let joined = lines.join("\n");
-        assert!(!joined.contains("beta"), "beta should be removed");
-        assert!(joined.contains("alpha"), "alpha should remain");
-        assert!(joined.contains("gamma"), "gamma should remain");
-    }
-
-    #[test]
-    fn remove_does_not_touch_unrelated_pub_use() {
-        let mut lines: Vec<String> = vec!["pub use other::{foo, bar};".into()];
-        remove_from_pub_use_block(&mut lines, "baz");
-        assert_eq!(lines[0], "pub use other::{foo, bar};");
-    }
-}
-
 /// Apply file move operations from fixes.
 ///
 /// Extracts all `InsertionKind::FileMove` from fixes, executes them via
@@ -1096,4 +1045,52 @@ pub fn apply_file_moves(fixes: &[Fix], root: &Path) -> Vec<ApplyChunkResult> {
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_from_single_line_pub_use() {
+        let mut lines: Vec<String> = vec![
+            "pub use planner::{analyze_stage_overlaps, build_refactor_plan, normalize_sources};"
+                .into(),
+        ];
+        remove_from_pub_use_block(&mut lines, "analyze_stage_overlaps");
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains("analyze_stage_overlaps"));
+        assert!(lines[0].contains("build_refactor_plan"));
+        assert!(lines[0].contains("normalize_sources"));
+    }
+
+    #[test]
+    fn remove_last_item_deletes_entire_line() {
+        let mut lines: Vec<String> = vec!["pub use planner::{only_function};".into()];
+        remove_from_pub_use_block(&mut lines, "only_function");
+        assert!(lines.is_empty(), "Empty pub use should be removed entirely");
+    }
+
+    #[test]
+    fn remove_from_multiline_pub_use() {
+        let mut lines: Vec<String> = vec![
+            "pub use module::{".into(),
+            "    alpha,".into(),
+            "    beta,".into(),
+            "    gamma,".into(),
+            "};".into(),
+        ];
+        remove_from_pub_use_block(&mut lines, "beta");
+        let joined = lines.join("\n");
+        assert!(!joined.contains("beta"), "beta should be removed");
+        assert!(joined.contains("alpha"), "alpha should remain");
+        assert!(joined.contains("gamma"), "gamma should remain");
+    }
+
+    #[test]
+    fn remove_does_not_touch_unrelated_pub_use() {
+        let mut lines: Vec<String> = vec!["pub use other::{foo, bar};".into()];
+        remove_from_pub_use_block(&mut lines, "baz");
+        assert_eq!(lines[0], "pub use other::{foo, bar};");
+    }
 }

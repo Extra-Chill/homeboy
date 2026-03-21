@@ -453,8 +453,7 @@ fn run_fix_iteration(
         // Apply test-only fixes with just the re-audit verifier (no lint smoke).
         // These are test module insertions that don't affect production code.
         if !test_only_fixes.is_empty() {
-            let test_verifier =
-                build_chunk_verifier(root, &audit_result.findings, vec![]);
+            let test_verifier = build_chunk_verifier(root, &audit_result.findings, vec![]);
             let chunk_results = fixer::apply_fixes_chunked(
                 &mut test_only_fixes,
                 root,
