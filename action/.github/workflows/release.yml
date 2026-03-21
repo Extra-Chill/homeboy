@@ -1,7 +1,7 @@
 # Continuous release pipeline for Homeboy Action.
 #
-# Runs every 15 minutes (and on manual dispatch). Checks for releasable
-# conventional commits since the last tag. If found:
+# Triggers on push to main (immediate release) and manual dispatch.
+# Checks for releasable conventional commits since the last tag. If found:
 #   1. Version bump + changelog generation
 #   2. Tag + push
 #   3. Post-release hook moves the floating v2 tag
@@ -21,8 +21,8 @@ permissions:
   pull-requests: write
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry-run:
