@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.85.0] - 2026-03-21
+
+### Added
+- inline test module placement instead of orphaned test files (#818)
+- method receiver construction for impl block methods (#818)
+- cross-file type registry for project-wide struct resolution (#818)
+- configurable field capture groups for PHP class property parsing (#818)
+- auto-fix adjacent intra-method duplicates
+- struct introspection for field-level test assertions
+- wire behavioral inference into test generation pipeline
+
+### Changed
+- remove all language-specific code from core test generation
+
+### Fixed
+- drop PlanOnly fixes in write mode to avoid wasted CI work
+- skip lint smoke for Safe-tier fixes in chunk verification
+- exclude build artifacts from refactor sandbox
+- three root causes blocking autofix write path (#818)
+- format files after write in apply_fixes_chunked before lint smoke
+- format sandbox between refactor stages so lint sees clean code
+
 ## [0.84.0] - 2026-03-20
 
 ### Added
