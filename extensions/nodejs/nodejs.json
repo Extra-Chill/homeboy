@@ -1,6 +1,6 @@
 {
   "name": "Node.js",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "icon": "server.rack",
   "description": "Node.js project type with PM2 integration",
   "author": "Extra Chill",
