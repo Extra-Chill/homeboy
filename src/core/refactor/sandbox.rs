@@ -75,10 +75,7 @@ pub fn copy_changed_files(
     Ok(())
 }
 
-pub fn snapshot_tree(
-    root: &str,
-    exclusions: &[String],
-) -> crate::Result<BTreeMap<String, u64>> {
+pub fn snapshot_tree(root: &str, exclusions: &[String]) -> crate::Result<BTreeMap<String, u64>> {
     let root_path = Path::new(root);
     let exclude_set: HashSet<&str> = exclusions.iter().map(|s| s.as_str()).collect();
     let mut files = BTreeMap::new();
