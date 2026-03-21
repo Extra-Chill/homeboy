@@ -414,27 +414,72 @@ fn run_fix_iteration(
     let verifier = build_chunk_verifier(root, &audit_result.findings, extra_smokes);
 
     if !auto_apply_result.fixes.is_empty() {
-        let chunk_results = fixer::apply_fixes_chunked(
-            &mut auto_apply_result.fixes,
-            root,
-            fixer::ApplyOptions {
-                verifier: Some(&verifier),
-            },
-        );
-        applied_chunks += chunk_results
-            .iter()
-            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
-            .count();
-        reverted_chunks += chunk_results
-            .iter()
-            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Reverted))
-            .count();
-        total_modified += chunk_results
-            .iter()
-            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
-            .map(|chunk| chunk.applied_files)
-            .sum::<usize>();
-        fix_result.chunk_results.extend(chunk_results);
+        // Separate test-only fixes from other fixes. Test-only fixes (TestModule
+        // insertions) skip the lint smoke because the lint runner checks the entire
+        // crate and fails on pre-existing warnings unrelated to the generated code.
+        // The scoped re-audit still validates these changes for compilation errors.
+        let (mut test_only_fixes, mut other_fixes): (Vec<_>, Vec<_>) =
+            auto_apply_result.fixes.drain(..).partition(|fix| {
+                fix.insertions
+                    .iter()
+                    .all(|ins| matches!(ins.kind, fixer::InsertionKind::TestModule))
+            });
+
+        // Apply non-test fixes with full verification (lint smoke + re-audit)
+        if !other_fixes.is_empty() {
+            let chunk_results = fixer::apply_fixes_chunked(
+                &mut other_fixes,
+                root,
+                fixer::ApplyOptions {
+                    verifier: Some(&verifier),
+                },
+            );
+            applied_chunks += chunk_results
+                .iter()
+                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
+                .count();
+            reverted_chunks += chunk_results
+                .iter()
+                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Reverted))
+                .count();
+            total_modified += chunk_results
+                .iter()
+                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
+                .map(|chunk| chunk.applied_files)
+                .sum::<usize>();
+            fix_result.chunk_results.extend(chunk_results);
+        }
+
+        // Apply test-only fixes with just the re-audit verifier (no lint smoke).
+        // These are test module insertions that don't affect production code.
+        if !test_only_fixes.is_empty() {
+            let test_verifier = build_chunk_verifier(root, &audit_result.findings, vec![]);
+            let chunk_results = fixer::apply_fixes_chunked(
+                &mut test_only_fixes,
+                root,
+                fixer::ApplyOptions {
+                    verifier: Some(&test_verifier),
+                },
+            );
+            applied_chunks += chunk_results
+                .iter()
+                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
+                .count();
+            reverted_chunks += chunk_results
+                .iter()
+                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Reverted))
+                .count();
+            total_modified += chunk_results
+                .iter()
+                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
+                .map(|chunk| chunk.applied_files)
+                .sum::<usize>();
+            fix_result.chunk_results.extend(chunk_results);
+        }
+
+        // Reassemble for downstream processing
+        auto_apply_result.fixes = other_fixes;
+        auto_apply_result.fixes.extend(test_only_fixes);
     }
 
     if !auto_apply_result.new_files.is_empty() {

@@ -377,12 +377,16 @@ fn build_variables(
         };
         vars.insert("receiver_mut".to_string(), receiver_mut.to_string());
 
-        // Build receiver setup line using fallback_default as the construction expr.
-        // The grammar's fallback_default (e.g., "Default::default()") is used to
-        // construct the instance. Extensions can override via type_constructors.
+        // Build receiver setup line. The grammar's fallback_default is "Default::default()"
+        // which would produce "Type::Default::default()" — wrong. We need "Type::default()".
+        let construction = if fallback_default == "Default::default()" {
+            "default()".to_string()
+        } else {
+            fallback_default.to_string()
+        };
         let receiver_setup = format!(
             "        let {}instance = {}::{};",
-            receiver_mut, impl_type, fallback_default
+            receiver_mut, impl_type, construction
         );
         vars.insert("receiver_setup".to_string(), receiver_setup.clone());
 

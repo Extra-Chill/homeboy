@@ -102,9 +102,10 @@ pub fn extract_contracts_from_grammar(
         // Detect async
         let is_async = decl_text.contains("async ");
 
-        // Determine the impl type for methods (functions with a receiver at depth > 0).
+        // Determine the impl type for ALL functions inside impl blocks (depth > 0).
+        // This covers both methods (&self) and associated functions (Type::new()).
         // Find the nearest impl_block that starts before this function's line.
-        let impl_type = if receiver.is_some() && fn_depth > 0 {
+        let impl_type = if fn_depth > 0 {
             impl_blocks
                 .iter()
                 .rev()
