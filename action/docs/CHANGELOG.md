@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.11.1] - 2026-03-21
+
+### Fixed
+- trigger release on push to main instead of cron
+
 ## [1.11.0] - 2026-03-21
 
 ### Added
