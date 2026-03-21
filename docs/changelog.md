@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.85.1] - 2026-03-21
+
+### Fixed
+- make audit and lint read-only in release pipeline
+- scope monorepo releases to component subdirectories
+- escape inner double quotes in generated test assertion strings
+- build before tag and reflect deploy failures in JSON envelope
+
 ## [0.85.0] - 2026-03-21
 
 ### Added
