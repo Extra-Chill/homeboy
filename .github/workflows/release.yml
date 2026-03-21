@@ -130,9 +130,8 @@ jobs:
    # Unlike PR CI (scoped to changed files), release quality gate runs
   # unscoped against the entire codebase.
   # Serial pipeline: audit → lint → test → release.
-  # All quality gates are read-only. The dedicated auto-refactor job at
-  # the end owns all code changes (refactor --from all --write).
-   # audit/lint/test are read-only here; the dedicated auto-refactor job owns all writes.
+   # All quality gates are read-only (autofix: false). The dedicated
+  # auto-refactor job at the end owns all code changes.
   gate-audit:
     name: Audit
     needs:
@@ -163,7 +162,7 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: audit
-          autofix-mode: 'disabled'
+          autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   gate-lint:
@@ -197,7 +196,7 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: lint
-          autofix-mode: 'disabled'
+          autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   gate-test:
@@ -231,6 +230,7 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: test
+          autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   gate-refactor:
