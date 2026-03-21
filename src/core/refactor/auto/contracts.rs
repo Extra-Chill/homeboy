@@ -164,6 +164,11 @@ pub enum InsertionKind {
         /// Target file path (relative to root).
         to: String,
     },
+    /// Append an inline test module to the end of a source file.
+    /// For Rust: `#[cfg(test)] mod tests { ... }`.
+    /// For PHP: test class or method block.
+    /// The code is appended after the last line of the file.
+    TestModule,
 }
 
 impl InsertionKind {
@@ -182,7 +187,8 @@ impl InsertionKind {
             | Self::VisibilityChange { .. }
             | Self::ReexportRemoval { .. }
             | Self::LineReplacement { .. }
-            | Self::FileMove { .. } => FixSafetyTier::Safe,
+            | Self::FileMove { .. }
+            | Self::TestModule => FixSafetyTier::Safe,
 
             // Plan-only: requires human review.
             Self::MethodStub | Self::FunctionRemoval { .. } | Self::TraitUse => {

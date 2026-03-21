@@ -32,6 +32,7 @@ pub(crate) fn apply_insertions_to_content(
     let mut doc_line_removals: Vec<usize> = Vec::new();
     let mut reexport_removals: Vec<&str> = Vec::new();
     let mut line_replacements: Vec<(usize, &str, &str)> = Vec::new();
+    let mut test_modules: Vec<&str> = Vec::new();
 
     for insertion in insertions {
         match &insertion.kind {
@@ -66,6 +67,7 @@ pub(crate) fn apply_insertions_to_content(
             InsertionKind::FileMove { .. } => {
                 // File moves are handled by apply_file_moves(), not content transformation.
             }
+            InsertionKind::TestModule => test_modules.push(&insertion.code),
         }
     }
 
@@ -195,6 +197,11 @@ pub(crate) fn apply_insertions_to_content(
             .collect::<Vec<_>>()
             .join("");
         result = insert_before_closing_brace(&result, &combined, language);
+    }
+
+    // Append test modules at the end of the file
+    for test_module in &test_modules {
+        result.push_str(test_module);
     }
 
     result

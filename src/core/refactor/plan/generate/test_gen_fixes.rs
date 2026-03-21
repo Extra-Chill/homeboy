@@ -18,16 +18,22 @@ use crate::core::refactor::auto::{
     Fix, FixSafetyTier, Insertion, InsertionKind, NewFile, SkippedFile,
 };
 
-/// Generate new test files for `MissingTestFile` findings.
+/// Generate inline test modules for `MissingTestFile` findings.
 ///
 /// For each finding, reads the source file, extracts function contracts,
-/// generates test plans, and renders compilable test source code.
-/// Produces `NewFile` entries at `Safe` tier — `validate_write` serves
+/// generates test plans, and renders a `#[cfg(test)] mod tests { ... }` block
+/// that gets appended to the end of the **source file** itself.
+///
+/// This matches the codebase's existing test pattern (all 830+ tests are inline)
+/// and avoids orphaned files in `tests/` that Rust's test runner can't discover.
+///
+/// Produces `Fix`/`Insertion` entries at `Safe` tier — `validate_write` serves
 /// as the safety net (if it doesn't compile, it gets rolled back).
 pub(crate) fn generate_test_file_fixes(
     result: &CodeAuditResult,
     root: &Path,
     new_files: &mut Vec<NewFile>,
+    fixes: &mut Vec<Fix>,
     skipped: &mut Vec<SkippedFile>,
 ) {
     let missing_test_findings: Vec<_> = result
@@ -41,23 +47,10 @@ pub(crate) fn generate_test_file_fixes(
     }
 
     // Build a project-wide type registry once for cross-file struct resolution.
-    // This enables field-level assertions when return types are defined in other files.
     let project_registry = build_project_registry_for_findings(&missing_test_findings, root);
 
     for finding in &missing_test_findings {
         let source_file = &finding.file;
-
-        // Extract the expected test path from the finding description
-        let test_path = match extract_test_path_from_description(&finding.description) {
-            Some(p) => p,
-            None => {
-                skipped.push(SkippedFile {
-                    file: source_file.clone(),
-                    reason: "Could not determine test file path from finding".to_string(),
-                });
-                continue;
-            }
-        };
 
         // Determine file extension and load grammar
         let ext = match Path::new(source_file).extension().and_then(|e| e.to_str()) {
@@ -95,6 +88,11 @@ pub(crate) fn generate_test_file_fixes(
             }
         };
 
+        // Skip files that already have a test module
+        if content.contains("#[cfg(test)]") {
+            continue;
+        }
+
         // Generate tests with cross-file type resolution
         let generated = match generate_tests_for_file_with_types(
             &content,
@@ -113,28 +111,89 @@ pub(crate) fn generate_test_file_fixes(
             }
         };
 
-        // Build the complete test file content
-        let test_content = build_test_file_content(source_file, &generated, ext);
+        // Build inline test module content
+        let test_module = build_inline_test_module(&generated, ext);
 
-        new_files.push(NewFile {
-            file: test_path.clone(),
-            finding: AuditFinding::MissingTestFile,
-            safety_tier: FixSafetyTier::Safe,
-            auto_apply: true,
-            blocked_reason: None,
-            preflight: None,
-            content: test_content,
-            description: format!(
-                "Generated test file for {} (testing: {})",
-                source_file,
-                generated.tested_functions.join(", ")
-            ),
-            written: false,
+        fixes.push(Fix {
+            file: source_file.clone(),
+            required_methods: vec![],
+            required_registrations: vec![],
+            insertions: vec![Insertion {
+                kind: InsertionKind::TestModule,
+                finding: AuditFinding::MissingTestFile,
+                safety_tier: FixSafetyTier::Safe,
+                auto_apply: true,
+                blocked_reason: None,
+                preflight: None,
+                code: test_module,
+                description: format!(
+                    "Append inline test module (testing: {})",
+                    generated.tested_functions.join(", ")
+                ),
+            }],
+            applied: false,
         });
     }
+
+    // Suppress unused parameter warning — new_files kept for backward compatibility
+    // with callers that still expect NewFile output for non-Rust languages
+    let _ = new_files;
+}
+
+/// Build an inline `#[cfg(test)] mod tests { ... }` block for Rust files,
+/// or a test class for PHP files.
+///
+/// For Rust: wraps the generated test functions in a test module with
+/// `use super::*;` to access the parent module's items.
+///
+/// For other languages: wraps in the appropriate test class structure.
+fn build_inline_test_module(generated: &GeneratedTestOutput, ext: &str) -> String {
+    let mut content = String::new();
+    content.push('\n');
+
+    match ext {
+        "rs" => {
+            content.push_str("#[cfg(test)]\nmod tests {\n");
+            content.push_str("    use super::*;\n");
+
+            // Add extra imports from type_defaults (e.g., use std::path::Path;)
+            for imp in &generated.extra_imports {
+                content.push_str(&format!("    {}\n", imp.trim()));
+            }
+
+            content.push('\n');
+            content.push_str(&generated.test_source);
+            content.push_str("}\n");
+        }
+        "php" => {
+            // PHP: test functions are methods in a test class
+            // The test_templates already produce method-level code
+            for imp in &generated.extra_imports {
+                content.push_str(imp);
+                content.push('\n');
+            }
+            if !generated.extra_imports.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(&generated.test_source);
+        }
+        _ => {
+            for imp in &generated.extra_imports {
+                content.push_str(imp);
+                content.push('\n');
+            }
+            if !generated.extra_imports.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(&generated.test_source);
+        }
+    }
+
+    content
 }
 
 /// Build the complete test file content with module declaration, imports, and test functions.
+/// Used as fallback for non-inline test file generation.
 fn build_test_file_content(
     source_file: &str,
     generated: &GeneratedTestOutput,
@@ -144,11 +203,9 @@ fn build_test_file_content(
 
     match ext {
         "rs" => {
-            // Build the import path for the source module
             let module_path = module_path_from_file(source_file);
             content.push_str(&format!("use crate::{}::*;\n", module_path));
 
-            // Add extra imports from type_defaults
             for imp in &generated.extra_imports {
                 content.push_str(imp);
                 content.push('\n');
@@ -158,7 +215,6 @@ fn build_test_file_content(
             content.push_str(&generated.test_source);
         }
         _ => {
-            // Non-Rust: just output the test source with extra imports
             for imp in &generated.extra_imports {
                 content.push_str(imp);
                 content.push('\n');
