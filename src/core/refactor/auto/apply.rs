@@ -155,7 +155,20 @@ pub(crate) fn apply_insertions_to_content(
                 lines.drain(start_idx..remove_end);
             }
         }
-        result = lines.join("\n");
+        // Collapse consecutive blank lines left behind by multiple removals.
+        // Without this, removing several adjacent imports leaves gaps that
+        // cause `cargo fmt --check` to fail in the validation stage.
+        let mut collapsed = Vec::with_capacity(lines.len());
+        let mut prev_blank = false;
+        for line in &lines {
+            let is_blank = line.trim().is_empty();
+            if is_blank && prev_blank {
+                continue;
+            }
+            collapsed.push(*line);
+            prev_blank = is_blank;
+        }
+        result = collapsed.join("\n");
         if content.ends_with('\n') && !result.ends_with('\n') {
             result.push('\n');
         }

@@ -29,11 +29,13 @@ on:
         type: boolean
         default: false
 
-# No concurrency group — let overlapping runs race. The check job exits
-# in seconds when there are no releasable commits (the common case when
-# an in-flight release already tagged HEAD). The failure cache prevents
-# retrying the same broken SHA. This avoids both canceling in-flight
-# releases (wastes work) and queuing idle runners (wastes capacity).
+# Only one release pipeline at a time. If a cron fires while a release
+# is already running, it queues (never cancels). The queued run starts
+# after the first finishes and its check job exits in seconds because
+# HEAD is already tagged — zero wasted work.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # ── Step 1: Check for releasable commits ──
