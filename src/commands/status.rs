@@ -217,10 +217,7 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
 ///
 /// Combines local version, remote (deployed) version, release state, and
 /// unreleased commit count into a single view per component.
-fn run_project_dashboard(
-    project_id: &str,
-    args: &StatusArgs,
-) -> CmdResult<StatusResult> {
+fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<StatusResult> {
     let proj = project::load(project_id)?;
     let components = project::resolve_project_components(&proj)?;
 
@@ -345,9 +342,7 @@ fn run_project_dashboard(
 ///
 /// Uses deploy check mode internally, which handles SSH resolution.
 /// Returns empty map on failure (e.g., no server configured, SSH unavailable).
-fn fetch_project_remote_versions(
-    project_id: &str,
-) -> std::collections::HashMap<String, String> {
+fn fetch_project_remote_versions(project_id: &str) -> std::collections::HashMap<String, String> {
     let config = DeployConfig {
         component_ids: vec![],
         all: true,
@@ -407,12 +402,11 @@ fn log_dashboard_table(rows: &[ProjectStatusRow]) {
 
     // Header
     eprintln!(
-        "{:<id_w$}  {:<local_w$}  {:<remote_w$}  {:>10}  {}",
+        "{:<id_w$}  {:<local_w$}  {:<remote_w$}  {:>10}  Status",
         "Component",
         "Local",
         "Remote",
         "Unreleased",
-        "Status",
         id_w = id_width,
         local_w = local_width,
         remote_w = remote_width,
