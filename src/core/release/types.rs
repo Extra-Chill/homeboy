@@ -250,3 +250,15 @@ pub struct BatchReleaseSummary {
     pub skipped: u32,
     pub failed: u32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_str_default_path() {
+        let instance = ReleaseStepType::default();
+        let s = "";
+        let _result = instance.from_str(&s);
+    }
+}

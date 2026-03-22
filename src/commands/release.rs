@@ -4,9 +4,7 @@ use serde::Serialize;
 use homeboy::component;
 use homeboy::deploy::{self, ReleaseStateStatus};
 use homeboy::project;
-use homeboy::release::{
-    self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult,
-};
+use homeboy::release::{self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult};
 
 use super::utils::args::{DryRunArgs, HiddenJsonArgs};
 use super::CmdResult;
@@ -162,7 +160,11 @@ pub fn run(
     };
 
     let batch_result = release::run_batch(&component_ids, &input_template);
-    let exit_code = if batch_result.summary.failed > 0 { 1 } else { 0 };
+    let exit_code = if batch_result.summary.failed > 0 {
+        1
+    } else {
+        0
+    };
 
     Ok((
         ReleaseCommandOutput::Batch(BatchReleaseOutput {
@@ -224,15 +226,9 @@ fn resolve_component_ids(args: &ReleaseArgs) -> homeboy::Result<Vec<String>> {
             };
             return Err(homeboy::Error::validation_invalid_argument(
                 "project",
-                format!(
-                    "No components {} in project '{}'",
-                    filter_desc, project_id
-                ),
+                format!("No components {} in project '{}'", filter_desc, project_id),
                 Some(project_id.to_string()),
-                Some(vec![format!(
-                    "Check with: homeboy status {}",
-                    project_id
-                )]),
+                Some(vec![format!("Check with: homeboy status {}", project_id)]),
             ));
         }
 

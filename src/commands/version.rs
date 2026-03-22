@@ -170,12 +170,18 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             );
 
             match super::release::run(release_args, _global)? {
-                (super::release::ReleaseCommandOutput::Single(output), exit_code) => {
-                    Ok((VersionOutput::Bump(VersionBumpOutput { result: output.result }), exit_code))
-                }
-                (super::release::ReleaseCommandOutput::Batch(output), exit_code) => {
-                    Ok((VersionOutput::BatchBump(VersionBatchBumpOutput { result: output.result }), exit_code))
-                }
+                (super::release::ReleaseCommandOutput::Single(output), exit_code) => Ok((
+                    VersionOutput::Bump(VersionBumpOutput {
+                        result: output.result,
+                    }),
+                    exit_code,
+                )),
+                (super::release::ReleaseCommandOutput::Batch(output), exit_code) => Ok((
+                    VersionOutput::BatchBump(VersionBatchBumpOutput {
+                        result: output.result,
+                    }),
+                    exit_code,
+                )),
             }
         }
     }
