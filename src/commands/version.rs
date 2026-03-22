@@ -2,10 +2,10 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::component;
-use homeboy::release::{self, ReleaseCommandInput, ReleaseCommandResult};
+use homeboy::release::{BatchReleaseResult, ReleaseCommandResult};
 use homeboy::version::{read_component_version, read_version, VersionTargetInfo};
 
-use super::utils::args::{DryRunArgs, HiddenJsonArgs, PositionalComponentArgs};
+use super::utils::args::{DryRunArgs, HiddenJsonArgs};
 use super::CmdResult;
 
 #[derive(Serialize)]
@@ -13,6 +13,7 @@ use super::CmdResult;
 pub enum VersionOutput {
     Show(VersionShowOutput),
     Bump(VersionBumpOutput),
+    BatchBump(VersionBatchBumpOutput),
 }
 
 #[derive(Args)]
@@ -35,8 +36,20 @@ enum VersionCommand {
 
     /// Bump version and release (alias for `homeboy release`)
     Bump {
-        #[command(flatten)]
-        comp: PositionalComponentArgs,
+        /// Component ID(s) to release
+        components: Vec<String>,
+
+        /// Release all components in a project that need a version bump
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+
+        /// Only release components with unreleased code commits (use with --project)
+        #[arg(long)]
+        outdated: bool,
+
+        /// Override local_path for version file lookup (single component only)
+        #[arg(long)]
+        path: Option<String>,
 
         #[command(flatten)]
         dry_run_args: DryRunArgs,
@@ -83,6 +96,12 @@ pub struct VersionBumpOutput {
     pub result: ReleaseCommandResult,
 }
 
+#[derive(Serialize)]
+#[serde(tag = "command", rename = "release.batch")]
+pub struct VersionBatchBumpOutput {
+    pub result: BatchReleaseResult,
+}
+
 pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<VersionOutput> {
     match args.command {
         VersionCommand::Show { component_id, path } => {
@@ -124,7 +143,10 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             ))
         }
         VersionCommand::Bump {
-            comp,
+            components,
+            project,
+            outdated,
+            path,
             dry_run_args,
             _json: _,
             deploy,
@@ -133,18 +155,28 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             major,
             skip_publish,
         } => {
-            let (result, exit_code) = release::run_command(ReleaseCommandInput {
-                component_id: comp.id().to_string(),
-                path_override: comp.path.clone(),
-                dry_run: dry_run_args.dry_run,
+            // Delegate to the release command's batch infrastructure
+            let release_args = super::release::ReleaseArgs::from_parts(
+                components,
+                project,
+                outdated,
+                path,
+                dry_run_args.dry_run,
                 deploy,
                 recover,
                 skip_checks,
                 major,
                 skip_publish,
-            })?;
+            );
 
-            Ok((VersionOutput::Bump(VersionBumpOutput { result }), exit_code))
+            match super::release::run(release_args, _global)? {
+                (super::release::ReleaseCommandOutput::Single(output), exit_code) => {
+                    Ok((VersionOutput::Bump(VersionBumpOutput { result: output.result }), exit_code))
+                }
+                (super::release::ReleaseCommandOutput::Batch(output), exit_code) => {
+                    Ok((VersionOutput::BatchBump(VersionBatchBumpOutput { result: output.result }), exit_code))
+                }
+            }
         }
     }
 }

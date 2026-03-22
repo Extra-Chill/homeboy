@@ -223,3 +223,30 @@ pub struct ReleaseCommandResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment: Option<ReleaseDeploymentResult>,
 }
+
+/// Result of a batch release across multiple components.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchReleaseResult {
+    pub results: Vec<BatchReleaseComponentResult>,
+    pub summary: BatchReleaseSummary,
+}
+
+/// Per-component result within a batch release.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchReleaseComponentResult {
+    pub component_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<ReleaseCommandResult>,
+}
+
+/// Summary counts for a batch release.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchReleaseSummary {
+    pub total: u32,
+    pub released: u32,
+    pub skipped: u32,
+    pub failed: u32,
+}

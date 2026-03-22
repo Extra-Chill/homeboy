@@ -5,8 +5,9 @@ use crate::git;
 
 use super::pipeline::load_component;
 use super::types::{
-    ReleaseCommandInput, ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary,
-    ReleaseOptions, ReleasePlan, ReleaseProjectDeployResult, ReleaseRun,
+    BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseCommandInput,
+    ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary, ReleaseOptions,
+    ReleasePlan, ReleaseProjectDeployResult, ReleaseRun,
 };
 
 pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
@@ -530,6 +531,98 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
         },
         0,
     ))
+}
+
+/// Run releases for multiple components sequentially.
+///
+/// Continue-on-error: if one component fails, the rest still run.
+/// Each component releases independently (own tag, own push).
+pub fn run_batch(component_ids: &[String], input_template: &ReleaseCommandInput) -> BatchReleaseResult {
+    let mut results = Vec::new();
+    let mut released: u32 = 0;
+    let mut skipped: u32 = 0;
+    let mut failed: u32 = 0;
+
+    for component_id in component_ids {
+        log_status!(
+            "release",
+            "--- Releasing '{}' ({}/{}) ---",
+            component_id,
+            results.len() + 1,
+            component_ids.len()
+        );
+
+        let input = ReleaseCommandInput {
+            component_id: component_id.clone(),
+            path_override: None,
+            dry_run: input_template.dry_run,
+            deploy: input_template.deploy,
+            recover: input_template.recover,
+            skip_checks: input_template.skip_checks,
+            major: input_template.major,
+            skip_publish: input_template.skip_publish,
+        };
+
+        match run_command(input) {
+            Ok((result, _exit_code)) => {
+                let was_skipped = result.skipped_reason.is_some();
+                let status = if was_skipped {
+                    skipped += 1;
+                    "skipped"
+                } else {
+                    released += 1;
+                    "released"
+                };
+
+                results.push(BatchReleaseComponentResult {
+                    component_id: component_id.clone(),
+                    status: status.to_string(),
+                    error: None,
+                    result: Some(result),
+                });
+            }
+            Err(e) => {
+                log_status!(
+                    "release",
+                    "Failed to release '{}': {}",
+                    component_id,
+                    e
+                );
+                failed += 1;
+                results.push(BatchReleaseComponentResult {
+                    component_id: component_id.clone(),
+                    status: "failed".to_string(),
+                    error: Some(e.to_string()),
+                    result: None,
+                });
+            }
+        }
+    }
+
+    let total = results.len() as u32;
+
+    // Log summary
+    if total > 1 {
+        log_status!("release", "--- Batch summary ---");
+        log_status!(
+            "release",
+            "{} component(s): {} released, {} skipped, {} failed",
+            total,
+            released,
+            skipped,
+            failed
+        );
+    }
+
+    BatchReleaseResult {
+        results,
+        summary: BatchReleaseSummary {
+            total,
+            released,
+            skipped,
+            failed,
+        },
+    }
 }
 
 #[cfg(test)]
