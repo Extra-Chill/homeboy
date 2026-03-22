@@ -5,9 +5,12 @@
 # Automatically detects project type from headers (Plugin Name or Theme Name)
 # and creates standardized production builds with dependency management.
 #
-# Output Structure (assistant-instructions compliant):
-#   /build/[project-name]/       - Clean production directory
-#   /build/[project-name].zip    - Production ZIP file (non-versioned)
+# Output Structure:
+#   /build/[project-name].zip    - Production ZIP file
+#
+# Staging uses .homeboy-build/ to avoid colliding with @wordpress/scripts
+# which outputs to build/ by convention. The staging dir is cleaned up after
+# the ZIP is created.
 #
 # Features:
 # - Auto-detects plugin/theme from file headers
@@ -22,11 +25,16 @@
 
 set -e
 
+# Staging directory for the intermediate production copy.
+# Intentionally NOT build/ — @wordpress/scripts outputs to build/ by convention
+# and using the same directory causes compiled JS/CSS to be silently dropped.
+STAGING_ROOT=".homeboy-build"
+
 # Cleanup on exit (restore dev deps if build fails unexpectedly)
 cleanup() {
     local exit_code=$?
-    if [ -d "build/$PROJECT_NAME" ] && [ $exit_code -ne 0 ]; then
-        rm -rf "build/$PROJECT_NAME"
+    if [ -d "${STAGING_ROOT}/${PROJECT_NAME:-}" ] && [ $exit_code -ne 0 ]; then
+        rm -rf "${STAGING_ROOT}/${PROJECT_NAME}"
     fi
     if [ -f "composer.json" ]; then
         composer install --no-interaction --quiet 2>&1 || true
@@ -153,13 +161,22 @@ extract_metadata() {
 
 # Clean previous builds
 #
+# Cleans the staging directory and any previous ZIP artifact.
+# Does NOT clean build/ — that's where @wordpress/scripts outputs compiled
+# JS/CSS, and npm run build needs it to survive between steps.
+#
 # Handles stale build directories that may be owned by a different user
 # (e.g., from a previous deployment or migration). Tries progressively
 # stronger cleanup strategies before failing with an actionable message.
 clean_previous_builds() {
     print_status "Cleaning previous build artifacts..."
 
-    remove_stale_dir "build"
+    remove_stale_dir "$STAGING_ROOT"
+
+    # Remove previous ZIP artifact (lives in build/ alongside npm output)
+    if [ -n "$PROJECT_NAME" ] && [ -f "build/$PROJECT_NAME.zip" ]; then
+        rm -f "build/$PROJECT_NAME.zip"
+    fi
 
     # Also clean old dist directories if they exist
     if [ -d "dist" ]; then
@@ -393,6 +410,9 @@ create_rsync_excludes() {
         sed 's|/$||; /^#/d; /^$/d' .buildignore > "$exclude_file"
     else
         # Default excludes if no .buildignore file
+        # Note: /build/ is intentionally NOT excluded — @wordpress/scripts outputs
+        # compiled JS/CSS there, and it must be included in the production ZIP.
+        # The staging directory (.homeboy-build/) is excluded instead.
         cat > "$exclude_file" << 'EOF'
 .git
 .gitignore
@@ -406,7 +426,7 @@ AGENTS.md
 *.swp
 *.swo
 *~
-/build/
+/.homeboy-build/
 /dist/
 *.zip
 *.tar.gz
@@ -429,19 +449,19 @@ EOF
     fi
 }
 
-# Copy files to build directory
+# Copy files to staging directory
 copy_project_files() {
-    print_status "Copying project files to build directory..."
+    print_status "Copying project files to staging directory..."
 
-    local build_dir="build/$PROJECT_NAME"
-    mkdir -p "$build_dir"
+    local staging_dir="${STAGING_ROOT}/$PROJECT_NAME"
+    mkdir -p "$staging_dir"
 
     # Create rsync excludes file
     local exclude_file="/tmp/.rsync-excludes-$$"
     create_rsync_excludes "$exclude_file"
 
     # Copy files using rsync with excludes
-    rsync -av --exclude-from="$exclude_file" ./ "$build_dir/" --quiet
+    rsync -av --exclude-from="$exclude_file" ./ "$staging_dir/" --quiet
 
     # Clean up exclude file
     rm -f "$exclude_file"
@@ -453,10 +473,10 @@ copy_project_files() {
 validate_build() {
     print_status "Validating build structure..."
 
-    local build_dir="build/$PROJECT_NAME"
+    local staging_dir="${STAGING_ROOT}/$PROJECT_NAME"
 
     # Check main file exists
-    if [ ! -f "$build_dir/$PROJECT_MAIN_FILE" ]; then
+    if [ ! -f "$staging_dir/$PROJECT_MAIN_FILE" ]; then
         print_error "Main file not found in build: $PROJECT_MAIN_FILE"
         return 1
     fi
@@ -465,7 +485,7 @@ validate_build() {
         # Plugin validation: Check for common directories
         local found_dirs=false
         for dir in "inc" "includes" "assets" "src"; do
-            if [ -d "$build_dir/$dir" ]; then
+            if [ -d "$staging_dir/$dir" ]; then
                 found_dirs=true
                 break
             fi
@@ -481,7 +501,7 @@ validate_build() {
         local missing_files=()
 
         for file in "${required_files[@]}"; do
-            if [ ! -f "$build_dir/$file" ]; then
+            if [ ! -f "$staging_dir/$file" ]; then
                 missing_files+=("$file")
             fi
         done
@@ -530,11 +550,11 @@ run_tests() {
     return 0
 }
 
-# PHP syntax validation (runs on built files)
+# PHP syntax validation (runs on staged files)
 validate_php_syntax() {
     print_status "Running PHP syntax check on build..."
 
-    local build_dir="build/$PROJECT_NAME"
+    local staging_dir="${STAGING_ROOT}/$PROJECT_NAME"
     local php_errors=0
 
     while IFS= read -r -d '' file; do
@@ -542,7 +562,7 @@ validate_php_syntax() {
             php -l "$file" 2>&1
             php_errors=1
         fi
-    done < <(find "$build_dir" -name "*.php" -print0)
+    done < <(find "$staging_dir" -name "*.php" -print0)
 
     if [ $php_errors -eq 1 ]; then
         print_error "PHP syntax errors found. Build aborted."
@@ -557,17 +577,20 @@ validate_php_syntax() {
 create_production_zip() {
     print_status "Creating production ZIP file..."
 
+    # Ensure build/ output dir exists (may contain npm build output too)
+    mkdir -p build
+
     local zip_file="build/$PROJECT_NAME.zip"
-    local build_dir="build/$PROJECT_NAME"
+    local staging_dir="${STAGING_ROOT}/$PROJECT_NAME"
 
     # Remove existing ZIP if it exists
     if [ -f "$zip_file" ]; then
         rm -f "$zip_file"
     fi
 
-    # Create ZIP from build directory (must be in build dir for correct paths)
-    cd build
-    zip -r "$PROJECT_NAME.zip" "$PROJECT_NAME/" -q
+    # Create ZIP from staging directory (must be in staging root for correct paths)
+    cd "$STAGING_ROOT"
+    zip -r "../$zip_file" "$PROJECT_NAME/" -q
     cd - > /dev/null
 
     # Get file size
@@ -578,10 +601,10 @@ create_production_zip() {
 
     print_success "Production ZIP created: $zip_file ($file_size, $total_files files)"
 
-    # Clean up intermediate directory now that ZIP is created
-    print_status "Cleaning up intermediate build directory..."
-    rm -rf "$build_dir"
-    print_success "Intermediate directory removed (production files are in ZIP)"
+    # Clean up staging directory now that ZIP is created
+    print_status "Cleaning up staging directory..."
+    rm -rf "$staging_dir"
+    print_success "Staging directory removed (production files are in ZIP)"
 }
 
 # Main build process
@@ -603,7 +626,7 @@ build_project() {
 
     if ! validate_php_syntax; then
         print_error "PHP syntax validation failed"
-        rm -rf "build/$PROJECT_NAME"
+        rm -rf "${STAGING_ROOT}/$PROJECT_NAME"
         restore_dev_deps
         exit 1
     fi
@@ -616,9 +639,9 @@ build_project() {
 
     # Validate PSR-4 autoload paths
     if [ -f "${EXTENSION_PATH}/scripts/build/validate-psr4.sh" ]; then
-        if ! bash "${EXTENSION_PATH}/scripts/build/validate-psr4.sh" "build/$PROJECT_NAME"; then
+        if ! bash "${EXTENSION_PATH}/scripts/build/validate-psr4.sh" "${STAGING_ROOT}/$PROJECT_NAME"; then
             print_error "PSR-4 autoload validation failed"
-            rm -rf "build/$PROJECT_NAME"
+            rm -rf "${STAGING_ROOT}/$PROJECT_NAME"
             restore_dev_deps
             exit 1
         fi
