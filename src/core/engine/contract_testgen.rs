@@ -907,11 +907,13 @@ fn resolve_assertion(
 
     if let Some(tmpl) = template {
         // Substitute variables in the assertion template.
-        // Escape double quotes since these values may contain source-level quotes
-        // (e.g. match arms like `Some("changed")`) and they get embedded inside
-        // string literals in the generated test code.
+        // Sanitize condition text for embedding inside Rust string literals.
+        // Source-level conditions can contain quotes, backticks, and braces
+        // (e.g. `Some(format!("```{} block", language))`) that break generated
+        // assert messages. Escape quotes and replace braces to avoid format
+        // string interpretation in the outer assert! macro.
         let mut rendered = tmpl.clone();
-        rendered = rendered.replace("{condition}", &condition.replace('"', "\\\""));
+        rendered = rendered.replace("{condition}", &sanitize_for_string_literal(condition));
         if let Some(ref val) = returns.value {
             rendered = rendered.replace("{expected_value}", &val.replace('"', "\\\""));
         }
@@ -919,9 +921,21 @@ fn resolve_assertion(
         rendered
     } else {
         // No grammar template — produce a minimal language-agnostic placeholder
-        let escaped_condition = condition.replace('"', "\\\"");
+        let escaped_condition = sanitize_for_string_literal(condition);
         format!("{indent}let _ = result; // {variant}: {escaped_condition}")
     }
+}
+
+/// Sanitize a source-level string for safe embedding inside a Rust string literal.
+///
+/// Escapes double quotes and replaces curly braces with Unicode lookalikes
+/// so the text doesn't interfere with `format!` / `assert!` macro parsing.
+/// Backticks in groups of 3+ are replaced to avoid raw string prefix confusion.
+fn sanitize_for_string_literal(s: &str) -> String {
+    s.replace('"', "\\\"")
+        .replace('{', "{{")
+        .replace('}', "}}")
+        .replace("```", "'''")
 }
 
 /// Replace assertion TODO placeholders with real field-level assertions.
