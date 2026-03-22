@@ -29,8 +29,9 @@ close = '}'
 # ===========================================================================
 
 [patterns.function]
-# Matches: pub fn foo(), pub(crate) async fn bar(), fn baz()
-regex = '^\s*(pub(?:\(crate\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)\s*\(([^)]*)\)'
+# Matches: pub fn foo(), pub(crate) async fn bar(), pub(super) fn baz(), fn qux()
+# The trailing \)? makes the closing paren optional so multiline signatures are still extracted.
+regex = '^\s*(pub(?:\([^)]+\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)\s*\(([^)]*)\)?'
 context = "any"
 skip_comments = true
 skip_strings = true
@@ -41,8 +42,8 @@ name = 2
 params = 3
 
 [patterns.struct]
-# Matches: pub struct Foo, enum Bar, pub(crate) trait Baz
-regex = '^\s*(pub(?:\(crate\))?\s+)?(struct|enum|trait)\s+(\w+)'
+# Matches: pub struct Foo, enum Bar, pub(crate) trait Baz, pub(super) struct Qux
+regex = '^\s*(pub(?:\([^)]+\))?\s+)?(struct|enum|trait)\s+(\w+)'
 context = "top_level"
 skip_comments = true
 skip_strings = true
@@ -96,7 +97,7 @@ args = 2
 
 [patterns.type_alias]
 # Matches: pub type Result<T> = std::result::Result<T, Error>;
-regex = '^\s*(pub(?:\(crate\))?\s+)?type\s+(\w+)'
+regex = '^\s*(pub(?:\([^)]+\))?\s+)?type\s+(\w+)'
 context = "top_level"
 skip_comments = true
 skip_strings = true
@@ -107,7 +108,7 @@ name = 2
 
 [patterns.const_static]
 # Matches: pub const FOO: &str = ...; pub static BAR: ...
-regex = '^\s*(pub(?:\(crate\))?\s+)?(const|static)\s+(\w+)\s*:'
+regex = '^\s*(pub(?:\([^)]+\))?\s+)?(const|static)\s+(\w+)\s*:'
 context = "any"
 skip_comments = true
 skip_strings = true
@@ -119,7 +120,7 @@ name = 3
 
 [patterns.mod_declaration]
 # Matches: pub mod foo; mod bar;
-regex = '^\s*(pub(?:\(crate\))?\s+)?mod\s+(\w+)\s*[;{]'
+regex = '^\s*(pub(?:\([^)]+\))?\s+)?mod\s+(\w+)\s*[;{]'
 context = "top_level"
 skip_comments = true
 skip_strings = true
@@ -174,7 +175,7 @@ fallback_default = 'Default::default()'
 # Struct field extraction — enables field-level assertions in generated tests.
 # field_pattern: regex with two captures: (1) field name, (2) field type
 # field_visibility_pattern: regex that matches public field declarations
-field_pattern = '^\s*(?:pub(?:\(crate\))?\s+)?(\w+)\s*:\s*(.+?),?\s*$'
+field_pattern = '^\s*(?:pub(?:\([^)]+\))?\s+)?(\w+)\s*:\s*(.+?),?\s*$'
 field_visibility_pattern = '^\s*pub\b'
 field_assertion_template = '{indent}assert_eq!(inner.{field_name}, {expected_value});'
 
