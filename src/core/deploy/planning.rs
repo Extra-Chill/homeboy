@@ -264,17 +264,36 @@ pub(super) struct LoadedComponents {
 ///
 /// Returns both the deployable components and the IDs of skipped (non-deployable) ones,
 /// so callers can produce accurate error messages.
-pub(super) fn load_project_components(project: &Project) -> Result<LoadedComponents> {
+pub(super) fn load_project_components(
+    project: &Project,
+    requested_ids: &[String],
+) -> Result<LoadedComponents> {
     let mut deployable = Vec::new();
     let mut skipped = Vec::new();
 
     for attachment in &project.components {
+        // When specific components are requested, skip extension validation for
+        // unrelated components — a missing extension on an unrequested component
+        // should not block deploying the ones you asked for.
+        let is_requested =
+            requested_ids.is_empty() || requested_ids.contains(&attachment.id);
+
         let mut loaded = project::resolve_project_component(project, &attachment.id)?;
 
         // Validate required extensions are installed before attempting artifact resolution.
         // Without this check, missing extensions cause resolve_artifact() to silently
         // return None, and the component gets skipped with a vague "no artifact" message.
-        extension::validate_required_extensions(&loaded)?;
+        if is_requested {
+            extension::validate_required_extensions(&loaded)?;
+        } else if extension::validate_required_extensions(&loaded).is_err() {
+            log_status!(
+                "deploy",
+                "Skipping '{}': missing required extension (not requested for deploy)",
+                loaded.id
+            );
+            skipped.push(loaded.id.clone());
+            continue;
+        }
 
         // Resolve effective artifact (component value OR extension pattern)
         let effective_artifact = component::resolve_artifact(&loaded);

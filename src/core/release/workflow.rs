@@ -155,6 +155,21 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         (None, 0)
     };
     let exit_code = if deploy_exit_code != 0 {
+        // Deploy failed after the release was already tagged and pushed.
+        // The tag cannot be rolled back safely, so warn the user to retry.
+        if let Some(ref t) = tag {
+            eprintln!();
+            log_status!(
+                "release",
+                "⚠️  Release {} was tagged and pushed, but deploy FAILED.",
+                t
+            );
+            log_status!(
+                "release",
+                "Run `homeboy deploy {}` to finish deploying.",
+                input.component_id
+            );
+        }
         deploy_exit_code
     } else {
         post_release_exit
@@ -328,7 +343,10 @@ fn execute_deployment(
             outdated: false,
             dry_run: false,
             check: false,
-            force: false,
+            // Force: the release pipeline just committed and tagged, so the
+            // workspace is clean by definition. Skipping the uncommitted changes
+            // check avoids false positives that silently block deployment.
+            force: true,
             skip_build: true,
             keep_deps: false,
             expected_version: None,
