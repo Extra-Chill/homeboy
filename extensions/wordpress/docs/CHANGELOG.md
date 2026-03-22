@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.2] - 2026-03-22
+
+### Fixed
+- use .homeboy-build/ staging dir to avoid build/ collision with npm output (fixes #169)
+- auto-detect PHP version from Requires PHP header for PHPStan (fixes #178)
+
 ## [2.10.1] - 2026-03-21
 
 ### Fixed
