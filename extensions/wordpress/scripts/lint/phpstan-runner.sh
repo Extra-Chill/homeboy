@@ -225,21 +225,48 @@ elif [ "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)" -le 2 ]
     PHPSTAN_MAX_PROCESSES="1"
 fi
 
-# If we need to override parallel processes, generate a temp neon config that
-# includes the main config and overrides the parallel setting.
+# Convert a PHP version string (e.g. "8.2", "8.2.1") to PHPStan's integer format (e.g. 80200, 80201).
+# PHPStan phpVersion format: major * 10000 + minor * 100 + patch
+php_version_to_phpstan_int() {
+    local version="$1"
+    local major minor patch
+    IFS='.' read -r major minor patch <<< "$version"
+    major="${major:-0}"
+    minor="${minor:-0}"
+    patch="${patch:-0}"
+    echo $(( major * 10000 + minor * 100 + patch ))
+}
+
+# Detect PHP version from HOMEBOY_PHP_VERSION (set by lint-runner or the user).
+PHPSTAN_PHP_VERSION=""
+if [ -n "${HOMEBOY_PHP_VERSION:-}" ]; then
+    PHPSTAN_PHP_VERSION=$(php_version_to_phpstan_int "${HOMEBOY_PHP_VERSION}")
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: PHPStan phpVersion: ${PHPSTAN_PHP_VERSION} (from ${HOMEBOY_PHP_VERSION})"
+    fi
+    echo "PHPStan PHP version target: ${HOMEBOY_PHP_VERSION} (${PHPSTAN_PHP_VERSION})"
+fi
+
+# Generate a temp neon config that includes the main config and overrides
+# parallel settings and/or phpVersion as needed.
 PHPSTAN_TMPCONFIG=""
 generate_phpstan_config() {
-    local max_processes="$1"
+    local max_processes="${1:-}"
     local tmpfile
     tmpfile=$(homeboy_mktemp 'phpstan-XXXXXX.neon')
-    cat > "$tmpfile" <<NEON
-includes:
-    - ${PHPSTAN_BASE_CONFIG}
-
-parameters:
-    parallel:
-        maximumNumberOfProcesses: ${max_processes}
-NEON
+    {
+        printf 'includes:\n'
+        printf '    - %s\n' "${PHPSTAN_BASE_CONFIG}"
+        printf '\n'
+        printf 'parameters:\n'
+        if [ -n "$max_processes" ]; then
+            printf '    parallel:\n'
+            printf '        maximumNumberOfProcesses: %s\n' "${max_processes}"
+        fi
+        if [ -n "$PHPSTAN_PHP_VERSION" ]; then
+            printf '    phpVersion: %s\n' "${PHPSTAN_PHP_VERSION}"
+        fi
+    } > "$tmpfile"
     echo "$tmpfile"
 }
 
@@ -249,7 +276,8 @@ cleanup_phpstan_config() {
 }
 trap 'cleanup_phpstan_config; cleanup_composite_autoload; cleanup_dependency_config' EXIT
 
-if [ -n "$PHPSTAN_MAX_PROCESSES" ]; then
+# Generate a temp config when we need to override parallel processes or phpVersion.
+if [ -n "$PHPSTAN_MAX_PROCESSES" ] || [ -n "$PHPSTAN_PHP_VERSION" ]; then
     PHPSTAN_TMPCONFIG=$(generate_phpstan_config "$PHPSTAN_MAX_PROCESSES")
     # Replace the --configuration arg with our temp config
     phpstan_args=(analyse)
@@ -266,8 +294,8 @@ if [ -n "$PHPSTAN_MAX_PROCESSES" ]; then
     phpstan_args+=("$PLUGIN_PATH")
 fi
 
-# Add the path to analyze (only when not already set by thread-override block above)
-if [ -z "$PHPSTAN_MAX_PROCESSES" ]; then
+# Add the path to analyze (only when not already set by override block above)
+if [ -z "$PHPSTAN_MAX_PROCESSES" ] && [ -z "$PHPSTAN_PHP_VERSION" ]; then
     phpstan_args+=("$PLUGIN_PATH")
 fi
 

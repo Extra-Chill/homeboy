@@ -193,13 +193,18 @@ if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
 fi
 
-# Auto-detect PHP version from composer.json (overrides phpcs.xml.dist default)
-# Priority: HOMEBOY_PHP_VERSION env var > composer.json require.php > phpcs.xml.dist default
+# Auto-detect PHP version for PHPCS and PHPStan.
+# Priority: HOMEBOY_PHP_VERSION env var > Requires PHP header > composer.json require.php > default
 PHP_VERSION=""
 if [ -n "${HOMEBOY_PHP_VERSION:-}" ]; then
     PHP_VERSION="${HOMEBOY_PHP_VERSION}"
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
         echo "DEBUG: PHP version from env: $PHP_VERSION"
+    fi
+elif [ -n "${HOMEBOY_COMPONENT_REQUIRES_PHP:-}" ]; then
+    PHP_VERSION="${HOMEBOY_COMPONENT_REQUIRES_PHP}"
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: PHP version from Requires PHP header: $PHP_VERSION"
     fi
 elif [ -f "${PLUGIN_PATH}/composer.json" ] && command -v php &> /dev/null; then
     PHP_VERSION=$(php -r '
@@ -216,7 +221,9 @@ elif [ -f "${PLUGIN_PATH}/composer.json" ] && command -v php &> /dev/null; then
     fi
 fi
 
+# Export for child scripts (phpstan-runner.sh reads this)
 if [ -n "$PHP_VERSION" ]; then
+    export HOMEBOY_PHP_VERSION="$PHP_VERSION"
     echo "PHP compatibility target: ${PHP_VERSION}-"
 fi
 
