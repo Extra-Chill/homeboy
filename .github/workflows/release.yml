@@ -240,9 +240,10 @@ jobs:
     needs:
       - check
       - gate-build
+      - gate-audit
+      - gate-lint
       - gate-test
-      - prepare
-    if: ${{ always() && needs.gate-test.result == 'success' }}
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
