@@ -15,6 +15,7 @@ pub use types::{
     DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult, MultiDeploySummary,
     ProjectDeployResult, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
 };
+pub use version_overrides::fetch_remote_versions;
 
 use crate::component;
 use crate::context::resolve_project_ssh_with_base_path;
