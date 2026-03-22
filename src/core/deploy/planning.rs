@@ -275,8 +275,7 @@ pub(super) fn load_project_components(
         // When specific components are requested, skip extension validation for
         // unrelated components — a missing extension on an unrequested component
         // should not block deploying the ones you asked for.
-        let is_requested =
-            requested_ids.is_empty() || requested_ids.contains(&attachment.id);
+        let is_requested = requested_ids.is_empty() || requested_ids.contains(&attachment.id);
 
         let mut loaded = project::resolve_project_component(project, &attachment.id)?;
 
