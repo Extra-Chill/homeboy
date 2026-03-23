@@ -266,6 +266,8 @@ pub fn apply_transforms(
 
             let (new_content, file_matches) = if rule.context == "file" {
                 apply_file_context(regex, &rule.replace, &content, &relative)
+            } else if rule.context == "hoist_static" {
+                apply_hoist_static_context(regex, &rule.replace, &content, &relative)
             } else {
                 apply_line_context(regex, &rule.replace, &content, &relative)
             };
@@ -586,6 +588,192 @@ fn apply_file_context(
         regex.replace_all(content, replace).to_string()
     };
     (new_content, matches)
+}
+
+/// Hoist local `let` bindings to `static` declarations using `LazyLock`.
+///
+/// Context `"hoist_static"`: the `find` regex must capture two groups:
+///   1. The variable name (e.g., `re`)
+///   2. The initializer expression (e.g., `Regex::new(r"\d+").unwrap()`)
+///
+/// The `replace` template receives:
+///   - `$1` → SCREAMING_SNAKE version of the variable name
+///   - `$2` → the original initializer expression
+///
+/// After replacing the declaration line, all references to the old variable
+/// name within the same function scope are renamed to the new static name.
+///
+/// Example with ad-hoc:
+/// ```text
+/// --find 'let\s+(mut\s+)?(\w+)\s*=\s*((?:regex::)?Regex::new\(r.*?\)\.unwrap\(\));'
+/// --replace 'static $1: std::sync::LazyLock<regex::Regex> =\n        std::sync::LazyLock::new(|| $2);'
+/// --context hoist_static
+/// ```
+fn apply_hoist_static_context(
+    regex: &Regex,
+    replace: &str,
+    content: &str,
+    relative_path: &str,
+) -> (String, Vec<TransformMatch>) {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    let mut matches = Vec::new();
+
+    // Collect all match sites first (line index, captures)
+    let mut match_sites: Vec<(usize, String, String, String)> = Vec::new(); // (line_idx, old_var, new_var, old_line)
+
+    // Pre-scan to find #[cfg(test)] boundary — skip test code
+    let test_mod_start = lines.iter().position(|l| l.trim() == "#[cfg(test)]");
+
+    for (i, line) in lines.iter().enumerate() {
+        // Skip matches inside #[cfg(test)] modules
+        if let Some(test_start) = test_mod_start {
+            if i >= test_start {
+                continue;
+            }
+        }
+
+        if let Some(caps) = regex.captures(line) {
+            // Find the variable name — try capture groups in order.
+            // The regex may have optional groups (e.g., `(mut\s+)?(\w+)`).
+            // We want the first non-empty capture that looks like a variable name.
+            let mut var_name = None;
+            let mut init_expr = None;
+            for g in 1..=caps.len().saturating_sub(1) {
+                if let Some(m) = caps.get(g) {
+                    let text = m.as_str().trim();
+                    if text.is_empty() || text.starts_with("mut") {
+                        continue;
+                    }
+                    if var_name.is_none()
+                        && text.len() < 50
+                        && text.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        var_name = Some(text.to_string());
+                    } else if init_expr.is_none() {
+                        init_expr = Some(text.to_string());
+                    }
+                }
+            }
+
+            let var = match var_name {
+                Some(v) => v,
+                None => continue,
+            };
+
+            // Convert to SCREAMING_SNAKE_CASE
+            let screaming = to_snake_case(&var).to_uppercase();
+
+            // Build the replacement line using the template.
+            // $1 → screaming name, $2 → initializer
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let replaced = replace
+                .replace("$1", &screaming)
+                .replace("$2", init_expr.as_deref().unwrap_or(""))
+                .split('\n')
+                .enumerate()
+                .map(|(j, part)| {
+                    if j == 0 {
+                        format!("{}{}", indent, part)
+                    } else {
+                        format!("{}{}", indent, part)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            matches.push(TransformMatch {
+                file: relative_path.to_string(),
+                line: i + 1,
+                before: line.to_string(),
+                after: replaced.clone(),
+            });
+
+            new_lines[i] = replaced;
+            match_sites.push((i, var, screaming, line.to_string()));
+        }
+    }
+
+    // For each match, rename the old variable to the new static name
+    // within the enclosing function scope.
+    for (match_line, old_var, new_var, _) in &match_sites {
+        if old_var == new_var {
+            continue;
+        }
+
+        // Find function boundaries: scan backward for fn declaration,
+        // forward for closing brace at the same depth.
+        let fn_start = find_enclosing_fn_start(&new_lines, *match_line);
+        let fn_end = find_enclosing_fn_end(&new_lines, fn_start.unwrap_or(0));
+
+        let start = fn_start.unwrap_or(0);
+        let end = fn_end.unwrap_or(new_lines.len());
+
+        // Build a word-boundary regex for the old variable name
+        let var_re = match Regex::new(&format!(r"\b{}\b", regex::escape(old_var))) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        // Rename all references within the function scope (skip the declaration line itself)
+        for i in start..end {
+            if i == *match_line {
+                continue; // Already replaced
+            }
+            if var_re.is_match(&new_lines[i]) {
+                let renamed = var_re.replace_all(&new_lines[i], new_var.as_str());
+                if renamed != new_lines[i] {
+                    matches.push(TransformMatch {
+                        file: relative_path.to_string(),
+                        line: i + 1,
+                        before: new_lines[i].clone(),
+                        after: renamed.to_string(),
+                    });
+                    new_lines[i] = renamed.to_string();
+                }
+            }
+        }
+    }
+
+    let mut result = new_lines.join("\n");
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+
+    (result, matches)
+}
+
+/// Find the line index of the enclosing `fn` declaration.
+fn find_enclosing_fn_start(lines: &[String], from: usize) -> Option<usize> {
+    static FN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+\w+").unwrap()
+    });
+    for i in (0..=from).rev() {
+        if FN_RE.is_match(&lines[i]) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Find the closing brace of a function starting at `fn_line`.
+fn find_enclosing_fn_end(lines: &[String], fn_line: usize) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut found_open = false;
+    for i in fn_line..lines.len() {
+        for ch in lines[i].chars() {
+            if ch == '{' {
+                depth += 1;
+                found_open = true;
+            } else if ch == '}' {
+                depth -= 1;
+                if found_open && depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Replace all matches using case-transform-aware expansion.

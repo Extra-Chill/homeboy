@@ -231,11 +231,12 @@ fn extract_php_methods(content: &str) -> Vec<ExtractedMethod> {
 }
 
 fn extract_php_functions(content: &str) -> Vec<ExtractedMethod> {
-    let fn_re = Regex::new(r"(?m)^function\s+(\w+)\s*\(([^)]*)\)").unwrap();
+    static FN_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"(?m)^function\s+(\w+)\s*\(([^)]*)\)").unwrap());
     let mut methods = Vec::new();
 
     for (i, line) in content.lines().enumerate() {
-        if let Some(cap) = fn_re.captures(line) {
+        if let Some(cap) = FN_RE.captures(line) {
             methods.push(ExtractedMethod {
                 name: cap[1].to_string(),
                 visibility: "public".to_string(),

@@ -284,25 +284,31 @@ fn extract_changes_from_diff(file: &str, diff: &str) -> Vec<ProductionChange> {
         r"(?:public|protected|private|static|abstract|final)\s+(?:static\s+)?function\s+(\w+)",
     )
     .unwrap();
-    let class_re = Regex::new(r"(?:abstract\s+)?(?:class|trait|interface)\s+(\w+)").unwrap();
-    let string_re = Regex::new(r#"'([a-z_]{3,50})'"#).unwrap();
+    static CLASS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?:abstract\s+)?(?:class|trait|interface)\s+(\w+)").unwrap()
+    });
+    static STRING_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r#"'([a-z_]{3,50})'"#).unwrap());
 
     // Rust patterns
-    let rust_fn_re = Regex::new(r"(?:pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+(\w+)").unwrap();
+    static RUST_FN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?:pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+(\w+)").unwrap()
+    });
     let rust_struct_re =
         Regex::new(r"(?:pub(?:\(crate\))?\s+)?(?:struct|enum|trait)\s+(\w+)").unwrap();
 
     let is_rust = file.ends_with(".rs");
-    let fn_re = if is_rust { &rust_fn_re } else { &method_re };
-    let cls_re = if is_rust { &rust_struct_re } else { &class_re };
-    let hunk_re = Regex::new(r"@@ -\d+(?:,\d+)? \+(\d+)").unwrap();
+    let fn_re = if is_rust { &RUST_FN_RE } else { &method_re };
+    let cls_re = if is_rust { &rust_struct_re } else { &CLASS_RE };
+    static HUNK_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"@@ -\d+(?:,\d+)? \+(\d+)").unwrap());
 
     let mut line_num: usize = 0;
 
     for line in diff.lines() {
         // Track line numbers from hunk headers
         if line.starts_with("@@") {
-            if let Some(cap) = hunk_re.captures(line) {
+            if let Some(cap) = HUNK_RE.captures(line) {
                 line_num = cap[1].parse().unwrap_or(0);
             }
             continue;
@@ -322,7 +328,7 @@ fn extract_changes_from_diff(file: &str, diff: &str) -> Vec<ProductionChange> {
             }
 
             // Check for removed string constants (error codes, etc.)
-            for cap in string_re.captures_iter(content) {
+            for cap in STRING_RE.captures_iter(content) {
                 removed_strings.push((cap[1].to_string(), line_num));
             }
         } else if line.starts_with('+') && !line.starts_with("+++") {
@@ -339,7 +345,7 @@ fn extract_changes_from_diff(file: &str, diff: &str) -> Vec<ProductionChange> {
             }
 
             // Check for added string constants
-            for cap in string_re.captures_iter(content) {
+            for cap in STRING_RE.captures_iter(content) {
                 added_strings.push((cap[1].to_string(), line_num));
             }
 

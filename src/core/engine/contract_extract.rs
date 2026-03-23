@@ -786,12 +786,13 @@ fn detect_calls(body_lines: &[(usize, &str)], params: &[Param]) -> Vec<FunctionC
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Simple call detection: word followed by (
-    let call_re = Regex::new(r"(\w+(?:::\w+)*)\s*\(").unwrap();
+    static CALL_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"(\w+(?:::\w+)*)\s*\(").unwrap());
 
     let param_names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
 
     for (_line_num, text) in body_lines {
-        for caps in call_re.captures_iter(text) {
+        for caps in CALL_RE.captures_iter(text) {
             let fn_name = caps[1].to_string();
 
             // Skip common non-function keywords
