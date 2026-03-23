@@ -1,12 +1,18 @@
-//! Intra-method duplicate autofix — remove adjacent duplicated code blocks.
+//! Intra-method duplicate autofix — remove or flag duplicated code blocks within functions.
 //!
-//! When the same block of code appears twice within a function, and the two
-//! occurrences are adjacent (no intervening logic), the second occurrence is
-//! a merge artifact or copy-paste error and can be safely removed.
+//! When the same block of code appears twice within a function, the fix depends
+//! on the structural relationship between the two occurrences:
 //!
-//! Non-adjacent duplicates (e.g., same setup in different if/else branches)
-//! require extract-to-helper refactoring and are skipped — those need human
-//! judgment about parameter extraction, return values, and naming.
+//! **Adjacent or same-indent duplicates**: The second block is a merge artifact
+//! or copy-paste error. Safe to remove — the first copy already does the work.
+//!
+//! **Cross-branch duplicates** (different indent levels): The same code appears
+//! in multiple branches (if/else, match arms). These are structural repetition
+//! where the fix requires human judgment about refactoring — PlanOnly with both
+//! ranges identified.
+//!
+//! The algorithm is language-agnostic — it operates on line content, indentation
+//! levels, and relative positions. No language parsing.
 
 use std::path::Path;
 
@@ -14,12 +20,28 @@ use crate::code_audit::{AuditFinding, CodeAuditResult};
 use crate::engine::local_files;
 use crate::refactor::auto::{Fix, FixSafetyTier, Insertion, InsertionKind, SkippedFile};
 
-/// Generate fixes for intra-method duplicates where blocks are adjacent.
+/// Structural relationship between two duplicated blocks.
+enum DupRelation {
+    /// Blocks are adjacent — only blank/comment lines between them.
+    /// Second block is a merge artifact. Safe to remove.
+    Adjacent,
+    /// Blocks are at the same indentation with a small gap of code between.
+    /// Likely a copy-paste error — the gap is context that doesn't depend on
+    /// the duplicated block. Safe to remove the second copy.
+    SameIndentSmallGap,
+    /// Blocks are at the same indentation but with a large gap of code.
+    /// Could be intentional repetition at different stages. PlanOnly.
+    SameIndentLargeGap,
+    /// Blocks are at different indentation levels — they're in different
+    /// branches (if/else, match arms, nested blocks). Structural repetition
+    /// that requires refactoring to consolidate. PlanOnly.
+    CrossBranch,
+}
+
+/// Generate fixes for intra-method duplicates.
 ///
-/// Parses the finding description to extract method name, line numbers, and
-/// block size. Reads the source file to verify the blocks are truly adjacent
-/// (no meaningful code between them), then generates a deletion fix using
-/// `FunctionRemoval` to remove the second block.
+/// Classifies the structural relationship between the two blocks and generates
+/// either a Safe removal (adjacent/same-indent) or a PlanOnly flag (cross-branch).
 pub(crate) fn generate_intra_duplicate_fixes(
     result: &CodeAuditResult,
     root: &Path,
@@ -49,27 +71,23 @@ pub(crate) fn generate_intra_duplicate_fixes(
 
         let method_name = caps[1].to_string();
         let block_size: usize = match caps[2].parse() {
-            Ok(n) => n,
-            Err(_) => continue,
+            Ok(n) if n > 0 => n,
+            _ => continue,
         };
         let first_line: usize = match caps[3].parse() {
-            Ok(n) => n,
-            Err(_) => continue,
+            Ok(n) if n > 0 => n,
+            _ => continue,
         };
         let second_line: usize = match caps[4].parse() {
-            Ok(n) => n,
-            Err(_) => continue,
+            Ok(n) if n > 0 => n,
+            _ => continue,
         };
 
-        // Only fix adjacent duplicates — where the second block starts right
-        // after the first block ends (allowing blank/comment lines between).
         if second_line <= first_line {
             continue;
         }
 
-        let gap = second_line.saturating_sub(first_line + block_size);
-
-        // Read the file to check if the gap contains only blank/comment lines
+        // Read the source file.
         let file_path = root.join(&finding.file);
         let content = match local_files::read_file(&file_path, "read source for duplicate fix") {
             Ok(c) => c,
@@ -84,35 +102,10 @@ pub(crate) fn generate_intra_duplicate_fixes(
 
         let lines: Vec<&str> = content.lines().collect();
 
-        // Verify the gap between the two blocks is empty (blank/comment only)
-        let gap_is_empty = if gap > 0 {
-            let gap_start = first_line + block_size; // 1-indexed line after block 1
-            let gap_end = second_line; // 1-indexed line where block 2 starts
-            (gap_start..gap_end).all(|line_num| {
-                if line_num == 0 || line_num > lines.len() {
-                    return false;
-                }
-                let line = lines[line_num - 1].trim();
-                line.is_empty() || line.starts_with("//") || line.starts_with('#')
-            })
-        } else {
-            true // Blocks are immediately adjacent
-        };
-
-        if !gap_is_empty {
-            skipped.push(SkippedFile {
-                file: finding.file.clone(),
-                reason: format!(
-                    "Non-adjacent duplicate in `{}` — logic between blocks requires extract-to-helper",
-                    method_name,
-                ),
-            });
-            continue;
-        }
-
-        // Validate line ranges
-        let remove_end = second_line + block_size - 1; // 1-indexed inclusive
-        if second_line == 0 || remove_end > lines.len() {
+        // Validate line ranges.
+        let first_end = first_line + block_size - 1;
+        let second_end = second_line + block_size - 1;
+        if first_end > lines.len() || second_end > lines.len() {
             skipped.push(SkippedFile {
                 file: finding.file.clone(),
                 reason: format!(
@@ -123,38 +116,256 @@ pub(crate) fn generate_intra_duplicate_fixes(
             continue;
         }
 
-        // Include gap lines in the removal range (blank lines between blocks)
-        let removal_start = if gap > 0 {
-            first_line + block_size // Start removing from gap
-        } else {
-            second_line // No gap, start from second block
-        };
+        // Classify the relationship.
+        let relation = classify_relation(&lines, first_line, second_line, block_size);
 
-        fixes.push(Fix {
-            file: finding.file.clone(),
-            required_methods: vec![],
-            required_registrations: vec![],
-            insertions: vec![Insertion {
-                kind: InsertionKind::FunctionRemoval {
-                    start_line: removal_start,
-                    end_line: remove_end,
-                },
-                finding: AuditFinding::IntraMethodDuplicate,
-                safety_tier: FixSafetyTier::Safe,
-                auto_apply: false,
-                blocked_reason: None,
-                preflight: None,
-                code: String::new(),
-                description: format!(
-                    "Remove duplicate block in `{}` (lines {}–{}) — identical to lines {}–{}",
-                    method_name,
-                    removal_start,
-                    remove_end,
-                    first_line,
-                    first_line + block_size - 1,
-                ),
-            }],
-            applied: false,
-        });
+        match relation {
+            DupRelation::Adjacent | DupRelation::SameIndentSmallGap => {
+                // Safe to remove the second block.
+                // For adjacent: also remove gap lines (blank/comment between blocks).
+                let removal_start = if matches!(relation, DupRelation::Adjacent) {
+                    // Include gap lines.
+                    first_line + block_size
+                } else {
+                    second_line
+                };
+
+                fixes.push(Fix {
+                    file: finding.file.clone(),
+                    required_methods: vec![],
+                    required_registrations: vec![],
+                    insertions: vec![Insertion {
+                        kind: InsertionKind::FunctionRemoval {
+                            start_line: removal_start,
+                            end_line: second_end,
+                        },
+                        finding: AuditFinding::IntraMethodDuplicate,
+                        safety_tier: FixSafetyTier::Safe,
+                        auto_apply: false,
+                        blocked_reason: None,
+                        preflight: None,
+                        code: String::new(),
+                        description: format!(
+                            "Remove duplicate block in `{}` (lines {}-{}) — identical to lines {}-{}",
+                            method_name, second_line, second_end, first_line, first_end,
+                        ),
+                    }],
+                    applied: false,
+                });
+            }
+            DupRelation::SameIndentLargeGap | DupRelation::CrossBranch => {
+                // PlanOnly — flag both blocks for human review.
+                let reason = match relation {
+                    DupRelation::CrossBranch => format!(
+                        "Cross-branch duplicate in `{}` — same block at different indent levels (branches). \
+                         Consider hoisting shared logic above the branch or extracting a helper.",
+                        method_name,
+                    ),
+                    _ => format!(
+                        "Non-adjacent duplicate in `{}` — significant code between blocks. \
+                         Verify the second copy is redundant before removing.",
+                        method_name,
+                    ),
+                };
+
+                fixes.push(Fix {
+                    file: finding.file.clone(),
+                    required_methods: vec![],
+                    required_registrations: vec![],
+                    insertions: vec![Insertion {
+                        kind: InsertionKind::FunctionRemoval {
+                            start_line: second_line,
+                            end_line: second_end,
+                        },
+                        finding: AuditFinding::IntraMethodDuplicate,
+                        safety_tier: FixSafetyTier::PlanOnly,
+                        auto_apply: false,
+                        blocked_reason: Some(reason),
+                        preflight: None,
+                        code: String::new(),
+                        description: format!(
+                            "Duplicate block in `{}`: lines {}-{} and lines {}-{} are identical",
+                            method_name, first_line, first_end, second_line, second_end,
+                        ),
+                    }],
+                    applied: false,
+                });
+            }
+        }
+    }
+}
+
+/// Classify the structural relationship between two duplicated blocks.
+///
+/// Uses indentation and gap analysis — no language parsing.
+fn classify_relation(
+    lines: &[&str],
+    first_line: usize,
+    second_line: usize,
+    block_size: usize,
+) -> DupRelation {
+    let gap_start = first_line + block_size; // 1-indexed, first line after block 1
+    let gap_end = second_line; // 1-indexed, first line of block 2
+
+    // Check if blocks are at different indentation levels (cross-branch).
+    let first_indent = median_indent(lines, first_line, block_size);
+    let second_indent = median_indent(lines, second_line, block_size);
+
+    if first_indent != second_indent {
+        return DupRelation::CrossBranch;
+    }
+
+    // Same indent — check the gap.
+    if gap_start >= gap_end {
+        // No gap at all — immediately adjacent.
+        return DupRelation::Adjacent;
+    }
+
+    // Count meaningful (non-blank, non-comment) lines in the gap.
+    let mut code_lines_in_gap = 0usize;
+    let gap_all_trivial = (gap_start..gap_end).all(|line_num| {
+        if line_num == 0 || line_num > lines.len() {
+            return false;
+        }
+        let line = lines[line_num - 1].trim();
+        if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
+            true
+        } else {
+            code_lines_in_gap += 1;
+            false
+        }
+    });
+
+    if gap_all_trivial {
+        return DupRelation::Adjacent;
+    }
+
+    // Same indent with code in the gap.
+    // Small gap (≤ 3 lines of real code): likely copy-paste with minor context between.
+    // Large gap: different enough to need human review.
+    if code_lines_in_gap <= 3 {
+        DupRelation::SameIndentSmallGap
+    } else {
+        DupRelation::SameIndentLargeGap
+    }
+}
+
+/// Compute the median indentation level of a block of lines.
+/// Uses the median to be robust against blank lines or unusual indentation on a single line.
+fn median_indent(lines: &[&str], start_line: usize, block_size: usize) -> usize {
+    let mut indents: Vec<usize> = Vec::with_capacity(block_size);
+
+    for i in 0..block_size {
+        let line_idx = start_line - 1 + i; // 0-indexed
+        if line_idx < lines.len() {
+            let line = lines[line_idx];
+            if !line.trim().is_empty() {
+                indents.push(line.len() - line.trim_start().len());
+            }
+        }
+    }
+
+    if indents.is_empty() {
+        return 0;
+    }
+
+    indents.sort_unstable();
+    indents[indents.len() / 2]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_adjacent_no_gap() {
+        let lines = vec![
+            "    let x = 1;",  // line 1
+            "    let y = 2;",  // line 2
+            "    let x = 1;",  // line 3
+            "    let y = 2;",  // line 4
+        ];
+        let rel = classify_relation(&lines, 1, 3, 2);
+        assert!(matches!(rel, DupRelation::Adjacent));
+    }
+
+    #[test]
+    fn classify_adjacent_blank_gap() {
+        let lines = vec![
+            "    let x = 1;",  // line 1
+            "    let y = 2;",  // line 2
+            "",                // line 3
+            "    let x = 1;",  // line 4
+            "    let y = 2;",  // line 5
+        ];
+        let rel = classify_relation(&lines, 1, 4, 2);
+        assert!(matches!(rel, DupRelation::Adjacent));
+    }
+
+    #[test]
+    fn classify_same_indent_small_gap() {
+        let lines = vec![
+            "    let x = 1;",        // line 1
+            "    let y = 2;",        // line 2
+            "    let z = x + y;",    // line 3 — 1 line of code
+            "    let x = 1;",        // line 4
+            "    let y = 2;",        // line 5
+        ];
+        let rel = classify_relation(&lines, 1, 4, 2);
+        assert!(matches!(rel, DupRelation::SameIndentSmallGap));
+    }
+
+    #[test]
+    fn classify_same_indent_large_gap() {
+        let lines = vec![
+            "    let x = 1;",        // line 1
+            "    let y = 2;",        // line 2
+            "    a();",              // line 3
+            "    b();",              // line 4
+            "    c();",              // line 5
+            "    d();",              // line 6  — 4 lines of code in gap
+            "    let x = 1;",        // line 7
+            "    let y = 2;",        // line 8
+        ];
+        let rel = classify_relation(&lines, 1, 7, 2);
+        assert!(matches!(rel, DupRelation::SameIndentLargeGap));
+    }
+
+    #[test]
+    fn classify_cross_branch_different_indent() {
+        let lines = vec![
+            "    if cond {",             // line 1
+            "        let x = 1;",        // line 2 — indent 8
+            "        let y = 2;",        // line 3
+            "    } else {",              // line 4
+            "            let x = 1;",    // line 5 — indent 12
+            "            let y = 2;",    // line 6
+            "    }",                     // line 7
+        ];
+        let rel = classify_relation(&lines, 2, 5, 2);
+        assert!(matches!(rel, DupRelation::CrossBranch));
+    }
+
+    #[test]
+    fn median_indent_skips_blank() {
+        let lines = vec![
+            "        code();",   // indent 8
+            "",                  // blank — skipped
+            "        more();",   // indent 8
+        ];
+        assert_eq!(median_indent(&lines, 1, 3), 8);
+    }
+
+    #[test]
+    fn median_indent_handles_outlier() {
+        let lines = vec![
+            "        code();",       // indent 8
+            "    oddly();",          // indent 4
+            "        more();",       // indent 8
+            "        again();",      // indent 8
+            "        last();",       // indent 8
+        ];
+        // Sorted: [4, 8, 8, 8, 8] → median at index 2 = 8
+        assert_eq!(median_indent(&lines, 1, 5), 8);
     }
 }
