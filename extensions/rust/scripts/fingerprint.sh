@@ -75,11 +75,12 @@ ctx = Context()
 # ============================================================================
 
 class FnInfo:
-    def __init__(self, name, line_num, impl_type, is_test, is_public, signature_lines, body_start_line):
+    def __init__(self, name, line_num, impl_type, is_test, is_public, signature_lines, body_start_line, is_test_helper=False):
         self.name = name
         self.line_num = line_num          # 1-indexed line number
         self.impl_type = impl_type        # None for free fns, 'Type' for impl methods
-        self.is_test = is_test            # Inside #[cfg(test)] or has #[test]
+        self.is_test = is_test            # Has #[test] attribute
+        self.is_test_helper = is_test_helper  # Inside #[cfg(test)] without #[test]
         self.is_public = is_public        # pub fn
         self.signature_lines = signature_lines  # Lines comprising the fn signature
         self.body_start_line = body_start_line  # Index where body starts (0-indexed)
@@ -151,7 +152,12 @@ while i < len(lines):
         fn_name = fn_match.group(2)
 
         has_test_attr = any(test_attr_pattern.search(a) for a in pending_attrs)
-        is_test = has_test_attr or ctx.is_in_test_module()
+        # A function is a test only if it has #[test] attribute.
+        # Being inside #[cfg(test)] mod tests {} WITHOUT #[test] makes
+        # it a test helper (like make_fingerprint()) — these shouldn't
+        # be prefixed with test_ or reported as orphaned tests.
+        is_test = has_test_attr
+        is_test_helper = not has_test_attr and ctx.is_in_test_module()
         is_public = bool(re.match(r'\s*pub(?:\([^)]*\))?\s+', line))
         impl_type = ctx.current_impl_type()
 
@@ -183,6 +189,7 @@ while i < len(lines):
             is_public=is_public,
             signature_lines=sig_lines,
             body_start_line=i,
+            is_test_helper=is_test_helper,
         )
 
         # Extract the full body (from fn line to matching closing brace)
@@ -233,11 +240,15 @@ while i < len(lines):
 # ============================================================================
 
 # --- Methods ---
-# All non-test functions. Include impl methods.
+# All non-test functions. Exclude test helpers (inside #[cfg(test)]
+# without #[test]) — they're not source methods and shouldn't trigger
+# "missing test method" findings.
 methods = []
 seen = set()
 for fn in functions:
     if fn.is_test:
+        continue
+    if fn.is_test_helper:
         continue
     if fn.name == 'tests':
         continue
@@ -246,10 +257,12 @@ for fn in functions:
         seen.add(fn.name)
 
 # --- Test Methods ---
-# Functions inside #[cfg(test)] or with #[test] attribute.
+# Functions with #[test] attribute only.
 # Included in the methods list with the test_ prefix so test_coverage
 # can identify them. Functions that already start with test_ keep their
 # name; others get prefixed (e.g. 'dedup_works' -> 'test_dedup_works').
+# Note: test helpers (functions inside #[cfg(test)] WITHOUT #[test])
+# are excluded — they're not tests and shouldn't appear in either list.
 test_methods = []
 for fn in functions:
     if fn.is_test:
