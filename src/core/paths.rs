@@ -35,6 +35,16 @@ pub fn projects() -> Result<PathBuf> {
     Ok(homeboy()?.join("projects"))
 }
 
+/// Project directory path (e.g., ~/.config/homeboy/projects/{id}/)
+pub fn project_dir(id: &str) -> Result<PathBuf> {
+    Ok(projects()?.join(id))
+}
+
+/// Project config file path (e.g., ~/.config/homeboy/projects/{id}/{id}.json)
+pub fn project_config(id: &str) -> Result<PathBuf> {
+    Ok(projects()?.join(id).join(format!("{}.json", id)))
+}
+
 /// Servers directory
 pub fn servers() -> Result<PathBuf> {
     Ok(homeboy()?.join("servers"))

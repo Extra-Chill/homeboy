@@ -872,6 +872,11 @@ pub(crate) fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
 
     let path = T::config_path(entity.id())?;
     local_files::ensure_app_dirs()?;
+    // Ensure parent directory exists (supports directory-based entities like
+    // projects and extensions where config_path is {dir}/{id}/{id}.json)
+    if let Some(parent) = path.parent() {
+        local_files::local().ensure_dir(parent)?;
+    }
     let content = to_string_pretty(entity)?;
     local_files::local().write(&path, &content)?;
     Ok(())
@@ -896,6 +901,9 @@ fn create_single<T: ConfigEntity>(entity: T) -> Result<CreateResult<T>> {
 
     let path = T::config_path(entity.id())?;
     local_files::ensure_app_dirs()?;
+    if let Some(parent) = path.parent() {
+        local_files::local().ensure_dir(parent)?;
+    }
     let content = to_string_pretty(&entity)?;
     local_files::local().write(&path, &content)?;
 
@@ -946,6 +954,22 @@ pub(crate) fn delete<T: ConfigEntity>(id: &str) -> Result<()> {
         return Err(T::not_found_error(id.to_string(), suggestions));
     }
     local_files::local().delete(&path)?;
+
+    // For directory-based entities, clean up the parent directory if it's
+    // now empty (e.g., projects/{id}/ after removing {id}.json).
+    if let Some(parent) = path.parent() {
+        if parent
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy() == id)
+        {
+            if let Ok(mut entries) = std::fs::read_dir(parent) {
+                if entries.next().is_none() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1225,12 +1249,51 @@ pub(crate) fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
     entity.set_id(new_id.clone());
 
     local_files::ensure_app_dirs()?;
-    std::fs::rename(&old_path, &new_path).map_err(|e| {
-        Error::internal_io(e.to_string(), Some(format!("rename {}", T::entity_type())))
-    })?;
+
+    // For directory-based entities (where the config file lives inside a
+    // named directory, e.g. projects/{id}/{id}.json), rename the directory
+    // first, then save the updated entity into the new location.
+    let old_parent = old_path.parent().map(|p| p.to_path_buf());
+    let new_parent = new_path.parent().map(|p| p.to_path_buf());
+    let is_directory_based = old_parent.as_ref().is_some_and(|p| {
+        p.file_name()
+            .is_some_and(|name| name.to_string_lossy() == id)
+    });
+
+    if is_directory_based {
+        if let (Some(old_dir), Some(new_dir)) = (&old_parent, &new_parent) {
+            std::fs::rename(old_dir, new_dir).map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some(format!("rename {} directory", T::entity_type())),
+                )
+            })?;
+            // Rename the JSON file inside the new directory
+            let old_json_in_new_dir = new_dir.join(format!("{}.json", id));
+            if old_json_in_new_dir.exists() {
+                std::fs::rename(&old_json_in_new_dir, &new_path).map_err(|e| {
+                    Error::internal_io(
+                        e.to_string(),
+                        Some(format!("rename {} config file", T::entity_type())),
+                    )
+                })?;
+            }
+        }
+    } else {
+        std::fs::rename(&old_path, &new_path).map_err(|e| {
+            Error::internal_io(e.to_string(), Some(format!("rename {}", T::entity_type())))
+        })?;
+    }
 
     if let Err(error) = save(&entity) {
-        let _ = std::fs::rename(&new_path, &old_path);
+        // Rollback: move back
+        if is_directory_based {
+            if let (Some(old_dir), Some(new_dir)) = (&old_parent, &new_parent) {
+                let _ = std::fs::rename(new_dir, old_dir);
+            }
+        } else {
+            let _ = std::fs::rename(&new_path, &old_path);
+        }
         return Err(error);
     }
 

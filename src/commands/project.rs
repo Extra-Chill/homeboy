@@ -82,6 +82,11 @@ enum ProjectCommand {
         /// Project ID
         project_id: String,
     },
+    /// Initialize a project directory (migrate from flat file to directory layout)
+    Init {
+        /// Project ID
+        project_id: String,
+    },
     /// Show live server health and component versions for a project
     Status {
         /// Project ID
@@ -237,6 +242,7 @@ pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
         ProjectCommand::Components { command } => components(command),
         ProjectCommand::Pin { command } => pin(command),
         ProjectCommand::Delete { project_id } => delete(&project_id),
+        ProjectCommand::Init { project_id } => init(&project_id),
         ProjectCommand::Status {
             project_id,
             health_only,
@@ -291,6 +297,12 @@ fn delete(project_id: &str) -> CmdResult<ProjectOutput> {
     project::delete(project_id)?;
 
     Ok((project::build_delete_output(project_id), 0))
+}
+
+fn init(project_id: &str) -> CmdResult<ProjectOutput> {
+    let dir = project::init_project_dir(project_id)?;
+
+    Ok((project::build_init_output(project_id, &dir), 0))
 }
 
 fn components(command: ProjectComponentsCommand) -> CmdResult<ProjectOutput> {

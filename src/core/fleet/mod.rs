@@ -2,7 +2,9 @@ use crate::config::{self, ConfigEntity};
 use crate::error::{Error, Result};
 use crate::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::project;
+use crate::project::ProjectComponentOverrides;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub mod check;
 pub mod exec;
@@ -26,6 +28,11 @@ pub struct Fleet {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Fleet-level component overrides applied as defaults when no project-level
+    /// override exists. Resolution order: component (repo) → project → fleet.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub component_overrides: HashMap<String, ProjectComponentOverrides>,
 }
 
 impl Fleet {
@@ -34,6 +41,7 @@ impl Fleet {
             id,
             project_ids,
             description: None,
+            component_overrides: HashMap::new(),
         }
     }
 }
@@ -129,3 +137,53 @@ pub fn component_usage(fleet_id: &str) -> Result<std::collections::HashMap<Strin
 // Fleet Sync was removed in #101 — it had OpenClaw-specific logic hardcoded
 // in core, violating homeboy's platform-agnostic design. Use `homeboy deploy`
 // to sync files across servers instead.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fleet_new_has_empty_component_overrides() {
+        let fleet = Fleet::new("test-fleet".to_string(), vec!["project-a".to_string()]);
+        assert!(fleet.component_overrides.is_empty());
+    }
+
+    #[test]
+    fn fleet_component_overrides_serialization_roundtrip() {
+        let mut fleet = Fleet::new("test-fleet".to_string(), vec![]);
+        fleet.component_overrides.insert(
+            "my-plugin".to_string(),
+            ProjectComponentOverrides {
+                remote_path: Some("wp-content/plugins/my-plugin".to_string()),
+                remote_owner: Some("www-data:www-data".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let json = serde_json::to_string(&fleet).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // component_overrides should be present in serialized output
+        let overrides = parsed.get("component_overrides").unwrap();
+        let plugin = overrides.get("my-plugin").unwrap();
+        assert_eq!(
+            plugin.get("remote_path").unwrap().as_str(),
+            Some("wp-content/plugins/my-plugin")
+        );
+        assert_eq!(
+            plugin.get("remote_owner").unwrap().as_str(),
+            Some("www-data:www-data")
+        );
+    }
+
+    #[test]
+    fn fleet_empty_component_overrides_not_serialized() {
+        let fleet = Fleet::new("test-fleet".to_string(), vec![]);
+
+        let json = serde_json::to_string(&fleet).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // component_overrides should be omitted when empty (skip_serializing_if)
+        assert!(parsed.get("component_overrides").is_none());
+    }
+}
