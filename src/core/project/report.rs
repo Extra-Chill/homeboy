@@ -302,3 +302,16 @@ pub fn build_status_output(project_id: &str, report: ProjectStatusReport) -> Pro
         ..Default::default()
     }
 }
+
+pub fn build_init_output(project_id: &str, dir: &std::path::Path) -> ProjectReportOutput {
+    ProjectReportOutput {
+        command: "project.init".to_string(),
+        id: Some(project_id.to_string()),
+        entity: load(project_id).ok(),
+        hint: Some(format!(
+            "Project directory initialized at {}",
+            dir.display()
+        )),
+        ..Default::default()
+    }
+}

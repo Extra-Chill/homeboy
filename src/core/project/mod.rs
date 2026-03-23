@@ -1,10 +1,13 @@
 use crate::component::ScopedExtensionConfig;
 use crate::config::{self, ConfigEntity};
+use crate::engine::local_files::{self, FileSystem};
 use crate::error::{Error, Result};
 use crate::output::{CreateOutput, MergeOutput, RemoveResult};
+use crate::paths;
 use crate::server;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 pub mod component;
 pub mod files;
@@ -28,10 +31,10 @@ pub use pins::{
 };
 pub use readiness::calculate_deploy_readiness;
 pub use report::{
-    build_components_output, build_create_output, build_delete_output, build_list_output,
-    build_pin_output, build_remove_output, build_rename_output, build_set_output,
-    build_show_output, build_status_output, list_report, show_report, status_report,
-    ProjectComponentVersion, ProjectListItem, ProjectListReport, ProjectReportExtra,
+    build_components_output, build_create_output, build_delete_output, build_init_output,
+    build_list_output, build_pin_output, build_remove_output, build_rename_output,
+    build_set_output, build_show_output, build_status_output, list_report, show_report,
+    status_report, ProjectComponentVersion, ProjectListItem, ProjectListReport, ProjectReportExtra,
     ProjectReportOutput, ProjectShowReport, ProjectStatusReport,
 };
 pub use status::{collect_status, ProjectComponentStatus, ProjectStatusSnapshot};
@@ -131,6 +134,27 @@ impl ConfigEntity for Project {
     }
     fn not_found_error(id: String, suggestions: Vec<String>) -> Error {
         Error::project_not_found(id, suggestions)
+    }
+
+    /// Directory-based config: `~/.config/homeboy/projects/{id}/{id}.json`.
+    ///
+    /// Falls back to legacy flat file `~/.config/homeboy/projects/{id}.json`
+    /// if the directory-based path doesn't exist yet. This allows transparent
+    /// migration — existing projects keep working, new projects use directories.
+    fn config_path(id: &str) -> Result<PathBuf> {
+        let dir_path = paths::project_config(id)?;
+        if dir_path.exists() {
+            return Ok(dir_path);
+        }
+
+        // Check for legacy flat file
+        let flat_path = Self::config_dir()?.join(format!("{}.json", id));
+        if flat_path.exists() {
+            return Ok(flat_path);
+        }
+
+        // Default to directory-based for new projects
+        Ok(dir_path)
     }
 
     fn validate(&self) -> Result<()> {
@@ -355,6 +379,95 @@ pub struct NewsletterConfig {
 // ============================================================================
 
 entity_crud!(Project; list_ids, merge, slugify_id);
+
+// ============================================================================
+// Project directory operations
+// ============================================================================
+
+/// Initialize a project directory at `~/.config/homeboy/projects/{id}/`.
+///
+/// Creates the directory structure and an initial `{id}.json` config file.
+/// If the project already exists as a flat file, migrates it to directory form.
+pub fn init_project_dir(id: &str) -> Result<PathBuf> {
+    let dir = paths::project_dir(id)?;
+    let config_path = paths::project_config(id)?;
+
+    // If directory config already exists, nothing to do
+    if config_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "id",
+            format!("Project directory '{}' already exists", id),
+            Some(id.to_string()),
+            None,
+        ));
+    }
+
+    // Check if a flat-file project exists that should be migrated
+    let flat_path = paths::projects()?.join(format!("{}.json", id));
+    if flat_path.exists() {
+        return migrate_to_directory(id);
+    }
+
+    // Check the project exists in the registry
+    if !exists(id) {
+        return Err(Error::validation_invalid_argument(
+            "id",
+            format!(
+                "Project '{}' does not exist. Create it first with `homeboy project create`",
+                id
+            ),
+            Some(id.to_string()),
+            None,
+        ));
+    }
+
+    // Load, then re-save — save() now creates the directory via config_path()
+    let project = load(id)?;
+    // Delete the old flat file if it exists
+    if flat_path.exists() {
+        let _ = std::fs::remove_file(&flat_path);
+    }
+    // Force the directory path for the new save
+    local_files::local().ensure_dir(&dir)?;
+    let content = config::to_string_pretty(&project)?;
+    local_files::local().write(&config_path, &content)?;
+
+    Ok(dir)
+}
+
+/// Migrate a project from flat file `{id}.json` to directory `{id}/{id}.json`.
+fn migrate_to_directory(id: &str) -> Result<PathBuf> {
+    let flat_path = paths::projects()?.join(format!("{}.json", id));
+    let dir = paths::project_dir(id)?;
+    let config_path = paths::project_config(id)?;
+
+    // Create the project directory
+    local_files::local().ensure_dir(&dir)?;
+
+    // Move the flat file into the directory with the correct name
+    std::fs::rename(&flat_path, &config_path).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("migrate project '{}' to directory", id)),
+        )
+    })?;
+
+    Ok(dir)
+}
+
+/// Check if a project is using the directory-based config layout.
+pub fn is_directory_based(id: &str) -> bool {
+    paths::project_config(id)
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
+/// Get the project directory path for a given project ID.
+/// Returns the directory path regardless of whether the project uses
+/// directory-based or flat-file config.
+pub fn project_dir_path(id: &str) -> Result<PathBuf> {
+    paths::project_dir(id)
+}
 
 pub fn pin(project_id: &str, pin_type: PinType, path: &str, options: PinOptions) -> Result<()> {
     let mut project = load(project_id)?;
