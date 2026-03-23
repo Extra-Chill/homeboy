@@ -235,6 +235,33 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
     # We capture that and build a JSON array for HOMEBOY_FIX_RESULTS_FILE.
     FIX_RESULTS_JSON="[]"
 
+    # Fixer confidence tiers:
+    #   safe       — Mechanical token rewrite, no semantic ambiguity. Always correct.
+    #   guarded    — Safe with guardrails (cross-file lookup, contract detection, syntax validation).
+    #   advisory   — May produce false positives or behavior changes. Review recommended.
+    declare -A FIXER_CONFIDENCE
+    FIXER_CONFIDENCE["yoda-condition"]="safe"
+    FIXER_CONFIDENCE["in-array-strict"]="safe"
+    FIXER_CONFIDENCE["escape-i18n"]="safe"
+    FIXER_CONFIDENCE["echo-translate"]="safe"
+    FIXER_CONFIDENCE["safe-redirect"]="safe"
+    FIXER_CONFIDENCE["wp-die-translate"]="safe"
+    FIXER_CONFIDENCE["lonely-if"]="safe"
+    FIXER_CONFIDENCE["loop-count"]="safe"
+    FIXER_CONFIDENCE["empty-catch"]="safe"
+    FIXER_CONFIDENCE["wp-alternatives"]="safe"
+    FIXER_CONFIDENCE["text-domain"]="safe"
+    FIXER_CONFIDENCE["commented-code"]="safe"
+    FIXER_CONFIDENCE["phpcs-ignore"]="safe"
+    FIXER_CONFIDENCE["phpcbf"]="safe"
+    FIXER_CONFIDENCE["reserved-param"]="guarded"
+    FIXER_CONFIDENCE["unused-param"]="guarded"
+    FIXER_CONFIDENCE["wp-filesystem"]="guarded"
+    FIXER_CONFIDENCE["silenced-error"]="guarded"
+    FIXER_CONFIDENCE["readdir"]="guarded"
+    FIXER_CONFIDENCE["short-ternary"]="advisory"
+    FIXER_CONFIDENCE["strict-comparison"]="advisory"
+
     # Run a fixer and capture its results for the sidecar.
     # Usage: run_fixer <rule_name> <fixer_binary> [args...]
     run_fixer() {
@@ -259,13 +286,16 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
         file_count=$(echo "$fixer_output" | grep -oE 'in [0-9]+ file' | head -1 | grep -oE '[0-9]+' || echo "0")
 
         if [ "$fix_count" != "0" ] && [ "$fix_count" -gt 0 ] 2>/dev/null; then
+            # Look up confidence tier for this fixer (default: advisory)
+            local confidence="${FIXER_CONFIDENCE[$rule]:-advisory}"
+
             # Append one entry per fix (rule-level granularity, not per-file)
             FIX_RESULTS_JSON=$(python3 -c "
 import json, sys
 results = json.loads(sys.argv[1])
-results.append({'file': '(multiple)' if int(sys.argv[3]) > 1 else '(single)', 'rule': sys.argv[2], 'action': 'rewrite'})
+results.append({'file': '(multiple)' if int(sys.argv[3]) > 1 else '(single)', 'rule': sys.argv[2], 'action': 'rewrite', 'confidence': sys.argv[4]})
 print(json.dumps(results))
-" "$FIX_RESULTS_JSON" "$rule" "$file_count" 2>/dev/null || echo "$FIX_RESULTS_JSON")
+" "$FIX_RESULTS_JSON" "$rule" "$file_count" "$confidence" 2>/dev/null || echo "$FIX_RESULTS_JSON")
         fi
 
         return $fixer_exit
@@ -353,7 +383,7 @@ print(json.dumps(results))
             FIX_RESULTS_JSON=$(python3 -c "
 import json, sys
 results = json.loads(sys.argv[1])
-results.append({'file': '(multiple)', 'rule': 'phpcbf', 'action': 'format'})
+results.append({'file': '(multiple)', 'rule': 'phpcbf', 'action': 'format', 'confidence': 'safe'})
 print(json.dumps(results))
 " "$FIX_RESULTS_JSON" 2>/dev/null || echo "$FIX_RESULTS_JSON")
         fi
