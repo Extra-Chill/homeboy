@@ -10,7 +10,6 @@ pub use planner::{
     TestSourceOptions, KNOWN_PLAN_SOURCES,
 };
 pub use verify::{
-    build_chunk_verifier, finding_fingerprint, run_audit_refactor, score_delta,
-    weighted_finding_score_with, AuditConvergenceScoring, AuditRefactorIterationSummary,
-    AuditRefactorOutcome, AuditVerificationToggles,
+    finding_fingerprint, run_audit_refactor, score_delta, weighted_finding_score_with,
+    AuditConvergenceScoring, AuditRefactorIterationSummary, AuditRefactorOutcome,
 };

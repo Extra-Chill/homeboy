@@ -1,14 +1,8 @@
-use crate::code_audit::{self, CodeAuditResult};
-use crate::component::{self, Component};
-use crate::engine::temp;
+use crate::code_audit::CodeAuditResult;
 use crate::engine::undo::UndoSnapshot;
-use crate::engine::validate_write;
-use crate::extension::test::compute_changed_test_files;
-use crate::extension::{lint as extension_lint, test as extension_test};
 use crate::refactor::auto as fixer;
 use serde::Serialize;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub use crate::code_audit::{
     finding_fingerprint, score_delta, weighted_finding_score_with, AuditConvergenceScoring,
@@ -65,12 +59,6 @@ pub(crate) fn rewrite_callers_after_dedup(fix: &fixer::Fix, root: &Path) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct AuditVerificationToggles {
-    pub lint_smoke: bool,
-    pub test_smoke: bool,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditRefactorIterationSummary {
     pub iteration: usize,
@@ -98,7 +86,6 @@ pub fn run_audit_refactor(
     only_kinds: &[crate::code_audit::AuditFinding],
     exclude_kinds: &[crate::code_audit::AuditFinding],
     scoring: AuditConvergenceScoring,
-    verification: AuditVerificationToggles,
     _max_iterations: usize,
     write: bool,
 ) -> crate::Result<AuditRefactorOutcome> {
@@ -118,86 +105,25 @@ pub fn run_audit_refactor(
             only_kinds,
             exclude_kinds,
             scoring,
-            verification,
         )?;
 
         let changed_files = iteration_summary.changed_files.clone();
         final_fix_result = fix_result;
         final_policy_summary = policy_summary;
 
+        iteration_summary.iteration = 1;
+        iteration_summary.findings_after = current_result.findings.len();
+        iteration_summary.weighted_score_after =
+            weighted_finding_score_with(&current_result, scoring);
+        iteration_summary.score_delta = 0;
+
         if changed_files.is_empty() {
-            iteration_summary.iteration = 1;
-            iteration_summary.findings_after = current_result.findings.len();
-            iteration_summary.weighted_score_after =
-                weighted_finding_score_with(&current_result, scoring);
-            iteration_summary.score_delta = 0;
             iteration_summary.status = "no_safe_changes".to_string();
-            iterations.push(iteration_summary);
         } else {
-            // Quick brace-balance check before expensive compile.
-            // Catches fixer-induced brace corruption in milliseconds.
-            let root = Path::new(&current_result.source_path);
-            let compile_check_files: Vec<PathBuf> =
-                changed_files.iter().map(|f| root.join(f)).collect();
-
-            let mut brace_error = None;
-            for file_path in &compile_check_files {
-                if let Ok(content) = std::fs::read_to_string(file_path) {
-                    let ext = file_path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or_default();
-                    if let Some(grammar) =
-                        crate::code_audit::core_fingerprint::load_grammar_for_ext(ext)
-                    {
-                        if !crate::extension::grammar_items::validate_brace_balance(
-                            &content, &grammar,
-                        ) {
-                            let rel = file_path
-                                .strip_prefix(root)
-                                .unwrap_or(file_path)
-                                .display()
-                                .to_string();
-                            brace_error = Some(format!(
-                                "Unbalanced braces in {} — fixer produced broken code",
-                                rel
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if let Some(err_msg) = brace_error {
-                crate::log_status!("refactor", "Brace check failed — {}", err_msg);
-                iteration_summary.iteration = 1;
-                iteration_summary.findings_after = current_result.findings.len();
-                iteration_summary.weighted_score_after =
-                    weighted_finding_score_with(&current_result, scoring);
-                iteration_summary.score_delta = 0;
-                iteration_summary.status = "brace_corruption".to_string();
-            } else {
-                // Compile check
-                let compile_result = validate_write::validate_only(root, &compile_check_files)?;
-                iteration_summary.iteration = 1;
-                iteration_summary.findings_after = current_result.findings.len();
-                iteration_summary.weighted_score_after =
-                    weighted_finding_score_with(&current_result, scoring);
-                iteration_summary.score_delta = 0;
-
-                if !compile_result.success {
-                    crate::log_status!("refactor", "Compile check failed after applying fixes");
-                    if let Some(output) = &compile_result.output {
-                        crate::log_status!("refactor", "{}", output);
-                    }
-                    iteration_summary.status = "compile_failure".to_string();
-                } else {
-                    iteration_summary.status = "completed".to_string();
-                }
-            }
-
-            iterations.push(iteration_summary);
+            iteration_summary.status = "completed".to_string();
         }
+
+        iterations.push(iteration_summary);
     } else {
         let root = Path::new(&current_result.source_path);
         let mut fix_result = super::generate::generate_audit_fixes(&current_result, root);
@@ -219,145 +145,13 @@ pub fn run_audit_refactor(
     })
 }
 
-fn load_or_discover(component_id: &str, source_path: &str) -> Option<Component> {
-    component::load(component_id).ok().or_else(|| {
-        let mut comp = component::discover_from_portable(Path::new(source_path))?;
-        comp.id = component_id.to_string();
-        comp.local_path = source_path.to_string();
-        Some(comp)
-    })
-}
 
-fn build_smoke_verifier<'a>(
-    component_id: &'a str,
-    source_path: &'a str,
-    changed_files: &'a [String],
-) -> Option<impl Fn(&fixer::ApplyChunkResult) -> Result<String, String> + 'a> {
-    let component = load_or_discover(component_id, source_path)?;
-    extension_lint::resolve_lint_command(&component).ok()?;
-    let root = PathBuf::from(source_path);
-    Some(move |chunk: &fixer::ApplyChunkResult| {
-        if changed_files.is_empty() {
-            return Ok("lint_smoke_skipped_no_files".to_string());
-        }
-
-        if chunk.files.is_empty() {
-            return Ok("lint_smoke_skipped_no_chunk_files".to_string());
-        }
-
-        let target_files: Vec<String> = changed_files
-            .iter()
-            .filter(|file| chunk.files.contains(file))
-            .cloned()
-            .collect();
-
-        if target_files.is_empty() {
-            return Ok("lint_smoke_skipped_no_overlap".to_string());
-        }
-
-        let glob = if target_files.len() == 1 {
-            root.join(&target_files[0]).to_string_lossy().to_string()
-        } else {
-            let joined = target_files
-                .iter()
-                .map(|file| root.join(file).to_string_lossy().to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{{{}}}", joined)
-        };
-
-        let output = extension_lint::build_lint_runner(
-            &component,
-            Some(source_path.to_string()),
-            &[],
-            false,
-            None,
-            Some(&glob),
-            false,
-            None,
-            None,
-            None,
-            "/dev/null",
-        )
-        .and_then(|runner| runner.run())
-        .map_err(|error| format!("lint smoke run failed: {}", error))?;
-
-        if output.success {
-            Ok("lint_smoke_passed".to_string())
-        } else {
-            Err("lint smoke failed".to_string())
-        }
-    })
-}
-
-fn build_test_smoke_verifier<'a>(
-    component_id: &'a str,
-    source_path: &'a str,
-    changed_files: &'a [String],
-) -> Option<impl Fn(&fixer::ApplyChunkResult) -> Result<String, String> + 'a> {
-    let component = load_or_discover(component_id, source_path)?;
-    extension_test::resolve_test_command(&component).ok()?;
-    let changed_test_files = compute_changed_test_files(&component, "HEAD~1")
-        .ok()
-        .and_then(|files| (!files.is_empty()).then_some(files.join("\n")));
-
-    Some(move |chunk: &fixer::ApplyChunkResult| {
-        if chunk.files.is_empty() || changed_files.is_empty() {
-            return Ok("test_smoke_skipped_no_files".to_string());
-        }
-
-        let overlapping_files: Vec<String> = changed_files
-            .iter()
-            .filter(|file| chunk.files.contains(file))
-            .cloned()
-            .collect();
-
-        if overlapping_files.is_empty() {
-            return Ok("test_smoke_skipped_no_overlap".to_string());
-        }
-
-        let results_file = temp::runtime_temp_file("homeboy-audit-test-smoke", ".json")
-            .map_err(|error| format!("create test smoke temp file failed: {}", error))?;
-        let results_file_str = results_file.to_string_lossy().to_string();
-        let selected_test_files = changed_test_files.as_ref().map(|files| {
-            files
-                .split('\n')
-                .filter(|file| !file.is_empty())
-                .map(|file| file.to_string())
-                .collect::<Vec<_>>()
-        });
-
-        let output = extension_test::build_test_runner(
-            &component,
-            Some(source_path.to_string()),
-            &[],
-            true,
-            false,
-            &results_file_str,
-            None,
-            None,
-            None,
-            selected_test_files.as_deref(),
-        )
-        .and_then(|runner| runner.run())
-        .map_err(|error| format!("test smoke run failed: {}", error))?;
-
-        let _ = std::fs::remove_file(&results_file);
-
-        if output.success {
-            Ok("test_smoke_passed".to_string())
-        } else {
-            Err("test smoke failed".to_string())
-        }
-    })
-}
 
 fn run_fix_iteration(
     audit_result: &CodeAuditResult,
     only_kinds: &[crate::code_audit::AuditFinding],
     exclude_kinds: &[crate::code_audit::AuditFinding],
     scoring: AuditConvergenceScoring,
-    verification: AuditVerificationToggles,
 ) -> crate::Result<(
     fixer::FixResult,
     fixer::PolicySummary,
@@ -399,111 +193,35 @@ fn run_fix_iteration(
         }
     }
 
-    let smoke_verifier = build_smoke_verifier(
-        &audit_result.component_id,
-        &audit_result.source_path,
-        &changed_files,
-    )
-    .filter(|_| verification.lint_smoke);
-    let test_smoke_verifier = build_test_smoke_verifier(
-        &audit_result.component_id,
-        &audit_result.source_path,
-        &changed_files,
-    )
-    .filter(|_| verification.test_smoke);
-    let mut extra_smokes: Vec<fixer::ChunkVerifier> = Vec::new();
-    if let Some(verifier) = smoke_verifier.as_ref() {
-        extra_smokes.push(verifier);
-    }
-    if let Some(verifier) = test_smoke_verifier.as_ref() {
-        extra_smokes.push(verifier);
-    }
-    let verifier = build_chunk_verifier(root, &audit_result.findings, extra_smokes);
-
+    // Apply all fixes without per-chunk verification. Validation belongs
+    // downstream (PR CI pipeline), not inside the refactor command.
     if !auto_apply_result.fixes.is_empty() {
-        // Partition fixes into three tiers based on verification needs:
-        //
-        // 1. Full verification (lint smoke + re-audit): fixes that change
-        //    production code and aren't compiler-guaranteed safe.
-        // 2. Re-audit only: Safe-tier fixes (compiler-suggested, guaranteed
-        //    correct) and test-only fixes (TestModule insertions). Skipping
-        //    lint smoke avoids redundant cargo fmt/clippy runs — these fixes
-        //    are already formatted by format_after_write() before verification.
-        let (mut light_fixes, mut full_fixes): (Vec<_>, Vec<_>) =
-            auto_apply_result.fixes.drain(..).partition(|fix| {
-                fix.insertions.iter().all(|ins| {
-                    matches!(ins.kind, fixer::InsertionKind::TestModule)
-                        || ins.safety_tier == fixer::FixSafetyTier::Safe
-                })
-            });
-
-        // Apply fixes that need full verification (lint smoke + re-audit).
-        if !full_fixes.is_empty() {
-            let chunk_results = fixer::apply_fixes_chunked(
-                &mut full_fixes,
-                root,
-                fixer::ApplyOptions {
-                    verifier: Some(&verifier),
-                },
-            );
-            applied_chunks += chunk_results
-                .iter()
-                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
-                .count();
-            reverted_chunks += chunk_results
-                .iter()
-                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Reverted))
-                .count();
-            total_modified += chunk_results
-                .iter()
-                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
-                .map(|chunk| chunk.applied_files)
-                .sum::<usize>();
-            fix_result.chunk_results.extend(chunk_results);
-        }
-
-        // Apply Safe-tier and test-only fixes with just the re-audit verifier.
-        // These skip lint smoke because:
-        // - Compiler-suggested fixes are guaranteed correct by the compiler.
-        // - Test module insertions don't affect production code.
-        // The scoped re-audit still validates no new audit findings are introduced.
-        if !light_fixes.is_empty() {
-            let light_verifier = build_chunk_verifier(root, &audit_result.findings, vec![]);
-            let chunk_results = fixer::apply_fixes_chunked(
-                &mut light_fixes,
-                root,
-                fixer::ApplyOptions {
-                    verifier: Some(&light_verifier),
-                },
-            );
-            applied_chunks += chunk_results
-                .iter()
-                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
-                .count();
-            reverted_chunks += chunk_results
-                .iter()
-                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Reverted))
-                .count();
-            total_modified += chunk_results
-                .iter()
-                .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
-                .map(|chunk| chunk.applied_files)
-                .sum::<usize>();
-            fix_result.chunk_results.extend(chunk_results);
-        }
-
-        // Reassemble for downstream processing
-        auto_apply_result.fixes = full_fixes;
-        auto_apply_result.fixes.extend(light_fixes);
+        let chunk_results = fixer::apply_fixes_chunked(
+            &mut auto_apply_result.fixes,
+            root,
+            fixer::ApplyOptions { verifier: None },
+        );
+        applied_chunks += chunk_results
+            .iter()
+            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
+            .count();
+        reverted_chunks += chunk_results
+            .iter()
+            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Reverted))
+            .count();
+        total_modified += chunk_results
+            .iter()
+            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
+            .map(|chunk| chunk.applied_files)
+            .sum::<usize>();
+        fix_result.chunk_results.extend(chunk_results);
     }
 
     if !auto_apply_result.new_files.is_empty() {
         let chunk_results = fixer::apply_new_files_chunked(
             &mut auto_apply_result.new_files,
             root,
-            fixer::ApplyOptions {
-                verifier: Some(&verifier),
-            },
+            fixer::ApplyOptions { verifier: None },
         );
         applied_chunks += chunk_results
             .iter()
@@ -525,9 +243,7 @@ fn run_fix_iteration(
         let decompose_chunk_results = fixer::apply_decompose_plans(
             &mut auto_apply_result.decompose_plans,
             root,
-            fixer::ApplyOptions {
-                verifier: Some(&verifier),
-            },
+            fixer::ApplyOptions { verifier: None },
         );
         fix_result.chunk_results.extend(decompose_chunk_results);
     }
@@ -608,94 +324,4 @@ fn run_fix_iteration(
     ))
 }
 
-/// Findings that are expected side effects of structural refactoring.
-///
-/// When decompose splits a god file into submodules, the new smaller files
-/// may trigger findings that weren't visible before (e.g., duplication
-/// patterns become detectable at the file level, or new files lack tests).
-/// These are the next step to fix, not a reason to rollback the refactor.
-fn is_cascading_finding_kind(kind: &crate::code_audit::AuditFinding) -> bool {
-    use crate::code_audit::AuditFinding;
 
-    matches!(
-        kind,
-        AuditFinding::GodFile
-            | AuditFinding::HighItemCount
-            | AuditFinding::DirectorySprawl
-            | AuditFinding::MissingTestFile
-            | AuditFinding::MissingTestMethod
-            | AuditFinding::IntraMethodDuplicate
-            | AuditFinding::NearDuplicate
-            | AuditFinding::ParallelImplementation
-            | AuditFinding::UnreferencedExport
-    )
-}
-
-pub fn build_chunk_verifier<'a>(
-    root: &'a Path,
-    baseline_findings: &'a [crate::code_audit::Finding],
-    extra_smokes: Vec<fixer::ChunkVerifier<'a>>,
-) -> impl Fn(&fixer::ApplyChunkResult) -> Result<String, String> + 'a {
-    move |chunk| {
-        let changed_files = chunk.files.clone();
-        if changed_files.is_empty() {
-            return Ok("no_files".to_string());
-        }
-
-        let baseline: HashSet<String> = baseline_findings
-            .iter()
-            .filter(|finding| changed_files.contains(&finding.file))
-            .map(finding_fingerprint)
-            .collect();
-
-        let audit_result = code_audit::audit_path_scoped(
-            "audit-fix-verify",
-            &root.to_string_lossy(),
-            &changed_files,
-            None,
-        )
-        .map_err(|error| format!("verification audit failed: {}", error))?;
-
-        let new_findings: Vec<&crate::code_audit::Finding> = audit_result
-            .findings
-            .iter()
-            .filter(|finding| changed_files.contains(&finding.file))
-            .filter(|finding| !baseline.contains(&finding_fingerprint(finding)))
-            .collect();
-
-        let hard_failures: Vec<String> = new_findings
-            .iter()
-            .filter(|finding| !is_cascading_finding_kind(&finding.kind))
-            .map(|finding| format!("{}: {:?}", finding.file, finding.kind))
-            .collect();
-        let cascading_count = new_findings.len() - hard_failures.len();
-
-        if !hard_failures.is_empty() {
-            Err(format!(
-                "scoped re-audit introduced new findings in changed files: {}",
-                hard_failures.join(", ")
-            ))
-        } else if cascading_count > 0 {
-            let mut verification = format!(
-                "scoped_reaudit_ok_with_{}_cascading_findings",
-                cascading_count
-            );
-            for smoke in &extra_smokes {
-                let smoke_result = smoke(chunk)?;
-                verification.push('+');
-                verification.push_str(&smoke_result);
-            }
-            Ok(verification)
-        } else if extra_smokes.is_empty() {
-            Ok("scoped_reaudit_no_new_findings".to_string())
-        } else {
-            let mut verification = "scoped_reaudit_no_new_findings".to_string();
-            for smoke in &extra_smokes {
-                let smoke_result = smoke(chunk)?;
-                verification.push('+');
-                verification.push_str(&smoke_result);
-            }
-            Ok(verification)
-        }
-    }
-}

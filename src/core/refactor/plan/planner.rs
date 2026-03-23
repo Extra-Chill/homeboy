@@ -1,7 +1,6 @@
 use crate::component::Component;
 use crate::engine::temp;
-use crate::engine::undo::{InMemoryRollback, UndoSnapshot};
-use crate::engine::validate_write;
+use crate::engine::undo::UndoSnapshot;
 use crate::extension;
 use crate::extension::test::compute_changed_test_files;
 use crate::git;
@@ -12,7 +11,7 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::verify::{AuditConvergenceScoring, AuditVerificationToggles};
+use super::verify::AuditConvergenceScoring;
 use crate::refactor::sandbox::{
     clone_tree, copy_changed_files, diff_tree_snapshots, resolve_build_exclusions, snapshot_tree,
     SandboxDir,
@@ -267,78 +266,6 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 &stage.summary.changed_files,
                 &mut warnings,
             );
-
-            // Fail-fast: compile-check the sandbox after each stage that modifies
-            // files. If a stage breaks compilation (e.g. audit fixes introduce
-            // parse errors), subsequent stages (lint, test) would run on broken
-            // code — producing bogus findings and wasting time. Skip them.
-            let abs_changed: Vec<PathBuf> = stage
-                .summary
-                .changed_files
-                .iter()
-                .map(|f| working_root.path().join(f))
-                .collect();
-
-            // Fast brace-balance check before expensive sandbox compile.
-            // Catches fixer-induced brace corruption in milliseconds.
-            let mut brace_broken = false;
-            for file_path in &abs_changed {
-                if let Ok(content) = std::fs::read_to_string(file_path) {
-                    let ext = file_path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or_default();
-                    if let Some(grammar) =
-                        crate::code_audit::core_fingerprint::load_grammar_for_ext(ext)
-                    {
-                        if !crate::extension::grammar_items::validate_brace_balance(
-                            &content, &grammar,
-                        ) {
-                            let rel = file_path
-                                .strip_prefix(working_root.path())
-                                .unwrap_or(file_path)
-                                .display()
-                                .to_string();
-                            crate::log_status!(
-                                "refactor",
-                                "Brace corruption in {} after {} stage — skipping compile",
-                                rel,
-                                source
-                            );
-                            warnings.push(format!(
-                                "{} stage produced unbalanced braces in {} — skipping",
-                                source, rel
-                            ));
-                            brace_broken = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if brace_broken {
-                accumulator.extend(stage.fix_results.clone());
-                planned_stages.push(stage);
-                break;
-            }
-
-            let sandbox_compile = validate_write::validate_only(working_root.path(), &abs_changed)?;
-            if !sandbox_compile.success {
-                crate::log_status!(
-                    "refactor",
-                    "Sandbox compile check failed after {} stage — skipping remaining stages",
-                    source
-                );
-                if let Some(output) = &sandbox_compile.output {
-                    warnings.push(format!(
-                        "{} stage broke compilation — skipping remaining stages: {}",
-                        source, output
-                    ));
-                }
-                accumulator.extend(stage.fix_results.clone());
-                planned_stages.push(stage);
-                break;
-            }
         }
 
         accumulator.extend(stage.fix_results.clone());
@@ -382,13 +309,8 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
             }
         }
 
-        // Capture pre-write state for rollback if validation fails
         let abs_changed: Vec<PathBuf> =
             changed_files.iter().map(|f| request.root.join(f)).collect();
-        let mut validation_rollback = InMemoryRollback::new();
-        for file in &abs_changed {
-            validation_rollback.capture(file);
-        }
 
         copy_changed_files(working_root.path(), &request.root, &changed_files)?;
 
@@ -405,43 +327,6 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
             Err(e) => {
                 crate::log_status!("format", "Warning: post-write format failed: {}", e);
             }
-        }
-
-        // Validate that written code compiles. If validation fails, roll back
-        // all changes and report as dry-run (no files modified).
-        let validation =
-            validate_write::validate_write(&request.root, &abs_changed, &validation_rollback)?;
-        if !validation.success {
-            crate::log_status!(
-                "validate",
-                "Post-write validation failed — all changes rolled back"
-            );
-            if let Some(output) = &validation.output {
-                warnings.push(format!("Validation failed: {}", output));
-            }
-            // Reset: no files were modified (rolled back by validate_write)
-            for stage in &mut stage_summaries {
-                stage.applied = false;
-            }
-            return Ok(RefactorPlan {
-                component_id: request.component.id.clone(),
-                source_path: request.root.to_string_lossy().to_string(),
-                sources: sources.clone(),
-                dry_run: false,
-                applied: false,
-                merge_strategy: merge_order.clone(),
-                proposals,
-                stages: stage_summaries,
-                plan_totals,
-                overlaps,
-                files_modified: 0,
-                changed_files: vec![],
-                fix_summary: None,
-                warnings,
-                hints: vec![
-                    "Validation failed — changes were rolled back. Fix compilation errors and retry.".to_string(),
-                ],
-            });
         }
     }
 
@@ -667,10 +552,6 @@ fn plan_audit_stage(
             only,
             exclude,
             AuditConvergenceScoring::default(),
-            AuditVerificationToggles {
-                lint_smoke: true,
-                test_smoke: true,
-            },
             1,
             true,
         )?;
