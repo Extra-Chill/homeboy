@@ -595,6 +595,16 @@ fn detect_branches(
         }
     }
 
+    // Detect error propagation branches (e.g., `?` in Rust).
+    // Each `?` is an implicit "if this fails, return Err" branch.
+    // Rather than generating one branch per `?` (noisy), we generate
+    // one branch for the first `?` site with a description of all
+    // propagation points. This produces a test that verifies the
+    // error path exists. (#818)
+    if matches!(return_type, ReturnShape::ResultType { .. }) {
+        detect_error_propagation(body_lines, contract, &mut branches);
+    }
+
     // Deduplicate branches by line number
     branches.sort_by_key(|b| b.line);
     branches.dedup_by_key(|b| b.line);
@@ -613,6 +623,107 @@ fn detect_branches(
     }
 
     branches
+}
+
+/// Detect error propagation branches from `?` operator usage.
+///
+/// Scans body lines for patterns matching `error_propagation` in the grammar
+/// (e.g., `?;` or `?` at end of line in Rust). Generates a single `Err` branch
+/// describing the propagation, rather than one branch per `?` site.
+///
+/// The generated branch uses a descriptive condition like:
+///   "error propagation via ? (3 sites: read_to_string, from_str, validate)"
+/// and has variant "err" so the test pipeline generates an error-path test.
+fn detect_error_propagation(
+    body_lines: &[(usize, &str)],
+    contract: &ContractGrammar,
+    branches: &mut Vec<Branch>,
+) {
+    if contract.error_propagation.is_empty() {
+        return;
+    }
+
+    let prop_regexes: Vec<Regex> = contract
+        .error_propagation
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect();
+
+    if prop_regexes.is_empty() {
+        return;
+    }
+
+    let mut prop_sites: Vec<(usize, String)> = Vec::new();
+
+    for &(line_num, text) in body_lines {
+        if prop_regexes.iter().any(|re| re.is_match(text)) {
+            // Extract a short description of what's being called before the `?`
+            let call_desc = extract_propagation_call(text);
+            prop_sites.push((line_num, call_desc));
+        }
+    }
+
+    if prop_sites.is_empty() {
+        return;
+    }
+
+    // Check if we already have an explicit Err branch — if so, propagation
+    // is secondary and we just note the count.
+    let has_explicit_err = branches.iter().any(|b| b.returns.variant == "err");
+
+    let first_line = prop_sites[0].0;
+    let call_names: Vec<&str> = prop_sites.iter().map(|(_, name)| name.as_str()).collect();
+    let condition = if prop_sites.len() == 1 {
+        format!("error propagation via ? ({})", call_names[0])
+    } else {
+        format!(
+            "error propagation via ? ({} sites: {})",
+            prop_sites.len(),
+            call_names.join(", ")
+        )
+    };
+
+    // Only add the branch if there's no explicit Err return already,
+    // or if we want to ensure propagation paths are tested too.
+    if !has_explicit_err {
+        branches.push(Branch {
+            condition,
+            returns: ReturnValue {
+                variant: "err".to_string(),
+                value: None,
+            },
+            effects: vec![],
+            line: Some(first_line),
+        });
+    }
+}
+
+/// Extract a short description of the function call before the `?` operator.
+///
+/// From `let content = fs::read_to_string(path)?;` extracts `read_to_string`.
+/// From `serde_json::from_str(&content)?` extracts `from_str`.
+/// Falls back to "operation" for unrecognized patterns.
+fn extract_propagation_call(line: &str) -> String {
+    let trimmed = line.trim();
+
+    // Find the `?` and work backwards to find the call
+    if let Some(q_pos) = trimmed.rfind('?') {
+        let before_q = &trimmed[..q_pos];
+        // Look for the last function call: name(...)
+        if let Some(paren_pos) = before_q.rfind('(') {
+            let before_paren = &before_q[..paren_pos];
+            // Extract the function/method name (last identifier before the paren)
+            let name = before_paren
+                .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or("operation");
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+
+    "operation".to_string()
 }
 
 /// Look backwards from a return statement to find the enclosing condition.
@@ -987,5 +1098,129 @@ mod tests {
         let params = extract_params_from_declaration(decl).unwrap();
         assert!(params.contains("&self"));
         assert!(params.contains("x: u32"));
+    }
+
+    #[test]
+    fn extract_propagation_call_method() {
+        assert_eq!(
+            extract_propagation_call("    let content = fs::read_to_string(path)?;"),
+            "read_to_string"
+        );
+    }
+
+    #[test]
+    fn extract_propagation_call_function() {
+        assert_eq!(
+            extract_propagation_call("    let parsed = serde_json::from_str(&content)?;"),
+            "from_str"
+        );
+    }
+
+    #[test]
+    fn extract_propagation_call_chained() {
+        assert_eq!(
+            extract_propagation_call("    config.validate()?;"),
+            "validate"
+        );
+    }
+
+    #[test]
+    fn extract_propagation_call_no_match() {
+        assert_eq!(
+            extract_propagation_call("    let x = 42;"),
+            "operation"
+        );
+    }
+
+    #[test]
+    fn detect_error_propagation_adds_branch() {
+        use std::collections::HashMap;
+
+        let body_lines = vec![
+            (2, "    let content = fs::read_to_string(path)?;"),
+            (3, "    let parsed = serde_json::from_str(&content)?;"),
+            (4, "    Ok(parsed)"),
+        ];
+
+        let contract = ContractGrammar {
+            error_propagation: vec![r"\?\s*;".to_string(), r"\?\s*$".to_string()],
+            return_patterns: HashMap::new(),
+            param_format: String::new(),
+            return_type_separator: "->".to_string(),
+            return_shapes: HashMap::new(),
+            guard_patterns: vec![],
+            side_effect_patterns: HashMap::new(),
+            type_defaults: vec![],
+            type_constructors: vec![],
+            assertion_templates: HashMap::new(),
+            test_templates: HashMap::new(),
+            fallback_default: String::new(),
+            field_pattern: None,
+            field_name_group: None,
+            field_type_group: None,
+            field_assertion_template: None,
+        };
+
+        let mut branches = Vec::new();
+        detect_error_propagation(
+            &body_lines,
+            &contract,
+            &mut branches,
+        );
+
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].returns.variant, "err");
+        assert!(branches[0].condition.contains("error propagation via ?"));
+        assert!(branches[0].condition.contains("read_to_string"));
+        assert!(branches[0].condition.contains("from_str"));
+    }
+
+    #[test]
+    fn detect_error_propagation_skips_when_explicit_err_exists() {
+        use std::collections::HashMap;
+
+        let body_lines = vec![
+            (2, "    let content = fs::read_to_string(path)?;"),
+            (3, "    Ok(content)"),
+        ];
+
+        let contract = ContractGrammar {
+            error_propagation: vec![r"\?\s*;".to_string()],
+            return_patterns: HashMap::new(),
+            param_format: String::new(),
+            return_type_separator: "->".to_string(),
+            return_shapes: HashMap::new(),
+            guard_patterns: vec![],
+            side_effect_patterns: HashMap::new(),
+            type_defaults: vec![],
+            type_constructors: vec![],
+            assertion_templates: HashMap::new(),
+            test_templates: HashMap::new(),
+            fallback_default: String::new(),
+            field_pattern: None,
+            field_name_group: None,
+            field_type_group: None,
+            field_assertion_template: None,
+        };
+
+        // Pre-existing explicit Err branch
+        let mut branches = vec![Branch {
+            condition: "invalid input".to_string(),
+            returns: ReturnValue {
+                variant: "err".to_string(),
+                value: None,
+            },
+            effects: vec![],
+            line: Some(5),
+        }];
+
+        detect_error_propagation(
+            &body_lines,
+            &contract,
+            &mut branches,
+        );
+
+        // Should NOT add another err branch
+        assert_eq!(branches.len(), 1);
     }
 }
