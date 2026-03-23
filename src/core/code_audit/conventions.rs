@@ -167,6 +167,9 @@ pub enum AuditFinding {
     /// Two directories contain overlapping file names with high content similarity.
     /// Indicates a copy-paste module that was never consolidated.
     ShadowModule,
+    /// Multiple structs define the same field group — candidates for extraction
+    /// into a shared type and flattening/embedding.
+    RepeatedFieldPattern,
 }
 
 impl AuditFinding {
@@ -208,6 +211,7 @@ impl AuditFinding {
             "compiler_warning",
             "missing_wrapper_declaration",
             "shadow_module",
+            "repeated_field_pattern",
         ]
     }
 }
