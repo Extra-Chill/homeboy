@@ -1117,9 +1117,17 @@ fn enrich_assertion_with_fields(
         .trim_start_matches("mut ")
         .trim();
 
+    // Try exact match first, then strip path prefixes (e.g., "crate::engine::ValidationResult" → "ValidationResult")
     let type_def = match type_registry.get(base_name) {
         Some(td) => td,
-        None => return assertion.to_string(),
+        None => {
+            // Strip Rust path prefix — registry stores bare names
+            let short_name = base_name.rsplit("::").next().unwrap_or(base_name);
+            match type_registry.get(short_name) {
+                Some(td) => td,
+                None => return assertion.to_string(),
+            }
+        }
     };
 
     let public_fields: Vec<&FieldDef> = type_def.fields.iter().filter(|f| f.is_public).collect();
@@ -1438,7 +1446,13 @@ pub fn build_project_type_registry(
 
     let field_pattern = match &contract_grammar.field_pattern {
         Some(p) => p.clone(),
-        None => return registry,
+        None => {
+            crate::log_status!(
+                "testgen",
+                "Type registry: no field_pattern in contract grammar — skipping"
+            );
+            return registry;
+        }
     };
 
     // Determine file extensions to scan from the grammar
@@ -1449,6 +1463,9 @@ pub fn build_project_type_registry(
     };
 
     let files = crate::engine::codebase_scan::walk_files(root, &scan_config);
+
+    let mut files_scanned = 0usize;
+    let mut files_with_grammar = 0usize;
 
     for file_path in &files {
         let content = match std::fs::read_to_string(file_path) {
@@ -1462,6 +1479,8 @@ pub fn build_project_type_registry(
             .to_string_lossy()
             .to_string();
 
+        files_scanned += 1;
+
         // Check if this file's extension has a matching grammar
         let ext = file_path
             .extension()
@@ -1471,6 +1490,7 @@ pub fn build_project_type_registry(
             Some(g) => g,
             None => continue,
         };
+        files_with_grammar += 1;
 
         // Use the file's own grammar for item extraction (handles multi-language projects)
         let items = crate::extension::grammar_items::parse_items(&content, &file_grammar);
@@ -1523,6 +1543,16 @@ pub fn build_project_type_registry(
                 },
             );
         }
+    }
+
+    if files_scanned > 0 {
+        crate::log_status!(
+            "testgen",
+            "Type registry: scanned {} files, {} had grammars, found {} types",
+            files_scanned,
+            files_with_grammar,
+            registry.len()
+        );
     }
 
     registry
@@ -1578,15 +1608,22 @@ pub fn generate_tests_for_file_with_types(
         return None;
     }
 
-    // Use project-wide registry if available, otherwise build per-file
-    let local_registry;
-    let type_registry = match project_type_registry {
-        Some(reg) => reg,
-        None => {
-            local_registry = build_type_registry(content, file_path, grammar, contract_grammar);
-            &local_registry
+    // Build per-file type registry, then merge with project-wide registry.
+    // This ensures types defined in the current file are always available
+    // for assertion enrichment, even if the project-wide scan missed them
+    // (e.g., due to extension loading issues in CI sandboxes).
+    let mut local_registry = build_type_registry(content, file_path, grammar, contract_grammar);
+
+    // Merge project-wide types into local (local takes precedence for same-file types)
+    if let Some(project_reg) = project_type_registry {
+        for (name, typedef) in project_reg {
+            local_registry
+                .entry(name.clone())
+                .or_insert_with(|| typedef.clone());
         }
-    };
+    }
+
+    let type_registry = &local_registry;
 
     // Generate and render test plans
     let mut test_source = String::new();
@@ -1672,14 +1709,20 @@ pub fn generate_tests_for_methods_with_types(
         return None;
     }
 
-    let local_registry;
-    let type_registry = match project_type_registry {
-        Some(reg) => reg,
-        None => {
-            local_registry = build_type_registry(content, file_path, grammar, contract_grammar);
-            &local_registry
+    // Build per-file type registry, then merge with project-wide registry.
+    // Same strategy as generate_tests_for_file_with_types — ensures types
+    // defined in the current file are always available for enrichment.
+    let mut local_registry = build_type_registry(content, file_path, grammar, contract_grammar);
+
+    if let Some(project_reg) = project_type_registry {
+        for (name, typedef) in project_reg {
+            local_registry
+                .entry(name.clone())
+                .or_insert_with(|| typedef.clone());
         }
-    };
+    }
+
+    let type_registry = &local_registry;
 
     let mut test_source = String::new();
     let mut all_extra_imports: Vec<String> = Vec::new();
@@ -2822,6 +2865,87 @@ mod tests {
     }
 
     #[test]
+    fn test_full_pipeline_renders_field_assertions_with_type_registry() {
+        let contract = sample_result_contract();
+        let grammar = full_grammar();
+
+        // Build a type registry containing ValidationResult
+        let mut type_registry = HashMap::new();
+        type_registry.insert(
+            "ValidationResult".to_string(),
+            TypeDefinition {
+                name: "ValidationResult".to_string(),
+                kind: "struct".to_string(),
+                file: "src/core/engine/validate_write.rs".to_string(),
+                line: 10,
+                fields: vec![
+                    FieldDef {
+                        name: "success".to_string(),
+                        field_type: "bool".to_string(),
+                        is_public: true,
+                    },
+                    FieldDef {
+                        name: "command".to_string(),
+                        field_type: "Option<String>".to_string(),
+                        is_public: true,
+                    },
+                    FieldDef {
+                        name: "output".to_string(),
+                        field_type: "Option<String>".to_string(),
+                        is_public: true,
+                    },
+                    FieldDef {
+                        name: "rolled_back".to_string(),
+                        field_type: "bool".to_string(),
+                        is_public: true,
+                    },
+                ],
+                is_public: true,
+            },
+        );
+
+        // Use generate_test_plan_with_types — this is the path the fixers use
+        let plan = generate_test_plan_with_types(&contract, &grammar, &type_registry);
+        let rendered = render_test_plan(&plan, &grammar.test_templates);
+
+        // Should produce output
+        assert!(!rendered.is_empty(), "rendered output should not be empty");
+
+        // With type registry, enrichment should replace the TODO placeholder with
+        // real field-level assertions instead of falling back to is_ok()
+        assert!(
+            rendered.contains("result.unwrap()"),
+            "with type registry, should unwrap() to get at the inner value, got:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("assert_eq!(inner.success, false)"),
+            "should assert success field, got:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("assert_eq!(inner.command, None)"),
+            "should assert command field, got:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("assert_eq!(inner.rolled_back, false)"),
+            "should assert rolled_back field, got:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("// TODO:"),
+            "should NOT contain TODO placeholders, got:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("is_ok()"),
+            "should NOT fall back to is_ok() when type info is available, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
     fn test_parse_fields_from_rust_struct_source() {
         let source = r#"
 pub struct ValidationResult {
@@ -2967,6 +3091,58 @@ class AbilityResult {
         assert!(
             !enriched.contains("let _ = inner"),
             "should remove the let _ = inner placeholder, got:\n{}",
+            enriched
+        );
+    }
+
+    #[test]
+    fn test_enrich_assertion_resolves_path_qualified_types() {
+        let mut type_registry = HashMap::new();
+        type_registry.insert(
+            "ValidationResult".to_string(),
+            TypeDefinition {
+                name: "ValidationResult".to_string(),
+                kind: "struct".to_string(),
+                file: "src/test.rs".to_string(),
+                line: 1,
+                fields: vec![FieldDef {
+                    name: "success".to_string(),
+                    field_type: "bool".to_string(),
+                    is_public: true,
+                }],
+                is_public: true,
+            },
+        );
+
+        let assertion = "        let inner = result.unwrap();\n        let _ = inner; // TODO: assert something";
+        // Return type uses a path-qualified name
+        let return_type = ReturnShape::ResultType {
+            ok_type: "crate::engine::ValidationResult".to_string(),
+            err_type: "Error".to_string(),
+        };
+        let returns = ReturnValue {
+            variant: "ok".to_string(),
+            value: Some("val".to_string()),
+        };
+
+        let enriched = enrich_assertion_with_fields(
+            assertion,
+            &returns,
+            &return_type,
+            &type_registry,
+            &sample_type_defaults(),
+            "Default::default()",
+            Some("{indent}assert_eq!(inner.{field_name}, {expected_value});"),
+        );
+
+        assert!(
+            enriched.contains("assert_eq!(inner.success, false)"),
+            "should resolve crate::engine::ValidationResult to ValidationResult, got:\n{}",
+            enriched
+        );
+        assert!(
+            !enriched.contains("TODO:"),
+            "should replace TODO placeholder, got:\n{}",
             enriched
         );
     }
