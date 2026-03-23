@@ -193,6 +193,21 @@ pub(crate) fn generate_test_plan_with_types(
                 &contract_grammar.fallback_default,
                 contract_grammar.field_assertion_template.as_deref(),
             );
+
+            // If the assertion still has a TODO placeholder after enrichment,
+            // fall back to the simpler non-value assertion (e.g. result_ok instead
+            // of result_ok_value). A test that asserts is_ok() is better than a
+            // stub with `let _ = inner; // TODO: assert ...`. (#818)
+            let assertion = if assertion.contains("// TODO:") {
+                fallback_to_simple_assertion(
+                    &branch.returns,
+                    &contract.signature.return_type,
+                    &branch.condition,
+                    &contract_grammar.assertion_templates,
+                ).unwrap_or(assertion)
+            } else {
+                assertion
+            };
             vars.insert("assertion_code".to_string(), assertion);
 
             cases.push(TestCase {
@@ -924,6 +939,37 @@ fn resolve_assertion(
         let escaped_condition = sanitize_for_string_literal(condition);
         format!("{indent}let _ = result; // {variant}: {escaped_condition}")
     }
+}
+
+/// When a value-level assertion template couldn't be enriched (type not in registry),
+/// fall back to the simpler base assertion that tests the discriminant only.
+///
+/// For example: `result_ok_value` (has TODO placeholder) → `result_ok` (asserts is_ok()).
+/// This produces a real test instead of a dead stub.
+fn fallback_to_simple_assertion(
+    returns: &ReturnValue,
+    return_type: &ReturnShape,
+    condition: &str,
+    assertion_templates: &HashMap<String, String>,
+) -> Option<String> {
+    let variant = returns.variant.as_str();
+
+    // Build the base key (without _value suffix)
+    let base_key = match return_type {
+        ReturnShape::ResultType { .. } => format!("result_{}", variant),
+        ReturnShape::OptionType { .. } => format!("option_{}", variant),
+        _ => return None, // Bool/Collection/etc don't have _value variants
+    };
+
+    let tmpl = assertion_templates.get(&base_key)?;
+
+    let mut rendered = tmpl.clone();
+    rendered = rendered.replace("{condition}", &sanitize_for_string_literal(condition));
+    if let Some(ref val) = returns.value {
+        rendered = rendered.replace("{expected_value}", &val.replace('"', "\\\""));
+    }
+    rendered = rendered.replace("{variant}", variant);
+    Some(rendered)
 }
 
 /// Sanitize a source-level string for safe embedding inside a Rust string literal.
