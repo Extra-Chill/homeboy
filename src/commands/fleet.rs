@@ -109,6 +109,10 @@ enum FleetCommand {
         #[arg(long)]
         check: bool,
 
+        /// Override the SSH user for this execution (instead of each server's configured user)
+        #[arg(long)]
+        user: Option<String>,
+
         /// Reserved for future parallel mode. Currently all execution is serial.
         #[arg(long, hide = true)]
         serial: bool,
@@ -161,8 +165,9 @@ pub fn run(args: FleetArgs, _global: &super::GlobalArgs) -> CmdResult<FleetOutpu
             id,
             command,
             check,
+            user,
             serial: _,
-        } => exec(&id, command, check),
+        } => exec(&id, command, check, user),
     }
 }
 
@@ -474,8 +479,13 @@ fn check(id: &str, only_outdated: bool) -> CmdResult<FleetOutput> {
     ))
 }
 
-fn exec(id: &str, command: Vec<String>, check: bool) -> CmdResult<FleetOutput> {
-    let (results, summary, exit_code) = fleet::collect_exec(id, command, check)?;
+fn exec(
+    id: &str,
+    command: Vec<String>,
+    check: bool,
+    user: Option<String>,
+) -> CmdResult<FleetOutput> {
+    let (results, summary, exit_code) = fleet::collect_exec(id, command, check, user)?;
 
     Ok((
         FleetOutput {

@@ -163,6 +163,7 @@ pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
                     user,
                     port: port.unwrap_or(22),
                     identity_file: None,
+                    env: std::collections::HashMap::new(),
                 };
 
                 homeboy::config::to_json_string(&new_server)?

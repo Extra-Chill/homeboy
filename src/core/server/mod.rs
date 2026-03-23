@@ -13,6 +13,8 @@ pub use health::*;
 pub use keys::*;
 pub use transfer::*;
 
+use std::collections::HashMap;
+
 use crate::config::{self, ConfigEntity};
 use crate::error::{Error, Result};
 use crate::output::{CreateOutput, MergeOutput, RemoveResult};
@@ -33,6 +35,10 @@ pub struct Server {
     pub port: u16,
     #[serde(default)]
     pub identity_file: Option<String>,
+    /// Environment variables to set before executing commands on this server.
+    /// Values support `$PATH`-style expansion — the shell handles it.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
 }
 
 fn default_port() -> u16 {

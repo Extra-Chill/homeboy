@@ -29,6 +29,7 @@ pub fn collect_exec(
     fleet_id: &str,
     command: Vec<String>,
     check: bool,
+    user_override: Option<String>,
 ) -> crate::Result<(Vec<FleetExecProjectResult>, FleetExecSummary, i32)> {
     if command.is_empty() {
         return Err(
@@ -97,9 +98,9 @@ pub fn collect_exec(
             }
         };
 
-        let client = match SshClient::from_server(&resolve_result.server, &resolve_result.server_id)
-        {
-            Ok(c) => c,
+        let mut client =
+            match SshClient::from_server(&resolve_result.server, &resolve_result.server_id) {
+                Ok(c) => c,
             Err(e) => {
                 summary.failed += 1;
                 results.push(FleetExecProjectResult {
@@ -114,6 +115,10 @@ pub fn collect_exec(
                 continue;
             }
         };
+
+        if let Some(ref user) = user_override {
+            client.user = user.clone();
+        }
 
         let effective_cmd = match &resolve_result.base_path {
             Some(bp) => format!("cd {} && {}", shell::quote_path(bp), &command_string),

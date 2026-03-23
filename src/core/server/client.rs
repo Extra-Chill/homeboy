@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::engine::shell;
 use crate::error::{Error, Result};
 
@@ -12,6 +14,9 @@ pub struct SshClient {
     /// When true, all commands run locally instead of over SSH.
     /// Set automatically when the server host is localhost/127.0.0.1/::1.
     pub is_local: bool,
+    /// Environment variables to inject before remote commands.
+    /// Values are passed through the shell, so `$PATH`-style expansion works.
+    pub env: HashMap<String, String>,
 }
 
 pub struct CommandOutput {
@@ -52,6 +57,7 @@ impl SshClient {
             port: server.port,
             identity_file,
             is_local,
+            env: server.env.clone(),
         })
     }
 
@@ -93,7 +99,22 @@ impl SshClient {
     }
 
     pub fn execute(&self, command: &str) -> CommandOutput {
-        self.execute_with_stdin(command, None)
+        let effective = self.prepend_env(command);
+        self.execute_with_stdin(&effective, None)
+    }
+
+    /// Build an env preamble that sets configured variables via `export`.
+    /// Values are quoted but allow shell expansion (e.g. `$PATH`).
+    fn prepend_env(&self, command: &str) -> String {
+        if self.env.is_empty() {
+            return command.to_string();
+        }
+        let exports: Vec<String> = self
+            .env
+            .iter()
+            .map(|(k, v)| format!("export {}={}", k, shell::quote_arg(v)))
+            .collect();
+        format!("{} && {}", exports.join(" && "), command)
     }
 
     pub fn upload_file(&self, local_path: &str, remote_path: &str) -> CommandOutput {
@@ -192,9 +213,12 @@ impl SshClient {
     }
 
     pub fn execute_interactive(&self, command: Option<&str>) -> i32 {
+        let effective = command.map(|c| self.prepend_env(c));
+        let effective_ref = effective.as_deref();
+
         // Local execution: run command directly instead of opening SSH session
         if self.is_local {
-            return match command {
+            return match effective_ref {
                 Some(cmd) => execute_local_command_interactive(cmd, None, None),
                 None => {
                     // Interactive shell on localhost — just open a shell
@@ -203,7 +227,7 @@ impl SshClient {
             };
         }
 
-        let args = self.build_ssh_args(command, true);
+        let args = self.build_ssh_args(effective_ref, true);
 
         let status = Command::new("ssh")
             .args(&args)

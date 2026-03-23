@@ -26,6 +26,10 @@ pub struct SshArgs {
     #[arg(long)]
     pub as_server: bool,
 
+    /// Override the SSH user (instead of the server's configured user)
+    #[arg(long)]
+    pub user: Option<String>,
+
     #[command(subcommand)]
     pub subcommand: Option<SshSubcommand>,
 }
@@ -108,7 +112,10 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
                 _ => command_string.clone(),
             };
 
-            let client = SshClient::from_server(&result.server, &result.server_id)?;
+            let mut client = SshClient::from_server(&result.server, &result.server_id)?;
+            if let Some(ref user_override) = args.user {
+                client.user = user_override.clone();
+            }
 
             if !args.command.is_empty() {
                 // Non-interactive: capture output for JSON response
