@@ -81,6 +81,19 @@ pub(super) fn execute_component_deploy(
         component.remote_path.clone()
     };
 
+    // Warn when deploying to a WordPress path without remote_owner configured.
+    // Files will end up as root:root which breaks WordPress functionality (#602).
+    if component.remote_owner.is_none() && effective_remote_path.contains("wp-content/") {
+        log_status!(
+            "deploy",
+            "⚠ Component '{}' deploys to a WordPress path but has no remote_owner set. \
+             Files may deploy as root:root. \
+             Fix: homeboy component set {} --json '{{\"remote_owner\":\"www-data:www-data\"}}'",
+            component.id,
+            component.id
+        );
+    }
+
     // Resolve install directory
     let install_dir = match base_path::join_remote_path(Some(base_path), &effective_remote_path) {
         Ok(v) => v,

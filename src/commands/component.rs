@@ -605,6 +605,11 @@ fn list() -> CmdResult<ComponentOutput> {
             })?;
             if let Value::Object(ref mut map) = value {
                 map.insert("id".to_string(), Value::String(component.id.clone()));
+                // Always surface remote_owner so missing config is visible (#602).
+                // Serde skips None fields, but for list output we want explicit null
+                // so users can audit which components are missing this critical config.
+                map.entry("remote_owner".to_string())
+                    .or_insert(Value::Null);
             }
             Ok(value)
         })
