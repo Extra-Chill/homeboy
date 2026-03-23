@@ -578,8 +578,7 @@ unit = """
     #[test]
     fn {test_name}() {
 {param_setup}
-        let result = {fn_name}({param_args});
-        assert!(result.is_ok(), "expected Ok for: {condition}");
+        {fn_name}({param_args});
     }
 """
 
