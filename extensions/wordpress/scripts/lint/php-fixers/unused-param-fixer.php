@@ -349,6 +349,9 @@ function build_callback_map($root) {
         // Detect call_user_func/call_user_func_array patterns.
         detect_call_user_func($content, $filepath, $map);
 
+        // Detect WordPress lifecycle hooks, widget/REST/CLI contracts, and PHP array callbacks.
+        detect_lifecycle_callbacks($content, $filepath, $map);
+
         return 0;
     });
 
@@ -532,10 +535,119 @@ function detect_tool_callbacks($content, $filepath, &$map) {
  * Detect call_user_func patterns that dispatch to methods.
  */
 function detect_call_user_func($content, $filepath, &$map) {
-    // Match: call_user_func($check['callback'], ...)
-    // This is too generic to resolve the actual target, but we mark the pattern.
-    // For now, we'll handle this via the "method is referenced in call_user_func" heuristic
-    // in the classification phase instead.
+    // Match: call_user_func([$this, 'method'], ...) and call_user_func(array($this, 'method'), ...)
+    $pattern = '/call_user_func(?:_array)?\s*\(\s*(?:array\s*\(|\[)\s*(?:\$this|static::class|self::class|[\w\\\\]+::class),\s*[\'"]([\w]+)[\'"]\s*(?:\)|\])/';
+    if (preg_match_all($pattern, $content, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $m) {
+            $method_name = $m[1];
+            $class_name  = detect_class_name($content);
+            if ($class_name !== null) {
+                $key = $class_name . '::' . $method_name;
+            } else {
+                $key = $method_name;
+            }
+            $map[$key] = ['type' => 'call_user_func', 'file' => $filepath];
+        }
+    }
+
+    // Match: call_user_func('function_name', ...)
+    $pattern2 = '/call_user_func(?:_array)?\s*\(\s*[\'"]([\w]+)[\'"]/';
+    if (preg_match_all($pattern2, $content, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $m) {
+            $map[$m[1]] = ['type' => 'call_user_func', 'file' => $filepath];
+        }
+    }
+}
+
+/**
+ * Detect WordPress lifecycle hook callbacks.
+ *
+ * Covers: register_activation_hook, register_deactivation_hook,
+ * register_uninstall_hook, register_setting sanitize callbacks,
+ * array_filter/array_map/usort with method callbacks.
+ */
+function detect_lifecycle_callbacks($content, $filepath, &$map) {
+    // register_activation_hook / register_deactivation_hook / register_uninstall_hook
+    $pattern = '/register_(?:activation|deactivation|uninstall)_hook\s*\(\s*[^,]+,\s*(?:array\s*\(|\[)\s*(?:\$this|static::class|self::class|[\w\\\\]+::class),\s*[\'"]([\w]+)[\'"]\s*(?:\)|\])/';
+    if (preg_match_all($pattern, $content, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $m) {
+            $method_name = $m[1];
+            $class_name  = detect_class_name($content);
+            $key = $class_name ? ($class_name . '::' . $method_name) : $method_name;
+            $map[$key] = ['type' => 'lifecycle_hook', 'file' => $filepath];
+        }
+    }
+
+    // register_setting sanitize callback: register_setting('group', 'option', ['sanitize_callback' => [$this, 'method']])
+    $pattern2 = '/[\'"]sanitize_callback[\'"]\s*=>\s*(?:array\s*\(|\[)\s*(?:\$this|static::class|self::class|[\w\\\\]+::class),\s*[\'"]([\w]+)[\'"]\s*(?:\)|\])/';
+    if (preg_match_all($pattern2, $content, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $m) {
+            $method_name = $m[1];
+            $class_name  = detect_class_name($content);
+            $key = $class_name ? ($class_name . '::' . $method_name) : $method_name;
+            $map[$key] = ['type' => 'sanitize_callback', 'file' => $filepath];
+        }
+    }
+
+    // PHP array callbacks: array_filter, array_map, usort, uasort, uksort, array_walk
+    $pattern3 = '/(?:array_filter|array_map|usort|uasort|uksort|array_walk)\s*\([^,]*,\s*(?:array\s*\(|\[)\s*(?:\$this|static::class|self::class|[\w\\\\]+::class),\s*[\'"]([\w]+)[\'"]\s*(?:\)|\])/';
+    if (preg_match_all($pattern3, $content, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $m) {
+            $method_name = $m[1];
+            $class_name  = detect_class_name($content);
+            $key = $class_name ? ($class_name . '::' . $method_name) : $method_name;
+            $map[$key] = ['type' => 'array_callback', 'file' => $filepath];
+        }
+    }
+
+    // wp_ajax_ handlers: add_action('wp_ajax_my_action', [$this, 'handler'])
+    // Already covered by detect_hook_callbacks, but ensure we also match
+    // wp_ajax_nopriv_ variants.
+
+    // WP_Widget method contracts: widget(), update(), form()
+    // If class extends WP_Widget, these methods have fixed signatures.
+    if (preg_match('/class\s+\w+\s+extends\s+WP_Widget\b/', $content)) {
+        $class_name = detect_class_name($content);
+        if ($class_name !== null) {
+            foreach (['widget', 'update', 'form'] as $widget_method) {
+                if (preg_match('/function\s+' . $widget_method . '\s*\(/', $content)) {
+                    $map[$class_name . '::' . $widget_method] = ['type' => 'widget_contract', 'file' => $filepath];
+                }
+            }
+        }
+    }
+
+    // WP_REST_Controller method contracts: common override methods have fixed signatures.
+    if (preg_match('/class\s+\w+\s+extends\s+(?:WP_REST_Controller|[\w\\\\]*REST[\w]*Controller)\b/', $content)) {
+        $class_name = detect_class_name($content);
+        if ($class_name !== null) {
+            $rest_methods = [
+                'get_items', 'get_item', 'create_item', 'update_item', 'delete_item',
+                'get_items_permissions_check', 'get_item_permissions_check',
+                'create_item_permissions_check', 'update_item_permissions_check',
+                'delete_item_permissions_check', 'prepare_item_for_response',
+                'prepare_item_for_database', 'get_collection_params',
+            ];
+            foreach ($rest_methods as $method) {
+                if (preg_match('/function\s+' . preg_quote($method, '/') . '\s*\(/', $content)) {
+                    $map[$class_name . '::' . $method] = ['type' => 'rest_controller_contract', 'file' => $filepath];
+                }
+            }
+        }
+    }
+
+    // WP_CLI command contracts: classes with @when annotations or extending WP_CLI_Command
+    if (preg_match('/class\s+\w+\s+extends\s+(?:WP_CLI_Command|[\w\\\\]*Command)\b/', $content)) {
+        $class_name = detect_class_name($content);
+        if ($class_name !== null) {
+            // CLI subcommands receive ($args, $assoc_args) — both are contract-mandated.
+            if (preg_match_all('/function\s+([\w]+)\s*\(\s*\$args\b/', $content, $cli_matches)) {
+                foreach ($cli_matches[1] as $method_name) {
+                    $map[$class_name . '::' . $method_name] = ['type' => 'cli_command', 'file' => $filepath];
+                }
+            }
+        }
+    }
 }
 
 /**

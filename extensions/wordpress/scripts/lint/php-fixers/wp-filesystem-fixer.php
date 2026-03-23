@@ -114,18 +114,30 @@ function process_file( $filepath ) {
 
 		$needs_fix = false;
 
-		// file_get_contents — but skip URL arguments (those should use wp_remote_get).
+		// file_get_contents — but skip URL arguments (those should use wp_remote_get)
+		// and stream wrappers (php://, data://, etc.) which WP_Filesystem can't handle.
 		// Also skip if already replaced (->get_contents).
 		if ( preg_match( '/\bfile_get_contents\s*\(/', $line ) && ! preg_match( '/->get_contents\s*\(/', $line ) ) {
 			// Skip if argument is a URL string.
 			if ( preg_match( '/file_get_contents\s*\(\s*[\'"]https?:/', $line ) ) {
 				continue;
 			}
+			// Skip PHP stream wrappers — these are not filesystem paths and
+			// WP_Filesystem cannot handle them. Covers php://stdin, php://input,
+			// php://output, php://memory, php://temp, php://filter, data://,
+			// compress.zlib://, compress.bzip2://, phar://, glob://, etc.
+			if ( preg_match( '/file_get_contents\s*\(\s*[\'"](?:php|data|compress\.\w+|phar|glob|expect|ogg|rar|ssh2|zlib):\/\//', $line ) ) {
+				continue;
+			}
 			$needs_fix = true;
 		}
 
 		// file_put_contents — skip if already replaced (->put_contents).
+		// Also skip stream wrappers that WP_Filesystem can't handle.
 		if ( preg_match( '/\bfile_put_contents\s*\(/', $line ) && ! preg_match( '/->put_contents\s*\(/', $line ) ) {
+			if ( preg_match( '/file_put_contents\s*\(\s*[\'"](?:php|data|compress\.\w+|phar|glob|expect|ogg|rar|ssh2|zlib):\/\//', $line ) ) {
+				continue;
+			}
 			$needs_fix = true;
 		}
 
