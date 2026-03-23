@@ -130,6 +130,37 @@ pub(crate) fn generate_intra_duplicate_fixes(
                     second_line
                 };
 
+                // Check that the lines being removed have balanced braces.
+                // Duplicated blocks inside closures or match arms may contain
+                // only half of a brace pair (e.g., the opening `{` is above
+                // the block, the closing `}` is inside it). Removing such a
+                // block corrupts the file's delimiter structure.
+                let removal_lines =
+                    &lines[removal_start.saturating_sub(1)..second_end.min(lines.len())];
+                let mut brace_depth: i32 = 0;
+                let mut paren_depth: i32 = 0;
+                for line in removal_lines {
+                    for ch in line.chars() {
+                        match ch {
+                            '{' => brace_depth += 1,
+                            '}' => brace_depth -= 1,
+                            '(' => paren_depth += 1,
+                            ')' => paren_depth -= 1,
+                            _ => {}
+                        }
+                    }
+                }
+                if brace_depth != 0 || paren_depth != 0 {
+                    skipped.push(SkippedFile {
+                        file: finding.file.clone(),
+                        reason: format!(
+                            "Duplicate block in `{}` (lines {}-{}) has unbalanced delimiters (braces: {}, parens: {}) — removal would corrupt file",
+                            method_name, second_line, second_end, brace_depth, paren_depth,
+                        ),
+                    });
+                    continue;
+                }
+
                 fixes.push(Fix {
                     file: finding.file.clone(),
                     required_methods: vec![],

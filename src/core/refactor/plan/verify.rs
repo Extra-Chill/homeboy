@@ -159,13 +159,62 @@ pub fn run_audit_refactor(
                 break;
             }
 
-            // Fail-fast: compile-check after applying fixes. If the code no
-            // longer compiles (e.g. "failed to resolve mod", parse errors),
-            // further iterations cannot recover — bail immediately instead of
-            // burning cold-compile retries that will never converge.
+            // Fail-fast: quick brace-balance check on changed files BEFORE
+            // the expensive compile. Catches fixer-induced brace corruption
+            // (mismatched delimiters from template expansion, bad line removals)
+            // in milliseconds instead of waiting for a 20+ minute cold compile.
             let root = Path::new(&current_result.source_path);
             let compile_check_files: Vec<PathBuf> =
                 changed_files.iter().map(|f| root.join(f)).collect();
+
+            let mut brace_error = None;
+            for file_path in &compile_check_files {
+                if let Ok(content) = std::fs::read_to_string(file_path) {
+                    let ext = file_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or_default();
+                    if let Some(grammar) =
+                        crate::code_audit::core_fingerprint::load_grammar_for_ext(ext)
+                    {
+                        if !crate::extension::grammar_items::validate_brace_balance(
+                            &content, &grammar,
+                        ) {
+                            let rel = file_path
+                                .strip_prefix(root)
+                                .unwrap_or(file_path)
+                                .display()
+                                .to_string();
+                            brace_error = Some(format!(
+                                "Unbalanced braces in {} after applying fixes — fixer produced broken code",
+                                rel
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if let Some(err_msg) = brace_error {
+                crate::log_status!(
+                    "refactor",
+                    "Brace check failed after iteration {} — stopping immediately",
+                    iteration_index + 1
+                );
+                crate::log_status!("refactor", "{}", err_msg);
+                iteration_summary.iteration = iteration_index + 1;
+                iteration_summary.findings_after = current_result.findings.len();
+                iteration_summary.weighted_score_after =
+                    weighted_finding_score_with(&current_result, scoring);
+                iteration_summary.score_delta =
+                    score_delta(&current_result, &current_result, scoring);
+                iteration_summary.status = "stopped_brace_corruption".to_string();
+                iterations.push(iteration_summary);
+                break;
+            }
+
+            // Full compile-check. If the code no longer compiles (e.g. type
+            // errors, missing imports), further iterations cannot recover.
             let compile_result = validate_write::validate_only(root, &compile_check_files)?;
             if !compile_result.success {
                 crate::log_status!(

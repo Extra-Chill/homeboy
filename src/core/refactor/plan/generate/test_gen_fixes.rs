@@ -13,7 +13,6 @@ use crate::code_audit::{AuditFinding, CodeAuditResult};
 use crate::core::engine::contract_testgen::{
     generate_tests_for_file_with_types, generate_tests_for_methods_with_types, GeneratedTestOutput,
 };
-use crate::core::engine::symbol_graph::module_path_from_file;
 use crate::core::extension::grammar_items;
 use crate::core::refactor::auto::{
     Fix, FixSafetyTier, Insertion, InsertionKind, NewFile, SkippedFile,
@@ -213,43 +212,6 @@ fn build_inline_test_module(generated: &GeneratedTestOutput, ext: &str) -> Optio
     }
 
     Some(content)
-}
-
-/// Build the complete test file content with module declaration, imports, and test functions.
-/// Used as fallback for non-inline test file generation.
-fn build_test_file_content(
-    source_file: &str,
-    generated: &GeneratedTestOutput,
-    ext: &str,
-) -> String {
-    let mut content = String::new();
-
-    match ext {
-        "rs" => {
-            let module_path = module_path_from_file(source_file);
-            content.push_str(&format!("use crate::{}::*;\n", module_path));
-
-            for imp in &generated.extra_imports {
-                content.push_str(imp);
-                content.push('\n');
-            }
-
-            content.push('\n');
-            content.push_str(&generated.test_source);
-        }
-        _ => {
-            for imp in &generated.extra_imports {
-                content.push_str(imp);
-                content.push('\n');
-            }
-            if !generated.extra_imports.is_empty() {
-                content.push('\n');
-            }
-            content.push_str(&generated.test_source);
-        }
-    }
-
-    content
 }
 
 /// Generate test methods for `MissingTestMethod` findings.
@@ -501,15 +463,6 @@ fn find_inline_test_module_end(content: &str) -> Option<usize> {
 }
 
 /// Extract the expected test path from a MissingTestFile finding description.
-///
-/// The description format is: "No test file found (expected 'tests/core/engine/foo_test.rs') ..."
-fn extract_test_path_from_description(description: &str) -> Option<String> {
-    let start = description.find("expected '")?;
-    let after_quote = &description[start + "expected '".len()..];
-    let end = after_quote.find('\'')?;
-    Some(after_quote[..end].to_string())
-}
-
 /// Build a project-wide type registry for a set of audit findings.
 ///
 /// Determines the dominant file extension from the findings, loads the
@@ -557,20 +510,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_test_path_from_description_typical() {
-        let desc = "No test file found (expected 'tests/core/engine/validate_write_test.rs') and no inline tests";
-        assert_eq!(
-            extract_test_path_from_description(desc),
-            Some("tests/core/engine/validate_write_test.rs".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_test_path_from_description_bad_format() {
-        assert_eq!(extract_test_path_from_description("no test file"), None);
-    }
-
-    #[test]
     fn test_extract_method_name_from_description_typical() {
         let desc =
             "Method 'validate_write' has no corresponding test (expected 'test_validate_write')";
@@ -596,19 +535,5 @@ mod tests {
             format!("tests/{}_test.rs", without_src)
         };
         assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn build_test_file_content_includes_imports() {
-        let generated = GeneratedTestOutput {
-            test_source: "#[test]\nfn test_foo() {}\n".to_string(),
-            extra_imports: vec!["use std::path::Path;".to_string()],
-            tested_functions: vec!["foo".to_string()],
-        };
-
-        let content = build_test_file_content("src/core/engine/foo.rs", &generated, "rs");
-        assert!(content.contains("use crate::core::engine::foo::*;"));
-        assert!(content.contains("use std::path::Path;"));
-        assert!(content.contains("#[test]"));
     }
 }

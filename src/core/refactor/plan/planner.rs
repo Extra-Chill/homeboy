@@ -278,6 +278,50 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 .iter()
                 .map(|f| working_root.path().join(f))
                 .collect();
+
+            // Fast brace-balance check before expensive sandbox compile.
+            // Catches fixer-induced brace corruption in milliseconds.
+            let mut brace_broken = false;
+            for file_path in &abs_changed {
+                if let Ok(content) = std::fs::read_to_string(file_path) {
+                    let ext = file_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or_default();
+                    if let Some(grammar) =
+                        crate::code_audit::core_fingerprint::load_grammar_for_ext(ext)
+                    {
+                        if !crate::extension::grammar_items::validate_brace_balance(
+                            &content, &grammar,
+                        ) {
+                            let rel = file_path
+                                .strip_prefix(working_root.path())
+                                .unwrap_or(file_path)
+                                .display()
+                                .to_string();
+                            crate::log_status!(
+                                "refactor",
+                                "Brace corruption in {} after {} stage — skipping compile",
+                                rel,
+                                source
+                            );
+                            warnings.push(format!(
+                                "{} stage produced unbalanced braces in {} — skipping",
+                                source, rel
+                            ));
+                            brace_broken = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if brace_broken {
+                accumulator.extend(stage.fix_results.clone());
+                planned_stages.push(stage);
+                break;
+            }
+
             let sandbox_compile = validate_write::validate_only(working_root.path(), &abs_changed)?;
             if !sandbox_compile.success {
                 crate::log_status!(
