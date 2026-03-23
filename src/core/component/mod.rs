@@ -305,7 +305,13 @@ impl Component {
     ///
     /// If the component has the `wordpress` extension and `remote_path` is empty,
     /// detect whether it's a plugin or theme from source files and return the
-    /// canonical WordPress path (`wp-content/plugins/{id}` or `wp-content/themes/{id}`).
+    /// canonical WordPress path.
+    ///
+    /// Uses the **local directory name** (basename of `local_path`) as the remote
+    /// directory name — not the component ID. The component ID may differ from the
+    /// directory name (e.g., component `extrachill-theme` lives in directory
+    /// `extrachill/`), and WordPress expects the directory name to match the slug
+    /// from `style.css` or the main plugin file.
     ///
     /// Returns `Some(path)` if auto-resolved, `None` if not applicable or not detectable.
     pub fn auto_resolve_remote_path(&self) -> Option<String> {
@@ -317,12 +323,22 @@ impl Component {
 
         let local = std::path::Path::new(&self.local_path);
 
-        // Check for plugin: {id}.php with "Plugin Name:" header
-        let plugin_file = local.join(format!("{}.php", self.id));
-        if plugin_file.exists() {
-            if let Ok(content) = std::fs::read_to_string(&plugin_file) {
-                if content.contains("Plugin Name:") {
-                    return Some(format!("wp-content/plugins/{}", self.id));
+        // Use the directory basename as the remote directory name.
+        // This matches WordPress convention: the theme/plugin slug is the directory name.
+        let dir_name = local.file_name()?.to_str()?;
+
+        // Check for plugin: look for a .php file with "Plugin Name:" header.
+        // Try {dir_name}.php first (standard convention), then {id}.php as fallback.
+        let plugin_candidates = [
+            local.join(format!("{}.php", dir_name)),
+            local.join(format!("{}.php", self.id)),
+        ];
+        for plugin_file in &plugin_candidates {
+            if plugin_file.exists() {
+                if let Ok(content) = std::fs::read_to_string(plugin_file) {
+                    if content.contains("Plugin Name:") {
+                        return Some(format!("wp-content/plugins/{}", dir_name));
+                    }
                 }
             }
         }
@@ -332,7 +348,7 @@ impl Component {
         if style_file.exists() {
             if let Ok(content) = std::fs::read_to_string(&style_file) {
                 if content.contains("Theme Name:") {
-                    return Some(format!("wp-content/themes/{}", self.id));
+                    return Some(format!("wp-content/themes/{}", dir_name));
                 }
             }
         }
@@ -499,9 +515,11 @@ mod tests {
     #[test]
     fn auto_resolve_remote_path_detects_wordpress_plugin() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let dir = tmp.path();
+        // Use a named subdirectory — auto_resolve uses the dir basename, not the component ID
+        let dir = tmp.path().join("my-plugin");
+        std::fs::create_dir_all(&dir).unwrap();
 
-        // Create a WordPress plugin file
+        // Create a WordPress plugin file matching the directory name
         std::fs::write(
             dir.join("my-plugin.php"),
             "<?php\n/**\n * Plugin Name: My Plugin\n */\n",
@@ -525,9 +543,36 @@ mod tests {
     }
 
     #[test]
+    fn auto_resolve_remote_path_uses_dirname_not_component_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Directory name differs from component ID — this is the bug scenario
+        let dir = tmp.path().join("extrachill");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("style.css"), "/*\nTheme Name: Extra Chill\n*/\n").unwrap();
+
+        let component = Component {
+            id: "extrachill-theme".to_string(), // ID differs from dir name
+            local_path: dir.to_string_lossy().to_string(),
+            extensions: Some(HashMap::from([(
+                "wordpress".to_string(),
+                ScopedExtensionConfig::default(),
+            )])),
+            ..Component::default()
+        };
+
+        // Should use directory name "extrachill", NOT component ID "extrachill-theme"
+        assert_eq!(
+            component.auto_resolve_remote_path(),
+            Some("wp-content/themes/extrachill".to_string()),
+        );
+    }
+
+    #[test]
     fn auto_resolve_remote_path_detects_wordpress_theme() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let dir = tmp.path();
+        let dir = tmp.path().join("my-theme");
+        std::fs::create_dir_all(&dir).unwrap();
 
         // Create a WordPress theme style.css
         std::fs::write(dir.join("style.css"), "/*\nTheme Name: My Theme\n*/\n").unwrap();
@@ -566,7 +611,8 @@ mod tests {
     #[test]
     fn resolve_remote_path_fills_empty() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let dir = tmp.path();
+        let dir = tmp.path().join("my-plugin");
+        std::fs::create_dir_all(&dir).unwrap();
 
         std::fs::write(
             dir.join("my-plugin.php"),

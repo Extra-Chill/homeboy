@@ -367,12 +367,20 @@ fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
             }
         };
 
-        // Save the current ref (branch name or commit hash for detached HEAD)
+        // Save the current branch name. Use symbolic-ref which returns the
+        // actual branch name and fails cleanly on detached HEAD (unlike
+        // --abbrev-ref which returns the literal "HEAD" string). If HEAD is
+        // already detached, save the commit hash so we can at least restore
+        // to the same commit afterward.
         let original_ref = crate::engine::command::run_in_optional(
             path,
             "git",
-            &["rev-parse", "--abbrev-ref", "HEAD"],
+            &["symbolic-ref", "--short", "HEAD"],
         )
+        .or_else(|| {
+            // Detached HEAD — save the commit hash as fallback
+            crate::engine::command::run_in_optional(path, "git", &["rev-parse", "HEAD"])
+        })
         .unwrap_or_else(|| "main".to_string());
 
         // If already on this tag's commit, skip checkout
@@ -430,10 +438,6 @@ fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
 /// is inconvenient but not destructive.
 fn restore_branches(checkouts: &[TagCheckout]) {
     for checkout in checkouts {
-        // Don't restore if original was detached HEAD (already on a tag/commit)
-        if checkout.original_ref == "HEAD" {
-            continue;
-        }
         let restore = crate::engine::command::run_in(
             &checkout.local_path,
             "git",
