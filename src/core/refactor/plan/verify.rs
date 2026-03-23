@@ -99,70 +99,43 @@ pub fn run_audit_refactor(
     exclude_kinds: &[crate::code_audit::AuditFinding],
     scoring: AuditConvergenceScoring,
     verification: AuditVerificationToggles,
-    max_iterations: usize,
+    _max_iterations: usize,
     write: bool,
 ) -> crate::Result<AuditRefactorOutcome> {
-    let mut current_result = initial_result;
+    let current_result = initial_result;
     let mut iterations = Vec::new();
-    let mut seen_fingerprints = HashSet::new();
-    let mut final_fix_result = fixer::FixResult {
-        fixes: vec![],
-        new_files: vec![],
-        decompose_plans: vec![],
-        skipped: vec![],
-        chunk_results: vec![],
-        total_insertions: 0,
-        files_modified: 0,
-    };
-    let mut final_policy_summary = fixer::PolicySummary::default();
+    let final_fix_result;
+    let final_policy_summary;
 
     if write {
-        for iteration_index in 0..max_iterations.max(1) {
-            let before_fingerprint = findings_fingerprint(&current_result);
-            if !seen_fingerprints.insert(before_fingerprint) {
-                iterations.push(AuditRefactorIterationSummary {
-                    iteration: iteration_index + 1,
-                    findings_before: current_result.findings.len(),
-                    findings_after: current_result.findings.len(),
-                    weighted_score_before: weighted_finding_score_with(&current_result, scoring),
-                    weighted_score_after: weighted_finding_score_with(&current_result, scoring),
-                    score_delta: 0,
-                    applied_chunks: 0,
-                    reverted_chunks: 0,
-                    changed_files: vec![],
-                    status: "stopped_cycle_detected".to_string(),
-                });
-                break;
-            }
+        // Single pass: take the provided findings, generate fixes, apply, validate.
+        // The refactor command receives findings from the audit that already ran —
+        // it does not re-run the audit internally. The convergence loop
+        // (audit → fix → PR → merge → re-audit) belongs in the orchestration
+        // pipeline, not inside a single refactor invocation.
+        let (fix_result, policy_summary, mut iteration_summary) = run_fix_iteration(
+            &current_result,
+            only_kinds,
+            exclude_kinds,
+            scoring,
+            verification,
+        )?;
 
-            let (fix_result, policy_summary, mut iteration_summary) = run_fix_iteration(
-                &current_result,
-                only_kinds,
-                exclude_kinds,
-                scoring,
-                verification,
-            )?;
+        let changed_files = iteration_summary.changed_files.clone();
+        final_fix_result = fix_result;
+        final_policy_summary = policy_summary;
 
-            let changed_files = iteration_summary.changed_files.clone();
-            final_fix_result = fix_result.clone();
-            final_policy_summary = policy_summary;
-
-            if changed_files.is_empty() {
-                iteration_summary.iteration = iteration_index + 1;
-                iteration_summary.findings_after = current_result.findings.len();
-                iteration_summary.weighted_score_after =
-                    weighted_finding_score_with(&current_result, scoring);
-                iteration_summary.score_delta =
-                    score_delta(&current_result, &current_result, scoring);
-                iteration_summary.status = "stopped_no_safe_changes".to_string();
-                iterations.push(iteration_summary);
-                break;
-            }
-
-            // Fail-fast: quick brace-balance check on changed files BEFORE
-            // the expensive compile. Catches fixer-induced brace corruption
-            // (mismatched delimiters from template expansion, bad line removals)
-            // in milliseconds instead of waiting for a 20+ minute cold compile.
+        if changed_files.is_empty() {
+            iteration_summary.iteration = 1;
+            iteration_summary.findings_after = current_result.findings.len();
+            iteration_summary.weighted_score_after =
+                weighted_finding_score_with(&current_result, scoring);
+            iteration_summary.score_delta = 0;
+            iteration_summary.status = "no_safe_changes".to_string();
+            iterations.push(iteration_summary);
+        } else {
+            // Quick brace-balance check before expensive compile.
+            // Catches fixer-induced brace corruption in milliseconds.
             let root = Path::new(&current_result.source_path);
             let compile_check_files: Vec<PathBuf> =
                 changed_files.iter().map(|f| root.join(f)).collect();
@@ -186,7 +159,7 @@ pub fn run_audit_refactor(
                                 .display()
                                 .to_string();
                             brace_error = Some(format!(
-                                "Unbalanced braces in {} after applying fixes — fixer produced broken code",
+                                "Unbalanced braces in {} — fixer produced broken code",
                                 rel
                             ));
                             break;
@@ -196,72 +169,34 @@ pub fn run_audit_refactor(
             }
 
             if let Some(err_msg) = brace_error {
-                crate::log_status!(
-                    "refactor",
-                    "Brace check failed after iteration {} — stopping immediately",
-                    iteration_index + 1
-                );
-                crate::log_status!("refactor", "{}", err_msg);
-                iteration_summary.iteration = iteration_index + 1;
+                crate::log_status!("refactor", "Brace check failed — {}", err_msg);
+                iteration_summary.iteration = 1;
                 iteration_summary.findings_after = current_result.findings.len();
                 iteration_summary.weighted_score_after =
                     weighted_finding_score_with(&current_result, scoring);
-                iteration_summary.score_delta =
-                    score_delta(&current_result, &current_result, scoring);
-                iteration_summary.status = "stopped_brace_corruption".to_string();
-                iterations.push(iteration_summary);
-                break;
-            }
-
-            // Full compile-check. If the code no longer compiles (e.g. type
-            // errors, missing imports), further iterations cannot recover.
-            let compile_result = validate_write::validate_only(root, &compile_check_files)?;
-            if !compile_result.success {
-                crate::log_status!(
-                    "refactor",
-                    "Compile check failed after iteration {} — stopping convergence",
-                    iteration_index + 1
-                );
-                if let Some(output) = &compile_result.output {
-                    crate::log_status!("refactor", "Compile error: {}", output);
-                }
-                iteration_summary.iteration = iteration_index + 1;
-                iteration_summary.findings_after = current_result.findings.len();
-                iteration_summary.weighted_score_after =
-                    weighted_finding_score_with(&current_result, scoring);
-                iteration_summary.score_delta =
-                    score_delta(&current_result, &current_result, scoring);
-                iteration_summary.status = "stopped_compile_failure".to_string();
-                iterations.push(iteration_summary);
-                break;
-            }
-
-            let next_result = code_audit::audit_path_with_id(
-                &current_result.component_id,
-                &current_result.source_path,
-            )?;
-
-            iteration_summary.iteration = iteration_index + 1;
-            iteration_summary.findings_after = next_result.findings.len();
-            iteration_summary.weighted_score_after =
-                weighted_finding_score_with(&next_result, scoring);
-            iteration_summary.score_delta = score_delta(&current_result, &next_result, scoring);
-            iteration_summary.status = if next_result.findings.is_empty() {
-                "stopped_clean".to_string()
-            } else if iteration_summary.score_delta <= 0 {
-                "stopped_no_progress".to_string()
+                iteration_summary.score_delta = 0;
+                iteration_summary.status = "brace_corruption".to_string();
             } else {
-                "continued".to_string()
-            };
-            let should_stop = next_result.findings.is_empty() || iteration_summary.score_delta <= 0;
-            iterations.push(iteration_summary);
+                // Compile check
+                let compile_result = validate_write::validate_only(root, &compile_check_files)?;
+                iteration_summary.iteration = 1;
+                iteration_summary.findings_after = current_result.findings.len();
+                iteration_summary.weighted_score_after =
+                    weighted_finding_score_with(&current_result, scoring);
+                iteration_summary.score_delta = 0;
 
-            if should_stop {
-                current_result = next_result;
-                break;
+                if !compile_result.success {
+                    crate::log_status!("refactor", "Compile check failed after applying fixes");
+                    if let Some(output) = &compile_result.output {
+                        crate::log_status!("refactor", "{}", output);
+                    }
+                    iteration_summary.status = "compile_failure".to_string();
+                } else {
+                    iteration_summary.status = "completed".to_string();
+                }
             }
 
-            current_result = next_result;
+            iterations.push(iteration_summary);
         }
     } else {
         let root = Path::new(&current_result.source_path);
@@ -282,12 +217,6 @@ pub fn run_audit_refactor(
         policy_summary: final_policy_summary,
         iterations,
     })
-}
-
-fn findings_fingerprint(result: &CodeAuditResult) -> Vec<String> {
-    let mut fingerprints: Vec<String> = result.findings.iter().map(finding_fingerprint).collect();
-    fingerprints.sort();
-    fingerprints
 }
 
 fn load_or_discover(component_id: &str, source_path: &str) -> Option<Component> {

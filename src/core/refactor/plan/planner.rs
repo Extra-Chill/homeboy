@@ -655,6 +655,13 @@ fn plan_audit_stage(
         Vec<String>,
         Vec<String>,
     ) = if write {
+        // Single pass: generate fixes from the provided findings, apply, validate.
+        // The audit already ran and provided findings in `result` — the refactor
+        // command does not re-run the audit internally. The convergence loop
+        // (audit → fix → merge → re-audit) belongs in the full orchestration
+        // pipeline, not inside a single refactor invocation. Each cold compile
+        // in the sandbox takes 10-20 minutes with no target/ cache, so multiple
+        // iterations are prohibitively expensive.
         let outcome = super::verify::run_audit_refactor(
             result.clone(),
             only,
@@ -664,7 +671,7 @@ fn plan_audit_stage(
                 lint_smoke: true,
                 test_smoke: true,
             },
-            3,
+            1,
             true,
         )?;
 
