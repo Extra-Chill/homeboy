@@ -270,6 +270,7 @@ pub(crate) fn generate_test_plan_with_types(
 /// Template variables are replaced: `{fn_name}`, `{fn_call}`, `{param_list}`, etc.
 pub(crate) fn render_test_plan(plan: &TestPlan, templates: &HashMap<String, String>) -> String {
     let mut output = String::new();
+    let mut seen_names: HashMap<String, usize> = HashMap::new();
 
     for case in &plan.cases {
         let template = match templates.get(&case.template_key) {
@@ -283,12 +284,26 @@ pub(crate) fn render_test_plan(plan: &TestPlan, templates: &HashMap<String, Stri
             }
         };
 
+        // Deduplicate test names by appending a numeric suffix when a name
+        // has been seen before. This prevents compilation errors from branches
+        // with identical slugified conditions (e.g. two `None => return false`
+        // match arms producing the same test name). (#818)
+        let unique_name = {
+            let count = seen_names.entry(case.test_name.clone()).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                case.test_name.clone()
+            } else {
+                format!("{}_{}", case.test_name, count)
+            }
+        };
+
         let mut rendered = template.clone();
         for (key, value) in &case.variables {
             rendered = rendered.replace(&format!("{{{}}}", key), value);
         }
         // Also replace the test name
-        rendered = rendered.replace("{test_name}", &case.test_name);
+        rendered = rendered.replace("{test_name}", &unique_name);
 
         output.push_str(&rendered);
         output.push('\n');
@@ -2129,6 +2144,54 @@ mod tests {
         let output = render_test_plan(&plan, &templates);
         assert!(output.contains("test_find_item_"));
         assert!(output.contains("todo!()"));
+    }
+
+    #[test]
+    fn test_render_test_plan_deduplicates_identical_names() {
+        // Simulate two branches with identical slugified conditions
+        let plan = TestPlan {
+            function_name: "check_status".to_string(),
+            cases: vec![
+                TestCase {
+                    test_name: "test_check_status_none_return_false".to_string(),
+                    branch_condition: "None => return false".to_string(),
+                    expected_variant: "ok".to_string(),
+                    expected_value: None,
+                    template_key: "default".to_string(),
+                    variables: HashMap::new(),
+                },
+                TestCase {
+                    test_name: "test_check_status_none_return_false".to_string(),
+                    branch_condition: "None => return false (other arm)".to_string(),
+                    expected_variant: "ok".to_string(),
+                    expected_value: None,
+                    template_key: "default".to_string(),
+                    variables: HashMap::new(),
+                },
+                TestCase {
+                    test_name: "test_check_status_none_return_false".to_string(),
+                    branch_condition: "None => return false (third arm)".to_string(),
+                    expected_variant: "ok".to_string(),
+                    expected_value: None,
+                    template_key: "default".to_string(),
+                    variables: HashMap::new(),
+                },
+            ],
+        };
+
+        let mut templates = HashMap::new();
+        templates.insert(
+            "default".to_string(),
+            "fn {test_name}() {{}}\n".to_string(),
+        );
+
+        let output = render_test_plan(&plan, &templates);
+
+        // First occurrence keeps original name
+        assert!(output.contains("fn test_check_status_none_return_false()"));
+        // Subsequent occurrences get numeric suffixes
+        assert!(output.contains("fn test_check_status_none_return_false_2()"));
+        assert!(output.contains("fn test_check_status_none_return_false_3()"));
     }
 
     #[test]
