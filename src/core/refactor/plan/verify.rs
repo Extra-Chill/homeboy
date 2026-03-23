@@ -100,12 +100,8 @@ pub fn run_audit_refactor(
         // it does not re-run the audit internally. The convergence loop
         // (audit → fix → PR → merge → re-audit) belongs in the orchestration
         // pipeline, not inside a single refactor invocation.
-        let (fix_result, policy_summary, mut iteration_summary) = run_fix_iteration(
-            &current_result,
-            only_kinds,
-            exclude_kinds,
-            scoring,
-        )?;
+        let (fix_result, policy_summary, mut iteration_summary) =
+            run_fix_iteration(&current_result, only_kinds, exclude_kinds, scoring)?;
 
         let changed_files = iteration_summary.changed_files.clone();
         final_fix_result = fix_result;
@@ -144,8 +140,6 @@ pub fn run_audit_refactor(
         iterations,
     })
 }
-
-
 
 fn run_fix_iteration(
     audit_result: &CodeAuditResult,
@@ -323,5 +317,3 @@ fn run_fix_iteration(
         },
     ))
 }
-
-
