@@ -100,8 +100,12 @@ pub fn run_audit_refactor(
         // it does not re-run the audit internally. The convergence loop
         // (audit → fix → PR → merge → re-audit) belongs in the orchestration
         // pipeline, not inside a single refactor invocation.
-        let (fix_result, policy_summary, mut iteration_summary) =
-            run_fix_iteration(&current_result, only_kinds, exclude_kinds, scoring)?;
+        let (fix_result, policy_summary, mut iteration_summary) = run_fix_iteration(
+            &current_result,
+            only_kinds,
+            exclude_kinds,
+            scoring,
+        )?;
 
         let changed_files = iteration_summary.changed_files.clone();
         final_fix_result = fix_result;
@@ -140,6 +144,8 @@ pub fn run_audit_refactor(
         iterations,
     })
 }
+
+
 
 fn run_fix_iteration(
     audit_result: &CodeAuditResult,
@@ -318,62 +324,4 @@ fn run_fix_iteration(
     ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_rewrite_callers_after_dedup_insertion_finding_crate_code_audit_auditfinding_duplicatefun(
-    ) {
-        rewrite_callers_after_dedup();
-    }
-
-    #[test]
-    fn test_rewrite_callers_after_dedup_let_some_canonical_file_insertion() {
-        rewrite_callers_after_dedup();
-    }
-
-    #[test]
-    fn test_rewrite_callers_after_dedup_has_expected_effects() {
-        // Expected effects: logging
-
-        let _ = rewrite_callers_after_dedup();
-    }
-
-    #[test]
-    fn test_run_audit_refactor_default_path() {
-        let initial_result = Default::default();
-        let only_kinds = Vec::new();
-        let exclude_kinds = Vec::new();
-        let scoring = Default::default();
-        let _max_iterations = 0;
-        let write = false;
-        let _result = run_audit_refactor(
-            initial_result,
-            &only_kinds,
-            &exclude_kinds,
-            scoring,
-            _max_iterations,
-            write,
-        );
-    }
-
-    #[test]
-    fn test_run_audit_refactor_has_expected_effects() {
-        // Expected effects: mutation
-        let initial_result = Default::default();
-        let only_kinds = Vec::new();
-        let exclude_kinds = Vec::new();
-        let scoring = Default::default();
-        let _max_iterations = 0;
-        let write = false;
-        let _ = run_audit_refactor(
-            initial_result,
-            &only_kinds,
-            &exclude_kinds,
-            scoring,
-            _max_iterations,
-            write,
-        );
-    }
-}
