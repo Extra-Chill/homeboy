@@ -270,9 +270,12 @@ fn find_extension_with_validate(file_ext: &str) -> Option<extension::ExtensionMa
 /// If no extension provides a validate script, we check for common build tools
 /// that can validate without a full build.
 fn resolve_builtin_validate_command(root: &Path) -> Option<String> {
-    // Rust: Cargo.toml → cargo check
+    // Rust: Cargo.toml → cargo check --tests
+    // --tests includes #[cfg(test)] modules so auto-generated test code
+    // is validated before committing. Without it, broken test signatures,
+    // duplicate names, and bad format strings slip through.
     if root.join("Cargo.toml").exists() {
-        return Some("cargo check 2>&1".to_string());
+        return Some("cargo check --tests 2>&1".to_string());
     }
 
     // TypeScript: tsconfig.json → tsc --noEmit
@@ -299,7 +302,7 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"t\"").unwrap();
         let cmd = resolve_builtin_validate_command(dir.path());
-        assert_eq!(cmd, Some("cargo check 2>&1".to_string()));
+        assert_eq!(cmd, Some("cargo check --tests 2>&1".to_string()));
     }
 
     #[test]
