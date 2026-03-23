@@ -472,15 +472,41 @@ fn build_call_graph(
     graph
 }
 
-/// Find connected components in the call graph using union-find.
+/// Maximum number of callees before a function is considered a "hub".
 ///
-/// Returns groups of function names that are connected by call relationships.
-fn call_graph_components(graph: &BTreeMap<String, HashSet<String>>) -> Vec<(String, Vec<String>)> {
-    // Union-find: map each name to its root
+/// Hub functions (orchestrators that call many others) are excluded from
+/// union-find clustering to prevent mega-groups. They stay in the parent
+/// module while their callees form focused sub-clusters.
+const HUB_THRESHOLD: usize = 4;
+
+/// Find connected components in the call graph using hub-aware union-find.
+///
+/// Unlike naive union-find, this identifies "hub" functions — orchestrators
+/// that call many others — and excludes their edges from clustering. This
+/// prevents mega-groups where everything reachable from a hub collapses into
+/// one component.
+///
+/// Hub functions are returned separately so they can be kept in the parent
+/// module (they're the orchestration layer that ties sub-clusters together).
+///
+/// Returns: (clustered groups, hub function names)
+fn call_graph_components(
+    graph: &BTreeMap<String, HashSet<String>>,
+) -> (Vec<(String, Vec<String>)>, Vec<String>) {
     let all_names: Vec<String> = graph.keys().cloned().collect();
+
+    // Identify hubs: functions that call HUB_THRESHOLD or more other functions
+    let hubs: HashSet<&str> = graph
+        .iter()
+        .filter(|(_, callees)| callees.len() >= HUB_THRESHOLD)
+        .map(|(name, _)| name.as_str())
+        .collect();
+
+    // Union-find on non-hub functions only
+    let non_hub_names: Vec<&String> = all_names.iter().filter(|n| !hubs.contains(n.as_str())).collect();
     let mut parent: BTreeMap<String, String> = BTreeMap::new();
-    for name in &all_names {
-        parent.insert(name.clone(), name.clone());
+    for name in &non_hub_names {
+        parent.insert((*name).clone(), (*name).clone());
     }
 
     fn find(parent: &mut BTreeMap<String, String>, x: &str) -> String {
@@ -502,8 +528,13 @@ fn call_graph_components(graph: &BTreeMap<String, HashSet<String>>) -> Vec<(Stri
         }
     }
 
-    // Union functions that call each other
+    // Build edges only between non-hub functions.
+    // Also consider reverse edges from hub callees: if a hub calls both A and B,
+    // and A also calls B, then A and B should still cluster together.
     for (caller, callees) in graph {
+        if hubs.contains(caller.as_str()) {
+            continue; // Skip hub edges
+        }
         for callee in callees {
             if parent.contains_key(callee) {
                 union(&mut parent, caller, callee);
@@ -513,24 +544,35 @@ fn call_graph_components(graph: &BTreeMap<String, HashSet<String>>) -> Vec<(Stri
 
     // Group by root
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for name in &all_names {
+    for name in &non_hub_names {
         let root = find(&mut parent, name);
-        groups.entry(root).or_default().push(name.clone());
+        groups.entry(root).or_default().push((*name).clone());
     }
 
     // Only return groups with 2+ members (singletons aren't useful)
-    groups
+    let clustered: Vec<(String, Vec<String>)> = groups
         .into_iter()
         .filter(|(_, members)| members.len() >= 2)
-        .collect()
+        .collect();
+
+    let hub_names: Vec<String> = hubs.iter().map(|s| s.to_string()).collect();
+    (clustered, hub_names)
 }
 
 /// Pick a representative name for a call-graph cluster.
 ///
-/// Prefers the function that is called by the most others (the "hub"),
-/// or falls back to the first alphabetically.
+/// Uses a multi-signal heuristic:
+/// 1. **Shared prefix** — if most members share a prefix (e.g., `resolve_*`), use it
+/// 2. **Longest common prefix** — if all members share a 2+ word prefix, use it
+/// 3. **Most-called function** — fall back to the function called most by others
+/// 4. **First alphabetically** — final fallback
 fn pick_cluster_label(members: &[String], graph: &BTreeMap<String, HashSet<String>>) -> String {
-    // Count how many times each member is called by other members
+    // Strategy 1: Check if most members share a common prefix
+    if let Some(prefix) = find_dominant_prefix(members) {
+        return prefix;
+    }
+
+    // Strategy 2: Most-called function as label
     let mut call_count: BTreeMap<&str, usize> = BTreeMap::new();
     for member in members {
         for callee in graph.get(member).into_iter().flatten() {
@@ -540,7 +582,6 @@ fn pick_cluster_label(members: &[String], graph: &BTreeMap<String, HashSet<Strin
         }
     }
 
-    // Pick the most-called member as the label
     call_count
         .into_iter()
         .max_by_key(|(_, count)| *count)
@@ -551,6 +592,44 @@ fn pick_cluster_label(members: &[String], graph: &BTreeMap<String, HashSet<Strin
                 .cloned()
                 .unwrap_or_else(|| "group".to_string())
         })
+}
+
+/// Find a dominant prefix shared by most members of a cluster.
+///
+/// Returns the prefix if ≥60% of members share it and it's a meaningful
+/// word (not a stop word). Prefers longer (more specific) prefixes.
+fn find_dominant_prefix(members: &[String]) -> Option<String> {
+    if members.len() < 2 {
+        return None;
+    }
+
+    let threshold = (members.len() as f64 * 0.6).ceil() as usize;
+    let mut prefix_counts: BTreeMap<String, usize> = BTreeMap::new();
+
+    for member in members {
+        let parts: Vec<&str> = member.split('_').filter(|s| !s.is_empty()).collect();
+        // Try 2-word prefix first, then 1-word
+        if parts.len() >= 2 {
+            let two_word = format!("{}_{}", parts[0], parts[1]).to_lowercase();
+            if !is_stop_word(parts[0]) {
+                *prefix_counts.entry(two_word).or_default() += 1;
+            }
+        }
+        if !parts.is_empty() && !is_stop_word(parts[0]) && parts[0].len() > 2 {
+            *prefix_counts.entry(parts[0].to_lowercase()).or_default() += 1;
+        }
+    }
+
+    // Find the longest prefix that meets the threshold
+    let mut candidates: Vec<_> = prefix_counts
+        .into_iter()
+        .filter(|(_, count)| *count >= threshold)
+        .collect();
+
+    // Sort by specificity: longer prefix first, then by count
+    candidates.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| b.1.cmp(&a.1)));
+
+    candidates.into_iter().next().map(|(prefix, _)| prefix)
 }
 
 // ============================================================================
@@ -712,6 +791,16 @@ fn is_stop_word(word: &str) -> bool {
             | "pub"
             | "run"
             | "do"
+            | "make"
+            | "on"
+            | "by"
+            | "or"
+            | "an"
+            | "at"
+            | "no"
+            | "not"
+            | "can"
+            | "all"
     )
 }
 
@@ -785,8 +874,15 @@ fn group_items(file: &str, items: &[ParsedItem], content: &str) -> Vec<Decompose
     if !unassigned_fns.is_empty() {
         let fn_name_set: HashSet<&str> = unassigned_fns.iter().map(|i| i.name.as_str()).collect();
         let call_graph = build_call_graph(&unassigned_fns, &fn_name_set);
-        let components = call_graph_components(&call_graph);
+        let (components, hub_names) = call_graph_components(&call_graph);
         let mut graph_assigned: HashSet<String> = HashSet::new();
+
+        // Hub functions (orchestrators) are excluded from clusters.
+        // They stay unassigned and will be handled by name clustering below,
+        // or stay in the parent module if they don't cluster with anything.
+        for hub in &hub_names {
+            graph_assigned.insert(hub.clone());
+        }
 
         for (_, members) in &components {
             let label = pick_cluster_label(members, &call_graph);
@@ -799,11 +895,11 @@ fn group_items(file: &str, items: &[ParsedItem], content: &str) -> Vec<Decompose
                 .extend(members.iter().cloned());
         }
 
-        // Remaining: name-based clustering
+        // Remaining (including hubs): name-based clustering
         let still_unassigned: Vec<&str> = unassigned_fns
             .iter()
             .map(|i| i.name.as_str())
-            .filter(|n| !graph_assigned.contains(*n))
+            .filter(|n| !graph_assigned.contains(*n) || hub_names.contains(&n.to_string()))
             .collect();
 
         if !still_unassigned.is_empty() {
@@ -1564,7 +1660,14 @@ fn parse_hunk() {}
         let fn_names: HashSet<&str> = items.iter().map(|i| i.name.as_str()).collect();
 
         let graph = build_call_graph(&item_refs, &fn_names);
-        let components = call_graph_components(&graph);
+        let (components, hubs) = call_graph_components(&graph);
+
+        // detect_drift only calls 2 functions, below HUB_THRESHOLD (4),
+        // so it should NOT be a hub — it clusters with its callees
+        assert!(
+            !hubs.contains(&"detect_drift".to_string()),
+            "detect_drift calls only 2 functions, should not be a hub"
+        );
 
         // detect_drift calls get_changed_files and extract_changes_from_diff → one component
         let detect_component = components
@@ -1585,6 +1688,84 @@ fn parse_hunk() {}
         assert!(rules_component.is_some(), "rules group should exist");
         let members = &rules_component.unwrap().1;
         assert!(members.contains(&"is_auto_fixable".to_string()));
+    }
+
+    #[test]
+    fn call_graph_excludes_hubs_from_clusters() {
+        // An orchestrator function that calls 5+ others should be identified as a hub
+        // and excluded from union-find to prevent mega-clusters
+        let items: Vec<ParsedItem> = vec![
+            item_with_source(
+                "orchestrate",
+                "function",
+                "fn orchestrate() { step_a(); step_b(); step_c(); step_d(); step_e(); }",
+            ),
+            item_with_source("step_a", "function", "fn step_a() { helper_a(); }"),
+            item_with_source("helper_a", "function", "fn helper_a() {}"),
+            item_with_source("step_b", "function", "fn step_b() {}"),
+            item_with_source("step_c", "function", "fn step_c() {}"),
+            item_with_source("step_d", "function", "fn step_d() {}"),
+            item_with_source("step_e", "function", "fn step_e() {}"),
+        ];
+        let item_refs: Vec<&ParsedItem> = items.iter().collect();
+        let fn_names: HashSet<&str> = items.iter().map(|i| i.name.as_str()).collect();
+
+        let graph = build_call_graph(&item_refs, &fn_names);
+        let (components, hubs) = call_graph_components(&graph);
+
+        // orchestrate calls 5 functions → should be a hub
+        assert!(
+            hubs.contains(&"orchestrate".to_string()),
+            "orchestrate should be identified as a hub (calls {} functions)",
+            graph.get("orchestrate").map(|c| c.len()).unwrap_or(0)
+        );
+
+        // step_a and helper_a should cluster together (step_a calls helper_a)
+        let step_a_component = components
+            .iter()
+            .find(|(_, members)| members.contains(&"step_a".to_string()));
+        assert!(
+            step_a_component.is_some(),
+            "step_a + helper_a should form a cluster"
+        );
+        assert!(step_a_component.unwrap().1.contains(&"helper_a".to_string()));
+
+        // Without hub exclusion, all 7 functions would be in one mega-component.
+        // With hub exclusion, we should have smaller, focused clusters.
+        let max_cluster_size = components.iter().map(|(_, m)| m.len()).max().unwrap_or(0);
+        assert!(
+            max_cluster_size < 6,
+            "No cluster should contain all non-hub functions (max: {})",
+            max_cluster_size
+        );
+    }
+
+    #[test]
+    fn find_dominant_prefix_detects_shared_naming() {
+        let members = vec![
+            "resolve_assertion".to_string(),
+            "resolve_constructor".to_string(),
+            "resolve_type_default".to_string(),
+        ];
+        let prefix = find_dominant_prefix(&members);
+        assert_eq!(prefix, Some("resolve".to_string()));
+
+        let members = vec![
+            "infer_setup_from_condition".to_string(),
+            "infer_hint_for_param".to_string(),
+            "infer_setup_with_complements".to_string(),
+        ];
+        let prefix = find_dominant_prefix(&members);
+        assert_eq!(prefix, Some("infer".to_string()));
+
+        // No dominant prefix
+        let members = vec![
+            "foo".to_string(),
+            "bar".to_string(),
+            "baz".to_string(),
+        ];
+        let prefix = find_dominant_prefix(&members);
+        assert_eq!(prefix, None);
     }
 
     #[test]
