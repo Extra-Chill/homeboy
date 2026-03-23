@@ -280,10 +280,10 @@ mod tests {
     #[test]
     fn classify_adjacent_no_gap() {
         let lines = vec![
-            "    let x = 1;",  // line 1
-            "    let y = 2;",  // line 2
-            "    let x = 1;",  // line 3
-            "    let y = 2;",  // line 4
+            "    let x = 1;", // line 1
+            "    let y = 2;", // line 2
+            "    let x = 1;", // line 3
+            "    let y = 2;", // line 4
         ];
         let rel = classify_relation(&lines, 1, 3, 2);
         assert!(matches!(rel, DupRelation::Adjacent));
@@ -292,11 +292,11 @@ mod tests {
     #[test]
     fn classify_adjacent_blank_gap() {
         let lines = vec![
-            "    let x = 1;",  // line 1
-            "    let y = 2;",  // line 2
-            "",                // line 3
-            "    let x = 1;",  // line 4
-            "    let y = 2;",  // line 5
+            "    let x = 1;", // line 1
+            "    let y = 2;", // line 2
+            "",               // line 3
+            "    let x = 1;", // line 4
+            "    let y = 2;", // line 5
         ];
         let rel = classify_relation(&lines, 1, 4, 2);
         assert!(matches!(rel, DupRelation::Adjacent));
@@ -305,11 +305,11 @@ mod tests {
     #[test]
     fn classify_same_indent_small_gap() {
         let lines = vec![
-            "    let x = 1;",        // line 1
-            "    let y = 2;",        // line 2
-            "    let z = x + y;",    // line 3 — 1 line of code
-            "    let x = 1;",        // line 4
-            "    let y = 2;",        // line 5
+            "    let x = 1;",     // line 1
+            "    let y = 2;",     // line 2
+            "    let z = x + y;", // line 3 — 1 line of code
+            "    let x = 1;",     // line 4
+            "    let y = 2;",     // line 5
         ];
         let rel = classify_relation(&lines, 1, 4, 2);
         assert!(matches!(rel, DupRelation::SameIndentSmallGap));
@@ -318,14 +318,14 @@ mod tests {
     #[test]
     fn classify_same_indent_large_gap() {
         let lines = vec![
-            "    let x = 1;",        // line 1
-            "    let y = 2;",        // line 2
-            "    a();",              // line 3
-            "    b();",              // line 4
-            "    c();",              // line 5
-            "    d();",              // line 6  — 4 lines of code in gap
-            "    let x = 1;",        // line 7
-            "    let y = 2;",        // line 8
+            "    let x = 1;", // line 1
+            "    let y = 2;", // line 2
+            "    a();",       // line 3
+            "    b();",       // line 4
+            "    c();",       // line 5
+            "    d();",       // line 6  — 4 lines of code in gap
+            "    let x = 1;", // line 7
+            "    let y = 2;", // line 8
         ];
         let rel = classify_relation(&lines, 1, 7, 2);
         assert!(matches!(rel, DupRelation::SameIndentLargeGap));
@@ -334,13 +334,13 @@ mod tests {
     #[test]
     fn classify_cross_branch_different_indent() {
         let lines = vec![
-            "    if cond {",             // line 1
-            "        let x = 1;",        // line 2 — indent 8
-            "        let y = 2;",        // line 3
-            "    } else {",              // line 4
-            "            let x = 1;",    // line 5 — indent 12
-            "            let y = 2;",    // line 6
-            "    }",                     // line 7
+            "    if cond {",          // line 1
+            "        let x = 1;",     // line 2 — indent 8
+            "        let y = 2;",     // line 3
+            "    } else {",           // line 4
+            "            let x = 1;", // line 5 — indent 12
+            "            let y = 2;", // line 6
+            "    }",                  // line 7
         ];
         let rel = classify_relation(&lines, 2, 5, 2);
         assert!(matches!(rel, DupRelation::CrossBranch));
@@ -349,9 +349,9 @@ mod tests {
     #[test]
     fn median_indent_skips_blank() {
         let lines = vec![
-            "        code();",   // indent 8
-            "",                  // blank — skipped
-            "        more();",   // indent 8
+            "        code();", // indent 8
+            "",                // blank — skipped
+            "        more();", // indent 8
         ];
         assert_eq!(median_indent(&lines, 1, 3), 8);
     }
@@ -359,11 +359,11 @@ mod tests {
     #[test]
     fn median_indent_handles_outlier() {
         let lines = vec![
-            "        code();",       // indent 8
-            "    oddly();",          // indent 4
-            "        more();",       // indent 8
-            "        again();",      // indent 8
-            "        last();",       // indent 8
+            "        code();",  // indent 8
+            "    oddly();",     // indent 4
+            "        more();",  // indent 8
+            "        again();", // indent 8
+            "        last();",  // indent 8
         ];
         // Sorted: [4, 8, 8, 8, 8] → median at index 2 = 8
         assert_eq!(median_indent(&lines, 1, 5), 8);

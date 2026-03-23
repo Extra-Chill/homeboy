@@ -608,8 +608,7 @@ fn list() -> CmdResult<ComponentOutput> {
                 // Always surface remote_owner so missing config is visible (#602).
                 // Serde skips None fields, but for list output we want explicit null
                 // so users can audit which components are missing this critical config.
-                map.entry("remote_owner".to_string())
-                    .or_insert(Value::Null);
+                map.entry("remote_owner".to_string()).or_insert(Value::Null);
             }
             Ok(value)
         })

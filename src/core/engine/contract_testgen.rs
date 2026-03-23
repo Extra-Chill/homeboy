@@ -149,7 +149,10 @@ pub(crate) fn generate_test_plan_with_types(
                 type_defaults,
                 &contract_grammar.fallback_default,
             );
-            vars.insert("condition".to_string(), branch.condition.clone());
+            vars.insert(
+                "condition".to_string(),
+                sanitize_for_string_literal(&branch.condition),
+            );
             vars.insert("condition_slug".to_string(), slugify(&branch.condition));
 
             // Behavioral inference: derive setup overrides from branch condition,
@@ -206,7 +209,8 @@ pub(crate) fn generate_test_plan_with_types(
                     &contract.signature.return_type,
                     &branch.condition,
                     &contract_grammar.assertion_templates,
-                ).unwrap_or(assertion)
+                )
+                .unwrap_or(assertion)
             } else {
                 assertion
             };
@@ -2237,10 +2241,7 @@ mod tests {
         };
 
         let mut templates = HashMap::new();
-        templates.insert(
-            "default".to_string(),
-            "fn {test_name}() {{}}\n".to_string(),
-        );
+        templates.insert("default".to_string(), "fn {test_name}() {{}}\n".to_string());
 
         let output = render_test_plan(&plan, &templates);
 

@@ -1126,10 +1126,7 @@ mod tests {
 
     #[test]
     fn extract_propagation_call_no_match() {
-        assert_eq!(
-            extract_propagation_call("    let x = 42;"),
-            "operation"
-        );
+        assert_eq!(extract_propagation_call("    let x = 42;"), "operation");
     }
 
     #[test]
@@ -1162,11 +1159,7 @@ mod tests {
         };
 
         let mut branches = Vec::new();
-        detect_error_propagation(
-            &body_lines,
-            &contract,
-            &mut branches,
-        );
+        detect_error_propagation(&body_lines, &contract, &mut branches);
 
         assert_eq!(branches.len(), 1);
         assert_eq!(branches[0].returns.variant, "err");
@@ -1214,11 +1207,7 @@ mod tests {
             line: Some(5),
         }];
 
-        detect_error_propagation(
-            &body_lines,
-            &contract,
-            &mut branches,
-        );
+        detect_error_propagation(&body_lines, &contract, &mut branches);
 
         // Should NOT add another err branch
         assert_eq!(branches.len(), 1);

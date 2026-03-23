@@ -155,8 +155,7 @@ pub(crate) fn generate_comment_fixes(
             continue;
         }
 
-        let (block_kind, start_line, end_line) =
-            classify_and_bound(&lines, comment_idx);
+        let (block_kind, start_line, end_line) = classify_and_bound(&lines, comment_idx);
 
         let (safety, blocked_reason) = match block_kind {
             BlockKind::Function | BlockKind::GuardClause | BlockKind::MatchArm => {
@@ -169,18 +168,20 @@ pub(crate) fn generate_comment_fixes(
                     Some("Removing else branch changes control flow — verify the if-branch is the canonical path".to_string()),
                 )
             }
-            BlockKind::CodeSection => {
-                (
-                    FixSafetyTier::PlanOnly,
-                    Some("Legacy code section boundaries detected heuristically — verify removal range".to_string()),
-                )
-            }
-            BlockKind::Unknown => {
-                (
-                    FixSafetyTier::PlanOnly,
-                    Some("Could not determine legacy code block boundaries — manual review required".to_string()),
-                )
-            }
+            BlockKind::CodeSection => (
+                FixSafetyTier::PlanOnly,
+                Some(
+                    "Legacy code section boundaries detected heuristically — verify removal range"
+                        .to_string(),
+                ),
+            ),
+            BlockKind::Unknown => (
+                FixSafetyTier::PlanOnly,
+                Some(
+                    "Could not determine legacy code block boundaries — manual review required"
+                        .to_string(),
+                ),
+            ),
         };
 
         let description = format!(
@@ -277,11 +278,7 @@ fn classify_and_bound(lines: &[&str], comment_idx: usize) -> (BlockKind, usize, 
     // Pattern: contiguous code section — runs until next blank line or de-indent
     let section_end = find_code_section_end(lines, comment_idx);
     if section_end > comment_idx {
-        return (
-            BlockKind::CodeSection,
-            comment_idx + 1,
-            section_end + 1,
-        );
+        return (BlockKind::CodeSection, comment_idx + 1, section_end + 1);
     }
 
     // Fallback: just the comment line
@@ -311,8 +308,7 @@ fn is_function_start(line: &str) -> bool {
         return true;
     }
     // PHP: function, public function, private function, etc.
-    let php_re =
-        Regex::new(r"^(?:public|private|protected|static|\s)*function\s+\w+").unwrap();
+    let php_re = Regex::new(r"^(?:public|private|protected|static|\s)*function\s+\w+").unwrap();
     php_re.is_match(line)
 }
 
@@ -551,7 +547,7 @@ mod tests {
         let (kind, start, end) = classify_and_bound(&src, 1);
         assert_eq!(kind, BlockKind::Function);
         assert_eq!(start, 2); // comment line (1-indexed)
-        assert_eq!(end, 5);   // closing brace of old_handler
+        assert_eq!(end, 5); // closing brace of old_handler
     }
 
     #[test]
@@ -582,7 +578,7 @@ mod tests {
         let (kind, start, end) = classify_and_bound(&src, 1);
         assert_eq!(kind, BlockKind::GuardClause);
         assert_eq!(start, 2); // comment
-        assert_eq!(end, 5);   // closing brace of if
+        assert_eq!(end, 5); // closing brace of if
     }
 
     #[test]
@@ -598,7 +594,7 @@ mod tests {
         let (kind, start, end) = classify_and_bound(&src, 3);
         assert_eq!(kind, BlockKind::ElseBranch);
         assert_eq!(start, 3); // `} else {` line (1-indexed)
-        assert_eq!(end, 6);   // closing brace
+        assert_eq!(end, 6); // closing brace
     }
 
     #[test]
@@ -614,7 +610,7 @@ mod tests {
         let (kind, start, end) = classify_and_bound(&src, 2);
         assert_eq!(kind, BlockKind::MatchArm);
         assert_eq!(start, 3); // comment
-        assert_eq!(end, 4);   // match arm line
+        assert_eq!(end, 4); // match arm line
     }
 
     #[test]
@@ -633,15 +629,12 @@ mod tests {
         let (kind, start, end) = classify_and_bound(&src, 3);
         assert_eq!(kind, BlockKind::CodeSection);
         assert_eq!(start, 4); // comment
-        assert_eq!(end, 6);   // last line before blank
+        assert_eq!(end, 6); // last line before blank
     }
 
     #[test]
     fn classifies_unknown_at_end_of_file() {
-        let src = vec![
-            "fn main() {}",
-            "// outdated: leftover note",
-        ];
+        let src = vec!["fn main() {}", "// outdated: leftover note"];
         let (kind, start, end) = classify_and_bound(&src, 1);
         // No code after the comment — Unknown.
         assert_eq!(kind, BlockKind::Unknown);
@@ -668,9 +661,8 @@ mod tests {
             convention: "comment_hygiene".to_string(),
             severity: Severity::Info,
             file: "src/old.rs".to_string(),
-            description:
-                "Potential legacy/stale comment on line 1: workaround for broken upstream"
-                    .to_string(),
+            description: "Potential legacy/stale comment on line 1: workaround for broken upstream"
+                .to_string(),
             suggestion: "Validate".to_string(),
             kind: AuditFinding::LegacyComment,
         });
@@ -795,12 +787,7 @@ mod tests {
 
     #[test]
     fn is_inside_else_branch_false_in_if() {
-        let lines = vec![
-            "if a {",
-            "    // workaround for bug",
-            "    x();",
-            "}",
-        ];
+        let lines = vec!["if a {", "    // workaround for bug", "    x();", "}"];
         assert!(!is_inside_else_branch(&lines, 1));
     }
 

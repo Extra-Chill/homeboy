@@ -43,8 +43,7 @@ pub fn resolve_project_component(
     // Inherit project-level extensions when the component's homeboy.json doesn't
     // declare any. This handles clean tag clones from older releases where
     // extensions weren't yet in homeboy.json. (#932)
-    if resolved.extensions.is_none() || resolved.extensions.as_ref().is_some_and(|e| e.is_empty())
-    {
+    if resolved.extensions.is_none() || resolved.extensions.as_ref().is_some_and(|e| e.is_empty()) {
         if let Some(project_extensions) = &project.extensions {
             if !project_extensions.is_empty() {
                 resolved.extensions = Some(project_extensions.clone());

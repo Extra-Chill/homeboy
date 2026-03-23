@@ -88,14 +88,11 @@ fn extract_php_fqcn(content: &str) -> Option<String> {
 
         if class_name.is_none() {
             // Match: class Foo, abstract class Foo, final class Foo
-            if let Some(rest) = trimmed
-                .strip_prefix("class ")
-                .or_else(|| {
-                    trimmed
-                        .strip_prefix("abstract class ")
-                        .or_else(|| trimmed.strip_prefix("final class "))
-                })
-            {
+            if let Some(rest) = trimmed.strip_prefix("class ").or_else(|| {
+                trimmed
+                    .strip_prefix("abstract class ")
+                    .or_else(|| trimmed.strip_prefix("final class "))
+            }) {
                 // Class name is the first word
                 let name = rest.split_whitespace().next()?;
                 class_name = Some(name.to_string());
@@ -526,7 +523,8 @@ fn generate_simple_duplicate_fixes(
         };
 
         let language = Language::from_path(&abs_path);
-        let import_stmt = generate_duplicate_import(&group.canonical_file, &group.function_name, &language, root);
+        let import_stmt =
+            generate_duplicate_import(&group.canonical_file, &group.function_name, &language, root);
 
         let mut insertions = vec![insertion(
             InsertionKind::FunctionRemoval {
@@ -702,7 +700,8 @@ mod tests {
 
     #[test]
     fn test_extract_php_fqcn_with_namespace() {
-        let content = "<?php\nnamespace DataMachine\\Abilities\\Fetch;\n\nclass FetchRssAbility {\n";
+        let content =
+            "<?php\nnamespace DataMachine\\Abilities\\Fetch;\n\nclass FetchRssAbility {\n";
         assert_eq!(
             extract_php_fqcn(content),
             Some("DataMachine\\Abilities\\Fetch\\FetchRssAbility".to_string())
@@ -711,8 +710,7 @@ mod tests {
 
     #[test]
     fn test_extract_php_fqcn_abstract_class() {
-        let content =
-            "<?php\nnamespace DataMachine\\Core;\n\nabstract class BaseHandler {\n";
+        let content = "<?php\nnamespace DataMachine\\Core;\n\nabstract class BaseHandler {\n";
         assert_eq!(
             extract_php_fqcn(content),
             Some("DataMachine\\Core\\BaseHandler".to_string())
@@ -722,10 +720,7 @@ mod tests {
     #[test]
     fn test_extract_php_fqcn_no_namespace() {
         let content = "<?php\nclass SimpleClass {\n";
-        assert_eq!(
-            extract_php_fqcn(content),
-            Some("SimpleClass".to_string())
-        );
+        assert_eq!(extract_php_fqcn(content), Some("SimpleClass".to_string()));
     }
 
     #[test]
@@ -742,7 +737,10 @@ mod tests {
             &Language::Rust,
             Path::new("/tmp"),
         );
-        assert_eq!(import, "use crate::core::engine::symbol_graph::parse_imports;");
+        assert_eq!(
+            import,
+            "use crate::core::engine::symbol_graph::parse_imports;"
+        );
     }
 
     #[test]
@@ -764,7 +762,10 @@ mod tests {
             &Language::Php,
             root,
         );
-        assert_eq!(import, "use DataMachine\\Abilities\\Fetch\\FetchRssAbility;");
+        assert_eq!(
+            import,
+            "use DataMachine\\Abilities\\Fetch\\FetchRssAbility;"
+        );
     }
 
     #[test]
@@ -776,7 +777,15 @@ mod tests {
             Path::new("/tmp"),
         );
         // JS imports derive the module name from the file path
-        assert!(import.starts_with("import {"), "Expected JS import, got: {}", import);
-        assert!(import.contains("helpers"), "Expected module name in import, got: {}", import);
+        assert!(
+            import.starts_with("import {"),
+            "Expected JS import, got: {}",
+            import
+        );
+        assert!(
+            import.contains("helpers"),
+            "Expected module name in import, got: {}",
+            import
+        );
     }
 }

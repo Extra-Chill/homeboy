@@ -216,7 +216,10 @@ fn find_prefix_match(project: &Project, inferred_id: &str) -> Option<String> {
             if suffix.starts_with('-') {
                 let after_dash = &suffix[1..];
                 let is_version_like = after_dash.starts_with('v')
-                    || after_dash.chars().next().is_some_and(|c| c.is_ascii_digit());
+                    || after_dash
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_digit());
                 if is_version_like {
                     // Prefer the longest matching prefix (most specific existing component)
                     if best_match.is_none_or(|prev| existing_id.len() > prev.len()) {

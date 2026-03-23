@@ -70,10 +70,7 @@ pub(crate) fn generate_near_duplicate_fixes(
     // Group by function name to find pairs.
     let mut groups: HashMap<String, Vec<NearDupInfo>> = HashMap::new();
     for info in infos {
-        groups
-            .entry(info.fn_name.clone())
-            .or_default()
-            .push(info);
+        groups.entry(info.fn_name.clone()).or_default().push(info);
     }
 
     for (fn_name, members) in &groups {
@@ -167,8 +164,7 @@ pub(crate) fn generate_near_duplicate_fixes(
         // 3. Ensure the canonical copy is pub(crate).
         let canon_path = root.join(canonical_file);
         if let Ok(canon_content) = std::fs::read_to_string(&canon_path) {
-            if let Some(vis_fix) =
-                build_visibility_upgrade(&canon_content, canonical_file, fn_name)
+            if let Some(vis_fix) = build_visibility_upgrade(&canon_content, canonical_file, fn_name)
             {
                 fixes.push(Fix {
                     file: canonical_file.to_string(),
@@ -234,11 +230,7 @@ fn file_to_module_path(file: &str) -> String {
 
 /// If the canonical function is not already `pub` or `pub(crate)`, generate a
 /// `VisibilityChange` insertion to make it `pub(crate)`.
-fn build_visibility_upgrade(
-    content: &str,
-    file: &str,
-    fn_name: &str,
-) -> Option<Insertion> {
+fn build_visibility_upgrade(content: &str, file: &str, fn_name: &str) -> Option<Insertion> {
     let lines: Vec<&str> = content.lines().collect();
 
     // Find the function declaration line.
