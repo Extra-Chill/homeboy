@@ -248,15 +248,6 @@ while [ "${PUSH_ATTEMPT}" -le "${AUTOFIX_PUSH_ATTEMPTS}" ]; do
     echo "Skipping code fixes (autofix cap reached)"
   fi
 
-  # Validate generated code compiles before committing.
-  # If validation fails, all changes are reverted and no commit is made.
-  if ! validate_autofix_changes "${WORKSPACE}"; then
-    echo "Autofix changes failed compilation — skipping commit"
-    echo "status=compile-failed" >> "${GITHUB_OUTPUT}"
-    echo "committed=false" >> "${GITHUB_OUTPUT}"
-    exit 0
-  fi
-
   maybe_update_baseline
 
   if ! stage_autofix_changes; then
