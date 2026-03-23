@@ -35,6 +35,8 @@ pub struct TestPlan {
     pub function_name: String,
     /// Source file containing the function.
     pub source_file: String,
+    /// Whether the function is async.
+    pub is_async: bool,
     /// Individual test cases to generate.
     pub cases: Vec<TestCase>,
 }
@@ -260,6 +262,7 @@ pub(crate) fn generate_test_plan_with_types(
     TestPlan {
         function_name: contract.name.clone(),
         source_file: contract.file.clone(),
+        is_async: contract.signature.is_async,
         cases,
     }
 }
@@ -305,11 +308,64 @@ pub(crate) fn render_test_plan(plan: &TestPlan, templates: &HashMap<String, Stri
         // Also replace the test name
         rendered = rendered.replace("{test_name}", &unique_name);
 
+        // For async functions, transform the test to use #[tokio::test] and .await.
+        // This avoids duplicating every template with async variants. (#818)
+        if plan.is_async {
+            rendered = make_test_async(&rendered);
+        }
+
         output.push_str(&rendered);
         output.push('\n');
     }
 
     output
+}
+
+/// Transform a synchronous test into an async test.
+///
+/// - `#[test]` → `#[tokio::test]`
+/// - `fn {name}()` → `async fn {name}()`
+/// - `{fn_name}({args})` gets `.await` appended (on lines with `let` bindings or bare calls)
+fn make_test_async(test_code: &str) -> String {
+    let mut result = String::new();
+
+    for line in test_code.lines() {
+        let transformed = line
+            // #[test] → #[tokio::test]
+            .replace("#[test]", "#[tokio::test]");
+
+        // fn name() → async fn name()
+        let transformed = if transformed.contains("fn ") && transformed.contains("()") {
+            transformed.replacen("fn ", "async fn ", 1)
+        } else {
+            transformed
+        };
+
+        // Add .await to function call lines (let result = fn(...); or let _ = fn(...);)
+        // but NOT to assert! lines or comment lines
+        let transformed = if (transformed.trim_start().starts_with("let ")
+            || transformed.trim_start().starts_with("{fn_name}"))
+            && transformed.trim_end().ends_with(';')
+            && !transformed.contains("assert")
+            && !transformed.contains("//")
+            && !transformed.contains("Default::default")
+        {
+            // Insert .await before the trailing semicolon
+            if let Some(semi_pos) = transformed.rfind(';') {
+                let (before, after) = transformed.split_at(semi_pos);
+                format!("{}.await{}", before, after)
+            } else {
+                transformed
+            }
+        } else {
+            transformed
+        };
+
+        result.push_str(&transformed);
+        result.push('\n');
+    }
+
+    result
 }
 
 /// Build template variables from a contract and optional branch.
@@ -2151,6 +2207,7 @@ mod tests {
         // Simulate two branches with identical slugified conditions
         let plan = TestPlan {
             function_name: "check_status".to_string(),
+            is_async: false,
             cases: vec![
                 TestCase {
                     test_name: "test_check_status_none_return_false".to_string(),
