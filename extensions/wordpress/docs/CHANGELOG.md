@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.4] - 2026-03-23
+
+### Fixed
+- atomic swap deploy with backup-before-replace for plugins and themes
+
 ## [2.10.3] - 2026-03-23
 
 ### Fixed
