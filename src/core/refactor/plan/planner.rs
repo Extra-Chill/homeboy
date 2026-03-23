@@ -267,6 +267,35 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 &stage.summary.changed_files,
                 &mut warnings,
             );
+
+            // Fail-fast: compile-check the sandbox after each stage that modifies
+            // files. If a stage breaks compilation (e.g. audit fixes introduce
+            // parse errors), subsequent stages (lint, test) would run on broken
+            // code — producing bogus findings and wasting time. Skip them.
+            let abs_changed: Vec<PathBuf> = stage
+                .summary
+                .changed_files
+                .iter()
+                .map(|f| working_root.path().join(f))
+                .collect();
+            let sandbox_compile =
+                validate_write::validate_only(working_root.path(), &abs_changed)?;
+            if !sandbox_compile.success {
+                crate::log_status!(
+                    "refactor",
+                    "Sandbox compile check failed after {} stage — skipping remaining stages",
+                    source
+                );
+                if let Some(output) = &sandbox_compile.output {
+                    warnings.push(format!(
+                        "{} stage broke compilation — skipping remaining stages: {}",
+                        source, output
+                    ));
+                }
+                accumulator.extend(stage.fix_results.clone());
+                planned_stages.push(stage);
+                break;
+            }
         }
 
         accumulator.extend(stage.fix_results.clone());
