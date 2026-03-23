@@ -55,6 +55,9 @@ enum ComponentCommand {
         /// Extension(s) this component uses (e.g., "wordpress"). Repeatable.
         #[arg(long = "extension", value_name = "EXTENSION")]
         extensions: Vec<String>,
+        /// Attach component to a project after creation
+        #[arg(long)]
+        project: Option<String>,
     },
     /// Display component configuration
     Show {
@@ -160,6 +163,7 @@ pub fn run(
             extract_command,
             changelog_target,
             extensions,
+            project,
         } => {
             if json.is_some() || skip_existing {
                 return Err(homeboy::Error::validation_invalid_argument(
@@ -234,11 +238,41 @@ pub fn run(
 
             component::write_portable_config(repo_path, &new_component)?;
 
+            // Attach to project if --project was specified (#900)
+            let mut attached_project: Option<String> = None;
+            if let Some(ref project_id) = project {
+                project::attach_component_path(project_id, &id, &local_path)?;
+                attached_project = Some(project_id.clone());
+            }
+
+            // Build a next-step hint when not attached to a project
+            let hint = if attached_project.is_some() {
+                None
+            } else {
+                // Try to suggest a project by checking existing projects
+                let suggestion = suggest_project_for_path(&local_path);
+                Some(match suggestion {
+                    Some(project_id) => format!(
+                        "Attach to a project to enable release/deploy:\n  homeboy project components attach-path {} {}",
+                        project_id, local_path
+                    ),
+                    None => format!(
+                        "Attach to a project to enable release/deploy:\n  homeboy project components attach-path <project> {}",
+                        local_path
+                    ),
+                })
+            };
+
             Ok((
                 ComponentOutput {
                     command: "component.create".to_string(),
                     id: Some(id),
                     entity: Some(component::portable_json(&new_component)?),
+                    hint,
+                    extra: ComponentExtra {
+                        project_ids: attached_project.map(|p| vec![p]),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 0,
@@ -275,6 +309,28 @@ pub fn run(
             add_version_target(&id, &file, &pattern)
         }
     }
+}
+
+/// Suggest a project for a newly created component based on sibling components.
+///
+/// Checks whether any existing project has components whose local_path shares the
+/// same parent directory as the new component's path. If a project is found with
+/// siblings in the same workspace directory, it's the most likely target.
+fn suggest_project_for_path(local_path: &str) -> Option<String> {
+    let new_parent = Path::new(local_path).parent()?;
+    let projects = project::list().ok()?;
+
+    for project in &projects {
+        for attachment in &project.components {
+            if let Some(existing_parent) = Path::new(&attachment.local_path).parent() {
+                if existing_parent == new_parent {
+                    return Some(project.id.clone());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn show(id: &str) -> CmdResult<ComponentOutput> {
