@@ -59,6 +59,14 @@ if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ] || [ "${GITHUB_ACTOR:-}" = "h
   exit 0
 fi
 
+if ! pr_is_active; then
+  echo "Skipping autofix: PR #${PR_NUMBER} is no longer open (merged or closed)"
+  echo "attempted=false" >> "${GITHUB_OUTPUT}"
+  echo "status=skipped-pr-closed" >> "${GITHUB_OUTPUT}"
+  echo "committed=false" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
 LAST_SUBJECT=$(git log -1 --pretty=%s 2>/dev/null || true)
 if [[ "${LAST_SUBJECT}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
   echo "Skipping autofix: HEAD already an autofix commit"
@@ -274,6 +282,15 @@ while [ "${PUSH_ATTEMPT}" -le "${AUTOFIX_PUSH_ATTEMPTS}" ]; do
   fi
 
   echo "Autofix push failed on attempt ${PUSH_ATTEMPT}/${AUTOFIX_PUSH_ATTEMPTS}; refetching latest PR head and recomputing"
+
+  # Re-check PR state before retrying — it may have been merged while we were fixing
+  if ! pr_is_active; then
+    echo "PR #${PR_NUMBER} was merged or closed during autofix — aborting retries"
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    echo "status=skipped-pr-closed" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
+
   fetch_latest_target_head || true
   PUSH_ATTEMPT=$((PUSH_ATTEMPT + 1))
 done

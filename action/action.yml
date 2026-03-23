@@ -335,6 +335,7 @@ runs:
         AUTOFIX_MODE: ${{ inputs.autofix-mode }}
         PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
         PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
         APP_TOKEN: ${{ inputs.app-token }}
       run: bash ${{ github.action_path }}/scripts/autofix/apply-autofix-commit.sh
 

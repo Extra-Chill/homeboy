@@ -2,6 +2,7 @@
 
 set -euo pipefail
 
+source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 source "${GITHUB_ACTION_PATH}/scripts/pr/comment/lib.sh"
 source "${GITHUB_ACTION_PATH}/scripts/pr/comment/sections.sh"
 source "${GITHUB_ACTION_PATH}/scripts/pr/comment/publish.sh"
@@ -12,6 +13,11 @@ COMP_ID="${COMPONENT_NAME:-$(basename "${GITHUB_REPOSITORY}")}"
 
 if [ -z "${OUTPUT_DIR}" ] || [ -z "${PR_NUMBER}" ]; then
   echo "Skipping PR comment — missing output dir or PR number"
+  exit 0
+fi
+
+if ! pr_is_active; then
+  echo "Skipping PR comment — PR #${PR_NUMBER} is no longer open (merged or closed)"
   exit 0
 fi
 
