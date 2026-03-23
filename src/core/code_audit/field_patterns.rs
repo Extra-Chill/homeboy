@@ -251,7 +251,9 @@ fn extract_type_name(line: &str) -> Option<String> {
     // Rust: pub struct Foo, struct Foo, pub(crate) struct Foo
     if let Some(pos) = trimmed.find("struct ") {
         let after = &trimmed[pos + 7..];
-        let name = after.split(|c: char| !c.is_alphanumeric() && c != '_').next()?;
+        let name = after
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .next()?;
         if !name.is_empty() {
             return Some(name.to_string());
         }
@@ -261,7 +263,9 @@ fn extract_type_name(line: &str) -> Option<String> {
     for keyword in &["class ", "interface "] {
         if let Some(pos) = trimmed.find(keyword) {
             let after = &trimmed[pos + keyword.len()..];
-            let name = after.split(|c: char| !c.is_alphanumeric() && c != '_').next()?;
+            let name = after
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()?;
             if !name.is_empty() {
                 return Some(name.to_string());
             }
@@ -318,15 +322,10 @@ fn parse_field_line(line: &str) -> Option<FieldSignature> {
 
         // Validate name is a reasonable identifier.
         if !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_')
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
             && !field_type.is_empty()
         {
-            return Some(FieldSignature {
-                name,
-                field_type,
-            });
+            return Some(FieldSignature { name, field_type });
         }
     }
 
@@ -440,7 +439,10 @@ impl Foo {
 
     #[test]
     fn extract_type_name_rust() {
-        assert_eq!(extract_type_name("pub struct Foo {"), Some("Foo".to_string()));
+        assert_eq!(
+            extract_type_name("pub struct Foo {"),
+            Some("Foo".to_string())
+        );
         assert_eq!(
             extract_type_name("pub(crate) struct Bar<T> {"),
             Some("Bar".to_string())
@@ -510,6 +512,9 @@ impl Foo {
         }
 
         let findings = detect_repeated_field_patterns(dir.path());
-        assert!(findings.is_empty(), "Two occurrences should be below threshold");
+        assert!(
+            findings.is_empty(),
+            "Two occurrences should be below threshold"
+        );
     }
 }

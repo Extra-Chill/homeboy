@@ -225,6 +225,24 @@ fn load_config(root: &Path) -> Option<WrapperInferenceConfig> {
 mod tests {
     use super::*;
 
+    fn make_fingerprint(path: &str, content: &str) -> FileFingerprint {
+        FileFingerprint {
+            relative_path: path.to_string(),
+            content: content.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn make_rule(name: &str, glob: &str, field: &str, patterns: &[&str]) -> WrapperRule {
+        WrapperRule {
+            name: name.to_string(),
+            wrapper_glob: glob.to_string(),
+            expected_field: field.to_string(),
+            call_patterns: patterns.iter().map(|p| p.to_string()).collect(),
+            field_format: None,
+        }
+    }
+
     #[test]
     fn test_has_field_php_style() {
         assert!(has_field("'ability' => 'foo'", "ability"));
@@ -343,30 +361,5 @@ mod tests {
         let matches = trace_calls(&fp.content, &patterns);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].captured, "PipelineAbilities");
-    }
-
-    #[test]
-    fn test_analyze_wrappers_let_some_config_load_config_root_else() {
-        let result = analyze_wrappers();
-        assert!(
-            result.is_ok(),
-            "expected Ok for: let Some(config) = load_config(root) else {"
-        );
-    }
-
-    #[test]
-    fn test_analyze_wrappers_if_let_some_line_m_line_num() {
-        let result = analyze_wrappers();
-        assert!(
-            result.is_ok(),
-            "expected Ok for: if let Some(line) = m.line_num {"
-        );
-    }
-
-    #[test]
-    fn test_analyze_wrappers_has_expected_effects() {
-        // Expected effects: mutation
-
-        let _ = analyze_wrappers();
     }
 }

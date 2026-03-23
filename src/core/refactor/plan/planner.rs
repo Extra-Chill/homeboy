@@ -278,8 +278,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 .iter()
                 .map(|f| working_root.path().join(f))
                 .collect();
-            let sandbox_compile =
-                validate_write::validate_only(working_root.path(), &abs_changed)?;
+            let sandbox_compile = validate_write::validate_only(working_root.path(), &abs_changed)?;
             if !sandbox_compile.success {
                 crate::log_status!(
                     "refactor",

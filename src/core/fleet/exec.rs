@@ -101,20 +101,20 @@ pub fn collect_exec(
         let mut client =
             match SshClient::from_server(&resolve_result.server, &resolve_result.server_id) {
                 Ok(c) => c,
-            Err(e) => {
-                summary.failed += 1;
-                results.push(FleetExecProjectResult {
-                    project_id: proj.id.clone(),
-                    server_id: server_id.clone(),
-                    base_path: proj.base_path.clone(),
-                    command: command_string.clone(),
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                    ..Default::default()
-                });
-                continue;
-            }
-        };
+                Err(e) => {
+                    summary.failed += 1;
+                    results.push(FleetExecProjectResult {
+                        project_id: proj.id.clone(),
+                        server_id: server_id.clone(),
+                        base_path: proj.base_path.clone(),
+                        command: command_string.clone(),
+                        status: "failed".to_string(),
+                        error: Some(e.to_string()),
+                        ..Default::default()
+                    });
+                    continue;
+                }
+            };
 
         if let Some(ref user) = user_override {
             client.user = user.clone();

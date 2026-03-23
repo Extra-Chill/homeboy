@@ -14,6 +14,7 @@ use crate::core::engine::contract_testgen::{
     generate_tests_for_file_with_types, generate_tests_for_methods_with_types, GeneratedTestOutput,
 };
 use crate::core::engine::symbol_graph::module_path_from_file;
+use crate::core::extension::grammar_items;
 use crate::core::refactor::auto::{
     Fix, FixSafetyTier, Insertion, InsertionKind, NewFile, SkippedFile,
 };
@@ -111,8 +112,17 @@ pub(crate) fn generate_test_file_fixes(
             }
         };
 
-        // Build inline test module content
-        let test_module = build_inline_test_module(&generated, ext);
+        // Build inline test module content — skip if brace validation fails
+        let test_module = match build_inline_test_module(&generated, ext) {
+            Some(module) => module,
+            None => {
+                skipped.push(SkippedFile {
+                    file: source_file.clone(),
+                    reason: "Generated test source has unbalanced braces — skipping to avoid compilation breakage".to_string(),
+                });
+                continue;
+            }
+        };
 
         fixes.push(Fix {
             file: source_file.clone(),
@@ -147,12 +157,25 @@ pub(crate) fn generate_test_file_fixes(
 /// `use super::*;` to access the parent module's items.
 ///
 /// For other languages: wraps in the appropriate test class structure.
-fn build_inline_test_module(generated: &GeneratedTestOutput, ext: &str) -> String {
+///
+/// Returns `None` if the generated test source has unbalanced braces,
+/// which would break compilation when appended to the source file.
+fn build_inline_test_module(generated: &GeneratedTestOutput, ext: &str) -> Option<String> {
     let mut content = String::new();
     content.push('\n');
 
     match ext {
         "rs" => {
+            // Validate that the generated test source has balanced braces before
+            // wrapping it in mod tests {}. Unbalanced braces in template-expanded
+            // code (e.g., from assertion conditions containing raw braces) would
+            // produce an extra closing `}` that breaks the module boundary.
+            if let Some(grammar) = load_grammar_for_ext("rs") {
+                if !grammar_items::validate_brace_balance(&generated.test_source, &grammar) {
+                    return None;
+                }
+            }
+
             content.push_str("#[cfg(test)]\nmod tests {\n");
             content.push_str("    use super::*;\n");
 
@@ -189,7 +212,7 @@ fn build_inline_test_module(generated: &GeneratedTestOutput, ext: &str) -> Strin
         }
     }
 
-    content
+    Some(content)
 }
 
 /// Build the complete test file content with module declaration, imports, and test functions.
@@ -321,6 +344,19 @@ pub(crate) fn generate_test_method_fixes(
             }
         };
 
+        // Validate brace balance in generated test source before insertion.
+        // Unbalanced braces from template expansion (e.g., conditions with raw
+        // braces) would break the target file's mod tests {} block.
+        if ext == "rs" {
+            if !grammar_items::validate_brace_balance(&generated.test_source, &grammar) {
+                skipped.push(SkippedFile {
+                    file: source_file.clone(),
+                    reason: "Generated test method source has unbalanced braces — skipping to avoid compilation breakage".to_string(),
+                });
+                continue;
+            }
+        }
+
         // Determine target file and build insertion code
         let (target_file, append_code) = match &test_location {
             TestLocation::SeparateFile(test_path) => {
@@ -428,55 +464,36 @@ fn find_test_location(source_file: &str, root: &Path, ext: &str) -> Option<TestL
 
 /// Find the line number of the closing brace of the inline test module.
 /// Returns the line number (1-indexed) of the last `}` in the `mod tests` block.
+///
+/// Uses grammar-aware brace matching (via `grammar_items::find_matching_brace`)
+/// to correctly handle braces inside string literals, comments, raw strings,
+/// and char literals. The naive char-counting approach previously used here
+/// would miscount braces in string content and produce wrong boundaries.
 fn find_inline_test_module_end(content: &str) -> Option<usize> {
+    let grammar = load_grammar_for_ext("rs")?;
     let lines: Vec<&str> = content.lines().collect();
 
-    // Find `#[cfg(test)]` as an actual attribute (not inside a comment or string)
-    let mut in_test_mod = false;
-    let mut brace_depth: i32 = 0;
+    // Find `#[cfg(test)]` followed by `mod tests`
     let mut found_cfg_test = false;
 
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
 
-        if !in_test_mod {
-            if !found_cfg_test {
-                // Must be exactly `#[cfg(test)]` as a standalone attribute line
-                // (not inside a comment, not part of a longer expression)
-                if trimmed == "#[cfg(test)]" {
-                    found_cfg_test = true;
-                }
-            } else {
-                // We found #[cfg(test)] on a prior line — look for `mod tests {`
-                if trimmed.is_empty() {
-                    continue; // Skip blank lines between attribute and mod
-                }
-                if trimmed.starts_with("mod tests") || trimmed.starts_with("mod test ") {
-                    in_test_mod = true;
-                    for ch in trimmed.chars() {
-                        if ch == '{' {
-                            brace_depth += 1;
-                        } else if ch == '}' {
-                            brace_depth -= 1;
-                        }
-                    }
-                } else {
-                    // Not a mod declaration after #[cfg(test)] — reset
-                    found_cfg_test = false;
-                }
+        if !found_cfg_test {
+            if trimmed == "#[cfg(test)]" {
+                found_cfg_test = true;
             }
         } else {
-            // Count braces to find the closing brace
-            for ch in trimmed.chars() {
-                if ch == '{' {
-                    brace_depth += 1;
-                } else if ch == '}' {
-                    brace_depth -= 1;
-                    if brace_depth == 0 {
-                        return Some(i + 1); // 1-indexed
-                    }
-                }
+            if trimmed.is_empty() {
+                continue; // Skip blank lines between attribute and mod
             }
+            if trimmed.starts_with("mod tests") || trimmed.starts_with("mod test ") {
+                // Use grammar-aware brace matching to find the end
+                let end_line_idx = grammar_items::find_matching_brace(&lines, i, &grammar);
+                return Some(end_line_idx + 1); // 1-indexed
+            }
+            // Not a mod declaration after #[cfg(test)] — reset
+            found_cfg_test = false;
         }
     }
 
