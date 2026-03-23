@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.12.0] - 2026-03-23
+
+### Added
+- add merge guard to skip autofix and PR comments on merged/closed PRs
+
 ## [1.11.3] - 2026-03-23
 
 ### Changed
