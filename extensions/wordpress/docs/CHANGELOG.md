@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.3] - 2026-03-23
+
+### Fixed
+- strengthen autofixer semantic safety and framework awareness
+
 ## [2.10.2] - 2026-03-22
 
 ### Fixed
