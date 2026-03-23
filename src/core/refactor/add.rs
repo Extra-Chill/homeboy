@@ -51,32 +51,8 @@ pub fn fixes_from_audit(audit: &CodeAuditResult, write: bool) -> Result<FixResul
     let mut fix_result = plan::generate_audit_fixes(audit, root);
 
     if write && !fix_result.fixes.is_empty() {
-        // Capture pre-write state for rollback on validation failure
-        let affected_files: Vec<PathBuf> = fix_result
-            .fixes
-            .iter()
-            .map(|f| root.join(&f.file))
-            .collect();
-        let mut rollback = crate::engine::undo::InMemoryRollback::new();
-        for file in &affected_files {
-            rollback.capture(file);
-        }
-
         let applied = auto::apply_fixes(&mut fix_result.fixes, root);
         fix_result.files_modified = applied;
-
-        // Validate written code compiles
-        if applied > 0 {
-            let validation =
-                crate::engine::validate_write::validate_write(root, &affected_files, &rollback)?;
-            if !validation.success {
-                crate::log_status!(
-                    "validate",
-                    "Post-write validation failed — changes rolled back"
-                );
-                fix_result.files_modified = 0;
-            }
-        }
     }
 
     Ok(fix_result)
@@ -147,27 +123,7 @@ pub fn add_import(
     let mut files_modified = 0;
 
     if write && !fixes.is_empty() {
-        // Capture pre-write state for rollback on validation failure
-        let affected_files: Vec<PathBuf> = fixes.iter().map(|f| root.join(&f.file)).collect();
-        let mut rollback = crate::engine::undo::InMemoryRollback::new();
-        for file in &affected_files {
-            rollback.capture(file);
-        }
-
         files_modified = auto::apply_fixes(&mut fixes, &root);
-
-        // Validate written code compiles
-        if files_modified > 0 {
-            let validation =
-                crate::engine::validate_write::validate_write(&root, &affected_files, &rollback)?;
-            if !validation.success {
-                crate::log_status!(
-                    "validate",
-                    "Post-write validation failed — changes rolled back"
-                );
-                files_modified = 0;
-            }
-        }
     }
 
     Ok(AddResult {
