@@ -2,6 +2,15 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.11.3] - 2026-03-23
+
+### Changed
+- resolve merge conflicts — keep validation removal
+- remove validate_autofix_changes — validation belongs in PR CI
+
+### Fixed
+- add compilation validation gate before committing autofix changes
+
 ## [1.11.2] - 2026-03-23
 
 ### Fixed
