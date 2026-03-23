@@ -1762,7 +1762,8 @@ fn parse_hunk() {}
             "infer_setup_with_complements".to_string(),
         ];
         let prefix = find_dominant_prefix(&members);
-        assert_eq!(prefix, Some("infer".to_string()));
+        // 2/3 members share "infer_setup" — more specific than "infer"
+        assert_eq!(prefix, Some("infer_setup".to_string()));
 
         // No dominant prefix
         let members = vec!["foo".to_string(), "bar".to_string(), "baz".to_string()];

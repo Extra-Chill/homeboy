@@ -223,20 +223,17 @@ fn classify_relation(
 
     // Count meaningful (non-blank, non-comment) lines in the gap.
     let mut code_lines_in_gap = 0usize;
-    let gap_all_trivial = (gap_start..gap_end).all(|line_num| {
+    for line_num in gap_start..gap_end {
         if line_num == 0 || line_num > lines.len() {
-            return false;
+            continue;
         }
         let line = lines[line_num - 1].trim();
-        if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
-            true
-        } else {
+        if !line.is_empty() && !line.starts_with("//") && !line.starts_with('#') {
             code_lines_in_gap += 1;
-            false
         }
-    });
+    }
 
-    if gap_all_trivial {
+    if code_lines_in_gap == 0 {
         return DupRelation::Adjacent;
     }
 

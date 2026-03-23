@@ -374,7 +374,32 @@ fn find_else_start(lines: &[&str], comment_idx: usize) -> usize {
 /// Find the closing brace of the else branch that encloses `comment_idx`.
 fn find_enclosing_else_end(lines: &[&str], comment_idx: usize) -> Option<usize> {
     let else_start = find_else_start(lines, comment_idx);
-    find_brace_block_end(lines, else_start)
+    // The else line may be `} else {` which has a closing brace from the
+    // if-block AND an opening brace for the else-block. find_brace_block_end
+    // would miscount the leading `}`. So we skip that line and start from
+    // the next, treating the `{` on the else line as depth 1.
+    let trimmed = lines[else_start].trim();
+    if trimmed.starts_with("} else") || trimmed.starts_with("}else") {
+        // The else block opened on this line — find its close starting from the next line.
+        let mut depth = 1i32; // the `{` from `} else {`
+        for i in (else_start + 1)..lines.len() {
+            for ch in lines[i].chars() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    } else {
+        find_brace_block_end(lines, else_start)
+    }
 }
 
 /// Find the end of a brace-delimited block starting at `start_idx`.

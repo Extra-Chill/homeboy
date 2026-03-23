@@ -329,9 +329,9 @@ mod tests {
     fn test_analyze_wrappers_skips_files_with_field() {
         let content_with_field = "'ability' => 'datamachine/search'\nSearchAbilities::run();";
         let fp = make_fingerprint("tools/Search.php", content_with_field);
-        let fps: Vec<&FileFingerprint> = vec![&fp];
+        let _fps: Vec<&FileFingerprint> = vec![&fp];
 
-        let config = WrapperInferenceConfig {
+        let _config = WrapperInferenceConfig {
             wrapper_rules: vec![make_rule(
                 "test",
                 "tools/**/*.php",

@@ -1131,8 +1131,6 @@ mod tests {
 
     #[test]
     fn detect_error_propagation_adds_branch() {
-        use std::collections::HashMap;
-
         let body_lines = vec![
             (2, "    let content = fs::read_to_string(path)?;"),
             (3, "    let parsed = serde_json::from_str(&content)?;"),
@@ -1141,21 +1139,7 @@ mod tests {
 
         let contract = ContractGrammar {
             error_propagation: vec![r"\?\s*;".to_string(), r"\?\s*$".to_string()],
-            return_patterns: HashMap::new(),
-            param_format: String::new(),
-            return_type_separator: "->".to_string(),
-            return_shapes: HashMap::new(),
-            guard_patterns: vec![],
-            side_effect_patterns: HashMap::new(),
-            type_defaults: vec![],
-            type_constructors: vec![],
-            assertion_templates: HashMap::new(),
-            test_templates: HashMap::new(),
-            fallback_default: String::new(),
-            field_pattern: None,
-            field_name_group: None,
-            field_type_group: None,
-            field_assertion_template: None,
+            ..Default::default()
         };
 
         let mut branches = Vec::new();
@@ -1170,8 +1154,6 @@ mod tests {
 
     #[test]
     fn detect_error_propagation_skips_when_explicit_err_exists() {
-        use std::collections::HashMap;
-
         let body_lines = vec![
             (2, "    let content = fs::read_to_string(path)?;"),
             (3, "    Ok(content)"),
@@ -1179,21 +1161,7 @@ mod tests {
 
         let contract = ContractGrammar {
             error_propagation: vec![r"\?\s*;".to_string()],
-            return_patterns: HashMap::new(),
-            param_format: String::new(),
-            return_type_separator: "->".to_string(),
-            return_shapes: HashMap::new(),
-            guard_patterns: vec![],
-            side_effect_patterns: HashMap::new(),
-            type_defaults: vec![],
-            type_constructors: vec![],
-            assertion_templates: HashMap::new(),
-            test_templates: HashMap::new(),
-            fallback_default: String::new(),
-            field_pattern: None,
-            field_name_group: None,
-            field_type_group: None,
-            field_assertion_template: None,
+            ..Default::default()
         };
 
         // Pre-existing explicit Err branch

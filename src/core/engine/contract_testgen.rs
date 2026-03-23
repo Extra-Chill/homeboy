@@ -2211,6 +2211,7 @@ mod tests {
         // Simulate two branches with identical slugified conditions
         let plan = TestPlan {
             function_name: "check_status".to_string(),
+            source_file: "src/lib.rs".to_string(),
             is_async: false,
             cases: vec![
                 TestCase {
@@ -2802,16 +2803,20 @@ mod tests {
         // Should produce output
         assert!(!rendered.is_empty(), "rendered output should not be empty");
 
-        // First branch (changed_files.is_empty()) should unwrap the Ok value
+        // Without type registry, enrichment can't resolve struct fields so the
+        // result_ok_value assertion template has a // TODO placeholder. The pipeline
+        // correctly falls back to the simpler result_ok assertion (is_ok()) because
+        // a real assertion is better than a TODO stub. (#818)
         assert!(
-            rendered.contains("result.unwrap()"),
-            "should unwrap Ok value instead of just is_ok(), got:\n{}",
+            rendered.contains("result.is_ok()"),
+            "without type registry, should fall back to is_ok() assertion, got:\n{}",
             rendered
         );
-        // Should mention the expected value from the contract
+
+        // Should mention the branch condition in the assertion message
         assert!(
-            rendered.contains("skipped"),
-            "should reference the expected return value 'skipped', got:\n{}",
+            rendered.contains("changed_files.is_empty()"),
+            "should reference the branch condition, got:\n{}",
             rendered
         );
     }
