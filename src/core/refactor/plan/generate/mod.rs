@@ -1,9 +1,11 @@
 mod builders;
+mod comment_fixes;
 mod compiler_warning_fixes;
 mod convention_fixes;
 mod doc_fixes;
 mod duplicate_fixes;
 mod intra_duplicate_fixes;
+mod near_duplicate_fixes;
 mod orphaned_test_fixes;
 mod parameter_fixes;
 mod signatures;
@@ -121,6 +123,8 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
     );
     test_gen_fixes::generate_test_method_fixes(result, root, &mut fixes, &mut skipped);
     compiler_warning_fixes::generate_compiler_warning_fixes(result, root, &mut fixes, &mut skipped);
+    comment_fixes::generate_comment_fixes(result, root, &mut fixes, &mut skipped);
+    near_duplicate_fixes::generate_near_duplicate_fixes(result, root, &mut fixes, &mut skipped);
     intra_duplicate_fixes::generate_intra_duplicate_fixes(result, root, &mut fixes, &mut skipped);
 
     let fixes = merge_fixes_per_file(fixes);
