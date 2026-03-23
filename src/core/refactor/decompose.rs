@@ -503,7 +503,10 @@ fn call_graph_components(
         .collect();
 
     // Union-find on non-hub functions only
-    let non_hub_names: Vec<&String> = all_names.iter().filter(|n| !hubs.contains(n.as_str())).collect();
+    let non_hub_names: Vec<&String> = all_names
+        .iter()
+        .filter(|n| !hubs.contains(n.as_str()))
+        .collect();
     let mut parent: BTreeMap<String, String> = BTreeMap::new();
     for name in &non_hub_names {
         parent.insert((*name).clone(), (*name).clone());
@@ -1728,7 +1731,10 @@ fn parse_hunk() {}
             step_a_component.is_some(),
             "step_a + helper_a should form a cluster"
         );
-        assert!(step_a_component.unwrap().1.contains(&"helper_a".to_string()));
+        assert!(step_a_component
+            .unwrap()
+            .1
+            .contains(&"helper_a".to_string()));
 
         // Without hub exclusion, all 7 functions would be in one mega-component.
         // With hub exclusion, we should have smaller, focused clusters.
@@ -1759,11 +1765,7 @@ fn parse_hunk() {}
         assert_eq!(prefix, Some("infer".to_string()));
 
         // No dominant prefix
-        let members = vec![
-            "foo".to_string(),
-            "bar".to_string(),
-            "baz".to_string(),
-        ];
+        let members = vec!["foo".to_string(), "bar".to_string(), "baz".to_string()];
         let prefix = find_dominant_prefix(&members);
         assert_eq!(prefix, None);
     }
