@@ -303,13 +303,17 @@ fn find_next_code_line(lines: &[&str], start_idx: usize) -> Option<usize> {
 /// Check if a line starts a function definition.
 fn is_function_start(line: &str) -> bool {
     // Rust: fn, pub fn, pub(crate) fn, async fn, etc.
-    let re = Regex::new(r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+\w+").unwrap();
-    if re.is_match(line) {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+\w+").unwrap()
+    });
+    if RE.is_match(line) {
         return true;
     }
     // PHP: function, public function, private function, etc.
-    let php_re = Regex::new(r"^(?:public|private|protected|static|\s)*function\s+\w+").unwrap();
-    php_re.is_match(line)
+    static PHP_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"^(?:public|private|protected|static|\s)*function\s+\w+").unwrap()
+    });
+    PHP_RE.is_match(line)
 }
 
 /// Check if a line starts an `if` statement.

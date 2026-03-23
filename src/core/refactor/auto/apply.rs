@@ -361,8 +361,10 @@ pub(crate) fn insert_into_constructor(
 pub(crate) fn insert_trait_uses(content: &str, stubs: &[&String], language: &Language) -> String {
     match language {
         Language::Php => {
-            let class_re = Regex::new(r"(?:class|trait|interface)\s+\w+[^\{]*\{").unwrap();
-            if let Some(m) = class_re.find(content) {
+            static CLASS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+                Regex::new(r"(?:class|trait|interface)\s+\w+[^\{]*\{").unwrap()
+            });
+            if let Some(m) = CLASS_RE.find(content) {
                 let insert_pos = m.end();
                 let mut result = String::with_capacity(content.len() + stubs.len() * 40);
                 result.push_str(&content[..insert_pos]);

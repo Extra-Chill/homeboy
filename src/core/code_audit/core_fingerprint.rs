@@ -809,17 +809,19 @@ fn replace_string_literals(input: &str) -> String {
 
 /// Replace numeric literals with NUM.
 fn replace_numeric_literals(input: &str) -> String {
-    let re = regex::Regex::new(r"\b\d[\d_]*(?:\.\d[\d_]*)?\b").unwrap();
-    re.replace_all(input, "NUM").to_string()
+    static RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\b\d[\d_]*(?:\.\d[\d_]*)?\b").unwrap());
+    RE.replace_all(input, "NUM").to_string()
 }
 
 /// Replace PHP $variable references with positional tokens.
 fn replace_php_variables(input: &str) -> String {
-    let re = regex::Regex::new(r"\$\w+").unwrap();
+    static RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\$\w+").unwrap());
     let mut var_map: HashMap<String, String> = HashMap::new();
     let mut counter = 0;
 
-    re.replace_all(input, |caps: &regex::Captures| {
+    RE.replace_all(input, |caps: &regex::Captures| {
         let var = caps[0].to_string();
         if var == "$this" {
             return var;
@@ -836,11 +838,12 @@ fn replace_php_variables(input: &str) -> String {
 
 /// Replace non-keyword identifiers with positional ID_N tokens.
 fn replace_identifiers(input: &str, keywords: &HashSet<&str>) -> String {
-    let re = regex::Regex::new(r"\b[a-zA-Z_]\w*\b").unwrap();
+    static RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\b[a-zA-Z_]\w*\b").unwrap());
     let mut id_map: HashMap<String, String> = HashMap::new();
     let mut counter = 0;
 
-    re.replace_all(input, |caps: &regex::Captures| {
+    RE.replace_all(input, |caps: &regex::Captures| {
         let word = &caps[0];
         if keywords.contains(word) {
             return word.to_string();
@@ -1113,8 +1116,9 @@ fn extract_internal_calls(content: &str, skip_calls: &[&str]) -> Vec<String> {
     let mut calls = HashSet::new();
 
     // Match function_name( patterns
-    let re = regex::Regex::new(r"\b(\w+)\s*\(").unwrap();
-    for caps in re.captures_iter(content) {
+    static RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\b(\w+)\s*\(").unwrap());
+    for caps in RE.captures_iter(content) {
         let name = &caps[1];
         if !skip_set.contains(name) && !name.starts_with("test_") {
             calls.insert(name.to_string());
@@ -1122,8 +1126,9 @@ fn extract_internal_calls(content: &str, skip_calls: &[&str]) -> Vec<String> {
     }
 
     // Match .method( and ::method( patterns
-    let method_re = regex::Regex::new(r"[.:](\w+)\s*\(").unwrap();
-    for caps in method_re.captures_iter(content) {
+    static METHOD_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"[.:](\w+)\s*\(").unwrap());
+    for caps in METHOD_RE.captures_iter(content) {
         let name = &caps[1];
         if !skip_set.contains(name) && !name.starts_with("test_") {
             calls.insert(name.to_string());
@@ -1214,8 +1219,9 @@ fn parse_param_names(params: &str) -> Vec<String> {
             }
         } else if chunk.contains('$') {
             // PHP-style: $name
-            let re = regex::Regex::new(r"\$(\w+)").unwrap();
-            if let Some(caps) = re.captures(chunk) {
+            static RE: std::sync::LazyLock<regex::Regex> =
+                std::sync::LazyLock::new(|| regex::Regex::new(r"\$(\w+)").unwrap());
+            if let Some(caps) = RE.captures(chunk) {
                 names.push(caps[1].to_string());
             }
         }
