@@ -12,6 +12,10 @@ Works with **any Homeboy extension** — WordPress, Rust, Node, or your own cust
 name: CI
 on: [pull_request]
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   homeboy:
     runs-on: ubuntu-latest
@@ -233,6 +237,8 @@ When enabled, the action will:
 
 For fork PRs, Homeboy Action now attempts the same direct-to-PR autofix flow first. Actual push success still depends on the token/permission model available to the workflow run.
 
+**Merge guard:** If the PR is merged or closed while CI is running, autofix and PR comments are automatically skipped. This prevents zombie commits to deleted branches and stale result noise on already-merged PRs. Pair with a `concurrency` group to cancel the entire run early.
+
 ### Auto-open Fix PRs on non-PR runs
 
 ```yaml
@@ -327,6 +333,7 @@ Use two workflows:
 1. **PR workflow** (fast + scoped)
    - `commands: lint,test,audit`
    - `scope: 'changed'`
+   - `concurrency` group per PR number to cancel stale runs
 
 2. **Release workflow** (continuous)
    - trigger on `schedule` (every 15 min) + `workflow_dispatch`

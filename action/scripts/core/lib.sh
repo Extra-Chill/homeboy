@@ -10,6 +10,50 @@ source "${SCRIPT_DIR}/../scope/flags.sh"
 # so the subject line can vary after it (e.g. fix types, file count).
 AUTOFIX_COMMIT_PREFIX="chore(ci): homeboy autofix"
 
+# Check whether the current PR is still open.
+# Returns 0 (true) if the PR is open, 1 (false) if merged/closed/unknown.
+# Uses gh CLI when available, falls back to GitHub REST API via curl.
+# Requires: GITHUB_REPOSITORY and PR_NUMBER (or $1) in the environment.
+pr_is_active() {
+  local pr_number="${1:-${PR_NUMBER:-}}"
+  local repo="${GITHUB_REPOSITORY:-}"
+
+  if [ -z "${pr_number}" ] || [ -z "${repo}" ]; then
+    # Can't check — assume active to avoid false cancellations
+    return 0
+  fi
+
+  local state=""
+  if command -v gh >/dev/null 2>&1; then
+    state=$(gh pr view "${pr_number}" --repo "${repo}" --json state -q '.state' 2>/dev/null || true)
+  fi
+
+  if [ -z "${state}" ]; then
+    # Fallback to curl — use GH_TOKEN or GITHUB_TOKEN for auth
+    local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [ -n "${token}" ]; then
+      state=$(curl -sfL \
+        -H "Authorization: Bearer ${token}" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${repo}/pulls/${pr_number}" 2>/dev/null \
+        | jq -r '.state // empty' 2>/dev/null || true)
+    fi
+  fi
+
+  case "${state}" in
+    OPEN|open)
+      return 0
+      ;;
+    MERGED|CLOSED|merged|closed)
+      return 1
+      ;;
+    *)
+      # Unknown state — assume active to avoid false cancellations
+      return 0
+      ;;
+  esac
+}
+
 # Build an informative autofix commit message.
 # Subject: chore(ci): homeboy autofix — audit (7 files, 33 fixes)
 # Body: per-category fix counts with affected files.
