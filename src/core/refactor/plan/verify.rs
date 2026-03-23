@@ -2,6 +2,7 @@ use crate::code_audit::{self, CodeAuditResult};
 use crate::component::{self, Component};
 use crate::engine::temp;
 use crate::engine::undo::UndoSnapshot;
+use crate::engine::validate_write;
 use crate::extension::test::compute_changed_test_files;
 use crate::extension::{lint as extension_lint, test as extension_test};
 use crate::refactor::auto as fixer;
@@ -154,6 +155,36 @@ pub fn run_audit_refactor(
                 iteration_summary.score_delta =
                     score_delta(&current_result, &current_result, scoring);
                 iteration_summary.status = "stopped_no_safe_changes".to_string();
+                iterations.push(iteration_summary);
+                break;
+            }
+
+            // Fail-fast: compile-check after applying fixes. If the code no
+            // longer compiles (e.g. "failed to resolve mod", parse errors),
+            // further iterations cannot recover — bail immediately instead of
+            // burning cold-compile retries that will never converge.
+            let root = Path::new(&current_result.source_path);
+            let compile_check_files: Vec<PathBuf> = changed_files
+                .iter()
+                .map(|f| root.join(f))
+                .collect();
+            let compile_result = validate_write::validate_only(root, &compile_check_files)?;
+            if !compile_result.success {
+                crate::log_status!(
+                    "refactor",
+                    "Compile check failed after iteration {} — stopping convergence",
+                    iteration_index + 1
+                );
+                if let Some(output) = &compile_result.output {
+                    crate::log_status!("refactor", "Compile error: {}", output);
+                }
+                iteration_summary.iteration = iteration_index + 1;
+                iteration_summary.findings_after = current_result.findings.len();
+                iteration_summary.weighted_score_after =
+                    weighted_finding_score_with(&current_result, scoring);
+                iteration_summary.score_delta =
+                    score_delta(&current_result, &current_result, scoring);
+                iteration_summary.status = "stopped_compile_failure".to_string();
                 iterations.push(iteration_summary);
                 break;
             }
