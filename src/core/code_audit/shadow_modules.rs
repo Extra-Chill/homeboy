@@ -215,7 +215,10 @@ fn parent_dir(path: &str) -> String {
 /// Extract the file stem (name without extension) from a path.
 fn file_stem(path: &str) -> Option<String> {
     let normalized = path.replace('\\', "/");
-    let file_name = normalized.rsplit_once('/').map(|(_, f)| f).unwrap_or(&normalized);
+    let file_name = normalized
+        .rsplit_once('/')
+        .map(|(_, f)| f)
+        .unwrap_or(&normalized);
     file_name.rsplit_once('.').map(|(stem, _)| stem.to_string())
 }
 
@@ -304,7 +307,9 @@ mod tests {
         let findings = detect_shadow_modules(&fps);
 
         assert_eq!(findings.len(), 2, "Should emit findings for both dirs");
-        assert!(findings.iter().all(|f| f.kind == AuditFinding::ShadowModule));
+        assert!(findings
+            .iter()
+            .all(|f| f.kind == AuditFinding::ShadowModule));
         assert!(findings
             .iter()
             .any(|f| f.file == "src/module_a" && f.description.contains("src/module_b")));
@@ -312,24 +317,9 @@ mod tests {
 
     #[test]
     fn ignores_test_directories() {
-        let fp1 = make_fp(
-            "src/module_a/foo.rs",
-            &["run"],
-            &[("run", "hash1")],
-            &[],
-        );
-        let fp2 = make_fp(
-            "src/module_a/bar.rs",
-            &["exec"],
-            &[("exec", "hash2")],
-            &[],
-        );
-        let fp3 = make_fp(
-            "tests/module_a/foo.rs",
-            &["run"],
-            &[("run", "hash1")],
-            &[],
-        );
+        let fp1 = make_fp("src/module_a/foo.rs", &["run"], &[("run", "hash1")], &[]);
+        let fp2 = make_fp("src/module_a/bar.rs", &["exec"], &[("exec", "hash2")], &[]);
+        let fp3 = make_fp("tests/module_a/foo.rs", &["run"], &[("run", "hash1")], &[]);
         let fp4 = make_fp(
             "tests/module_a/bar.rs",
             &["exec"],
@@ -397,30 +387,10 @@ mod tests {
 
     #[test]
     fn ignores_subdirectory_relationship() {
-        let fp1 = make_fp(
-            "src/core/foo.rs",
-            &["run"],
-            &[("run", "hash1")],
-            &[],
-        );
-        let fp2 = make_fp(
-            "src/core/bar.rs",
-            &["exec"],
-            &[("exec", "hash2")],
-            &[],
-        );
-        let fp3 = make_fp(
-            "src/core/sub/foo.rs",
-            &["run"],
-            &[("run", "hash1")],
-            &[],
-        );
-        let fp4 = make_fp(
-            "src/core/sub/bar.rs",
-            &["exec"],
-            &[("exec", "hash2")],
-            &[],
-        );
+        let fp1 = make_fp("src/core/foo.rs", &["run"], &[("run", "hash1")], &[]);
+        let fp2 = make_fp("src/core/bar.rs", &["exec"], &[("exec", "hash2")], &[]);
+        let fp3 = make_fp("src/core/sub/foo.rs", &["run"], &[("run", "hash1")], &[]);
+        let fp4 = make_fp("src/core/sub/bar.rs", &["exec"], &[("exec", "hash2")], &[]);
 
         let fps: Vec<&FileFingerprint> = vec![&fp1, &fp2, &fp3, &fp4];
         let findings = detect_shadow_modules(&fps);

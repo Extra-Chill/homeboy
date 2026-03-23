@@ -164,10 +164,8 @@ pub fn run_audit_refactor(
             // further iterations cannot recover — bail immediately instead of
             // burning cold-compile retries that will never converge.
             let root = Path::new(&current_result.source_path);
-            let compile_check_files: Vec<PathBuf> = changed_files
-                .iter()
-                .map(|f| root.join(f))
-                .collect();
+            let compile_check_files: Vec<PathBuf> =
+                changed_files.iter().map(|f| root.join(f)).collect();
             let compile_result = validate_write::validate_only(root, &compile_check_files)?;
             if !compile_result.success {
                 crate::log_status!(
