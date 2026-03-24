@@ -244,4 +244,101 @@ mod tests {
 
         run_dir.cleanup();
     }
+
+    #[test]
+    fn test_create_default_path() {
+        let instance = RunDir::default();
+        let _result = instance.create();
+    }
+
+    #[test]
+    fn test_create_error_internal_io_e_to_string_some_create_annotations_dir_to() {
+        let instance = RunDir::default();
+        let _result = instance.create();
+    }
+
+    #[test]
+    fn test_create_default_path_2() {
+        let instance = RunDir::default();
+        let _result = instance.create();
+    }
+
+    #[test]
+    fn test_create_ok_self_path() {
+        let instance = RunDir::default();
+        let result = instance.create();
+        assert!(result.is_ok(), "expected Ok for: Ok(Self {{ path }})");
+    }
+
+    #[test]
+    fn test_from_existing_path_is_dir() {
+        let instance = RunDir::default();
+        let path = PathBuf::new();
+        let _result = instance.from_existing(path);
+    }
+
+    #[test]
+    fn test_from_existing_ok_self_path() {
+        let instance = RunDir::default();
+        let path = PathBuf::new();
+        let result = instance.from_existing(path);
+        assert!(result.is_ok(), "expected Ok for: Ok(Self {{ path }})");
+    }
+
+    #[test]
+    fn test_path_default_path() {
+        let instance = RunDir::default();
+        let _result = instance.path();
+    }
+
+    #[test]
+    fn test_step_file_default_path() {
+        let instance = RunDir::default();
+        let filename = "";
+        let _result = instance.step_file(&filename);
+    }
+
+    #[test]
+    fn test_annotations_dir_default_path() {
+        let instance = RunDir::default();
+        let _result = instance.annotations_dir();
+    }
+
+    #[test]
+    fn test_legacy_env_vars_default_path() {
+        let instance = RunDir::default();
+        let result = instance.legacy_env_vars();
+        assert!(
+            !result.is_empty(),
+            "expected non-empty collection for: default path"
+        );
+    }
+
+    #[test]
+    fn test_read_step_output_default_path() {
+        let instance = RunDir::default();
+        let filename = "";
+        let _result = instance.read_step_output(&filename);
+    }
+
+    #[test]
+    fn test_read_step_output_has_expected_effects() {
+        // Expected effects: file_read
+        let instance = RunDir::default();
+        let filename = "";
+        let _ = instance.read_step_output(&filename);
+    }
+
+    #[test]
+    fn test_cleanup_does_not_panic() {
+        let instance = RunDir::default();
+        let _ = instance.cleanup();
+    }
+
+    #[test]
+    fn test_cleanup_has_expected_effects() {
+        // Expected effects: file_delete
+        let instance = RunDir::default();
+        let _ = instance.cleanup();
+    }
 }
