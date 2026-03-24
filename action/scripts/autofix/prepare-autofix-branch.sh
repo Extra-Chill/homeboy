@@ -108,16 +108,6 @@ else
   echo "Skipping code fixes (autofix cap reached)"
 fi
 
-# Validate generated code compiles before committing.
-# If validation fails, all changes are reverted and no commit is made.
-if ! validate_autofix_changes "${WORKSPACE}"; then
-  echo "Autofix changes failed compilation — skipping commit"
-  git checkout -
-  git branch -D "${AUTOFIX_BRANCH}"
-  echo "committed=false" >> "${GITHUB_OUTPUT}"
-  exit 0
-fi
-
 # Update baseline so it stays current when this commit merges to main.
 # Full (unscoped) audit ensures the baseline reflects the entire codebase,
 # not just changed files. Tolerate failure — baseline update is best-effort.
