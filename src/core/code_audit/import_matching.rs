@@ -71,11 +71,6 @@ pub(crate) fn has_import(expected: &str, actual_imports: &[String], file_content
     }
 
     // 4. Local definition check: if the file defines the symbol locally,
-    //    it doesn't need an import (e.g., `fn default_true() -> bool { true }`)
-    if !terminal.is_empty() && content_defines_name(file_content, terminal) {
-        return true;
-    }
-
     // 5. Usage check: if the terminal name isn't referenced outside imports,
     //    the import would be unused — not a real convention violation
     if !terminal.is_empty() && !content_references_name(file_content, terminal) {
@@ -400,5 +395,27 @@ fn default_true() -> bool {
             "serde::{Deserialize, Serialize}",
             "Serialize"
         ));
+    }
+
+    #[test]
+    fn test_grouped_import_contains_if_let_some_brace_start_import_find() {
+        let _result = grouped_import_contains();
+    }
+
+    #[test]
+    fn test_content_references_name_contains_word_trimmed_name() {
+        let result = content_references_name();
+        assert!(result, "expected true when: contains_word(trimmed, name)");
+    }
+
+    #[test]
+    fn test_contains_word_while_let_some_pos_text_start_find_word() {
+        let _result = contains_word();
+    }
+
+    #[test]
+    fn test_contains_word_before_ok_after_ok() {
+        let result = contains_word();
+        assert!(result, "expected true when: before_ok && after_ok");
     }
 }
