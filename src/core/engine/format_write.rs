@@ -100,8 +100,8 @@ pub fn format_after_write(root: &Path, changed_files: &[PathBuf]) -> Result<Form
     }
 
     // cargo fmt failed — try rustfmt directly on individual files.
-    // This handles sandbox/clean-clone environments where cargo fmt needs
-    // target/ for module resolution but it's excluded from the sandbox.
+    // This handles environments where cargo fmt needs target/ for module
+    // resolution but it may not be available.
     if format_command.starts_with("cargo fmt") {
         let rust_files: Vec<&PathBuf> = changed_files
             .iter()

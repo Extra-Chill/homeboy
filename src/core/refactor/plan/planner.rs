@@ -560,9 +560,7 @@ fn plan_audit_stage(
         // The audit already ran and provided findings in `result` — the refactor
         // command does not re-run the audit internally. The convergence loop
         // (audit → fix → merge → re-audit) belongs in the full orchestration
-        // pipeline, not inside a single refactor invocation. Each cold compile
-        // in the sandbox takes 10-20 minutes with no target/ cache, so multiple
-        // iterations are prohibitively expensive.
+        // pipeline, not inside a single refactor invocation.
         let outcome = super::verify::run_audit_refactor(
             result.clone(),
             only,
@@ -850,7 +848,7 @@ pub fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
                         earlier_stage: earlier_stage.stage.clone(),
                         later_stage: later_stage.stage.clone(),
                         resolution: format!(
-                            "{} pass ran after {} in sandbox sequence",
+                            "{} pass ran after {} in pipeline sequence",
                             later_stage.stage, earlier_stage.stage
                         ),
                     });
@@ -954,13 +952,13 @@ mod tests {
                     file: "src/lib.rs".to_string(),
                     earlier_stage: "audit".to_string(),
                     later_stage: "lint".to_string(),
-                    resolution: "lint pass ran after audit in sandbox sequence".to_string(),
+                    resolution: "lint pass ran after audit in pipeline sequence".to_string(),
                 },
                 PlanOverlap {
                     file: "src/main.rs".to_string(),
                     earlier_stage: "lint".to_string(),
                     later_stage: "test".to_string(),
-                    resolution: "test pass ran after lint in sandbox sequence".to_string(),
+                    resolution: "test pass ran after lint in pipeline sequence".to_string(),
                 },
             ]
         );

@@ -1611,7 +1611,7 @@ pub fn generate_tests_for_file_with_types(
     // Build per-file type registry, then merge with project-wide registry.
     // This ensures types defined in the current file are always available
     // for assertion enrichment, even if the project-wide scan missed them
-    // (e.g., due to extension loading issues in CI sandboxes).
+    // (e.g., due to extension loading issues in CI environments).
     let mut local_registry = build_type_registry(content, file_path, grammar, contract_grammar);
 
     // Merge project-wide types into local (local takes precedence for same-file types)

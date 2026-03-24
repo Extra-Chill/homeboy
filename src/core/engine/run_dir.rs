@@ -79,17 +79,6 @@ impl RunDir {
         Ok(Self { path })
     }
 
-    /// Resolve a RunDir from the environment or create a new one.
-    pub fn resolve_or_create() -> Result<Self> {
-        if let Ok(dir) = std::env::var(RUN_DIR_ENV) {
-            let path = PathBuf::from(dir);
-            if path.is_dir() {
-                return Self::from_existing(path);
-            }
-        }
-        Self::create()
-    }
-
     /// The root path of this run directory.
     pub fn path(&self) -> &Path {
         &self.path

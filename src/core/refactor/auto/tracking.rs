@@ -1,6 +1,5 @@
-use super::outcome::{AppliedAutofixCapture, AutofixSidecarFiles};
-use super::summary::summarize_optional_fix_results;
 use std::collections::HashSet;
+
 #[cfg(not(test))]
 pub fn changed_file_set(local_path: &str) -> crate::Result<HashSet<String>> {
     let uncommitted = crate::git::get_uncommitted_changes(local_path)?;
@@ -35,25 +34,4 @@ pub fn newly_changed_files(before: &HashSet<String>, after: &HashSet<String>) ->
     let mut changed: Vec<String> = after.difference(before).cloned().collect();
     changed.sort();
     changed
-}
-
-pub fn begin_applied_fix_capture(local_path: &str) -> crate::Result<HashSet<String>> {
-    changed_file_set(local_path)
-}
-
-pub fn finish_applied_fix_capture(
-    local_path: &str,
-    before_fix_files: &HashSet<String>,
-    sidecars: &AutofixSidecarFiles,
-) -> crate::Result<AppliedAutofixCapture> {
-    let after_fix_files = changed_file_set(local_path)?;
-    let files_modified = count_newly_changed(before_fix_files, &after_fix_files);
-    let fix_results = sidecars.consume_fix_results();
-    let fix_summary = summarize_optional_fix_results(&fix_results);
-
-    Ok(AppliedAutofixCapture {
-        files_modified,
-        fix_results,
-        fix_summary,
-    })
 }

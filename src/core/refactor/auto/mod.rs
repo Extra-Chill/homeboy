@@ -22,14 +22,8 @@ pub use outcome::{
 };
 pub use policy::apply_fix_policy;
 pub use preflight::{run_fix_preflight, run_insertion_preflight, run_new_file_preflight};
-pub use sidecar::{
-    fix_plan_temp_path, fix_results_temp_path, parse_fix_plan_file, parse_fix_results_file,
-    read_fix_results,
-};
+pub use sidecar::{parse_fix_plan_file, parse_fix_results_file, read_fix_results};
 pub use summary::{
     summarize_audit_fix_result, summarize_fix_results, summarize_optional_fix_results,
 };
-pub use tracking::{
-    begin_applied_fix_capture, changed_file_set, count_newly_changed, finish_applied_fix_capture,
-    newly_changed_files,
-};
+pub use tracking::{changed_file_set, count_newly_changed, newly_changed_files};
