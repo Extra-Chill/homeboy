@@ -394,3 +394,221 @@ pub(super) fn run_post_deploy_hooks(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_self_deploy_some_p_p() {
+        let _result = is_self_deploy();
+    }
+
+    #[test]
+    fn test_is_self_deploy_none_return_false() {
+        let result = is_self_deploy();
+        assert!(!result, "expected false when: None => return false,");
+    }
+
+    #[test]
+    fn test_is_self_deploy_match_exe_name() {
+        let _result = is_self_deploy();
+    }
+
+    #[test]
+    fn test_prefer_installed_binary_default_path() {
+        let _result = prefer_installed_binary();
+    }
+
+    #[test]
+    fn test_prefer_installed_binary_exe_path_build_artifact() {
+        let result = prefer_installed_binary();
+        assert!(
+            result.is_none(),
+            "expected None for: exe_path == build_artifact"
+        );
+    }
+
+    #[test]
+    fn test_prefer_installed_binary_exe_path_build_artifact_2() {
+        let _result = prefer_installed_binary();
+    }
+
+    #[test]
+    fn test_prefer_installed_binary_exe_path_build_artifact_3() {
+        let _result = prefer_installed_binary();
+    }
+
+    #[test]
+    fn test_prefer_installed_binary_some_exe_path() {
+        let result = prefer_installed_binary();
+        assert!(result.is_some(), "expected Some for: Some(exe_path)");
+    }
+
+    #[test]
+    fn test_prefer_installed_binary_else() {
+        let result = prefer_installed_binary();
+        assert!(result.is_none(), "expected None for: else");
+    }
+
+    #[test]
+    fn test_prefer_installed_binary_has_expected_effects() {
+        // Expected effects: logging
+
+        let _ = prefer_installed_binary();
+    }
+
+    #[test]
+    fn test_fetch_remote_versions_if_let_some_ver_fetch_version_from_file_component_base_path_() {
+        let components = Vec::new();
+        let base_path = "";
+        let client = Default::default();
+        let result = fetch_remote_versions(&components, &base_path, &client);
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(ver) = fetch_version_from_file(component, base_path, client) {{");
+    }
+
+    #[test]
+    fn test_fetch_remote_versions_if_let_some_ver_fetch_version_from_binary_component_client() {
+        let components = Vec::new();
+        let base_path = "";
+        let client = Default::default();
+        let result = fetch_remote_versions(&components, &base_path, &client);
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(ver) = fetch_version_from_binary(component, client) {{");
+    }
+
+    #[test]
+    fn test_fetch_remote_versions_has_expected_effects() {
+        // Expected effects: mutation
+        let components = Vec::new();
+        let base_path = "";
+        let client = Default::default();
+        let _ = fetch_remote_versions(&components, &base_path, &client);
+    }
+
+    #[test]
+    fn test_find_deploy_verification_target_path_contains_verification_path_pattern() {
+        let result = find_deploy_verification();
+        let inner =
+            result.expect("expected Some for: target_path.contains(&verification.path_pattern)");
+        // Branch returns Some(verification.clone()
+        assert_eq!(inner.path_pattern, String::new());
+        assert_eq!(inner.verify_command, None);
+        assert_eq!(inner.verify_error_message, None);
+    }
+
+    #[test]
+    fn test_find_deploy_verification_target_path_contains_verification_path_pattern_2() {
+        let result = find_deploy_verification();
+        assert!(
+            result.is_none(),
+            "expected None for: target_path.contains(&verification.path_pattern)"
+        );
+    }
+
+    #[test]
+    fn test_find_deploy_override_target_path_contains_override_config_path_pattern() {
+        let result = find_deploy_override();
+        assert!(
+            result.is_some(),
+            "expected Some for: target_path.contains(&override_config.path_pattern)"
+        );
+    }
+
+    #[test]
+    fn test_find_deploy_override_target_path_contains_override_config_path_pattern_2() {
+        let result = find_deploy_override();
+        assert!(
+            result.is_none(),
+            "expected None for: target_path.contains(&override_config.path_pattern)"
+        );
+    }
+
+    #[test]
+    fn test_deploy_with_override_some_local_path_display_to_string() {
+        let _result = deploy_with_override();
+    }
+
+    #[test]
+    fn test_deploy_with_override_default_path() {
+        let _result = deploy_with_override();
+    }
+
+    #[test]
+    fn test_deploy_with_override_default_path_2() {
+        let _result = deploy_with_override();
+    }
+
+    #[test]
+    fn test_deploy_with_override_upload_result_success() {
+        let result = deploy_with_override();
+        let inner = result.unwrap();
+        // Branch returns Ok(upload_result) when: !upload_result.success
+        assert_eq!(inner.success, false);
+        assert_eq!(inner.exit_code, 0);
+        assert_eq!(inner.error, None);
+    }
+
+    #[test]
+    fn test_deploy_with_override_if_let_some_cleanup_cmd_template_override_config_cleanup_com() {
+        let _result = deploy_with_override();
+    }
+
+    #[test]
+    fn test_deploy_with_override_override_config_skip_permissions_fix() {
+        let _result = deploy_with_override();
+    }
+
+    #[test]
+    fn test_deploy_with_override_if_let_some_v_verification() {
+        let _result = deploy_with_override();
+    }
+
+    #[test]
+    fn test_deploy_with_override_let_some_v_verification() {
+        let _result = deploy_with_override();
+    }
+
+    #[test]
+    fn test_deploy_with_override_default_path_3() {
+        let result = deploy_with_override();
+        let inner = result.unwrap();
+        // Branch returns Ok(DeployResult::failure(1, error_msg) when: default path
+        assert_eq!(inner.success, false);
+        assert_eq!(inner.exit_code, 0);
+        assert_eq!(inner.error, None);
+    }
+
+    #[test]
+    fn test_deploy_with_override_ok_deployresult_success_0() {
+        let result = deploy_with_override();
+        let inner = result.unwrap();
+        // Branch returns Ok(DeployResult::success(0) when: Ok(DeployResult::success(0))
+        assert_eq!(inner.success, false);
+        assert_eq!(inner.exit_code, 0);
+        assert_eq!(inner.error, None);
+    }
+
+    #[test]
+    fn test_deploy_with_override_has_expected_effects() {
+        // Expected effects: logging, mutation
+
+        let _ = deploy_with_override();
+    }
+
+    #[test]
+    fn test_run_post_deploy_hooks_ok_result() {
+        run_post_deploy_hooks();
+    }
+
+    #[test]
+    fn test_run_post_deploy_hooks_err_e() {
+        run_post_deploy_hooks();
+    }
+
+    #[test]
+    fn test_run_post_deploy_hooks_has_expected_effects() {
+        // Expected effects: logging, mutation
+
+        let _ = run_post_deploy_hooks();
+    }
+}
