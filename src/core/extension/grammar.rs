@@ -27,7 +27,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::core::defaults::default_true;
 use crate::engine::local_files;
 use crate::error::{Error, Result};
 
