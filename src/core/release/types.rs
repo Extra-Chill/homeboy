@@ -4,6 +4,14 @@ mod types;
 pub use release_step_type::*;
 pub use types::*;
 
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+use crate::engine::pipeline::{self, PipelinePlanStep, PipelineRunResult};
+use crate::is_zero_u32;
+
+impl ReleaseStepType {
+    pub(crate) fn from_str(s: &str) -> Self {
         match s {
             "version" => ReleaseStepType::Version,
             "git.commit" => ReleaseStepType::GitCommit,
@@ -30,11 +38,4 @@ mod tests {
         let instance = ReleaseStepType::default();
         let _result = instance.from_str();
     }
-
-    #[test]
-    fn test_from_str_default_path() {
-        let instance = ReleaseStepType::default();
-        let _result = instance.from_str();
-    }
-
 }

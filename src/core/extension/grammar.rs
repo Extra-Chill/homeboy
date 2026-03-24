@@ -22,27 +22,6 @@
 //! - **Composable** — features query for concepts ("give me methods") not languages
 //! - **Same model as `utils/baseline.rs`** — dumb primitive, smart consumers
 
-mod block_syntax;
-mod convenience_helpers_feature;
-mod extraction_apply_grammar;
-mod grammar_definition_loaded;
-mod grammar_loading;
-mod structural_context;
-mod structural_parser_context;
-mod symbol;
-mod types;
-
-pub use block_syntax::*;
-pub use convenience_helpers_feature::*;
-pub use extraction_apply_grammar::*;
-pub use grammar_definition_loaded::*;
-pub use grammar_loading::*;
-pub use structural_context::*;
-pub use structural_parser_context::*;
-pub use symbol::*;
-pub use types::*;
-
-
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,9 +35,382 @@ use crate::error::{Error, Result};
 // Grammar definition (loaded from extension TOML/JSON)
 // ============================================================================
 
+/// A language grammar defining patterns for structural concepts.
+///
+/// Grammars are loaded from extension files (e.g., `grammar.toml`).
+/// Each grammar defines how to recognize methods, classes, imports, etc.
+/// in a specific language.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Grammar {
+    /// Language metadata.
+    pub language: LanguageMeta,
+
+    /// Comment syntax for this language.
+    pub comments: CommentSyntax,
+
+    /// String literal syntax for this language.
+    pub strings: StringSyntax,
+
+    /// Block delimiter (usually braces, but could be indentation).
+    #[serde(default)]
+    pub blocks: BlockSyntax,
+
+    /// Named patterns for structural concepts.
+    pub patterns: HashMap<String, ConceptPattern>,
+
+    /// Contract extraction patterns — for analyzing function internals.
+    /// Optional: extensions that don't provide this get no contract extraction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<ContractGrammar>,
+}
+
+/// Grammar section for function contract extraction.
+///
+/// Defines patterns that identify control flow, side effects, and return
+/// paths within function bodies. All patterns are applied only inside
+/// function body ranges (between the function's opening and closing braces).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContractGrammar {
+    /// Patterns that identify side effects. Keys are effect kind names
+    /// (e.g., "file_read", "file_write", "process_spawn"), values are
+    /// regex patterns to match against lines inside function bodies.
+    #[serde(default)]
+    pub effects: HashMap<String, Vec<String>>,
+
+    /// Patterns that identify early return / guard clause lines.
+    /// Each pattern should match a line that contains a conditional return.
+    #[serde(default)]
+    pub guard_patterns: Vec<String>,
+
+    /// Patterns that identify return expressions with their variant.
+    /// Keys are variant names (e.g., "ok", "err", "some", "none", "true", "false").
+    /// Values are regex patterns that match return statements of that variant.
+    #[serde(default)]
+    pub return_patterns: HashMap<String, Vec<String>>,
+
+    /// Patterns that identify error propagation (e.g., `?` in Rust, `throw` in JS).
+    #[serde(default)]
+    pub error_propagation: Vec<String>,
+
+    /// Return type shape detection patterns. Keys are shape names
+    /// (e.g., "result", "option", "bool"), values are regex patterns
+    /// to match against the function signature's return type.
+    #[serde(default)]
+    pub return_shapes: HashMap<String, Vec<String>>,
+
+    /// Patterns for detecting panic/abort/unreachable paths.
+    #[serde(default)]
+    pub panic_patterns: Vec<String>,
+
+    /// The separator between the parameter list and return type in function declarations.
+    /// Rust: `"->"`, PHP: `":"`, TypeScript: `":"`.
+    /// Defaults to `"->"` for backward compatibility.
+    #[serde(default = "default_return_type_separator")]
+    pub return_type_separator: String,
+
+    /// Parameter format in function declarations.
+    /// `"name_colon_type"` — Rust/Go: `name: Type` (default)
+    /// `"type_dollar_name"` — PHP: `Type $name` or `$name`
+    #[serde(default = "default_param_format")]
+    pub param_format: String,
+
+    /// Test code templates keyed by template name (e.g., "result_ok", "option_none").
+    /// Templates contain variables like `{fn_name}`, `{param_names}`, `{test_name}`,
+    /// `{condition}`, etc. that are replaced by the test plan renderer.
+    ///
+    /// This is what makes test output language-specific without any language code in core.
+    #[serde(default)]
+    pub test_templates: HashMap<String, String>,
+
+    /// Type-to-default-value mappings for test input construction.
+    /// Keys are regex patterns matched against parameter types.
+    /// Values are code expressions that produce a valid zero/default value.
+    ///
+    /// Example (Rust): `"&str" → "\"\"", "&Path" → "Path::new(\"\")"`.
+    ///
+    /// Patterns are tried in order; first match wins. The fallback for
+    /// unmatched types is `Default::default()` (Rust) or language equivalent.
+    #[serde(default)]
+    pub type_defaults: Vec<TypeDefault>,
+
+    /// Behavioral constructors for condition-specific test inputs.
+    ///
+    /// Maps a `(semantic_hint, type_pattern)` pair to a code expression.
+    /// Core analyzes branch conditions to produce semantic hints like
+    /// `"empty"`, `"non_empty"`, `"nonexistent_path"`, `"none"`, etc.
+    /// The grammar then provides the language-specific code that
+    /// produces a value satisfying that hint for the matched type.
+    ///
+    /// This keeps core language-agnostic: core recognizes *what* the
+    /// condition needs, the grammar provides *how* to express it.
+    #[serde(default)]
+    pub type_constructors: Vec<TypeConstructor>,
+
+    /// Assertion templates for behavioral test assertions.
+    ///
+    /// Maps an assertion key (e.g., `"result_ok_value"`, `"result_err_value"`,
+    /// `"option_none"`, `"bool_true"`) to a template string containing
+    /// variables like `{condition}`, `{expected_value}`.
+    ///
+    /// Core selects the assertion key based on the branch return; the grammar
+    /// provides the language-specific assertion code. This avoids hardcoding
+    /// `unwrap()` or `is_ok()` in core.
+    #[serde(default)]
+    pub assertion_templates: HashMap<String, String>,
+
+    /// Fallback default expression when no type_default or type_constructor
+    /// matches. Language-specific (e.g., `"Default::default()"` for Rust,
+    /// `"null"` for PHP).
+    #[serde(default = "default_fallback_default")]
+    pub fallback_default: String,
+
+    /// Regex pattern for extracting struct/class field declarations.
+    /// Must have two capture groups for field name and field type.
+    /// Applied to each line inside a struct/class body.
+    ///
+    /// Which capture group is name vs type is controlled by `field_name_group`
+    /// and `field_type_group` (default: group 1 = name, group 2 = type).
+    ///
+    /// Rust: `"^\s*(?:pub\s+)?(\w+)\s*:\s*(.+?),?\s*$"` — name:1, type:2
+    /// PHP:  `"^\s*(?:public|protected|private)\s+(?:readonly\s+)?(\??\w+)\s+\$(\w+)"` — type:1, name:2
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_pattern: Option<String>,
+
+    /// Which capture group in `field_pattern` contains the field name. Default: 1.
+    #[serde(default = "default_group_1")]
+    pub field_name_group: usize,
+
+    /// Which capture group in `field_pattern` contains the field type. Default: 2.
+    #[serde(default = "default_group_2")]
+    pub field_type_group: usize,
+
+    /// Regex pattern that identifies public visibility on a field line.
+    /// Used to set `FieldDef.is_public`.
+    ///
+    /// Rust: `"^\s*pub\b"`, PHP: `"^\s*public\b"`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_visibility_pattern: Option<String>,
+
+    /// Template for asserting a single struct field in a generated test.
+    /// Variables: `{field_name}`, `{expected_value}`, `{indent}`.
+    ///
+    /// Rust:  `"{indent}assert_eq!(inner.{field_name}, {expected_value});"`
+    /// PHP:   `"{indent}$this->assertSame( {expected_value}, $result->{field_name} );"`
+    ///
+    /// If not set, field-level assertions are not generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_assertion_template: Option<String>,
+}
+
+fn default_fallback_default() -> String {
+    "Default::default()".to_string()
+}
+
+fn default_group_1() -> usize {
+    1
+}
+
+fn default_group_2() -> usize {
+    2
+}
+
+fn default_return_type_separator() -> String {
+    "->".to_string()
+}
+
+fn default_param_format() -> String {
+    "name_colon_type".to_string()
+}
+
+/// A single type-to-default-value mapping for test input construction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeDefault {
+    /// Regex pattern to match against the parameter type string.
+    pub pattern: String,
+    /// Code expression that produces a valid default value for matched types.
+    pub value: String,
+    /// Optional extra `use` imports required by this default value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<String>,
+}
+
+/// A behavioral constructor mapping a semantic hint + type pattern to a code expression.
+///
+/// Core produces semantic hints from branch conditions (e.g., `"empty"` from
+/// `items.is_empty()`). The grammar maps each `(hint, type_pattern)` pair to
+/// the language-specific expression that produces a value satisfying that hint.
+///
+/// The `hint` field is matched exactly. The `pattern` field is a regex matched
+/// against the parameter type. First match wins (entries are tried in order).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeConstructor {
+    /// Semantic hint from behavioral inference (e.g., "empty", "non_empty",
+    /// "nonexistent_path", "none", "some_default", "true", "false", "zero",
+    /// "positive", "contains").
+    pub hint: String,
+    /// Regex pattern to match against the parameter type string.
+    pub pattern: String,
+    /// Code expression that produces a value satisfying the hint for this type.
+    /// May contain `{param_name}` which is replaced with the actual param name.
+    pub value: String,
+    /// Optional override for the call argument (e.g., `"{param_name}.path()"` for tempdir).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_arg: Option<String>,
+    /// Optional extra `use` imports required by this value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<String>,
+}
+
+/// Language identification metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanguageMeta {
+    /// Language identifier (e.g., "php", "rust", "javascript").
+    pub id: String,
+
+    /// File extensions this grammar applies to.
+    pub extensions: Vec<String>,
+}
+
+/// How comments work in this language.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommentSyntax {
+    /// Single-line comment prefixes (e.g., ["//", "#"]).
+    #[serde(default)]
+    pub line: Vec<String>,
+
+    /// Multi-line comment delimiters (e.g., [["/*", "*/"]]).
+    #[serde(default)]
+    pub block: Vec<(String, String)>,
+
+    /// Doc comment prefixes (e.g., ["///", "//!"]).
+    #[serde(default)]
+    pub doc: Vec<String>,
+}
+
+/// How string literals work in this language.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StringSyntax {
+    /// Quote characters (e.g., ["\"", "'", "`"]).
+    #[serde(default = "default_quotes")]
+    pub quotes: Vec<String>,
+
+    /// Escape character (usually backslash).
+    #[serde(default = "default_escape_string")]
+    pub escape: String,
+
+    /// Multi-line string delimiters (e.g., Python's triple-quote).
+    #[serde(default)]
+    pub multiline: Vec<(String, String)>,
+}
+
+fn default_quotes() -> Vec<String> {
+    vec!["\"".to_string(), "'".to_string()]
+}
+
+fn default_escape_string() -> String {
+    "\\".to_string()
+}
+
+/// Block (scope) delimiters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockSyntax {
+    /// Opening delimiter (default: "{").
+    #[serde(default = "default_open")]
+    pub open: String,
+
+    /// Closing delimiter (default: "}").
+    #[serde(default = "default_close")]
+    pub close: String,
+}
+
+impl Default for BlockSyntax {
+    fn default() -> Self {
+        Self {
+            open: "{".to_string(),
+            close: "}".to_string(),
+        }
+    }
+}
+
+fn default_open() -> String {
+    "{".to_string()
+}
+
+fn default_close() -> String {
+    "}".to_string()
+}
+
+/// A pattern for a structural concept (method, class, import, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConceptPattern {
+    /// Regex pattern to match this concept.
+    pub regex: String,
+
+    /// Named capture group mapping.
+    /// Maps semantic names to capture group indices.
+    /// e.g., {"name": 1, "visibility": 2, "params": 3}
+    #[serde(default)]
+    pub captures: HashMap<String, usize>,
+
+    /// Context constraint: where this pattern is valid.
+    /// - "any" (default) — match anywhere
+    /// - "top_level" — only at brace depth 0
+    /// - "in_block" — only inside a block (depth > 0)
+    /// - "line" — match per-line (default for most patterns)
+    #[serde(default = "default_context")]
+    pub context: String,
+
+    /// Whether to skip matches inside comments.
+    #[serde(default = "default_true")]
+    pub skip_comments: bool,
+
+    /// Whether to skip matches inside string literals.
+    #[serde(default = "default_true")]
+    pub skip_strings: bool,
+
+    /// Filter: only include matches where this capture group is non-empty.
+    #[serde(default)]
+    pub require_capture: Option<String>,
+}
+
+fn default_context() -> String {
+    "any".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 // ============================================================================
 // Structural parser — context-aware iteration over source text
 // ============================================================================
+
+/// Region classification for a line or span of text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    /// Normal code.
+    Code,
+    /// Inside a single-line comment.
+    LineComment,
+    /// Inside a block comment.
+    BlockComment,
+    /// Inside a string literal.
+    StringLiteral,
+}
+
+/// Tracks structural context while parsing source text.
+#[derive(Debug, Clone)]
+pub struct StructuralContext {
+    /// Current brace nesting depth.
+    pub depth: i32,
+
+    /// Current region (code, comment, string).
+    pub region: Region,
+
+    /// Stack of block contexts: (kind_label, depth_when_entered).
+    /// Features can push/pop to track impl blocks, test modules, etc.
+    pub block_stack: Vec<(String, i32)>,
+}
 
 impl StructuralContext {
     pub fn new() -> Self {
@@ -97,6 +449,28 @@ impl StructuralContext {
             }
         }
     }
+}
+
+impl Default for StructuralContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A line of source with its structural context.
+#[derive(Debug, Clone)]
+pub struct ContextualLine<'a> {
+    /// The line content.
+    pub text: &'a str,
+
+    /// 1-indexed line number.
+    pub line_num: usize,
+
+    /// Brace depth at the start of this line.
+    pub depth: i32,
+
+    /// What region this line is in.
+    pub region: Region,
 }
 
 /// Iterate lines with structural context, tracking brace depth and regions.
@@ -168,9 +542,71 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
     result
 }
 
+/// Check if a trimmed line is a single-line comment.
+fn is_line_comment(trimmed: &str, comments: &CommentSyntax) -> bool {
+    for prefix in &comments.line {
+        if trimmed.starts_with(prefix.as_str()) {
+            return true;
+        }
+    }
+    for prefix in &comments.doc {
+        if trimmed.starts_with(prefix.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Update brace depth for a line, skipping strings.
+fn update_depth(
+    line: &str,
+    blocks: &BlockSyntax,
+    strings: &StringSyntax,
+    ctx: &mut StructuralContext,
+) {
+    let mut in_string: Option<char> = None;
+    let mut prev_char = '\0';
+
+    for ch in line.chars() {
+        if let Some(quote) = in_string {
+            if ch == quote && prev_char != strings.escape.chars().next().unwrap_or('\\') {
+                in_string = None;
+            }
+        } else if strings.quotes.iter().any(|q| q.starts_with(ch)) {
+            in_string = Some(ch);
+        } else if blocks.open.starts_with(ch) {
+            ctx.depth += 1;
+        } else if blocks.close.starts_with(ch) {
+            ctx.depth -= 1;
+        }
+        prev_char = ch;
+    }
+}
+
 // ============================================================================
 // Extraction — apply grammar patterns to get symbols
 // ============================================================================
+
+/// A symbol extracted from source code.
+#[derive(Debug, Clone, Serialize)]
+pub struct Symbol {
+    /// What kind of concept this is (matches the pattern key in the grammar).
+    /// e.g., "method", "class", "import", "namespace"
+    pub concept: String,
+
+    /// Named captures from the pattern match.
+    /// e.g., {"name": "foo", "visibility": "pub", "params": "&self, key: &str"}
+    pub captures: HashMap<String, String>,
+
+    /// 1-indexed line number where the symbol was found.
+    pub line: usize,
+
+    /// Brace depth at the match location.
+    pub depth: i32,
+
+    /// The full matched text.
+    pub matched_text: String,
+}
 
 impl Symbol {
     /// Get a named capture value.
@@ -189,13 +625,171 @@ impl Symbol {
     }
 }
 
+/// Extract all symbols from source content using a grammar.
+pub fn extract(content: &str, grammar: &Grammar) -> Vec<Symbol> {
+    let lines = walk_lines(content, grammar);
+    let mut symbols = Vec::new();
+
+    for (concept_name, pattern) in &grammar.patterns {
+        let re = match Regex::new(&pattern.regex) {
+            Ok(r) => r,
+            Err(_) => continue, // Skip invalid patterns
+        };
+
+        for ctx_line in &lines {
+            // Skip based on region
+            if pattern.skip_comments
+                && (ctx_line.region == Region::LineComment
+                    || ctx_line.region == Region::BlockComment)
+            {
+                continue;
+            }
+
+            // Skip based on context constraint
+            match pattern.context.as_str() {
+                "top_level" => {
+                    if ctx_line.depth != 0 {
+                        continue;
+                    }
+                }
+                "in_block" => {
+                    if ctx_line.depth == 0 {
+                        continue;
+                    }
+                }
+                _ => {} // "any" or "line" — no constraint
+            }
+
+            // Try to match
+            if let Some(caps) = re.captures(ctx_line.text) {
+                let mut capture_map = HashMap::new();
+
+                for (name, &index) in &pattern.captures {
+                    if let Some(m) = caps.get(index) {
+                        capture_map.insert(name.clone(), m.as_str().to_string());
+                    }
+                }
+
+                // Check require_capture filter
+                if let Some(ref required) = pattern.require_capture {
+                    if capture_map.get(required).is_none_or(|v| v.is_empty()) {
+                        continue;
+                    }
+                }
+
+                symbols.push(Symbol {
+                    concept: concept_name.clone(),
+                    captures: capture_map,
+                    line: ctx_line.line_num,
+                    depth: ctx_line.depth,
+                    matched_text: caps[0].to_string(),
+                });
+            }
+        }
+    }
+
+    // Sort by line number for stable output
+    symbols.sort_by_key(|s| s.line);
+    symbols
+}
+
+/// Extract symbols of a specific concept only.
+#[cfg(test)]
+pub(crate) fn extract_concept(content: &str, grammar: &Grammar, concept: &str) -> Vec<Symbol> {
+    extract(content, grammar)
+        .into_iter()
+        .filter(|s| s.concept == concept)
+        .collect()
+}
+
 // ============================================================================
 // Grammar loading
 // ============================================================================
 
+/// Load a grammar from a TOML file.
+pub fn load_grammar(path: &Path) -> Result<Grammar> {
+    let content = local_files::read_file(path, "read grammar file")?;
+    toml::from_str(&content).map_err(|e| {
+        Error::internal_io(
+            format!("Failed to parse grammar {}: {}", path.display(), e),
+            Some("grammar.load".to_string()),
+        )
+    })
+}
+
+/// Load a grammar from a JSON file.
+pub fn load_grammar_json(path: &Path) -> Result<Grammar> {
+    let content = local_files::read_file(path, "read grammar file")?;
+    serde_json::from_str(&content).map_err(|e| {
+        Error::internal_io(
+            format!("Failed to parse grammar {}: {}", path.display(), e),
+            Some("grammar.load".to_string()),
+        )
+    })
+}
+
 // ============================================================================
 // Convenience helpers for feature consumers
 // ============================================================================
+
+/// Get all method/function names from extracted symbols.
+#[cfg(test)]
+pub(crate) fn method_names(symbols: &[Symbol]) -> Vec<String> {
+    symbols
+        .iter()
+        .filter(|s| {
+            s.concept == "method" || s.concept == "function" || s.concept == "free_function"
+        })
+        .filter_map(|s| s.name().map(|n| n.to_string()))
+        .collect()
+}
+
+/// Get all class/struct/trait names from extracted symbols.
+#[cfg(test)]
+pub(crate) fn type_names(symbols: &[Symbol]) -> Vec<String> {
+    symbols
+        .iter()
+        .filter(|s| {
+            s.concept == "class"
+                || s.concept == "struct"
+                || s.concept == "trait"
+                || s.concept == "enum"
+                || s.concept == "interface"
+                || s.concept == "type"
+        })
+        .filter_map(|s| s.name().map(|n| n.to_string()))
+        .collect()
+}
+
+/// Get all import paths from extracted symbols.
+#[cfg(test)]
+pub(crate) fn import_paths(symbols: &[Symbol]) -> Vec<String> {
+    symbols
+        .iter()
+        .filter(|s| s.concept == "import" || s.concept == "use")
+        .filter_map(|s| s.get("path").map(|p| p.to_string()))
+        .collect()
+}
+
+/// Get the namespace from extracted symbols.
+pub fn namespace(symbols: &[Symbol]) -> Option<String> {
+    symbols
+        .iter()
+        .find(|s| s.concept == "namespace" || s.concept == "module")
+        .and_then(|s| s.name().map(|n| n.to_string()))
+}
+
+/// Filter symbols to only public API (visibility contains "pub" or "public").
+#[cfg(test)]
+pub(crate) fn public_symbols(symbols: &[Symbol]) -> Vec<&Symbol> {
+    symbols
+        .iter()
+        .filter(|s| {
+            s.visibility()
+                .is_none_or(|v| v.contains("pub") || v == "public")
+        })
+        .collect()
+}
 
 // ============================================================================
 // Block body extraction
@@ -250,6 +844,79 @@ pub(crate) fn extract_block_body<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rust_grammar() -> Grammar {
+        Grammar {
+            language: LanguageMeta {
+                id: "rust".to_string(),
+                extensions: vec!["rs".to_string()],
+            },
+            comments: CommentSyntax {
+                line: vec!["//".to_string()],
+                block: vec![("/*".to_string(), "*/".to_string())],
+                doc: vec!["///".to_string(), "//!".to_string()],
+            },
+            strings: StringSyntax {
+                quotes: vec!["\"".to_string()],
+                escape: "\\".to_string(),
+                multiline: vec![],
+            },
+            blocks: BlockSyntax::default(),
+            contract: None,
+            patterns: {
+                let mut p = HashMap::new();
+                p.insert(
+                    "function".to_string(),
+                    ConceptPattern {
+                        regex: r"(?:pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([^)]*)\)"
+                            .to_string(),
+                        captures: {
+                            let mut c = HashMap::new();
+                            c.insert("name".to_string(), 1);
+                            c.insert("params".to_string(), 2);
+                            c
+                        },
+                        context: "any".to_string(),
+                        skip_comments: true,
+                        skip_strings: true,
+                        require_capture: None,
+                    },
+                );
+                p.insert(
+                    "struct".to_string(),
+                    ConceptPattern {
+                        regex: r"(?:pub(?:\(crate\))?\s+)?(?:struct|enum|trait)\s+(\w+)"
+                            .to_string(),
+                        captures: {
+                            let mut c = HashMap::new();
+                            c.insert("name".to_string(), 1);
+                            c
+                        },
+                        context: "top_level".to_string(),
+                        skip_comments: true,
+                        skip_strings: true,
+                        require_capture: None,
+                    },
+                );
+                p.insert(
+                    "import".to_string(),
+                    ConceptPattern {
+                        regex: r"use\s+([\w:]+(?:::\{[^}]+\})?);".to_string(),
+                        captures: {
+                            let mut c = HashMap::new();
+                            c.insert("path".to_string(), 1);
+                            c
+                        },
+                        context: "top_level".to_string(),
+                        skip_comments: true,
+                        skip_strings: true,
+                        require_capture: None,
+                    },
+                );
+                p
+            },
+        }
+    }
 
     fn php_grammar() -> Grammar {
         Grammar {
@@ -373,6 +1040,16 @@ mod tests {
         // Braces inside string should NOT change depth
         assert_eq!(lines[0].depth, 0);
         assert_eq!(lines[1].depth, 0);
+    }
+
+    #[test]
+    fn php_hash_comments() {
+        let content = "<?php\n# this is a comment\n$x = 1;\n";
+        let grammar = php_grammar();
+        let lines = walk_lines(content, &grammar);
+
+        assert_eq!(lines[1].region, Region::LineComment);
+        assert_eq!(lines[2].region, Region::Code);
     }
 
     // ---- Extraction tests ----
@@ -581,6 +1258,10 @@ pub fn standalone(x: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn it_works() {
+        assert!(true);
+    }
 }
 "#;
 
@@ -699,176 +1380,4 @@ class PipelineAbilities extends BaseAbilities {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name(), Some("init"));
     }
-
-    #[test]
-    fn test_current_block_label_default_path() {
-        let instance = StructuralContext::default();
-        let _result = instance.current_block_label();
-    }
-
-    #[test]
-    fn test_push_block_does_not_panic() {
-        let instance = StructuralContext::default();
-        let _ = instance.push_block();
-    }
-
-    #[test]
-    fn test_push_block_has_expected_effects() {
-        // Expected effects: mutation
-        let instance = StructuralContext::default();
-        let _ = instance.push_block();
-    }
-
-    #[test]
-    fn test_pop_exited_blocks_while_let_some_entry_depth_self_block_stack_last() {
-        let instance = StructuralContext::default();
-        instance.pop_exited_blocks();
-    }
-
-    #[test]
-    fn test_get_default_path() {
-        let instance = Symbol::default();
-        let key = "";
-        let _result = instance.get(&key);
-    }
-
-    #[test]
-    fn test_name_default_path() {
-        let instance = Symbol::default();
-        let _result = instance.name();
-    }
-
-    #[test]
-    fn test_visibility_default_path() {
-        let instance = Symbol::default();
-        let _result = instance.visibility();
-    }
-
-    #[test]
-    fn test_extract_ok_r_r() {
-        let content = "";
-        let grammar = Default::default();
-        let result = extract(&content, &grammar);
-        assert!(!result.is_empty(), "expected non-empty collection for: Ok(r) => r,");
-    }
-
-    #[test]
-    fn test_extract_err_continue_skip_invalid_patterns() {
-        let content = "";
-        let grammar = Default::default();
-        let result = extract(&content, &grammar);
-        assert!(!result.is_empty(), "expected non-empty collection for: Err(_) => continue, // Skip invalid patterns");
-    }
-
-    #[test]
-    fn test_extract_if_let_some_caps_re_captures_ctx_line_text() {
-        let content = "";
-        let grammar = Default::default();
-        let result = extract(&content, &grammar);
-        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(caps) = re.captures(ctx_line.text) {{");
-    }
-
-    #[test]
-    fn test_extract_let_some_caps_re_captures_ctx_line_text() {
-        let content = "";
-        let grammar = Default::default();
-        let result = extract(&content, &grammar);
-        assert!(!result.is_empty(), "expected non-empty collection for: let Some(caps) = re.captures(ctx_line.text)");
-    }
-
-    #[test]
-    fn test_extract_if_let_some_ref_required_pattern_require_capture() {
-        let content = "";
-        let grammar = Default::default();
-        let result = extract(&content, &grammar);
-        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(ref required) = pattern.require_capture {{");
-    }
-
-    #[test]
-    fn test_extract_has_expected_effects() {
-        // Expected effects: mutation
-        let content = "";
-        let grammar = Default::default();
-        let _ = extract(&content, &grammar);
-    }
-
-    #[test]
-    fn test_extract_concept_default_path() {
-
-        let result = extract_concept();
-        assert!(!result.is_empty(), "expected non-empty collection for: default path");
-    }
-
-    #[test]
-    fn test_load_grammar_default_path() {
-        let path = Path::new("");
-        let _result = load_grammar(&path);
-    }
-
-    #[test]
-    fn test_load_grammar_some_grammar_load_to_string() {
-        let path = Path::new("");
-        let _result = load_grammar(&path);
-    }
-
-    #[test]
-    fn test_load_grammar_json_default_path() {
-        let path = Path::new("");
-        let _result = load_grammar_json(&path);
-    }
-
-    #[test]
-    fn test_load_grammar_json_some_grammar_load_to_string() {
-        let path = Path::new("");
-        let _result = load_grammar_json(&path);
-    }
-
-    #[test]
-    fn test_method_names_default_path() {
-
-        let result = method_names();
-        assert!(!result.is_empty(), "expected non-empty collection for: default path");
-    }
-
-    #[test]
-    fn test_type_names_default_path() {
-
-        let result = type_names();
-        assert!(!result.is_empty(), "expected non-empty collection for: default path");
-    }
-
-    #[test]
-    fn test_import_paths_default_path() {
-
-        let result = import_paths();
-        assert!(!result.is_empty(), "expected non-empty collection for: default path");
-    }
-
-    #[test]
-    fn test_namespace_default_path() {
-        let symbols = Vec::new();
-        let _result = namespace(&symbols);
-    }
-
-    #[test]
-    fn test_public_symbols_default_path() {
-
-        let result = public_symbols();
-        assert!(!result.is_empty(), "expected non-empty collection for: default path");
-    }
-
-    #[test]
-    fn test_load_default_path() {
-        let instance = Config::default();
-        let path = Path::new("");
-        let _result = instance.load(&path);
-    }
-
-    #[test]
-    fn test_standalone_default_path() {
-        let instance = Config::default();
-        let x = 0;
-        let _result = instance.standalone(x);
-    }
-
 }
