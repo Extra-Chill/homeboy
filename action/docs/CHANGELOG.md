@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.12.1] - 2026-03-24
+
+### Fixed
+- surface refactor command failures in CI failure issues
+
 ## [1.12.0] - 2026-03-23
 
 ### Added
