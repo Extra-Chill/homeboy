@@ -3,8 +3,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-03-24T00:06:34Z",
-      "item_count": 967,
+      "created_at": "2026-03-24T15:10:26Z",
+      "item_count": 975,
       "known_fingerprints": [
         "Commands (Tests)::tests/commands/deploy_test.rs::MissingMethod",
         "Commands (Tests)::tests/commands/deploy_test.rs::MissingMethod",
@@ -193,6 +193,7 @@
         "intra-method-duplication::src/core/git/operations.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/git/operations.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/project/files.rs::IntraMethodDuplicate",
+        "intra-method-duplication::src/core/refactor/auto/apply.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/refactor/auto/apply.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/refactor/auto/apply.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/refactor/auto/apply.rs::IntraMethodDuplicate",
@@ -816,6 +817,13 @@
         "test_coverage::src/core/refactor/auto/apply.rs::MissingTestMethod",
         "test_coverage::src/core/refactor/auto/apply.rs::MissingTestMethod",
         "test_coverage::src/core/refactor/auto/apply.rs::MissingTestMethod",
+        "test_coverage::src/core/refactor/auto/apply.rs::OrphanedTest",
+        "test_coverage::src/core/refactor/auto/apply.rs::OrphanedTest",
+        "test_coverage::src/core/refactor/auto/apply.rs::OrphanedTest",
+        "test_coverage::src/core/refactor/auto/apply.rs::OrphanedTest",
+        "test_coverage::src/core/refactor/auto/apply.rs::OrphanedTest",
+        "test_coverage::src/core/refactor/auto/apply.rs::OrphanedTest",
+        "test_coverage::src/core/refactor/auto/apply.rs::OrphanedTest",
         "test_coverage::src/core/refactor/auto/apply.rs::OrphanedTest",
         "test_coverage::src/core/refactor/auto/apply.rs::OrphanedTest",
         "test_coverage::src/core/refactor/auto/apply.rs::OrphanedTest",
