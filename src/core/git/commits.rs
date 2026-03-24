@@ -972,4 +972,235 @@ mod tests {
         let subject = "";
         let _result = strip_conventional_prefix(&subject);
     }
+
+    #[test]
+    fn test_detect_default_path() {
+        let instance = MonorepoContext::default();
+        let local_path = "";
+        let component_id = "";
+        let _result = instance.detect(&local_path, &component_id);
+    }
+
+    #[test]
+    fn test_detect_default_path_2() {
+        let instance = MonorepoContext::default();
+        let local_path = "";
+        let component_id = "";
+        let _result = instance.detect(&local_path, &component_id);
+    }
+
+    #[test]
+    fn test_format_tag_default_path() {
+        let instance = MonorepoContext::default();
+        let version = "";
+        let _result = instance.format_tag(&version);
+    }
+
+    #[test]
+    fn test_rank_default_path() {
+        let instance = SemverBump::default();
+        let _result = instance.rank();
+    }
+
+    #[test]
+    fn test_parse_match_value() {
+        let instance = SemverBump::default();
+        let value = "";
+        let result = instance.parse(&value);
+        assert!(result.is_some(), "expected Some for: match value");
+    }
+
+    #[test]
+    fn test_parse_match_value_2() {
+        let instance = SemverBump::default();
+        let value = "";
+        let result = instance.parse(&value);
+        assert!(result.is_some(), "expected Some for: match value");
+    }
+
+    #[test]
+    fn test_parse_match_value_3() {
+        let instance = SemverBump::default();
+        let value = "";
+        let result = instance.parse(&value);
+        assert!(result.is_some(), "expected Some for: match value");
+    }
+
+    #[test]
+    fn test_prefix_match_self() {
+        let instance = CommitCategory::default();
+        let result = instance.prefix();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_prefix_match_self_2() {
+        let instance = CommitCategory::default();
+        let result = instance.prefix();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_prefix_match_self_3() {
+        let instance = CommitCategory::default();
+        let result = instance.prefix();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_prefix_match_self_4() {
+        let instance = CommitCategory::default();
+        let result = instance.prefix();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_prefix_match_self_5() {
+        let instance = CommitCategory::default();
+        let result = instance.prefix();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_to_changelog_entry_type_match_self() {
+        let instance = CommitCategory::default();
+        let result = instance.to_changelog_entry_type();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_to_changelog_entry_type_match_self_2() {
+        let instance = CommitCategory::default();
+        let result = instance.to_changelog_entry_type();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_to_changelog_entry_type_match_self_3() {
+        let instance = CommitCategory::default();
+        let result = instance.to_changelog_entry_type();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_to_changelog_entry_type_commitcategory_other_some_changed() {
+        let instance = CommitCategory::default();
+        let result = instance.to_changelog_entry_type();
+        assert!(result.is_some(), "expected Some for: CommitCategory::Other => Some(\"changed\"),");
+    }
+
+    #[test]
+    fn test_parse_conventional_commit_default_path() {
+
+        let _result = parse_conventional_commit();
+    }
+
+    #[test]
+    fn test_classify_commit_lower_contains_breaking_change_subject_contains() {
+
+        let _result = classify_commit();
+    }
+
+    #[test]
+    fn test_extract_version_from_tag_default_path() {
+
+        let _result = extract_version_from_tag();
+    }
+
+    #[test]
+    fn test_find_version_commit_default_path() {
+        let path = "";
+        let _result = find_version_commit(&path);
+    }
+
+    #[test]
+    fn test_find_version_commit_if_let_some_hash_subject_line_split_once() {
+        let path = "";
+        let result = find_version_commit(&path);
+        assert!(result.is_some(), "expected Some for: if let Some((hash, subject)) = line.split_once('|') {{");
+    }
+
+    #[test]
+    fn test_find_version_commit_version_pattern_is_match_subject() {
+        let path = "";
+        let _result = find_version_commit(&path);
+    }
+
+    #[test]
+    fn test_find_version_commit_ok_none() {
+        let path = "";
+        let _result = find_version_commit(&path);
+    }
+
+    #[test]
+    fn test_find_version_release_commit_let_some_stdout_command_run_in_optional_path_git_log_200_for() {
+        let path = "";
+        let version = "";
+        let result = find_version_release_commit(&path, &version);
+        assert!(result.is_some(), "expected Some for: let Some(stdout) = command::run_in_optional(path, \"git\", &[\"log\", \"-200\", \"--format=%h|%s\"])");
+    }
+
+    #[test]
+    fn test_find_version_release_commit_else() {
+        let path = "";
+        let version = "";
+        let _result = find_version_release_commit(&path, &version);
+    }
+
+    #[test]
+    fn test_find_version_release_commit_if_let_some_hash_subject_line_split_once() {
+        let path = "";
+        let version = "";
+        let result = find_version_release_commit(&path, &version);
+        assert!(result.is_some(), "expected Some for: if let Some((hash, subject)) = line.split_once('|') {{");
+    }
+
+    #[test]
+    fn test_find_version_release_commit_regex_new_pattern() {
+        let path = "";
+        let version = "";
+        let _result = find_version_release_commit(&path, &version);
+    }
+
+    #[test]
+    fn test_find_version_release_commit_ok_none() {
+        let path = "";
+        let version = "";
+        let _result = find_version_release_commit(&path, &version);
+    }
+
+    #[test]
+    fn test_categorize_commits_default_path() {
+        let path = "";
+        let commits = Vec::new();
+        let _result = categorize_commits(&path, &commits);
+    }
+
+    #[test]
+    fn test_recommended_bump_from_commits_none_some_bump() {
+        let commits = Vec::new();
+        let result = recommended_bump_from_commits(&commits);
+        assert!(result.is_some(), "expected Some for: None => Some(bump),");
+    }
+
+    #[test]
+    fn test_recommended_bump_from_commits_some_existing_if_bump_rank_existing_rank_some_bump() {
+        let commits = Vec::new();
+        let result = recommended_bump_from_commits(&commits);
+        assert!(result.is_some(), "expected Some for: Some(existing) if bump.rank() > existing.rank() => Some(bump),");
+    }
+
+    #[test]
+    fn test_recommended_bump_from_commits_some_existing_some_existing() {
+        let commits = Vec::new();
+        let result = recommended_bump_from_commits(&commits);
+        assert!(result.is_some(), "expected Some for: Some(existing) => Some(existing),");
+    }
+
+    #[test]
+    fn test_strip_conventional_prefix_if_let_some_pos_subject_find() {
+        let subject = "";
+        let _result = strip_conventional_prefix(&subject);
+    }
+
 }

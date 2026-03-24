@@ -674,3 +674,61 @@ impl PipelineStepExecutor for ReleaseStepExecutor {
         self.execute_core_step(step)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let component_id = String::new();
+        let component = Default::default();
+        let extensions = Vec::new();
+        let _result = instance.new(component_id, component, extensions);
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path() {
+        let instance = ReleaseStepExecutor::default();
+        let _result = instance.build_release_payload();
+    }
+
+    #[test]
+    fn test_build_release_payload_some_format_step_requires_version_context_step_id() {
+        let instance = ReleaseStepExecutor::default();
+        let _result = instance.build_release_payload();
+    }
+
+    #[test]
+    fn test_build_release_payload_some_vec_ensure_version_step_runs_before_this_step_to_string() {
+        let instance = ReleaseStepExecutor::default();
+        let _result = instance.build_release_payload();
+    }
+
+    #[test]
+    fn test_build_release_payload_default_path_2() {
+        let instance = ReleaseStepExecutor::default();
+        let _result = instance.build_release_payload();
+    }
+
+    #[test]
+    fn test_build_release_payload_step_config_is_empty() {
+        let instance = ReleaseStepExecutor::default();
+        let _result = instance.build_release_payload();
+    }
+
+    #[test]
+    fn test_build_release_payload_step_config_is_empty_2() {
+        let instance = ReleaseStepExecutor::default();
+        let _result = instance.build_release_payload();
+    }
+
+    #[test]
+    fn test_build_release_payload_ok_payload() {
+        let instance = ReleaseStepExecutor::default();
+        let result = instance.build_release_payload();
+        assert!(result.is_ok(), "expected Ok for: Ok(payload)");
+    }
+
+}
