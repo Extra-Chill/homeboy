@@ -14,8 +14,8 @@ use super::release_download;
 use super::safety_and_artifact::{deploy_artifact, deploy_via_git, validate_deploy_target};
 use super::types::{ComponentDeployResult, DeployConfig, DeployResult};
 use super::version_overrides::{
-    artifact_is_fresh, deploy_with_override, find_deploy_override, find_deploy_verification,
-    is_self_deploy, prefer_installed_binary, run_post_deploy_hooks,
+    deploy_with_override, find_deploy_override, find_deploy_verification, is_self_deploy,
+    prefer_installed_binary, run_post_deploy_hooks,
 };
 
 pub(super) fn execute_component_deploy(
@@ -43,13 +43,6 @@ pub(super) fn execute_component_deploy(
     // Build (git-deploy, skip-build, and release-download skip this step)
     let (build_exit_code, build_error) =
         if is_git_deploy || config.skip_build || release_artifact.is_some() {
-            (Some(0), None)
-        } else if artifact_is_fresh(component) {
-            log_status!(
-                "deploy",
-                "Artifact for '{}' is up-to-date, skipping build",
-                component.id
-            );
             (Some(0), None)
         } else {
             build::build_component(component)
