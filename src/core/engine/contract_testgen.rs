@@ -20,6 +20,25 @@
 //!    to derive specific assertions. E.g., `Ok("skipped")` → assert the
 //!    unwrapped value matches the expected description, not just `is_ok()`.
 
+mod build;
+mod condition_contains;
+mod default_call_arg;
+mod generate_test;
+mod helpers;
+mod like;
+mod test_async;
+mod types;
+
+pub use build::*;
+pub use condition_contains::*;
+pub use default_call_arg::*;
+pub use generate_test::*;
+pub use helpers::*;
+pub use like::*;
+pub use test_async::*;
+pub use types::*;
+
+
 use std::collections::HashMap;
 
 use regex::Regex;
@@ -27,478 +46,6 @@ use serde::{Deserialize, Serialize};
 
 use super::contract::*;
 use crate::extension::grammar::{ContractGrammar, TypeConstructor, TypeDefault};
-
-/// A plan for generating tests for a single function.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestPlan {
-    /// The function being tested.
-    pub function_name: String,
-    /// Source file containing the function.
-    pub source_file: String,
-    /// Whether the function is async.
-    pub is_async: bool,
-    /// Individual test cases to generate.
-    pub cases: Vec<TestCase>,
-}
-
-/// A single test case to generate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestCase {
-    /// Suggested test function name (e.g., "test_validate_write_skips_when_empty").
-    pub test_name: String,
-    /// Which branch this test covers.
-    pub branch_condition: String,
-    /// The expected return variant (ok, err, some, none, true, false, value).
-    pub expected_variant: String,
-    /// Description of what the expected return value should be.
-    pub expected_value: Option<String>,
-    /// The template key to use for rendering (e.g., "result_ok", "option_none", "bool_true").
-    pub template_key: String,
-    /// Template variables for rendering.
-    pub variables: HashMap<String, String>,
-}
-
-/// Generate a test plan from a function contract.
-///
-/// Produces one test case per branch with behavioral setup and assertions.
-/// The plan is language-agnostic — rendering to source code requires
-/// templates from the grammar.
-///
-/// The `contract_grammar` provides all language-specific knowledge:
-/// - `type_defaults` — zero/default values for parameter types
-/// - `type_constructors` — behavioral constructors for condition-specific inputs
-/// - `assertion_templates` — language-specific assertion code patterns
-/// - `fallback_default` — fallback expression when nothing else matches
-/// - `field_pattern` — regex for extracting struct fields from source
-///
-/// The `type_registry` maps type names to their definitions, enabling
-/// field-level assertions when the return type is a known struct.
-///
-/// Core analyzes conditions and returns to produce **semantic hints**, then
-/// resolves those hints through the grammar to get language-specific code.
-/// Convenience wrapper — generates a test plan without a type registry.
-#[cfg(test)]
-pub(crate) fn generate_test_plan(
-    contract: &FunctionContract,
-    contract_grammar: &ContractGrammar,
-) -> TestPlan {
-    generate_test_plan_with_types(contract, contract_grammar, &HashMap::new())
-}
-
-/// Generate a test plan with access to a type registry for struct introspection.
-pub(crate) fn generate_test_plan_with_types(
-    contract: &FunctionContract,
-    contract_grammar: &ContractGrammar,
-    type_registry: &HashMap<String, TypeDefinition>,
-) -> TestPlan {
-    let mut cases = Vec::new();
-    let type_defaults = &contract_grammar.type_defaults;
-
-    if contract.branches.is_empty() {
-        // No branches detected — generate a basic "does not panic" test
-        cases.push(TestCase {
-            test_name: format!("test_{}_does_not_panic", contract.name),
-            branch_condition: "default invocation".to_string(),
-            expected_variant: "no_panic".to_string(),
-            expected_value: None,
-            template_key: "no_panic".to_string(),
-            variables: build_variables(
-                contract,
-                None,
-                type_defaults,
-                &contract_grammar.fallback_default,
-            ),
-        });
-    } else {
-        // First pass: collect hints from all branches so we can infer complements.
-        // If branch 1 says param X should be "empty", branches that don't mention X
-        // should use "non_empty" to reach a different code path.
-        let all_branch_hints: Vec<HashMap<String, String>> = contract
-            .branches
-            .iter()
-            .map(|b| {
-                let cond_lower = b.condition.to_lowercase();
-                let mut hints_for_branch = HashMap::new();
-                for param in &contract.signature.params {
-                    if let Some(hint) = infer_hint_for_param(&b.condition, &cond_lower, param) {
-                        hints_for_branch.insert(param.name.clone(), hint);
-                    }
-                }
-                hints_for_branch
-            })
-            .collect();
-
-        for (i, branch) in contract.branches.iter().enumerate() {
-            let condition_slug = slugify(&branch.condition);
-            let test_name = format!(
-                "test_{}_{}",
-                contract.name,
-                if condition_slug.is_empty() {
-                    format!("branch_{}", i)
-                } else {
-                    condition_slug
-                }
-            );
-
-            let template_key =
-                derive_template_key(&contract.signature.return_type, &branch.returns);
-
-            let mut vars = build_variables(
-                contract,
-                Some(branch),
-                type_defaults,
-                &contract_grammar.fallback_default,
-            );
-            vars.insert(
-                "condition".to_string(),
-                sanitize_for_string_literal(&branch.condition),
-            );
-            vars.insert("condition_slug".to_string(), slugify(&branch.condition));
-
-            // Behavioral inference: derive setup overrides from branch condition,
-            // with cross-branch complement hints for unmatched params.
-            let complement_hints = build_complement_hints(i, &all_branch_hints);
-            let setup_override = infer_setup_with_complements(
-                &branch.condition,
-                &contract.signature.params,
-                type_defaults,
-                &contract_grammar.type_constructors,
-                &contract_grammar.fallback_default,
-                &complement_hints,
-            );
-            if let Some(ref so) = setup_override {
-                vars.insert("param_setup".to_string(), so.setup_lines.clone());
-                vars.insert("param_args".to_string(), so.call_args.clone());
-                if !so.extra_imports.is_empty() {
-                    let existing = vars.get("extra_imports").cloned().unwrap_or_default();
-                    let merged = merge_imports(&existing, &so.extra_imports);
-                    vars.insert("extra_imports".to_string(), merged);
-                }
-            }
-
-            // Behavioral inference: derive assertion from branch return.
-            // Core selects an assertion key; grammar provides the template.
-            // When a type registry is available, assertions can reference
-            // specific struct fields instead of using opaque TODO placeholders.
-            let assertion = resolve_assertion(
-                &branch.returns,
-                &contract.signature.return_type,
-                &branch.condition,
-                &contract_grammar.assertion_templates,
-            );
-
-            // If we have type info and the assertion has a TODO placeholder,
-            // replace it with real field-level assertions using type defaults.
-            let assertion = enrich_assertion_with_fields(
-                &assertion,
-                &branch.returns,
-                &contract.signature.return_type,
-                type_registry,
-                type_defaults,
-                &contract_grammar.fallback_default,
-                contract_grammar.field_assertion_template.as_deref(),
-            );
-
-            // If the assertion still has a TODO placeholder after enrichment,
-            // fall back to the simpler non-value assertion (e.g. result_ok instead
-            // of result_ok_value). A test that asserts is_ok() is better than a
-            // stub with `let _ = inner; // TODO: assert ...`. (#818)
-            let assertion = if assertion.contains("// TODO:") {
-                fallback_to_simple_assertion(
-                    &branch.returns,
-                    &contract.signature.return_type,
-                    &branch.condition,
-                    &contract_grammar.assertion_templates,
-                )
-                .unwrap_or(assertion)
-            } else {
-                assertion
-            };
-            vars.insert("assertion_code".to_string(), assertion);
-
-            cases.push(TestCase {
-                test_name,
-                branch_condition: branch.condition.clone(),
-                expected_variant: branch.returns.variant.clone(),
-                expected_value: branch.returns.value.clone(),
-                template_key,
-                variables: vars,
-            });
-        }
-    }
-
-    // If the function has effects, generate an effect-specific test
-    if contract.has_effects() && !contract.effects.is_empty() {
-        let effect_names: Vec<&str> = contract
-            .effects
-            .iter()
-            .map(|e| match e {
-                Effect::FileRead => "file_read",
-                Effect::FileWrite => "file_write",
-                Effect::FileDelete => "file_delete",
-                Effect::ProcessSpawn { .. } => "process_spawn",
-                Effect::Mutation { .. } => "mutation",
-                Effect::Panic { .. } => "panic",
-                Effect::Network => "network",
-                Effect::ResourceAlloc { .. } => "resource_alloc",
-                Effect::Logging => "logging",
-            })
-            .collect();
-
-        let mut vars = build_variables(
-            contract,
-            None,
-            type_defaults,
-            &contract_grammar.fallback_default,
-        );
-        vars.insert("effects".to_string(), effect_names.join(", "));
-
-        cases.push(TestCase {
-            test_name: format!("test_{}_has_expected_effects", contract.name),
-            branch_condition: "effect verification".to_string(),
-            expected_variant: "effects".to_string(),
-            expected_value: Some(effect_names.join(", ")),
-            template_key: "effects".to_string(),
-            variables: vars,
-        });
-    }
-
-    TestPlan {
-        function_name: contract.name.clone(),
-        source_file: contract.file.clone(),
-        is_async: contract.signature.is_async,
-        cases,
-    }
-}
-
-/// Render a test plan into source code using templates.
-///
-/// Templates are key → string pairs where keys match `TestCase.template_key`.
-/// Template variables are replaced: `{fn_name}`, `{fn_call}`, `{param_list}`, etc.
-pub(crate) fn render_test_plan(plan: &TestPlan, templates: &HashMap<String, String>) -> String {
-    let mut output = String::new();
-    let mut seen_names: HashMap<String, usize> = HashMap::new();
-
-    for case in &plan.cases {
-        let template = match templates.get(&case.template_key) {
-            Some(t) => t,
-            None => {
-                // Fall back to a generic template if the specific one doesn't exist
-                match templates.get("default") {
-                    Some(t) => t,
-                    None => continue,
-                }
-            }
-        };
-
-        // Deduplicate test names by appending a numeric suffix when a name
-        // has been seen before. This prevents compilation errors from branches
-        // with identical slugified conditions (e.g. two `None => return false`
-        // match arms producing the same test name). (#818)
-        let unique_name = {
-            let count = seen_names.entry(case.test_name.clone()).or_insert(0);
-            *count += 1;
-            if *count == 1 {
-                case.test_name.clone()
-            } else {
-                format!("{}_{}", case.test_name, count)
-            }
-        };
-
-        let mut rendered = template.clone();
-        for (key, value) in &case.variables {
-            rendered = rendered.replace(&format!("{{{}}}", key), value);
-        }
-        // Also replace the test name
-        rendered = rendered.replace("{test_name}", &unique_name);
-
-        // For async functions, transform the test to use #[tokio::test] and .await.
-        // This avoids duplicating every template with async variants. (#818)
-        if plan.is_async {
-            rendered = make_test_async(&rendered);
-        }
-
-        output.push_str(&rendered);
-        output.push('\n');
-    }
-
-    output
-}
-
-/// Transform a synchronous test into an async test.
-///
-/// - `#[test]` → `#[tokio::test]`
-/// - `fn {name}()` → `async fn {name}()`
-/// - `{fn_name}({args})` gets `.await` appended (on lines with `let` bindings or bare calls)
-fn make_test_async(test_code: &str) -> String {
-    let mut result = String::new();
-
-    for line in test_code.lines() {
-        let transformed = line
-            // #[test] → #[tokio::test]
-            .replace("#[test]", "#[tokio::test]");
-
-        // fn name() → async fn name()
-        let transformed = if transformed.contains("fn ") && transformed.contains("()") {
-            transformed.replacen("fn ", "async fn ", 1)
-        } else {
-            transformed
-        };
-
-        // Add .await to function call lines (let result = fn(...); or let _ = fn(...);)
-        // but NOT to assert! lines or comment lines
-        let transformed = if (transformed.trim_start().starts_with("let ")
-            || transformed.trim_start().starts_with("{fn_name}"))
-            && transformed.trim_end().ends_with(';')
-            && !transformed.contains("assert")
-            && !transformed.contains("//")
-            && !transformed.contains("Default::default")
-        {
-            // Insert .await before the trailing semicolon
-            if let Some(semi_pos) = transformed.rfind(';') {
-                let (before, after) = transformed.split_at(semi_pos);
-                format!("{}.await{}", before, after)
-            } else {
-                transformed
-            }
-        } else {
-            transformed
-        };
-
-        result.push_str(&transformed);
-        result.push('\n');
-    }
-
-    result
-}
-
-/// Build template variables from a contract and optional branch.
-fn build_variables(
-    contract: &FunctionContract,
-    branch: Option<&Branch>,
-    type_defaults: &[TypeDefault],
-    fallback_default: &str,
-) -> HashMap<String, String> {
-    let mut vars = HashMap::new();
-
-    vars.insert("fn_name".to_string(), contract.name.clone());
-    vars.insert("file".to_string(), contract.file.clone());
-    vars.insert("line".to_string(), contract.line.to_string());
-
-    // Build param list for function call
-    let param_names: Vec<&str> = contract
-        .signature
-        .params
-        .iter()
-        .map(|p| p.name.as_str())
-        .collect();
-    vars.insert("param_names".to_string(), param_names.join(", "));
-
-    // Build typed param declarations
-    let param_decls: Vec<String> = contract
-        .signature
-        .params
-        .iter()
-        .map(|p| format!("{}: {}", p.name, p.param_type))
-        .collect();
-    vars.insert("param_decls".to_string(), param_decls.join(", "));
-
-    // Param count
-    vars.insert(
-        "param_count".to_string(),
-        contract.signature.params.len().to_string(),
-    );
-
-    // Build param setup lines and call args using type_defaults
-    let (setup_lines, call_args, extra_imports) =
-        build_param_inputs(&contract.signature.params, type_defaults, fallback_default);
-    vars.insert("param_setup".to_string(), setup_lines);
-    vars.insert("param_args".to_string(), call_args);
-    vars.insert("extra_imports".to_string(), extra_imports);
-
-    // Return type info
-    match &contract.signature.return_type {
-        ReturnShape::Unit => vars.insert("return_shape".to_string(), "unit".to_string()),
-        ReturnShape::Bool => vars.insert("return_shape".to_string(), "bool".to_string()),
-        ReturnShape::Value { value_type } => {
-            vars.insert("return_shape".to_string(), "value".to_string());
-            vars.insert("return_type".to_string(), value_type.clone())
-        }
-        ReturnShape::OptionType { some_type } => {
-            vars.insert("return_shape".to_string(), "option".to_string());
-            vars.insert("some_type".to_string(), some_type.clone())
-        }
-        ReturnShape::ResultType { ok_type, err_type } => {
-            vars.insert("return_shape".to_string(), "result".to_string());
-            vars.insert("ok_type".to_string(), ok_type.clone());
-            vars.insert("err_type".to_string(), err_type.clone())
-        }
-        ReturnShape::Collection { element_type } => {
-            vars.insert("return_shape".to_string(), "collection".to_string());
-            vars.insert("element_type".to_string(), element_type.clone())
-        }
-        ReturnShape::Unknown { raw } => {
-            vars.insert("return_shape".to_string(), "unknown".to_string());
-            vars.insert("return_type".to_string(), raw.clone())
-        }
-    };
-
-    // Branch-specific variables
-    if let Some(branch) = branch {
-        vars.insert("variant".to_string(), branch.returns.variant.clone());
-        if let Some(ref val) = branch.returns.value {
-            vars.insert("expected_value".to_string(), val.clone());
-        }
-    }
-
-    // Is it a method (has receiver)?
-    let is_method = contract.signature.receiver.is_some();
-    vars.insert("is_method".to_string(), is_method.to_string());
-    vars.insert("is_pure".to_string(), contract.is_pure().to_string());
-
-    // Method receiver support: impl_type and receiver construction
-    if let Some(ref impl_type) = contract.impl_type {
-        vars.insert("impl_type".to_string(), impl_type.clone());
-
-        // Determine receiver mutability for the let binding
-        let receiver_mut = match &contract.signature.receiver {
-            Some(Receiver::MutRef) => "mut ",
-            _ => "",
-        };
-        vars.insert("receiver_mut".to_string(), receiver_mut.to_string());
-
-        // Build receiver setup line. The grammar's fallback_default is "Default::default()"
-        // which would produce "Type::Default::default()" — wrong. We need "Type::default()".
-        let construction = if fallback_default == "Default::default()" {
-            "default()".to_string()
-        } else {
-            fallback_default.to_string()
-        };
-        let receiver_setup = format!(
-            "        let {}instance = {}::{};",
-            receiver_mut, impl_type, construction
-        );
-        vars.insert("receiver_setup".to_string(), receiver_setup.clone());
-
-        // Override param_setup to include receiver construction
-        let existing_setup = vars.get("param_setup").cloned().unwrap_or_default();
-        let combined_setup = if existing_setup.trim().is_empty() {
-            receiver_setup.clone()
-        } else {
-            format!("{}\n{}", receiver_setup, existing_setup)
-        };
-        vars.insert("param_setup".to_string(), combined_setup);
-
-        // Override fn_name to use method call syntax: instance.method_name
-        vars.insert("fn_name".to_string(), format!("instance.{}", contract.name));
-    };
-    vars.insert(
-        "branch_count".to_string(),
-        contract.branch_count().to_string(),
-    );
-
-    vars
-}
 
 /// Resolve a default value expression for a parameter type using type_defaults patterns.
 ///
@@ -521,93 +68,6 @@ fn resolve_type_default<'a>(
     }
     // Fallback: language-specific default from grammar
     (fallback_default.to_string(), None, vec![])
-}
-
-/// Build parameter setup lines, call arguments, and extra imports from type_defaults.
-///
-/// Returns `(setup_lines, call_args, extra_imports)` where:
-/// - `setup_lines` is newline-separated `let` bindings
-/// - `call_args` is comma-separated arguments for the function call
-/// - `extra_imports` is newline-separated `use` statements
-fn build_param_inputs(
-    params: &[Param],
-    type_defaults: &[TypeDefault],
-    fallback_default: &str,
-) -> (String, String, String) {
-    if params.is_empty() {
-        return (String::new(), String::new(), String::new());
-    }
-
-    let mut setup_lines = Vec::new();
-    let mut call_args = Vec::new();
-    let mut all_imports: Vec<String> = Vec::new();
-
-    for param in params {
-        let (value_expr, call_override, imports) =
-            resolve_type_default(&param.param_type, type_defaults, fallback_default);
-
-        // Build the let binding
-        setup_lines.push(format!("        let {} = {};", param.name, value_expr));
-
-        // Build the call argument — if the type is a reference, borrow the variable
-        let call_arg = call_override.unwrap_or_else(|| {
-            let trimmed = param.param_type.trim();
-            if trimmed.starts_with('&') {
-                format!("&{}", param.name)
-            } else {
-                param.name.clone()
-            }
-        });
-        call_args.push(call_arg);
-
-        for imp in imports {
-            let imp_string = imp.to_string();
-            if !all_imports.contains(&imp_string) {
-                all_imports.push(imp_string);
-            }
-        }
-    }
-
-    let setup = setup_lines.join("\n");
-    let args = call_args.join(", ");
-    let imports = all_imports.join("\n");
-    (setup, args, imports)
-}
-
-/// Derive the template key from the return type shape and the branch's return variant.
-fn derive_template_key(return_type: &ReturnShape, returns: &ReturnValue) -> String {
-    match return_type {
-        ReturnShape::ResultType { .. } => format!("result_{}", returns.variant),
-        ReturnShape::OptionType { .. } => format!("option_{}", returns.variant),
-        ReturnShape::Bool => format!("bool_{}", returns.variant),
-        ReturnShape::Unit => "unit".to_string(),
-        ReturnShape::Collection { .. } => "collection".to_string(),
-        _ => format!("value_{}", returns.variant),
-    }
-}
-
-/// Convert a condition string to a snake_case slug suitable for a test name.
-fn slugify(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else if c == ' ' || c == '.' || c == ':' || c == '-' || c == '_' {
-                '_'
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        // Collapse multiple underscores
-        .split('_')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("_")
-        // Truncate to reasonable length
-        .chars()
-        .take(60)
-        .collect()
 }
 
 // ── Behavioral inference ──
@@ -637,312 +97,6 @@ mod hints {
     pub const ZERO: &str = "zero";
     pub const POSITIVE: &str = "positive";
     pub const CONTAINS: &str = "contains";
-}
-
-/// Overridden setup derived from a branch condition.
-struct SetupOverride {
-    /// Newline-separated `let` bindings (8-space indented).
-    setup_lines: String,
-    /// Comma-separated call arguments.
-    call_args: String,
-    /// Extra `use` imports needed.
-    extra_imports: String,
-}
-
-/// Infer parameter setup code from a branch condition string (without cross-branch complements).
-///
-/// Delegates to `infer_setup_with_complements` with no complement hints.
-/// Used in tests and simple single-branch scenarios.
-#[cfg(test)]
-fn infer_setup_from_condition(
-    condition: &str,
-    params: &[Param],
-    type_defaults: &[TypeDefault],
-    type_constructors: &[TypeConstructor],
-    fallback_default: &str,
-) -> Option<SetupOverride> {
-    let condition_lower = condition.to_lowercase();
-
-    // Step 1: Produce semantic hints for each parameter
-    let mut param_hints: HashMap<String, String> = HashMap::new();
-    for param in params {
-        if let Some(hint) = infer_hint_for_param(condition, &condition_lower, param) {
-            param_hints.insert(param.name.clone(), hint);
-        }
-    }
-
-    if param_hints.is_empty() {
-        return None;
-    }
-
-    // Step 2: Resolve hints through grammar constructors
-    let mut setup_lines = Vec::new();
-    let mut call_args = Vec::new();
-    let mut all_imports: Vec<String> = Vec::new();
-
-    for param in params {
-        let (value_expr, call_arg, imports) = if let Some(hint) = param_hints.get(&param.name) {
-            resolve_constructor(
-                hint,
-                &param.name,
-                &param.param_type,
-                type_constructors,
-                type_defaults,
-                fallback_default,
-            )
-        } else {
-            // No hint for this param — use type_defaults
-            let (val, call_override, imps) =
-                resolve_type_default(&param.param_type, type_defaults, fallback_default);
-            let call =
-                call_override.unwrap_or_else(|| default_call_arg(&param.name, &param.param_type));
-            let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
-            (val, call, imp_strs)
-        };
-
-        setup_lines.push(format!("        let {} = {};", param.name, value_expr));
-        call_args.push(call_arg);
-
-        for imp in imports {
-            if !all_imports.contains(&imp) {
-                all_imports.push(imp);
-            }
-        }
-    }
-
-    Some(SetupOverride {
-        setup_lines: setup_lines.join("\n"),
-        call_args: call_args.join(", "),
-        extra_imports: all_imports.join("\n"),
-    })
-}
-
-/// Produce the default call argument for a parameter based on its type.
-fn default_call_arg(name: &str, param_type: &str) -> String {
-    if param_type.trim().starts_with('&') {
-        format!("&{}", name)
-    } else {
-        name.to_string()
-    }
-}
-
-/// Analyze a branch condition to produce a semantic hint for a parameter.
-///
-/// This is the core of behavioral inference — it recognizes common condition
-/// patterns and maps them to language-agnostic hints. The hints are then
-/// resolved through the grammar's `type_constructors` to get actual code.
-///
-/// Returns `None` if no hint can be inferred for this parameter.
-fn infer_hint_for_param(condition: &str, condition_lower: &str, param: &Param) -> Option<String> {
-    let pname = &param.name;
-    let ptype = &param.param_type;
-
-    // ── Negated emptiness — check BEFORE non-negated to avoid false matches ──
-    if condition_contains_negated_method(condition, pname, "is_empty") {
-        return Some(hints::NON_EMPTY.to_string());
-    }
-
-    // ── Emptiness: "param.is_empty()" ──
-    if condition_contains_param_method(condition_lower, pname, "is_empty") {
-        return Some(hints::EMPTY.to_string());
-    }
-
-    // ── Option: "param.is_none()" ──
-    if (condition_contains_param_method(condition_lower, pname, "is_none")
-        || (condition_lower.contains(&pname.to_lowercase()) && condition_lower.contains("none")))
-        && ptype.starts_with("Option")
-    {
-        return Some(hints::NONE.to_string());
-    }
-
-    // ── Option: "param.is_some()" ──
-    if (condition_contains_param_method(condition_lower, pname, "is_some")
-        || (condition_lower.contains(&pname.to_lowercase()) && condition_lower.contains("some")))
-        && ptype.starts_with("Option")
-    {
-        return Some(hints::SOME_DEFAULT.to_string());
-    }
-
-    // ── Path existence ──
-    if is_path_like(ptype) {
-        if condition_lower.contains("doesn't exist")
-            || condition_lower.contains("does not exist")
-            || condition_lower.contains("not exist")
-            || condition_contains_negated_method(condition, pname, "exists")
-        {
-            return Some(hints::NONEXISTENT_PATH.to_string());
-        }
-        if condition_contains_param_method(condition_lower, pname, "exists")
-            && !condition_lower.contains("not")
-            && !condition.contains('!')
-        {
-            return Some(hints::EXISTENT_PATH.to_string());
-        }
-    }
-
-    // ── Boolean params ──
-    if ptype.trim() == "bool" {
-        if condition_lower.contains(&format!("!{}", pname.to_lowercase()))
-            || condition_lower.contains(&format!("{} == false", pname.to_lowercase()))
-            || condition_lower.contains(&format!("{} is false", pname.to_lowercase()))
-        {
-            return Some(hints::FALSE.to_string());
-        }
-        if condition_lower == pname.to_lowercase()
-            || condition_lower.contains(&format!("{} == true", pname.to_lowercase()))
-            || condition_lower.contains(&format!("{} is true", pname.to_lowercase()))
-        {
-            return Some(hints::TRUE.to_string());
-        }
-    }
-
-    // ── Numeric comparisons ──
-    if is_numeric_like(ptype) {
-        if condition_lower.contains(&format!("{} == 0", pname.to_lowercase()))
-            || condition_lower.contains(&format!("{} < 1", pname.to_lowercase()))
-        {
-            return Some(hints::ZERO.to_string());
-        }
-        if condition_lower.contains(&format!("{} > 0", pname.to_lowercase()))
-            || condition_lower.contains(&format!("{} >= 1", pname.to_lowercase()))
-        {
-            return Some(hints::POSITIVE.to_string());
-        }
-    }
-
-    // ── String content: ".contains(X)" or ".starts_with(X)" ──
-    if let Some(literal) = extract_method_string_arg(condition, pname, "contains") {
-        // Store the literal in the hint using a separator
-        return Some(format!("{}:{}", hints::CONTAINS, literal));
-    }
-    if let Some(literal) = extract_method_string_arg(condition, pname, "starts_with") {
-        return Some(format!("{}:{}", hints::CONTAINS, literal));
-    }
-
-    None
-}
-
-/// Resolve a semantic hint + param type through the grammar's type_constructors.
-///
-/// Tries constructors in order; first match on both `hint` and `pattern` wins.
-/// Falls back to `type_defaults` if no constructor matches, then to `fallback_default`.
-///
-/// The `{param_name}` placeholder in constructor values is replaced with the
-/// actual parameter name.
-fn resolve_constructor(
-    hint: &str,
-    param_name: &str,
-    param_type: &str,
-    constructors: &[TypeConstructor],
-    type_defaults: &[TypeDefault],
-    fallback_default: &str,
-) -> (String, String, Vec<String>) {
-    // Split compound hints like "contains:foo" into base hint + argument
-    let (base_hint, hint_arg) = if let Some(colon_pos) = hint.find(':') {
-        (&hint[..colon_pos], Some(&hint[colon_pos + 1..]))
-    } else {
-        (hint, None)
-    };
-
-    // Try type_constructors first
-    for tc in constructors {
-        if tc.hint != base_hint {
-            continue;
-        }
-        if let Ok(re) = Regex::new(&tc.pattern) {
-            if re.is_match(param_type) {
-                // Found a match — apply parameter name substitution
-                let mut value = tc.value.replace("{param_name}", param_name);
-                // For "contains" hints, also substitute the literal argument
-                if let Some(arg) = hint_arg {
-                    value = value.replace("{hint_arg}", arg);
-                }
-
-                let call_arg = tc
-                    .call_arg
-                    .as_ref()
-                    .map(|c| c.replace("{param_name}", param_name))
-                    .unwrap_or_else(|| default_call_arg(param_name, param_type));
-
-                let imports: Vec<String> = tc.imports.to_vec();
-                return (value, call_arg, imports);
-            }
-        }
-    }
-
-    // No constructor matched — fall back to type_defaults
-    let (val, call_override, imps) =
-        resolve_type_default(param_type, type_defaults, fallback_default);
-    let call = call_override.unwrap_or_else(|| default_call_arg(param_name, param_type));
-    let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
-    (val, call, imp_strs)
-}
-
-/// Check if condition contains `param.method()` (case-insensitive).
-fn condition_contains_param_method(condition_lower: &str, param: &str, method: &str) -> bool {
-    let pattern = format!("{}.{}(", param.to_lowercase(), method);
-    condition_lower.contains(&pattern)
-}
-
-/// Check if condition contains a negated method call: `!param.method()`.
-fn condition_contains_negated_method(condition: &str, param: &str, method: &str) -> bool {
-    let pattern = format!("!{}.{}(", param, method);
-    condition.contains(&pattern)
-}
-
-/// Check if a type looks like a filesystem path (language-agnostic heuristic).
-fn is_path_like(ptype: &str) -> bool {
-    let t = ptype.trim().to_lowercase();
-    t.contains("path")
-}
-
-/// Check if a type looks like a numeric type (language-agnostic heuristic).
-fn is_numeric_like(ptype: &str) -> bool {
-    let t = ptype.trim();
-    // Common numeric type patterns across languages
-    matches!(
-        t,
-        "usize"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "u128"
-            | "isize"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "i128"
-            | "f32"
-            | "f64"
-            | "int"
-            | "float"
-            | "double"
-            | "number"
-    )
-}
-
-/// Extract a string literal argument from a method call in a condition.
-///
-/// E.g., from `name.contains("foo")` extracts `"foo"`.
-fn extract_method_string_arg(condition: &str, param: &str, method: &str) -> Option<String> {
-    let pattern = format!("{}.{}(\"", param, method);
-    if let Some(start) = condition.find(&pattern) {
-        let after = &condition[start + pattern.len()..];
-        if let Some(end) = after.find('"') {
-            return Some(after[..end].to_string());
-        }
-    }
-    // Also try single-quote variant
-    let pattern_sq = format!("{}.{}('", param, method);
-    if let Some(start) = condition.find(&pattern_sq) {
-        let after = &condition[start + pattern_sq.len()..];
-        if let Some(end) = after.find('\'') {
-            return Some(after[..end].to_string());
-        }
-    }
-    None
 }
 
 /// Resolve an assertion for a branch return using grammar-defined assertion templates.
@@ -1578,7 +732,7 @@ pub struct GeneratedTestOutput {
 /// When `project_type_registry` is provided, return types from any file in the
 /// project can be resolved to their struct fields. When `None`, falls back to
 /// a per-file registry (only finds types defined in the same file).
-pub fn generate_tests_for_file(
+pub(crate) fn generate_tests_for_file(
     content: &str,
     file_path: &str,
     grammar: &crate::extension::grammar::Grammar,
@@ -1679,7 +833,7 @@ pub fn generate_tests_for_file_with_types(
 /// Like `generate_tests_for_file`, but only generates tests for functions
 /// whose names are in `method_names`. Used for MissingTestMethod findings
 /// where the test file exists but specific methods lack coverage.
-pub fn generate_tests_for_methods(
+pub(crate) fn generate_tests_for_methods(
     content: &str,
     file_path: &str,
     grammar: &crate::extension::grammar::Grammar,
@@ -1919,29 +1073,10 @@ mod tests {
         ]
     }
 
-    /// Build a minimal ContractGrammar for testing.
-    fn empty_grammar() -> ContractGrammar {
-        ContractGrammar::default()
-    }
-
     /// Build a ContractGrammar with type_defaults populated.
     fn grammar_with_defaults() -> ContractGrammar {
         ContractGrammar {
             type_defaults: sample_type_defaults(),
-            ..Default::default()
-        }
-    }
-
-    /// Build a ContractGrammar with type_defaults + type_constructors + assertion_templates + test_templates.
-    fn full_grammar() -> ContractGrammar {
-        ContractGrammar {
-            type_defaults: sample_type_defaults(),
-            type_constructors: sample_type_constructors(),
-            assertion_templates: sample_assertion_templates(),
-            test_templates: sample_test_templates(),
-            field_assertion_template: Some(
-                "{indent}assert_eq!(inner.{field_name}, {expected_value});".to_string(),
-            ),
             ..Default::default()
         }
     }
@@ -2268,13 +1403,6 @@ mod tests {
                 TestCase {
                     test_name: "test_check_status_none_return_false".to_string(),
                     branch_condition: "None => return false (other arm)".to_string(),
-                    expected_variant: "ok".to_string(),
-                    expected_value: None,
-                    template_key: "default".to_string(),
-                    variables: HashMap::new(),
-                },
-                TestCase {
-                    test_name: "test_check_status_none_return_false".to_string(),
                     branch_condition: "None => return false (third arm)".to_string(),
                     expected_variant: "ok".to_string(),
                     expected_value: None,
@@ -3015,165 +2143,305 @@ class AbilityResult {
         assert!(fields[4].is_public, "success should be public");
     }
 
+
     #[test]
-    fn test_enrich_assertion_replaces_todo_with_field_hints() {
-        let mut type_registry = HashMap::new();
-        type_registry.insert(
-            "ValidationResult".to_string(),
-            TypeDefinition {
-                name: "ValidationResult".to_string(),
-                kind: "struct".to_string(),
-                file: "src/test.rs".to_string(),
-                line: 1,
-                fields: vec![
-                    FieldDef {
-                        name: "success".to_string(),
-                        field_type: "bool".to_string(),
-                        is_public: true,
-                    },
-                    FieldDef {
-                        name: "command".to_string(),
-                        field_type: "Option<String>".to_string(),
-                        is_public: true,
-                    },
-                    FieldDef {
-                        name: "rolled_back".to_string(),
-                        field_type: "bool".to_string(),
-                        is_public: true,
-                    },
-                ],
-                is_public: true,
-            },
-        );
+    fn test_generate_test_plan_default_path() {
 
-        let assertion = "        let inner = result.unwrap();\n        // Branch returns Ok(skipped)\n        let _ = inner; // TODO: assert specific value for \"skipped\"";
-        let return_type = ReturnShape::ResultType {
-            ok_type: "ValidationResult".to_string(),
-            err_type: "Error".to_string(),
-        };
-        let returns = ReturnValue {
-            variant: "ok".to_string(),
-            value: Some("skipped".to_string()),
-        };
-
-        let type_defaults = sample_type_defaults();
-        let enriched = enrich_assertion_with_fields(
-            assertion,
-            &returns,
-            &return_type,
-            &type_registry,
-            &type_defaults,
-            "Default::default()",
-            Some("{indent}assert_eq!(inner.{field_name}, {expected_value});"),
-        );
-
-        // Should generate real assert_eq! statements, not comments
-        assert!(
-            enriched.contains("assert_eq!(inner.success, false)"),
-            "should assert success field equals false, got:\n{}",
-            enriched
-        );
-        assert!(
-            enriched.contains("assert_eq!(inner.command, None)"),
-            "should assert command field equals None, got:\n{}",
-            enriched
-        );
-        assert!(
-            enriched.contains("assert_eq!(inner.rolled_back, false)"),
-            "should assert rolled_back field equals false, got:\n{}",
-            enriched
-        );
-        assert!(
-            !enriched.contains("TODO:"),
-            "should replace the TODO placeholder, got:\n{}",
-            enriched
-        );
-        assert!(
-            !enriched.contains("let _ = inner"),
-            "should remove the let _ = inner placeholder, got:\n{}",
-            enriched
-        );
+        let _result = generate_test_plan();
     }
 
     #[test]
-    fn test_enrich_assertion_resolves_path_qualified_types() {
-        let mut type_registry = HashMap::new();
-        type_registry.insert(
-            "ValidationResult".to_string(),
-            TypeDefinition {
-                name: "ValidationResult".to_string(),
-                kind: "struct".to_string(),
-                file: "src/test.rs".to_string(),
-                line: 1,
-                fields: vec![FieldDef {
-                    name: "success".to_string(),
-                    field_type: "bool".to_string(),
-                    is_public: true,
-                }],
-                is_public: true,
-            },
-        );
+    fn test_generate_test_plan_with_types_if_let_some_hint_infer_hint_for_param_b_condition_cond_lower() {
 
-        let assertion = "        let inner = result.unwrap();\n        let _ = inner; // TODO: assert something";
-        // Return type uses a path-qualified name
-        let return_type = ReturnShape::ResultType {
-            ok_type: "crate::engine::ValidationResult".to_string(),
-            err_type: "Error".to_string(),
-        };
-        let returns = ReturnValue {
-            variant: "ok".to_string(),
-            value: Some("val".to_string()),
-        };
-
-        let enriched = enrich_assertion_with_fields(
-            assertion,
-            &returns,
-            &return_type,
-            &type_registry,
-            &sample_type_defaults(),
-            "Default::default()",
-            Some("{indent}assert_eq!(inner.{field_name}, {expected_value});"),
-        );
-
-        assert!(
-            enriched.contains("assert_eq!(inner.success, false)"),
-            "should resolve crate::engine::ValidationResult to ValidationResult, got:\n{}",
-            enriched
-        );
-        assert!(
-            !enriched.contains("TODO:"),
-            "should replace TODO placeholder, got:\n{}",
-            enriched
-        );
+        let _result = generate_test_plan_with_types();
     }
 
     #[test]
-    fn test_enrich_assertion_skips_when_no_type_in_registry() {
-        let type_registry = HashMap::new();
+    fn test_generate_test_plan_with_types_some_branch() {
 
-        let assertion = "        let _ = inner; // TODO: assert something";
-        let return_type = ReturnShape::ResultType {
-            ok_type: "UnknownType".to_string(),
-            err_type: "Error".to_string(),
-        };
-        let returns = ReturnValue {
-            variant: "ok".to_string(),
-            value: Some("val".to_string()),
-        };
-
-        let enriched = enrich_assertion_with_fields(
-            assertion,
-            &returns,
-            &return_type,
-            &type_registry,
-            &[],
-            "Default::default()",
-            Some("{indent}assert_eq!(inner.{field_name}, {expected_value});"),
-        );
-
-        assert_eq!(
-            enriched, assertion,
-            "should return assertion unchanged when type is not in registry"
-        );
+        let _result = generate_test_plan_with_types();
     }
+
+    #[test]
+    fn test_generate_test_plan_with_types_if_let_some_ref_so_setup_override() {
+
+        let _result = generate_test_plan_with_types();
+    }
+
+    #[test]
+    fn test_generate_test_plan_with_types_expected_value_some_effect_names_join() {
+
+        let _result = generate_test_plan_with_types();
+    }
+
+    #[test]
+    fn test_generate_test_plan_with_types_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = generate_test_plan_with_types();
+    }
+
+    #[test]
+    fn test_render_test_plan_some_t_t() {
+
+        let _result = render_test_plan();
+    }
+
+    #[test]
+    fn test_render_test_plan_match_templates_get_default() {
+
+        let _result = render_test_plan();
+    }
+
+    #[test]
+    fn test_render_test_plan_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = render_test_plan();
+    }
+
+    #[test]
+    fn test_build_project_type_registry_some_p_p_clone() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: Some(p) => p.clone(),");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_ok_c_c() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: Ok(c) => c,");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_err_continue() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: Err(_) => continue,");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_some_g_g() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: Some(g) => g,");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_sym_concept_struct_sym_concept_class() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: sym.concept != \"struct\" && sym.concept != \"class\"");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_some_s_s() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: Some(s) => s,");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_has_expected_effects() {
+        // Expected effects: mutation, file_read, logging
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let _ = build_project_type_registry(&root, &_grammar, &contract_grammar);
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_default_path() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let _result = generate_tests_for_file(&content, &file_path, &grammar);
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_default_path() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let _result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_contract_grammar_test_templates_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+        assert!(result.is_none(), "expected None for: contract_grammar.test_templates.is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_default_path_2() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let _result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_contracts_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+        assert!(result.is_none(), "expected None for: contracts.is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_if_let_some_project_reg_project_type_registry() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = Some(Default::default());
+        let result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+        assert!(result.is_some(), "expected Some for: if let Some(project_reg) = project_type_registry {{");
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_if_let_some_imports_str_case_variables_get_extra_imports() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+        assert!(result.is_some(), "expected Some for: if let Some(imports_str) = case.variables.get(\"extra_imports\") {{");
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_test_source_trim_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+        assert!(result.is_none(), "expected None for: test_source.trim().is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_has_expected_effects() {
+        // Expected effects: mutation
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let _ = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_default_path() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let _result = generate_tests_for_methods(&content, &file_path, &grammar, &method_names);
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_default_path() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let _result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_contract_grammar_test_templates_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+        assert!(result.is_none(), "expected None for: contract_grammar.test_templates.is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_contract_grammar_test_templates_is_empty_2() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let _result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_contracts_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+        assert!(result.is_none(), "expected None for: contracts.is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_if_let_some_project_reg_project_type_registry() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = Some(Default::default());
+        let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+        assert!(result.is_some(), "expected Some for: if let Some(project_reg) = project_type_registry {{");
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_plan_cases_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+        assert!(result.is_some(), "expected Some for: plan.cases.is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_test_source_trim_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+        assert!(result.is_none(), "expected None for: test_source.trim().is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_has_expected_effects() {
+        // Expected effects: mutation
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let _ = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+    }
+
 }

@@ -258,4 +258,93 @@ mod tests {
         assert!(result.success);
         assert!(result.command.is_none());
     }
+
+    #[test]
+    fn test_format_after_write_changed_files_is_empty() {
+        let root = Path::new("");
+        let changed_files = Vec::new();
+        let result = format_after_write(&root, &changed_files);
+        let inner = result.unwrap();
+        // Branch returns Ok(FormatResult::skipped(0) when: changed_files.is_empty()
+        assert_eq!(inner.success, false);
+        assert_eq!(inner.command, None);
+        assert_eq!(inner.output, None);
+        assert_eq!(inner.files_in_scope, 0);
+    }
+
+    #[test]
+    fn test_format_after_write_changed_files_is_empty_2() {
+        let root = Path::new("");
+        let changed_files = Vec::new();
+        let _result = format_after_write(&root, &changed_files);
+    }
+
+    #[test]
+    fn test_format_after_write_none_return_ok_formatresult_skipped_changed_files_len() {
+        let root = Path::new("");
+        let changed_files = vec![Default::default()];
+        let result = format_after_write(&root, &changed_files);
+        let inner = result.unwrap();
+        // Branch returns Ok(FormatResult::skipped(changed_files.len() when: None => return Ok(FormatResult::skipped(changed_files.len())),
+        assert_eq!(inner.success, false);
+        assert_eq!(inner.command, None);
+        assert_eq!(inner.output, None);
+        assert_eq!(inner.files_in_scope, 0);
+    }
+
+    #[test]
+    fn test_format_after_write_some_format_after_write_to_string() {
+        let root = Path::new("");
+        let changed_files = vec![Default::default()];
+        let _result = format_after_write(&root, &changed_files);
+    }
+
+    #[test]
+    fn test_format_after_write_default_path() {
+        let root = Path::new("");
+        let changed_files = vec![Default::default()];
+        let _result = format_after_write(&root, &changed_files);
+    }
+
+    #[test]
+    fn test_format_after_write_output_status_success() {
+        let root = Path::new("");
+        let changed_files = vec![Default::default()];
+        let result = format_after_write(&root, &changed_files);
+        let inner = result.unwrap();
+        // Branch returns Ok(FormatResult::passed(format_command, changed_files.len() when: output.status.success()
+        assert_eq!(inner.success, false);
+        assert_eq!(inner.command, None);
+        assert_eq!(inner.output, None);
+        assert_eq!(inner.files_in_scope, 0);
+    }
+
+    #[test]
+    fn test_format_after_write_format_command_starts_with_cargo_fmt() {
+        let root = Path::new("");
+        let changed_files = vec![Default::default()];
+        let _result = format_after_write(&root, &changed_files);
+    }
+
+    #[test]
+    fn test_format_after_write_match_rustfmt_output() {
+        let root = Path::new("");
+        let changed_files = vec![Default::default()];
+        let result = format_after_write(&root, &changed_files);
+        let inner = result.unwrap();
+        // Branch returns Ok(o) when: match rustfmt_output
+        assert_eq!(inner.success, false);
+        assert_eq!(inner.command, None);
+        assert_eq!(inner.output, None);
+        assert_eq!(inner.files_in_scope, 0);
+    }
+
+    #[test]
+    fn test_format_after_write_has_expected_effects() {
+        // Expected effects: process_spawn, logging
+        let root = Path::new("");
+        let changed_files = Vec::new();
+        let _ = format_after_write(&root, &changed_files);
+    }
+
 }

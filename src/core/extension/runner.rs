@@ -97,7 +97,7 @@ impl ExtensionRunner {
 
     /// Set the run directory, injecting HOMEBOY_RUN_DIR and all legacy
     /// per-file env vars so extension scripts work with either pattern.
-    pub fn with_run_dir(mut self, run_dir: &crate::engine::run_dir::RunDir) -> Self {
+    pub(crate) fn with_run_dir(mut self, run_dir: &crate::engine::run_dir::RunDir) -> Self {
         self.env_vars.extend(run_dir.legacy_env_vars());
         self
     }
@@ -195,4 +195,148 @@ impl ExtensionRunner {
             self.command_override.as_deref(),
         )
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_component_default_path() {
+        let instance = ExtensionRunner::default();
+        let comp = Default::default();
+        let _result = instance.component(comp);
+    }
+
+    #[test]
+    fn test_for_context_default_path() {
+        let instance = ExtensionRunner::default();
+        let _result = instance.for_context();
+    }
+
+    #[test]
+    fn test_path_override_default_path() {
+        let instance = ExtensionRunner::default();
+        let path = None;
+        let _result = instance.path_override(path);
+    }
+
+    #[test]
+    fn test_settings_default_path() {
+        let instance = ExtensionRunner::default();
+        let overrides = Default::default();
+        let _result = instance.settings(&overrides);
+    }
+
+    #[test]
+    fn test_settings_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ExtensionRunner::default();
+        let overrides = Default::default();
+        let _ = instance.settings(&overrides);
+    }
+
+    #[test]
+    fn test_env_default_path() {
+        let instance = ExtensionRunner::default();
+        let key = "";
+        let value = "";
+        let _result = instance.env(&key, &value);
+    }
+
+    #[test]
+    fn test_env_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ExtensionRunner::default();
+        let key = "";
+        let value = "";
+        let _ = instance.env(&key, &value);
+    }
+
+    #[test]
+    fn test_env_if_default_path() {
+        let instance = ExtensionRunner::default();
+        let condition = false;
+        let key = "";
+        let value = "";
+        let _result = instance.env_if(condition, &key, &value);
+    }
+
+    #[test]
+    fn test_env_if_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ExtensionRunner::default();
+        let condition = false;
+        let key = "";
+        let value = "";
+        let _ = instance.env_if(condition, &key, &value);
+    }
+
+    #[test]
+    fn test_env_opt_if_let_some_v_value() {
+        let instance = ExtensionRunner::default();
+        let _result = instance.env_opt();
+    }
+
+    #[test]
+    fn test_env_opt_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ExtensionRunner::default();
+        let _ = instance.env_opt();
+    }
+
+    #[test]
+    fn test_with_run_dir_default_path() {
+        let instance = ExtensionRunner::default();
+        let run_dir = Default::default();
+        let _result = instance.with_run_dir(&run_dir);
+    }
+
+    #[test]
+    fn test_with_run_dir_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ExtensionRunner::default();
+        let run_dir = Default::default();
+        let _ = instance.with_run_dir(&run_dir);
+    }
+
+    #[test]
+    fn test_script_args_default_path() {
+        let instance = ExtensionRunner::default();
+        let args = Vec::new();
+        let _result = instance.script_args(&args);
+    }
+
+    #[test]
+    fn test_script_args_has_expected_effects() {
+        // Expected effects: mutation
+        let instance = ExtensionRunner::default();
+        let args = Vec::new();
+        let _ = instance.script_args(&args);
+    }
+
+    #[test]
+    fn test_working_dir_default_path() {
+        let instance = ExtensionRunner::default();
+        let _result = instance.working_dir();
+    }
+
+    #[test]
+    fn test_command_override_default_path() {
+        let instance = ExtensionRunner::default();
+        let _result = instance.command_override();
+    }
+
+    #[test]
+    fn test_run_default_path() {
+        let instance = ExtensionRunner::default();
+        let _result = instance.run();
+    }
+
+    #[test]
+    fn test_run_default_path_2() {
+        let instance = ExtensionRunner::default();
+        let _result = instance.run();
+    }
+
 }

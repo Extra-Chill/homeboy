@@ -3,7 +3,7 @@ use crate::deploy::{self, DeployConfig};
 use crate::error::{Error, Result};
 use crate::git;
 
-use super::pipeline::load_component;
+use super::load_component::load_component;
 use super::types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseCommandInput,
     ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary, ReleaseOptions,
