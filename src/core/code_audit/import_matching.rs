@@ -226,4 +226,31 @@ mod tests {
             "Serialize"
         ));
     }
+
+    #[test]
+    fn test_grouped_import_contains_if_let_some_brace_start_import_find() {
+
+        let _result = grouped_import_contains();
+    }
+
+    #[test]
+    fn test_content_references_name_contains_word_trimmed_name() {
+
+        let result = content_references_name();
+        assert!(result, "expected true when: contains_word(trimmed, name)");
+    }
+
+    #[test]
+    fn test_contains_word_while_let_some_pos_text_start_find_word() {
+
+        let _result = contains_word();
+    }
+
+    #[test]
+    fn test_contains_word_before_ok_after_ok() {
+
+        let result = contains_word();
+        assert!(result, "expected true when: before_ok && after_ok");
+    }
+
 }

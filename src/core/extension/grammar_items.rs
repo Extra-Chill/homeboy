@@ -17,7 +17,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::grammar::{self, Grammar, Symbol};
+use super::grammar::self;
+use super::types::Grammar;
+use super::symbol::Symbol;
 
 // ============================================================================
 // Types
