@@ -44,9 +44,13 @@ pub struct ReleaseArgs {
     #[arg(long)]
     skip_checks: bool,
 
-    /// Allow a major version bump. Required when commits contain breaking changes.
-    /// Without this flag, homeboy will warn and exit instead of releasing a major bump.
+    /// Force a specific version bump: major, minor, patch, or an explicit version (e.g. 2.0.0).
+    /// Overrides auto-detection from commit history.
     #[arg(long)]
+    bump: Option<String>,
+
+    /// Deprecated: use --bump major instead. Kept for backwards compatibility.
+    #[arg(long, hide = true)]
     major: bool,
 
     /// Skip publish/package steps (version bump + tag + push only).
@@ -87,6 +91,7 @@ impl ReleaseArgs {
         skip_checks: bool,
         major: bool,
         skip_publish: bool,
+        bump: Option<String>,
     ) -> Self {
         Self {
             components,
@@ -98,6 +103,7 @@ impl ReleaseArgs {
             deploy,
             recover,
             skip_checks,
+            bump,
             major,
             skip_publish,
         }
@@ -110,6 +116,10 @@ pub fn run(
 ) -> CmdResult<ReleaseCommandOutput> {
     let component_ids = resolve_component_ids(&args)?;
 
+    // Resolve --bump and --major into a single bump_override.
+    // --major is a deprecated alias for --bump major.
+    let bump_override = resolve_bump_override(&args);
+
     // Single component: use the original single-release flow
     if component_ids.len() == 1 {
         let component_id = &component_ids[0];
@@ -120,7 +130,7 @@ pub fn run(
             deploy: args.deploy,
             recover: args.recover,
             skip_checks: args.skip_checks,
-            major: args.major,
+            bump_override: bump_override.clone(),
             skip_publish: args.skip_publish,
         })?;
 
@@ -155,7 +165,7 @@ pub fn run(
         deploy: args.deploy,
         recover: false,
         skip_checks: args.skip_checks,
-        major: args.major,
+        bump_override: bump_override,
         skip_publish: args.skip_publish,
     };
 
@@ -254,5 +264,18 @@ fn resolve_component_ids(args: &ReleaseArgs) -> homeboy::Result<Vec<String>> {
         }
     } else {
         Ok(args.components.clone())
+    }
+}
+
+/// Resolve --bump and --major into a single bump override string.
+/// --major is a deprecated alias for --bump major.
+fn resolve_bump_override(args: &ReleaseArgs) -> Option<String> {
+    if let Some(ref bump) = args.bump {
+        Some(bump.clone())
+    } else if args.major {
+        eprintln!("Warning: --major is deprecated. Use --bump major instead.");
+        Some("major".to_string())
+    } else {
+        None
     }
 }

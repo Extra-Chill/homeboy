@@ -69,9 +69,13 @@ enum VersionCommand {
         #[arg(long)]
         skip_checks: bool,
 
-        /// Allow a major version bump. Required when commits contain breaking changes.
-        /// Without this flag, homeboy will warn and exit instead of releasing a major bump.
+        /// Force a specific version bump: major, minor, patch, or an explicit version (e.g. 2.0.0).
+        /// Overrides auto-detection from commit history.
         #[arg(long)]
+        bump: Option<String>,
+
+        /// Deprecated: use --bump major instead.
+        #[arg(long, hide = true)]
         major: bool,
 
         /// Skip publish/package steps (version bump + tag + push only).
@@ -152,6 +156,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             deploy,
             recover,
             skip_checks,
+            bump,
             major,
             skip_publish,
         } => {
@@ -167,6 +172,7 @@ pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 skip_checks,
                 major,
                 skip_publish,
+                bump,
             );
 
             match super::release::run(release_args, _global)? {

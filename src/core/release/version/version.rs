@@ -12,9 +12,21 @@ pub fn parse_version(content: &str, pattern: &str) -> Option<String> {
     text::extract_first(content, pattern)
 }
 
-/// Increment semver version.
-/// bump_type: "patch", "minor", or "major"
+/// Increment semver version or set an explicit version.
+///
+/// bump_type can be:
+/// - "patch", "minor", or "major" — increments the corresponding semver component
+/// - An explicit version string like "2.0.0" — returned as-is after validation
 pub fn increment_version(version: &str, bump_type: &str) -> Option<String> {
+    // If bump_type looks like a version string (contains a dot), use it directly
+    if bump_type.contains('.') {
+        let parts: Vec<&str> = bump_type.split('.').collect();
+        if parts.len() != 3 || parts.iter().any(|p| p.parse::<u32>().is_err()) {
+            return None; // Invalid version format
+        }
+        return Some(bump_type.to_string());
+    }
+
     let parts: Vec<&str> = version.split('.').collect();
     if parts.len() != 3 {
         return None;
@@ -40,4 +52,58 @@ pub fn increment_version(version: &str, bump_type: &str) -> Option<String> {
 pub fn get_component_version(component: &Component) -> Option<String> {
     let target = component.version_targets.as_ref()?.first()?;
     read_local_version(&component.local_path, target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn increment_version_patch() {
+        assert_eq!(
+            increment_version("1.2.3", "patch"),
+            Some("1.2.4".to_string())
+        );
+    }
+
+    #[test]
+    fn increment_version_minor() {
+        assert_eq!(
+            increment_version("1.2.3", "minor"),
+            Some("1.3.0".to_string())
+        );
+    }
+
+    #[test]
+    fn increment_version_major() {
+        assert_eq!(
+            increment_version("1.2.3", "major"),
+            Some("2.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn increment_version_explicit_version() {
+        // Explicit version string passed as bump_type — returned as-is
+        assert_eq!(
+            increment_version("1.25.5", "2.0.0"),
+            Some("2.0.0".to_string())
+        );
+        assert_eq!(
+            increment_version("0.5.0", "1.0.0"),
+            Some("1.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn increment_version_explicit_invalid() {
+        // Invalid explicit versions
+        assert_eq!(increment_version("1.0.0", "2.0"), None);
+        assert_eq!(increment_version("1.0.0", "abc.def.ghi"), None);
+    }
+
+    #[test]
+    fn increment_version_unknown_bump_type() {
+        assert_eq!(increment_version("1.0.0", "huge"), None);
+    }
 }

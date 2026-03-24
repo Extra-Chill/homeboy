@@ -171,8 +171,10 @@ pub struct ReleaseCommandInput {
     pub recover: bool,
     #[serde(default)]
     pub skip_checks: bool,
-    #[serde(default)]
-    pub major: bool,
+    /// Explicit bump override: "major", "minor", "patch", or a version string like "2.0.0".
+    /// When set, overrides auto-detection from commit history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bump_override: Option<String>,
     #[serde(default)]
     pub skip_publish: bool,
 }

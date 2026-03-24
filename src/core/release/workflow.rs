@@ -24,85 +24,150 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     )?;
 
     let monorepo = git::MonorepoContext::detect(&component.local_path, &input.component_id);
-    let (mut bump_type, releasable_count) =
+    let (auto_bump_type, releasable_count) =
         match resolve_bump(&component.local_path, monorepo.as_ref())? {
             Some(result) => result,
             None => {
-                log_status!(
-                    "release",
-                    "No releasable commits since last tag — nothing to release"
-                );
-                return Ok((
-                    ReleaseCommandResult {
-                        component_id: input.component_id,
-                        bump_type: "none".to_string(),
-                        dry_run: input.dry_run,
-                        releasable_commits: 0,
-                        new_version: None,
-                        tag: None,
-                        skipped_reason: Some("no-releasable-commits".to_string()),
-                        plan: None,
-                        run: None,
-                        deployment: None,
-                    },
-                    0,
-                ));
+                // No releasable commits, but --bump can still force a release
+                if input.bump_override.is_some() {
+                    ("none".to_string(), 0)
+                } else {
+                    log_status!(
+                        "release",
+                        "No releasable commits since last tag — nothing to release"
+                    );
+                    return Ok((
+                        ReleaseCommandResult {
+                            component_id: input.component_id,
+                            bump_type: "none".to_string(),
+                            dry_run: input.dry_run,
+                            releasable_commits: 0,
+                            new_version: None,
+                            tag: None,
+                            skipped_reason: Some("no-releasable-commits".to_string()),
+                            plan: None,
+                            run: None,
+                            deployment: None,
+                        },
+                        0,
+                    ));
+                }
             }
         };
 
-    // Pre-1.0 semver: breaking changes bump minor, not major.
-    // In semver, 0.x.y signals "initial development" where the public API is
-    // not stable. Breaking changes are expected and land as minor bumps.
-    // A major bump to 1.0.0 should only happen when the author explicitly
-    // decides the API is stable (via --major).
-    if bump_type == "major" {
-        let current_version = super::version::read_version(Some(&input.component_id))
-            .ok()
-            .and_then(|v| v.version.split('.').next().map(String::from))
-            .unwrap_or_default();
-        if current_version == "0" {
+    let has_breaking_commits = auto_bump_type == "major";
+
+    // Resolve the effective bump type: --bump overrides auto-detection.
+    let bump_type = if let Some(ref override_value) = input.bump_override {
+        // Check if it's an explicit version string (e.g. "2.0.0")
+        let is_explicit_version = override_value.contains('.');
+
+        if is_explicit_version {
+            // Explicit version — pass through as-is, skip all semver logic
+            if has_breaking_commits {
+                log_status!(
+                    "release",
+                    "Breaking changes detected in commits — releasing as explicit version {}",
+                    override_value
+                );
+            }
+            override_value.clone()
+        } else {
+            // Semver keyword: major, minor, patch
+            let bump = override_value.to_lowercase();
+            if !["major", "minor", "patch"].contains(&bump.as_str()) {
+                return Err(Error::validation_invalid_argument(
+                    "bump",
+                    format!(
+                        "Invalid --bump value '{}'. Use: major, minor, patch, or a version like 2.0.0",
+                        override_value
+                    ),
+                    Some(override_value.clone()),
+                    None,
+                ));
+            }
+
+            // Warn if overriding to a lower bump than auto-detected
+            if has_breaking_commits && bump != "major" {
+                log_status!(
+                    "release",
+                    "⚠ Breaking changes detected in commits, but --bump {} overrides to {} bump",
+                    bump,
+                    bump
+                );
+            }
+
             log_status!(
                 "release",
-                "Pre-1.0: downgrading major → minor (breaking changes are minor bumps in 0.x)"
+                "Using --bump {} (overriding auto-detected {} from {} commit{})",
+                bump,
+                auto_bump_type,
+                releasable_count,
+                if releasable_count == 1 { "" } else { "s" }
             );
-            bump_type = "minor".to_string();
+            bump
         }
-    }
+    } else {
+        // No override — use auto-detected bump type
+        let mut bump_type = auto_bump_type;
 
-    if bump_type == "major" && !input.major {
+        // Pre-1.0 semver: breaking changes bump minor, not major.
+        // In semver, 0.x.y signals "initial development" where the public API is
+        // not stable. Breaking changes are expected and land as minor bumps.
+        // A major bump to 1.0.0 should only happen when the author explicitly
+        // decides the API is stable (via --bump major).
+        if bump_type == "major" {
+            let current_version = super::version::read_version(Some(&input.component_id))
+                .ok()
+                .and_then(|v| v.version.split('.').next().map(String::from))
+                .unwrap_or_default();
+            if current_version == "0" {
+                log_status!(
+                    "release",
+                    "Pre-1.0: downgrading major → minor (breaking changes are minor bumps in 0.x)"
+                );
+                bump_type = "minor".to_string();
+            }
+        }
+
+        // Gate: auto-detected major requires explicit --bump major
+        if bump_type == "major" {
+            log_status!(
+                "release",
+                "⚠ Breaking changes detected — this requires a major version bump"
+            );
+            log_status!(
+                "release",
+                "Re-run with: homeboy release {} --bump major",
+                input.component_id
+            );
+            return Ok((
+                ReleaseCommandResult {
+                    component_id: input.component_id,
+                    bump_type: "major".to_string(),
+                    dry_run: input.dry_run,
+                    releasable_commits: releasable_count,
+                    new_version: None,
+                    tag: None,
+                    skipped_reason: Some("major-requires-flag".to_string()),
+                    plan: None,
+                    run: None,
+                    deployment: None,
+                },
+                0,
+            ));
+        }
+
         log_status!(
             "release",
-            "Commits require a major version bump (breaking changes detected)"
+            "Detected {} bump from {} releasable commit{}",
+            bump_type,
+            releasable_count,
+            if releasable_count == 1 { "" } else { "s" }
         );
-        log_status!(
-            "release",
-            "Re-run with --major to confirm: homeboy release {} --major",
-            input.component_id
-        );
-        return Ok((
-            ReleaseCommandResult {
-                component_id: input.component_id,
-                bump_type: "major".to_string(),
-                dry_run: input.dry_run,
-                releasable_commits: releasable_count,
-                new_version: None,
-                tag: None,
-                skipped_reason: Some("major-requires-flag".to_string()),
-                plan: None,
-                run: None,
-                deployment: None,
-            },
-            0,
-        ));
-    }
 
-    log_status!(
-        "release",
-        "Detected {} bump from {} releasable commit{}",
-        bump_type,
-        releasable_count,
-        if releasable_count == 1 { "" } else { "s" }
-    );
+        bump_type
+    };
 
     let options = ReleaseOptions {
         bump_type: bump_type.clone(),
@@ -564,7 +629,7 @@ pub fn run_batch(
             deploy: input_template.deploy,
             recover: input_template.recover,
             skip_checks: input_template.skip_checks,
-            major: input_template.major,
+            bump_override: input_template.bump_override.clone(),
             skip_publish: input_template.skip_publish,
         };
 
