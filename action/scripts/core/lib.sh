@@ -121,19 +121,27 @@ extract_fix_details_from_output() {
         "file_move": "Files moved",
         "line_replacement": "Lines replaced",
         "line_removal": "Lines removed",
-        "missing_test_file": "Test files generated"
+        "missing_test_file": "Test files generated",
+        "missing_test_method": "Test stubs generated",
+        "unreferenced_export": "Unreferenced exports narrowed",
+        "duplicate_function": "Duplicate functions removed",
+        "god_file": "God files decomposed",
+        "high_item_count": "Large files decomposed"
       }[.] // .;
 
-    # Collect insertions with normalized category
+    # Collect insertions with normalized category (FixResult format)
     [.[].fixes // [] | .[] | .file as $file |
       .insertions[]? | {cat: (.kind | category), file: $file}
     ] as $insertions |
 
-    # Collect new files
+    # Collect new files (FixResult format)
     [.[].new_files // [] | .[] | {cat: .finding, file}] as $new_files |
 
-    # Combine and group by category
-    ($insertions + $new_files) | group_by(.cat) |
+    # Collect proposals (RefactorPlan format — from refactor --from all)
+    [.[].proposals // [] | .[] | {cat: .rule_id, file}] as $proposals |
+
+    # Combine all sources and group by category
+    ($insertions + $new_files + $proposals) | group_by(.cat) |
     map({
       cat: .[0].cat,
       count: length,

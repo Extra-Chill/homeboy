@@ -104,10 +104,13 @@ reset_to_target_head() {
 }
 
 run_autofixes() {
+  AUTOFIX_OUTPUT_DIR=$(mktemp -d)
   echo "Applying autofixes..."
+  local fix_index=0
   for FIX_CMD in "${FIX_ARRAY[@]}"; do
     FIX_CMD=$(echo "${FIX_CMD}" | xargs)
-    BASE_CMD="$(build_autofix_command "${FIX_CMD}" "${COMP_ID}" "${WORKSPACE}")"
+    local output_file="${AUTOFIX_OUTPUT_DIR}/fix-${fix_index}.json"
+    BASE_CMD="$(build_autofix_command "${FIX_CMD}" "${COMP_ID}" "${WORKSPACE}" "${output_file}")"
 
     echo "Running autofix: ${BASE_CMD}"
     set +e
@@ -118,6 +121,7 @@ run_autofixes() {
     if [ "${FIX_EXIT}" -ne 0 ]; then
       echo "Autofix command exited non-zero (${FIX_EXIT}), continuing to check for file changes"
     fi
+    fix_index=$((fix_index + 1))
   done
 }
 
@@ -182,9 +186,13 @@ homeboy.json"
 
     AUTOFIX_DETAILS=""
     AUTOFIX_TOTAL_FIXES=""
-    if [ -n "${HOMEBOY_OUTPUT_DIR:-}" ] && [ -d "${HOMEBOY_OUTPUT_DIR}" ]; then
+    # Read fix details from the autofix run's own output (AUTOFIX_OUTPUT_DIR),
+    # not the diagnostic run's output (HOMEBOY_OUTPUT_DIR). The autofix run
+    # captures --output with the actual fix results and fixer categories.
+    local details_dir="${AUTOFIX_OUTPUT_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
+    if [ -n "${details_dir}" ] && [ -d "${details_dir}" ]; then
       local raw_details
-      raw_details="$(extract_fix_details_from_output "${HOMEBOY_OUTPUT_DIR}")"
+      raw_details="$(extract_fix_details_from_output "${details_dir}")"
       if [ -n "${raw_details}" ]; then
         AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
         AUTOFIX_DETAILS="$(echo "${raw_details}" | tail -n +2)"
