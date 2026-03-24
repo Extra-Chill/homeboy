@@ -1,8 +1,9 @@
-"""Tests for import resolution in decompose refactoring."""
+"""Tests for import resolution and visibility in decompose refactoring."""
 
 import unittest
 from .imports import resolve_imports, extract_use_names, fix_import_path
 from .module_index import generate_module_index
+from .visibility import adjust_visibility
 
 
 class TestExtractUseNames(unittest.TestCase):
@@ -436,6 +437,231 @@ pub fn remaining_fn() {}
         self.assertIn("mod helpers;", content)
         self.assertIn("pub use helpers::*;", content)
         self.assertIn("pub fn remaining() {}", content)
+
+
+class TestVisibilityDecompose(unittest.TestCase):
+    """Visibility adjuster must upgrade pub(crate) → pub in decompose case."""
+
+    def test_pub_crate_upgraded_to_pub_in_decompose(self):
+        """When decomposing, pub(crate) items need pub so glob re-export works."""
+        items = [{
+            "source": "pub(crate) fn do_thing() -> bool {\n    true\n}",
+            "visibility": "pub(crate)",
+            "kind": "function",
+        }]
+        result = adjust_visibility(
+            items,
+            "src/core/big.rs",
+            "src/core/big/helpers.rs",
+        )
+        adjusted = result["items"]
+        self.assertEqual(len(adjusted), 1)
+        self.assertTrue(adjusted[0]["changed"])
+        self.assertEqual(adjusted[0]["new_visibility"], "pub")
+        self.assertIn("pub fn do_thing()", adjusted[0]["source"])
+        self.assertNotIn("pub(crate)", adjusted[0]["source"])
+
+    def test_pub_crate_struct_upgraded_in_decompose(self):
+        """pub(crate) structs also need upgrading."""
+        items = [{
+            "source": "pub(crate) struct Config {\n    pub name: String,\n}",
+            "visibility": "pub(crate)",
+            "kind": "struct",
+        }]
+        result = adjust_visibility(
+            items,
+            "src/core/engine.rs",
+            "src/core/engine/config.rs",
+        )
+        adjusted = result["items"]
+        self.assertTrue(adjusted[0]["changed"])
+        self.assertEqual(adjusted[0]["new_visibility"], "pub")
+        self.assertIn("pub struct Config", adjusted[0]["source"])
+
+    def test_pub_crate_NOT_upgraded_in_regular_move(self):
+        """In a regular move (not decompose), pub(crate) stays unchanged."""
+        items = [{
+            "source": "pub(crate) fn helper() {}",
+            "visibility": "pub(crate)",
+            "kind": "function",
+        }]
+        result = adjust_visibility(
+            items,
+            "src/core/foo.rs",
+            "src/core/bar.rs",
+        )
+        adjusted = result["items"]
+        self.assertFalse(adjusted[0]["changed"])
+        self.assertEqual(adjusted[0]["new_visibility"], "pub(crate)")
+
+    def test_private_still_gets_pub_crate_in_decompose(self):
+        """Private items still get pub(crate) even during decompose."""
+        items = [{
+            "source": "fn internal() {}",
+            "visibility": "",
+            "kind": "function",
+        }]
+        result = adjust_visibility(
+            items,
+            "src/core/big.rs",
+            "src/core/big/helpers.rs",
+        )
+        adjusted = result["items"]
+        self.assertTrue(adjusted[0]["changed"])
+        self.assertEqual(adjusted[0]["new_visibility"], "pub(crate)")
+
+    def test_impl_blocks_unchanged_in_decompose(self):
+        """impl blocks have no visibility of their own."""
+        items = [{
+            "source": "impl Foo {\n    pub fn bar() {}\n}",
+            "visibility": "",
+            "kind": "impl",
+        }]
+        result = adjust_visibility(
+            items,
+            "src/core/big.rs",
+            "src/core/big/helpers.rs",
+        )
+        adjusted = result["items"]
+        self.assertFalse(adjusted[0]["changed"])
+
+    def test_pub_items_unchanged_in_decompose(self):
+        """Already pub items don't need upgrading."""
+        items = [{
+            "source": "pub fn already_public() {}",
+            "visibility": "pub",
+            "kind": "function",
+        }]
+        result = adjust_visibility(
+            items,
+            "src/core/big.rs",
+            "src/core/big/helpers.rs",
+        )
+        adjusted = result["items"]
+        self.assertFalse(adjusted[0]["changed"])
+        self.assertEqual(adjusted[0]["new_visibility"], "pub")
+
+
+class TestStandaloneTraitImports(unittest.TestCase):
+    """Phase 1b: standalone trait imports (not in {self, Trait} groups) must be carried."""
+
+    def test_standalone_trait_import_carried(self):
+        """use crate::foo::MyTrait; should be carried when trait methods are used."""
+        source = """use crate::engine::local_files::FileSystem;
+
+pub fn read_file(path: &str) -> String {
+    let fs = get_filesystem();
+    fs.read(path).unwrap()
+}
+"""
+        moved_items = [{
+            "name": "read_file",
+            "kind": "fn",
+            "source": """pub fn read_file(path: &str) -> String {
+    let fs = get_filesystem();
+    fs.read(path).unwrap()
+}""",
+        }]
+        result = resolve_imports(
+            moved_items, source,
+            "src/core/big.rs",
+            "src/core/big/helpers.rs",
+        )
+        imports = result["needed_imports"]
+        import_text = "\n".join(imports)
+        # FileSystem is PascalCase, not used literally in moved code,
+        # so Phase 1b should carry it as a trait import
+        self.assertIn("FileSystem", import_text)
+
+    def test_screaming_case_not_treated_as_trait(self):
+        """SCREAMING_CASE constants should not be carried as trait imports."""
+        source = """use crate::constants::MAX_RETRIES;
+
+pub fn try_connect() -> bool {
+    true
+}
+"""
+        moved_items = [{
+            "name": "try_connect",
+            "kind": "fn",
+            "source": "pub fn try_connect() -> bool { true }",
+        }]
+        result = resolve_imports(
+            moved_items, source,
+            "src/core/big.rs",
+            "src/core/big/helpers.rs",
+        )
+        imports = result["needed_imports"]
+        import_text = "\n".join(imports)
+        # SCREAMING_CASE should NOT be treated as a trait
+        self.assertNotIn("MAX_RETRIES", import_text)
+
+    def test_type_used_literally_not_double_carried(self):
+        """If a PascalCase name IS used literally, Phase 1 handles it — no double carry."""
+        source = """use crate::types::Config;
+
+pub fn build_config() -> Config {
+    Config::default()
+}
+"""
+        moved_items = [{
+            "name": "build_config",
+            "kind": "fn",
+            "source": """pub fn build_config() -> Config {
+    Config::default()
+}""",
+        }]
+        result = resolve_imports(
+            moved_items, source,
+            "src/core/big.rs",
+            "src/core/big/helpers.rs",
+        )
+        imports = result["needed_imports"]
+        # Should appear exactly once (from Phase 1, not duplicated by Phase 1b)
+        config_imports = [i for i in imports if "Config" in i]
+        self.assertEqual(len(config_imports), 1)
+
+    def test_multiple_trait_imports_carried(self):
+        """Multiple standalone trait imports should all be carried."""
+        source = """use std::io::Read;
+use std::io::Write;
+use std::path::Path;
+
+pub fn copy_data(input: &mut impl Read, output: &mut impl Write) {
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = input.read(&mut buf).unwrap();
+        if n == 0 { break; }
+        output.write_all(&buf[..n]).unwrap();
+    }
+}
+"""
+        # Note: Read and Write appear in `impl Read` and `impl Write` in the
+        # function signature, so Phase 1 would catch them. Let's test the case
+        # where they DON'T appear literally.
+        moved_items = [{
+            "name": "copy_data",
+            "kind": "fn",
+            "source": """pub fn copy_data(input: &mut dyn Any, output: &mut dyn Any) {
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = input.read(&mut buf).unwrap();
+        if n == 0 { break; }
+        output.write_all(&buf[..n]).unwrap();
+    }
+}""",
+        }]
+        result = resolve_imports(
+            moved_items, source,
+            "src/core/big.rs",
+            "src/core/big/helpers.rs",
+        )
+        imports = result["needed_imports"]
+        import_text = "\n".join(imports)
+        # Path IS used literally (via Path::new etc), so Phase 1 won't catch it
+        # unless it's in the source. Read and Write are not used literally.
+        self.assertIn("Read", import_text)
+        self.assertIn("Write", import_text)
 
 
 if __name__ == "__main__":
