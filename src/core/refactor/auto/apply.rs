@@ -670,12 +670,58 @@ pub fn apply_new_files(new_files: &mut [NewFile], root: &Path) -> usize {
         .sum()
 }
 
+/// Merge insertions from fixes targeting the same file into the first fix for
+/// that file. This ensures all `FunctionRemoval` line ranges are applied against
+/// the original file content in a single pass. Without this, the second fix
+/// re-reads the already-modified file but uses line numbers from the original,
+/// causing brace corruption when lines shift after the first removal.
+fn merge_same_file_insertions(fixes: &mut [Fix]) {
+    use std::collections::HashMap;
+
+    // Map file path → index of the first fix for that file
+    let mut first_for_file: HashMap<&str, usize> = HashMap::new();
+    let mut merge_sources: Vec<(usize, usize)> = Vec::new(); // (donor_idx, target_idx)
+
+    for (i, fix) in fixes.iter().enumerate() {
+        match first_for_file.get(fix.file.as_str()) {
+            Some(&target_idx) => {
+                merge_sources.push((i, target_idx));
+            }
+            None => {
+                first_for_file.insert(&fix.file, i);
+            }
+        }
+    }
+
+    // Move insertions from donor fixes into the target (first) fix for each file
+    for (donor_idx, target_idx) in merge_sources {
+        // Split the slice to get mutable references to both elements
+        if donor_idx > target_idx {
+            let (left, right) = fixes.split_at_mut(donor_idx);
+            left[target_idx]
+                .insertions
+                .extend(right[0].insertions.drain(..));
+        } else {
+            let (left, right) = fixes.split_at_mut(target_idx);
+            right[0]
+                .insertions
+                .extend(left[donor_idx].insertions.drain(..));
+        }
+    }
+}
+
 pub fn apply_fixes_chunked(
     fixes: &mut [Fix],
     root: &Path,
     options: ApplyOptions<'_>,
 ) -> Vec<ApplyChunkResult> {
     let mut results = Vec::new();
+
+    // Merge fixes targeting the same file so all insertions (especially
+    // FunctionRemoval line ranges) are applied to the original content in a
+    // single pass. Without this, the second fix re-reads the already-modified
+    // file but uses line numbers from the original, causing brace corruption.
+    merge_same_file_insertions(fixes);
 
     for (index, fix) in fixes.iter_mut().enumerate() {
         let abs_path = root.join(&fix.file);
@@ -1107,5 +1153,180 @@ mod tests {
         let mut lines: Vec<String> = vec!["pub use other::{foo, bar};".into()];
         remove_from_pub_use_block(&mut lines, "baz");
         assert_eq!(lines[0], "pub use other::{foo, bar};");
+    }
+
+    #[test]
+    fn merge_same_file_insertions_combines_removals() {
+        // Simulate the temp.rs scenario: 3 orphaned tests in the same file,
+        // each generating a separate Fix with one FunctionRemoval.
+        use crate::code_audit::AuditFinding;
+        use crate::refactor::auto::FixSafetyTier;
+
+        fn removal_insertion(start: usize, end: usize, desc: &str) -> Insertion {
+            Insertion {
+                kind: InsertionKind::FunctionRemoval {
+                    start_line: start,
+                    end_line: end,
+                },
+                finding: AuditFinding::OrphanedTest,
+                code: String::new(),
+                description: desc.into(),
+                safety_tier: FixSafetyTier::Safe,
+                auto_apply: true,
+                blocked_reason: None,
+                preflight: None,
+            }
+        }
+
+        let mut fixes = vec![
+            Fix {
+                file: "src/engine/temp.rs".into(),
+                required_methods: vec![],
+                required_registrations: vec![],
+                insertions: vec![removal_insertion(108, 111, "Remove orphaned test env_lock")],
+                applied: false,
+            },
+            Fix {
+                file: "src/engine/temp.rs".into(),
+                required_methods: vec![],
+                required_registrations: vec![],
+                insertions: vec![removal_insertion(
+                    151,
+                    175,
+                    "Remove orphaned test prune_removes",
+                )],
+                applied: false,
+            },
+            Fix {
+                file: "src/engine/temp.rs".into(),
+                required_methods: vec![],
+                required_registrations: vec![],
+                insertions: vec![removal_insertion(
+                    177,
+                    197,
+                    "Remove orphaned test prune_ignores",
+                )],
+                applied: false,
+            },
+            Fix {
+                file: "src/other.rs".into(),
+                required_methods: vec![],
+                required_registrations: vec![],
+                insertions: vec![removal_insertion(10, 20, "Some other file fix")],
+                applied: false,
+            },
+        ];
+
+        merge_same_file_insertions(&mut fixes);
+
+        // The first temp.rs fix should have all 3 insertions merged into it
+        let temp_fixes_with_insertions: Vec<_> = fixes
+            .iter()
+            .filter(|f| f.file == "src/engine/temp.rs" && !f.insertions.is_empty())
+            .collect();
+        assert_eq!(
+            temp_fixes_with_insertions.len(),
+            1,
+            "Only one temp.rs fix should have insertions"
+        );
+        assert_eq!(
+            temp_fixes_with_insertions[0].insertions.len(),
+            3,
+            "merged fix should have all 3 insertions"
+        );
+
+        // Donor fixes should be emptied (insertions drained)
+        let empty_temp_fixes = fixes
+            .iter()
+            .filter(|f| f.file == "src/engine/temp.rs" && f.insertions.is_empty())
+            .count();
+        assert_eq!(empty_temp_fixes, 2, "donor fixes should be emptied");
+
+        // The other.rs fix should be untouched
+        let other_fixes: Vec<_> = fixes.iter().filter(|f| f.file == "src/other.rs").collect();
+        assert_eq!(other_fixes.len(), 1);
+        assert_eq!(other_fixes[0].insertions.len(), 1);
+    }
+
+    #[test]
+    fn multiple_removals_same_file_preserve_braces() {
+        // Reproduce the temp.rs brace corruption: a test module with multiple
+        // test functions removed. The mod tests closing brace must survive.
+        let content = "\
+fn source_fn() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn helper() -> i32 {
+        42
+    }
+
+    #[test]
+    fn test_alpha() {
+        assert_eq!(helper(), 42);
+    }
+
+    #[test]
+    fn test_beta() {
+        let x = 1;
+        assert_eq!(x, 1);
+    }
+
+    #[test]
+    fn test_gamma() {
+        let y = 2;
+        assert_eq!(y, 2);
+    }
+}
+";
+        use crate::code_audit::AuditFinding;
+        use crate::refactor::auto::FixSafetyTier;
+
+        fn removal(start: usize, end: usize, desc: &str) -> Insertion {
+            Insertion {
+                kind: InsertionKind::FunctionRemoval {
+                    start_line: start,
+                    end_line: end,
+                },
+                finding: AuditFinding::OrphanedTest,
+                code: String::new(),
+                description: desc.into(),
+                safety_tier: FixSafetyTier::Safe,
+                auto_apply: true,
+                blocked_reason: None,
+                preflight: None,
+            }
+        }
+
+        // Remove all three test functions (lines are 1-indexed):
+        // test_alpha: #[test] at 11, fn at 12, body 13, } at 14
+        // test_beta:  #[test] at 16, fn at 17, body 18-19, } at 20
+        // test_gamma: #[test] at 22, fn at 23, body 24-25, } at 26
+        let insertions = vec![
+            removal(11, 14, "Remove test_alpha"),
+            removal(16, 20, "Remove test_beta"),
+            removal(22, 26, "Remove test_gamma"),
+        ];
+
+        let result = apply_insertions_to_content(content, &insertions, &Language::Rust);
+
+        // The mod tests block must still be properly closed
+        let open_braces = result.matches('{').count();
+        let close_braces = result.matches('}').count();
+        assert_eq!(
+            open_braces, close_braces,
+            "Braces must be balanced after removal.\nResult:\n{result}"
+        );
+        assert!(
+            result.contains("mod tests {"),
+            "mod tests should still exist"
+        );
+        // helper() should survive — it wasn't removed
+        assert!(
+            result.contains("fn helper()"),
+            "helper function should survive"
+        );
     }
 }
