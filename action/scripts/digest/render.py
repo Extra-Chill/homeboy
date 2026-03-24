@@ -246,10 +246,7 @@ def render_markdown(
     lines.append("")
 
     lines.append("### Machine-readable artifacts")
-    lines.append("- `homeboy-lint-summary.json`")
-    lines.append("- `homeboy-test-failures.json`")
-    lines.append("- `homeboy-audit-summary.json`")
-    lines.append("- `homeboy-autofixability.json`")
+    lines.append("- `{command}.json` — structured output per command (from `homeboy --output`)")
 
     if job_links:
         lines.append("")

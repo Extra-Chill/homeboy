@@ -9,20 +9,15 @@ compact_summary() {
 }
 
 summary_json_for() {
-  case "$1" in
-    lint)
-      printf '%s\n' "${OUTPUT_DIR}/homeboy-lint-summary.json"
-      ;;
-    test)
-      printf '%s\n' "${OUTPUT_DIR}/homeboy-test-failures.json"
-      ;;
-    audit)
-      printf '%s\n' "${OUTPUT_DIR}/homeboy-audit-summary.json"
-      ;;
-    *)
-      printf '%s\n' ""
-      ;;
-  esac
+  # Resolve the structured --output JSON written by run-homeboy-commands.sh.
+  # All commands use the same output stem convention.
+  local stem
+  stem="$(printf '%s' "$1" | sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+//; s/-+$//')"
+  if [ -n "${OUTPUT_DIR}" ] && [ -f "${OUTPUT_DIR}/${stem}.json" ]; then
+    printf '%s\n' "${OUTPUT_DIR}/${stem}.json"
+  else
+    printf '%s\n' ""
+  fi
 }
 
 REPO="${GITHUB_REPOSITORY}"

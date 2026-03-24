@@ -238,12 +238,6 @@ def build_audit_digest_from_json(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def write_json(path: str, payload: dict[str, Any]) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-        f.write("\n")
-
-
 def resolve_failed_job_links(run_url: str) -> dict[str, str]:
     """Resolve direct failed job URLs for this workflow run via gh api."""
     run_id = run_url.rstrip("/").split("/")[-1]
@@ -400,16 +394,7 @@ def main() -> int:
         autofix_commands_csv,
     )
 
-    lint_json_path = os.path.join(output_dir, "homeboy-lint-summary.json")
-    test_json_path = os.path.join(output_dir, "homeboy-test-failures.json")
-    audit_json_path = os.path.join(output_dir, "homeboy-audit-summary.json")
-    autofixability_json_path = os.path.join(output_dir, "homeboy-autofixability.json")
     md_path = os.path.join(output_dir, "homeboy-failure-digest.md")
-
-    write_json(lint_json_path, lint_digest)
-    write_json(test_json_path, test_digest)
-    write_json(audit_json_path, audit_digest)
-    write_json(autofixability_json_path, autofixability)
 
     job_links = resolve_failed_job_links(run_url)
     markdown = render_markdown(

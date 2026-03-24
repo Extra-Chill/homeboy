@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Render command summaries from homeboy structured JSON output.
+
+Reads the raw CliResponse<T> envelope written by `homeboy --output`.
+Produces compact (one-line) or markdown summaries for PR comments and
+issue filing.
+"""
 from __future__ import annotations
 
 import json
@@ -10,6 +16,18 @@ def load_json(path: str) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return data if isinstance(data, dict) else {}
+
+
+def unwrap_envelope(raw: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Unwrap a CliResponse envelope into (data, error).
+
+    Handles both the raw CLI envelope ({"success": bool, "data": {...}})
+    and pre-normalized dicts (no envelope).
+    """
+    if "success" in raw and ("data" in raw or "error" in raw):
+        return raw.get("data", {}) or {}, raw.get("error", {}) or {}
+    # Already unwrapped or flat dict
+    return raw, {}
 
 
 def append_details(lines: list[str], summary: str, body_lines: list[str]) -> None:
@@ -26,10 +44,134 @@ def append_details(lines: list[str], summary: str, body_lines: list[str]) -> Non
     lines.append("</details>")
 
 
+# ── Compact summaries (one-line for issue filing) ─────────────────────
+
+def compact_summary(command: str, raw: dict[str, Any]) -> str:
+    data, error = unwrap_envelope(raw)
+
+    # Surface errors from any command
+    if error and error.get("message"):
+        code = error.get("code", "")
+        msg = str(error["message"])
+        return f"error: {code} — {msg}" if code else f"error: {msg}"
+
+    if command == "lint":
+        return compact_lint(data)
+    if command == "test":
+        return compact_test(data)
+    if command == "audit":
+        return compact_audit(data)
+    if command == "refactor":
+        return compact_refactor(data)
+    return "structured command details available"
+
+
+def compact_lint(data: dict[str, Any]) -> str:
+    for value in [
+        data.get("build_failed"),
+        data.get("summary"),
+        data.get("phpcs_summary"),
+        data.get("phpstan_summary"),
+    ]:
+        if value:
+            return str(value)
+    top = data.get("top_violations", [])
+    if top:
+        return f"{len(top)} violation(s)"
+    return "structured lint details available"
+
+
+def compact_test(data: dict[str, Any]) -> str:
+    test_counts = data.get("test_counts", {}) or {}
+    failed_tests = data.get("failed_tests", []) or []
+    failed_count = int(test_counts.get("failed", 0) or 0) + int(test_counts.get("errors", 0) or 0)
+    if not failed_count:
+        failed_count = len(failed_tests)
+
+    if failed_tests:
+        first = failed_tests[0] if isinstance(failed_tests[0], dict) else {"name": str(failed_tests[0])}
+        name = str(first.get("name", "unknown")).strip()
+        detail = str(first.get("detail", first.get("message", ""))).strip()
+        suffix = f" — {name}" if name else ""
+        if detail:
+            suffix += f": {detail}"
+        return f"{failed_count} failed test(s){suffix}"
+    return f"{failed_count} failed test(s)"
+
+
+def compact_audit(data: dict[str, Any]) -> str:
+    baseline = data.get("baseline_comparison", {}) or {}
+    summary = data.get("summary", {}) or {}
+    new_items = baseline.get("new_items", []) if isinstance(baseline, dict) else []
+    if isinstance(new_items, list) and new_items:
+        return f"{len(new_items)} new finding(s) since baseline"
+    outliers = summary.get("outliers_found") if isinstance(summary, dict) else None
+    if isinstance(outliers, int):
+        return f"{outliers} outlier(s) in current run"
+    alignment = summary.get("alignment_score") if isinstance(summary, dict) else None
+    if isinstance(alignment, (int, float)):
+        return f"alignment score {alignment:.3f}"
+    return "structured audit details available"
+
+
+def compact_refactor(data: dict[str, Any]) -> str:
+    files_modified = int(data.get("files_modified", 0) or 0)
+    stages = data.get("stages", [])
+    totals = data.get("plan_totals", {})
+    total_fixes = int(totals.get("total_fixes_proposed", 0) or 0) if isinstance(totals, dict) else 0
+
+    stage_parts: list[str] = []
+    for stage in (stages if isinstance(stages, list) else []):
+        if not isinstance(stage, dict):
+            continue
+        name = str(stage.get("stage", "unknown"))
+        proposed = int(stage.get("fixes_proposed", 0) or 0)
+        if proposed > 0:
+            stage_parts.append(f"{name}: {proposed}")
+
+    if stage_parts:
+        breakdown = ", ".join(stage_parts)
+        return f"{total_fixes} fix(es) across {files_modified} file(s) — {breakdown}"
+    if files_modified > 0:
+        return f"{total_fixes} fix(es) across {files_modified} file(s)"
+
+    warnings = data.get("warnings", [])
+    validation_warnings = [str(w) for w in warnings if isinstance(w, str) and "validation" in w.lower()]
+    if validation_warnings:
+        return validation_warnings[0]
+    return "no automated fixes found"
+
+
+# ── Markdown summaries (multi-line for PR comments) ───────────────────
+
+def markdown_summary(command: str, raw: dict[str, Any]) -> str:
+    data, error = unwrap_envelope(raw)
+    lines: list[str] = []
+
+    # Surface errors from any command
+    if error and error.get("message"):
+        lines.append(f"- Error: **{error.get('code', 'unknown')}** — {error['message']}")
+        hints = error.get("hints", [])
+        for hint in (hints if isinstance(hints, list) else [])[:3]:
+            lines.append(f"  - Hint: {hint}")
+        return "\n".join(lines)
+
+    if command == "lint":
+        markdown_lint(data, lines)
+    elif command == "test":
+        markdown_test(data, lines)
+    elif command == "audit":
+        markdown_audit(data, lines)
+    elif command == "refactor":
+        markdown_refactor(data, lines)
+
+    return "\n".join(lines)
+
+
 def summarize_test_failure(item: dict[str, Any], idx: int) -> str:
     name = str(item.get("name", "unknown"))
-    detail = str(item.get("detail", "")).strip()
-    location = str(item.get("location", "")).strip()
+    detail = str(item.get("detail", item.get("message", ""))).strip()
+    location = str(item.get("location", item.get("file", ""))).strip()
     parts = [f"{idx}. {name}"]
     if detail:
         parts.append(detail)
@@ -38,134 +180,169 @@ def summarize_test_failure(item: dict[str, Any], idx: int) -> str:
     return " — ".join(parts)
 
 
-def compact_summary(command: str, data: dict[str, Any]) -> str:
-    if command == "lint":
-        for value in [
-            data.get("error_message"),
-            data.get("build_failed"),
-            data.get("lint_summary"),
-            data.get("phpcs_summary"),
-            data.get("phpstan_summary"),
-        ]:
-            if value:
-                return str(value)
-        return "structured lint details available"
-
-    if command == "test":
-        failed_count = int(data.get("failed_tests_count", 0) or 0)
-        top_failed = data.get("top_failed_tests", []) or []
-        if top_failed:
-            first = top_failed[0] if isinstance(top_failed[0], dict) else {"name": str(top_failed[0])}
-            detail = str(first.get("detail", "")).strip()
-            name = str(first.get("name", "unknown")).strip()
-            suffix = f" — {name}" if name else ""
-            if detail:
-                suffix += f": {detail}"
-            return f"{failed_count} failed test(s){suffix}"
-        return f"{failed_count} failed test(s)"
-
-    if command == "audit":
-        new_findings_count = int(data.get("new_findings_count", 0) or 0)
-        if new_findings_count > 0:
-            return f"{new_findings_count} new finding(s) since baseline"
-        outliers = data.get("outliers_found")
-        if isinstance(outliers, int):
-            return f"{outliers} outlier(s) in current run"
-        alignment = data.get("alignment_score")
-        if isinstance(alignment, (int, float)):
-            return f"alignment score {alignment:.3f}"
-        return "structured audit details available"
-
-    return "structured command details available"
+def markdown_lint(data: dict[str, Any], lines: list[str]) -> None:
+    if data.get("summary"):
+        lines.append(f"- Lint summary: **{data['summary']}**")
+    if data.get("phpcs_summary"):
+        lines.append(f"- PHPCS: {data['phpcs_summary']}")
+    if data.get("phpstan_summary"):
+        lines.append(f"- PHPStan: {data['phpstan_summary']}")
+    if data.get("build_failed"):
+        lines.append(f"- Build failed: {data['build_failed']}")
+    top_violations = [str(v) for v in (data.get("top_violations", []) or [])][:10]
+    append_details(lines, "Top lint violations", top_violations)
 
 
-def markdown_summary(command: str, data: dict[str, Any]) -> str:
-    lines: list[str] = []
+def markdown_test(data: dict[str, Any], lines: list[str]) -> None:
+    test_counts = data.get("test_counts", {}) or {}
+    failed_tests = data.get("failed_tests", []) or []
+    failed_count = int(test_counts.get("failed", 0) or 0) + int(test_counts.get("errors", 0) or 0)
+    if not failed_count:
+        failed_count = len(failed_tests)
 
-    if command == "lint":
-        if data.get("lint_summary"):
-            lines.append(f"- Lint summary: **{data['lint_summary']}**")
-        if data.get("phpcs_summary"):
-            lines.append(f"- PHPCS: {data['phpcs_summary']}")
-        if data.get("phpstan_summary"):
-            lines.append(f"- PHPStan: {data['phpstan_summary']}")
-        if data.get("build_failed"):
-            lines.append(f"- Build failed: {data['build_failed']}")
-        if data.get("error_code"):
-            lines.append(f"- Error code: `{data['error_code']}`")
-        if data.get("error_message"):
-            lines.append(f"- Error message: {data['error_message']}")
-        if data.get("error_field"):
-            lines.append(f"- Error field: `{data['error_field']}`")
-        if data.get("error_hint"):
-            lines.append(f"- Hint: {data['error_hint']}")
-        top_violations = [str(v) for v in (data.get("top_violations", []) or [])][:10]
-        append_details(lines, "Top lint violations", top_violations)
+    lines.append(f"- Failed tests: **{failed_count}**")
+    details = []
+    for idx, item in enumerate(failed_tests[:10], start=1):
+        if isinstance(item, dict):
+            details.append(summarize_test_failure(item, idx))
+        else:
+            details.append(f"{idx}. {item}")
+    append_details(lines, f"Failed test details ({min(len(details), 10)} shown)", details)
 
-    elif command == "test":
-        failed_count = int(data.get("failed_tests_count", 0) or 0)
-        lines.append(f"- Failed tests: **{failed_count}**")
-        top_failed = data.get("top_failed_tests", []) or []
-        details = []
-        for idx, item in enumerate(top_failed[:10], start=1):
-            if isinstance(item, dict):
-                details.append(summarize_test_failure(item, idx))
-            else:
-                details.append(f"{idx}. {item}")
-        append_details(lines, f"Failed test details ({min(len(details), 10)} shown)", details)
 
-    elif command == "audit":
-        alignment = data.get("alignment_score")
-        if isinstance(alignment, (int, float)):
-            lines.append(f"- Alignment score: **{alignment:.3f}**")
-        severity_counts = data.get("severity_counts", {}) or {}
-        if severity_counts:
-            sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(severity_counts.items()))
-            lines.append(f"- Severity counts: **{sev_text}**")
-        outliers = data.get("outliers_found")
-        if isinstance(outliers, int):
-            lines.append(f"- Outliers in current run: **{outliers}**")
-        lines.append(f"- Drift increased: **{'yes' if data.get('drift_increased') else 'no'}**")
-        new_findings = data.get("new_findings", []) or []
-        new_findings_count = int(data.get("new_findings_count", 0) or 0)
-        if new_findings_count > 0:
-            lines.append(f"- New findings since baseline: **{new_findings_count}**")
-            for idx, finding in enumerate(new_findings[:5], start=1):
-                context = str(finding.get("context", "unknown"))
-                message = str(finding.get("message", ""))
-                fingerprint = str(finding.get("fingerprint", ""))
-                entry = f"  {idx}. **{context}**"
-                if message:
-                    entry += f" — {message}"
-                if fingerprint:
-                    entry += f" (`{fingerprint}`)"
-                lines.append(entry)
-        top_findings = data.get("top_findings", []) or []
-        if top_findings:
-            lines.append("- Top actionable findings:")
-            detail_lines: list[str] = []
-            for idx, finding in enumerate(top_findings[:10], start=1):
-                file_value = str(finding.get("file", "unknown"))
-                rule_value = str(finding.get("rule", "unknown"))
-                message = str(finding.get("message", ""))
-                line = f"  {idx}. **{file_value}** — {rule_value}"
-                detail = f"{idx}. **{file_value}** — {rule_value}"
-                if message:
-                    line += f" — {message}"
-                    detail += f" — {message}"
-                lines.append(line)
-                detail_lines.append(detail)
-            append_details(lines, f"Audit findings ({min(len(top_findings), 10)} shown)", detail_lines)
+def normalize_file(raw: Any) -> str:
+    if isinstance(raw, dict):
+        return str(raw.get("path") or raw.get("file") or "unknown")
+    return str(raw or "unknown")
 
-    return "\n".join(lines)
 
+def markdown_audit(data: dict[str, Any], lines: list[str]) -> None:
+    baseline = data.get("baseline_comparison", {}) or {}
+    summary = data.get("summary", {}) or {}
+    findings = data.get("findings", []) if isinstance(data, dict) else []
+    conventions = data.get("conventions", []) if isinstance(data, dict) else []
+
+    alignment = summary.get("alignment_score") if isinstance(summary, dict) else None
+    if isinstance(alignment, (int, float)):
+        lines.append(f"- Alignment score: **{alignment:.3f}**")
+
+    outliers = summary.get("outliers_found") if isinstance(summary, dict) else None
+    if isinstance(outliers, int):
+        lines.append(f"- Outliers in current run: **{outliers}**")
+
+    drift = baseline.get("drift_increased", False) if isinstance(baseline, dict) else False
+    lines.append(f"- Drift increased: **{'yes' if drift else 'no'}**")
+
+    # New findings from baseline comparison
+    new_items = baseline.get("new_items", []) if isinstance(baseline, dict) else []
+    if isinstance(new_items, list) and new_items:
+        lines.append(f"- New findings since baseline: **{len(new_items)}**")
+        for idx, item in enumerate(new_items[:5], start=1):
+            if not isinstance(item, dict):
+                continue
+            context = str(item.get("context_label") or item.get("file") or "unknown")
+            message = str(item.get("description") or item.get("message") or "(new finding)")
+            fingerprint = str(item.get("fingerprint") or "")
+            entry = f"  {idx}. **{context}**"
+            if message:
+                entry += f" — {message}"
+            if fingerprint:
+                entry += f" (`{fingerprint}`)"
+            lines.append(entry)
+
+    # Collect outlier items from conventions
+    outlier_items: list[dict[str, Any]] = []
+    for conv in (conventions if isinstance(conventions, list) else []):
+        if not isinstance(conv, dict):
+            continue
+        context_label = str(
+            conv.get("context_label") or conv.get("name") or conv.get("rule") or "unknown"
+        )
+        for outlier in (conv.get("outliers", []) if isinstance(conv.get("outliers"), list) else []):
+            if isinstance(outlier, dict):
+                item = dict(outlier)
+                item.setdefault("context_label", context_label)
+                outlier_items.append(item)
+
+    # Severity counts + top findings from findings + outliers
+    severity_counts: dict[str, int] = {}
+    top_findings: list[dict[str, str]] = []
+    for item in (findings if isinstance(findings, list) else []) + outlier_items:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or item.get("level") or "unknown").lower()
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        top_findings.append({
+            "file": normalize_file(item.get("file") or item.get("path") or item.get("context_label")),
+            "rule": str(item.get("rule") or item.get("kind") or item.get("category") or "outlier"),
+            "message": str(item.get("description") or item.get("message") or "(outlier)"),
+        })
+
+    if severity_counts:
+        sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(severity_counts.items()))
+        lines.append(f"- Severity counts: **{sev_text}**")
+
+    if top_findings:
+        lines.append("- Top actionable findings:")
+        detail_lines: list[str] = []
+        for idx, finding in enumerate(top_findings[:10], start=1):
+            file_value = finding["file"]
+            rule_value = finding["rule"]
+            message = finding["message"]
+            line = f"  {idx}. **{file_value}** — {rule_value}"
+            detail = f"{idx}. **{file_value}** — {rule_value}"
+            if message:
+                line += f" — {message}"
+                detail += f" — {message}"
+            lines.append(line)
+            detail_lines.append(detail)
+        append_details(lines, f"Audit findings ({min(len(top_findings), 10)} shown)", detail_lines)
+
+
+def markdown_refactor(data: dict[str, Any], lines: list[str]) -> None:
+    files_modified = int(data.get("files_modified", 0) or 0)
+    totals = data.get("plan_totals", {})
+    total_fixes = int(totals.get("total_fixes_proposed", 0) or 0) if isinstance(totals, dict) else 0
+    lines.append(f"- Total fixes proposed: **{total_fixes}**")
+    lines.append(f"- Files modified: **{files_modified}**")
+
+    stages = data.get("stages", [])
+    if isinstance(stages, list) and stages:
+        lines.append("- Stages:")
+        for stage in stages:
+            if not isinstance(stage, dict):
+                continue
+            name = str(stage.get("stage", "unknown"))
+            proposed = int(stage.get("fixes_proposed", 0) or 0)
+            stage_files = int(stage.get("files_modified", 0) or 0)
+            detected = stage.get("detected_findings")
+            detected_str = f", {detected} findings detected" if detected is not None else ""
+            lines.append(f"  - **{name}**: {proposed} fix(es), {stage_files} file(s){detected_str}")
+
+    changed_files = data.get("changed_files", [])
+    if isinstance(changed_files, list) and changed_files:
+        detail_lines = [f"{idx}. `{f}`" for idx, f in enumerate(changed_files[:15], start=1)]
+        if len(changed_files) > 15:
+            detail_lines.append(f"... and {len(changed_files) - 15} more")
+        append_details(lines, f"Changed files ({len(changed_files)})", detail_lines)
+
+    warnings = data.get("warnings", [])
+    if isinstance(warnings, list):
+        notable = [str(w) for w in warnings if isinstance(w, str) and "merge order" not in w.lower()]
+        if notable:
+            append_details(lines, f"Warnings ({len(notable)})", notable[:10])
+
+
+# ── CLI entry point ───────────────────────────────────────────────────
 
 def main() -> int:
     if len(sys.argv) < 3 or len(sys.argv) > 4:
         print(f"Usage: {sys.argv[0]} <command> <json-file> [compact|markdown]", file=sys.stderr)
         return 1
 
-    command = sys.argv[1].strip().lower()
+    raw_command = sys.argv[1].strip().lower()
+    # Normalize compound commands like "refactor --from all" to base command
+    command = raw_command.split()[0] if raw_command else raw_command
     path = sys.argv[2]
     mode = sys.argv[3].strip().lower() if len(sys.argv) == 4 else "markdown"
 

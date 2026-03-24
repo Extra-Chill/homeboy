@@ -64,22 +64,16 @@ PY
 }
 
 summary_json_for_command() {
+  # Resolve the structured --output JSON written by run-homeboy-commands.sh.
+  # All commands use the same output stem convention.
   local command="$1"
-
-  case "${command}" in
-    lint)
-      printf '%s\n' "${OUTPUT_DIR}/homeboy-lint-summary.json"
-      ;;
-    test)
-      printf '%s\n' "${OUTPUT_DIR}/homeboy-test-failures.json"
-      ;;
-    audit)
-      printf '%s\n' "${OUTPUT_DIR}/homeboy-audit-summary.json"
-      ;;
-    *)
-      printf '\n'
-      ;;
-  esac
+  local stem
+  stem="$(printf '%s' "${command}" | sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+//; s/-+$//')"
+  if [ -n "${OUTPUT_DIR:-}" ] && [ -f "${OUTPUT_DIR}/${stem}.json" ]; then
+    printf '%s\n' "${OUTPUT_DIR}/${stem}.json"
+  else
+    printf '\n'
+  fi
 }
 
 command_status() {
