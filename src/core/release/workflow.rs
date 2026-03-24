@@ -348,7 +348,9 @@ fn execute_deployment(
             // workspace is clean by definition. Skipping the uncommitted changes
             // check avoids false positives that silently block deployment.
             force: true,
-            skip_build: true,
+            // Always rebuild to guarantee the artifact matches the just-tagged
+            // commit. Reusing a stale artifact is a silent production bug (#991).
+            skip_build: false,
             keep_deps: false,
             expected_version: None,
             no_pull: true,

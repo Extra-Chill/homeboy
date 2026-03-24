@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::SystemTime;
 
 use super::permissions;
 use crate::component::Component;
@@ -8,7 +7,6 @@ use crate::engine::hooks::{self, HookFailureMode};
 use crate::engine::shell;
 use crate::engine::template::{render_map, TemplateVars};
 use crate::error::{Error, Result};
-use crate::extension::build::resolve_artifact_path;
 use crate::extension::{
     load_all_extensions, DeployOverride, DeployVerification, ExtensionManifest,
 };
@@ -18,43 +16,6 @@ use crate::version;
 
 use super::transfer::scp_file;
 use super::types::DeployResult;
-
-pub(super) fn artifact_is_fresh(component: &Component) -> bool {
-    let artifact_pattern = match component.build_artifact.as_ref() {
-        Some(p) => p,
-        None => return false,
-    };
-
-    let artifact_path = match resolve_artifact_path(artifact_pattern) {
-        Ok(p) => p,
-        Err(_) => return false, // artifact doesn't exist yet
-    };
-
-    let artifact_mtime = match artifact_path.metadata().and_then(|m| m.modified()) {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-
-    // Get HEAD commit timestamp as Unix epoch seconds
-    let commit_ts = crate::engine::command::run_in_optional(
-        &component.local_path,
-        "git",
-        &["log", "-1", "--format=%ct", "HEAD"],
-    );
-
-    let commit_time = match commit_ts {
-        Some(ts) => {
-            let secs: u64 = match ts.trim().parse() {
-                Ok(s) => s,
-                Err(_) => return false,
-            };
-            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
-        }
-        None => return false,
-    };
-
-    artifact_mtime > commit_time
-}
 
 /// Detect if a component's artifact is a CLI binary matching the currently
 /// running process name. Used to print a post-deploy hint for self-deploy.
