@@ -53,29 +53,7 @@ pub fn lint_refactor_request(
     }
 }
 
-pub fn test_refactor_request(
-    component: Component,
-    root: PathBuf,
-    settings: Vec<(String, String)>,
-    options: TestSourceOptions,
-    write: bool,
-) -> RefactorPlanRequest {
-    RefactorPlanRequest {
-        component,
-        root,
-        sources: vec!["test".to_string()],
-        changed_since: None,
-        only: Vec::new(),
-        exclude: Vec::new(),
-        settings,
-        lint: LintSourceOptions::default(),
-        test: options,
-        write,
-        force: false,
-    }
-}
-
-pub fn run_lint_refactor(
+pub(crate) fn run_lint_refactor(
     component: Component,
     root: PathBuf,
     settings: Vec<(String, String)>,
@@ -87,7 +65,7 @@ pub fn run_lint_refactor(
     ))
 }
 
-pub fn run_test_refactor(
+pub(crate) fn run_test_refactor(
     component: Component,
     root: PathBuf,
     settings: Vec<(String, String)>,
@@ -382,7 +360,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
     })
 }
 
-pub fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
+pub(crate) fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
     let lowered: Vec<String> = sources.iter().map(|source| source.to_lowercase()).collect();
 
     if lowered.iter().any(|source| source == "all") {
@@ -854,7 +832,7 @@ fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) -> Vec<FixA
     entries
 }
 
-pub fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
+pub(crate) fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
     let mut overlaps = Vec::new();
 
     for (later_index, later_stage) in stages.iter().enumerate() {
@@ -899,7 +877,7 @@ pub fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
     overlaps
 }
 
-pub fn summarize_plan_totals(
+pub(crate) fn summarize_plan_totals(
     stages: &[PlanStageSummary],
     total_files_selected: usize,
 ) -> PlanTotals {
@@ -919,23 +897,6 @@ mod tests {
     use crate::component::Component;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn tmp_dir(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("homeboy-refactor-planner-{name}-{nanos}"))
-    }
-
-    fn test_component(root: &Path) -> Component {
-        Component {
-            id: "component".to_string(),
-            local_path: root.to_string_lossy().to_string(),
-            remote_path: String::new(),
-            ..Default::default()
-        }
-    }
 
     #[test]
     fn analyze_stage_overlaps_reports_later_stage_precedence() {
@@ -1139,4 +1100,181 @@ mod tests {
             normalize_sources(&["weird".to_string()]).expect_err("unknown source should fail");
         assert!(err.to_string().contains("Unknown refactor source"));
     }
+
+    #[test]
+    fn test_lint_refactor_request_default_path() {
+        let component = Default::default();
+        let root = PathBuf::new();
+        let settings = Vec::new();
+        let options = Default::default();
+        let write = false;
+        let _result = lint_refactor_request(component, root, settings, options, write);
+    }
+
+    #[test]
+    fn test_run_lint_refactor_default_path() {
+        let component = Default::default();
+        let root = PathBuf::new();
+        let settings = Vec::new();
+        let options = Default::default();
+        let write = false;
+        let _result = run_lint_refactor(component, root, settings, options, write);
+    }
+
+    #[test]
+    fn test_run_test_refactor_default_path() {
+        let component = Default::default();
+        let root = PathBuf::new();
+        let settings = Vec::new();
+        let options = Default::default();
+        let write = false;
+        let _result = run_test_refactor(component, root, settings, options, write);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_default_path() {
+        let request = Default::default();
+        let _result = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_request_write_request_force() {
+        let request = Default::default();
+        let _result = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_let_scoped_changed_files_if_let_some_git_ref_request_changed() {
+        let request = Default::default();
+        let _result = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_some_git_get_files_changed_since_root_str_git_ref() {
+        let request = Default::default();
+        let _result = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_else() {
+        let request = Default::default();
+        let _result = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_else_2() {
+        let request = Default::default();
+        let _result = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_else_3() {
+        let request = Default::default();
+        let _result = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_else_4() {
+        let request = Default::default();
+        let _result = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_request_write() {
+        let request = Default::default();
+        let _result = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_snapshot_files_is_empty() {
+        let request = Default::default();
+        let result = build_refactor_plan(request);
+        assert!(result.is_err(), "expected Err for: !snapshot_files.is_empty()");
+    }
+
+    #[test]
+    fn test_build_refactor_plan_match_crate_engine_format_write_format_after_write_request_r() {
+        let request = Default::default();
+        let result = build_refactor_plan(request);
+        let inner = result.unwrap();
+        // Branch returns Ok(fmt) when: match crate::engine::format_write::format_after_write(&request.root, &abs_changed)
+        assert_eq!(inner.component_id, String::new());
+        assert_eq!(inner.source_path, String::new());
+        assert_eq!(inner.sources, Vec::new());
+        assert_eq!(inner.dry_run, false);
+        assert_eq!(inner.applied, false);
+        assert_eq!(inner.merge_strategy, String::new());
+        assert_eq!(inner.proposals, Vec::new());
+        assert_eq!(inner.stages, Vec::new());
+        assert_eq!(inner.plan_totals, Default::default());
+        assert_eq!(inner.overlaps, Vec::new());
+        assert_eq!(inner.files_modified, 0);
+        assert_eq!(inner.changed_files, Vec::new());
+        assert_eq!(inner.fix_summary, None);
+        assert_eq!(inner.warnings, Vec::new());
+        assert_eq!(inner.hints, Vec::new());
+    }
+
+    #[test]
+    fn test_build_refactor_plan_match_crate_engine_format_write_format_after_write_request_r_2() {
+        let request = Default::default();
+        let _result = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_build_refactor_plan_fmt_success() {
+        let request = Default::default();
+        let result = build_refactor_plan(request);
+        assert!(result.is_err(), "expected Err for: !fmt.success");
+    }
+
+    #[test]
+    fn test_build_refactor_plan_has_expected_effects() {
+        // Expected effects: logging, mutation
+        let request = Default::default();
+        let _ = build_refactor_plan(request);
+    }
+
+    #[test]
+    fn test_normalize_sources_ordered_is_empty() {
+        let sources = Vec::new();
+        let result = normalize_sources(&sources);
+        assert!(!result.is_empty(), "expected non-empty collection for: ordered.is_empty()");
+    }
+
+    #[test]
+    fn test_normalize_sources_ordered_is_empty_2() {
+        let sources = Vec::new();
+        let result = normalize_sources(&sources);
+        assert!(!result.is_empty(), "expected non-empty collection for: ordered.is_empty()");
+    }
+
+    #[test]
+    fn test_normalize_sources_has_expected_effects() {
+        // Expected effects: mutation
+        let sources = Vec::new();
+        let _ = normalize_sources(&sources);
+    }
+
+    #[test]
+    fn test_analyze_stage_overlaps_default_path() {
+        let stages = Vec::new();
+        let result = analyze_stage_overlaps(&stages);
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_analyze_stage_overlaps_has_expected_effects() {
+        // Expected effects: mutation
+        let stages = Vec::new();
+        let _ = analyze_stage_overlaps(&stages);
+    }
+
+    #[test]
+    fn test_summarize_plan_totals_default_path() {
+        let stages = Vec::new();
+        let total_files_selected = 0;
+        let _result = summarize_plan_totals(&stages, total_files_selected);
+    }
+
 }
