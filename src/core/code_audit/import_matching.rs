@@ -70,7 +70,13 @@ pub(crate) fn has_import(expected: &str, actual_imports: &[String], file_content
         }
     }
 
-    // 4. Usage check: if the terminal name isn't referenced outside imports,
+    // 4. Local definition check: if the file defines the symbol locally,
+    //    it doesn't need an import (e.g., `fn default_true() -> bool { true }`)
+    if !terminal.is_empty() && content_defines_name(file_content, terminal) {
+        return true;
+    }
+
+    // 5. Usage check: if the terminal name isn't referenced outside imports,
     //    the import would be unused — not a real convention violation
     if !terminal.is_empty() && !content_references_name(file_content, terminal) {
         return true;
@@ -88,6 +94,70 @@ pub(crate) fn grouped_import_contains(import: &str, name: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Check if file content contains a local definition of a name.
+///
+/// Detects `fn name`, `struct name`, `enum name`, `type name`, `const name`,
+/// `static name`, `trait name`, and `macro_rules! name`. Skips import/use
+/// lines to avoid false positives from re-exports.
+///
+/// This prevents the convention detector from flagging a "missing import" when
+/// the file already defines the symbol locally (e.g., `fn default_true()`).
+pub(crate) fn content_defines_name(content: &str, name: &str) -> bool {
+    // Declaration keywords that introduce a named definition
+    const DEF_KEYWORDS: &[&str] = &[
+        "fn ",
+        "struct ",
+        "enum ",
+        "type ",
+        "const ",
+        "static ",
+        "trait ",
+        "macro_rules! ",
+    ];
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Skip comments
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+            continue;
+        }
+        // Skip import/use lines
+        if trimmed.starts_with("use ") || trimmed.starts_with("pub use ") {
+            continue;
+        }
+        // Strip visibility modifiers to find the keyword
+        let stripped = trimmed
+            .strip_prefix("pub(crate) ")
+            .or_else(|| trimmed.strip_prefix("pub(super) "))
+            .or_else(|| trimmed.strip_prefix("pub "))
+            .unwrap_or(trimmed);
+        // Also strip async/unsafe/const qualifiers before fn
+        let stripped = stripped.strip_prefix("async ").unwrap_or(stripped);
+        let stripped = stripped.strip_prefix("unsafe ").unwrap_or(stripped);
+
+        for kw in DEF_KEYWORDS {
+            if let Some(rest) = stripped.strip_prefix(kw) {
+                // The name should appear right after the keyword, followed by
+                // a non-identifier char (paren, brace, colon, angle bracket, etc.)
+                if rest.starts_with(name) {
+                    let after = &rest[name.len()..];
+                    if after.is_empty()
+                        || after.starts_with('(')
+                        || after.starts_with('<')
+                        || after.starts_with(':')
+                        || after.starts_with('{')
+                        || after.starts_with(' ')
+                        || after.starts_with(';')
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Check if file content references a name outside of import/use statements.
@@ -195,6 +265,111 @@ mod tests {
             "super::CmdResult",
             &imports,
             "fn run() -> CmdResult<T> {}"
+        ));
+    }
+
+    #[test]
+    fn has_import_local_definition_satisfies() {
+        // File defines fn default_true locally — no import needed
+        let imports = vec![];
+        let content = r#"
+#[serde(default = "default_true")]
+pub enabled: bool,
+
+fn default_true() -> bool {
+    true
+}
+"#;
+        assert!(has_import(
+            "crate::core::defaults::default_true",
+            &imports,
+            content
+        ));
+    }
+
+    #[test]
+    fn has_import_local_pub_fn_satisfies() {
+        let imports = vec![];
+        let content = "pub fn helper() -> String { String::new() }\nfn main() { helper(); }\n";
+        assert!(has_import("super::helper", &imports, content));
+    }
+
+    #[test]
+    fn has_import_local_struct_satisfies() {
+        let imports = vec![];
+        let content = "pub struct Config { pub name: String }\nfn use_it(c: Config) {}\n";
+        assert!(has_import("crate::types::Config", &imports, content));
+    }
+
+    #[test]
+    fn has_import_local_async_fn_satisfies() {
+        let imports = vec![];
+        let content = "pub async fn fetch() -> Result<()> { Ok(()) }\nfn main() { fetch(); }\n";
+        assert!(has_import("super::fetch", &imports, content));
+    }
+
+    #[test]
+    fn has_import_no_local_definition_still_flags() {
+        // File uses Config but doesn't define it — should still flag
+        let imports = vec![];
+        let content = "fn build() -> Config { Config::default() }\n";
+        assert!(!has_import("crate::types::Config", &imports, content));
+    }
+
+    #[test]
+    fn content_defines_name_detects_fn() {
+        assert!(content_defines_name(
+            "fn default_true() -> bool { true }",
+            "default_true"
+        ));
+    }
+
+    #[test]
+    fn content_defines_name_detects_pub_fn() {
+        assert!(content_defines_name(
+            "pub fn helper() -> String {}",
+            "helper"
+        ));
+    }
+
+    #[test]
+    fn content_defines_name_detects_pub_crate_struct() {
+        assert!(content_defines_name(
+            "pub(crate) struct Config {}",
+            "Config"
+        ));
+    }
+
+    #[test]
+    fn content_defines_name_detects_async_fn() {
+        assert!(content_defines_name(
+            "pub async fn fetch() -> Result<()> {}",
+            "fetch"
+        ));
+    }
+
+    #[test]
+    fn content_defines_name_rejects_substring() {
+        // "default_true_ext" should not match "default_true"
+        assert!(!content_defines_name(
+            "fn default_true_ext() -> bool { true }",
+            "default_true"
+        ));
+    }
+
+    #[test]
+    fn content_defines_name_skips_comments() {
+        assert!(!content_defines_name(
+            "// fn default_true() -> bool { true }",
+            "default_true"
+        ));
+    }
+
+    #[test]
+    fn content_defines_name_skips_use_statements() {
+        assert!(!content_defines_name(
+            "use crate::defaults::default_true;",
+            "default_true"
         ));
     }
 
