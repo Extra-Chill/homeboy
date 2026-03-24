@@ -54,3 +54,37 @@ pub(crate) fn get_unexpected_uncommitted_files(
         .cloned()
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_release_allowed_files_if_let_ok_relative_changelog_path_strip_prefix_repo_root() {
+
+        let result = get_release_allowed_files();
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Ok(relative) = changelog_path.strip_prefix(repo_root) {{");
+    }
+
+    #[test]
+    fn test_get_release_allowed_files_if_let_ok_relative_std_path_path_new_target_strip_prefix_rep() {
+
+        let result = get_release_allowed_files();
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Ok(relative) = std::path::Path::new(target).strip_prefix(repo_root) {{");
+    }
+
+    #[test]
+    fn test_get_release_allowed_files_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = get_release_allowed_files();
+    }
+
+    #[test]
+    fn test_get_unexpected_uncommitted_files_default_path() {
+
+        let result = get_unexpected_uncommitted_files();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+}

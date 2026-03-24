@@ -15,3 +15,21 @@ pub(crate) fn condition_contains_negated_method(condition: &str, param: &str, me
     let pattern = format!("!{}.{}(", param, method);
     condition.contains(&pattern)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_condition_contains_param_method_default_path() {
+
+        let _result = condition_contains_param_method();
+    }
+
+    #[test]
+    fn test_condition_contains_negated_method_default_path() {
+
+        let _result = condition_contains_negated_method();
+    }
+
+}

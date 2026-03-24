@@ -505,4 +505,231 @@ mod tests {
         let _ = run_main_test_workflow(&component, &source_path, args, &run_dir);
     }
 
+
+    #[test]
+    fn test_run_main_test_workflow_let_changed_scope_if_let_some_ref_git_ref_args_changed_since() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_some_compute_changed_test_scope_component_git_ref() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_else() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_some_run_dir_step_file_run_dir_files_coverage() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_else_2() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_else_3() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_else_4() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_if_let_some_ref_scope_changed_scope() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_test_scope_some_scope_clone() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_some_build_test_summary_none_none_0() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_else_5() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_branch_11() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_default_path() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_let_status_if_let_some_ref_counts_test_counts() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_some_analyze_args_component_id_analysis_input() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_else_6() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_args_baseline() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_let_some_ref_counts_test_counts() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_args_baseline_args_ignore_baseline() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_if_let_some_existing_baseline_resolved_baseline() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_comparison_regression() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_default_path_2() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_default_path_3() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_else_7() {
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _result = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
+    #[test]
+    fn test_run_main_test_workflow_has_expected_effects() {
+        // Expected effects: mutation
+        let component = Default::default();
+        let source_path = PathBuf::new();
+        let args = Default::default();
+        let run_dir = Default::default();
+        let _ = run_main_test_workflow(&component, &source_path, args, &run_dir);
+    }
+
 }

@@ -681,4 +681,108 @@ mod tests {
 
         assert!(has_post_release_warnings(&run));
     }
+
+    #[test]
+    fn test_run_command_default_path() {
+        let input = Default::default();
+        let _result = run_command(input);
+    }
+
+    #[test]
+    fn test_run_command_match_resolve_bump_component_local_path_monorepo_as_ref() {
+        let input = Default::default();
+        let _result = run_command(input);
+    }
+
+    #[test]
+    fn test_run_command_skipped_reason_some_no_releasable_commits_to_string() {
+        let input = Default::default();
+        let _result = run_command(input);
+    }
+
+    #[test]
+    fn test_run_command_bump_type_major() {
+        let input = Default::default();
+        let _result = run_command(input);
+    }
+
+    #[test]
+    fn test_run_command_skipped_reason_some_major_requires_flag_to_string() {
+        let input = Default::default();
+        let _result = run_command(input);
+    }
+
+    #[test]
+    fn test_run_command_options_dry_run() {
+        let input = Default::default();
+        let _result = run_command(input);
+    }
+
+    #[test]
+    fn test_run_command_plan_some_plan() {
+        let input = Default::default();
+        let _result = run_command(input);
+    }
+
+    #[test]
+    fn test_run_command_default_path_2() {
+        let input = Default::default();
+        let _result = run_command(input);
+    }
+
+    #[test]
+    fn test_run_command_if_let_some_ref_t_tag() {
+        let input = Default::default();
+        let _result = run_command(input);
+    }
+
+    #[test]
+    fn test_run_command_run_some_run_result() {
+        let input = Default::default();
+        let _result = run_command(input);
+    }
+
+    #[test]
+    fn test_run_command_has_expected_effects() {
+        // Expected effects: logging
+        let input = Default::default();
+        let _ = run_command(input);
+    }
+
+    #[test]
+    fn test_run_batch_match_run_command_input() {
+        let component_ids = Vec::new();
+        let input_template = Default::default();
+        let _result = run_batch(&component_ids, &input_template);
+    }
+
+    #[test]
+    fn test_run_batch_result_some_result() {
+        let component_ids = Vec::new();
+        let input_template = Default::default();
+        let _result = run_batch(&component_ids, &input_template);
+    }
+
+    #[test]
+    fn test_run_batch_err_e() {
+        let component_ids = Vec::new();
+        let input_template = Default::default();
+        let _result = run_batch(&component_ids, &input_template);
+    }
+
+    #[test]
+    fn test_run_batch_error_some_e_to_string() {
+        let component_ids = Vec::new();
+        let input_template = Default::default();
+        let _result = run_batch(&component_ids, &input_template);
+    }
+
+    #[test]
+    fn test_run_batch_has_expected_effects() {
+        // Expected effects: logging, mutation
+        let component_ids = Vec::new();
+        let input_template = Default::default();
+        let _ = run_batch(&component_ids, &input_template);
+    }
+
 }

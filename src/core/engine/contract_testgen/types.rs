@@ -45,3 +45,12 @@ pub(crate) struct SetupOverride {
     /// Extra `use` imports needed.
     extra_imports: String,
 }
+/// Generated test output with source code and metadata.
+pub struct GeneratedTestOutput {
+    /// The rendered test source code (test functions only, no module wrapper).
+    pub test_source: String,
+    /// Extra `use` imports needed by the generated default values.
+    pub extra_imports: Vec<String>,
+    /// The function names that tests were generated for.
+    pub tested_functions: Vec<String>,
+}

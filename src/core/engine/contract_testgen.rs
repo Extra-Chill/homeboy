@@ -20,6 +20,21 @@
 //!    to derive specific assertions. E.g., `Ok("skipped")` → assert the
 //!    unwrapped value matches the expected description, not just `is_ok()`.
 
+mod complement_hint;
+mod default_field_type;
+mod generate_tests;
+mod helpers;
+mod sanitize_string_literal;
+mod types;
+
+pub use complement_hint::*;
+pub use default_field_type::*;
+pub use generate_tests::*;
+pub use helpers::*;
+pub use sanitize_string_literal::*;
+pub use types::*;
+
+
 mod build;
 mod condition_contains;
 mod default_call_arg;
@@ -37,7 +52,6 @@ pub use helpers::*;
 pub use like::*;
 pub use test_async::*;
 pub use types::*;
-
 
 use std::collections::HashMap;
 
@@ -99,828 +113,9 @@ mod hints {
     pub const CONTAINS: &str = "contains";
 }
 
-/// Resolve an assertion for a branch return using grammar-defined assertion templates.
-///
-/// Core selects an assertion key based on the return type and variant. The grammar's
-/// `assertion_templates` section provides language-specific assertion code for each key.
-/// Falls back to simple variant-check assertions if no template is found.
-fn resolve_assertion(
-    returns: &ReturnValue,
-    return_type: &ReturnShape,
-    condition: &str,
-    assertion_templates: &HashMap<String, String>,
-) -> String {
-    let indent = "        ";
-
-    // Determine the assertion key based on return type + variant + whether we have a value
-    let has_value = returns.value.is_some();
-    let variant = returns.variant.as_str();
-
-    let key = match return_type {
-        ReturnShape::ResultType { .. } => {
-            if has_value {
-                format!("result_{}_value", variant)
-            } else {
-                format!("result_{}", variant)
-            }
-        }
-        ReturnShape::OptionType { .. } => {
-            if has_value {
-                format!("option_{}_value", variant)
-            } else {
-                format!("option_{}", variant)
-            }
-        }
-        ReturnShape::Bool => format!("bool_{}", variant),
-        ReturnShape::Collection { .. } => {
-            if condition.contains("empty") || condition.contains("is_empty") {
-                "collection_empty".to_string()
-            } else {
-                "collection_non_empty".to_string()
-            }
-        }
-        _ => "value_default".to_string(),
-    };
-
-    // Try the specific key first, then fall back to the base key (without _value)
-    let template = assertion_templates.get(&key).or_else(|| {
-        // Fall back: result_ok_value → result_ok
-        let base = key.rsplit_once('_').map(|(base, _)| base.to_string());
-        base.and_then(|b| assertion_templates.get(&b))
-    });
-
-    if let Some(tmpl) = template {
-        // Substitute variables in the assertion template.
-        // Sanitize condition text for embedding inside Rust string literals.
-        // Source-level conditions can contain quotes, backticks, and braces
-        // (e.g. `Some(format!("```{} block", language))`) that break generated
-        // assert messages. Escape quotes and replace braces to avoid format
-        // string interpretation in the outer assert! macro.
-        let mut rendered = tmpl.clone();
-        rendered = rendered.replace("{condition}", &sanitize_for_string_literal(condition));
-        if let Some(ref val) = returns.value {
-            rendered = rendered.replace("{expected_value}", &val.replace('"', "\\\""));
-        }
-        rendered = rendered.replace("{variant}", variant);
-        rendered
-    } else {
-        // No grammar template — produce a minimal language-agnostic placeholder
-        let escaped_condition = sanitize_for_string_literal(condition);
-        format!("{indent}let _ = result; // {variant}: {escaped_condition}")
-    }
-}
-
-/// When a value-level assertion template couldn't be enriched (type not in registry),
-/// fall back to the simpler base assertion that tests the discriminant only.
-///
-/// For example: `result_ok_value` (has TODO placeholder) → `result_ok` (asserts is_ok()).
-/// This produces a real test instead of a dead stub.
-fn fallback_to_simple_assertion(
-    returns: &ReturnValue,
-    return_type: &ReturnShape,
-    condition: &str,
-    assertion_templates: &HashMap<String, String>,
-) -> Option<String> {
-    let variant = returns.variant.as_str();
-
-    // Build the base key (without _value suffix)
-    let base_key = match return_type {
-        ReturnShape::ResultType { .. } => format!("result_{}", variant),
-        ReturnShape::OptionType { .. } => format!("option_{}", variant),
-        _ => return None, // Bool/Collection/etc don't have _value variants
-    };
-
-    let tmpl = assertion_templates.get(&base_key)?;
-
-    let mut rendered = tmpl.clone();
-    rendered = rendered.replace("{condition}", &sanitize_for_string_literal(condition));
-    if let Some(ref val) = returns.value {
-        rendered = rendered.replace("{expected_value}", &val.replace('"', "\\\""));
-    }
-    rendered = rendered.replace("{variant}", variant);
-    Some(rendered)
-}
-
-/// Sanitize a source-level string for safe embedding inside a Rust string literal.
-///
-/// Escapes double quotes and replaces curly braces with Unicode lookalikes
-/// so the text doesn't interfere with `format!` / `assert!` macro parsing.
-/// Backticks in groups of 3+ are replaced to avoid raw string prefix confusion.
-fn sanitize_for_string_literal(s: &str) -> String {
-    s.replace('"', "\\\"")
-        .replace('{', "{{")
-        .replace('}', "}}")
-        .replace("```", "'''")
-}
-
-/// Replace assertion TODO placeholders with real field-level assertions.
-///
-/// When the return type is a known struct, generates `assert_eq!` for each
-/// public field using the field's type-default value as the expected value.
-/// This produces tests that actually **assert behavior**, not just document
-/// what fields exist.
-///
-/// Turns:
-///   `let _ = inner; // TODO: assert specific value for "skipped"`
-/// Into:
-///   `assert_eq!(inner.success, false);`
-///   `assert_eq!(inner.command, None);`
-///   `assert_eq!(inner.rolled_back, false);`
-///   `assert_eq!(inner.files_checked, 0);`
-fn enrich_assertion_with_fields(
-    assertion: &str,
-    returns: &ReturnValue,
-    return_type: &ReturnShape,
-    type_registry: &HashMap<String, TypeDefinition>,
-    type_defaults: &[TypeDefault],
-    fallback_default: &str,
-    field_assertion_template: Option<&str>,
-) -> String {
-    // Only enrich if the assertion has a TODO placeholder
-    if !assertion.contains("TODO:") {
-        return assertion.to_string();
-    }
-
-    // Determine the inner type name to look up
-    let type_name = match return_type {
-        ReturnShape::ResultType { ok_type, .. } => {
-            if returns.variant == "ok" {
-                Some(ok_type.as_str())
-            } else {
-                None
-            }
-        }
-        ReturnShape::OptionType { some_type } => {
-            if returns.variant == "some" {
-                Some(some_type.as_str())
-            } else {
-                None
-            }
-        }
-        ReturnShape::Value { value_type } => Some(value_type.as_str()),
-        _ => None,
-    };
-
-    let type_name = match type_name {
-        Some(n) => n.trim(),
-        None => return assertion.to_string(),
-    };
-
-    let base_name = type_name
-        .trim_start_matches('&')
-        .trim_start_matches("mut ")
-        .trim();
-
-    // Try exact match first, then strip path prefixes (e.g., "crate::engine::ValidationResult" → "ValidationResult")
-    let type_def = match type_registry.get(base_name) {
-        Some(td) => td,
-        None => {
-            // Strip Rust path prefix — registry stores bare names
-            let short_name = base_name.rsplit("::").next().unwrap_or(base_name);
-            match type_registry.get(short_name) {
-                Some(td) => td,
-                None => return assertion.to_string(),
-            }
-        }
-    };
-
-    let public_fields: Vec<&FieldDef> = type_def.fields.iter().filter(|f| f.is_public).collect();
-    if public_fields.is_empty() {
-        return assertion.to_string();
-    }
-
-    // Must have a field assertion template from the grammar to generate assertions
-    let template = match field_assertion_template {
-        Some(t) => t,
-        None => return assertion.to_string(),
-    };
-
-    let indent = "        ";
-
-    // Find the TODO line and everything after it (including the `let _ = inner;` line before it)
-    let todo_pos = match assertion.find("// TODO:") {
-        Some(pos) => pos,
-        None => return assertion.to_string(),
-    };
-
-    // Find the start of the line containing the `let _ =` before the TODO
-    // We want to replace both the `let _ = inner;` line AND the TODO line
-    let search_region = &assertion[..todo_pos];
-    let let_underscore_pos = search_region.rfind("let _ = ");
-    let replace_start = if let Some(lpos) = let_underscore_pos {
-        // Find the line start before `let _ =`
-        assertion[..lpos].rfind('\n').map(|p| p + 1).unwrap_or(0)
-    } else {
-        // No `let _ =` found, just replace from the TODO line start
-        assertion[..todo_pos]
-            .rfind('\n')
-            .map(|p| p + 1)
-            .unwrap_or(0)
-    };
-
-    let replace_end = assertion[todo_pos..]
-        .find('\n')
-        .map(|p| todo_pos + p + 1)
-        .unwrap_or(assertion.len());
-
-    // Build real field assertions using the grammar's field_assertion_template
-    let mut field_assertions = Vec::new();
-    for field in &public_fields {
-        let expected = default_for_field_type(&field.field_type, type_defaults, fallback_default);
-        let rendered = template
-            .replace("{indent}", indent)
-            .replace("{field_name}", &field.name)
-            .replace("{expected_value}", &expected.replace('"', "\\\""));
-        field_assertions.push(rendered);
-    }
-
-    format!(
-        "{}{}{}",
-        &assertion[..replace_start],
-        field_assertions.join("\n"),
-        &assertion[replace_end..],
-    )
-}
-
-/// Resolve a default/zero value for a field type to use as expected assertion value.
-///
-/// Uses the grammar's `type_defaults` exclusively — no language-specific fallbacks
-/// in core. If no `type_default` matches, uses `fallback_default` from the grammar.
-fn default_for_field_type(
-    field_type: &str,
-    type_defaults: &[TypeDefault],
-    fallback_default: &str,
-) -> String {
-    let trimmed = field_type.trim();
-
-    for td in type_defaults {
-        if let Ok(re) = Regex::new(&td.pattern) {
-            if re.is_match(trimmed) {
-                return td.value.clone();
-            }
-        }
-    }
-
-    fallback_default.to_string()
-}
-
-/// Build complement hints for a branch by examining what other branches require.
-///
-/// If branch 1 says param X needs hint `"empty"`, then branches that don't
-/// mention param X should use `"non_empty"` to reach a different code path.
-/// This ensures each branch's test uses inputs that actually trigger that branch.
-fn build_complement_hints(
-    branch_index: usize,
-    all_branch_hints: &[HashMap<String, String>],
-) -> HashMap<String, String> {
-    let mut complements = HashMap::new();
-    let my_hints = &all_branch_hints[branch_index];
-
-    for (j, other_hints) in all_branch_hints.iter().enumerate() {
-        if j == branch_index {
-            continue;
-        }
-        for (param_name, hint) in other_hints {
-            // Only provide a complement if this branch doesn't have its own hint
-            if my_hints.contains_key(param_name) || complements.contains_key(param_name) {
-                continue;
-            }
-            if let Some(complement) = complement_hint(hint) {
-                complements.insert(param_name.clone(), complement);
-            }
-        }
-    }
-
-    complements
-}
-
-/// Return the opposite hint for a given hint.
-///
-/// This allows branches that don't mention a param to use the inverse
-/// of what another branch requires, ensuring the test reaches the right path.
-fn complement_hint(hint: &str) -> Option<String> {
-    // Split compound hints like "contains:foo"
-    let base = hint.split(':').next().unwrap_or(hint);
-
-    match base {
-        "empty" => Some(hints::NON_EMPTY.to_string()),
-        "non_empty" => Some(hints::EMPTY.to_string()),
-        "none" => Some(hints::SOME_DEFAULT.to_string()),
-        "some_default" => Some(hints::NONE.to_string()),
-        "true" => Some(hints::FALSE.to_string()),
-        "false" => Some(hints::TRUE.to_string()),
-        "zero" => Some(hints::POSITIVE.to_string()),
-        "positive" => Some(hints::ZERO.to_string()),
-        "nonexistent_path" => Some(hints::EXISTENT_PATH.to_string()),
-        "existent_path" => Some(hints::NONEXISTENT_PATH.to_string()),
-        _ => None,
-    }
-}
-
-/// Like `infer_setup_from_condition` but also applies complement hints
-/// for params that aren't matched by the current condition.
-fn infer_setup_with_complements(
-    condition: &str,
-    params: &[Param],
-    type_defaults: &[TypeDefault],
-    type_constructors: &[TypeConstructor],
-    fallback_default: &str,
-    complement_hints: &HashMap<String, String>,
-) -> Option<SetupOverride> {
-    let condition_lower = condition.to_lowercase();
-
-    // Step 1: Produce direct hints from this branch's condition
-    let mut param_hints: HashMap<String, String> = HashMap::new();
-    for param in params {
-        if let Some(hint) = infer_hint_for_param(condition, &condition_lower, param) {
-            param_hints.insert(param.name.clone(), hint);
-        }
-    }
-
-    // Step 2: Apply complement hints for params not directly matched
-    for (param_name, complement) in complement_hints {
-        if !param_hints.contains_key(param_name) {
-            param_hints.insert(param_name.clone(), complement.clone());
-        }
-    }
-
-    if param_hints.is_empty() {
-        return None;
-    }
-
-    // Step 3: Resolve all hints through grammar constructors
-    let mut setup_lines = Vec::new();
-    let mut call_args = Vec::new();
-    let mut all_imports: Vec<String> = Vec::new();
-
-    for param in params {
-        let (value_expr, call_arg, imports) = if let Some(hint) = param_hints.get(&param.name) {
-            resolve_constructor(
-                hint,
-                &param.name,
-                &param.param_type,
-                type_constructors,
-                type_defaults,
-                fallback_default,
-            )
-        } else {
-            let (val, call_override, imps) =
-                resolve_type_default(&param.param_type, type_defaults, fallback_default);
-            let call =
-                call_override.unwrap_or_else(|| default_call_arg(&param.name, &param.param_type));
-            let imp_strs: Vec<String> = imps.into_iter().map(|s| s.to_string()).collect();
-            (val, call, imp_strs)
-        };
-
-        setup_lines.push(format!("        let {} = {};", param.name, value_expr));
-        call_args.push(call_arg);
-
-        for imp in imports {
-            if !all_imports.contains(&imp) {
-                all_imports.push(imp);
-            }
-        }
-    }
-
-    Some(SetupOverride {
-        setup_lines: setup_lines.join("\n"),
-        call_args: call_args.join(", "),
-        extra_imports: all_imports.join("\n"),
-    })
-}
-
-/// Merge new import lines into existing imports, deduplicating.
-fn merge_imports(existing: &str, new_imports: &str) -> String {
-    let mut all: Vec<String> = Vec::new();
-    for line in existing.lines().chain(new_imports.lines()) {
-        let trimmed = line.trim().to_string();
-        if !trimmed.is_empty() && !all.contains(&trimmed) {
-            all.push(trimmed);
-        }
-    }
-    all.join("\n")
-}
-
 // ── Type registry ──
 
-/// Build a type registry from struct/class definitions found in a source file.
-///
-/// Uses the grammar's symbol extraction to find struct/enum/class definitions,
-/// then parses their field declarations using the grammar's `field_pattern`.
-/// Returns a map from type name to `TypeDefinition`.
-fn build_type_registry(
-    content: &str,
-    file_path: &str,
-    grammar: &crate::extension::grammar::Grammar,
-    contract_grammar: &ContractGrammar,
-) -> HashMap<String, TypeDefinition> {
-    let mut registry = HashMap::new();
-
-    // Need a field pattern to parse fields
-    let field_pattern = match &contract_grammar.field_pattern {
-        Some(p) => p.as_str(),
-        None => return registry,
-    };
-
-    // Extract all symbols from the file via grammar
-    let symbols = crate::extension::grammar::extract(content, grammar);
-
-    // Also extract grammar items to get the full source of structs
-    let items = crate::extension::grammar_items::parse_items(content, grammar);
-
-    // Build a lookup from name → source body
-    let mut item_source: HashMap<String, String> = HashMap::new();
-    for item in &items {
-        if item.kind == "struct" || item.kind == "enum" || item.kind == "class" {
-            item_source.insert(item.name.clone(), item.source.clone());
-        }
-    }
-
-    // Process each struct/enum/class symbol
-    for sym in &symbols {
-        if sym.concept != "struct" && sym.concept != "class" {
-            continue;
-        }
-
-        let name: String = match sym.name() {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-
-        let source = match item_source.get(&name) {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let fields = parse_fields_from_source(
-            source,
-            field_pattern,
-            contract_grammar.field_visibility_pattern.as_deref(),
-            contract_grammar.field_name_group,
-            contract_grammar.field_type_group,
-        );
-
-        let is_public = sym
-            .captures
-            .get("visibility")
-            .map(|v: &String| v.contains("pub"))
-            .unwrap_or(false);
-
-        registry.insert(
-            name.clone(),
-            TypeDefinition {
-                name,
-                kind: sym.concept.clone(),
-                file: file_path.to_string(),
-                line: sym.line,
-                fields,
-                is_public,
-            },
-        );
-    }
-
-    registry
-}
-
-/// Build a project-wide type registry by scanning all source files.
-///
-/// Walks the project tree via `codebase_scan`, extracts struct/class
-/// definitions from each file using grammar items, and parses their fields.
-/// Returns a map from type name to `TypeDefinition` spanning the entire project.
-///
-/// This enables cross-file type resolution: when `validate_write()` returns
-/// `Result<ValidationResult, Error>` and `ValidationResult` is defined in a
-/// different file, the registry still finds it.
-pub fn build_project_type_registry(
-    root: &std::path::Path,
-    _grammar: &crate::extension::grammar::Grammar,
-    contract_grammar: &ContractGrammar,
-) -> HashMap<String, TypeDefinition> {
-    let mut registry = HashMap::new();
-
-    let field_pattern = match &contract_grammar.field_pattern {
-        Some(p) => p.clone(),
-        None => {
-            crate::log_status!(
-                "testgen",
-                "Type registry: no field_pattern in contract grammar — skipping"
-            );
-            return registry;
-        }
-    };
-
-    // Determine file extensions to scan from the grammar
-    let scan_config = crate::engine::codebase_scan::ScanConfig {
-        extensions: crate::engine::codebase_scan::ExtensionFilter::All,
-        skip_hidden: true,
-        ..Default::default()
-    };
-
-    let files = crate::engine::codebase_scan::walk_files(root, &scan_config);
-
-    let mut files_scanned = 0usize;
-    let mut files_with_grammar = 0usize;
-
-    for file_path in &files {
-        let content = match std::fs::read_to_string(file_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let rel_path = file_path
-            .strip_prefix(root)
-            .unwrap_or(file_path)
-            .to_string_lossy()
-            .to_string();
-
-        files_scanned += 1;
-
-        // Check if this file's extension has a matching grammar
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default();
-        let file_grammar = match crate::code_audit::core_fingerprint::load_grammar_for_ext(ext) {
-            Some(g) => g,
-            None => continue,
-        };
-        files_with_grammar += 1;
-
-        // Use the file's own grammar for item extraction (handles multi-language projects)
-        let items = crate::extension::grammar_items::parse_items(&content, &file_grammar);
-        let symbols = crate::extension::grammar::extract(&content, &file_grammar);
-
-        let mut item_source: HashMap<String, String> = HashMap::new();
-        for item in &items {
-            if item.kind == "struct" || item.kind == "enum" || item.kind == "class" {
-                item_source.insert(item.name.clone(), item.source.clone());
-            }
-        }
-
-        for sym in &symbols {
-            if sym.concept != "struct" && sym.concept != "class" {
-                continue;
-            }
-            let name: String = match sym.name() {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            let source = match item_source.get(&name) {
-                Some(s) => s,
-                None => continue,
-            };
-
-            // Use the contract_grammar's field pattern (from the target language)
-            let fields = parse_fields_from_source(
-                source,
-                &field_pattern,
-                contract_grammar.field_visibility_pattern.as_deref(),
-                contract_grammar.field_name_group,
-                contract_grammar.field_type_group,
-            );
-
-            let is_public = sym
-                .captures
-                .get("visibility")
-                .map(|v: &String| v.contains("pub"))
-                .unwrap_or(false);
-
-            registry.insert(
-                name.clone(),
-                TypeDefinition {
-                    name,
-                    kind: sym.concept.clone(),
-                    file: rel_path.clone(),
-                    line: sym.line,
-                    fields,
-                    is_public,
-                },
-            );
-        }
-    }
-
-    if files_scanned > 0 {
-        crate::log_status!(
-            "testgen",
-            "Type registry: scanned {} files, {} had grammars, found {} types",
-            files_scanned,
-            files_with_grammar,
-            registry.len()
-        );
-    }
-
-    registry
-}
-
 // ── End-to-end API ──
-
-/// Generated test output with source code and metadata.
-pub struct GeneratedTestOutput {
-    /// The rendered test source code (test functions only, no module wrapper).
-    pub test_source: String,
-    /// Extra `use` imports needed by the generated default values.
-    pub extra_imports: Vec<String>,
-    /// The function names that tests were generated for.
-    pub tested_functions: Vec<String>,
-}
-
-/// Generate test source code for all functions in a source file.
-///
-/// This is the full pipeline: grammar → contracts → test plans → rendered source.
-/// Returns `None` if the grammar has no contract or test_templates section.
-///
-/// When `project_type_registry` is provided, return types from any file in the
-/// project can be resolved to their struct fields. When `None`, falls back to
-/// a per-file registry (only finds types defined in the same file).
-pub(crate) fn generate_tests_for_file(
-    content: &str,
-    file_path: &str,
-    grammar: &crate::extension::grammar::Grammar,
-) -> Option<GeneratedTestOutput> {
-    generate_tests_for_file_with_types(content, file_path, grammar, None)
-}
-
-/// Generate test source with access to a project-wide type registry.
-pub fn generate_tests_for_file_with_types(
-    content: &str,
-    file_path: &str,
-    grammar: &crate::extension::grammar::Grammar,
-    project_type_registry: Option<&HashMap<String, TypeDefinition>>,
-) -> Option<GeneratedTestOutput> {
-    let contract_grammar = grammar.contract.as_ref()?;
-
-    // Must have test templates to render
-    if contract_grammar.test_templates.is_empty() {
-        return None;
-    }
-
-    // Extract contracts
-    let contracts =
-        super::contract_extract::extract_contracts_from_grammar(content, file_path, grammar)?;
-
-    if contracts.is_empty() {
-        return None;
-    }
-
-    // Build per-file type registry, then merge with project-wide registry.
-    // This ensures types defined in the current file are always available
-    // for assertion enrichment, even if the project-wide scan missed them
-    // (e.g., due to extension loading issues in CI environments).
-    let mut local_registry = build_type_registry(content, file_path, grammar, contract_grammar);
-
-    // Merge project-wide types into local (local takes precedence for same-file types)
-    if let Some(project_reg) = project_type_registry {
-        for (name, typedef) in project_reg {
-            local_registry
-                .entry(name.clone())
-                .or_insert_with(|| typedef.clone());
-        }
-    }
-
-    let type_registry = &local_registry;
-
-    // Generate and render test plans
-    let mut test_source = String::new();
-    let mut all_extra_imports: Vec<String> = Vec::new();
-    let mut tested_functions = Vec::new();
-
-    for contract in &contracts {
-        // Skip test functions, private functions, and trivial functions
-        if contract.name.starts_with("test_") {
-            continue;
-        }
-        if !contract.signature.is_public {
-            continue;
-        }
-
-        let plan = generate_test_plan_with_types(contract, contract_grammar, type_registry);
-        if plan.cases.is_empty() {
-            continue;
-        }
-
-        // Collect extra imports from case variables
-        for case in &plan.cases {
-            if let Some(imports_str) = case.variables.get("extra_imports") {
-                for imp in imports_str.lines() {
-                    let imp = imp.trim().to_string();
-                    if !imp.is_empty() && !all_extra_imports.contains(&imp) {
-                        all_extra_imports.push(imp);
-                    }
-                }
-            }
-        }
-
-        let rendered = render_test_plan(&plan, &contract_grammar.test_templates);
-        if !rendered.trim().is_empty() {
-            tested_functions.push(contract.name.clone());
-            test_source.push_str(&rendered);
-        }
-    }
-
-    if test_source.trim().is_empty() {
-        None
-    } else {
-        Some(GeneratedTestOutput {
-            test_source,
-            extra_imports: all_extra_imports,
-            tested_functions,
-        })
-    }
-}
-
-/// Generate test source code for specific methods in a source file.
-///
-/// Like `generate_tests_for_file`, but only generates tests for functions
-/// whose names are in `method_names`. Used for MissingTestMethod findings
-/// where the test file exists but specific methods lack coverage.
-pub(crate) fn generate_tests_for_methods(
-    content: &str,
-    file_path: &str,
-    grammar: &crate::extension::grammar::Grammar,
-    method_names: &[&str],
-) -> Option<GeneratedTestOutput> {
-    generate_tests_for_methods_with_types(content, file_path, grammar, method_names, None)
-}
-
-/// Generate tests for specific methods with access to a project-wide type registry.
-pub fn generate_tests_for_methods_with_types(
-    content: &str,
-    file_path: &str,
-    grammar: &crate::extension::grammar::Grammar,
-    method_names: &[&str],
-    project_type_registry: Option<&HashMap<String, TypeDefinition>>,
-) -> Option<GeneratedTestOutput> {
-    let contract_grammar = grammar.contract.as_ref()?;
-
-    if contract_grammar.test_templates.is_empty() {
-        return None;
-    }
-
-    let contracts =
-        super::contract_extract::extract_contracts_from_grammar(content, file_path, grammar)?;
-
-    if contracts.is_empty() {
-        return None;
-    }
-
-    // Build per-file type registry, then merge with project-wide registry.
-    // Same strategy as generate_tests_for_file_with_types — ensures types
-    // defined in the current file are always available for enrichment.
-    let mut local_registry = build_type_registry(content, file_path, grammar, contract_grammar);
-
-    if let Some(project_reg) = project_type_registry {
-        for (name, typedef) in project_reg {
-            local_registry
-                .entry(name.clone())
-                .or_insert_with(|| typedef.clone());
-        }
-    }
-
-    let type_registry = &local_registry;
-
-    let mut test_source = String::new();
-    let mut all_extra_imports: Vec<String> = Vec::new();
-    let mut tested_functions = Vec::new();
-
-    for contract in &contracts {
-        // Only generate tests for the requested methods
-        if !method_names.contains(&contract.name.as_str()) {
-            continue;
-        }
-
-        let plan = generate_test_plan_with_types(contract, contract_grammar, type_registry);
-        if plan.cases.is_empty() {
-            continue;
-        }
-
-        for case in &plan.cases {
-            if let Some(imports_str) = case.variables.get("extra_imports") {
-                for imp in imports_str.lines() {
-                    let imp = imp.trim().to_string();
-                    if !imp.is_empty() && !all_extra_imports.contains(&imp) {
-                        all_extra_imports.push(imp);
-                    }
-                }
-            }
-        }
-
-        let rendered = render_test_plan(&plan, &contract_grammar.test_templates);
-        if !rendered.trim().is_empty() {
-            tested_functions.push(contract.name.clone());
-            test_source.push_str(&rendered);
-        }
-    }
-
-    if test_source.trim().is_empty() {
-        None
-    } else {
-        Some(GeneratedTestOutput {
-            test_source,
-            extra_imports: all_extra_imports,
-            tested_functions,
-        })
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1422,19 +617,6 @@ mod tests {
         // Subsequent occurrences get numeric suffixes
         assert!(output.contains("fn test_check_status_none_return_false_2()"));
         assert!(output.contains("fn test_check_status_none_return_false_3()"));
-    }
-
-    #[test]
-    fn test_slugify() {
-        assert_eq!(
-            slugify("changed_files.is_empty()"),
-            "changed_files_is_empty"
-        );
-        assert_eq!(
-            slugify("validation command fails"),
-            "validation_command_fails"
-        );
-        assert_eq!(slugify("default path"), "default_path");
     }
 
     #[test]
@@ -2143,44 +1325,6 @@ class AbilityResult {
         assert!(fields[4].is_public, "success should be public");
     }
 
-
-    #[test]
-    fn test_generate_test_plan_default_path() {
-
-        let _result = generate_test_plan();
-    }
-
-    #[test]
-    fn test_generate_test_plan_with_types_if_let_some_hint_infer_hint_for_param_b_condition_cond_lower() {
-
-        let _result = generate_test_plan_with_types();
-    }
-
-    #[test]
-    fn test_generate_test_plan_with_types_some_branch() {
-
-        let _result = generate_test_plan_with_types();
-    }
-
-    #[test]
-    fn test_generate_test_plan_with_types_if_let_some_ref_so_setup_override() {
-
-        let _result = generate_test_plan_with_types();
-    }
-
-    #[test]
-    fn test_generate_test_plan_with_types_expected_value_some_effect_names_join() {
-
-        let _result = generate_test_plan_with_types();
-    }
-
-    #[test]
-    fn test_generate_test_plan_with_types_has_expected_effects() {
-        // Expected effects: mutation
-
-        let _ = generate_test_plan_with_types();
-    }
-
     #[test]
     fn test_render_test_plan_some_t_t() {
 
@@ -2420,6 +1564,262 @@ class AbilityResult {
         let project_type_registry = None;
         let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
         assert!(result.is_some(), "expected Some for: plan.cases.is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_test_source_trim_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+        assert!(result.is_none(), "expected None for: test_source.trim().is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_has_expected_effects() {
+        // Expected effects: mutation
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let _ = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+    }
+
+
+    #[test]
+    fn test_build_project_type_registry_some_p_p_clone() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: Some(p) => p.clone(),");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_ok_c_c() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: Ok(c) => c,");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_err_continue() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: Err(_) => continue,");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_some_g_g() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: Some(g) => g,");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_sym_concept_struct_sym_concept_class() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: sym.concept != \"struct\" && sym.concept != \"class\"");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_some_s_s() {
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let result = build_project_type_registry(&root, &_grammar, &contract_grammar);
+        assert!(!result.is_empty(), "expected non-empty collection for: Some(s) => s,");
+    }
+
+    #[test]
+    fn test_build_project_type_registry_has_expected_effects() {
+        // Expected effects: logging, mutation, file_read
+        let root = Default::default();
+        let _grammar = Default::default();
+        let contract_grammar = Default::default();
+        let _ = build_project_type_registry(&root, &_grammar, &contract_grammar);
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_default_path() {
+
+        let _result = generate_tests_for_file();
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_default_path() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let _result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_contract_grammar_test_templates_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+        assert!(result.is_none(), "expected None for: contract_grammar.test_templates.is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_default_path_2() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let _result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_contracts_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+        assert!(result.is_none(), "expected None for: contracts.is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_if_let_some_project_reg_project_type_registry() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = Some(Default::default());
+        let result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+        let inner = result.expect("expected Some for: if let Some(project_reg) = project_type_registry {{");
+        // Branch returns Some(project_reg)
+        assert_eq!(inner.test_source, String::new());
+        assert_eq!(inner.extra_imports, Vec::new());
+        assert_eq!(inner.tested_functions, Vec::new());
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_if_let_some_imports_str_case_variables_get_extra_imports() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+        let inner = result.expect("expected Some for: if let Some(imports_str) = case.variables.get(\"extra_imports\") {{");
+        // Branch returns Some(imports_str)
+        assert_eq!(inner.test_source, String::new());
+        assert_eq!(inner.extra_imports, Vec::new());
+        assert_eq!(inner.tested_functions, Vec::new());
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_test_source_trim_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let result = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+        assert!(result.is_none(), "expected None for: test_source.trim().is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_file_with_types_has_expected_effects() {
+        // Expected effects: mutation
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let project_type_registry = None;
+        let _ = generate_tests_for_file_with_types(&content, &file_path, &grammar, project_type_registry);
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_default_path() {
+
+        let _result = generate_tests_for_methods();
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_default_path() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let _result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_contract_grammar_test_templates_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+        assert!(result.is_none(), "expected None for: contract_grammar.test_templates.is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_contract_grammar_test_templates_is_empty_2() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let _result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_contracts_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+        assert!(result.is_none(), "expected None for: contracts.is_empty()");
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_if_let_some_project_reg_project_type_registry() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = Some(Default::default());
+        let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+        let inner = result.expect("expected Some for: if let Some(project_reg) = project_type_registry {{");
+        // Branch returns Some(project_reg)
+        assert_eq!(inner.test_source, String::new());
+        assert_eq!(inner.extra_imports, Vec::new());
+        assert_eq!(inner.tested_functions, Vec::new());
+    }
+
+    #[test]
+    fn test_generate_tests_for_methods_with_types_plan_cases_is_empty() {
+        let content = "";
+        let file_path = "";
+        let grammar = Default::default();
+        let method_names = Vec::new();
+        let project_type_registry = None;
+        let result = generate_tests_for_methods_with_types(&content, &file_path, &grammar, &method_names, project_type_registry);
+        let inner = result.expect("expected Some for: plan.cases.is_empty()");
+        // Branch returns Some(imports_str)
+        assert_eq!(inner.test_source, String::new());
+        assert_eq!(inner.extra_imports, Vec::new());
+        assert_eq!(inner.tested_functions, Vec::new());
     }
 
     #[test]

@@ -36,3 +36,21 @@ pub(crate) fn is_numeric_like(ptype: &str) -> bool {
             | "number"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_path_like_default_path() {
+
+        let _result = is_path_like();
+    }
+
+    #[test]
+    fn test_is_numeric_like_default_path() {
+
+        let _result = is_numeric_like();
+    }
+
+}

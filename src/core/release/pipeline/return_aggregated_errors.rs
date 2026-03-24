@@ -735,3 +735,449 @@ pub(crate) fn build_release_steps(
 
     Ok(steps)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_semver_recommendation_some_vec_use_one_of_patch_minor_major_to_string() {
+
+        let result = build_semver_recommendation();
+        assert!(result.is_some(), "expected Some for: Some(vec![\"Use one of: patch, minor, major\".to_string()]),");
+    }
+
+    #[test]
+    fn test_build_semver_recommendation_default_path() {
+
+        let _result = build_semver_recommendation();
+    }
+
+    #[test]
+    fn test_build_semver_recommendation_default_path_2() {
+
+        let _result = build_semver_recommendation();
+    }
+
+    #[test]
+    fn test_build_semver_recommendation_commits_is_empty() {
+
+        let _result = build_semver_recommendation();
+    }
+
+    #[test]
+    fn test_build_semver_recommendation_if_let_some_rec_recommended() {
+
+        let result = build_semver_recommendation();
+        assert!(result.is_some(), "expected Some for: if let Some(rec) = recommended {{");
+    }
+
+    #[test]
+    fn test_resolve_tag_and_commits_match_monorepo() {
+
+        let result = resolve_tag_and_commits();
+        assert!(result.is_some(), "expected Some for: match monorepo");
+    }
+
+    #[test]
+    fn test_resolve_tag_and_commits_match_monorepo_2() {
+
+        let _result = resolve_tag_and_commits();
+    }
+
+    #[test]
+    fn test_resolve_tag_and_commits_some_ctx_path_prefix() {
+
+        let result = resolve_tag_and_commits();
+        assert!(result.is_some(), "expected Some for: Some(&ctx.path_prefix),");
+    }
+
+    #[test]
+    fn test_resolve_tag_and_commits_default_path() {
+
+        let _result = resolve_tag_and_commits();
+    }
+
+    #[test]
+    fn test_resolve_tag_and_commits_ok_latest_tag_commits() {
+
+        let _result = resolve_tag_and_commits();
+    }
+
+    #[test]
+    fn test_resolve_tag_and_commits_default_path_2() {
+
+        let _result = resolve_tag_and_commits();
+    }
+
+    #[test]
+    fn test_resolve_tag_and_commits_default_path_3() {
+
+        let _result = resolve_tag_and_commits();
+    }
+
+    #[test]
+    fn test_resolve_tag_and_commits_ok_latest_tag_commits_2() {
+
+        let _result = resolve_tag_and_commits();
+    }
+
+    #[test]
+    fn test_validate_changelog_default_path() {
+
+        let _result = validate_changelog();
+    }
+
+    #[test]
+    fn test_validate_changelog_default_path_2() {
+
+        let _result = validate_changelog();
+    }
+
+    #[test]
+    fn test_validate_changelog_default_path_3() {
+
+        let _result = validate_changelog();
+    }
+
+    #[test]
+    fn test_validate_changelog_if_let_some_status() {
+
+        let _result = validate_changelog();
+    }
+
+    #[test]
+    fn test_validate_changelog_let_some_status() {
+
+        let _result = validate_changelog();
+    }
+
+    #[test]
+    fn test_validate_changelog_ok() {
+
+        let result = validate_changelog();
+        assert!(result.is_ok(), "expected Ok for: Ok(())");
+    }
+
+    #[test]
+    fn test_validate_changelog_has_expected_effects() {
+        // Expected effects: logging
+
+        let _ = validate_changelog();
+    }
+
+    #[test]
+    fn test_validate_remote_sync_default_path() {
+
+        let _result = validate_remote_sync();
+    }
+
+    #[test]
+    fn test_validate_remote_sync_if_let_some_n_synced() {
+
+        let _result = validate_remote_sync();
+    }
+
+    #[test]
+    fn test_validate_remote_sync_ok() {
+
+        let result = validate_remote_sync();
+        assert!(result.is_ok(), "expected Ok for: Ok(())");
+    }
+
+    #[test]
+    fn test_validate_remote_sync_has_expected_effects() {
+        // Expected effects: logging
+
+        let _ = validate_remote_sync();
+    }
+
+    #[test]
+    fn test_validate_code_quality_if_let_ok_lint_context_lint_context() {
+
+        let result = validate_code_quality();
+        assert!(result.is_ok(), "expected Ok for: if let Ok(lint_context) = lint_context {{");
+    }
+
+    #[test]
+    fn test_validate_code_quality_let_ok_lint_context_lint_context() {
+
+        let _result = validate_code_quality();
+    }
+
+    #[test]
+    fn test_validate_code_quality_ok_output() {
+
+        let result = validate_code_quality();
+        assert!(result.is_ok(), "expected Ok for: Ok(output) => {{");
+    }
+
+    #[test]
+    fn test_validate_code_quality_if_let_some_baseline() {
+
+        let _result = validate_code_quality();
+    }
+
+    #[test]
+    fn test_validate_code_quality_else() {
+
+        let result = validate_code_quality();
+        assert!(result.is_err(), "expected Err for: else");
+    }
+
+    #[test]
+    fn test_validate_code_quality_if_let_ok_test_context_test_context() {
+
+        let result = validate_code_quality();
+        assert!(result.is_ok(), "expected Ok for: if let Ok(test_context) = test_context {{");
+    }
+
+    #[test]
+    fn test_validate_code_quality_default_path() {
+
+        let _result = validate_code_quality();
+    }
+
+    #[test]
+    fn test_validate_code_quality_ok_output_if_output_success() {
+
+        let result = validate_code_quality();
+        assert!(result.is_ok(), "expected Ok for: Ok(output) if output.success => {{");
+    }
+
+    #[test]
+    fn test_validate_code_quality_ok_output_2() {
+
+        let result = validate_code_quality();
+        assert!(result.is_ok(), "expected Ok for: Ok(output) => {{");
+    }
+
+    #[test]
+    fn test_validate_code_quality_err_e() {
+
+        let result = validate_code_quality();
+        assert!(result.is_err(), "expected Err for: Err(e) => {{");
+    }
+
+    #[test]
+    fn test_validate_code_quality_checks_run_0() {
+
+        let result = validate_code_quality();
+        assert!(result.is_ok(), "expected Ok for: checks_run == 0");
+    }
+
+    #[test]
+    fn test_validate_code_quality_failures_is_empty() {
+
+        let result = validate_code_quality();
+        assert!(result.is_ok(), "expected Ok for: failures.is_empty()");
+    }
+
+    #[test]
+    fn test_validate_code_quality_has_expected_effects() {
+        // Expected effects: logging, mutation
+
+        let _ = validate_code_quality();
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_default_path() {
+
+        let _result = validate_commits_vs_changelog();
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_commits_is_empty() {
+
+        let _result = validate_commits_vs_changelog();
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_commits_is_empty_2() {
+
+        let _result = validate_commits_vs_changelog();
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_default_path_2() {
+
+        let _result = validate_commits_vs_changelog();
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_default_path_3() {
+
+        let result = validate_commits_vs_changelog();
+        assert!(result.is_some(), "expected Some for: default path");
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_missing_commits_is_empty() {
+
+        let result = validate_commits_vs_changelog();
+        assert!(result.is_some(), "expected Some for: missing_commits.is_empty()");
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_if_let_some_latest_tag_some_changelog_ver_str_latest_tag_lat() {
+
+        let result = validate_commits_vs_changelog();
+        assert!(result.is_some(), "expected Some for: if let (Some(latest_tag), Some(changelog_ver_str)) = (&latest_tag, latest_changelog_version) {{");
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_let_some_latest_tag_some_changelog_ver_str_latest_tag_latest() {
+
+        let _result = validate_commits_vs_changelog();
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_default_path_4() {
+
+        let result = validate_commits_vs_changelog();
+        assert!(result.is_some(), "expected Some for: default path");
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_ok_some_entries() {
+
+        let result = validate_commits_vs_changelog();
+        assert!(result.is_some(), "expected Some for: Ok(Some(entries))");
+    }
+
+    #[test]
+    fn test_validate_commits_vs_changelog_has_expected_effects() {
+        // Expected effects: logging
+
+        let _ = validate_commits_vs_changelog();
+    }
+
+    #[test]
+    fn test_normalize_changelog_text_default_path() {
+
+        let _result = normalize_changelog_text();
+    }
+
+    #[test]
+    fn test_strip_pr_reference_if_let_some_pos_trimmed_rfind() {
+
+        let _result = strip_pr_reference();
+    }
+
+    #[test]
+    fn test_find_uncovered_commits_default_path() {
+
+        let result = find_uncovered_commits();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_group_commits_for_changelog_if_let_some_entry_type_commit_category_to_changelog_entry_ty() {
+
+        let result = group_commits_for_changelog();
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(entry_type) = commit.category.to_changelog_entry_type() {{");
+    }
+
+    #[test]
+    fn test_group_commits_for_changelog_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = group_commits_for_changelog();
+    }
+
+    #[test]
+    fn test_changelog_entries_to_json_default_path() {
+
+        let _result = changelog_entries_to_json();
+    }
+
+    #[test]
+    fn test_changelog_entries_from_json_default_path() {
+
+        let _result = changelog_entries_from_json();
+    }
+
+    #[test]
+    fn test_get_publish_targets_default_path() {
+
+        let result = get_publish_targets();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_has_package_capability_default_path() {
+
+        let _result = has_package_capability();
+    }
+
+    #[test]
+    fn test_build_release_steps_label_some_format_commit_release_v_new_version() {
+
+        let result = build_release_steps();
+        assert!(!result.is_empty(), "expected non-empty collection for: label: Some(format!(\"Commit release: v{{}}\", new_version)),");
+    }
+
+    #[test]
+    fn test_build_release_steps_label_some_package_release_artifacts_to_string() {
+
+        let result = build_release_steps();
+        assert!(!result.is_empty(), "expected non-empty collection for: label: Some(\"Package release artifacts\".to_string()),");
+    }
+
+    #[test]
+    fn test_build_release_steps_some_ctx_ctx_format_tag_new_version() {
+
+        let result = build_release_steps();
+        assert!(!result.is_empty(), "expected non-empty collection for: Some(ctx) => ctx.format_tag(new_version),");
+    }
+
+    #[test]
+    fn test_build_release_steps_label_some_format_tag_tag_name() {
+
+        let result = build_release_steps();
+        assert!(!result.is_empty(), "expected non-empty collection for: label: Some(format!(\"Tag {{}}\", tag_name)),");
+    }
+
+    #[test]
+    fn test_build_release_steps_label_some_push_to_remote_to_string() {
+
+        let result = build_release_steps();
+        assert!(!result.is_empty(), "expected non-empty collection for: label: Some(\"Push to remote\".to_string()),");
+    }
+
+    #[test]
+    fn test_build_release_steps_label_some_format_publish_to_target() {
+
+        let result = build_release_steps();
+        assert!(!result.is_empty(), "expected non-empty collection for: label: Some(format!(\"Publish to {{}}\", target)),");
+    }
+
+    #[test]
+    fn test_build_release_steps_options_deploy() {
+
+        let result = build_release_steps();
+        assert!(!result.is_empty(), "expected non-empty collection for: !options.deploy");
+    }
+
+    #[test]
+    fn test_build_release_steps_label_some_run_post_release_hooks_to_string() {
+
+        let result = build_release_steps();
+        assert!(!result.is_empty(), "expected non-empty collection for: label: Some(\"Run post-release hooks\".to_string()),");
+    }
+
+    #[test]
+    fn test_build_release_steps_ok_steps() {
+
+        let result = build_release_steps();
+        assert!(!result.is_empty(), "expected non-empty collection for: Ok(steps)");
+    }
+
+    #[test]
+    fn test_build_release_steps_has_expected_effects() {
+        // Expected effects: logging, mutation
+
+        let _ = build_release_steps();
+    }
+
+}

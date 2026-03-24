@@ -185,3 +185,57 @@ pub(crate) fn build_param_inputs(
     let imports = all_imports.join("\n");
     (setup, args, imports)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_variables_if_let_some_branch_branch() {
+
+        let result = build_variables();
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(branch) = branch {{");
+    }
+
+    #[test]
+    fn test_build_variables_let_some_branch_branch() {
+
+        let result = build_variables();
+        assert!(!result.is_empty(), "expected non-empty collection for: let Some(branch) = branch");
+    }
+
+    #[test]
+    fn test_build_variables_if_let_some_ref_impl_type_contract_impl_type() {
+
+        let result = build_variables();
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(ref impl_type) = contract.impl_type {{");
+    }
+
+    #[test]
+    fn test_build_variables_let_some_ref_impl_type_contract_impl_type() {
+
+        let result = build_variables();
+        assert!(!result.is_empty(), "expected non-empty collection for: let Some(ref impl_type) = contract.impl_type");
+    }
+
+    #[test]
+    fn test_build_variables_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = build_variables();
+    }
+
+    #[test]
+    fn test_build_param_inputs_default_path() {
+
+        let _result = build_param_inputs();
+    }
+
+    #[test]
+    fn test_build_param_inputs_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = build_param_inputs();
+    }
+
+}

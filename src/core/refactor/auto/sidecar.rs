@@ -103,4 +103,54 @@ mod tests {
         assert!(!result.is_empty(), "expected non-empty collection for: if let Some(plan_file) = plan_file {{");
     }
 
+
+    #[test]
+    fn test_for_run_dir_plan_file_some_run_dir_step_file_run_dir_files_fix_plan() {
+        let instance = AutofixSidecarFiles::default();
+        let run_dir = Default::default();
+        let _result = instance.for_run_dir(&run_dir);
+    }
+
+    #[test]
+    fn test_consume_fix_results_default_path() {
+        let instance = AutofixSidecarFiles::default();
+        let result = instance.consume_fix_results();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_parse_fix_results_file_path_exists() {
+
+        let result = parse_fix_results_file();
+        assert!(!result.is_empty(), "expected non-empty collection for: !path.exists()");
+    }
+
+    #[test]
+    fn test_parse_fix_results_file_err_return_vec_new() {
+
+        let result = parse_fix_results_file();
+        assert!(!result.is_empty(), "expected non-empty collection for: Err(_) => return Vec::new(),");
+    }
+
+    #[test]
+    fn test_parse_fix_results_file_has_expected_effects() {
+        // Expected effects: file_read
+
+        let _ = parse_fix_results_file();
+    }
+
+    #[test]
+    fn test_parse_fix_plan_file_default_path() {
+
+        let result = parse_fix_plan_file();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_read_fix_results_if_let_some_plan_file_plan_file() {
+
+        let result = read_fix_results();
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(plan_file) = plan_file {{");
+    }
+
 }

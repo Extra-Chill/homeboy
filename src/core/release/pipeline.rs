@@ -137,7 +137,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_load_component_component_resolve_effective_some_component_id_options_path_o() {
 
@@ -202,20 +201,6 @@ mod tests {
 
     #[test]
     fn test_plan_match_version_increment_version_info_version_options_bump_ty() {
-        let component_id = "";
-        let options = Default::default();
-        let _result = plan(&component_id, &options);
-    }
-
-    #[test]
-    fn test_plan_none() {
-        let component_id = "";
-        let options = Default::default();
-        let _result = plan(&component_id, &options);
-    }
-
-    #[test]
-    fn test_plan_else() {
         let component_id = "";
         let options = Default::default();
         let _result = plan(&component_id, &options);

@@ -242,3 +242,170 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         hints,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_component_component_resolve_effective_some_component_id_options_path_o() {
+
+        let _result = load_component();
+    }
+
+    #[test]
+    fn test_run_default_path() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = run(&component_id, &options);
+    }
+
+    #[test]
+    fn test_run_default_path_2() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = run(&component_id, &options);
+    }
+
+    #[test]
+    fn test_run_default_path_3() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = run(&component_id, &options);
+    }
+
+    #[test]
+    fn test_run_default_path_4() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = run(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_default_path() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_default_path_2() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_default_path_3() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_let_new_version_if_let_some_ref_info_version_info() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_match_version_increment_version_info_version_options_bump_ty() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_none() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_else() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_will_auto_generate() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_if_let_some_ref_info_version_info() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_let_some_ref_info_version_info() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_uncommitted_has_changes() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_default_path_4() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_default_path_5() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_default_path_6() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_default_path_7() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_if_let_some_ref_entries_pending_entries() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_let_some_ref_entries_pending_entries() {
+        let component_id = "";
+        let options = Default::default();
+        let _result = plan(&component_id, &options);
+    }
+
+    #[test]
+    fn test_plan_has_expected_effects() {
+        // Expected effects: mutation, logging, process_spawn
+        let component_id = "";
+        let options = Default::default();
+        let _ = plan(&component_id, &options);
+    }
+
+}

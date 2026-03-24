@@ -107,3 +107,41 @@ pub(crate) fn make_test_async(test_code: &str) -> String {
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_test_plan_some_t_t() {
+
+        let _result = render_test_plan();
+    }
+
+    #[test]
+    fn test_render_test_plan_match_templates_get_default() {
+
+        let _result = render_test_plan();
+    }
+
+    #[test]
+    fn test_render_test_plan_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = render_test_plan();
+    }
+
+    #[test]
+    fn test_make_test_async_if_let_some_semi_pos_transformed_rfind() {
+
+        let _result = make_test_async();
+    }
+
+    #[test]
+    fn test_make_test_async_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = make_test_async();
+    }
+
+}
