@@ -1,3 +1,4 @@
+use crate::code_audit::CodeAuditResult;
 use crate::component::Component;
 use crate::engine::run_dir::{self, RunDir};
 use crate::engine::undo::UndoSnapshot;
@@ -14,6 +15,13 @@ use std::path::{Path, PathBuf};
 use super::verify::AuditConvergenceScoring;
 
 pub const KNOWN_PLAN_SOURCES: &[&str] = &["audit", "lint", "test"];
+
+/// Name of the env var pointing to previous command output files.
+///
+/// When set, `--from audit` reads the cached audit result instead of
+/// re-running the audit. The action sets this during `run-homeboy-commands.sh`
+/// and it persists across steps via `GITHUB_ENV`.
+const OUTPUT_DIR_ENV: &str = "HOMEBOY_OUTPUT_DIR";
 
 #[derive(Debug, Clone)]
 pub struct RefactorPlanRequest {
@@ -504,6 +512,43 @@ fn collect_stage_changed_files(stages: &[PlanStageSummary]) -> Vec<String> {
     final_changed_files.into_iter().collect()
 }
 
+/// Try to load a cached audit result from a previous `homeboy audit` run.
+///
+/// Checks `HOMEBOY_OUTPUT_DIR/audit.json` for a `CliResponse<CodeAuditResult>`
+/// envelope. If found and parseable, returns the `CodeAuditResult` without
+/// re-running the audit. This avoids redundant full-codebase scans when the
+/// refactor step runs after an audit gate that already produced the results.
+///
+/// Returns `None` if:
+/// - `HOMEBOY_OUTPUT_DIR` is not set
+/// - The file doesn't exist
+/// - The file can't be parsed (e.g. the audit failed and wrote an error envelope)
+fn try_load_cached_audit() -> Option<CodeAuditResult> {
+    let output_dir = std::env::var(OUTPUT_DIR_ENV).ok()?;
+    let audit_file = PathBuf::from(&output_dir).join("audit.json");
+
+    let content = std::fs::read_to_string(&audit_file).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    // Only use cached results from successful runs
+    if json.get("success")?.as_bool()? != true {
+        return None;
+    }
+
+    // The `--output` envelope wraps the audit in a `data` field
+    let data = json.get("data")?;
+    let result: CodeAuditResult = serde_json::from_value(data.clone()).ok()?;
+
+    crate::log_status!(
+        "refactor",
+        "Using cached audit result ({} findings from {})",
+        result.findings.len(),
+        audit_file.display()
+    );
+
+    Some(result)
+}
+
 fn plan_audit_stage(
     component_id: &str,
     root: &Path,
@@ -512,9 +557,11 @@ fn plan_audit_stage(
     exclude: &[crate::code_audit::AuditFinding],
     write: bool,
 ) -> crate::Result<PlannedStage> {
-    let result = if let Some(changed) = changed_files {
+    let result = if let Some(cached) = try_load_cached_audit() {
+        cached
+    } else if let Some(changed) = changed_files {
         if changed.is_empty() {
-            crate::code_audit::CodeAuditResult {
+            CodeAuditResult {
                 component_id: component_id.to_string(),
                 source_path: root.to_string_lossy().to_string(),
                 summary: crate::code_audit::AuditSummary {
@@ -1094,6 +1141,83 @@ mod tests {
             .any(|warning| warning.starts_with("audit iteration ")));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn try_load_cached_audit_reads_output_dir() {
+        let dir = tmp_dir("cached-audit");
+        fs::create_dir_all(&dir).unwrap();
+        let audit_result = CodeAuditResult {
+            component_id: "test".to_string(),
+            source_path: "/tmp/test".to_string(),
+            summary: crate::code_audit::AuditSummary {
+                files_scanned: 10,
+                conventions_detected: 2,
+                outliers_found: 1,
+                alignment_score: None,
+                files_skipped: 0,
+                warnings: vec![],
+            },
+            conventions: vec![],
+            directory_conventions: vec![],
+            findings: vec![],
+            duplicate_groups: vec![],
+        };
+
+        // Write a CliResponse envelope
+        let envelope = serde_json::json!({
+            "success": true,
+            "data": audit_result,
+        });
+        fs::write(
+            dir.join("audit.json"),
+            serde_json::to_string_pretty(&envelope).unwrap(),
+        )
+        .unwrap();
+
+        // Set the env var and load
+        std::env::set_var(OUTPUT_DIR_ENV, dir.to_string_lossy().as_ref());
+        let loaded = try_load_cached_audit();
+        std::env::remove_var(OUTPUT_DIR_ENV);
+
+        let loaded = loaded.expect("should load cached audit");
+        assert_eq!(loaded.component_id, "test");
+        assert_eq!(loaded.summary.files_scanned, 10);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn try_load_cached_audit_skips_failed_envelope() {
+        let dir = tmp_dir("cached-audit-fail");
+        fs::create_dir_all(&dir).unwrap();
+        let envelope = serde_json::json!({
+            "success": false,
+            "error": {
+                "code": "internal.io_error",
+                "message": "something broke",
+                "details": {},
+            },
+        });
+        fs::write(
+            dir.join("audit.json"),
+            serde_json::to_string_pretty(&envelope).unwrap(),
+        )
+        .unwrap();
+
+        std::env::set_var(OUTPUT_DIR_ENV, dir.to_string_lossy().as_ref());
+        let loaded = try_load_cached_audit();
+        std::env::remove_var(OUTPUT_DIR_ENV);
+
+        assert!(loaded.is_none(), "should not use failed audit result");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn try_load_cached_audit_returns_none_when_unset() {
+        std::env::remove_var(OUTPUT_DIR_ENV);
+        assert!(try_load_cached_audit().is_none());
     }
 
     #[test]
