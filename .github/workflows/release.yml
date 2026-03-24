@@ -245,6 +245,8 @@ jobs:
       - gate-test
     if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' }}
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -256,6 +258,15 @@ jobs:
           name: homeboy-binary
           path: .homeboy-bin
 
+      - name: Install homeboy + extension
+        run: |
+          chmod +x .homeboy-bin/homeboy
+          sudo cp .homeboy-bin/homeboy /usr/local/bin/homeboy
+          homeboy extension install rust --source https://github.com/Extra-Chill/homeboy-extensions
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -264,15 +275,113 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v2
-        with:
-          binary-path: .homeboy-bin/homeboy
-          commands: 'refactor --from all'
-          autofix-mode: 'always'
-          autofix-commands: 'refactor --from all --write'
-          autofix-max-commits: '3'
-          comment-section-title: 'Auto-refactor'
-          app-token: ${{ steps.app-token.outputs.token || '' }}
+      # Run refactor directly — no dry-run. The audit/lint/test gates already
+      # identified what needs fixing. This step just applies fixes.
+      - name: Apply refactor fixes
+        id: refactor
+        run: |
+          set +e
+          homeboy refactor homeboy --from all --write --force --path .
+          REFACTOR_EXIT=$?
+          set -e
+
+          if [ "${REFACTOR_EXIT}" -ne 0 ]; then
+            echo "::warning::refactor --from all --write exited ${REFACTOR_EXIT}"
+          fi
+
+          # Check if any files changed
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No refactor changes to commit"
+            echo "has-changes=false" >> "${GITHUB_OUTPUT}"
+          else
+            FILE_COUNT=$(git diff --name-only | wc -l | xargs)
+            echo "Refactor produced changes in ${FILE_COUNT} file(s)"
+            echo "has-changes=true" >> "${GITHUB_OUTPUT}"
+            echo "file-count=${FILE_COUNT}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      # Update audit baseline so it stays current when autofix merges to main.
+      - name: Update audit baseline
+        if: always()
+        run: |
+          homeboy audit homeboy --baseline --path . || echo "Baseline update failed (non-fatal)"
+
+      # Commit, push, and open/update PR if changes were made.
+      - name: Commit and push autofix
+        id: autofix-push
+        if: steps.refactor.outputs.has-changes == 'true'
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          AUTOFIX_BRANCH="ci/autofix/homeboy/main"
+          BOT_NAME="homeboy-ci[bot]"
+          BOT_EMAIL="266378653+homeboy-ci[bot]@users.noreply.github.com"
+
+          git checkout -b "${AUTOFIX_BRANCH}"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No staged changes after add"
+            echo "committed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          FILE_COUNT=$(git diff --cached --name-only | wc -l | xargs)
+          COMMIT_MSG="ci(autofix): refactor ${FILE_COUNT} file(s)
+
+          Applied by homeboy refactor --from all --write.
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          git config user.name "${BOT_NAME}"
+          git config user.email "${BOT_EMAIL}"
+          GIT_AUTHOR_NAME="${BOT_NAME}" \
+          GIT_AUTHOR_EMAIL="${BOT_EMAIL}" \
+          GIT_COMMITTER_NAME="${BOT_NAME}" \
+          GIT_COMMITTER_EMAIL="${BOT_EMAIL}" \
+            git commit -m "${COMMIT_MSG}"
+
+          # Use App token if available (triggers CI re-run on the PR)
+          if [ -n "${APP_TOKEN:-}" ]; then
+            git -c "http.https://github.com/.extraheader=" \
+              push --force "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              "${AUTOFIX_BRANCH}"
+          else
+            git push --force origin "${AUTOFIX_BRANCH}"
+          fi
+
+          echo "committed=true" >> "${GITHUB_OUTPUT}"
+          echo "branch=${AUTOFIX_BRANCH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Open or update autofix PR
+        if: steps.autofix-push.outputs.committed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          AUTOFIX_BRANCH="${{ steps.autofix-push.outputs.branch }}"
+          FILE_COUNT="${{ steps.refactor.outputs.file-count }}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          # Check for existing PR
+          EXISTING=$(gh pr list --state open --base main --head "${AUTOFIX_BRANCH}" --json number --jq '.[0].number // empty' 2>/dev/null || true)
+
+          BODY="## Summary
+          - **${FILE_COUNT}** file(s) fixed via **refactor --from all --write**
+          - Generated automatically by the release pipeline
+
+          ## Context
+          - Workflow run: ${RUN_URL}
+          - Branch: \`${AUTOFIX_BRANCH}\`"
+
+          if [ -n "${EXISTING}" ]; then
+            echo "Updating existing PR #${EXISTING}"
+            gh pr edit "${EXISTING}" --body "${BODY}" 2>/dev/null || true
+          else
+            gh pr create \
+              --base main \
+              --head "${AUTOFIX_BRANCH}" \
+              --title "chore(ci): autofix homeboy from main" \
+              --body "${BODY}"
+          fi
 
   # ── Step 3: Version bump + changelog + tag ──
   prepare:
