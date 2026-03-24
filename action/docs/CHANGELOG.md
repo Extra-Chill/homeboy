@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.13.0] - 2026-03-24
+
+### Added
+- capture --output in PR autofix and include fixer categories in commit messages
+
+### Fixed
+- remove dead validate_autofix_changes call from non-PR autofix
+
 ## [1.12.1] - 2026-03-24
 
 ### Fixed
