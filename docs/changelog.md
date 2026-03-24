@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.86.1] - 2026-03-24
+
+### Fixed
+- merge same-file fixes before applying to prevent brace corruption
+
 ## [0.86.0] - 2026-03-24
 
 ### Added
