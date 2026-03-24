@@ -125,6 +125,18 @@ pub fn get_files_changed_since(path: &str, git_ref: &str) -> Result<Vec<String>>
     parse_diff_output(&fallback.stdout)
 }
 
+/// Get all dirty files in the working tree (modified, new, deleted).
+/// Returns repo-relative paths. Useful for detecting what changed between
+/// operations on the working tree.
+pub fn get_dirty_files(path: &str) -> Result<Vec<String>> {
+    let changes = get_uncommitted_changes(path)?;
+    let mut files: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    files.extend(changes.staged);
+    files.extend(changes.unstaged);
+    files.extend(changes.untracked);
+    Ok(files.into_iter().collect())
+}
+
 /// Parse `git diff --name-only` output into a list of file paths.
 fn parse_diff_output(stdout: &[u8]) -> Result<Vec<String>> {
     let text = String::from_utf8_lossy(stdout);
@@ -172,4 +184,106 @@ pub fn get_range_diff(path: &str, baseline_ref: &str) -> Result<String> {
     .map_err(|e| Error::git_command_failed(e.to_string()))?;
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_uncommitted_changes_default_path() {
+        let path = "";
+        let _result = get_uncommitted_changes(&path);
+    }
+
+    #[test]
+    fn test_get_uncommitted_changes_has_expected_effects() {
+        // Expected effects: mutation
+        let path = "";
+        let _ = get_uncommitted_changes(&path);
+    }
+
+    #[test]
+    fn test_get_files_changed_since_default_path() {
+        let path = "";
+        let git_ref = "";
+        let _result = get_files_changed_since(&path, &git_ref);
+    }
+
+    #[test]
+    fn test_get_files_changed_since_default_path_2() {
+        let path = "";
+        let git_ref = "";
+        let _result = get_files_changed_since(&path, &git_ref);
+    }
+
+    #[test]
+    fn test_get_files_changed_since_has_expected_effects() {
+        // Expected effects: logging
+        let path = "";
+        let git_ref = "";
+        let _ = get_files_changed_since(&path, &git_ref);
+    }
+
+    #[test]
+    fn test_get_dirty_files_default_path() {
+        let path = "";
+        let _result = get_dirty_files(&path);
+    }
+
+    #[test]
+    fn test_get_dirty_files_ok_files_into_iter_collect() {
+        let path = "";
+        let result = get_dirty_files(&path);
+        assert!(result.is_ok(), "expected Ok for: Ok(files.into_iter().collect())");
+    }
+
+    #[test]
+    fn test_get_dirty_files_has_expected_effects() {
+        // Expected effects: mutation
+        let path = "";
+        let _ = get_dirty_files(&path);
+    }
+
+    #[test]
+    fn test_get_diff_default_path() {
+        let path = "";
+        let _result = get_diff(&path);
+    }
+
+    #[test]
+    fn test_get_diff_default_path_2() {
+        let path = "";
+        let _result = get_diff(&path);
+    }
+
+    #[test]
+    fn test_get_diff_ok_result() {
+        let path = "";
+        let result = get_diff(&path);
+        assert!(result.is_ok(), "expected Ok for: Ok(result)");
+    }
+
+    #[test]
+    fn test_get_diff_has_expected_effects() {
+        // Expected effects: mutation
+        let path = "";
+        let _ = get_diff(&path);
+    }
+
+    #[test]
+    fn test_get_range_diff_default_path() {
+        let path = "";
+        let baseline_ref = "";
+        let _result = get_range_diff(&path, &baseline_ref);
+    }
+
+    #[test]
+    fn test_get_range_diff_ok_string_from_utf8_lossy_output_stdout_to_string() {
+        let path = "";
+        let baseline_ref = "";
+        let result = get_range_diff(&path, &baseline_ref);
+        assert!(result.is_ok(), "expected Ok for: Ok(String::from_utf8_lossy(&output.stdout).to_string())");
+    }
+
 }

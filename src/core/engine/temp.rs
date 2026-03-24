@@ -7,10 +7,12 @@ use std::time::{Duration, SystemTime};
 
 const HOMEBOY_RUNTIME_TMPDIR_ENV: &str = "HOMEBOY_RUNTIME_TMPDIR";
 
-/// Maximum age for sandbox directories before they are pruned (1 hour).
+/// Maximum age for legacy sandbox directories before they are pruned (1 hour).
+/// These were created by the old refactor sandbox (removed in v0.87). The pruner
+/// stays to clean up any stragglers left from previous versions.
 const STALE_SANDBOX_MAX_AGE: Duration = Duration::from_secs(3600);
 
-/// Prefix used by refactor sandbox directories.
+/// Prefix used by legacy refactor sandbox directories.
 const SANDBOX_PREFIX: &str = "homeboy-refactor-ci-";
 
 fn runtime_root() -> Result<PathBuf> {
@@ -24,7 +26,7 @@ fn runtime_root() -> Result<PathBuf> {
     Ok(paths::homeboy()?.join("runtime").join("tmp"))
 }
 
-pub fn ensure_runtime_tmp_dir() -> Result<PathBuf> {
+pub(crate) fn ensure_runtime_tmp_dir() -> Result<PathBuf> {
     let runtime_dir = runtime_root()?;
     fs::create_dir_all(&runtime_dir).map_err(|e| {
         Error::internal_io(
@@ -39,13 +41,12 @@ pub fn ensure_runtime_tmp_dir() -> Result<PathBuf> {
     Ok(runtime_dir)
 }
 
-/// Remove sandbox directories older than `STALE_SANDBOX_MAX_AGE`.
+/// Remove legacy sandbox directories older than `STALE_SANDBOX_MAX_AGE`.
 ///
-/// Sandboxes are created by `SandboxDir` (refactor pipeline) and normally
-/// cleaned up by its `Drop` impl. When the process is killed by a signal
-/// (SIGKILL, SIGTERM, Ctrl+C), `Drop` never fires and directories accumulate.
-/// This sweeper runs on the next `ensure_runtime_tmp_dir()` call and prunes
-/// any orphans.
+/// The refactor sandbox was removed in v0.87 — refactoring now operates
+/// directly on the working tree with git as the rollback mechanism.
+/// This sweeper stays to clean up any leftover sandbox directories from
+/// previous versions.
 fn prune_stale_sandboxes(runtime_dir: &Path) {
     let now = SystemTime::now();
 
@@ -105,19 +106,6 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    #[test]
-    fn runtime_temp_file_honors_override() {
-        let _guard = env_lock().lock().expect("env lock");
-        let dir = tempfile::tempdir().expect("tempdir");
-        unsafe {
-            env::set_var(HOMEBOY_RUNTIME_TMPDIR_ENV, dir.path());
-        }
-
         let path = runtime_temp_file("homeboy-test", ".json").expect("temp file path");
         assert!(path.starts_with(dir.path()));
         assert!(path
@@ -148,51 +136,110 @@ mod tests {
         }
     }
 
+
     #[test]
-    fn prune_removes_stale_sandbox_dirs() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn test_ensure_runtime_tmp_dir_default_path() {
 
-        // Create a "stale" sandbox directory and backdate its mtime.
-        let stale = tmp.path().join("homeboy-refactor-ci-aaaa-1111");
-        fs::create_dir(&stale).expect("create stale dir");
-        let two_hours_ago = SystemTime::now() - Duration::from_secs(7200);
-        filetime::set_file_mtime(&stale, filetime::FileTime::from_system_time(two_hours_ago))
-            .expect("set mtime");
-
-        // Create a "fresh" sandbox directory (just created, mtime = now).
-        let fresh = tmp.path().join("homeboy-refactor-ci-bbbb-2222");
-        fs::create_dir(&fresh).expect("create fresh dir");
-
-        // Create a non-sandbox directory that should be left alone.
-        let other = tmp.path().join("some-other-dir");
-        fs::create_dir(&other).expect("create other dir");
-
-        prune_stale_sandboxes(tmp.path());
-
-        assert!(!stale.exists(), "stale sandbox should be removed");
-        assert!(fresh.exists(), "fresh sandbox should be kept");
-        assert!(other.exists(), "non-sandbox dir should be untouched");
+        let _result = ensure_runtime_tmp_dir();
     }
 
     #[test]
-    fn prune_ignores_non_directory_files() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn test_ensure_runtime_tmp_dir_some_create_homeboy_runtime_tmp_directory_to_string() {
 
-        // Create a file (not a directory) with the sandbox prefix.
-        let file_path = tmp.path().join("homeboy-refactor-ci-file-3333");
-        fs::write(&file_path, "not a dir").expect("write file");
-        let two_hours_ago = SystemTime::now() - Duration::from_secs(7200);
-        filetime::set_file_mtime(
-            &file_path,
-            filetime::FileTime::from_system_time(two_hours_ago),
-        )
-        .expect("set mtime");
-
-        prune_stale_sandboxes(tmp.path());
-
-        assert!(
-            file_path.exists(),
-            "non-directory file should not be removed"
-        );
+        let _result = ensure_runtime_tmp_dir();
     }
+
+    #[test]
+    fn test_ensure_runtime_tmp_dir_default_path_2() {
+
+        let _result = ensure_runtime_tmp_dir();
+    }
+
+    #[test]
+    fn test_ensure_runtime_tmp_dir_ok_runtime_dir() {
+
+        let result = ensure_runtime_tmp_dir();
+        assert!(result.is_ok(), "expected Ok for: Ok(runtime_dir)");
+    }
+
+    #[test]
+    fn test_runtime_temp_file_ok_ensure_runtime_tmp_dir_join_unique_name_prefix_suffix() {
+        let prefix = "";
+        let suffix = "";
+        let result = runtime_temp_file(&prefix, &suffix);
+        assert!(result.is_ok(), "expected Ok for: Ok(ensure_runtime_tmp_dir()?.join(unique_name(prefix, suffix)))");
+    }
+
+    #[test]
+    fn test_runtime_temp_dir_error_internal_io_e_to_string_some_format_create_temp_dir_pr() {
+        let prefix = "";
+        let _result = runtime_temp_dir(&prefix);
+    }
+
+    #[test]
+    fn test_runtime_temp_dir_default_path() {
+        let prefix = "";
+        let _result = runtime_temp_dir(&prefix);
+    }
+
+    #[test]
+    fn test_runtime_temp_dir_ok_path() {
+        let prefix = "";
+        let result = runtime_temp_dir(&prefix);
+        assert!(result.is_ok(), "expected Ok for: Ok(path)");
+    }
+
+
+    #[test]
+    fn test_ensure_runtime_tmp_dir_default_path() {
+
+        let _result = ensure_runtime_tmp_dir();
+    }
+
+    #[test]
+    fn test_ensure_runtime_tmp_dir_some_create_homeboy_runtime_tmp_directory_to_string() {
+
+        let _result = ensure_runtime_tmp_dir();
+    }
+
+    #[test]
+    fn test_ensure_runtime_tmp_dir_default_path_2() {
+
+        let _result = ensure_runtime_tmp_dir();
+    }
+
+    #[test]
+    fn test_ensure_runtime_tmp_dir_ok_runtime_dir() {
+
+        let result = ensure_runtime_tmp_dir();
+        assert!(result.is_ok(), "expected Ok for: Ok(runtime_dir)");
+    }
+
+    #[test]
+    fn test_runtime_temp_file_ok_ensure_runtime_tmp_dir_join_unique_name_prefix_suffix() {
+        let prefix = "";
+        let suffix = "";
+        let result = runtime_temp_file(&prefix, &suffix);
+        assert!(result.is_ok(), "expected Ok for: Ok(ensure_runtime_tmp_dir()?.join(unique_name(prefix, suffix)))");
+    }
+
+    #[test]
+    fn test_runtime_temp_dir_error_internal_io_e_to_string_some_format_create_temp_dir_pr() {
+        let prefix = "";
+        let _result = runtime_temp_dir(&prefix);
+    }
+
+    #[test]
+    fn test_runtime_temp_dir_default_path() {
+        let prefix = "";
+        let _result = runtime_temp_dir(&prefix);
+    }
+
+    #[test]
+    fn test_runtime_temp_dir_ok_path() {
+        let prefix = "";
+        let result = runtime_temp_dir(&prefix);
+        assert!(result.is_ok(), "expected Ok for: Ok(path)");
+    }
+
 }

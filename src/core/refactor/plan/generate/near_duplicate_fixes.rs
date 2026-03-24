@@ -10,8 +10,7 @@
 //! 5. Adds a `use` import in the other file to reference the canonical
 //!
 //! Fixes are Safe — the audit has already verified structural identity.
-//! The sandbox validation + cargo check gate catches any breakage before
-//! the fix reaches main.
+//! CI validation catches any breakage before the fix reaches main.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -342,4 +341,92 @@ mod tests {
             "Should not upgrade already-pub(crate) function"
         );
     }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_finding_kind_auditfinding_nearduplicate() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_ok_c_c() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_err() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_let_some_start_line_end_line_find_function_range_content_fn_() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_if_let_ok_canon_content_std_fs_read_to_string_canon_path() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_let_ok_canon_content_std_fs_read_to_string_canon_path() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_has_expected_effects() {
+        // Expected effects: file_read, mutation
+
+        let _ = generate_near_duplicate_fixes();
+    }
+
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_finding_kind_auditfinding_nearduplicate() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_ok_c_c() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_err() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_let_some_start_line_end_line_find_function_range_content_fn_() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_if_let_ok_canon_content_std_fs_read_to_string_canon_path() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_let_ok_canon_content_std_fs_read_to_string_canon_path() {
+
+        generate_near_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_near_duplicate_fixes_has_expected_effects() {
+        // Expected effects: mutation, file_read
+
+        let _ = generate_near_duplicate_fixes();
+    }
+
 }

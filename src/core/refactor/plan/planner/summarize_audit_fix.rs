@@ -1,0 +1,182 @@
+//! summarize_audit_fix — extracted from planner.rs.
+
+use crate::refactor::auto as fixer;
+use crate::refactor::auto::{self, FixApplied, FixResultsSummary};
+use std::collections::{BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
+use super::super::verify::AuditConvergenceScoring;
+use super::summary;
+use super::PlannedStage;
+use super::PlanStageSummary;
+use super::super::*;
+
+
+pub(crate) fn plan_audit_stage(
+    component_id: &str,
+    root: &Path,
+    changed_files: Option<&[String]>,
+    only: &[crate::code_audit::AuditFinding],
+    exclude: &[crate::code_audit::AuditFinding],
+    write: bool,
+) -> crate::Result<PlannedStage> {
+    let result = if let Some(changed) = changed_files {
+        if changed.is_empty() {
+            crate::code_audit::CodeAuditResult {
+                component_id: component_id.to_string(),
+                source_path: root.to_string_lossy().to_string(),
+                summary: crate::code_audit::AuditSummary {
+                    files_scanned: 0,
+                    conventions_detected: 0,
+                    outliers_found: 0,
+                    alignment_score: None,
+                    files_skipped: 0,
+                    warnings: vec![],
+                },
+                conventions: vec![],
+                directory_conventions: vec![],
+                findings: vec![],
+                duplicate_groups: vec![],
+            }
+        } else {
+            crate::code_audit::audit_path_scoped(
+                component_id,
+                &root.to_string_lossy(),
+                changed,
+                None,
+            )?
+        }
+    } else {
+        crate::code_audit::audit_path_with_id(component_id, &root.to_string_lossy())?
+    };
+
+    let mut fix_result = super::generate::generate_audit_fixes(&result, root);
+    let policy = fixer::FixPolicy {
+        only: (!only.is_empty()).then_some(only.to_vec()),
+        exclude: exclude.to_vec(),
+    };
+    let preflight_context = fixer::PreflightContext { root };
+    let (fix_result, policy_summary, changed_files, stage_warnings): (
+        fixer::FixResult,
+        fixer::PolicySummary,
+        Vec<String>,
+        Vec<String>,
+    ) = if write {
+        // Single pass: generate fixes from the provided findings, apply, validate.
+        // The audit already ran and provided findings in `result` — the refactor
+        // command does not re-run the audit internally. The convergence loop
+        // (audit → fix → merge → re-audit) belongs in the full orchestration
+        // pipeline, not inside a single refactor invocation. Each cold compile
+        // in the sandbox takes 10-20 minutes with no target/ cache, so multiple
+        // iterations are prohibitively expensive.
+        let outcome = super::verify::run_audit_refactor(
+            result.clone(),
+            only,
+            exclude,
+            AuditConvergenceScoring::default(),
+            1,
+            true,
+        )?;
+
+        let changed_files = outcome
+            .fix_result
+            .chunk_results
+            .iter()
+            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
+            .flat_map(|chunk| chunk.files.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let warnings = outcome
+            .iterations
+            .iter()
+            .filter(|iteration| iteration.status != "continued")
+            .map(|iteration| {
+                format!(
+                    "audit iteration {}: {}",
+                    iteration.iteration, iteration.status
+                )
+            })
+            .collect::<Vec<_>>();
+
+        (
+            outcome.fix_result,
+            outcome.policy_summary,
+            changed_files,
+            warnings,
+        )
+    } else {
+        let policy_summary =
+            fixer::apply_fix_policy(&mut fix_result, false, &policy, &preflight_context);
+        let changed_files = collect_audit_changed_files(&fix_result);
+        (fix_result, policy_summary, changed_files, Vec::new())
+    };
+
+    let fix_results = summarize_audit_fix_result_entries(&fix_result);
+    let fixes_proposed = fix_results.len();
+
+    Ok(PlannedStage {
+        source: "audit".to_string(),
+        summary: PlanStageSummary {
+            stage: "audit".to_string(),
+            planned: true,
+            applied: write && !changed_files.is_empty(),
+            fixes_proposed,
+            files_modified: changed_files.len(),
+            detected_findings: Some(result.findings.len()),
+            changed_files,
+            fix_summary: if write {
+                if fix_result.files_modified > 0 {
+                    Some(auto::summarize_audit_fix_result(&fix_result))
+                } else {
+                    None
+                }
+            } else if policy_summary.visible_insertions + policy_summary.visible_new_files > 0 {
+                Some(auto::summarize_audit_fix_result(&fix_result))
+            } else {
+                None
+            },
+            warnings: stage_warnings,
+        },
+        fix_results,
+    })
+}
+
+pub(crate) fn collect_audit_changed_files(fix_result: &fixer::FixResult) -> Vec<String> {
+    let mut files = BTreeSet::new();
+    for fix in &fix_result.fixes {
+        if !fix.insertions.is_empty() {
+            files.insert(fix.file.clone());
+        }
+    }
+    for file in &fix_result.new_files {
+        files.insert(file.file.clone());
+    }
+    files.into_iter().collect()
+}
+
+pub(crate) fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) -> Vec<FixApplied> {
+    let mut entries = Vec::new();
+
+    for fix in &fix_result.fixes {
+        for insertion in &fix.insertions {
+            if insertion.auto_apply {
+                entries.push(FixApplied {
+                    file: fix.file.clone(),
+                    rule: format!("{:?}", insertion.finding).to_lowercase(),
+                    action: Some("insert".to_string()),
+                });
+            }
+        }
+    }
+
+    for new_file in &fix_result.new_files {
+        entries.push(FixApplied {
+            file: new_file.file.clone(),
+            rule: format!("{:?}", new_file.finding).to_lowercase(),
+            action: Some("create".to_string()),
+        });
+    }
+
+    entries
+}
