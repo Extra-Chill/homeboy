@@ -264,6 +264,39 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
                         if fixed not in needed:
                             needed.append(fixed)
 
+    # Phase 1b: Carry trait-like imports conservatively.
+    # Traits used for method dispatch (e.g., `use std::io::Read;` enabling `.read()`)
+    # are invisible in Phase 1 because the trait name never appears literally in the code.
+    # Conservative heuristic: carry imports with PascalCase terminal names that weren't
+    # already picked up by Phase 1 and don't appear as explicit types in the moved code.
+    # This catches trait imports while being safe — the worst case is an unused import
+    # (which `cargo fix` or rustfmt can clean up), vs a missing trait import which breaks compilation.
+    already_carried = set()
+    for use_stmt in needed:
+        already_carried.update(extract_use_names(use_stmt))
+
+    for use_stmt in source_uses:
+        if use_stmt in needed:
+            continue
+        names = extract_use_names(use_stmt)
+        for name in names:
+            if name in already_carried or name in moved_item_names:
+                continue
+            # PascalCase heuristic: starts with uppercase, contains lowercase
+            # (excludes SCREAMING_CASE constants which are not traits)
+            if not name or not name[0].isupper() or name.isupper():
+                continue
+            # If the name appears literally in the moved code, Phase 1 already
+            # handled it (or it's a type, not a trait). Skip.
+            if re.search(r'\b' + re.escape(name) + r'\b', combined_source):
+                continue
+            # This is likely a trait import needed for method dispatch — carry it
+            fixed = fix_import_path(use_stmt, source_path, dest_path)
+            if fixed not in needed:
+                needed.append(fixed)
+                already_carried.update(extract_use_names(fixed))
+            break  # This use_stmt is handled, move to next
+
     # Phase 2: Add imports for same-module definitions referenced by moved items (#339)
     # This covers types, functions, and constants that were in scope because
     # the moved code lived in the same file.
