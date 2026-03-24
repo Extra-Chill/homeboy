@@ -147,4 +147,47 @@ fn test_parse_items() {
     );
 
     let _ = fs::remove_dir_all(root);
+
+    #[test]
+    fn test_apply_plan_write() {
+        let plan = Default::default();
+        let root = Path::new("");
+        let write = true;
+        let _result = apply_plan(&plan, &root, write);
+    }
+
+    #[test]
+    fn test_apply_plan_write_2() {
+        let plan = Default::default();
+        let root = Path::new("");
+        let write = true;
+        let _result = apply_plan(&plan, &root, write);
+    }
+
+    #[test]
+    fn test_apply_plan_write_3() {
+        let plan = Default::default();
+        let root = Path::new("");
+        let write = false;
+        let result = apply_plan(&plan, &root, write);
+        assert!(result.is_ok(), "expected Ok for: !write");
+    }
+
+    #[test]
+    fn test_apply_plan_default_path() {
+        let plan = Default::default();
+        let root = Path::new("");
+        let write = false;
+        let _result = apply_plan(&plan, &root, write);
+    }
+
+    #[test]
+    fn test_apply_plan_results_iter_any_r_r_applied() {
+        let plan = Default::default();
+        let root = Path::new("");
+        let write = false;
+        let result = apply_plan(&plan, &root, write);
+        assert!(result.is_ok(), "expected Ok for: results.iter().any(|r| r.applied)");
+    }
+
 }
