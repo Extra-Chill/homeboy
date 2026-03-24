@@ -4,6 +4,55 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.86.0] - 2026-03-24
+
+### Added
+- directory-based config hierarchy — fleet, project, and component levels
+- add --context filter to refactor rename
+- add hoist_static transform context + convert Regex to LazyLock
+- richer type introspection for test generation — field-level assertions
+- add --user override and per-server env to fleet exec/ssh
+- add repeated struct field pattern detection
+- add shadow module detection audit rule
+- expand intra-method duplicate fixer to handle non-adjacent blocks
+- add autofix for legacy_comment and near_duplicate findings
+- detect error propagation branches from ? operator
+- async function test generation + is_async on TestPlan
+- surface remote_owner in component list + warn on WordPress deploy
+- component create --project flag and next-step hints
+- wrapper-to-implementation inference + fix broken auto-generated tests
+- enhance fleet status with observability dashboard (#613)
+- batch version bump for multiple components (#917)
+- project-scoped status dashboard with version drift view
+
+### Changed
+- remove broken autofix decompose of grammar.rs
+- add concurrency group to cancel stale PR runs
+- remove all internal validation from refactor — let CI handle it
+- remove convergence loop from refactor command — single pass only
+- hub-aware decompose grouping to prevent mega-clusters
+- Add compile check between planner stages to skip broken cascades
+- Fail-fast on compile errors in convergence loop
+- serialize auto-refactor across overlapping release runs
+
+### Fixed
+- truncate decompose module names to 3 meaningful words
+- restore branch after deploy tag checkout + use dirname for remote path
+- skip intra-duplicate removal when block has unbalanced delimiters
+- fast brace-balance check before expensive sandbox compile
+- remove dead code from test_gen_fixes.rs
+- skip dead_code removal in test modules + fix 4 pre-existing test failures
+- prevent test gen from producing broken code + remove broken auto-generated tests
+- sanitize condition text in test template variables + cargo fmt
+- rewrite comment fixer to remove legacy code blocks, not just comments
+- handle multi-line function signatures in contract extraction
+- deduplicate test function names in render_test_plan
+- fall back to simple assertions when test gen can't resolve value types
+- generate proper PHP imports in duplicate function fixer
+- deploy from clean tag clones — preserve remote_path, inherit extensions, stabilize component IDs
+- auto-refactor should run even when quality gates fail
+- sanitize condition text in generated test assertions
+
 ## [0.85.3] - 2026-03-22
 
 ### Fixed
