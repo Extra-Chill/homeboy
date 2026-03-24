@@ -1961,10 +1961,7 @@ fn parse_hunk() {}
     #[test]
     fn truncate_module_name_drops_stop_words() {
         // Stop words like "for", "from", "to", "in" are dropped, not counted
-        assert_eq!(
-            truncate_module_name("items_for_display"),
-            "items_display"
-        );
+        assert_eq!(truncate_module_name("items_for_display"), "items_display");
         assert_eq!(
             truncate_module_name("data_from_source_to_target"),
             "data_source_target"
