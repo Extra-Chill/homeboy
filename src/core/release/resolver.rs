@@ -3,7 +3,7 @@ use crate::engine::pipeline::PipelineCapabilityResolver;
 use crate::error::{Error, Result};
 use crate::extension::{self, ExtensionManifest};
 
-use super::types::ReleaseStepType;
+use super::release_step_type::ReleaseStepType;
 
 pub(crate) struct ReleaseCapabilityResolver {
     extensions: Vec<ExtensionManifest>,

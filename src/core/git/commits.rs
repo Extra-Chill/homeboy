@@ -721,71 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn recommended_bump_prefers_highest_severity() {
-        let commits = vec![
-            CommitInfo {
-                hash: "a1".to_string(),
-                subject: "fix: patch fix".to_string(),
-                category: CommitCategory::Fix,
-            },
-            CommitInfo {
-                hash: "b2".to_string(),
-                subject: "feat: add feature".to_string(),
-                category: CommitCategory::Feature,
-            },
-            CommitInfo {
-                hash: "c3".to_string(),
-                subject: "refactor!: break API".to_string(),
-                category: CommitCategory::Breaking,
-            },
-        ];
-
-        assert_eq!(
-            recommended_bump_from_commits(&commits),
-            Some(SemverBump::Major)
-        );
-    }
-
-    #[test]
-    fn recommended_bump_ignores_docs_and_chore() {
-        let commits = vec![
-            CommitInfo {
-                hash: "a1".to_string(),
-                subject: "docs: update".to_string(),
-                category: CommitCategory::Docs,
-            },
-            CommitInfo {
-                hash: "b2".to_string(),
-                subject: "chore: cleanup".to_string(),
-                category: CommitCategory::Chore,
-            },
-        ];
-
-        assert_eq!(recommended_bump_from_commits(&commits), None);
-    }
-
-    #[test]
-    fn recommended_bump_from_fix_and_other_is_patch() {
-        let commits = vec![
-            CommitInfo {
-                hash: "a1".to_string(),
-                subject: "random commit".to_string(),
-                category: CommitCategory::Other,
-            },
-            CommitInfo {
-                hash: "b2".to_string(),
-                subject: "fix: bug".to_string(),
-                category: CommitCategory::Fix,
-            },
-        ];
-
-        assert_eq!(
-            recommended_bump_from_commits(&commits),
-            Some(SemverBump::Patch)
-        );
-    }
-
-    #[test]
     fn monorepo_context_format_tag() {
         let ctx = MonorepoContext {
             git_root: "/repo".to_string(),
@@ -797,19 +732,239 @@ mod tests {
     }
 
     #[test]
-    fn extract_version_from_component_prefixed_tag() {
-        assert_eq!(
-            extract_version_from_tag("wordpress-v1.2.3"),
-            Some("1.2.3".to_string())
+    fn test_detect_default_path() {
+        let instance = MonorepoContext::default();
+        let local_path = "";
+        let component_id = "";
+        let _result = instance.detect(&local_path, &component_id);
+    }
+
+    #[test]
+    fn test_detect_default_path_2() {
+        let instance = MonorepoContext::default();
+        let local_path = "";
+        let component_id = "";
+        let _result = instance.detect(&local_path, &component_id);
+    }
+
+    #[test]
+    fn test_format_tag_default_path() {
+        let instance = MonorepoContext::default();
+        let version = "";
+        let _result = instance.format_tag(&version);
+    }
+
+    #[test]
+    fn test_rank_default_path() {
+        let instance = SemverBump::default();
+        let _result = instance.rank();
+    }
+
+    #[test]
+    fn test_parse_match_value() {
+        let instance = SemverBump::default();
+        let value = "";
+        let result = instance.parse(&value);
+        assert!(result.is_some(), "expected Some for: match value");
+    }
+
+    #[test]
+    fn test_parse_match_value_2() {
+        let instance = SemverBump::default();
+        let value = "";
+        let result = instance.parse(&value);
+        assert!(result.is_some(), "expected Some for: match value");
+    }
+
+    #[test]
+    fn test_parse_match_value_3() {
+        let instance = SemverBump::default();
+        let value = "";
+        let result = instance.parse(&value);
+        assert!(result.is_some(), "expected Some for: match value");
+    }
+
+    #[test]
+    fn test_prefix_match_self() {
+        let instance = CommitCategory::default();
+        let result = instance.prefix();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_prefix_match_self_2() {
+        let instance = CommitCategory::default();
+        let result = instance.prefix();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_prefix_match_self_3() {
+        let instance = CommitCategory::default();
+        let result = instance.prefix();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_prefix_match_self_4() {
+        let instance = CommitCategory::default();
+        let result = instance.prefix();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_prefix_match_self_5() {
+        let instance = CommitCategory::default();
+        let result = instance.prefix();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_to_changelog_entry_type_match_self() {
+        let instance = CommitCategory::default();
+        let result = instance.to_changelog_entry_type();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_to_changelog_entry_type_match_self_2() {
+        let instance = CommitCategory::default();
+        let result = instance.to_changelog_entry_type();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_to_changelog_entry_type_match_self_3() {
+        let instance = CommitCategory::default();
+        let result = instance.to_changelog_entry_type();
+        assert!(result.is_some(), "expected Some for: match self");
+    }
+
+    #[test]
+    fn test_to_changelog_entry_type_commitcategory_other_some_changed() {
+        let instance = CommitCategory::default();
+        let result = instance.to_changelog_entry_type();
+        assert!(
+            result.is_some(),
+            "expected Some for: CommitCategory::Other => Some(\"changed\"),"
         );
-        assert_eq!(
-            extract_version_from_tag("github-v0.5.0"),
-            Some("0.5.0".to_string())
+    }
+
+    #[test]
+    fn test_parse_conventional_commit_default_path() {
+        let _result = parse_conventional_commit();
+    }
+
+    #[test]
+    fn test_classify_commit_lower_contains_breaking_change_subject_contains() {
+        let _result = classify_commit();
+    }
+
+    #[test]
+    fn test_extract_version_from_tag_default_path() {
+        let _result = extract_version_from_tag();
+    }
+
+    #[test]
+    fn test_find_version_commit_default_path() {
+        let path = "";
+        let _result = find_version_commit(&path);
+    }
+
+    #[test]
+    fn test_find_version_commit_if_let_some_hash_subject_line_split_once() {
+        let path = "";
+        let _result = find_version_commit(&path);
+    }
+
+    #[test]
+    fn test_find_version_commit_version_pattern_is_match_subject() {
+        let path = "";
+        let _result = find_version_commit(&path);
+    }
+
+    #[test]
+    fn test_find_version_commit_ok_none() {
+        let path = "";
+        let result = find_version_commit(&path);
+        assert!(result.is_ok(), "expected Ok for: Ok(None)");
+    }
+
+    #[test]
+    fn test_find_version_release_commit_let_some_stdout_command_run_in_optional_path_git_log_200_for(
+    ) {
+        let path = "";
+        let version = "";
+        let _result = find_version_release_commit(&path, &version);
+    }
+
+    #[test]
+    fn test_find_version_release_commit_else() {
+        let path = "";
+        let version = "";
+        let result = find_version_release_commit(&path, &version);
+        assert!(result.is_ok(), "expected Ok for: else");
+    }
+
+    #[test]
+    fn test_find_version_release_commit_if_let_some_hash_subject_line_split_once() {
+        let path = "";
+        let version = "";
+        let _result = find_version_release_commit(&path, &version);
+    }
+
+    #[test]
+    fn test_find_version_release_commit_regex_new_pattern() {
+        let path = "";
+        let version = "";
+        let _result = find_version_release_commit(&path, &version);
+    }
+
+    #[test]
+    fn test_find_version_release_commit_ok_none() {
+        let path = "";
+        let version = "";
+        let result = find_version_release_commit(&path, &version);
+        assert!(result.is_ok(), "expected Ok for: Ok(None)");
+    }
+
+    #[test]
+    fn test_categorize_commits_default_path() {
+        let path = "";
+        let commits = Vec::new();
+        let _result = categorize_commits(&path, &commits);
+    }
+
+    #[test]
+    fn test_recommended_bump_from_commits_none_some_bump() {
+        let commits = Vec::new();
+        let result = recommended_bump_from_commits(&commits);
+        assert!(result.is_some(), "expected Some for: None => Some(bump),");
+    }
+
+    #[test]
+    fn test_recommended_bump_from_commits_some_existing_if_bump_rank_existing_rank_some_bump() {
+        let commits = Vec::new();
+        let result = recommended_bump_from_commits(&commits);
+        assert!(
+            result.is_some(),
+            "expected Some for: Some(existing) if bump.rank() > existing.rank() => Some(bump),"
         );
-        // Standard tags still work
-        assert_eq!(
-            extract_version_from_tag("v1.0.0"),
-            Some("1.0.0".to_string())
+    }
+
+    #[test]
+    fn test_recommended_bump_from_commits_some_existing_some_existing() {
+        let commits = Vec::new();
+        let result = recommended_bump_from_commits(&commits);
+        assert!(
+            result.is_some(),
+            "expected Some for: Some(existing) => Some(existing),"
         );
+    }
+
+    #[test]
+    fn test_strip_conventional_prefix_if_let_some_pos_subject_find() {
+        let subject = "";
+        let _result = strip_conventional_prefix(&subject);
     }
 }

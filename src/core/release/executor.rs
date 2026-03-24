@@ -8,7 +8,8 @@ use crate::error::{Error, Result};
 use crate::extension::{self, ExtensionManifest};
 use crate::{changelog, version};
 
-use super::types::{ReleaseContext, ReleaseStepType};
+use super::release_step_type::ReleaseStepType;
+use super::types::ReleaseContext;
 use super::utils::extract_latest_notes;
 
 pub(crate) struct ReleaseStepExecutor {
