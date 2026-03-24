@@ -72,8 +72,8 @@ pub use plan::{
     normalize_sources, run_audit_refactor, run_lint_refactor, run_test_refactor, score_delta,
     summarize_plan_totals, test_refactor_request, weighted_finding_score_with,
     AuditConvergenceScoring, AuditRefactorIterationSummary, AuditRefactorOutcome,
-    LintSourceOptions, PlanOverlap, PlanStageSummary, RefactorPlan,
-    RefactorPlanRequest, TestSourceOptions, KNOWN_PLAN_SOURCES,
+    LintSourceOptions, PlanOverlap, PlanStageSummary, RefactorPlan, RefactorPlanRequest,
+    TestSourceOptions, KNOWN_PLAN_SOURCES,
 };
 pub use propagate::{propagate, PropagateConfig, PropagateEdit, PropagateField, PropagateResult};
 pub use rename::{
