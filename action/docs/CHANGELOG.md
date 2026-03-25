@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.13.1] - 2026-03-25
+
+### Fixed
+- skip autofix when a previous autofix was reverted on the branch
+
 ## [1.13.0] - 2026-03-24
 
 ### Added
