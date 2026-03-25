@@ -1,5 +1,13 @@
 //! audit_finding — extracted from conventions.rs.
 
+use super::super::fingerprint::FileFingerprint;
+use super::super::*;
+use std::collections::HashMap;
+use std::path::Path;
+
+#[serde(rename_all = "snake_case")]
+pub enum AuditFinding {
+    MissingMethod,
     ExtraMethod,
     MissingRegistration,
     DifferentRegistration,

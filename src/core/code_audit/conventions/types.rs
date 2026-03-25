@@ -1,8 +1,14 @@
 //! types — extracted from conventions.rs.
 
+use super::super::fingerprint::FileFingerprint;
+use super::super::*;
 use super::all_names;
 use super::from_str;
 use super::Err;
+use std::collections::HashMap;
+use std::path::Path;
+
+/// A discovered convention: a pattern that most files in a group follow.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Convention {
     /// Human-readable name (auto-generated or from config).

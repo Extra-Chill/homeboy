@@ -14,6 +14,18 @@ pub use language::*;
 pub use signature_consistency::*;
 pub use types::*;
 
+use std::collections::HashMap;
+use std::path::Path;
+
+use super::fingerprint::FileFingerprint;
+use super::import_matching::has_import;
+use super::naming::{detect_naming_suffix, suffix_matches};
+use super::signatures::{compute_signature_skeleton, tokenize_signature};
+
+impl Language {
+    pub fn from_extension(ext: &str) -> Self {
+        match ext {
+            "php" => Language::Php,
             "rs" => Language::Rust,
             "js" | "jsx" | "mjs" => Language::JavaScript,
             "ts" | "tsx" => Language::TypeScript,
