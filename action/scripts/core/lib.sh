@@ -9,6 +9,8 @@ source "${SCRIPT_DIR}/../scope/flags.sh"
 # Prefix used for all autofix commits. Loop guards grep for this prefix,
 # so the subject line can vary after it (e.g. fix types, file count).
 AUTOFIX_COMMIT_PREFIX="chore(ci): homeboy autofix"
+AUTOFIX_BOT_NAME="homeboy-ci[bot]"
+AUTOFIX_BOT_EMAIL="266378653+homeboy-ci[bot]@users.noreply.github.com"
 
 # Check whether any autofix commit was reverted on this branch.
 # A revert indicates the autofix output was broken — the bot should back off
@@ -31,6 +33,18 @@ has_reverted_autofix() {
     # Non-PR context: check recent history (generous window)
     git log --format=%s -n 20 2>/dev/null | grep -qF "${revert_pattern}"
   fi
+}
+
+# Check whether the current HEAD commit was authored by the autofix bot.
+# PR autofix should run only after human commits; bot-authored HEAD commits
+# indicate we're in a rerun after an autofix push and must not write again.
+head_commit_is_autofix_bot() {
+  local author_name
+  local author_email
+  author_name="$(git log -1 --format=%an 2>/dev/null || true)"
+  author_email="$(git log -1 --format=%ae 2>/dev/null || true)"
+
+  [ "${author_name}" = "${AUTOFIX_BOT_NAME}" ] || [ "${author_email}" = "${AUTOFIX_BOT_EMAIL}" ]
 }
 
 # Check whether the current PR is still open.
@@ -377,5 +391,4 @@ build_autofix_command() {
 
   printf '%s\n' "${full_cmd}"
 }
-
 

@@ -59,6 +59,14 @@ if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ] || [ "${GITHUB_ACTOR:-}" = "h
   exit 0
 fi
 
+if head_commit_is_autofix_bot; then
+  echo "Skipping autofix: HEAD commit author is ${AUTOFIX_BOT_NAME} (human-commit-only guard)"
+  echo "attempted=false" >> "${GITHUB_OUTPUT}"
+  echo "status=skipped-head-bot-author" >> "${GITHUB_OUTPUT}"
+  echo "committed=false" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
 if ! pr_is_active; then
   echo "Skipping autofix: PR #${PR_NUMBER} is no longer open (merged or closed)"
   echo "attempted=false" >> "${GITHUB_OUTPUT}"

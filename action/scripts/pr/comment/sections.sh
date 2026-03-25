@@ -20,6 +20,8 @@ append_autofix_section() {
     SECTION_BODY+="> ${autofix_summary}"$'\n\n'
   elif [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_ATTEMPTED:-false}" = "true" ] && [ "${AUTOFIX_STATUS:-}" = "push-failed" ]; then
     SECTION_BODY+="> :warning: Autofix generated changes but could not push them back to **${AUTOFIX_TARGET_REPO:-${REPO}}:${AUTOFIX_TARGET_BRANCH:-unknown}**"$'\n\n'
+  elif [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_STATUS:-}" = "skipped-head-bot-author" ]; then
+    SECTION_BODY+="> :information_source: Autofix skipped — PR head is already a **homeboy-ci[bot]** commit, so PR autofix only runs after human commits"$'\n\n'
   elif [ "${AUTOFIX_ENABLED}" = "true" ]; then
     SECTION_BODY+="> :information_source: Autofix enabled, but no fixable file changes were produced"$'\n\n'
   fi
