@@ -10,6 +10,29 @@ source "${SCRIPT_DIR}/../scope/flags.sh"
 # so the subject line can vary after it (e.g. fix types, file count).
 AUTOFIX_COMMIT_PREFIX="chore(ci): homeboy autofix"
 
+# Check whether any autofix commit was reverted on this branch.
+# A revert indicates the autofix output was broken — the bot should back off
+# instead of pushing the same broken code again.
+#
+# Checks the commit range (base..HEAD for PRs, last N commits otherwise)
+# for subjects matching: Revert "chore(ci): homeboy autofix*"
+#
+# Arguments:
+#   $1 - optional base ref for range scoping (e.g., origin/main)
+# Returns 0 if a reverted autofix was found, 1 otherwise.
+has_reverted_autofix() {
+  local base="${1:-}"
+  local revert_pattern="Revert \"${AUTOFIX_COMMIT_PREFIX}"
+
+  if [ -n "${base}" ]; then
+    # PR context: check only commits on this branch
+    git log --format=%s "${base}..HEAD" 2>/dev/null | grep -qF "${revert_pattern}"
+  else
+    # Non-PR context: check recent history (generous window)
+    git log --format=%s -n 20 2>/dev/null | grep -qF "${revert_pattern}"
+  fi
+}
+
 # Check whether the current PR is still open.
 # Returns 0 (true) if the PR is open, 1 (false) if merged/closed/unknown.
 # Uses gh CLI when available, falls back to GitHub REST API via curl.

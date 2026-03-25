@@ -86,6 +86,22 @@ if [ -n "${AUTOFIX_LABEL:-}" ]; then
   fi
 fi
 
+# Check if a previous autofix commit was reverted on this branch.
+# A revert is a clear signal that the autofix output was broken — don't
+# push the same broken code again.
+REVERT_BASE="${BASE:-}"
+if [ -z "${REVERT_BASE}" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+  REVERT_BASE="origin/${GITHUB_BASE_REF}"
+fi
+if has_reverted_autofix "${REVERT_BASE}"; then
+  echo "Skipping autofix: a previous autofix commit was reverted on this branch"
+  echo "This indicates the autofix output was incorrect — manual review required."
+  echo "attempted=false" >> "${GITHUB_OUTPUT}"
+  echo "status=skipped-reverted" >> "${GITHUB_OUTPUT}"
+  echo "committed=false" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
 COMP_ID="$(resolve_component_id)"
 WORKSPACE="$(resolve_workspace)"
 TARGET_REPO="$(resolve_pr_target_repo)"

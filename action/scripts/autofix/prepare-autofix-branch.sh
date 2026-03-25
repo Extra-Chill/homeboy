@@ -45,6 +45,15 @@ if [[ "${GITHUB_REF_NAME:-}" == ci/autofix/* ]]; then
   exit 0
 fi
 
+# Check if a previous autofix commit was reverted in recent history.
+# A revert signals broken autofix output — back off until a human intervenes.
+if has_reverted_autofix; then
+  echo "Skipping non-PR autofix: a previous autofix commit was reverted in recent history"
+  echo "This indicates the autofix output was incorrect — manual review required."
+  echo "committed=false" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
 COMP_ID="$(resolve_component_id)"
 WORKSPACE="$(resolve_workspace)"
 
