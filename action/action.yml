@@ -378,34 +378,14 @@ runs:
         APP_TOKEN: ${{ inputs.app-token }}
       run: bash ${{ github.action_path }}/scripts/autofix/prepare-autofix-branch.sh
 
-    # Rerun verifies that autofix actually repaired the failures. Skip when
-    # the command set is refactor-only — the autofix IS the same refactor
-    # command, so rerunning it is circular and wastes CI minutes.
-    - name: Re-run Homeboy commands after autofix
-      id: rerun-commands
-      continue-on-error: true
-      if: |
-        steps.resolve-commands.outputs.refactor-only != 'true'
-        && (
-          (github.event_name == 'pull_request' && steps.autofix-commit.outputs.committed == 'true')
-          || (github.event_name != 'pull_request' && steps.autofix-prepare-nonpr.outputs.committed == 'true')
-        )
-      shell: bash
-      env:
-        COMPONENT_NAME: ${{ inputs.component }}
-        EXTRA_ARGS: ${{ inputs.args }}
-        RUN_GROUP_PREFIX: homeboy rerun
-      run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
-
     - name: Open non-PR autofix PR
       id: autofix-open-pr
-      if: github.event_name != 'pull_request' && steps.autofix-prepare-nonpr.outputs.committed == 'true' && steps.rerun-commands.outputs.results != '' && !contains(steps.rerun-commands.outputs.results, '"fail"')
+      if: github.event_name != 'pull_request' && steps.autofix-prepare-nonpr.outputs.committed == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token || github.token }}
         COMPONENT_NAME: ${{ inputs.component }}
         AUTOFIX_BRANCH: ${{ steps.autofix-prepare-nonpr.outputs.autofix-branch }}
-        RESULTS: ${{ steps.rerun-commands.outputs.results }}
         AUTOFIX_FILE_COUNT: ${{ steps.autofix-prepare-nonpr.outputs.autofix-file-count }}
         AUTOFIX_FIX_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-fix-types }}
         AUTOFIX_FINDING_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-finding-types }}
@@ -419,7 +399,6 @@ runs:
       shell: bash
       env:
         FIRST_RESULTS: ${{ steps.run-commands.outputs.results }}
-        RERUN_RESULTS: ${{ steps.rerun-commands.outputs.results }}
       run: bash ${{ github.action_path }}/scripts/core/select-final-results.sh
 
     - name: Generate failure digest
