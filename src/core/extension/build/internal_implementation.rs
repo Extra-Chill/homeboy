@@ -1,14 +1,9 @@
 //! internal_implementation — extracted from mod.rs.
 
 use crate::component::{self, Component};
-use crate::config::{is_json_input, parse_bulk_ids};
 use crate::core::extension::build::command;
-use crate::core::extension::build::run;
-use crate::core::extension::build::BuildOutput;
 use crate::core::extension::build::BuildResult;
 use crate::core::extension::build::ResolvedBuildCommand;
-use crate::core::extension::*;
-use crate::deploy::permissions;
 use crate::engine::command::CapturedOutput;
 use crate::engine::shell;
 use crate::error::{Error, Result};
@@ -16,9 +11,6 @@ use crate::extension::{self, exec_context, ExtensionCapability, ExtensionExecuti
 use crate::output::{BulkResult, BulkSummary, ItemOutcome};
 use crate::paths;
 use crate::server::execute_local_command_in_dir;
-use serde::Serialize;
-use std::path::PathBuf;
-
 /// Resolve build command for a component using extension-managed build configuration.
 ///
 /// Priority:

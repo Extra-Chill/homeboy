@@ -1,24 +1,7 @@
 //! public_api — extracted from mod.rs.
 
-use crate::component::{self, Component};
-use crate::config::{is_json_input, parse_bulk_ids};
 use crate::core::extension::build::command;
 use crate::core::extension::build::BuildResult;
-use crate::core::extension::*;
-use crate::deploy::permissions;
-use crate::engine::command::CapturedOutput;
-use crate::error::{Error, Result};
-use crate::extension::{self, exec_context, ExtensionCapability, ExtensionExecutionContext};
-use crate::output::{BulkResult, BulkSummary, ItemOutcome};
-use serde::Serialize;
-use std::path::PathBuf;
-
-/// Run build for one or more components.
-///
-/// Accepts either:
-/// - A single component ID: "extrachill-api"
-/// - A JSON spec: {"componentIds": ["api", "users"]}
-pub fn run(input: &str) -> Result<(BuildResult, i32)> {
     if is_json_input(input) {
         run_bulk(input)
     } else {
@@ -98,4 +81,49 @@ pub(crate) fn format_build_error(
     }
 
     msg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_default_path() {
+        let input = "";
+        let _result = run(&input);
+    }
+
+    #[test]
+    fn test_build_component_match_execute_build_component_component() {
+
+        let _result = build_component();
+    }
+
+    #[test]
+    fn test_build_component_output_success() {
+
+        let result = build_component();
+        assert!(result.is_some(), "expected Some for: output.success");
+    }
+
+    #[test]
+    fn test_build_component_else() {
+
+        let result = build_component();
+        assert!(result.is_some(), "expected Some for: else");
+    }
+
+    #[test]
+    fn test_build_component_err_e_some_1_some_e_to_string() {
+
+        let result = build_component();
+        assert!(result.is_some(), "expected Some for: Err(e) => (Some(1), Some(e.to_string())),");
+    }
+
+    #[test]
+    fn test_format_build_error_default_path() {
+
+        let _result = format_build_error();
+    }
+
 }

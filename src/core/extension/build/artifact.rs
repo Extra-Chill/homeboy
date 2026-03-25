@@ -221,4 +221,77 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), file_path);
     }
+
+    #[test]
+    fn test_resolve_artifact_path_default_path() {
+        let pattern = "";
+        let _result = resolve_artifact_path(&pattern);
+    }
+
+    #[test]
+    fn test_resolve_artifact_path_from_root_path_exists() {
+        let pattern = "";
+        let root = None;
+        let result = resolve_artifact_path_from_root(&pattern, root);
+        assert!(result.is_ok(), "expected Ok for: path.exists()");
+    }
+
+    #[test]
+    fn test_resolve_artifact_path_from_root_some_pattern_to_string() {
+        let pattern = "";
+        let root = None;
+        let _result = resolve_artifact_path_from_root(&pattern, root);
+    }
+
+    #[test]
+    fn test_resolve_artifact_path_from_root_some_pattern_to_string_2() {
+        let pattern = "";
+        let root = None;
+        let _result = resolve_artifact_path_from_root(&pattern, root);
+    }
+
+    #[test]
+    fn test_resolve_artifact_path_from_root_branch_3() {
+        let pattern = "";
+        let root = None;
+        let _result = resolve_artifact_path_from_root(&pattern, root);
+    }
+
+    #[test]
+    fn test_resolve_artifact_path_from_root_entries_is_empty() {
+        let pattern = "";
+        let root = None;
+        let _result = resolve_artifact_path_from_root(&pattern, root);
+    }
+
+    #[test]
+    fn test_resolve_artifact_path_from_root_match_newest() {
+        let pattern = "";
+        let root = None;
+        let _result = resolve_artifact_path_from_root(&pattern, root);
+    }
+
+    #[test]
+    fn test_resolve_artifact_path_from_root_match_newest_2() {
+        let pattern = "";
+        let root = None;
+        let result = resolve_artifact_path_from_root(&pattern, root);
+        assert!(result.is_ok(), "expected Ok for: match newest");
+    }
+
+    #[test]
+    fn test_resolve_artifact_path_from_root_some_pattern_to_string_3() {
+        let pattern = "";
+        let root = None;
+        let _result = resolve_artifact_path_from_root(&pattern, root);
+    }
+
+    #[test]
+    fn test_resolve_artifact_path_from_root_has_expected_effects() {
+        // Expected effects: logging
+        let pattern = "";
+        let root = None;
+        let _ = resolve_artifact_path_from_root(&pattern, root);
+    }
+
 }
