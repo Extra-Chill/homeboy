@@ -52,11 +52,11 @@ if [ -n "${EXISTING_PR_URL}" ]; then
       FINDING_DETAIL="- **Finding categories:** ${AUTOFIX_FINDING_TYPES}"
     fi
 
-    cat > "${UPDATE_BODY_FILE}" <<UPDATEBODY
+cat > "${UPDATE_BODY_FILE}" <<UPDATEBODY
 ## Summary
 ${AUTOFIX_DETAIL:+${AUTOFIX_DETAIL}
 }${FINDING_DETAIL:+${FINDING_DETAIL}
-}- Rerun after autofix passed for configured command set.
+}- Opened immediately after autofix without rerunning quality gates.
 - Generated automatically by Homeboy Action.
 
 ## Context
@@ -94,7 +94,7 @@ cat > "${BODY_FILE}" <<EOF
 ## Summary
 ${AUTOFIX_DETAIL:+${AUTOFIX_DETAIL}
 }${FINDING_DETAIL:+${FINDING_DETAIL}
-}- Rerun after autofix passed for configured command set.
+}- Opened immediately after autofix without rerunning quality gates.
 - Generated automatically by Homeboy Action.
 
 ## Context
