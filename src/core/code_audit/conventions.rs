@@ -651,11 +651,21 @@ pub fn check_signature_consistency(conventions: &mut [Convention], root: &Path) 
                     for t in &tokenized {
                         *len_counts.entry(t.len()).or_insert(0) += 1;
                     }
-                    let majority_len = len_counts
+                    let max_family_size = len_counts.values().copied().max().unwrap_or(0);
+                    if max_family_size < 2 {
+                        continue;
+                    }
+
+                    let majority_lens: Vec<usize> = len_counts
                         .iter()
-                        .max_by_key(|(_, count)| *count)
+                        .filter(|(_, count)| **count == max_family_size)
                         .map(|(len, _)| *len)
-                        .unwrap_or(0);
+                        .collect();
+                    if majority_lens.len() != 1 {
+                        continue;
+                    }
+
+                    let majority_len = majority_lens[0];
 
                     // Build canonical from majority-length sigs
                     let majority_sigs: Vec<&Vec<String>> = tokenized
@@ -1084,6 +1094,45 @@ mod tests {
         assert_eq!(conv.conforming.len(), 2);
         assert_eq!(conv.outliers.len(), 1);
         assert_eq!(conv.outliers[0].file, "handlers/c.rs");
+    }
+
+    #[test]
+    fn signature_check_skips_ambiguous_tie() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(dir.join("undo")).unwrap();
+
+        std::fs::write(
+            dir.join("undo/snapshot.rs"),
+            "pub fn new(root: &Path, label: &str) -> Self { Self {} }\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            dir.join("undo/rollback.rs"),
+            "pub fn new() -> Self { Self {} }\n",
+        )
+        .unwrap();
+
+        let mut conventions = vec![Convention {
+            name: "Undo".to_string(),
+            glob: "undo/*".to_string(),
+            expected_methods: vec!["new".to_string()],
+            expected_registrations: vec![],
+            expected_interfaces: vec![],
+            expected_namespace: None,
+            expected_imports: vec![],
+            conforming: vec!["undo/snapshot.rs".to_string(), "undo/rollback.rs".to_string()],
+            outliers: vec![],
+            total_files: 2,
+            confidence: 1.0,
+        }];
+
+        check_signature_consistency(&mut conventions, &dir);
+
+        let conv = &conventions[0];
+        assert_eq!(conv.conforming.len(), 2);
+        assert!(conv.outliers.is_empty());
     }
 
     #[test]
