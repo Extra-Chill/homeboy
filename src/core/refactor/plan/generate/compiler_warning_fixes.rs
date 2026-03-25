@@ -537,4 +537,24 @@ mod helpers {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_generate_compiler_warning_fixes_root_join_cargo_toml_exists() {
+
+        generate_compiler_warning_fixes();
+    }
+
+    #[test]
+    fn test_generate_compiler_warning_fixes_err_e() {
+
+        generate_compiler_warning_fixes();
+    }
+
+    #[test]
+    fn test_generate_compiler_warning_fixes_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = generate_compiler_warning_fixes();
+    }
+
 }

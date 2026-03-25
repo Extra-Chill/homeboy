@@ -718,4 +718,26 @@ mod tests {
             findings.iter().map(|f| &f.description).collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn test_analyze_dead_code_other_relative_path_fp_relative_path() {
+
+        let result = analyze_dead_code();
+        assert!(!result.is_empty(), "expected non-empty collection for: other.relative_path == fp.relative_path");
+    }
+
+    #[test]
+    fn test_analyze_dead_code_other_internal_calls_contains_export() {
+
+        let result = analyze_dead_code();
+        assert!(!result.is_empty(), "expected non-empty collection for: other.internal_calls.contains(export)");
+    }
+
+    #[test]
+    fn test_analyze_dead_code_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = analyze_dead_code();
+    }
+
 }

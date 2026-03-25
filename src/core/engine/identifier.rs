@@ -87,3 +87,66 @@ pub fn validate_component_id(id: &str) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_slugify_id_a_z_0_9_some_ch() {
+        let value = "";
+        let field_name = "";
+        let _result = slugify_id(&value, &field_name);
+    }
+
+    #[test]
+    fn test_slugify_id_a_z_some_ch_to_ascii_lowercase() {
+        let value = "";
+        let field_name = "";
+        let _result = slugify_id(&value, &field_name);
+    }
+
+    #[test]
+    fn test_slugify_id_if_ch_is_whitespace_ch_ch_some() {
+        let value = "";
+        let field_name = "";
+        let _result = slugify_id(&value, &field_name);
+    }
+
+    #[test]
+    fn test_slugify_id_if_let_some_c_normalized() {
+        let value = "";
+        let field_name = "";
+        let _result = slugify_id(&value, &field_name);
+    }
+
+    #[test]
+    fn test_slugify_id_ok_out() {
+        let value = "";
+        let field_name = "";
+        let result = slugify_id(&value, &field_name);
+        assert!(result.is_ok(), "expected Ok for: Ok(out)");
+    }
+
+    #[test]
+    fn test_slugify_id_has_expected_effects() {
+        // Expected effects: mutation
+        let value = "";
+        let field_name = "";
+        let _ = slugify_id(&value, &field_name);
+    }
+
+    #[test]
+    fn test_validate_component_id_id_chars_any_c_c_is_control_c_c() {
+        let id = "";
+        let _result = validate_component_id(&id);
+    }
+
+    #[test]
+    fn test_validate_component_id_ok() {
+        let id = "";
+        let result = validate_component_id(&id);
+        assert!(result.is_ok(), "expected Ok for: Ok(())");
+    }
+
+}

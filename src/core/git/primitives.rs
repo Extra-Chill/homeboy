@@ -94,3 +94,95 @@ pub fn get_component_path_prefix(local_path: &str) -> Option<String> {
         .ok()
         .map(|p| p.to_string_lossy().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_clone_repo_default_path() {
+        let url = "";
+        let target_dir = Path::new("");
+        let _result = clone_repo(&url, &target_dir);
+    }
+
+    #[test]
+    fn test_clone_repo_ok() {
+        let url = "";
+        let target_dir = Path::new("");
+        let result = clone_repo(&url, &target_dir);
+        assert!(result.is_ok(), "expected Ok for: Ok(())");
+    }
+
+    #[test]
+    fn test_pull_repo_default_path() {
+        let repo_dir = Path::new("");
+        let _result = pull_repo(&repo_dir);
+    }
+
+    #[test]
+    fn test_pull_repo_ok() {
+        let repo_dir = Path::new("");
+        let result = pull_repo(&repo_dir);
+        assert!(result.is_ok(), "expected Ok for: Ok(())");
+    }
+
+    #[test]
+    fn test_is_workdir_clean_match_output() {
+        let path = Path::new("");
+        let _result = is_workdir_clean(&path);
+    }
+
+    #[test]
+    fn test_is_workdir_clean_has_expected_effects() {
+        // Expected effects: process_spawn
+        let path = Path::new("");
+        let _ = is_workdir_clean(&path);
+    }
+
+    #[test]
+    fn test_list_tracked_markdown_files_default_path() {
+
+        let result = list_tracked_markdown_files();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_is_git_repo_default_path() {
+
+        let _result = is_git_repo();
+    }
+
+    #[test]
+    fn test_get_git_root_default_path() {
+        let path = "";
+        let _result = get_git_root(&path);
+    }
+
+    #[test]
+    fn test_get_component_path_prefix_default_path() {
+        let local_path = "";
+        let _result = get_component_path_prefix(&local_path);
+    }
+
+    #[test]
+    fn test_get_component_path_prefix_default_path_2() {
+        let local_path = "";
+        let _result = get_component_path_prefix(&local_path);
+    }
+
+    #[test]
+    fn test_get_component_path_prefix_default_path_3() {
+        let local_path = "";
+        let _result = get_component_path_prefix(&local_path);
+    }
+
+    #[test]
+    fn test_get_component_path_prefix_root_component() {
+        let local_path = "";
+        let result = get_component_path_prefix(&local_path);
+        assert!(result.is_none(), "expected None for: root == component");
+    }
+
+}

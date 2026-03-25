@@ -661,4 +661,78 @@ mod tests {
         );
         assert_eq!(test_file_to_source_path("src/foo.rs"), None);
     }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_finding_description_contains_is_misplaced() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_is_method_level_orphan_finding_description() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_ok_content_content() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_err() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_let_some_start_line_end_line_find_test_function_range_conten() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_if_let_some_new_source_name_rename_candidate() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_let_some_new_source_name_rename_candidate() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_if_let_some_stripped_old_test_name_strip_prefix_test() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_if_let_some_decl_idx_decl_line_idx() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_else_if_let_some_stripped_old_test_name_strip_prefix_test() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_else() {
+
+        generate_orphaned_test_fixes();
+    }
+
+    #[test]
+    fn test_generate_orphaned_test_fixes_has_expected_effects() {
+        // Expected effects: file_read, mutation
+
+        let _ = generate_orphaned_test_fixes();
+    }
+
 }

@@ -198,4 +198,107 @@ mod tests {
         let desc = "Stale file reference `src/utils/shell.rs` (line 87) — target has moved";
         assert_eq!(extract_line_number(desc), Some(87));
     }
+
+    #[test]
+    fn test_extract_suggested_path_if_let_some_pos_suggestion_find_needle() {
+
+        let result = extract_suggested_path();
+        assert!(result.is_some(), "expected Some for: if let Some(pos) = suggestion.find(needle) {{");
+    }
+
+    #[test]
+    fn test_extract_suggested_path_let_some_pos_suggestion_find_needle() {
+
+        let _result = extract_suggested_path();
+    }
+
+    #[test]
+    fn test_extract_suggested_path_let_some_pos_suggestion_find_needle_2() {
+
+        let result = extract_suggested_path();
+        assert!(result.is_some(), "expected Some for: let Some(pos) = suggestion.find(needle)");
+    }
+
+    #[test]
+    fn test_extract_suggested_path_none() {
+
+        let result = extract_suggested_path();
+        assert!(result.is_none(), "expected None for: None");
+    }
+
+    #[test]
+    fn test_should_remove_broken_doc_line_default_path() {
+
+        let _result = should_remove_broken_doc_line();
+    }
+
+    #[test]
+    fn test_extract_stale_ref_path_default_path() {
+
+        let _result = extract_stale_ref_path();
+    }
+
+    #[test]
+    fn test_extract_stale_ref_path_some_rest_end_to_string() {
+
+        let result = extract_stale_ref_path();
+        assert!(result.is_some(), "expected Some for: Some(rest[..end].to_string())");
+    }
+
+    #[test]
+    fn test_extract_line_number_default_path() {
+
+        let _result = extract_line_number();
+    }
+
+    #[test]
+    fn test_apply_stale_doc_reference_fixes_finding_kind_auditfinding_staledocreference() {
+
+        apply_stale_doc_reference_fixes();
+    }
+
+    #[test]
+    fn test_apply_stale_doc_reference_fixes_let_some_old_path_extract_stale_ref_path_finding_description() {
+
+        apply_stale_doc_reference_fixes();
+    }
+
+    #[test]
+    fn test_apply_stale_doc_reference_fixes_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = apply_stale_doc_reference_fixes();
+    }
+
+    #[test]
+    fn test_apply_broken_doc_reference_fixes_finding_kind_auditfinding_brokendocreference() {
+
+        apply_broken_doc_reference_fixes();
+    }
+
+    #[test]
+    fn test_apply_broken_doc_reference_fixes_let_some_line_num_extract_line_number_finding_description_el() {
+
+        apply_broken_doc_reference_fixes();
+    }
+
+    #[test]
+    fn test_apply_broken_doc_reference_fixes_let_ok_content_std_fs_read_to_string_abs_path_else() {
+
+        apply_broken_doc_reference_fixes();
+    }
+
+    #[test]
+    fn test_apply_broken_doc_reference_fixes_let_some_line_content_lines_nth_line_num_saturating_sub_1_el() {
+
+        apply_broken_doc_reference_fixes();
+    }
+
+    #[test]
+    fn test_apply_broken_doc_reference_fixes_has_expected_effects() {
+        // Expected effects: mutation, file_read
+
+        let _ = apply_broken_doc_reference_fixes();
+    }
+
 }

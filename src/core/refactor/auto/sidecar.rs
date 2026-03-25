@@ -16,7 +16,7 @@ impl AutofixSidecarFiles {
     }
 }
 
-pub fn parse_fix_results_file(path: &Path) -> Vec<FixApplied> {
+pub(crate) fn parse_fix_results_file(path: &Path) -> Vec<FixApplied> {
     if !path.exists() {
         return Vec::new();
     }
@@ -33,11 +33,11 @@ pub fn parse_fix_results_file(path: &Path) -> Vec<FixApplied> {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-pub fn parse_fix_plan_file(path: &Path) -> Vec<FixApplied> {
+pub(crate) fn parse_fix_plan_file(path: &Path) -> Vec<FixApplied> {
     parse_fix_results_file(path)
 }
 
-pub fn read_fix_results(results_file: &Path, plan_file: Option<&Path>) -> Vec<FixApplied> {
+pub(crate) fn read_fix_results(results_file: &Path, plan_file: Option<&Path>) -> Vec<FixApplied> {
     if let Some(plan_file) = plan_file {
         let planned_fix_results = parse_fix_plan_file(plan_file);
         if !planned_fix_results.is_empty() {

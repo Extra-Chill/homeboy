@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Read a `homeboy.json` portable config from a repo directory.
-pub fn read_portable_config(repo_path: &Path) -> Result<Option<Value>> {
+pub(crate) fn read_portable_config(repo_path: &Path) -> Result<Option<Value>> {
     let config_path = repo_path.join("homeboy.json");
     if !config_path.exists() {
         return Ok(None);
@@ -176,7 +176,7 @@ fn merge_preserving_unknown(existing: Value, component: Value) -> Value {
     }
 }
 
-pub fn has_portable_config(path: &Path) -> bool {
+pub(crate) fn has_portable_config(path: &Path) -> bool {
     read_portable_config(path).ok().flatten().is_some()
 }
 

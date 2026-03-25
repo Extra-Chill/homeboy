@@ -24,17 +24,17 @@ pub struct ExtensionUpdateCache {
     pub checked_at: u64,
 }
 
-fn cache_path() -> Option<std::path::PathBuf> {
+pub(crate) fn cache_path() -> Option<std::path::PathBuf> {
     paths::homeboy().ok().map(|path| path.join(CACHE_FILENAME))
 }
 
-fn read_cache() -> Option<ExtensionUpdateCache> {
+pub(crate) fn read_cache() -> Option<ExtensionUpdateCache> {
     let path = cache_path()?;
     let content = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
-fn write_cache(cache: &ExtensionUpdateCache) {
+pub(crate) fn write_cache(cache: &ExtensionUpdateCache) {
     let Some(path) = cache_path() else { return };
     let Ok(content) = serde_json::to_string_pretty(cache) else {
         return;
@@ -42,7 +42,7 @@ fn write_cache(cache: &ExtensionUpdateCache) {
     let _ = std::fs::write(&path, content);
 }
 
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -59,7 +59,7 @@ fn is_disabled_by_env() -> bool {
         .unwrap_or(false)
 }
 
-fn is_disabled_by_config() -> bool {
+pub(crate) fn is_disabled_by_config() -> bool {
     !crate::defaults::load_config().update_check
 }
 
@@ -167,4 +167,24 @@ mod tests {
         assert_eq!(parsed.extensions_behind["wordpress"], 3);
         assert_eq!(parsed.checked_at, 1700000000);
     }
+
+    #[test]
+    fn test_run_startup_check_if_let_some_ref_cache_cached() {
+
+        run_startup_check();
+    }
+
+    #[test]
+    fn test_run_startup_check_if_let_some_update_extension_check_update_available_id() {
+
+        run_startup_check();
+    }
+
+    #[test]
+    fn test_run_startup_check_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = run_startup_check();
+    }
+
 }

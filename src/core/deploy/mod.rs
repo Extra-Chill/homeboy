@@ -9,7 +9,7 @@ mod types;
 mod version_overrides;
 
 // Public API — re-export types and entry points used outside the deploy module
-pub use planning::{bucket_release_states, calculate_release_state, classify_release_state};
+pub use planning::{bucket_release_states, calculate_release_state };
 pub use types::{
     parse_bulk_component_ids, ComponentDeployResult, ComponentStatus, DeployConfig,
     DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult, MultiDeploySummary,

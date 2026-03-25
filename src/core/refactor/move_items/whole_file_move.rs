@@ -7,6 +7,7 @@ use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use crate::{component, Result};
 
 use super::{
+use crate::core::refactor::add::resolve_root;
     core_parse_items, ext_parse_items, ext_rewrite_caller_imports, find_refactor_extension,
     ImportRewrite, MoveFileResult,
 };
@@ -330,21 +331,3 @@ pub(crate) fn add_mod_declaration(content: &str, module_name: &str) -> String {
 }
 
 /// Resolve the root directory from component ID or explicit path.
-pub fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> Result<PathBuf> {
-    if let Some(p) = path {
-        let pb = PathBuf::from(p);
-        if !pb.is_dir() {
-            return Err(crate::Error::validation_invalid_argument(
-                "path",
-                format!("Not a directory: {}", p),
-                None,
-                None,
-            ));
-        }
-        Ok(pb)
-    } else {
-        let comp = component::resolve(component_id)?;
-        let validated = component::validate_local_path(&comp)?;
-        Ok(validated)
-    }
-}

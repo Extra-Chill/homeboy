@@ -362,4 +362,26 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].captured, "PipelineAbilities");
     }
+
+    #[test]
+    fn test_analyze_wrappers_let_some_config_load_config_root_else() {
+
+        let result = analyze_wrappers();
+        assert!(!result.is_empty(), "expected non-empty collection for: let Some(config) = load_config(root) else {{");
+    }
+
+    #[test]
+    fn test_analyze_wrappers_if_let_some_line_m_line_num() {
+
+        let result = analyze_wrappers();
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(line) = m.line_num {{");
+    }
+
+    #[test]
+    fn test_analyze_wrappers_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = analyze_wrappers();
+    }
+
 }

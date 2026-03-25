@@ -154,4 +154,87 @@ mod tests {
         assert!(!suffix_matches("BlockSanitizer", "Ability"));
         assert!(!suffix_matches("EngineHelpers", "Tool"));
     }
+
+    #[test]
+    fn test_detect_naming_suffix_names_len_2() {
+
+        let result = detect_naming_suffix();
+        assert!(result.is_none(), "expected None for: names.len() < 2");
+    }
+
+    #[test]
+    fn test_detect_naming_suffix_if_let_some_suffix_extract_class_suffix_name() {
+
+        let result = detect_naming_suffix();
+        assert!(result.is_some(), "expected Some for: if let Some(suffix) = extract_class_suffix(name) {{");
+    }
+
+    #[test]
+    fn test_extract_class_suffix_ch_is_uppercase_i_0() {
+
+        let result = extract_class_suffix();
+        assert!(result.is_some(), "expected Some for: ch.is_uppercase() && i > 0");
+    }
+
+    #[test]
+    fn test_suffix_matches_candidate_ends_with_suffix() {
+
+        let result = suffix_matches();
+        assert!(result, "expected true when: candidate.ends_with(suffix)");
+    }
+
+    #[test]
+    fn test_suffix_matches_candidate_ends_with_plural_suffix() {
+
+        let result = suffix_matches();
+        assert!(result, "expected true when: candidate.ends_with(&plural_suffix)");
+    }
+
+    #[test]
+    fn test_suffix_matches_candidate_ends_with_plural_suffix_2() {
+
+        let _result = suffix_matches();
+    }
+
+    #[test]
+    fn test_suffix_matches_candidate_ends_with_singular() {
+
+        let result = suffix_matches();
+        assert!(result, "expected true when: candidate.ends_with(&singular)");
+    }
+
+    #[test]
+    fn test_pluralize_default_path() {
+
+        let _result = pluralize();
+    }
+
+    #[test]
+    fn test_singularize_word_ends_with_ies_word_len_3() {
+
+        let result = singularize();
+        assert!(result.is_some(), "expected Some for: word.ends_with(\"ies\") && word.len() > 3");
+    }
+
+    #[test]
+    fn test_singularize_word_ends_with_ses() {
+
+        let result = singularize();
+        assert!(result.is_some(), "expected Some for: word.ends_with(\"ses\")");
+    }
+
+    #[test]
+    fn test_singularize_word_ends_with_s_word_ends_with_ss_word_len_1() {
+
+        let result = singularize();
+        assert!(result.is_some(), "expected Some for: word.ends_with('s') && !word.ends_with(\"ss\") && word.len() > 1");
+    }
+
+    #[test]
+    fn test_singularize_else() {
+
+        let result = singularize();
+        assert!(result.is_none(), "expected None for: else");
+    }
+
 }

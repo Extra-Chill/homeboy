@@ -39,7 +39,7 @@ pub fn inventory() -> Result<Vec<Component>> {
 }
 
 /// Check if any linked extension provides an artifact pattern.
-pub fn extension_provides_artifact_pattern(component: &Component) -> bool {
+pub(crate) fn extension_provides_artifact_pattern(component: &Component) -> bool {
     component
         .extensions
         .as_ref()

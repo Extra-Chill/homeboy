@@ -396,4 +396,54 @@ mod tests {
         // Sorted: [4, 8, 8, 8, 8] → median at index 2 = 8
         assert_eq!(median_indent(&lines, 1, 5), 8);
     }
+
+    #[test]
+    fn test_generate_intra_duplicate_fixes_finding_kind_auditfinding_intramethodduplicate() {
+
+        generate_intra_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_intra_duplicate_fixes_ok_n_if_n_0_n() {
+
+        generate_intra_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_intra_duplicate_fixes_ok_n_if_n_0_n_2() {
+
+        generate_intra_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_intra_duplicate_fixes_ok_n_if_n_0_n_3() {
+
+        generate_intra_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_intra_duplicate_fixes_ok_c_c() {
+
+        generate_intra_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_intra_duplicate_fixes_err() {
+
+        generate_intra_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_intra_duplicate_fixes_blocked_reason_some_reason() {
+
+        generate_intra_duplicate_fixes();
+    }
+
+    #[test]
+    fn test_generate_intra_duplicate_fixes_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = generate_intra_duplicate_fixes();
+    }
+
 }

@@ -174,4 +174,25 @@ mod tests {
         assert!(!is_test_path("src/utils/test_helpers.rs")); // helper, not a test
         assert!(!is_test_path("src/testing/framework.rs")); // "testing" != "tests"
     }
+
+    #[test]
+    fn test_extension_provided_file_extensions_default_path() {
+
+        let result = extension_provided_file_extensions();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_walk_source_files_ok_files() {
+
+        let result = walk_source_files();
+        assert!(result.is_ok(), "expected Ok for: Ok(files)");
+    }
+
+    #[test]
+    fn test_count_unclaimed_source_files_default_path() {
+
+        let _result = count_unclaimed_source_files();
+    }
+
 }

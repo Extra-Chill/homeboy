@@ -100,3 +100,115 @@ pub fn parse_version_targets(targets: &[String]) -> Result<Vec<VersionTarget>> {
     }
     Ok(parsed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_version_target_conflict_existing_pattern_new_pattern() {
+        let existing = Vec::new();
+        let new_file = "";
+        let new_pattern = "";
+        let _component_id = "";
+        let result = validate_version_target_conflict(&existing, &new_file, &new_pattern, &_component_id);
+        assert!(result.is_ok(), "expected Ok for: existing_pattern == new_pattern");
+    }
+
+    #[test]
+    fn test_validate_version_target_conflict_existing_pattern_new_pattern_2() {
+        let existing = Vec::new();
+        let new_file = "";
+        let new_pattern = "";
+        let _component_id = "";
+        let result = validate_version_target_conflict(&existing, &new_file, &new_pattern, &_component_id);
+        assert!(result.is_ok(), "expected Ok for: existing_pattern == new_pattern");
+    }
+
+    #[test]
+    fn test_validate_version_pattern_some_pattern_to_string() {
+        let pattern = "";
+        let _result = validate_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_validate_version_pattern_some_pattern_to_string_2() {
+        let pattern = "";
+        let _result = validate_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_validate_version_pattern_default_path() {
+        let pattern = "";
+        let _result = validate_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_validate_version_pattern_some_pattern_to_string_3() {
+        let pattern = "";
+        let _result = validate_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_validate_version_pattern_ok() {
+        let pattern = "";
+        let result = validate_version_pattern(&pattern);
+        assert!(result.is_ok(), "expected Ok for: Ok(())");
+    }
+
+    #[test]
+    fn test_normalize_version_pattern_default_path() {
+        let pattern = "";
+        let _result = normalize_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_normalize_version_pattern_has_expected_effects() {
+        // Expected effects: mutation
+        let pattern = "";
+        let _ = normalize_version_pattern(&pattern);
+    }
+
+    #[test]
+    fn test_parse_version_targets_default_path() {
+        let targets = Vec::new();
+        let result = parse_version_targets(&targets);
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_parse_version_targets_if_let_some_p_pattern() {
+        let targets = Vec::new();
+        let result = parse_version_targets(&targets);
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(p) = pattern {{");
+    }
+
+    #[test]
+    fn test_parse_version_targets_let_some_p_pattern() {
+        let targets = Vec::new();
+        let result = parse_version_targets(&targets);
+        assert!(!result.is_empty(), "expected non-empty collection for: let Some(p) = pattern");
+    }
+
+    #[test]
+    fn test_parse_version_targets_let_some_p_pattern_2() {
+        let targets = Vec::new();
+        let result = parse_version_targets(&targets);
+        assert!(!result.is_empty(), "expected non-empty collection for: let Some(p) = pattern");
+    }
+
+    #[test]
+    fn test_parse_version_targets_ok_parsed() {
+        let targets = Vec::new();
+        let result = parse_version_targets(&targets);
+        assert!(!result.is_empty(), "expected non-empty collection for: Ok(parsed)");
+    }
+
+    #[test]
+    fn test_parse_version_targets_has_expected_effects() {
+        // Expected effects: mutation
+        let targets = Vec::new();
+        let _ = parse_version_targets(&targets);
+    }
+
+}

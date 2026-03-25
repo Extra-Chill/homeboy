@@ -117,7 +117,7 @@ impl std::fmt::Display for AffectReason {
 ///
 /// Uses `git show <ref>:<path>` to get the base version without checkout,
 /// then runs the extension fingerprint script on that content.
-pub fn fingerprint_from_git_ref(
+pub(crate) fn fingerprint_from_git_ref(
     source_path: &str,
     git_ref: &str,
     relative_path: &str,
@@ -172,7 +172,7 @@ pub fn fingerprint_from_git_ref(
 ///
 /// For each changed file, retrieves the base version, fingerprints it, and
 /// produces a `SymbolDiff` describing what symbols changed.
-pub fn diff_changed_files(
+pub(crate) fn diff_changed_files(
     source_path: &str,
     git_ref: &str,
     changed_files: &[String],
@@ -360,7 +360,7 @@ fn similarity(a: &str, b: &str) -> f64 {
 /// - `hooks` matching removed hook names
 ///
 /// Returns only files NOT already in the changed set.
-pub fn find_affected_files(
+pub(crate) fn find_affected_files(
     diffs: &[SymbolDiff],
     all_fingerprints: &[&FileFingerprint],
     changed_files: &HashSet<&str>,
@@ -469,7 +469,7 @@ pub fn find_affected_files(
 ///   3. Filter findings to changed files + affected files
 ///
 /// Returns the expanded file set and a list of affected files for logging.
-pub fn expand_scope(
+pub(crate) fn expand_scope(
     source_path: &str,
     git_ref: &str,
     changed_files: &[String],
@@ -655,12 +655,6 @@ mod tests {
             vec![("action", "my_custom_action")],
         );
         let current = make_fingerprint(
-            "Foo.php",
-            vec![],
-            vec![],
-            vec![],
-            None,
-            None,
             vec![("action", "my_renamed_action")],
         );
 

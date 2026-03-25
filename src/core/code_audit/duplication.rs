@@ -12,581 +12,30 @@
 //! - `detect_near_duplicates()` → flat `Vec<Finding>` for structural near-duplicates
 //! - `detect_intra_method_duplicates()` → duplicated blocks within a single method
 
+mod build_groups;
+mod constants;
+mod intra_method_duplication;
+mod near_duplicate_detection;
+
+pub use build_groups::*;
+pub use constants::*;
+pub use intra_method_duplication::*;
+pub use near_duplicate_detection::*;
+
+
 use std::collections::HashMap;
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 
-/// Minimum number of locations for a function to count as duplicated.
-const MIN_DUPLICATE_LOCATIONS: usize = 2;
-
-/// A group of files containing an identical function.
-///
-/// The fixer uses this to keep the canonical copy and remove the rest.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DuplicateGroup {
-    /// The duplicated function name.
-    pub function_name: String,
-    /// File chosen to keep the function (canonical location).
-    pub canonical_file: String,
-    /// Files where the duplicate should be removed and replaced with an import.
-    pub remove_from: Vec<String>,
-}
-
-/// Build grouped duplication data from fingerprints.
-///
-/// For each group of identical functions, picks a canonical file (shortest
-/// path, then alphabetical) and lists the rest as removal targets.
-fn build_groups(fingerprints: &[&FileFingerprint]) -> HashMap<(String, String), Vec<String>> {
-    let mut hash_groups: HashMap<(String, String), Vec<String>> = HashMap::new();
-
-    for fp in fingerprints {
-        for (method_name, body_hash) in &fp.method_hashes {
-            hash_groups
-                .entry((method_name.clone(), body_hash.clone()))
-                .or_default()
-                .push(fp.relative_path.clone());
-        }
-    }
-
-    hash_groups
-}
-
-/// Pick the canonical file from a list of locations.
-///
-/// Heuristics (in order):
-/// 1. Files in a `utils/` directory are preferred (already shared)
-/// 2. Shortest path (most general module)
-/// 3. Alphabetical (deterministic tiebreaker)
-fn pick_canonical(locations: &[String]) -> String {
-    let mut sorted = locations.to_vec();
-    sorted.sort_by(|a, b| {
-        let a_utils = a.contains("/utils/") || a.contains("/utils.");
-        let b_utils = b.contains("/utils/") || b.contains("/utils.");
-        // utils files first
-        b_utils
-            .cmp(&a_utils)
-            // then shortest path
-            .then_with(|| a.len().cmp(&b.len()))
-            // then alphabetical
-            .then_with(|| a.cmp(b))
-    });
-    sorted[0].clone()
-}
-
-/// Detect duplicate groups with canonical file selection.
-///
-/// Returns structured data the fixer uses to remove duplicates.
-pub(crate) fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<DuplicateGroup> {
-    let hash_groups = build_groups(fingerprints);
-    let mut groups = Vec::new();
-
-    for ((method_name, _hash), locations) in &hash_groups {
-        if locations.len() < MIN_DUPLICATE_LOCATIONS {
-            continue;
-        }
-
-        let canonical = pick_canonical(locations);
-        let mut remove_from: Vec<String> = locations
-            .iter()
-            .filter(|f| **f != canonical)
-            .cloned()
-            .collect();
-        remove_from.sort();
-
-        groups.push(DuplicateGroup {
-            function_name: method_name.clone(),
-            canonical_file: canonical,
-            remove_from,
-        });
-    }
-
-    groups.sort_by(|a, b| a.function_name.cmp(&b.function_name));
-    groups
-}
-
-/// Detect duplicated functions across all fingerprinted files.
-///
-/// Groups functions by their body hash. When two or more files contain a
-/// function with the same name and the same normalized body hash, a finding
-/// is emitted for each location.
-/// Detect exact function body duplicates across files.
-///
-/// `convention_methods` are excluded — identical implementations across convention-
-/// following files are expected behavior (e.g. `__construct`, `checkPermission`,
-/// interface methods with identical bodies).
-pub(crate) fn detect_duplicates(
-    fingerprints: &[&FileFingerprint],
-    convention_methods: &std::collections::HashSet<String>,
-) -> Vec<Finding> {
-    let hash_groups = build_groups(fingerprints);
-    let mut findings = Vec::new();
-
-    for ((method_name, _hash), locations) in &hash_groups {
-        if locations.len() < MIN_DUPLICATE_LOCATIONS {
-            continue;
-        }
-
-        // Skip convention-expected methods — identical implementations are by design.
-        if convention_methods.contains(method_name) {
-            continue;
-        }
-
-        let suggestion = format!(
-            "Function `{}` has identical body in {} files. \
-             Extract to a shared module and import it.",
-            method_name,
-            locations.len()
-        );
-
-        // Emit one finding per file that has the duplicate
-        for file in locations {
-            let mut also_in_vec: Vec<_> =
-                locations.iter().filter(|f| *f != file).cloned().collect();
-            also_in_vec.sort();
-            let also_in = also_in_vec.join(", ");
-
-            findings.push(Finding {
-                convention: "duplication".to_string(),
-                severity: Severity::Warning,
-                file: file.clone(),
-                description: format!("Duplicate function `{}` — also in {}", method_name, also_in),
-                suggestion: suggestion.clone(),
-                kind: AuditFinding::DuplicateFunction,
-            });
-        }
-    }
-
-    // Sort by file path then description for deterministic output
-    findings.sort_by(|a, b| {
-        a.file
-            .cmp(&b.file)
-            .then_with(|| a.description.cmp(&b.description))
-    });
-    findings
-}
-
 // ============================================================================
 // Near-Duplicate Detection (structural similarity)
 // ============================================================================
 
-/// Names that are too generic to flag as near-duplicates.
-/// These appear in many files with completely unrelated implementations.
-const GENERIC_NAMES: &[&str] = &[
-    "run", "new", "default", "build", "list", "show", "set", "get", "delete", "remove", "clear",
-    "create", "update", "status", "search", "find", "read", "write", "rename", "init", "test",
-    "fmt", "from", "into", "clone", "drop", "display", "parse", "validate", "execute", "handle",
-    "process", "merge", "resolve", "pin", "plan",
-];
-
-/// Minimum body line count — skip trivial functions (1-2 line bodies).
-/// Functions like `fn default_true() -> bool { true }` are too small
-/// to meaningfully refactor into shared code with a parameter.
-const MIN_BODY_LINES: usize = 3;
-
-/// Build structural hash groups from fingerprints.
-///
-/// Groups functions by (name, structural_hash), returning only groups
-/// where the exact body hashes differ (otherwise they'd already be caught
-/// by the exact-duplicate detector).
-fn build_structural_groups(
-    fingerprints: &[&FileFingerprint],
-) -> HashMap<(String, String), Vec<(String, String)>> {
-    // Collect: (fn_name, structural_hash) → [(file, body_hash), ...]
-    let mut groups: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
-
-    for fp in fingerprints {
-        for (method_name, struct_hash) in &fp.structural_hashes {
-            groups
-                .entry((method_name.clone(), struct_hash.clone()))
-                .or_default()
-                .push((
-                    fp.relative_path.clone(),
-                    fp.method_hashes
-                        .get(method_name)
-                        .cloned()
-                        .unwrap_or_default(),
-                ));
-        }
-    }
-
-    groups
-}
-
-/// Check if a file path looks like a CLI command module.
-///
-/// Command modules (`src/commands/*.rs`) are expected to have identically-
-/// named functions (`run`, `list`, etc.) with completely different bodies.
-fn is_command_file(path: &str) -> bool {
-    path.contains("/commands/") || path.starts_with("commands/")
-}
-
-/// Count the body lines of a function in a file's structural hash data.
-///
-/// Uses heuristic: count lines in the content between `fn <name>` and the
-/// matching closing brace. Returns 0 if function not found or content empty.
-fn count_body_lines(fp: &FileFingerprint, method_name: &str) -> usize {
-    let pattern = format!("fn {}", method_name);
-    let lines: Vec<&str> = fp.content.lines().collect();
-    let mut start = None;
-
-    for (i, line) in lines.iter().enumerate() {
-        if line.contains(&pattern) {
-            start = Some(i);
-            break;
-        }
-    }
-
-    let Some(start_idx) = start else { return 0 };
-
-    let mut brace_depth = 0i32;
-    let mut found_open = false;
-    for (offset, line) in lines[start_idx..].iter().enumerate() {
-        for ch in line.chars() {
-            if ch == '{' {
-                brace_depth += 1;
-                found_open = true;
-            } else if ch == '}' {
-                brace_depth -= 1;
-            }
-        }
-        if found_open && brace_depth == 0 {
-            return offset + 1;
-        }
-    }
-
-    0
-}
-
-/// Detect structural near-duplicates across all fingerprinted files.
-///
-/// Groups functions by (name, structural_hash). When two or more files
-/// contain a function with the same name and the same structural hash
-/// but *different* exact body hashes, it means the functions have
-/// identical control flow but differ in identifiers/constants.
-///
-/// Filters out:
-/// - Functions already caught by exact-duplicate detection
-/// - Generic names (`run`, `list`, `show`, etc.)
-/// - Command/core delegation pairs (command module ↔ core module)
-/// - Trivial functions (< 3 body lines)
-pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
-    let structural_groups = build_structural_groups(fingerprints);
-    let exact_groups = build_groups(fingerprints);
-
-    // Collect exact-duplicate (name, hash) pairs for exclusion
-    let exact_duplicate_names: std::collections::HashSet<String> = exact_groups
-        .iter()
-        .filter(|(_, locs)| locs.len() >= MIN_DUPLICATE_LOCATIONS)
-        .map(|((name, _), _)| name.clone())
-        .collect();
-
-    let mut findings = Vec::new();
-
-    for ((method_name, _struct_hash), file_hashes) in &structural_groups {
-        // Need at least 2 locations
-        if file_hashes.len() < MIN_DUPLICATE_LOCATIONS {
-            continue;
-        }
-
-        // Skip if already an exact duplicate
-        if exact_duplicate_names.contains(method_name) {
-            continue;
-        }
-
-        // Skip generic names
-        if GENERIC_NAMES.contains(&method_name.as_str()) {
-            continue;
-        }
-
-        // Check that exact hashes actually differ (otherwise exact detection covers it)
-        let unique_body_hashes: std::collections::HashSet<&str> =
-            file_hashes.iter().map(|(_, h)| h.as_str()).collect();
-        if unique_body_hashes.len() < 2 {
-            continue;
-        }
-
-        let files: Vec<&str> = file_hashes.iter().map(|(f, _)| f.as_str()).collect();
-
-        // Filter: skip if all files are command modules (delegation pattern)
-        if files.iter().all(|f| is_command_file(f)) {
-            continue;
-        }
-
-        // Filter: skip command↔core pairs where one is in commands/ and another in core/
-        // These are the delegation pattern — the command calls the core function.
-        let has_command = files.iter().any(|f| is_command_file(f));
-        let has_non_command = files.iter().any(|f| !is_command_file(f));
-        if has_command && has_non_command && files.len() == 2 {
-            continue;
-        }
-
-        // Filter: skip trivial functions (< MIN_BODY_LINES)
-        let body_lines: Vec<usize> = files
-            .iter()
-            .filter_map(|file_path| {
-                fingerprints
-                    .iter()
-                    .find(|fp| fp.relative_path == *file_path)
-                    .map(|fp| count_body_lines(fp, method_name))
-            })
-            .collect();
-        if body_lines.iter().all(|&l| l < MIN_BODY_LINES) {
-            continue;
-        }
-
-        let suggestion = format!(
-            "Function `{}` has identical structure in {} files but different \
-             identifiers/constants. Consider extracting shared logic into a \
-             parameterized function.",
-            method_name,
-            files.len()
-        );
-
-        for (file, _body_hash) in file_hashes {
-            let mut also_in_vec: Vec<&str> = file_hashes
-                .iter()
-                .filter(|(f, _)| f != file)
-                .map(|(f, _)| f.as_str())
-                .collect();
-            also_in_vec.sort();
-            let also_in = also_in_vec.join(", ");
-
-            findings.push(Finding {
-                convention: "near-duplication".to_string(),
-                severity: Severity::Info,
-                file: file.clone(),
-                description: format!(
-                    "Near-duplicate `{}` — structurally identical to {}",
-                    method_name, also_in
-                ),
-                suggestion: suggestion.clone(),
-                kind: AuditFinding::NearDuplicate,
-            });
-        }
-    }
-
-    findings.sort_by(|a, b| {
-        a.file
-            .cmp(&b.file)
-            .then_with(|| a.description.cmp(&b.description))
-    });
-    findings
-}
-
 // ============================================================================
 // Intra-Method Duplication Detection
 // ============================================================================
-
-/// Minimum number of non-blank, non-comment lines for a block to be
-/// considered meaningful. Blocks shorter than this are too trivial to flag.
-const MIN_INTRA_BLOCK_LINES: usize = 5;
-
-/// Detect duplicated code blocks within the same method/function.
-///
-/// For each method in each file, extracts the method body from the file
-/// content and uses a sliding window of `MIN_INTRA_BLOCK_LINES` normalized
-/// lines. When the same window hash appears at two non-overlapping positions
-/// within one method, it means a block of code was copy-pasted (merge
-/// artifacts, copy-paste errors, etc.).
-pub(crate) fn detect_intra_method_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
-    let mut findings = Vec::new();
-
-    for fp in fingerprints {
-        if fp.content.is_empty() {
-            continue;
-        }
-
-        let file_lines: Vec<&str> = fp.content.lines().collect();
-
-        for method_name in &fp.methods {
-            let Some((body_start, body_end)) = find_method_body(&file_lines, method_name) else {
-                continue;
-            };
-
-            // Extract body lines (excluding the opening/closing brace lines)
-            if body_start + 1 >= body_end {
-                continue;
-            }
-            let body_lines: Vec<&str> = file_lines[body_start + 1..body_end].to_vec();
-
-            if body_lines.len() < MIN_INTRA_BLOCK_LINES * 2 {
-                // Body too short to contain two meaningful duplicate blocks
-                continue;
-            }
-
-            // Build list of (original_body_index, normalized_text) for non-blank
-            // non-comment lines
-            let normalized: Vec<(usize, String)> = body_lines
-                .iter()
-                .enumerate()
-                .filter_map(|(i, line)| {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() || is_comment_only(trimmed) {
-                        None
-                    } else {
-                        Some((i, normalize_line(trimmed)))
-                    }
-                })
-                .collect();
-
-            if normalized.len() < MIN_INTRA_BLOCK_LINES * 2 {
-                continue;
-            }
-
-            // Hash each sliding window of MIN_INTRA_BLOCK_LINES consecutive
-            // normalized lines. Store (hash, start_body_idx, end_body_idx).
-            let mut window_hashes: Vec<(u64, usize, usize)> = Vec::new();
-
-            for win_start in 0..=normalized.len() - MIN_INTRA_BLOCK_LINES {
-                let win_end = win_start + MIN_INTRA_BLOCK_LINES;
-                let mut hasher = std::hash::DefaultHasher::new();
-                for (_, norm_line) in &normalized[win_start..win_end] {
-                    std::hash::Hash::hash(norm_line, &mut hasher);
-                }
-                let hash = std::hash::Hasher::finish(&hasher);
-
-                let orig_start = normalized[win_start].0;
-                let orig_end = normalized[win_end - 1].0;
-
-                window_hashes.push((hash, orig_start, orig_end));
-            }
-
-            // Group by hash, look for non-overlapping pairs
-            let mut hash_positions: HashMap<u64, Vec<(usize, usize)>> = HashMap::new();
-            for (hash, start, end) in &window_hashes {
-                hash_positions
-                    .entry(*hash)
-                    .or_default()
-                    .push((*start, *end));
-            }
-
-            let mut reported = false;
-
-            for positions in hash_positions.values() {
-                if reported || positions.len() < 2 {
-                    continue;
-                }
-
-                let first = positions[0];
-                for other in &positions[1..] {
-                    // Non-overlapping: second block starts after first block ends
-                    if other.0 <= first.1 {
-                        continue;
-                    }
-
-                    // Extend the match: keep sliding forward while lines match
-                    let first_norm_idx = normalized
-                        .iter()
-                        .position(|(i, _)| *i == first.0)
-                        .unwrap_or(0);
-                    let other_norm_idx = normalized
-                        .iter()
-                        .position(|(i, _)| *i == other.0)
-                        .unwrap_or(0);
-
-                    let mut match_len = MIN_INTRA_BLOCK_LINES;
-                    while first_norm_idx + match_len < normalized.len()
-                        && other_norm_idx + match_len < normalized.len()
-                        && first_norm_idx + match_len < other_norm_idx
-                    {
-                        if normalized[first_norm_idx + match_len].1
-                            == normalized[other_norm_idx + match_len].1
-                        {
-                            match_len += 1;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // Convert body-relative line numbers to 1-indexed file lines
-                    let first_file_line = body_start + 1 + first.0 + 1;
-                    let other_file_line = body_start + 1 + other.0 + 1;
-
-                    findings.push(Finding {
-                        convention: "intra-method-duplication".to_string(),
-                        severity: Severity::Warning,
-                        file: fp.relative_path.clone(),
-                        description: format!(
-                            "Duplicated block in `{}` — {} identical lines at line {} and line {}",
-                            method_name, match_len, first_file_line, other_file_line
-                        ),
-                        suggestion: format!(
-                            "Function `{}` contains a duplicated code block ({} lines). \
-                             This is often a merge artifact or copy-paste error. \
-                             Remove the duplicate or extract shared logic.",
-                            method_name, match_len
-                        ),
-                        kind: AuditFinding::IntraMethodDuplicate,
-                    });
-                    reported = true;
-                    break;
-                }
-
-                if reported {
-                    break;
-                }
-            }
-        }
-    }
-
-    findings.sort_by(|a, b| {
-        a.file
-            .cmp(&b.file)
-            .then_with(|| a.description.cmp(&b.description))
-    });
-    findings
-}
-
-/// Find the body of a method/function in the file lines.
-///
-/// Returns `(open_brace_line, close_brace_line)` — the line indices of the
-/// opening and closing braces. Searches for `function <name>` or `fn <name>`.
-fn find_method_body(lines: &[&str], method_name: &str) -> Option<(usize, usize)> {
-    let fn_pattern_php = format!("function {}", method_name);
-    let fn_pattern_rust = format!("fn {}", method_name);
-
-    let mut start_line = None;
-    for (i, line) in lines.iter().enumerate() {
-        if line.contains(&fn_pattern_php) || line.contains(&fn_pattern_rust) {
-            start_line = Some(i);
-            break;
-        }
-    }
-
-    let start = start_line?;
-
-    // Find opening brace from the function declaration line
-    let mut brace_line = None;
-    for (offset, line) in lines[start..].iter().enumerate() {
-        if line.contains('{') {
-            brace_line = Some(start + offset);
-            break;
-        }
-    }
-
-    let open_line = brace_line?;
-
-    // Track brace depth to find closing brace
-    let mut depth = 0i32;
-    let mut found_open = false;
-    for (i, line) in lines[open_line..].iter().enumerate() {
-        for ch in line.chars() {
-            if ch == '{' {
-                depth += 1;
-                found_open = true;
-            } else if ch == '}' {
-                depth -= 1;
-            }
-        }
-        if found_open && depth == 0 {
-            return Some((open_line, open_line + i));
-        }
-    }
-
-    None
-}
 
 /// Check if a line is comment-only (PHP, Rust, or shell style).
 fn is_comment_only(trimmed: &str) -> bool {
@@ -1701,4 +1150,89 @@ mod tests {
             findings.iter().map(|f| &f.description).collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn test_detect_duplicate_groups_default_path() {
+
+        let result = detect_duplicate_groups();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_detect_duplicate_groups_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = detect_duplicate_groups();
+    }
+
+    #[test]
+    fn test_detect_duplicates_default_path() {
+
+        let result = detect_duplicates();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_detect_duplicates_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = detect_duplicates();
+    }
+
+    #[test]
+    fn test_detect_near_duplicates_default_path() {
+
+        let result = detect_near_duplicates();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_detect_near_duplicates_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = detect_near_duplicates();
+    }
+
+    #[test]
+    fn test_detect_intra_method_duplicates_let_some_body_start_body_end_find_method_body_file_lines_met() {
+
+        let result = detect_intra_method_duplicates();
+        assert!(!result.is_empty(), "expected non-empty collection for: let Some((body_start, body_end)) = find_method_body(&file_lines, method_name) else {{");
+    }
+
+    #[test]
+    fn test_detect_intra_method_duplicates_trimmed_is_empty_is_comment_only_trimmed() {
+
+        let result = detect_intra_method_duplicates();
+        assert!(!result.is_empty(), "expected non-empty collection for: trimmed.is_empty() || is_comment_only(trimmed)");
+    }
+
+    #[test]
+    fn test_detect_intra_method_duplicates_else() {
+
+        let result = detect_intra_method_duplicates();
+        assert!(!result.is_empty(), "expected non-empty collection for: else");
+    }
+
+    #[test]
+    fn test_detect_intra_method_duplicates_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = detect_intra_method_duplicates();
+    }
+
+    #[test]
+    fn test_detect_parallel_implementations_default_path() {
+
+        let result = detect_parallel_implementations();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_detect_parallel_implementations_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = detect_parallel_implementations();
+    }
+
 }

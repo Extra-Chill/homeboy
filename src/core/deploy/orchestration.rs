@@ -498,3 +498,70 @@ fn verify_expected_version(components: &[Component], expected: &str) -> Result<(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deploy_components_default_path() {
+
+        let _result = deploy_components();
+    }
+
+    #[test]
+    fn test_deploy_components_default_path_2() {
+
+        let _result = deploy_components();
+    }
+
+    #[test]
+    fn test_deploy_components_config_no_pull_config_skip_build() {
+
+        let _result = deploy_components();
+    }
+
+    #[test]
+    fn test_deploy_components_config_force() {
+
+        let _result = deploy_components();
+    }
+
+    #[test]
+    fn test_deploy_components_checkout_latest_tags_components() {
+
+        let _result = deploy_components();
+    }
+
+    #[test]
+    fn test_deploy_components_else() {
+
+        let _result = deploy_components();
+    }
+
+    #[test]
+    fn test_deploy_components_let_some_ref_expected_config_expected_version() {
+
+        let _result = deploy_components();
+    }
+
+    #[test]
+    fn test_deploy_components_if_let_some_checkout_tag_checkouts() {
+
+        let _result = deploy_components();
+    }
+
+    #[test]
+    fn test_deploy_components_config_head() {
+
+        let _result = deploy_components();
+    }
+
+    #[test]
+    fn test_deploy_components_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = deploy_components();
+    }
+
+}

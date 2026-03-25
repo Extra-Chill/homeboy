@@ -69,7 +69,7 @@ pub fn validate_local_path(component: &Component) -> Result<PathBuf> {
 }
 
 /// Detect component ID from current working directory.
-pub fn detect_from_cwd() -> Option<String> {
+pub(crate) fn detect_from_cwd() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let components = inventory().ok()?;
 

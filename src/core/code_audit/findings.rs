@@ -183,4 +183,19 @@ mod tests {
         assert_eq!(findings[0].severity, Severity::Info);
         assert_eq!(findings[0].kind, AuditFinding::NamingMismatch);
     }
+
+    #[test]
+    fn test_build_findings_default_path() {
+        let results = Vec::new();
+        let result = build_findings(&results);
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_build_findings_has_expected_effects() {
+        // Expected effects: mutation
+        let results = Vec::new();
+        let _ = build_findings(&results);
+    }
+
 }

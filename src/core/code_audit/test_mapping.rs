@@ -113,7 +113,7 @@ pub fn source_to_test_path(source_path: &str, config: &TestMappingConfig) -> Opt
 }
 
 /// Convert a test file path back to its expected source file path.
-pub fn test_to_source_path(test_path: &str, config: &TestMappingConfig) -> Option<String> {
+pub(crate) fn test_to_source_path(test_path: &str, config: &TestMappingConfig) -> Option<String> {
     let pattern = &config.test_file_pattern;
     let test_dir = config.test_dirs.first()?;
 

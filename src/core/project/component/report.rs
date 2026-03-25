@@ -77,3 +77,91 @@ fn build_components_output(
         components,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_list_components_default_path() {
+        let project_id = "";
+        let _result = list_components(&project_id);
+    }
+
+    #[test]
+    fn test_set_components_default_path() {
+        let project_id = "";
+        let json_spec = "";
+        let _result = set_components(&project_id, &json_spec);
+    }
+
+    #[test]
+    fn test_set_components_some_parse_project_component_attachments_to_string() {
+        let project_id = "";
+        let json_spec = "";
+        let _result = set_components(&project_id, &json_spec);
+    }
+
+    #[test]
+    fn test_set_components_default_path_2() {
+        let project_id = "";
+        let json_spec = "";
+        let _result = set_components(&project_id, &json_spec);
+    }
+
+    #[test]
+    fn test_set_components_default_path_3() {
+        let project_id = "";
+        let json_spec = "";
+        let _result = set_components(&project_id, &json_spec);
+    }
+
+    #[test]
+    fn test_set_components_default_path_4() {
+        let project_id = "";
+        let json_spec = "";
+        let _result = set_components(&project_id, &json_spec);
+    }
+
+    #[test]
+    fn test_attach_component_path_report_default_path() {
+        let project_id = "";
+        let local_path = Path::new("");
+        let _result = attach_component_path_report(&project_id, &local_path);
+    }
+
+    #[test]
+    fn test_attach_component_path_report_default_path_2() {
+        let project_id = "";
+        let local_path = Path::new("");
+        let _result = attach_component_path_report(&project_id, &local_path);
+    }
+
+    #[test]
+    fn test_remove_components_report_default_path() {
+        let project_id = "";
+        let component_ids = Vec::new();
+        let _result = remove_components_report(&project_id, component_ids);
+    }
+
+    #[test]
+    fn test_remove_components_report_default_path_2() {
+        let project_id = "";
+        let component_ids = Vec::new();
+        let _result = remove_components_report(&project_id, component_ids);
+    }
+
+    #[test]
+    fn test_clear_components_default_path() {
+        let project_id = "";
+        let _result = clear_components(&project_id);
+    }
+
+    #[test]
+    fn test_clear_components_default_path_2() {
+        let project_id = "";
+        let _result = clear_components(&project_id);
+    }
+
+}

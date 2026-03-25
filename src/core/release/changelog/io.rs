@@ -51,7 +51,7 @@ pub struct FinalizedReleaseSnapshot {
     pub summary: Option<String>,
 }
 
-pub fn read_component_snapshots(
+pub(crate) fn read_component_snapshots(
     component: &Component,
 ) -> Result<(
     Option<FinalizedReleaseSnapshot>,

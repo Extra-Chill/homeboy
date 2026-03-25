@@ -22,3 +22,41 @@ pub(crate) fn core_parse_items(ext: &ExtensionManifest, content: &str) -> Option
     }
     Some(items.into_iter().map(ParsedItem::from).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_refactor_extension_default_path() {
+
+        let _result = find_refactor_extension();
+    }
+
+    #[test]
+    fn test_core_parse_items_default_path() {
+
+        let _result = core_parse_items();
+    }
+
+    #[test]
+    fn test_core_parse_items_default_path_2() {
+
+        let _result = core_parse_items();
+    }
+
+    #[test]
+    fn test_core_parse_items_items_is_empty() {
+
+        let result = core_parse_items();
+        assert!(result.is_none(), "expected None for: items.is_empty()");
+    }
+
+    #[test]
+    fn test_core_parse_items_items_is_empty_2() {
+
+        let result = core_parse_items();
+        assert!(result.is_some(), "expected Some for: items.is_empty()");
+    }
+
+}

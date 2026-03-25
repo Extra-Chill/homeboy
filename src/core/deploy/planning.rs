@@ -222,7 +222,7 @@ pub fn calculate_release_state(component: &Component) -> Option<ReleaseState> {
     })
 }
 
-pub fn classify_release_state(state: Option<&ReleaseState>) -> ReleaseStateStatus {
+pub(crate) fn classify_release_state(state: Option<&ReleaseState>) -> ReleaseStateStatus {
     state
         .map(ReleaseState::status)
         .unwrap_or(ReleaseStateStatus::Unknown)

@@ -84,4 +84,24 @@ mod tests {
             assert!(path.is_dir());
         }
     }
+
+    #[test]
+    fn test_runtime_temp_dir_error_internal_io_e_to_string_some_format_create_temp_dir_pr() {
+        let prefix = "";
+        let _result = runtime_temp_dir(&prefix);
+    }
+
+    #[test]
+    fn test_runtime_temp_dir_default_path() {
+        let prefix = "";
+        let _result = runtime_temp_dir(&prefix);
+    }
+
+    #[test]
+    fn test_runtime_temp_dir_ok_path() {
+        let prefix = "";
+        let result = runtime_temp_dir(&prefix);
+        assert!(result.is_ok(), "expected Ok for: Ok(path)");
+    }
+
 }

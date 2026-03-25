@@ -119,3 +119,83 @@ pub fn collect_check(
     let exit_code = if summary.projects_failed > 0 { 1 } else { 0 };
     Ok((project_checks, summary, exit_code))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_collect_check_default_path() {
+        let fleet_id = "";
+        let only_outdated = true;
+        let _result = collect_check(&fleet_id, only_outdated);
+    }
+
+    #[test]
+    fn test_collect_check_match_deploy_run_project_id_config() {
+        let fleet_id = "";
+        let only_outdated = true;
+        let result = collect_check(&fleet_id, only_outdated);
+        assert!(result.is_ok(), "expected Ok for: match deploy::run(project_id, &config)");
+    }
+
+    #[test]
+    fn test_collect_check_some_deploy_componentstatus_uptodate_up_to_date() {
+        let fleet_id = "";
+        let only_outdated = true;
+        let _result = collect_check(&fleet_id, only_outdated);
+    }
+
+    #[test]
+    fn test_collect_check_some_deploy_componentstatus_needsupdate_needs_update() {
+        let fleet_id = "";
+        let only_outdated = true;
+        let _result = collect_check(&fleet_id, only_outdated);
+    }
+
+    #[test]
+    fn test_collect_check_some_deploy_componentstatus_behindremote_behind_remote() {
+        let fleet_id = "";
+        let only_outdated = true;
+        let _result = collect_check(&fleet_id, only_outdated);
+    }
+
+    #[test]
+    fn test_collect_check_some_deploy_componentstatus_unknown_none_unknown() {
+        let fleet_id = "";
+        let only_outdated = true;
+        let _result = collect_check(&fleet_id, only_outdated);
+    }
+
+    #[test]
+    fn test_collect_check_err_e() {
+        let fleet_id = "";
+        let only_outdated = true;
+        let result = collect_check(&fleet_id, only_outdated);
+        assert!(result.is_err(), "expected Err for: Err(e) => {{");
+    }
+
+    #[test]
+    fn test_collect_check_only_outdated() {
+        let fleet_id = "";
+        let only_outdated = false;
+        let _result = collect_check(&fleet_id, only_outdated);
+    }
+
+    #[test]
+    fn test_collect_check_ok_project_checks_summary_exit_code() {
+        let fleet_id = "";
+        let only_outdated = true;
+        let result = collect_check(&fleet_id, only_outdated);
+        assert!(result.is_ok(), "expected Ok for: Ok((project_checks, summary, exit_code))");
+    }
+
+    #[test]
+    fn test_collect_check_has_expected_effects() {
+        // Expected effects: mutation
+        let fleet_id = "";
+        let only_outdated = false;
+        let _ = collect_check(&fleet_id, only_outdated);
+    }
+
+}

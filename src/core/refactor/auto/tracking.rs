@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 #[cfg(not(test))]
-pub fn changed_file_set(local_path: &str) -> crate::Result<HashSet<String>> {
+pub(crate) fn changed_file_set(local_path: &str) -> crate::Result<HashSet<String>> {
     let uncommitted = crate::git::get_uncommitted_changes(local_path)?;
     let mut files = HashSet::new();
     files.extend(uncommitted.staged);
@@ -26,11 +26,11 @@ pub fn changed_file_set(local_path: &str) -> crate::Result<HashSet<String>> {
     }
 }
 
-pub fn count_newly_changed(before: &HashSet<String>, after: &HashSet<String>) -> usize {
+pub(crate) fn count_newly_changed(before: &HashSet<String>, after: &HashSet<String>) -> usize {
     after.difference(before).count()
 }
 
-pub fn newly_changed_files(before: &HashSet<String>, after: &HashSet<String>) -> Vec<String> {
+pub(crate) fn newly_changed_files(before: &HashSet<String>, after: &HashSet<String>) -> Vec<String> {
     let mut changed: Vec<String> = after.difference(before).cloned().collect();
     changed.sort();
     changed

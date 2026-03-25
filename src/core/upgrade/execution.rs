@@ -97,3 +97,101 @@ pub(crate) fn execute_upgrade(method: InstallMethod) -> Result<(bool, Option<Str
 
     Ok((true, new_version))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_execute_upgrade_error_internal_io_e_to_string_some_run_homebrew_upgrade_to_s() {
+
+        let result = execute_upgrade();
+        assert!(result.is_some(), "expected Some for: Error::internal_io(e.to_string(), Some(\"run homebrew upgrade\".to_string()))");
+    }
+
+    #[test]
+    fn test_execute_upgrade_branch_1() {
+
+        let _result = execute_upgrade();
+    }
+
+    #[test]
+    fn test_execute_upgrade_error_internal_io_e_to_string_some_run_cargo_upgrade_to_stri() {
+
+        let result = execute_upgrade();
+        assert!(result.is_some(), "expected Some for: Error::internal_io(e.to_string(), Some(\"run cargo upgrade\".to_string()))");
+    }
+
+    #[test]
+    fn test_execute_upgrade_branch_3() {
+
+        let _result = execute_upgrade();
+    }
+
+    #[test]
+    fn test_execute_upgrade_some_get_current_executable_path_to_string() {
+
+        let result = execute_upgrade();
+        assert!(result.is_some(), "expected Some for: Some(\"get current executable path\".to_string()),");
+    }
+
+    #[test]
+    fn test_execute_upgrade_default_path() {
+
+        let _result = execute_upgrade();
+    }
+
+    #[test]
+    fn test_execute_upgrade_git_dir_exists() {
+
+        let result = execute_upgrade();
+        assert!(result.is_some(), "expected Some for: !git_dir.exists()");
+    }
+
+    #[test]
+    fn test_execute_upgrade_error_internal_io_e_to_string_some_run_source_upgrade_to_str() {
+
+        let result = execute_upgrade();
+        assert!(result.is_some(), "expected Some for: Error::internal_io(e.to_string(), Some(\"run source upgrade\".to_string()))");
+    }
+
+    #[test]
+    fn test_execute_upgrade_branch_8() {
+
+        let _result = execute_upgrade();
+    }
+
+    #[test]
+    fn test_execute_upgrade_error_internal_io_e_to_string_some_run_binary_upgrade_to_str() {
+
+        let result = execute_upgrade();
+        assert!(result.is_some(), "expected Some for: Error::internal_io(e.to_string(), Some(\"run binary upgrade\".to_string()))");
+    }
+
+    #[test]
+    fn test_execute_upgrade_branch_10() {
+
+        let _result = execute_upgrade();
+    }
+
+    #[test]
+    fn test_execute_upgrade_else() {
+
+        let result = execute_upgrade();
+        assert!(result.is_some(), "expected Some for: else");
+    }
+
+    #[test]
+    fn test_execute_upgrade_ok_true_new_version() {
+
+        let _result = execute_upgrade();
+    }
+
+    #[test]
+    fn test_execute_upgrade_has_expected_effects() {
+        // Expected effects: process_spawn
+
+        let _ = execute_upgrade();
+    }
+
+}

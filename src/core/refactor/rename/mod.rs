@@ -6,6 +6,15 @@
 //! 3. Generates file content edits and file/directory renames
 //! 4. Applies changes to disk (or returns a dry-run preview)
 
+mod rename_context;
+mod rename_scope;
+mod types;
+
+pub use rename_context::*;
+pub use rename_scope::*;
+pub use types::*;
+
+
 use crate::engine::codebase_scan::{
     self, find_boundary_matches, find_case_insensitive_matches, find_literal_matches,
     ExtensionFilter, ScanConfig,
@@ -18,17 +27,6 @@ use std::path::{Path, PathBuf};
 // ============================================================================
 // Types
 // ============================================================================
-
-/// What scope to apply renames to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RenameScope {
-    /// Source files only.
-    Code,
-    /// Config files only (homeboy.json, component configs).
-    Config,
-    /// Everything.
-    All,
-}
 
 impl RenameScope {
     #[allow(clippy::should_implement_trait)]
@@ -45,27 +43,6 @@ impl RenameScope {
             )),
         }
     }
-}
-
-/// Syntactic context filter for rename matches.
-///
-/// Restricts which occurrences of a term get renamed based on their
-/// syntactic position in the source code. Useful for selective renames
-/// where only certain usages should change (e.g., rename an array key
-/// but not a variable with the same name).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RenameContext {
-    /// Only match inside string literals (`'term'`, `"term"`) and
-    /// property access (`.term`, `->term`, `::term`).
-    Key,
-    /// Only match variable references (`$term` in PHP, standalone identifiers
-    /// NOT inside strings or property access).
-    Variable,
-    /// Only match function parameter definitions (inside parentheses
-    /// following a function/fn keyword).
-    Parameter,
-    /// Match everything — current default behavior.
-    All,
 }
 
 impl RenameContext {
@@ -101,52 +78,6 @@ impl RenameContext {
             RenameContext::Parameter => is_parameter_context(line, col),
         }
     }
-}
-
-/// Check if match is inside a string literal or follows a property accessor.
-fn is_key_context(line: &str, col: usize, match_len: usize) -> bool {
-    let bytes = line.as_bytes();
-
-    // Check if preceded by `.`, `->`, or `::` (property/method access)
-    let before = &line[..col];
-    let trimmed = before.trim_end();
-    if trimmed.ends_with('.') || trimmed.ends_with("->") || trimmed.ends_with("::") {
-        return true;
-    }
-
-    // Check if inside string quotes: count unescaped quotes before the match position.
-    // If an odd number of single or double quotes precede us, we're inside a string.
-    let match_end = col + match_len;
-    for quote in [b'\'', b'"'] {
-        let mut count = 0;
-        let mut i = 0;
-        while i < col {
-            if bytes[i] == b'\\' {
-                i += 2; // skip escaped char
-                continue;
-            }
-            if bytes[i] == quote {
-                count += 1;
-            }
-            i += 1;
-        }
-        if count % 2 == 1 {
-            // Verify the closing quote is after the match
-            let mut j = match_end;
-            while j < bytes.len() {
-                if bytes[j] == b'\\' {
-                    j += 2;
-                    continue;
-                }
-                if bytes[j] == quote {
-                    return true; // Inside a quoted string
-                }
-                j += 1;
-            }
-        }
-    }
-
-    false
 }
 
 /// Check if match is a variable reference (`$term` in PHP, or a standalone identifier

@@ -47,3 +47,40 @@ pub fn get_unreleased_entries(content: &str, aliases: &[String]) -> Vec<String> 
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_count_unreleased_entries_some_idx_idx() {
+        let content = "";
+        let aliases = Vec::new();
+        let _result = count_unreleased_entries(&content, &aliases);
+    }
+
+    #[test]
+    fn test_get_unreleased_entries_some_idx_idx() {
+        let content = "";
+        let aliases = Vec::new();
+        let result = get_unreleased_entries(&content, &aliases);
+        assert!(!result.is_empty(), "expected non-empty collection for: Some(idx) => idx,");
+    }
+
+    #[test]
+    fn test_get_unreleased_entries_if_let_some_rest_trimmed_strip_prefix() {
+        let content = "";
+        let aliases = Vec::new();
+        let result = get_unreleased_entries(&content, &aliases);
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(rest) = trimmed.strip_prefix(\"- \") {{");
+    }
+
+    #[test]
+    fn test_get_unreleased_entries_let_some_rest_trimmed_strip_prefix() {
+        let content = "";
+        let aliases = Vec::new();
+        let result = get_unreleased_entries(&content, &aliases);
+        assert!(!result.is_empty(), "expected non-empty collection for: let Some(rest) = trimmed.strip_prefix(\"- \")");
+    }
+
+}

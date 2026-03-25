@@ -1,3 +1,17 @@
+mod component_deploy_result;
+mod deploy_result;
+mod helpers;
+mod release_state;
+mod release_state_status;
+mod types;
+
+pub use component_deploy_result::*;
+pub use deploy_result::*;
+pub use helpers::*;
+pub use release_state::*;
+pub use release_state_status::*;
+pub use types::*;
+
 use serde::Serialize;
 
 use crate::component::Component;
@@ -5,18 +19,6 @@ use crate::config;
 use crate::error::Result;
 use crate::is_zero_u32;
 use crate::paths as base_path;
-
-/// Parse bulk component IDs from a JSON spec.
-pub fn parse_bulk_component_ids(json_spec: &str) -> Result<Vec<String>> {
-    let input = config::parse_bulk_ids(json_spec)?;
-    Ok(input.component_ids)
-}
-
-pub struct DeployResult {
-    pub success: bool,
-    pub exit_code: i32,
-    pub error: Option<String>,
-}
 
 impl DeployResult {
     pub(super) fn success(exit_code: i32) -> Self {
@@ -34,88 +36,6 @@ impl DeployResult {
             error: Some(error),
         }
     }
-}
-
-pub struct DeployConfig {
-    pub component_ids: Vec<String>,
-    pub all: bool,
-    pub outdated: bool,
-    pub dry_run: bool,
-    pub check: bool,
-    pub force: bool,
-    /// Skip build if artifact already exists (used by release --deploy)
-    pub skip_build: bool,
-    /// Keep build dependencies (skip cleanup even when auto_cleanup is enabled)
-    pub keep_deps: bool,
-    /// Assert expected version before deploying (abort if mismatch)
-    pub expected_version: Option<String>,
-    /// Skip auto-pulling latest changes before deploy
-    pub no_pull: bool,
-    /// Deploy from current branch HEAD instead of latest tag
-    pub head: bool,
-}
-
-/// Reason why a component was selected for deployment.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeployReason {
-    /// Component was explicitly specified by ID
-    ExplicitlySelected,
-    /// --all flag was used
-    AllSelected,
-    /// Local and remote versions differ
-    VersionMismatch,
-    /// Could not determine local version
-    UnknownLocalVersion,
-    /// Could not determine remote version (not deployed or no version file)
-    UnknownRemoteVersion,
-}
-
-/// Status indicator for component version comparison.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ComponentStatus {
-    /// Local and remote versions match
-    UpToDate,
-    /// Local version ahead of remote (needs deploy)
-    NeedsUpdate,
-    /// Remote version ahead of local (local behind)
-    BehindRemote,
-    /// Cannot determine status
-    Unknown,
-}
-
-/// Release state tracking for deployment decisions.
-/// Captures git state relative to the last version tag.
-#[derive(Debug, Clone, Serialize)]
-pub struct ReleaseState {
-    /// Number of commits since the last version tag
-    pub commits_since_version: u32,
-    /// Number of code commits (non-docs)
-    #[serde(skip_serializing_if = "is_zero_u32")]
-    pub code_commits: u32,
-    /// Number of docs-only commits
-    #[serde(skip_serializing_if = "is_zero_u32")]
-    pub docs_only_commits: u32,
-    /// Whether there are uncommitted changes in the working directory
-    pub has_uncommitted_changes: bool,
-    /// The baseline reference (tag or commit hash) used for comparison
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_ref: Option<String>,
-    /// Warning emitted when the detected baseline may not align with the current version
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_warning: Option<String>,
-}
-
-/// High-level status derived from a component release state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReleaseStateStatus {
-    Uncommitted,
-    NeedsBump,
-    DocsOnly,
-    Clean,
-    Unknown,
 }
 
 impl ReleaseState {
@@ -142,39 +62,6 @@ impl ReleaseStateStatus {
             ReleaseStateStatus::Unknown => "unknown",
         }
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ReleaseStateBuckets {
-    pub ready_to_deploy: Vec<String>,
-    pub needs_bump: Vec<String>,
-    pub docs_only: Vec<String>,
-    pub has_uncommitted: Vec<String>,
-    pub unknown: Vec<String>,
-}
-
-/// Result for a single component deployment.
-#[derive(Debug, Clone, Serialize)]
-
-pub struct ComponentDeployResult {
-    pub id: String,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deploy_reason: Option<DeployReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_status: Option<ComponentStatus>,
-    pub local_version: Option<String>,
-    pub remote_version: Option<String>,
-    pub error: Option<String>,
-    pub artifact_path: Option<String>,
-    pub remote_path: Option<String>,
-    pub build_exit_code: Option<i32>,
-    pub deploy_exit_code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub release_state: Option<ReleaseState>,
-    /// The git ref (tag or branch) that was built and deployed
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deployed_ref: Option<String>,
 }
 
 impl ComponentDeployResult {
@@ -255,51 +142,4 @@ impl ComponentDeployResult {
         self.deployed_ref = Some(git_ref);
         self
     }
-}
-
-/// Result of deploying to a single project within a multi-project run.
-#[derive(Debug, Clone, Serialize)]
-pub struct ProjectDeployResult {
-    pub project_id: String,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub results: Vec<ComponentDeployResult>,
-    pub summary: DeploySummary,
-}
-
-/// Result of a multi-project deployment.
-#[derive(Debug, Clone, Serialize)]
-pub struct MultiDeployResult {
-    pub component_ids: Vec<String>,
-    pub projects: Vec<ProjectDeployResult>,
-    pub summary: MultiDeploySummary,
-}
-
-/// Summary of multi-project deployment.
-#[derive(Debug, Clone, Serialize)]
-pub struct MultiDeploySummary {
-    pub total_projects: u32,
-    pub succeeded: u32,
-    pub failed: u32,
-    pub skipped: u32,
-    pub planned: u32,
-}
-
-/// Summary of deploy orchestration.
-#[derive(Debug, Clone, Serialize)]
-
-pub struct DeploySummary {
-    pub total: u32,
-    pub succeeded: u32,
-    pub failed: u32,
-    pub skipped: u32,
-}
-
-/// Result of deploy orchestration for multiple components.
-#[derive(Debug, Clone, Serialize)]
-
-pub struct DeployOrchestrationResult {
-    pub results: Vec<ComponentDeployResult>,
-    pub summary: DeploySummary,
 }

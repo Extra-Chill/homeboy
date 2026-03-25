@@ -406,4 +406,44 @@ mod tests {
         let results = discover_cross_directory(&conventions);
         assert!(results.is_empty()); // These aren't siblings under a common parent
     }
+
+    #[test]
+    fn test_auto_discover_groups_if_let_ok_walker_walk_source_files_root() {
+
+        let _result = auto_discover_groups();
+    }
+
+    #[test]
+    fn test_auto_discover_groups_let_ok_walker_walk_source_files_root() {
+
+        let _result = auto_discover_groups();
+    }
+
+    #[test]
+    fn test_auto_discover_groups_match_chars_next() {
+
+        let _result = auto_discover_groups();
+    }
+
+    #[test]
+    fn test_auto_discover_groups_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = auto_discover_groups();
+    }
+
+    #[test]
+    fn test_discover_cross_directory_default_path() {
+
+        let result = discover_cross_directory();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_discover_cross_directory_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = discover_cross_directory();
+    }
+
 }

@@ -26,7 +26,7 @@ pub enum VerifyResult {
 ///
 /// The `component_id` is used to strip component-prefixed paths (e.g., `homeboy/docs/index.md`
 /// becomes `docs/index.md` when verifying against the homeboy component).
-pub fn verify_claim(
+pub(crate) fn verify_claim(
     claim: &Claim,
     source_path: &Path,
     docs_path: &Path,

@@ -389,7 +389,7 @@ pub(crate) fn validate_and_finalize_changelog(
     })
 }
 
-pub fn validate_baseline_alignment(
+pub(crate) fn validate_baseline_alignment(
     version: Option<&ComponentVersionSnapshot>,
     baseline_ref: Option<&str>,
 ) -> Option<String> {

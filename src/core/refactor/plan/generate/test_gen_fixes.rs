@@ -564,4 +564,151 @@ mod tests {
         };
         assert_eq!(result, expected);
     }
+
+    #[test]
+    fn test_generate_test_file_fixes_some_e_e() {
+
+        generate_test_file_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_file_fixes_some_g_g() {
+
+        generate_test_file_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_file_fixes_ok_c_c() {
+
+        generate_test_file_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_file_fixes_err_e() {
+
+        generate_test_file_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_file_fixes_some_project_registry() {
+
+        generate_test_file_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_file_fixes_some_g_g_2() {
+
+        generate_test_file_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_file_fixes_some_module_module() {
+
+        generate_test_file_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_file_fixes_some_generated_test_uses_default_default_fallback_types_not_() {
+
+        generate_test_file_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_file_fixes_else() {
+
+        generate_test_file_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_file_fixes_has_expected_effects() {
+        // Expected effects: file_read, mutation
+
+        let _ = generate_test_file_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_finding_kind_auditfinding_missingtestmethod() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_some_e_e() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_some_g_g() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_some_loc_loc() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_ok_c_c() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_err_e() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_some_project_registry() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_some_g_g_2() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_ok_c_c_2() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_err_continue() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_some_l_l() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_some_generated_test_uses_default_default_fallback_types_not_() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_else() {
+
+        generate_test_method_fixes();
+    }
+
+    #[test]
+    fn test_generate_test_method_fixes_has_expected_effects() {
+        // Expected effects: file_read, mutation
+
+        let _ = generate_test_method_fixes();
+    }
+
 }

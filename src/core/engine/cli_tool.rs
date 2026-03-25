@@ -347,3 +347,25 @@ fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<
         None,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_some_sub_std_iter_once_sub_to_string() {
+        let tool = "";
+        let identifier = "";
+        let args = Vec::new();
+        let _result = run(&tool, &identifier, &args);
+    }
+
+    #[test]
+    fn test_run_if_let_some_result_try_run_for_component_tool_identifier_arg() {
+        let tool = "";
+        let identifier = "";
+        let args = Vec::new();
+        let _result = run(&tool, &identifier, &args);
+    }
+
+}

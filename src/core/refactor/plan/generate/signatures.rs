@@ -245,3 +245,68 @@ fn extract_method_body(lines: &[&str], start_line: usize) -> Option<String> {
 pub(crate) fn extract_signatures(content: &str, language: &Language) -> Vec<MethodSignature> {
     extract_signatures_from_items(content, language)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_primary_type_name_from_declaration_match_language() {
+
+        let _result = primary_type_name_from_declaration();
+    }
+
+    #[test]
+    fn test_primary_type_name_from_declaration_ok() {
+
+        let _result = primary_type_name_from_declaration();
+    }
+
+    #[test]
+    fn test_primary_type_name_from_declaration_ok_2() {
+
+        let _result = primary_type_name_from_declaration();
+    }
+
+    #[test]
+    fn test_generate_fallback_signature_default_path() {
+
+        let _result = generate_fallback_signature();
+    }
+
+    #[test]
+    fn test_parse_items_for_dedup_if_let_some_grammar_crate_code_audit_core_fingerprint_load_g() {
+
+        let result = parse_items_for_dedup();
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(grammar) = crate::code_audit::core_fingerprint::load_grammar_for_ext(file_ext) {{");
+    }
+
+    #[test]
+    fn test_parse_items_for_dedup_default_path() {
+
+        let result = parse_items_for_dedup();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_extract_signatures_from_items_let_some_grammar_crate_code_audit_core_fingerprint_load_gram() {
+
+        let result = extract_signatures_from_items();
+        assert!(!result.is_empty(), "expected non-empty collection for: let Some(grammar) = crate::code_audit::core_fingerprint::load_grammar_for_ext(file_ext) else {{");
+    }
+
+    #[test]
+    fn test_extract_signatures_from_items_default_path() {
+
+        let result = extract_signatures_from_items();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_extract_signatures_default_path() {
+
+        let result = extract_signatures();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+}

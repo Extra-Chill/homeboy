@@ -5,158 +5,20 @@
 //! - Directory paths in backticks
 //! - Code examples in fenced blocks
 
+mod constants;
+mod helpers;
+mod types;
+
+pub use constants::*;
+pub use helpers::*;
+pub use types::*;
+
+
 use glob_match::glob_match;
 use regex::Regex;
 use std::sync::LazyLock;
 
-/// Types of claims that can be extracted from documentation.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaimType {
-    /// File path reference (e.g., `src/main.rs`, `/inc/foo/bar.php`)
-    FilePath,
-    /// Directory path reference (e.g., `src/core/`, `/inc/Engine/`)
-    DirectoryPath,
-    /// Code example in a fenced block
-    CodeExample,
-    /// Namespaced class reference (e.g., `DataMachine\Services\CacheManager`)
-    ClassName,
-}
-
-/// How confident we are that a claim is a real reference vs. a placeholder/example.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaimConfidence {
-    /// Real reference — expected to resolve against codebase
-    Real,
-    /// Likely a placeholder or example (inside code block, generic names)
-    Example,
-    /// Cannot determine — needs manual review
-    Unclear,
-}
-
-/// A claim extracted from documentation.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Claim {
-    pub claim_type: ClaimType,
-    pub value: String,
-    pub doc_file: String,
-    pub line: usize,
-    pub confidence: ClaimConfidence,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
-}
-
 // Regex patterns for claim extraction
-static FILE_PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches paths that contain at least one directory separator
-    // e.g., `src/main.rs`, `/inc/Engine/AI/Tools/BaseTool.php`, `path/to/file.ext`
-    // Must have: path separator + file extension
-    Regex::new(r"`(/?(?:[\w.-]+/)+[\w.-]+\.[a-zA-Z0-9]+)`").unwrap()
-});
-
-static DIR_PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches directory paths like `/inc/Engine/` or `src/core/` in backticks
-    // Must end with / and contain at least one directory level
-    Regex::new(r"`(/?(?:[\w.-]+/)+)`").unwrap()
-});
-
-static CODE_BLOCK_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches fenced code blocks with language identifier
-    Regex::new(r"(?s)```(\w+)\n(.*?)```").unwrap()
-});
-
-static CLASS_NAME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches namespaced class references like DataMachine\Services\CacheManager
-    // or DataMachine\\Services\\CacheManager (escaped backslashes in markdown)
-    // Requires at least two segments (Namespace\Class)
-    Regex::new(r"(?:`)?([A-Z][a-zA-Z0-9]*(?:\\{1,2}[A-Z][a-zA-Z0-9]*)+)(?:`)?").unwrap()
-});
-
-/// Extensions that indicate domain-like patterns (not file paths)
-const DOMAIN_EXTENSIONS: &[&str] = &[
-    ".com", ".org", ".io", ".net", ".dev", ".co", ".app", ".ai", ".xyz",
-];
-
-/// Check if a path looks like a MIME type (platform-agnostic, IANA standard).
-fn is_mime_type(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    lower.starts_with("application/")
-        || lower.starts_with("text/")
-        || lower.starts_with("image/")
-        || lower.starts_with("audio/")
-        || lower.starts_with("video/")
-        || lower.starts_with("font/")
-        || lower.starts_with("multipart/")
-}
-
-/// Check if a value matches any of the component's ignore patterns.
-fn matches_ignore_pattern(value: &str, patterns: &[String]) -> bool {
-    patterns.iter().any(|pattern| glob_match(pattern, value))
-}
-
-/// Placeholder name prefixes that indicate example/template references.
-const PLACEHOLDER_PREFIXES: &[&str] = &[
-    "My", "Your", "Example", "Sample", "Foo", "Bar", "Test", "Demo", "Dummy", "Fake",
-];
-
-/// Check if a class name uses placeholder/example naming conventions.
-fn is_placeholder_class(value: &str) -> bool {
-    // Check each namespace segment for placeholder prefixes
-    value.split('\\').any(|segment| {
-        PLACEHOLDER_PREFIXES
-            .iter()
-            .any(|prefix| segment.starts_with(prefix))
-    })
-}
-
-/// Check if a line's surrounding context suggests an example rather than a real reference.
-fn line_suggests_example(line: &str) -> bool {
-    let lower = line.to_lowercase();
-    lower.contains("example")
-        || lower.contains("e.g.")
-        || lower.contains("e.g.,")
-        || lower.contains("for instance")
-        || lower.contains("sample")
-        || lower.contains("such as")
-        || lower.contains("this creates")
-        || lower.contains("would create")
-        || lower.contains("would generate")
-        || lower.contains("would produce")
-        || lower.contains("would rename")
-        || lower.contains("would become")
-        || lower.contains("would be")
-        || lower.contains("could be")
-        || lower.contains("hypothetical")
-        || lower.contains("imagine")
-        || lower.contains("suppose")
-        || lower.contains("typically:")
-        || lower.contains("renaming")
-}
-
-/// Check if a backslash-separated match is part of an OS filesystem path on the line.
-///
-/// Looks at characters before the regex match position to detect drive letters (`C:\`),
-/// or other OS path indicators that mean this isn't a namespaced class reference.
-fn is_os_path_context(line: &str, match_start: usize) -> bool {
-    // Check if there's a drive letter + colon + backslash before the match
-    // e.g., "C:\Users\<username>\AppData\Roaming"
-    if match_start >= 2 {
-        let prefix = &line[..match_start];
-        // Look for X:\ pattern anywhere before the match
-        if prefix.contains(":\\") || prefix.contains(":/") {
-            return true;
-        }
-    }
-    // Check if the line contains common OS path indicators
-    let lower = line.to_lowercase();
-    (lower.contains("c:\\") || lower.contains("c:/"))
-        || (lower.contains("users\\") || lower.contains("users/"))
-        || lower.contains("program files")
-        || lower.contains("%appdata%")
-        || lower.contains("$home")
-}
-
 /// Check if a line's context suggests a real reference (annotation, cross-ref).
 fn line_suggests_real(line: &str) -> bool {
     line.contains("@see")
@@ -671,4 +533,50 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
             );
         }
     }
+
+    #[test]
+    fn test_extract_claims_context_some_line_trim_to_string() {
+        let content = "";
+        let doc_file = "";
+        let ignore_patterns = Vec::new();
+        let result = extract_claims(&content, &doc_file, &ignore_patterns);
+        assert!(!result.is_empty(), "expected non-empty collection for: context: Some(line.trim().to_string()),");
+    }
+
+    #[test]
+    fn test_extract_claims_context_some_line_trim_to_string_2() {
+        let content = "";
+        let doc_file = "";
+        let ignore_patterns = Vec::new();
+        let result = extract_claims(&content, &doc_file, &ignore_patterns);
+        assert!(!result.is_empty(), "expected non-empty collection for: context: Some(line.trim().to_string()),");
+    }
+
+    #[test]
+    fn test_extract_claims_context_some_line_trim_to_string_3() {
+        let content = "";
+        let doc_file = "";
+        let ignore_patterns = Vec::new();
+        let result = extract_claims(&content, &doc_file, &ignore_patterns);
+        assert!(!result.is_empty(), "expected non-empty collection for: context: Some(line.trim().to_string()),");
+    }
+
+    #[test]
+    fn test_extract_claims_context_some_format_block_language() {
+        let content = "";
+        let doc_file = "";
+        let ignore_patterns = Vec::new();
+        let result = extract_claims(&content, &doc_file, &ignore_patterns);
+        assert!(!result.is_empty(), "expected non-empty collection for: context: Some(format!(\"'''{{}} block\", language)),");
+    }
+
+    #[test]
+    fn test_extract_claims_has_expected_effects() {
+        // Expected effects: mutation
+        let content = "";
+        let doc_file = "";
+        let ignore_patterns = Vec::new();
+        let _ = extract_claims(&content, &doc_file, &ignore_patterns);
+    }
+
 }

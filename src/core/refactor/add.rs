@@ -138,7 +138,7 @@ pub fn add_import(
 // ============================================================================
 
 /// Resolve the root directory from component ID or explicit path.
-fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> Result<PathBuf> {
+pub(crate) fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> Result<PathBuf> {
     if let Some(p) = path {
         let pb = PathBuf::from(p);
         if !pb.is_dir() {

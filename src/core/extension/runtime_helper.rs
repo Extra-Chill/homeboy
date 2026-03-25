@@ -99,4 +99,40 @@ mod tests {
             "write test results helper should be in pairs"
         );
     }
+
+    #[test]
+    fn test_ensure_all_helpers_some_create_homeboy_runtime_directory_to_string() {
+
+        let result = ensure_all_helpers();
+        assert!(!result.is_empty(), "expected non-empty collection for: Some(\"create homeboy runtime directory\".to_string()),");
+    }
+
+    #[test]
+    fn test_ensure_all_helpers_default_path() {
+
+        let result = ensure_all_helpers();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_ensure_all_helpers_default_path_2() {
+
+        let result = ensure_all_helpers();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_ensure_all_helpers_ok_env_pairs() {
+
+        let result = ensure_all_helpers();
+        assert!(!result.is_empty(), "expected non-empty collection for: Ok(env_pairs)");
+    }
+
+    #[test]
+    fn test_ensure_all_helpers_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = ensure_all_helpers();
+    }
+
 }

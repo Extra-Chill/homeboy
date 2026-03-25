@@ -39,6 +39,19 @@
 //! }
 //! ```
 
+mod baseline_config;
+mod constants;
+mod json;
+mod leap_year;
+mod types;
+
+pub use baseline_config::*;
+pub use constants::*;
+pub use json::*;
+pub use leap_year::*;
+pub use types::*;
+
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -46,20 +59,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
-
-pub trait Fingerprintable {
-    fn fingerprint(&self) -> String;
-    fn description(&self) -> String;
-    fn context_label(&self) -> String;
-}
-
-pub struct BaselineConfig {
-    root: PathBuf,
-    key: String,
-}
-
-const HOMEBOY_JSON: &str = "homeboy.json";
-const BASELINES_KEY: &str = "baselines";
 
 impl BaselineConfig {
     pub fn new(root: impl Into<PathBuf>, key: impl Into<String>) -> Self {
@@ -76,30 +75,6 @@ impl BaselineConfig {
     pub fn key(&self) -> &str {
         &self.key
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Baseline<M: Serialize> {
-    pub created_at: String,
-    pub context_id: String,
-    pub item_count: usize,
-    pub known_fingerprints: Vec<String>,
-    pub metadata: M,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Comparison {
-    pub new_items: Vec<NewItem>,
-    pub resolved_fingerprints: Vec<String>,
-    pub delta: i64,
-    pub drift_increased: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct NewItem {
-    pub fingerprint: String,
-    pub description: String,
-    pub context_label: String,
 }
 
 pub fn save<M: Serialize + for<'de> Deserialize<'de>>(
@@ -320,46 +295,6 @@ pub fn compare<T: Fingerprintable, M: Serialize>(
     }
 }
 
-fn read_json_or_empty(path: &Path) -> Result<Value> {
-    if !path.exists() {
-        return Ok(Value::Object(serde_json::Map::new()));
-    }
-
-    let content = std::fs::read_to_string(path).map_err(|error| {
-        Error::internal_io(
-            format!("Failed to read {}: {}", path.display(), error),
-            Some("baseline.read_json".to_string()),
-        )
-    })?;
-
-    if content.trim().is_empty() {
-        return Ok(Value::Object(serde_json::Map::new()));
-    }
-
-    serde_json::from_str(&content).map_err(|error| {
-        Error::internal_io(
-            format!("Failed to parse {}: {}", path.display(), error),
-            Some("baseline.read_json".to_string()),
-        )
-    })
-}
-
-fn write_json(path: &Path, value: &Value) -> Result<()> {
-    let content = serde_json::to_string_pretty(value).map_err(|error| {
-        Error::internal_io(
-            format!("Failed to serialize {}: {}", path.display(), error),
-            Some("baseline.write_json".to_string()),
-        )
-    })?;
-
-    std::fs::write(path, content).map_err(|error| {
-        Error::internal_io(
-            format!("Failed to write {}: {}", path.display(), error),
-            Some("baseline.write_json".to_string()),
-        )
-    })
-}
-
 pub fn load_from_git_ref<M: for<'de> Deserialize<'de> + Serialize>(
     source_path: &str,
     git_ref: &str,
@@ -372,73 +307,4 @@ pub fn load_from_git_ref<M: for<'de> Deserialize<'de> + Serialize>(
     let root: Value = serde_json::from_str(&content).ok()?;
     let value = root.get(BASELINES_KEY)?.get(key)?;
     serde_json::from_value::<Baseline<M>>(value.clone()).ok()
-}
-
-fn utc_now_iso8601() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let secs_per_day = 86400u64;
-    let secs_per_hour = 3600u64;
-    let secs_per_min = 60u64;
-
-    let days = now / secs_per_day;
-    let remaining = now % secs_per_day;
-    let hours = remaining / secs_per_hour;
-    let remaining = remaining % secs_per_hour;
-    let minutes = remaining / secs_per_min;
-    let seconds = remaining % secs_per_min;
-
-    let (year, month, day) = days_to_date(days);
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
-    )
-}
-
-fn days_to_date(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970u64;
-
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-
-    let leap = is_leap_year(year);
-    let month_days = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-
-    let mut month = 1u64;
-    for &month_days in &month_days {
-        if days < month_days {
-            break;
-        }
-        days -= month_days;
-        month += 1;
-    }
-
-    (year, month, days + 1)
-}
-
-fn is_leap_year(year: u64) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
