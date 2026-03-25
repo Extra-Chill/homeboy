@@ -116,17 +116,9 @@ pub(crate) fn generate_unreferenced_export_fixes(
     root: &Path,
     fixes: &mut Vec<Fix>,
     skipped: &mut Vec<SkippedFile>,
-    decompose_targets: &std::collections::HashSet<String>,
 ) {
     for finding in &result.findings {
         if finding.kind != AuditFinding::UnreferencedExport {
-            continue;
-        }
-
-        // Skip files targeted for decompose. Narrowing pub → pub(crate) on items
-        // that decompose will move to submodules breaks the pub use * re-exports —
-        // consumers can't access pub(crate) items through re-export paths.
-        if decompose_targets.contains(&finding.file) {
             continue;
         }
 

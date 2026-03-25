@@ -1,3 +1,4 @@
+pub mod file_intent;
 pub mod generate;
 pub mod planner;
 pub mod verify;

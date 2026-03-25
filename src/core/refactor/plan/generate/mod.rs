@@ -14,6 +14,7 @@ mod test_gen_fixes;
 use crate::code_audit::{AuditFinding, CodeAuditResult};
 use crate::core::refactor::auto::{DecomposeFixPlan, Fix, FixResult, SkippedFile};
 use crate::core::refactor::decompose;
+use crate::core::refactor::plan::file_intent::{FileIntent, FileIntentMap};
 use std::path::Path;
 
 use convention_fixes::apply_convention_fixes;
@@ -66,27 +67,30 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
     let mut fixes = Vec::new();
     let mut skipped = Vec::new();
 
-    // ── Phase 0: Identify decompose targets ────────────────────────────
-    // Collect the set of files that will be decomposed BEFORE generating
-    // other fixes. This lets convention fixes and UnreferencedExport skip
-    // these files — decompose's pub use * re-exports handle imports and
-    // visibility, so other fixers' modifications would conflict.
-    let mut decompose_target_files = std::collections::HashSet::new();
+    // ── Phase 0: Build file intent map ─────────────────────────────────
+    // Identify structural operations (decompose, move, delete) planned for
+    // each file BEFORE generating content fixes. After all fixes are
+    // generated, resolve_conflicts() drops content fixes that would
+    // conflict with structural intents — replacing ad-hoc skip sets with
+    // declarative conflict rules.
+    let mut intent_map = FileIntentMap::new();
     for finding in &result.findings {
         if matches!(
             finding.kind,
             AuditFinding::GodFile | AuditFinding::HighItemCount
         ) && !crate::code_audit::walker::is_test_path(&finding.file)
         {
-            decompose_target_files.insert(finding.file.clone());
+            intent_map.set(finding.file.clone(), FileIntent::Decompose);
         }
     }
 
-    // ── Phase 1: Generate content fixes (skip decompose targets) ───────
-    apply_convention_fixes(result, root, &mut fixes, &mut skipped, &decompose_target_files);
+    // ── Phase 1: Generate all content fixes ────────────────────────────
+    // Fixers run freely against the audit data. Conflicts with structural
+    // intents are resolved after generation, not during.
+    apply_convention_fixes(result, root, &mut fixes, &mut skipped);
 
     let mut new_files = Vec::new();
-    generate_unreferenced_export_fixes(result, root, &mut fixes, &mut skipped, &decompose_target_files);
+    generate_unreferenced_export_fixes(result, root, &mut fixes, &mut skipped);
     generate_duplicate_function_fixes(result, root, &mut fixes, &mut new_files, &mut skipped);
     orphaned_test_fixes::generate_orphaned_test_fixes(result, root, &mut fixes, &mut skipped);
 
@@ -146,7 +150,20 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
     near_duplicate_fixes::generate_near_duplicate_fixes(result, root, &mut fixes, &mut skipped);
     intra_duplicate_fixes::generate_intra_duplicate_fixes(result, root, &mut fixes, &mut skipped);
 
-    let fixes = merge_fixes_per_file(fixes);
+    let mut fixes = merge_fixes_per_file(fixes);
+
+    // ── Phase 4: Resolve cross-fixer conflicts ─────────────────────────
+    // Drop content fixes that conflict with structural intents. This is
+    // the central conflict resolution — no individual fixer needs to know
+    // about other fixers' existence.
+    let dropped = intent_map.resolve_conflicts(&mut fixes);
+    if dropped > 0 {
+        eprintln!(
+            "FileIntent conflict resolution: dropped {} dominated insertions",
+            dropped
+        );
+    }
+
     let total_insertions: usize = fixes.iter().map(|fix| fix.insertions.len()).sum();
     let files_modified = fixes.len();
 

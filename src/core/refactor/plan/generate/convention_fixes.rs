@@ -103,7 +103,6 @@ pub(super) fn apply_convention_fixes(
     root: &Path,
     fixes: &mut Vec<Fix>,
     skipped: &mut Vec<SkippedFile>,
-    decompose_targets: &std::collections::HashSet<String>,
 ) {
     for conv_report in &result.conventions {
         if conv_report.outliers.is_empty() {
@@ -137,12 +136,6 @@ pub(super) fn apply_convention_fixes(
         let sig_map = build_signature_map(&conv_report.conforming, root);
 
         for outlier in &conv_report.outliers {
-            // Skip files targeted for decompose — their imports will be handled
-            // by decompose's pub use * re-exports, not by convention fixes.
-            if decompose_targets.contains(&outlier.file) {
-                continue;
-            }
-
             if let Some(ref suffix) = naming_suffix {
                 let file_stem = Path::new(&outlier.file)
                     .file_stem()
