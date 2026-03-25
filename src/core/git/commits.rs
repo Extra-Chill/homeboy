@@ -8,6 +8,11 @@ use crate::error::Result;
 const DOCS_FILE_EXTENSIONS: [&str; 1] = [".md"];
 const DOCS_DIRECTORIES: [&str; 1] = ["docs/"];
 
+// Git log field/record separators — ASCII control characters that won't appear in commit text.
+// Used to reliably split multi-line commit bodies from hash and subject.
+const FIELD_SEP: char = '\x1e'; // ASCII Record Separator — separates hash|subject|body
+const RECORD_SEP: char = '\x1f'; // ASCII Unit Separator — separates commits
+
 /// Context for a component that lives inside a monorepo.
 ///
 /// When a component's `local_path` is a subdirectory of the git root,
@@ -130,8 +135,15 @@ impl CommitCategory {
 }
 
 /// Parse a commit subject into a category based on conventional commit format.
-/// Falls back to Other if no pattern matches - this is fine, commits still get included.
+/// Subject-only variant — delegates to `classify_commit` with no body.
+/// Kept for backwards compatibility and test convenience.
+#[cfg(test)]
 pub(crate) fn parse_conventional_commit(subject: &str) -> CommitCategory {
+    classify_commit(subject, None)
+}
+
+/// Full commit classification with optional body text.
+pub(crate) fn classify_commit(subject: &str, body: Option<&str>) -> CommitCategory {
     let lower = subject.to_lowercase();
 
     // Detect merge commits first - they should be filtered out
@@ -142,9 +154,20 @@ pub(crate) fn parse_conventional_commit(subject: &str) -> CommitCategory {
         return CommitCategory::Merge;
     }
 
+    // Check subject for breaking change markers
     if lower.contains("breaking change") || subject.contains("!:") {
-        CommitCategory::Breaking
-    } else if lower.starts_with("feat") {
+        return CommitCategory::Breaking;
+    }
+
+    // Check body for BREAKING CHANGE: or BREAKING-CHANGE: footer (conventional commits spec)
+    if let Some(body_text) = body {
+        let body_lower = body_text.to_lowercase();
+        if body_lower.contains("breaking change:") || body_lower.contains("breaking-change:") {
+            return CommitCategory::Breaking;
+        }
+    }
+
+    if lower.starts_with("feat") {
         CommitCategory::Feature
     } else if lower.starts_with("fix") {
         CommitCategory::Fix
@@ -155,6 +178,32 @@ pub(crate) fn parse_conventional_commit(subject: &str) -> CommitCategory {
     } else {
         CommitCategory::Other
     }
+}
+
+/// Parse raw git log output that uses FIELD_SEP / RECORD_SEP delimiters
+/// into a list of CommitInfo structs with body-aware category classification.
+fn parse_commit_records(raw: &str) -> Vec<CommitInfo> {
+    raw.split(RECORD_SEP)
+        .filter_map(|record| {
+            let record = record.trim();
+            if record.is_empty() {
+                return None;
+            }
+            let mut parts = record.splitn(3, FIELD_SEP);
+            let hash = parts.next()?.trim().to_string();
+            let subject = parts.next()?.trim().to_string();
+            let body = parts.next().map(|b| b.trim()).filter(|b| !b.is_empty());
+            if hash.is_empty() || subject.is_empty() {
+                return None;
+            }
+            let category = classify_commit(&subject, body);
+            Some(CommitInfo {
+                hash,
+                subject,
+                category,
+            })
+        })
+        .collect()
 }
 
 /// Extract version number from a git tag.
@@ -274,23 +323,15 @@ pub fn get_last_n_commits(path: &str, n: usize) -> Result<Vec<CommitInfo>> {
     let stdout = command::run_in(
         path,
         "git",
-        &["log", &format!("-{}", n), "--format=%h|%s"],
+        &[
+            "log",
+            &format!("-{}", n),
+            &format!("--format=%h{}%s{}%b{}", FIELD_SEP, FIELD_SEP, RECORD_SEP),
+        ],
         "git log",
     )?;
 
-    let commits = stdout
-        .lines()
-        .filter_map(|line| {
-            let (hash, subject) = line.split_once('|')?;
-            Some(CommitInfo {
-                hash: hash.to_string(),
-                subject: subject.to_string(),
-                category: parse_conventional_commit(subject),
-            })
-        })
-        .collect();
-
-    Ok(commits)
+    Ok(parse_commit_records(&stdout))
 }
 
 /// Get commits since a given tag (or all commits if tag is None).
@@ -314,7 +355,8 @@ pub fn get_commits_since_tag_for_path(
         .map(|t| format!("{}..HEAD", t))
         .unwrap_or_else(|| "HEAD".to_string());
 
-    let mut args = vec!["log".to_string(), range, "--format=%h|%s".to_string()];
+    let format_str = format!("--format=%h{}%s{}%b{}", FIELD_SEP, FIELD_SEP, RECORD_SEP);
+    let mut args = vec!["log".to_string(), range, format_str];
 
     // Add path filter for monorepo scoping: `git log <range> -- <path_prefix>`
     if let Some(prefix) = path_prefix {
@@ -325,19 +367,7 @@ pub fn get_commits_since_tag_for_path(
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let stdout = command::run_in(path, "git", &args_refs, "git log")?;
 
-    let commits = stdout
-        .lines()
-        .filter_map(|line| {
-            let (hash, subject) = line.split_once('|')?;
-            Some(CommitInfo {
-                hash: hash.to_string(),
-                subject: subject.to_string(),
-                category: parse_conventional_commit(subject),
-            })
-        })
-        .collect();
-
-    Ok(commits)
+    Ok(parse_commit_records(&stdout))
 }
 
 /// Counts of commits categorized by type.
@@ -514,6 +544,78 @@ mod tests {
             parse_conventional_commit("BREAKING CHANGE: Something big"),
             CommitCategory::Breaking
         );
+    }
+
+    #[test]
+    fn classify_commit_breaking_change_in_body() {
+        // BREAKING CHANGE: in commit body should be detected even with a non-breaking subject
+        assert_eq!(
+            classify_commit(
+                "feat: refactor handler API",
+                Some("BREAKING CHANGE: Handler subclasses removed")
+            ),
+            CommitCategory::Breaking
+        );
+
+        // BREAKING-CHANGE: (hyphenated form per conventional commits spec)
+        assert_eq!(
+            classify_commit(
+                "feat: update config format",
+                Some("BREAKING-CHANGE: old config format no longer supported")
+            ),
+            CommitCategory::Breaking
+        );
+
+        // Case insensitive in body
+        assert_eq!(
+            classify_commit(
+                "feat: migrate API",
+                Some("breaking change: removed deprecated endpoints")
+            ),
+            CommitCategory::Breaking
+        );
+
+        // Body without breaking change — should use subject classification
+        assert_eq!(
+            classify_commit(
+                "feat: add new feature",
+                Some("This is a regular body with no breaking changes")
+            ),
+            CommitCategory::Feature
+        );
+
+        // No body — should work like parse_conventional_commit
+        assert_eq!(
+            classify_commit("feat: add feature", None),
+            CommitCategory::Feature
+        );
+    }
+
+    #[test]
+    fn parse_commit_records_with_body() {
+        // Simulate git log output with field/record separators
+        let raw = format!(
+            "abc123{}feat: add feature{}Some body text{}def456{}fix: bug fix{}{}ghi789{}refactor: big change{}BREAKING CHANGE: removed old API{}",
+            FIELD_SEP, FIELD_SEP, RECORD_SEP,
+            FIELD_SEP, FIELD_SEP, RECORD_SEP,
+            FIELD_SEP, FIELD_SEP, RECORD_SEP,
+        );
+
+        let commits = parse_commit_records(&raw);
+        assert_eq!(commits.len(), 3);
+
+        assert_eq!(commits[0].hash, "abc123");
+        assert_eq!(commits[0].subject, "feat: add feature");
+        assert_eq!(commits[0].category, CommitCategory::Feature);
+
+        assert_eq!(commits[1].hash, "def456");
+        assert_eq!(commits[1].subject, "fix: bug fix");
+        assert_eq!(commits[1].category, CommitCategory::Fix);
+
+        // This one has BREAKING CHANGE in the body
+        assert_eq!(commits[2].hash, "ghi789");
+        assert_eq!(commits[2].subject, "refactor: big change");
+        assert_eq!(commits[2].category, CommitCategory::Breaking);
     }
 
     #[test]
