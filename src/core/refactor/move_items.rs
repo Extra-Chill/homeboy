@@ -54,7 +54,7 @@ impl ItemKind {
 // ============================================================================
 
 /// Ask an extension to parse all top-level items in a source file.
-fn ext_parse_items(
+pub(crate) fn ext_parse_items(
     ext: &ExtensionManifest,
     content: &str,
     file_path: &str,

@@ -68,6 +68,7 @@ pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePl
         vec![]
     });
     let items = dedupe_parsed_items(items);
+    let items = filter_extractable_items(file, &content, items, &mut warnings);
 
     let groups = group_items(file, &items, &content);
     let projected_audit_impact = project_audit_impact(&groups);
@@ -140,7 +141,7 @@ fn generate_source_module_index(plan: &DecomposePlan, root: &Path) {
             let stem = target.file_stem()?.to_str()?;
             Some(super::move_items::ModuleIndexEntry {
                 name: stem.to_string(),
-                pub_items: vec![], // empty = glob re-export (pub use submodule::*)
+                pub_items: public_items_for_group(plan, group),
             })
         })
         .collect();
@@ -949,6 +950,8 @@ fn group_items(file: &str, items: &[ParsedItem], content: &str) -> Vec<Decompose
         }
     }
 
+    let parent_kept_functions = identify_parent_kept_functions(file, &fn_items, content);
+
     // Phase 2: Try section headers first (strongest signal)
     let sections = extract_sections(content);
     let mut fn_buckets: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -972,6 +975,7 @@ fn group_items(file: &str, items: &[ParsedItem], content: &str) -> Vec<Decompose
         .iter()
         .copied()
         .filter(|i| !section_assigned.contains(&i.name))
+        .filter(|i| !parent_kept_functions.contains(&i.name))
         .collect();
 
     if !unassigned_fns.is_empty() {
@@ -1110,6 +1114,8 @@ fn group_items(file: &str, items: &[ParsedItem], content: &str) -> Vec<Decompose
             final_buckets.insert(name, names);
         }
     }
+
+    let final_buckets = rebalance_for_viable_parent_surface(file, content, &fn_items, final_buckets);
 
     let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("rs");
 
@@ -1379,6 +1385,337 @@ fn dedupe_parsed_items(items: Vec<ParsedItem>) -> Vec<ParsedItem> {
     deduped
 }
 
+fn filter_extractable_items(
+    file: &str,
+    content: &str,
+    items: Vec<ParsedItem>,
+    warnings: &mut Vec<String>,
+) -> Vec<ParsedItem> {
+    let mut filtered = Vec::new();
+
+    for item in items {
+        if is_non_extractable_item(file, content, &item) {
+            warnings.push(format!(
+                "Skipped non-extractable item '{}' ({} lines {}-{}) during decompose planning",
+                item.name, item.kind, item.start_line, item.end_line
+            ));
+            continue;
+        }
+        filtered.push(item);
+    }
+
+    filtered
+}
+
+fn is_non_extractable_item(file: &str, content: &str, item: &ParsedItem) -> bool {
+    let source = item.source.trim();
+
+    if source.contains("$Entity") || source.contains("$feature") {
+        return true;
+    }
+
+    if is_effective_module_root(file, content) && is_root_orchestrator_name(&item.name) {
+        return true;
+    }
+
+    if is_effective_module_root(file, content) && is_public_item_source(source) {
+        return true;
+    }
+
+    if !starts_like_extractable_declaration(source, &item.kind) {
+        return true;
+    }
+
+    if is_effective_module_root(file, content)
+        && item.kind == "function"
+        && item.source.lines().count() > 100
+        && count_local_function_references(content, &item.name) == 0
+    {
+        return true;
+    }
+
+    false
+}
+
+fn identify_parent_kept_functions(
+    file: &str,
+    fn_items: &[&ParsedItem],
+    content: &str,
+) -> HashSet<String> {
+    let mut keep = HashSet::new();
+    if !is_effective_module_root(file, content) {
+        return keep;
+    }
+
+    for item in fn_items {
+        if is_root_orchestrator_name(&item.name) {
+            keep.insert(item.name.clone());
+            continue;
+        }
+
+        if is_public_item_source(&item.source) {
+            keep.insert(item.name.clone());
+            continue;
+        }
+
+        let local_refs = count_local_function_references(content, &item.name);
+        if local_refs >= 3 {
+            keep.insert(item.name.clone());
+        }
+    }
+
+    keep
+}
+
+fn count_local_function_references(content: &str, name: &str) -> usize {
+    let pattern = format!(r"\b{}\s*\(", regex::escape(name));
+    let Ok(re) = regex::Regex::new(&pattern) else {
+        return 0;
+    };
+    re.find_iter(content).count().saturating_sub(1)
+}
+
+fn is_module_root(file: &str) -> bool {
+    let path = Path::new(file);
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| matches!(name, "mod.rs" | "lib.rs" | "main.rs" | "config.rs"))
+        .unwrap_or(false)
+}
+
+fn is_effective_module_root(file: &str, content: &str) -> bool {
+    is_module_root(file) || has_established_module_surface(content)
+}
+
+fn has_established_module_surface(content: &str) -> bool {
+    let mut public_decl_count = 0usize;
+
+    for line in content.lines().map(str::trim) {
+        if line.starts_with("pub use ") || line.starts_with("pub mod ") || line.starts_with("mod ") {
+            return true;
+        }
+
+        if line.starts_with("pub fn ")
+            || line.starts_with("pub(crate) fn ")
+            || line.starts_with("pub struct ")
+            || line.starts_with("pub(crate) struct ")
+            || line.starts_with("pub enum ")
+            || line.starts_with("pub(crate) enum ")
+            || line.starts_with("pub trait ")
+            || line.starts_with("pub(crate) trait ")
+            || line.starts_with("pub type ")
+            || line.starts_with("pub(crate) type ")
+            || line.starts_with("pub const ")
+            || line.starts_with("pub(crate) const ")
+        {
+            public_decl_count += 1;
+            if public_decl_count >= 4 {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn is_public_item_source(source: &str) -> bool {
+    let trimmed = source.trim_start();
+    trimmed.starts_with("pub ") || trimmed.starts_with("pub(crate) ")
+}
+
+fn starts_like_extractable_declaration(source: &str, kind: &str) -> bool {
+    let mut saw_attribute = false;
+
+    for line in source.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with("//") || line.starts_with("///") {
+            continue;
+        }
+
+        if line.starts_with("#") {
+            saw_attribute = true;
+            continue;
+        }
+
+        let decl = matches_declaration_prefix(line, kind);
+        if decl {
+            return true;
+        }
+
+        // If we saw attributes/doc comments, the next real line must be the item
+        // declaration itself — not a method chain/body fragment.
+        if saw_attribute {
+            return false;
+        }
+
+        // First meaningful non-attribute line is not a declaration: this is a
+        // partial body fragment and must not be extracted.
+        return false;
+    }
+
+    false
+}
+
+fn matches_declaration_prefix(line: &str, kind: &str) -> bool {
+    match kind {
+        "function" => {
+            line.starts_with("fn ")
+                || line.starts_with("pub fn ")
+                || line.starts_with("pub(crate) fn ")
+                || line.starts_with("pub(super) fn ")
+                || line.starts_with("pub async fn ")
+                || line.starts_with("pub(crate) async fn ")
+                || line.starts_with("async fn ")
+        }
+        "struct" => {
+            line.starts_with("struct ")
+                || line.starts_with("pub struct ")
+                || line.starts_with("pub(crate) struct ")
+        }
+        "enum" => {
+            line.starts_with("enum ")
+                || line.starts_with("pub enum ")
+                || line.starts_with("pub(crate) enum ")
+        }
+        "trait" => {
+            line.starts_with("trait ")
+                || line.starts_with("pub trait ")
+                || line.starts_with("pub(crate) trait ")
+        }
+        "type_alias" => {
+            line.starts_with("type ")
+                || line.starts_with("pub type ")
+                || line.starts_with("pub(crate) type ")
+        }
+        "impl" => line.starts_with("impl "),
+        "const" => {
+            line.starts_with("const ")
+                || line.starts_with("pub const ")
+                || line.starts_with("pub(crate) const ")
+        }
+        "static" => {
+            line.starts_with("static ")
+                || line.starts_with("pub static ")
+                || line.starts_with("pub(crate) static ")
+        }
+        _ => false,
+    }
+}
+
+fn rebalance_for_viable_parent_surface(
+    file: &str,
+    content: &str,
+    fn_items: &[&ParsedItem],
+    mut buckets: BTreeMap<String, Vec<String>>,
+) -> BTreeMap<String, Vec<String>> {
+    if !is_effective_module_root(file, content) {
+        return buckets;
+    }
+
+    let parent_surface: HashSet<String> = fn_items
+        .iter()
+        .filter(|item| is_root_orchestrator_name(&item.name) || is_public_item_source(&item.source))
+        .map(|item| item.name.clone())
+        .collect();
+
+    if parent_surface.is_empty() {
+        return buckets;
+    }
+
+    let extracted_surface_count = buckets
+        .values()
+        .flat_map(|names| names.iter())
+        .filter(|name| parent_surface.contains(*name))
+        .count();
+
+    if extracted_surface_count >= parent_surface.len().saturating_sub(1) {
+        let mut preserved = Vec::new();
+        for names in buckets.values_mut() {
+            let mut i = 0usize;
+            while i < names.len() {
+                if parent_surface.contains(&names[i]) {
+                    preserved.push(names.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        buckets.retain(|_, names| !names.is_empty());
+        if !preserved.is_empty() {
+            buckets
+                .entry("parent_surface".to_string())
+                .or_default()
+                .extend(preserved);
+        }
+    }
+
+    buckets
+}
+
+fn is_root_orchestrator_name(name: &str) -> bool {
+    matches!(
+        name,
+        "audit_internal"
+            | "audit_component"
+            | "audit_path"
+            | "audit_path_with_id"
+            | "audit_path_scoped"
+            | "build_convention_method_set"
+            | "fingerprint_reference_paths"
+            | "entity_crud"
+    )
+}
+
+fn public_items_for_group(plan: &DecomposePlan, group: &DecomposeGroup) -> Vec<String> {
+    let source_path = Path::new(&plan.file);
+    let ext = source_path.extension().and_then(|e| e.to_str()).unwrap_or("rs");
+
+    let root = Path::new(".");
+    let content = std::fs::read_to_string(source_path).unwrap_or_default();
+    let items = parse_items_for_group_export(ext, &content, &plan.file).unwrap_or_default();
+
+    let group_names: HashSet<&str> = group.item_names.iter().map(|name| name.as_str()).collect();
+    let mut pub_items: Vec<String> = items
+        .into_iter()
+        .filter(|item| group_names.contains(item.name.as_str()))
+        .filter(|item| is_public_item_source(&item.source))
+        .filter_map(|item| export_name_for_item(&item))
+        .collect();
+
+    pub_items.sort();
+    pub_items.dedup();
+
+    // Fallback for cases where the source file has already been rewritten and
+    // we can't recover the exact public names yet. Better to re-export the named
+    // group items than spray a glob import.
+    if pub_items.is_empty() {
+        pub_items = group
+            .item_names
+            .iter()
+            .filter(|name| !name.contains(" for "))
+            .cloned()
+            .collect();
+    }
+
+    let _ = root;
+    pub_items
+}
+
+fn parse_items_for_group_export(ext: &str, content: &str, file: &str) -> Option<Vec<ParsedItem>> {
+    let manifest = crate::extension::find_extension_for_file_ext(ext, "refactor")?;
+    crate::core::refactor::move_items::ext_parse_items(&manifest, content, file)
+        .or_else(|| crate::core::refactor::move_items::core_parse_items(&manifest, content))
+}
+
+fn export_name_for_item(item: &ParsedItem) -> Option<String> {
+    match item.kind.as_str() {
+        "function" | "struct" | "enum" | "trait" | "type_alias" | "const" | "static" => {
+            Some(item.name.clone())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1613,6 +1950,148 @@ mod tests {
                 g.suggested_target
             );
         }
+    }
+
+    #[test]
+    fn filter_extractable_items_skips_macro_template_fragments() {
+        let content = r#"
+macro_rules! entity_crud {
+    ($Entity:ty $(; $($feature:ident),+ )?) => {
+        pub fn load(id: &str) -> Result<$Entity> {
+            config::load::<$Entity>(id)
+        }
+    };
+}
+"#;
+        let items = vec![ParsedItem {
+            name: "load".to_string(),
+            kind: "function".to_string(),
+            start_line: 3,
+            end_line: 5,
+            source: "pub fn load(id: &str) -> Result<$Entity> {\n    config::load::<$Entity>(id)\n}"
+                .to_string(),
+            visibility: String::new(),
+        }];
+        let mut warnings = Vec::new();
+        let filtered = filter_extractable_items("src/core/config.rs", content, items, &mut warnings);
+        assert!(filtered.is_empty(), "macro template fragment should not be extractable");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn starts_like_extractable_declaration_rejects_dangling_body_fragment() {
+        let source = ".map(|c| {\n    c.to_ascii_lowercase()\n})\n\npub fn slugify(s: &str) -> String {\n    s.to_string()\n}";
+        assert!(!starts_like_extractable_declaration(source, "function"));
+    }
+
+    #[test]
+    fn starts_like_extractable_declaration_accepts_attr_prefixed_function() {
+        let source = "#[cfg(test)]\npub fn slugify(s: &str) -> String {\n    s.to_string()\n}";
+        assert!(starts_like_extractable_declaration(source, "function"));
+    }
+
+    #[test]
+    fn identify_parent_kept_functions_keeps_root_orchestrator() {
+        let content = r#"
+pub fn audit_component(component_id: &str) -> Result<CodeAuditResult> {
+    audit_path_with_id(component_id, ".")
+}
+
+fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAuditResult> {
+    audit_internal(component_id, source_path)
+}
+
+fn audit_internal(component_id: &str, source_path: &str) -> Result<CodeAuditResult> {
+    let _ = (component_id, source_path);
+    Ok(todo!())
+}
+"#;
+        let items = vec![
+            ParsedItem {
+                name: "audit_component".to_string(),
+                kind: "function".to_string(),
+                start_line: 2,
+                end_line: 4,
+                source: "pub fn audit_component(component_id: &str) -> Result<CodeAuditResult> {\n    audit_path_with_id(component_id, \".\")\n}".to_string(),
+                visibility: "pub".to_string(),
+            },
+            ParsedItem {
+                name: "audit_path_with_id".to_string(),
+                kind: "function".to_string(),
+                start_line: 6,
+                end_line: 8,
+                source: "fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAuditResult> {\n    audit_internal(component_id, source_path)\n}".to_string(),
+                visibility: String::new(),
+            },
+            ParsedItem {
+                name: "audit_internal".to_string(),
+                kind: "function".to_string(),
+                start_line: 10,
+                end_line: 13,
+                source: "fn audit_internal(component_id: &str, source_path: &str) -> Result<CodeAuditResult> {\n    let _ = (component_id, source_path);\n    Ok(todo!())\n}".to_string(),
+                visibility: String::new(),
+            },
+        ];
+        let refs: Vec<&ParsedItem> = items.iter().collect();
+        let kept = identify_parent_kept_functions("src/core/code_audit/mod.rs", &refs, content);
+        assert!(kept.contains("audit_component"));
+        assert!(kept.contains("audit_internal"));
+    }
+
+    #[test]
+    fn effective_module_root_detects_public_surface_regular_file() {
+        let content = r#"
+pub fn load() {}
+pub fn list() {}
+pub fn save() {}
+pub fn delete() {}
+"#;
+        assert!(has_established_module_surface(content));
+        assert!(is_effective_module_root("src/core/config.rs", content));
+    }
+
+    #[test]
+    fn rebalance_for_viable_parent_surface_preserves_public_root_surface() {
+        let content = r#"
+pub fn a() {}
+pub fn b() {}
+fn helper() {}
+"#;
+        let items = vec![
+            ParsedItem {
+                name: "a".to_string(),
+                kind: "function".to_string(),
+                start_line: 1,
+                end_line: 1,
+                source: "pub fn a() {}".to_string(),
+                visibility: "pub".to_string(),
+            },
+            ParsedItem {
+                name: "b".to_string(),
+                kind: "function".to_string(),
+                start_line: 2,
+                end_line: 2,
+                source: "pub fn b() {}".to_string(),
+                visibility: "pub".to_string(),
+            },
+            ParsedItem {
+                name: "helper".to_string(),
+                kind: "function".to_string(),
+                start_line: 3,
+                end_line: 3,
+                source: "fn helper() {}".to_string(),
+                visibility: String::new(),
+            },
+        ];
+        let refs: Vec<&ParsedItem> = items.iter().collect();
+        let mut buckets = BTreeMap::new();
+        buckets.insert("alpha".to_string(), vec!["a".to_string()]);
+        buckets.insert("beta".to_string(), vec!["b".to_string(), "helper".to_string()]);
+
+        let rebalanced =
+            rebalance_for_viable_parent_surface("src/core/config.rs", content, &refs, buckets);
+        assert!(rebalanced.contains_key("parent_surface"));
+        assert_eq!(rebalanced["parent_surface"].len(), 2);
     }
 
     #[test]
