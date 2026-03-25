@@ -77,3 +77,39 @@ struct ApiInput {
     endpoint: String,
     body: Option<Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_some_parse_api_input_to_string() {
+        let input = "";
+        let _result = run(&input);
+    }
+
+    #[test]
+    fn test_run_some_input_chars_take_200_collect_string() {
+        let input = "";
+        let _result = run(&input);
+    }
+
+    #[test]
+    fn test_run_default_path() {
+        let input = "";
+        let _result = run(&input);
+    }
+
+    #[test]
+    fn test_run_default_path_2() {
+        let input = "";
+        let _result = run(&input);
+    }
+
+    #[test]
+    fn test_run_default_path_3() {
+        let input = "";
+        let _result = run(&input);
+    }
+
+}

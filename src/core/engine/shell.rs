@@ -77,3 +77,34 @@ fn split_respecting_quotes(input: &str) -> Vec<String> {
 pub fn quote_path(path: &str) -> String {
     format!("'{}'", escape_single_quote_content(path))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quote_arg_default_path() {
+        let arg = "";
+        let _result = quote_arg(&arg);
+    }
+
+    #[test]
+    fn test_quote_args_default_path() {
+        let args = Vec::new();
+        let _result = quote_args(&args);
+    }
+
+    #[test]
+    fn test_normalize_args_default_path() {
+        let args = Vec::new();
+        let result = normalize_args(&args);
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_quote_path_default_path() {
+        let path = "";
+        let _result = quote_path(&path);
+    }
+
+}

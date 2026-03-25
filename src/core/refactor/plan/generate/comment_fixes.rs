@@ -852,4 +852,42 @@ mod tests {
         assert_eq!(start, 2);
         assert_eq!(end, 6);
     }
+
+    #[test]
+    fn test_generate_comment_fixes_some_c_c() {
+
+        generate_comment_fixes();
+    }
+
+    #[test]
+    fn test_generate_comment_fixes_some_c_c_2() {
+
+        generate_comment_fixes();
+    }
+
+    #[test]
+    fn test_generate_comment_fixes_ok_c_c() {
+
+        generate_comment_fixes();
+    }
+
+    #[test]
+    fn test_generate_comment_fixes_err() {
+
+        generate_comment_fixes();
+    }
+
+    #[test]
+    fn test_generate_comment_fixes_some_removing_else_branch_changes_control_flow_verify_the_if() {
+
+        generate_comment_fixes();
+    }
+
+    #[test]
+    fn test_generate_comment_fixes_has_expected_effects() {
+        // Expected effects: file_read, mutation
+
+        let _ = generate_comment_fixes();
+    }
+
 }

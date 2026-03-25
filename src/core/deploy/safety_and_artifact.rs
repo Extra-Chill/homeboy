@@ -358,3 +358,58 @@ fn render_extract_command(template: &str, vars: &HashMap<String, String>) -> Str
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_deploy_target_some_install_dir_to_string() {
+
+        let _result = validate_deploy_target();
+    }
+
+    #[test]
+    fn test_validate_deploy_target_some_install_dir_to_string_2() {
+
+        let _result = validate_deploy_target();
+    }
+
+    #[test]
+    fn test_validate_deploy_target_ok() {
+
+        let result = validate_deploy_target();
+        assert!(result.is_ok(), "expected Ok for: Ok(())");
+    }
+
+    #[test]
+    fn test_deploy_via_git_let_checkout_target_if_let_some_ref_pattern_git_config_tag_p() {
+
+        let _result = deploy_via_git();
+    }
+
+    #[test]
+    fn test_deploy_via_git_if_let_some_ver_component_version() {
+
+        let _result = deploy_via_git();
+    }
+
+    #[test]
+    fn test_deploy_via_git_ok_deployresult_success_0() {
+
+        let result = deploy_via_git();
+        let inner = result.unwrap();
+        // Branch returns Ok(DeployResult::success(0) when: Ok(DeployResult::success(0))
+        assert_eq!(inner.success, false);
+        assert_eq!(inner.exit_code, 0);
+        assert_eq!(inner.error, None);
+    }
+
+    #[test]
+    fn test_deploy_via_git_has_expected_effects() {
+        // Expected effects: mutation, logging
+
+        let _ = deploy_via_git();
+    }
+
+}

@@ -22,3 +22,43 @@ pub(crate) fn core_parse_items(ext: &ExtensionManifest, content: &str) -> Option
     }
     Some(items.into_iter().map(ParsedItem::from).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_refactor_extension_default_path() {
+
+        let _result = find_refactor_extension();
+    }
+
+    #[test]
+    fn test_core_parse_items_default_path() {
+
+        let result = core_parse_items();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_core_parse_items_default_path_2() {
+
+        let result = core_parse_items();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_core_parse_items_items_is_empty() {
+
+        let result = core_parse_items();
+        assert!(!result.is_empty(), "expected non-empty collection for: items.is_empty()");
+    }
+
+    #[test]
+    fn test_core_parse_items_items_is_empty_2() {
+
+        let result = core_parse_items();
+        assert!(!result.is_empty(), "expected non-empty collection for: items.is_empty()");
+    }
+
+}

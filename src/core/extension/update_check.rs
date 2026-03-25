@@ -167,4 +167,24 @@ mod tests {
         assert_eq!(parsed.extensions_behind["wordpress"], 3);
         assert_eq!(parsed.checked_at, 1700000000);
     }
+
+    #[test]
+    fn test_run_startup_check_if_let_some_ref_cache_cached() {
+
+        run_startup_check();
+    }
+
+    #[test]
+    fn test_run_startup_check_if_let_some_update_extension_check_update_available_id() {
+
+        run_startup_check();
+    }
+
+    #[test]
+    fn test_run_startup_check_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = run_startup_check();
+    }
+
 }

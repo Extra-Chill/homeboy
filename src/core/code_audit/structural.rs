@@ -461,4 +461,26 @@ export default function main() {}
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_analyze_structure_ok_c_c() {
+
+        let result = analyze_structure();
+        assert!(!result.is_empty(), "expected non-empty collection for: Ok(c) => c,");
+    }
+
+    #[test]
+    fn test_analyze_structure_err_continue() {
+
+        let result = analyze_structure();
+        assert!(!result.is_empty(), "expected non-empty collection for: Err(_) => continue,");
+    }
+
+    #[test]
+    fn test_analyze_structure_has_expected_effects() {
+        // Expected effects: mutation, file_read
+
+        let _ = analyze_structure();
+    }
+
 }

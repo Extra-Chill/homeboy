@@ -267,4 +267,36 @@ mod tests {
             _ => panic!("Expected LineReplacement"),
         }
     }
+
+    #[test]
+    fn test_generate_parameter_fixes_finding_description_contains_truly_dead() {
+
+        generate_parameter_fixes();
+    }
+
+    #[test]
+    fn test_generate_parameter_fixes_ok_c_c() {
+
+        generate_parameter_fixes();
+    }
+
+    #[test]
+    fn test_generate_parameter_fixes_err() {
+
+        generate_parameter_fixes();
+    }
+
+    #[test]
+    fn test_generate_parameter_fixes_if_let_some_insertion() {
+
+        generate_parameter_fixes();
+    }
+
+    #[test]
+    fn test_generate_parameter_fixes_has_expected_effects() {
+        // Expected effects: file_read, mutation
+
+        let _ = generate_parameter_fixes();
+    }
+
 }

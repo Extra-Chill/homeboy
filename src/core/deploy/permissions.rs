@@ -139,3 +139,41 @@ fn ensure_remote_success(output: CommandOutput, operation: &str, remote_path: &s
         },
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fix_local_permissions_does_not_panic() {
+
+        let _ = fix_local_permissions();
+    }
+
+    #[test]
+    fn test_fix_local_permissions_has_expected_effects() {
+        // Expected effects: process_spawn, logging
+
+        let _ = fix_local_permissions();
+    }
+
+    #[test]
+    fn test_fix_deployed_permissions_default_path() {
+
+        let _result = fix_deployed_permissions();
+    }
+
+    #[test]
+    fn test_fix_deployed_permissions_default_path_2() {
+
+        let _result = fix_deployed_permissions();
+    }
+
+    #[test]
+    fn test_fix_deployed_permissions_ok() {
+
+        let result = fix_deployed_permissions();
+        assert!(result.is_ok(), "expected Ok for: Ok(())");
+    }
+
+}

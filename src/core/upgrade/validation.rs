@@ -23,3 +23,15 @@ pub fn check_for_updates() -> Result<VersionCheck> {
         install_method,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_for_updates_default_path() {
+
+        let _result = check_for_updates();
+    }
+
+}

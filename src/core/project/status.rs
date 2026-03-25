@@ -65,3 +65,30 @@ fn collect_component_versions(project_id: &str) -> Option<Vec<ProjectComponentSt
             .collect()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_collect_status_ok_project_project() {
+        let project_id = "";
+        let health_only = false;
+        let _result = collect_status(&project_id, health_only);
+    }
+
+    #[test]
+    fn test_collect_status_err() {
+        let project_id = "";
+        let health_only = false;
+        let _result = collect_status(&project_id, health_only);
+    }
+
+    #[test]
+    fn test_collect_status_none() {
+        let project_id = "";
+        let health_only = false;
+        let _result = collect_status(&project_id, health_only);
+    }
+
+}

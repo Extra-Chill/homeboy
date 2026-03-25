@@ -232,4 +232,12 @@ mod tests {
             findings
         );
     }
+
+    #[test]
+    fn test_run_default_path() {
+        let root = Path::new("");
+        let result = run(&root);
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
 }

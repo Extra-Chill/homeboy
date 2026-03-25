@@ -260,3 +260,27 @@ fn scp_file_atomic(
 
     Ok(DeployResult::success(0))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_upload_directory_default_path() {
+
+        let _result = upload_directory();
+    }
+
+    #[test]
+    fn test_upload_file_default_path() {
+
+        let _result = upload_file();
+    }
+
+    #[test]
+    fn test_scp_file_default_path() {
+
+        let _result = scp_file();
+    }
+
+}

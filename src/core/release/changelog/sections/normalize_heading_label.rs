@@ -133,3 +133,114 @@ pub fn extract_last_release_snapshot(content: &str) -> Option<FinalizedReleaseSn
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_section_content_default_path() {
+
+        let _result = validate_section_content();
+    }
+
+    #[test]
+    fn test_normalize_heading_label_default_path() {
+
+        let _result = normalize_heading_label();
+    }
+
+    #[test]
+    fn test_is_matching_next_section_heading_trimmed_starts_with() {
+
+        let result = is_matching_next_section_heading();
+        assert!(!result, "expected false when: !trimmed.starts_with(\"##\")");
+    }
+
+    #[test]
+    fn test_extract_version_from_heading_default_path() {
+
+        let _result = extract_version_from_heading();
+    }
+
+    #[test]
+    fn test_get_latest_finalized_version_trimmed_starts_with() {
+        let content = "";
+        let result = get_latest_finalized_version(&content);
+        assert!(result.is_some(), "expected Some for: trimmed.starts_with(\"## \")");
+    }
+
+    #[test]
+    fn test_get_latest_finalized_version_let_some_version_extract_version_from_heading_label() {
+        let content = "";
+        let result = get_latest_finalized_version(&content);
+        assert!(result.is_some(), "expected Some for: let Some(version) = extract_version_from_heading(label)");
+    }
+
+    #[test]
+    fn test_get_latest_finalized_version_let_some_version_extract_version_from_heading_label_2() {
+        let content = "";
+        let result = get_latest_finalized_version(&content);
+        assert!(result.is_none(), "expected None for: let Some(version) = extract_version_from_heading(label)");
+    }
+
+    #[test]
+    fn test_extract_date_from_heading_default_path() {
+
+        let _result = extract_date_from_heading();
+    }
+
+    #[test]
+    fn test_extract_first_bullet_trimmed_starts_with() {
+
+        let result = extract_first_bullet();
+        assert!(result.is_some(), "expected Some for: trimmed.starts_with(\"## \")");
+    }
+
+    #[test]
+    fn test_extract_first_bullet_let_some_rest_trimmed_strip_prefix() {
+
+        let result = extract_first_bullet();
+        assert!(result.is_some(), "expected Some for: let Some(rest) = trimmed.strip_prefix(\"- \")");
+    }
+
+    #[test]
+    fn test_extract_first_bullet_let_some_rest_trimmed_strip_prefix_2() {
+
+        let result = extract_first_bullet();
+        assert!(result.is_some(), "expected Some for: let Some(rest) = trimmed.strip_prefix(\"- \")");
+    }
+
+    #[test]
+    fn test_extract_first_bullet_let_some_rest_trimmed_strip_prefix_3() {
+
+        let result = extract_first_bullet();
+        assert!(result.is_some(), "expected Some for: let Some(rest) = trimmed.strip_prefix(\"* \")");
+    }
+
+    #[test]
+    fn test_extract_first_bullet_let_some_rest_trimmed_strip_prefix_4() {
+
+        let result = extract_first_bullet();
+        assert!(result.is_none(), "expected None for: let Some(rest) = trimmed.strip_prefix(\"* \")");
+    }
+
+    #[test]
+    fn test_extract_last_release_snapshot_normalized_eq_ignore_ascii_case_unreleased_normalized_eq_ign() {
+        let content = "";
+        let result = extract_last_release_snapshot(&content);
+        let inner = result.expect("expected Some for: normalized.eq_ignore_ascii_case(\"unreleased\") || normalized.eq_ignore_ascii_case(\"next\")");
+        // Branch returns Some(tag)
+        assert_eq!(inner.tag, String::new());
+        assert_eq!(inner.date, None);
+        assert_eq!(inner.summary, None);
+    }
+
+    #[test]
+    fn test_extract_last_release_snapshot_none() {
+        let content = "";
+        let result = extract_last_release_snapshot(&content);
+        assert!(result.is_none(), "expected None for: None");
+    }
+
+}

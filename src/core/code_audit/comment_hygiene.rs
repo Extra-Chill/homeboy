@@ -217,4 +217,12 @@ mod tests {
         assert_eq!(normalized_comment("- TODO: check"), "TODO: check");
         assert_eq!(normalized_comment("  * legacy note"), "legacy note");
     }
+
+    #[test]
+    fn test_run_default_path() {
+
+        let result = run();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
 }

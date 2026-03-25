@@ -1,154 +1,14 @@
+mod homeboy;
+mod join_remote;
+mod resolve_path;
+
+pub use homeboy::*;
+pub use join_remote::*;
+pub use resolve_path::*;
+
 use crate::error::{Error, Result};
 use std::env;
 use std::path::PathBuf;
-
-/// Base homeboy config directory (universal ~/.config/homeboy/ on all platforms)
-pub fn homeboy() -> Result<PathBuf> {
-    #[cfg(windows)]
-    {
-        let appdata = env::var("APPDATA").map_err(|_| {
-            Error::internal_unexpected(
-                "APPDATA environment variable not set on Windows".to_string(),
-            )
-        })?;
-        Ok(PathBuf::from(appdata).join("homeboy"))
-    }
-
-    #[cfg(not(windows))]
-    {
-        let home = env::var("HOME").map_err(|_| {
-            Error::internal_unexpected(
-                "HOME environment variable not set on Unix-like system".to_string(),
-            )
-        })?;
-        Ok(PathBuf::from(home).join(".config").join("homeboy"))
-    }
-}
-
-/// Global homeboy.json config file path
-pub fn homeboy_json() -> Result<PathBuf> {
-    Ok(homeboy()?.join("homeboy.json"))
-}
-
-/// Projects directory
-pub fn projects() -> Result<PathBuf> {
-    Ok(homeboy()?.join("projects"))
-}
-
-/// Project directory path (e.g., ~/.config/homeboy/projects/{id}/)
-pub fn project_dir(id: &str) -> Result<PathBuf> {
-    Ok(projects()?.join(id))
-}
-
-/// Project config file path (e.g., ~/.config/homeboy/projects/{id}/{id}.json)
-pub fn project_config(id: &str) -> Result<PathBuf> {
-    Ok(projects()?.join(id).join(format!("{}.json", id)))
-}
-
-/// Servers directory
-pub fn servers() -> Result<PathBuf> {
-    Ok(homeboy()?.join("servers"))
-}
-
-/// Components directory
-pub fn components() -> Result<PathBuf> {
-    Ok(homeboy()?.join("components"))
-}
-
-/// Extensions directory
-pub fn extensions() -> Result<PathBuf> {
-    Ok(homeboy()?.join("extensions"))
-}
-
-/// Keys directory
-pub fn keys() -> Result<PathBuf> {
-    Ok(homeboy()?.join("keys"))
-}
-
-/// Backups directory
-pub fn backups() -> Result<PathBuf> {
-    Ok(homeboy()?.join("backups"))
-}
-
-/// Extension directory path
-pub fn extension(id: &str) -> Result<PathBuf> {
-    Ok(extensions()?.join(id))
-}
-
-/// Extension manifest file path
-pub fn extension_manifest(id: &str) -> Result<PathBuf> {
-    Ok(extensions()?.join(id).join(format!("{}.json", id)))
-}
-
-/// Key file path
-pub fn key(server_id: &str) -> Result<PathBuf> {
-    Ok(keys()?.join(format!("{}_id_rsa", server_id)))
-}
-
-/// Resolve path that may be absolute or relative to base.
-pub fn resolve_path(base: &str, file: &str) -> PathBuf {
-    if file.starts_with('/') {
-        PathBuf::from(file)
-    } else {
-        PathBuf::from(base).join(file)
-    }
-}
-
-/// Resolve path and return as String.
-pub fn resolve_path_string(base: &str, file: &str) -> String {
-    resolve_path(base, file).to_string_lossy().to_string()
-}
-
-pub(crate) fn resolve_optional_base_path(base_path: Option<&str>) -> Option<&str> {
-    base_path.and_then(|value| (!value.trim().is_empty()).then_some(value.trim()))
-}
-
-pub fn join_remote_path(base_path: Option<&str>, path: &str) -> Result<String> {
-    let path = path.trim();
-
-    if path.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "Path cannot be empty",
-            None,
-            None,
-        ));
-    }
-
-    if path.starts_with('/') {
-        return Ok(path.to_string());
-    }
-
-    let Some(base) = resolve_optional_base_path(base_path) else {
-        return Err(Error::config_missing_key("base_path", None));
-    };
-
-    if base.ends_with('/') {
-        Ok(format!("{}{}", base, path))
-    } else {
-        Ok(format!("{}/{}", base, path))
-    }
-}
-
-pub(crate) fn join_remote_child(base_path: Option<&str>, dir: &str, child: &str) -> Result<String> {
-    let dir_path = join_remote_path(base_path, dir)?;
-    let child = child.trim();
-
-    if child.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "child",
-            "Child path cannot be empty",
-            None,
-            None,
-        ));
-    }
-
-    if dir_path.ends_with('/') {
-        Ok(format!("{}{}", dir_path, child))
-    } else {
-        Ok(format!("{}/{}", dir_path, child))
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -208,4 +68,194 @@ mod tests {
         let result = resolve_path_string("/base", "relative/path");
         assert_eq!(result, "/base/relative/path");
     }
+
+    #[test]
+    fn test_homeboy_default_path() {
+
+        let _result = homeboy();
+    }
+
+    #[test]
+    fn test_homeboy_ok_pathbuf_from_appdata_join_homeboy() {
+
+        let result = homeboy();
+        assert!(result.is_ok(), "expected Ok for: Ok(PathBuf::from(appdata).join(\"homeboy\"))");
+    }
+
+    #[test]
+    fn test_homeboy_default_path_2() {
+
+        let _result = homeboy();
+    }
+
+    #[test]
+    fn test_homeboy_ok_pathbuf_from_home_join_config_join_homeboy() {
+
+        let result = homeboy();
+        assert!(result.is_ok(), "expected Ok for: Ok(PathBuf::from(home).join(\".config\").join(\"homeboy\"))");
+    }
+
+    #[test]
+    fn test_homeboy_json_ok_homeboy_join_homeboy_json() {
+
+        let result = homeboy_json();
+        assert!(result.is_ok(), "expected Ok for: Ok(homeboy()?.join(\"homeboy.json\"))");
+    }
+
+    #[test]
+    fn test_projects_ok_homeboy_join_projects() {
+
+        let result = projects();
+        assert!(result.is_ok(), "expected Ok for: Ok(homeboy()?.join(\"projects\"))");
+    }
+
+    #[test]
+    fn test_project_dir_ok_projects_join_id() {
+        let id = "";
+        let result = project_dir(&id);
+        assert!(result.is_ok(), "expected Ok for: Ok(projects()?.join(id))");
+    }
+
+    #[test]
+    fn test_project_config_ok_projects_join_id_join_format_json_id() {
+        let id = "";
+        let result = project_config(&id);
+        assert!(result.is_ok(), "expected Ok for: Ok(projects()?.join(id).join(format!(\"{{}}.json\", id)))");
+    }
+
+    #[test]
+    fn test_servers_ok_homeboy_join_servers() {
+
+        let result = servers();
+        assert!(result.is_ok(), "expected Ok for: Ok(homeboy()?.join(\"servers\"))");
+    }
+
+    #[test]
+    fn test_components_ok_homeboy_join_components() {
+
+        let result = components();
+        assert!(result.is_ok(), "expected Ok for: Ok(homeboy()?.join(\"components\"))");
+    }
+
+    #[test]
+    fn test_extensions_ok_homeboy_join_extensions() {
+
+        let result = extensions();
+        assert!(result.is_ok(), "expected Ok for: Ok(homeboy()?.join(\"extensions\"))");
+    }
+
+    #[test]
+    fn test_keys_ok_homeboy_join_keys() {
+
+        let result = keys();
+        assert!(result.is_ok(), "expected Ok for: Ok(homeboy()?.join(\"keys\"))");
+    }
+
+    #[test]
+    fn test_backups_ok_homeboy_join_backups() {
+
+        let result = backups();
+        assert!(result.is_ok(), "expected Ok for: Ok(homeboy()?.join(\"backups\"))");
+    }
+
+    #[test]
+    fn test_extension_ok_extensions_join_id() {
+        let id = "";
+        let result = extension(&id);
+        assert!(result.is_ok(), "expected Ok for: Ok(extensions()?.join(id))");
+    }
+
+    #[test]
+    fn test_extension_manifest_ok_extensions_join_id_join_format_json_id() {
+        let id = "";
+        let result = extension_manifest(&id);
+        assert!(result.is_ok(), "expected Ok for: Ok(extensions()?.join(id).join(format!(\"{{}}.json\", id)))");
+    }
+
+    #[test]
+    fn test_key_ok_keys_join_format_id_rsa_server_id() {
+        let server_id = "";
+        let result = key(&server_id);
+        assert!(result.is_ok(), "expected Ok for: Ok(keys()?.join(format!(\"{{}}_id_rsa\", server_id)))");
+    }
+
+    #[test]
+    fn test_resolve_path_default_path() {
+        let base = "";
+        let file = "";
+        let _result = resolve_path(&base, &file);
+    }
+
+    #[test]
+    fn test_resolve_path_string_default_path() {
+        let base = "";
+        let file = "";
+        let _result = resolve_path_string(&base, &file);
+    }
+
+    #[test]
+    fn test_resolve_optional_base_path_default_path() {
+
+        let _result = resolve_optional_base_path();
+    }
+
+    #[test]
+    fn test_join_remote_path_path_starts_with() {
+        let base_path = None;
+        let path = "/";
+        let result = join_remote_path(base_path, &path);
+        assert!(result.is_ok(), "expected Ok for: path.starts_with('/')");
+    }
+
+    #[test]
+    fn test_join_remote_path_path_starts_with_2() {
+        let base_path = None;
+        let path = "/";
+        let _result = join_remote_path(base_path, &path);
+    }
+
+    #[test]
+    fn test_join_remote_path_path_starts_with_3() {
+        let base_path = None;
+        let path = "/";
+        let result = join_remote_path(base_path, &path);
+        assert!(result.is_err(), "expected Err for: path.starts_with('/')");
+    }
+
+    #[test]
+    fn test_join_remote_path_base_ends_with() {
+        let base_path = None;
+        let path = "";
+        let result = join_remote_path(base_path, &path);
+        assert!(result.is_ok(), "expected Ok for: base.ends_with('/')");
+    }
+
+    #[test]
+    fn test_join_remote_path_else() {
+        let base_path = None;
+        let path = "";
+        let result = join_remote_path(base_path, &path);
+        assert!(result.is_ok(), "expected Ok for: else");
+    }
+
+    #[test]
+    fn test_join_remote_child_default_path() {
+
+        let _result = join_remote_child();
+    }
+
+    #[test]
+    fn test_join_remote_child_dir_path_ends_with() {
+
+        let result = join_remote_child();
+        assert!(result.is_ok(), "expected Ok for: dir_path.ends_with('/')");
+    }
+
+    #[test]
+    fn test_join_remote_child_else() {
+
+        let result = join_remote_child();
+        assert!(result.is_ok(), "expected Ok for: else");
+    }
+
 }

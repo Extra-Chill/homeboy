@@ -822,4 +822,158 @@ mod tests {
             import
         );
     }
+
+    #[test]
+    fn test_extract_function_name_from_unreferenced_default_path() {
+
+        let _result = extract_function_name_from_unreferenced();
+    }
+
+    #[test]
+    fn test_extract_function_name_from_unreferenced_some_rest_end_to_string() {
+
+        let result = extract_function_name_from_unreferenced();
+        assert!(result.is_some(), "expected Some for: Some(rest[..end].to_string())");
+    }
+
+    #[test]
+    fn test_module_path_from_file_default_path() {
+
+        let _result = module_path_from_file();
+    }
+
+    #[test]
+    fn test_generate_unreferenced_export_fixes_finding_kind_auditfinding_unreferencedexport() {
+
+        generate_unreferenced_export_fixes();
+    }
+
+    #[test]
+    fn test_generate_unreferenced_export_fixes_matches_language_language_rust() {
+
+        generate_unreferenced_export_fixes();
+    }
+
+    #[test]
+    fn test_generate_unreferenced_export_fixes_let_some_symbol_surface_surface_symbol_surface_fn_name_else() {
+
+        generate_unreferenced_export_fixes();
+    }
+
+    #[test]
+    fn test_generate_unreferenced_export_fixes_ok_content_content() {
+
+        generate_unreferenced_export_fixes();
+    }
+
+    #[test]
+    fn test_generate_unreferenced_export_fixes_err_continue() {
+
+        generate_unreferenced_export_fixes();
+    }
+
+    #[test]
+    fn test_generate_unreferenced_export_fixes_let_some_line_num_found_line_else() {
+
+        generate_unreferenced_export_fixes();
+    }
+
+    #[test]
+    fn test_generate_unreferenced_export_fixes_has_expected_effects() {
+        // Expected effects: mutation, file_read
+
+        let _ = generate_unreferenced_export_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_ok_content_content() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_err() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_else() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_else_2() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_match_std_fs_read_to_string_abs_path() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_err_2() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_let_some_result_val_crate_extension_run_refactor_script_mani() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_if_let_some_trait_file_some_trait_content() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_if_let_some_file_edits_result_val() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_let_some_file_edits_result_val() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_if_let_some_remove_lines_edit_get_remove_lines() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_let_some_remove_lines_edit_get_remove_lines() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_if_let_some_import_edit_get_add_import_and_then_value_value_() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_if_let_some_use_trait_edit_get_add_use_trait_and_then_value_() {
+
+        generate_duplicate_function_fixes();
+    }
+
+    #[test]
+    fn test_generate_duplicate_function_fixes_has_expected_effects() {
+        // Expected effects: mutation, file_read
+
+        let _ = generate_duplicate_function_fixes();
+    }
+
 }

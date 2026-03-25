@@ -62,3 +62,61 @@ pub fn status(project_id: &str) -> Result<AuthStatus> {
         authenticated: client.is_authenticated(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_login_default_path() {
+        let project_id = "";
+        let credentials = HashMap::new();
+        let _result = login(&project_id, credentials);
+    }
+
+    #[test]
+    fn test_login_default_path_2() {
+        let project_id = "";
+        let credentials = HashMap::new();
+        let _result = login(&project_id, credentials);
+    }
+
+    #[test]
+    fn test_login_default_path_3() {
+        let project_id = "";
+        let credentials = HashMap::new();
+        let _result = login(&project_id, credentials);
+    }
+
+    #[test]
+    fn test_logout_default_path() {
+        let project_id = "";
+        let _result = logout(&project_id);
+    }
+
+    #[test]
+    fn test_logout_default_path_2() {
+        let project_id = "";
+        let _result = logout(&project_id);
+    }
+
+    #[test]
+    fn test_logout_default_path_3() {
+        let project_id = "";
+        let _result = logout(&project_id);
+    }
+
+    #[test]
+    fn test_status_default_path() {
+        let project_id = "";
+        let _result = status(&project_id);
+    }
+
+    #[test]
+    fn test_status_default_path_2() {
+        let project_id = "";
+        let _result = status(&project_id);
+    }
+
+}

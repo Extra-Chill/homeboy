@@ -151,4 +151,12 @@ mod tests {
         let results = check_conventions(&[conv]);
         assert_eq!(results[0].status, CheckStatus::Fragmented);
     }
+
+    #[test]
+    fn test_check_conventions_default_path() {
+        let conventions = Vec::new();
+        let result = check_conventions(&conventions);
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
 }

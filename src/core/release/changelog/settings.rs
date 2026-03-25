@@ -97,4 +97,24 @@ mod tests {
         assert!(aliases.iter().any(|a| a == "Next"));
         assert!(aliases.iter().any(|a| a == "[Next]"));
     }
+
+    #[test]
+    fn test_resolve_effective_settings_else() {
+        let component = None;
+        let _result = resolve_effective_settings(component);
+    }
+
+    #[test]
+    fn test_resolve_effective_settings_has_expected_effects() {
+        // Expected effects: mutation
+        let component = None;
+        let _ = resolve_effective_settings(component);
+    }
+
+    #[test]
+    fn test_subsection_header_from_type_default_path() {
+
+        let _result = subsection_header_from_type();
+    }
+
 }

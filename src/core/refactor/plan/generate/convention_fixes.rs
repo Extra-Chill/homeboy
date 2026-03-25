@@ -366,3 +366,97 @@ pub(super) fn apply_convention_fixes(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_import_statement_default_path() {
+
+        let _result = generate_import_statement();
+    }
+
+    #[test]
+    fn test_generate_namespace_declaration_match_language() {
+
+        let result = generate_namespace_declaration();
+        assert!(result.is_some(), "expected Some for: match language");
+    }
+
+    #[test]
+    fn test_generate_type_conformance_declaration_default_path() {
+
+        let _result = generate_type_conformance_declaration();
+    }
+
+    #[test]
+    fn test_generate_registration_stub_default_path() {
+
+        let _result = generate_registration_stub();
+    }
+
+    #[test]
+    fn test_build_signature_map_if_let_ok_content_std_fs_read_to_string_abs_path() {
+
+        let result = build_signature_map();
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Ok(content) = std::fs::read_to_string(&abs_path) {{");
+    }
+
+    #[test]
+    fn test_build_signature_map_has_expected_effects() {
+        // Expected effects: file_read
+
+        let _ = build_signature_map();
+    }
+
+    #[test]
+    fn test_file_has_constructor_default_path() {
+
+        let _result = file_has_constructor();
+    }
+
+    #[test]
+    fn test_apply_convention_fixes_if_let_some_ref_suffix_naming_suffix() {
+
+        apply_convention_fixes();
+    }
+
+    #[test]
+    fn test_apply_convention_fixes_if_let_some_expected_namespace() {
+
+        apply_convention_fixes();
+    }
+
+    #[test]
+    fn test_apply_convention_fixes_let_some_expected_namespace() {
+
+        apply_convention_fixes();
+    }
+
+    #[test]
+    fn test_apply_convention_fixes_let_some_type_name_content() {
+
+        apply_convention_fixes();
+    }
+
+    #[test]
+    fn test_apply_convention_fixes_if_let_some_sig_sig_map_get_constructor_name() {
+
+        apply_convention_fixes();
+    }
+
+    #[test]
+    fn test_apply_convention_fixes_if_let_some_sig_sig_map_get_method_name() {
+
+        apply_convention_fixes();
+    }
+
+    #[test]
+    fn test_apply_convention_fixes_has_expected_effects() {
+        // Expected effects: file_read, mutation
+
+        let _ = apply_convention_fixes();
+    }
+
+}

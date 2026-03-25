@@ -15,3 +15,29 @@ pub(crate) fn resolve_binary_on_path_var(path_var: &str) -> Option<std::path::Pa
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_binary_on_path_default_path() {
+
+        let _result = resolve_binary_on_path();
+    }
+
+    #[test]
+    fn test_resolve_binary_on_path_var_candidate_exists() {
+
+        let result = resolve_binary_on_path_var();
+        assert!(result.is_some(), "expected Some for: candidate.exists()");
+    }
+
+    #[test]
+    fn test_resolve_binary_on_path_var_candidate_exists_2() {
+
+        let result = resolve_binary_on_path_var();
+        assert!(result.is_none(), "expected None for: candidate.exists()");
+    }
+
+}

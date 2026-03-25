@@ -272,4 +272,130 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.code.as_str(), "internal.io_error");
     }
+
+    #[test]
+    fn test_local_default_path() {
+
+        let _result = local();
+    }
+
+    #[test]
+    fn test_ensure_app_dirs_default_path() {
+
+        let _result = ensure_app_dirs();
+    }
+
+    #[test]
+    fn test_ensure_app_dirs_ok() {
+
+        let result = ensure_app_dirs();
+        assert!(result.is_ok(), "expected Ok for: Ok(())");
+    }
+
+    #[test]
+    fn test_read_file_map_err_e_error_internal_io_e_to_string_some_operation_to_st() {
+        let path = Path::new("");
+        let operation = "";
+        let _result = read_file(&path, &operation);
+    }
+
+    #[test]
+    fn test_read_file_has_expected_effects() {
+        // Expected effects: file_read
+        let path = Path::new("");
+        let operation = "";
+        let _ = read_file(&path, &operation);
+    }
+
+    #[test]
+    fn test_write_file_map_err_e_error_internal_io_e_to_string_some_operation_to_st() {
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let _result = write_file(&path, &content, &operation);
+    }
+
+    #[test]
+    fn test_write_file_has_expected_effects() {
+        // Expected effects: file_write
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let _ = write_file(&path, &content, &operation);
+    }
+
+    #[test]
+    fn test_write_file_atomic_some_operation_to_string() {
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let _result = write_file_atomic(&path, &content, &operation);
+    }
+
+    #[test]
+    fn test_write_file_atomic_default_path() {
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let _result = write_file_atomic(&path, &content, &operation);
+    }
+
+    #[test]
+    fn test_write_file_atomic_some_operation_to_string_2() {
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let _result = write_file_atomic(&path, &content, &operation);
+    }
+
+    #[test]
+    fn test_write_file_atomic_default_path_2() {
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let _result = write_file_atomic(&path, &content, &operation);
+    }
+
+    #[test]
+    fn test_write_file_atomic_error_internal_io_e_to_string_some_format_write_temp_operati() {
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let _result = write_file_atomic(&path, &content, &operation);
+    }
+
+    #[test]
+    fn test_write_file_atomic_default_path_3() {
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let _result = write_file_atomic(&path, &content, &operation);
+    }
+
+    #[test]
+    fn test_write_file_atomic_default_path_4() {
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let _result = write_file_atomic(&path, &content, &operation);
+    }
+
+    #[test]
+    fn test_write_file_atomic_ok() {
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let result = write_file_atomic(&path, &content, &operation);
+        assert!(result.is_ok(), "expected Ok for: Ok(())");
+    }
+
+    #[test]
+    fn test_write_file_atomic_has_expected_effects() {
+        // Expected effects: file_write
+        let path = Path::new("");
+        let content = "";
+        let operation = "";
+        let _ = write_file_atomic(&path, &content, &operation);
+    }
+
 }

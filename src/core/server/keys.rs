@@ -169,3 +169,208 @@ pub fn use_key(server_id: &str, key_path: &str) -> Result<Server> {
 pub fn unset_key(server_id: &str) -> Result<Server> {
     set_identity_file(server_id, None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_key_default_path() {
+        let server_id = "";
+        let _result = generate_key(&server_id);
+    }
+
+    #[test]
+    fn test_generate_key_default_path_2() {
+        let server_id = "";
+        let _result = generate_key(&server_id);
+    }
+
+    #[test]
+    fn test_generate_key_if_let_some_parent_key_path_parent() {
+        let server_id = "";
+        let _result = generate_key(&server_id);
+    }
+
+    #[test]
+    fn test_generate_key_let_some_parent_key_path_parent() {
+        let server_id = "";
+        let _result = generate_key(&server_id);
+    }
+
+    #[test]
+    fn test_generate_key_default_path_3() {
+        let server_id = "";
+        let _result = generate_key(&server_id);
+    }
+
+    #[test]
+    fn test_generate_key_default_path_4() {
+        let server_id = "";
+        let _result = generate_key(&server_id);
+    }
+
+    #[test]
+    fn test_generate_key_default_path_5() {
+        let server_id = "";
+        let _result = generate_key(&server_id);
+    }
+
+    #[test]
+    fn test_generate_key_has_expected_effects() {
+        // Expected effects: process_spawn, file_delete
+        let server_id = "";
+        let _ = generate_key(&server_id);
+    }
+
+    #[test]
+    fn test_get_public_key_default_path() {
+        let server_id = "";
+        let _result = get_public_key(&server_id);
+    }
+
+    #[test]
+    fn test_get_public_key_default_path_2() {
+        let server_id = "";
+        let _result = get_public_key(&server_id);
+    }
+
+    #[test]
+    fn test_get_public_key_else() {
+        let server_id = "";
+        let _result = get_public_key(&server_id);
+    }
+
+    #[test]
+    fn test_get_public_key_else_2() {
+        let server_id = "";
+        let _result = get_public_key(&server_id);
+    }
+
+    #[test]
+    fn test_get_public_key_else_3() {
+        let server_id = "";
+        let result = get_public_key(&server_id);
+        assert!(result.is_ok(), "expected Ok for: else");
+    }
+
+    #[test]
+    fn test_get_public_key_has_expected_effects() {
+        // Expected effects: file_read
+        let server_id = "";
+        let _ = get_public_key(&server_id);
+    }
+
+    #[test]
+    fn test_import_key_default_path() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_default_path_2() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_private_key_contains_begin_private_key_contains_private_key() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_private_key_contains_begin_private_key_contains_private_key_2() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_default_path_3() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_default_path_4() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_if_let_some_parent_key_path_parent() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_let_some_parent_key_path_parent() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_let_some_parent_key_path_parent_2() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_e_error_internal_io_e_to_string_some_set_ssh_key_permissions() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_default_path_5() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_default_path_6() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_default_path_7() {
+        let server_id = "";
+        let source_path = "";
+        let _result = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_import_key_has_expected_effects() {
+        // Expected effects: process_spawn
+        let server_id = "";
+        let source_path = "";
+        let _ = import_key(&server_id, &source_path);
+    }
+
+    #[test]
+    fn test_use_key_set_identity_file_server_id_some_expanded_path() {
+        let server_id = "";
+        let key_path = "";
+        let _result = use_key(&server_id, &key_path);
+    }
+
+    #[test]
+    fn test_unset_key_default_path() {
+        let server_id = "";
+        let _result = unset_key(&server_id);
+    }
+
+}

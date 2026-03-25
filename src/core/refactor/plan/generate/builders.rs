@@ -38,3 +38,21 @@ pub(crate) fn new_file(
         written: false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_insertion_default_path() {
+
+        let _result = insertion();
+    }
+
+    #[test]
+    fn test_new_file_default_path() {
+
+        let _result = new_file();
+    }
+
+}

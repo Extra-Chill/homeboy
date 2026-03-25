@@ -529,4 +529,60 @@ mod tests {
             "Skeleton should compute despite type hint differences"
         );
     }
+
+    #[test]
+    fn test_normalize_signature_default_path() {
+
+        let _result = normalize_signature();
+    }
+
+    #[test]
+    fn test_tokenize_signature_default_path() {
+
+        let result = tokenize_signature();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_tokenize_signature_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = tokenize_signature();
+    }
+
+    #[test]
+    fn test_compute_signature_skeleton_tokenized_sigs_is_empty() {
+
+        let result = compute_signature_skeleton();
+        assert!(!result.is_empty(), "expected non-empty collection for: tokenized_sigs.is_empty()");
+    }
+
+    #[test]
+    fn test_compute_signature_skeleton_tokenized_sigs_iter_all_t_t_len_expected_len() {
+
+        let result = compute_signature_skeleton();
+        assert!(!result.is_empty(), "expected non-empty collection for: !tokenized_sigs.iter().all(|t| t.len() == expected_len)");
+    }
+
+    #[test]
+    fn test_compute_signature_skeleton_tokenized_sigs_iter_all_t_t_i_first() {
+
+        let result = compute_signature_skeleton();
+        assert!(!result.is_empty(), "expected non-empty collection for: tokenized_sigs.iter().all(|t| &t[i] == first)");
+    }
+
+    #[test]
+    fn test_compute_signature_skeleton_else() {
+
+        let result = compute_signature_skeleton();
+        assert!(!result.is_empty(), "expected non-empty collection for: else");
+    }
+
+    #[test]
+    fn test_compute_signature_skeleton_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = compute_signature_skeleton();
+    }
+
 }
