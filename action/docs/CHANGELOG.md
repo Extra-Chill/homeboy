@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.13.3] - 2026-03-25
+
+### Fixed
+- skip PR autofix on bot-authored head commits
+
 ## [1.13.2] - 2026-03-25
 
 ### Fixed
