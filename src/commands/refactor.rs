@@ -5,10 +5,9 @@ use homeboy::refactor::{
     self, auto, AddResult, MoveResult, RenameContext, RenameScope, RenameSpec, RenameTargeting,
 };
 use serde::Serialize;
+use std::collections::HashSet;
 
-use super::utils::args::{
-    BaselineArgs, ComponentArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs,
-};
+use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs};
 use crate::commands::CmdResult;
 
 #[derive(Args)]
@@ -16,6 +15,14 @@ use crate::commands::CmdResult;
 pub struct RefactorArgs {
     #[command(flatten)]
     comp: Option<PositionalComponentArgs>,
+
+    /// Target a component by ID (repeatable)
+    #[arg(short, long = "component", value_name = "ID", action = clap::ArgAction::Append)]
+    component_ids: Vec<String>,
+
+    /// Target multiple components with a comma-separated list
+    #[arg(long, value_name = "ID[,ID...]", value_delimiter = ',')]
+    components: Vec<String>,
 
     /// Include a specific proposal source (repeatable): audit, lint, test, all
     #[arg(long = "from", value_name = "SOURCE", action = clap::ArgAction::Append)]
@@ -61,7 +68,7 @@ enum RefactorCommand {
         #[arg(long)]
         to: String,
         #[command(flatten)]
-        component: ComponentArgs,
+        target: RefactorTargetArgs,
         /// Scope: code, config, all (default: all)
         #[arg(long, default_value = "all")]
         scope: String,
@@ -104,7 +111,7 @@ enum RefactorCommand {
         to: Option<String>,
 
         #[command(flatten)]
-        component: ComponentArgs,
+        target: RefactorTargetArgs,
         #[command(flatten)]
         write_mode: WriteModeArgs,
     },
@@ -133,7 +140,7 @@ enum RefactorCommand {
         to: String,
 
         #[command(flatten)]
-        component: ComponentArgs,
+        target: RefactorTargetArgs,
         #[command(flatten)]
         write_mode: WriteModeArgs,
     },
@@ -154,7 +161,7 @@ enum RefactorCommand {
         definition: Option<String>,
 
         #[command(flatten)]
-        component: ComponentArgs,
+        target: RefactorTargetArgs,
         #[command(flatten)]
         write_mode: WriteModeArgs,
     },
@@ -200,7 +207,7 @@ enum RefactorCommand {
         rule: Option<String>,
 
         #[command(flatten)]
-        component: ComponentArgs,
+        target: RefactorTargetArgs,
         #[command(flatten)]
         write_mode: WriteModeArgs,
     },
@@ -216,17 +223,34 @@ enum RefactorCommand {
         strategy: String,
 
         #[command(flatten)]
-        component: ComponentArgs,
+        target: RefactorTargetArgs,
 
         #[command(flatten)]
         write_mode: WriteModeArgs,
     },
 }
 
+#[derive(Args, Debug, Clone, Default)]
+struct RefactorTargetArgs {
+    /// Target a component by ID (repeatable)
+    #[arg(short, long = "component", value_name = "ID", action = clap::ArgAction::Append)]
+    component_ids: Vec<String>,
+
+    /// Target multiple components with a comma-separated list
+    #[arg(long, value_name = "ID[,ID...]", value_delimiter = ',')]
+    components: Vec<String>,
+
+    /// Override the source root for a single target
+    #[arg(long)]
+    path: Option<String>,
+}
+
 pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RefactorOutput> {
     match args.command {
         None => run_refactor_sources(
             args.comp.as_ref(),
+            &args.component_ids,
+            &args.components,
             &args.from,
             args.changed_since.as_deref(),
             &args.only,
@@ -239,7 +263,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
         Some(RefactorCommand::Rename {
             from,
             to,
-            component,
+            target,
             scope,
             literal,
             files,
@@ -250,8 +274,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
         }) => run_rename(
             &from,
             &to,
-            component.component.as_deref(),
-            component.path.as_deref(),
+            &target,
             &scope,
             literal,
             &files,
@@ -265,14 +288,13 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             from_audit,
             import,
             to,
-            component,
+            target,
             write_mode,
         }) => run_add(
             from_audit.as_deref(),
             import.as_deref(),
             to.as_deref(),
-            component.component.as_deref(),
-            component.path.as_deref(),
+            &target,
             write_mode.write,
         ),
 
@@ -281,20 +303,12 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             file,
             from,
             to,
-            component,
+            target,
             write_mode,
         }) => {
             if let Some(file_path) = file {
-                // File mode: move entire module
-                run_move_file(
-                    &file_path,
-                    &to,
-                    component.component.as_deref(),
-                    component.path.as_deref(),
-                    write_mode.write,
-                )
+                run_move_file(&file_path, &to, &target, write_mode.write)
             } else if let Some(from_path) = from {
-                // Item mode: move specific items
                 if item.is_empty() {
                     return Err(homeboy::Error::validation_invalid_argument(
                         "item",
@@ -307,14 +321,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
                         ]),
                     ));
                 }
-                run_move(
-                    &item,
-                    &from_path,
-                    &to,
-                    component.component.as_deref(),
-                    component.path.as_deref(),
-                    write_mode.write,
-                )
+                run_move(&item, &from_path, &to, &target, write_mode.write)
             } else {
                 Err(homeboy::Error::validation_invalid_argument(
                     "from",
@@ -332,13 +339,12 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
         Some(RefactorCommand::Propagate {
             struct_name,
             definition,
-            component,
+            target,
             write_mode,
         }) => run_propagate(
             &struct_name,
             definition.as_deref(),
-            component.component.as_deref(),
-            component.path.as_deref(),
+            &target,
             write_mode.write,
         ),
 
@@ -349,7 +355,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             files,
             context,
             rule,
-            component,
+            target,
             write_mode,
         }) => run_transform(
             name.as_deref(),
@@ -358,23 +364,16 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             &files,
             &context,
             rule.as_deref(),
-            component.component.as_deref(),
-            component.path.as_deref(),
+            &target,
             write_mode.write,
         ),
 
         Some(RefactorCommand::Decompose {
             file,
             strategy,
-            component,
+            target,
             write_mode,
-        }) => run_decompose(
-            &file,
-            &strategy,
-            component.component.as_deref(),
-            component.path.as_deref(),
-            write_mode.write,
-        ),
+        }) => run_decompose(&file, &strategy, &target, write_mode.write),
     }
 }
 
@@ -448,6 +447,13 @@ pub enum RefactorOutput {
         dry_run: bool,
         applied: bool,
     },
+
+    #[serde(rename = "refactor.bulk")]
+    Bulk {
+        action: String,
+        results: Vec<RefactorBulkItem>,
+        summary: RefactorBulkSummary,
+    },
 }
 
 #[derive(Serialize)]
@@ -478,8 +484,189 @@ pub struct WarningSummary {
     pub message: String,
 }
 
+#[derive(Debug, Clone)]
+struct RefactorTarget {
+    component_id: Option<String>,
+    path: Option<String>,
+    label: String,
+}
+
+#[derive(Serialize)]
+pub struct RefactorBulkItem {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Box<RefactorOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RefactorBulkSummary {
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+}
+
+impl RefactorTargetArgs {
+    fn resolve_targets(&self) -> homeboy::Result<Vec<RefactorTarget>> {
+        let component_ids = collect_component_ids(&self.component_ids, &self.components);
+        if self.path.is_some() && !component_ids.is_empty() {
+            return Err(homeboy::Error::validation_invalid_argument(
+                "component",
+                "--path cannot be combined with multiple component IDs",
+                None,
+                Some(vec![
+                    "Use --path for one target only".to_string(),
+                    "Use --component/--components for multi-component refactors".to_string(),
+                ]),
+            ));
+        }
+
+        if let Some(path) = &self.path {
+            return Ok(vec![RefactorTarget {
+                component_id: None,
+                path: Some(path.clone()),
+                label: path.clone(),
+            }]);
+        }
+
+        if component_ids.is_empty() {
+            return Err(homeboy::Error::validation_missing_argument(vec![
+                "component".to_string(),
+            ]));
+        }
+
+        Ok(component_ids
+            .into_iter()
+            .map(|id| RefactorTarget {
+                label: id.clone(),
+                component_id: Some(id),
+                path: None,
+            })
+            .collect())
+    }
+}
+
+fn resolve_top_level_targets(
+    comp: Option<&PositionalComponentArgs>,
+    component_ids: &[String],
+    components: &[String],
+) -> homeboy::Result<Vec<RefactorTarget>> {
+    let flagged_ids = collect_component_ids(component_ids, components);
+
+    if let Some(comp) = comp {
+        if !flagged_ids.is_empty() {
+            return Err(homeboy::Error::validation_invalid_argument(
+                "component",
+                "Use either positional component syntax or --component/--components, not both",
+                None,
+                None,
+            ));
+        }
+
+        return Ok(vec![RefactorTarget {
+            component_id: Some(comp.component.clone()),
+            path: comp.path.clone(),
+            label: comp.component.clone(),
+        }]);
+    }
+
+    if flagged_ids.is_empty() {
+        return Err(homeboy::Error::validation_missing_argument(vec![
+            "component".to_string(),
+        ]));
+    }
+
+    Ok(flagged_ids
+        .into_iter()
+        .map(|id| RefactorTarget {
+            label: id.clone(),
+            component_id: Some(id),
+            path: None,
+        })
+        .collect())
+}
+
+fn collect_component_ids(primary: &[String], secondary: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    primary
+        .iter()
+        .chain(secondary.iter())
+        .filter_map(|id| {
+            let trimmed = id.trim();
+            if trimmed.is_empty() {
+                None
+            } else if seen.insert(trimmed.to_string()) {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn run_across_targets<F>(
+    action: &str,
+    targets: Vec<RefactorTarget>,
+    mut run_single: F,
+) -> CmdResult<RefactorOutput>
+where
+    F: FnMut(Option<&str>, Option<&str>) -> CmdResult<RefactorOutput>,
+{
+    if targets.len() == 1 {
+        let target = &targets[0];
+        return run_single(target.component_id.as_deref(), target.path.as_deref());
+    }
+
+    let mut results = Vec::with_capacity(targets.len());
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut any_zero_exit = false;
+
+    for target in targets {
+        match run_single(target.component_id.as_deref(), target.path.as_deref()) {
+            Ok((output, exit_code)) => {
+                if exit_code == 0 {
+                    any_zero_exit = true;
+                }
+                succeeded += 1;
+                results.push(RefactorBulkItem {
+                    id: target.label,
+                    result: Some(Box::new(output)),
+                    error: None,
+                });
+            }
+            Err(error) => {
+                failed += 1;
+                results.push(RefactorBulkItem {
+                    id: target.label,
+                    result: None,
+                    error: Some(error.to_string()),
+                });
+            }
+        }
+    }
+
+    let exit_code = if failed > 0 || !any_zero_exit { 1 } else { 0 };
+
+    Ok((
+        RefactorOutput::Bulk {
+            action: action.to_string(),
+            results,
+            summary: RefactorBulkSummary {
+                total: succeeded + failed,
+                succeeded,
+                failed,
+            },
+        },
+        exit_code,
+    ))
+}
+
 fn run_refactor_sources(
     comp: Option<&PositionalComponentArgs>,
+    component_ids: &[String],
+    components: &[String],
     from: &[String],
     changed_since: Option<&str>,
     only: &[String],
@@ -488,11 +675,40 @@ fn run_refactor_sources(
     force: bool,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
-    let comp = comp.ok_or_else(|| {
+    let targets = resolve_top_level_targets(comp, component_ids, components)?;
+    run_across_targets("sources", targets, |component_id, path| {
+        run_refactor_sources_single(
+            component_id,
+            path,
+            from,
+            changed_since,
+            only,
+            exclude,
+            settings,
+            force,
+            write,
+        )
+    })
+}
+
+fn run_refactor_sources_single(
+    component_id: Option<&str>,
+    path: Option<&str>,
+    from: &[String],
+    changed_since: Option<&str>,
+    only: &[String],
+    exclude: &[String],
+    settings: &[(String, String)],
+    force: bool,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let component_id = component_id.ok_or_else(|| {
         homeboy::Error::validation_missing_argument(vec!["component".to_string()])
     })?;
-    let ctx =
-        execution_context::resolve(&ResolveOptions::source_only(comp.id(), comp.path.clone()))?;
+    let ctx = execution_context::resolve(&ResolveOptions::source_only(
+        component_id,
+        path.map(str::to_string),
+    ))?;
     let requested_sources = from.to_vec();
     let only_findings = parse_audit_findings(only)?;
     let exclude_findings = parse_audit_findings(exclude)?;
@@ -532,6 +748,37 @@ fn parse_audit_findings(values: &[String]) -> homeboy::Result<Vec<AuditFinding>>
 
 #[allow(clippy::too_many_arguments)]
 fn run_rename(
+    from: &str,
+    to: &str,
+    target: &RefactorTargetArgs,
+    scope: &str,
+    literal: bool,
+    include_globs: &[String],
+    exclude_globs: &[String],
+    no_file_renames: bool,
+    context: &str,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let targets = target.resolve_targets()?;
+    run_across_targets("rename", targets, |component_id, path| {
+        run_rename_single(
+            from,
+            to,
+            component_id,
+            path,
+            scope,
+            literal,
+            include_globs,
+            exclude_globs,
+            no_file_renames,
+            context,
+            write,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_rename_single(
     from: &str,
     to: &str,
     component_id: Option<&str>,
@@ -658,8 +905,7 @@ fn run_add(
     from_audit: Option<&str>,
     import: Option<&str>,
     to: Option<&str>,
-    component_id: Option<&str>,
-    path: Option<&str>,
+    target: &RefactorTargetArgs,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
     // Mode 1: From audit JSON
@@ -669,7 +915,7 @@ fn run_add(
 
     // Mode 2: Explicit import addition
     if let Some(import_line) = import {
-        let target = to.ok_or_else(|| {
+        let destination = to.ok_or_else(|| {
             homeboy::Error::validation_invalid_argument(
                 "to",
                 "--to is required when using --import",
@@ -681,7 +927,10 @@ fn run_add(
             )
         })?;
 
-        return run_add_import(import_line, target, component_id, path, write);
+        let targets = target.resolve_targets()?;
+        return run_across_targets("add", targets, |component_id, path| {
+            run_add_import(import_line, destination, component_id, path, write)
+        });
     }
 
     // Neither mode specified
@@ -800,6 +1049,19 @@ fn run_move(
     items: &[String],
     from: &str,
     to: &str,
+    target: &RefactorTargetArgs,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let targets = target.resolve_targets()?;
+    run_across_targets("move", targets, |component_id, path| {
+        run_move_single(items, from, to, component_id, path, write)
+    })
+}
+
+fn run_move_single(
+    items: &[String],
+    from: &str,
+    to: &str,
     component_id: Option<&str>,
     path: Option<&str>,
     write: bool,
@@ -867,6 +1129,18 @@ fn run_move(
 fn run_move_file(
     file: &str,
     to: &str,
+    target: &RefactorTargetArgs,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let targets = target.resolve_targets()?;
+    run_across_targets("move_file", targets, |component_id, path| {
+        run_move_file_single(file, to, component_id, path, write)
+    })
+}
+
+fn run_move_file_single(
+    file: &str,
+    to: &str,
     component_id: Option<&str>,
     path: Option<&str>,
     write: bool,
@@ -917,6 +1191,18 @@ fn run_move_file(
 // ============================================================================
 
 fn run_propagate(
+    struct_name: &str,
+    definition_file: Option<&str>,
+    target: &RefactorTargetArgs,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let targets = target.resolve_targets()?;
+    run_across_targets("propagate", targets, |component_id, path| {
+        run_propagate_single(struct_name, definition_file, component_id, path, write)
+    })
+}
+
+fn run_propagate_single(
     struct_name: &str,
     definition_file: Option<&str>,
     component_id: Option<&str>,
@@ -992,6 +1278,33 @@ fn run_propagate(
 
 #[allow(clippy::too_many_arguments)]
 fn run_transform(
+    name: Option<&str>,
+    find: Option<&str>,
+    replace: Option<&str>,
+    files: &str,
+    context: &str,
+    rule_filter: Option<&str>,
+    target: &RefactorTargetArgs,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let targets = target.resolve_targets()?;
+    run_across_targets("transform", targets, |component_id, path| {
+        run_transform_single(
+            name,
+            find,
+            replace,
+            files,
+            context,
+            rule_filter,
+            component_id,
+            path,
+            write,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_transform_single(
     name: Option<&str>,
     find: Option<&str>,
     replace: Option<&str>,
@@ -1129,6 +1442,18 @@ fn run_transform(
 fn run_decompose(
     file: &str,
     strategy: &str,
+    target: &RefactorTargetArgs,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let targets = target.resolve_targets()?;
+    run_across_targets("decompose", targets, |component_id, path| {
+        run_decompose_single(file, strategy, component_id, path, write)
+    })
+}
+
+fn run_decompose_single(
+    file: &str,
+    strategy: &str,
     component_id: Option<&str>,
     path: Option<&str>,
     write: bool,
@@ -1199,4 +1524,48 @@ fn run_decompose(
         },
         0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collect_component_ids_dedupes_and_trims() {
+        let ids = collect_component_ids(
+            &["alpha".to_string(), " beta ".to_string()],
+            &["beta".to_string(), "gamma".to_string(), "".to_string()],
+        );
+
+        assert_eq!(ids, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn target_args_reject_path_with_multiple_components() {
+        let args = RefactorTargetArgs {
+            component_ids: vec!["alpha".to_string(), "beta".to_string()],
+            components: vec![],
+            path: Some("/tmp/example".to_string()),
+        };
+
+        let error = args.resolve_targets().unwrap_err();
+        assert!(
+            error.to_string().contains("--path cannot be combined"),
+            "unexpected error: {}",
+            error
+        );
+    }
+
+    #[test]
+    fn target_args_build_multi_component_targets() {
+        let args = RefactorTargetArgs {
+            component_ids: vec!["alpha".to_string()],
+            components: vec!["beta".to_string(), "alpha".to_string()],
+            path: None,
+        };
+
+        let targets = args.resolve_targets().unwrap();
+        let labels: Vec<_> = targets.into_iter().map(|target| target.label).collect();
+        assert_eq!(labels, vec!["alpha", "beta"]);
+    }
 }

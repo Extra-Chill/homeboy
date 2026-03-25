@@ -1,6 +1,6 @@
 //! Build artifact path resolution with glob pattern support.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
@@ -10,8 +10,18 @@ use crate::error::{Error, Result};
 /// - If path is a glob, expands and returns most recently modified match
 /// - Returns error if no files match or path doesn't exist
 pub fn resolve_artifact_path(pattern: &str) -> Result<PathBuf> {
+    resolve_artifact_path_from_root(pattern, None)
+}
+
+/// Resolve an artifact path relative to a component root when provided.
+///
+/// Relative paths/globs are interpreted from `root`, which avoids stale sibling
+/// artifacts from other components when deploy runs outside the component cwd.
+pub fn resolve_artifact_path_from_root(pattern: &str, root: Option<&Path>) -> Result<PathBuf> {
+    let resolved_pattern = resolve_pattern(pattern, root);
+
     if !contains_glob_chars(pattern) {
-        let path = PathBuf::from(pattern);
+        let path = resolved_pattern;
         if path.exists() {
             return Ok(path);
         }
@@ -23,11 +33,15 @@ pub fn resolve_artifact_path(pattern: &str) -> Result<PathBuf> {
         ));
     }
 
-    let entries: Vec<PathBuf> = glob::glob(pattern)
+    let entries: Vec<PathBuf> = glob::glob(&resolved_pattern.to_string_lossy())
         .map_err(|e| {
             Error::validation_invalid_argument(
                 "build_artifact",
-                format!("Invalid glob pattern '{}': {}", pattern, e),
+                format!(
+                    "Invalid glob pattern '{}': {}",
+                    resolved_pattern.display(),
+                    e
+                ),
                 Some(pattern.to_string()),
                 None,
             )
@@ -60,6 +74,17 @@ pub fn resolve_artifact_path(pattern: &str) -> Result<PathBuf> {
             Some(pattern.to_string()),
             None,
         )),
+    }
+}
+
+fn resolve_pattern(pattern: &str, root: Option<&Path>) -> PathBuf {
+    let candidate = PathBuf::from(pattern);
+    if candidate.is_absolute() {
+        candidate
+    } else if let Some(root) = root {
+        root.join(candidate)
+    } else {
+        candidate
     }
 }
 
@@ -167,5 +192,33 @@ mod tests {
         assert!(contains_glob_chars("file[0-9].txt"));
         assert!(!contains_glob_chars("dist/artifact.zip"));
         assert!(!contains_glob_chars("/path/to/file.tar.gz"));
+    }
+
+    #[test]
+    fn test_relative_literal_resolves_from_root() {
+        let dir = TempDir::new().unwrap();
+        let artifact_dir = dir.path().join("target").join("distrib");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let file_path = artifact_dir.join("artifact.zip");
+        File::create(&file_path).unwrap();
+
+        let result =
+            resolve_artifact_path_from_root("target/distrib/artifact.zip", Some(dir.path()));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), file_path);
+    }
+
+    #[test]
+    fn test_relative_glob_resolves_from_root() {
+        let dir = TempDir::new().unwrap();
+        let artifact_dir = dir.path().join("target").join("distrib");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let file_path = artifact_dir.join("build-1.0.1.zip");
+        File::create(&file_path).unwrap();
+
+        let result =
+            resolve_artifact_path_from_root("target/distrib/build-*.zip", Some(dir.path()));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), file_path);
     }
 }
