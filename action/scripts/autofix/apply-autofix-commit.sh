@@ -15,41 +15,8 @@ if ! [[ "${AUTOFIX_PUSH_ATTEMPTS}" =~ ^[0-9]+$ ]]; then
   AUTOFIX_PUSH_ATTEMPTS=3
 fi
 
-# Count autofix commits on THIS PR branch only.
-# Scope: base_ref..HEAD counts only commits added by this PR, so autofix
-# commits on other PRs or merged to main never count against this branch.
-# Fallback: count consecutive autofix commits at HEAD (same logic as non-PR)
-# so we never accidentally count the entire repo history.
 BASE="$(scope_base_ref)"
-if [ -n "${BASE}" ]; then
-  AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "${BASE}..HEAD" 2>/dev/null | wc -l | xargs)
-elif [ -n "${GITHUB_BASE_REF:-}" ]; then
-  AUTOFIX_COMMIT_COUNT=$(git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "origin/${GITHUB_BASE_REF}..HEAD" 2>/dev/null | wc -l | xargs)
-else
-  # No base ref available — count consecutive autofix commits at HEAD.
-  # This prevents false positives from historical autofix commits on other branches.
-  AUTOFIX_COMMIT_COUNT=0
-  while IFS= read -r subject; do
-    if [[ "${subject}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
-      AUTOFIX_COMMIT_COUNT=$((AUTOFIX_COMMIT_COUNT + 1))
-    else
-      break
-    fi
-  done < <(git log --format=%s -n "$((AUTOFIX_MAX_COMMITS + 1))" 2>/dev/null)
-fi
-# When the cap is hit, code fixes are skipped but baseline updates still run
-# (non-PR only — PR context skips baseline in maybe_update_baseline).
 AUTOFIX_CAP_HIT=false
-if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
-  echo "Autofix cap reached: ${AUTOFIX_COMMIT_COUNT} autofix commits on this branch (max ${AUTOFIX_MAX_COMMITS})"
-  if [ "$(scope_context)" = "pr" ]; then
-    echo "Skipping autofix entirely (PR context — baseline updates also skip on PRs)"
-    echo "committed=false" >> "${GITHUB_OUTPUT}"
-    exit 0
-  fi
-  echo "Skipping code fixes but will still attempt baseline update (non-PR context)"
-  AUTOFIX_CAP_HIT=true
-fi
 
 if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ] || [ "${GITHUB_ACTOR:-}" = "homeboy-ci[bot]" ]; then
   echo "Skipping autofix: workflow actor is ${GITHUB_ACTOR} (bot loop guard)"
@@ -67,23 +34,6 @@ if head_commit_is_autofix_bot; then
   exit 0
 fi
 
-if ! pr_is_active; then
-  echo "Skipping autofix: PR #${PR_NUMBER} is no longer open (merged or closed)"
-  echo "attempted=false" >> "${GITHUB_OUTPUT}"
-  echo "status=skipped-pr-closed" >> "${GITHUB_OUTPUT}"
-  echo "committed=false" >> "${GITHUB_OUTPUT}"
-  exit 0
-fi
-
-LAST_SUBJECT=$(git log -1 --pretty=%s 2>/dev/null || true)
-if [[ "${LAST_SUBJECT}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
-  echo "Skipping autofix: HEAD already an autofix commit"
-  echo "attempted=false" >> "${GITHUB_OUTPUT}"
-  echo "status=skipped-head-autofix" >> "${GITHUB_OUTPUT}"
-  echo "committed=false" >> "${GITHUB_OUTPUT}"
-  exit 0
-fi
-
 if [ -n "${AUTOFIX_LABEL:-}" ]; then
   if ! echo "${PR_LABELS_JSON}" | jq -e --arg label "${AUTOFIX_LABEL}" 'index($label) != null' > /dev/null; then
     echo "Skipping autofix: required label '${AUTOFIX_LABEL}' not present"
@@ -94,20 +44,9 @@ if [ -n "${AUTOFIX_LABEL:-}" ]; then
   fi
 fi
 
-# Check if a previous autofix commit was reverted on this branch.
-# A revert is a clear signal that the autofix output was broken — don't
-# push the same broken code again.
 REVERT_BASE="${BASE:-}"
 if [ -z "${REVERT_BASE}" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
   REVERT_BASE="origin/${GITHUB_BASE_REF}"
-fi
-if has_reverted_autofix "${REVERT_BASE}"; then
-  echo "Skipping autofix: a previous autofix commit was reverted on this branch"
-  echo "This indicates the autofix output was incorrect — manual review required."
-  echo "attempted=false" >> "${GITHUB_OUTPUT}"
-  echo "status=skipped-reverted" >> "${GITHUB_OUTPUT}"
-  echo "committed=false" >> "${GITHUB_OUTPUT}"
-  exit 0
 fi
 
 COMP_ID="$(resolve_component_id)"
@@ -125,6 +64,80 @@ fetch_latest_target_head() {
 reset_to_target_head() {
   git reset --hard "${TARGET_REF}"
   git clean -fd
+}
+
+compute_autofix_commit_count() {
+  if [ -n "${BASE}" ]; then
+    git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "${BASE}..HEAD" 2>/dev/null | wc -l | xargs
+  elif [ -n "${GITHUB_BASE_REF:-}" ]; then
+    git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "origin/${GITHUB_BASE_REF}..HEAD" 2>/dev/null | wc -l | xargs
+  else
+    local count=0
+    while IFS= read -r subject; do
+      if [[ "${subject}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
+        count=$((count + 1))
+      else
+        break
+      fi
+    done < <(git log --format=%s -n "$((AUTOFIX_MAX_COMMITS + 1))" 2>/dev/null)
+    printf '%s\n' "${count}"
+  fi
+}
+
+refresh_autofix_cap_state() {
+  AUTOFIX_COMMIT_COUNT="$(compute_autofix_commit_count)"
+  AUTOFIX_CAP_HIT=false
+
+  if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
+    echo "Autofix cap reached: ${AUTOFIX_COMMIT_COUNT} autofix commits on this branch (max ${AUTOFIX_MAX_COMMITS})"
+    if [ "$(scope_context)" = "pr" ]; then
+      echo "Skipping autofix entirely (PR context — baseline updates also skip on PRs)"
+      echo "attempted=false" >> "${GITHUB_OUTPUT}"
+      echo "status=skipped-cap-reached" >> "${GITHUB_OUTPUT}"
+      echo "committed=false" >> "${GITHUB_OUTPUT}"
+      exit 0
+    fi
+    echo "Skipping code fixes but will still attempt baseline update (non-PR context)"
+    AUTOFIX_CAP_HIT=true
+  fi
+}
+
+guard_synced_pr_head() {
+  if ! pr_is_active; then
+    echo "Skipping autofix: PR #${PR_NUMBER} is no longer open (merged or closed)"
+    echo "attempted=false" >> "${GITHUB_OUTPUT}"
+    echo "status=skipped-pr-closed" >> "${GITHUB_OUTPUT}"
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
+
+  refresh_autofix_cap_state
+
+  if head_commit_is_autofix_bot; then
+    echo "Skipping autofix: synced HEAD commit author is ${AUTOFIX_BOT_NAME} (human-commit-only guard)"
+    echo "attempted=false" >> "${GITHUB_OUTPUT}"
+    echo "status=skipped-head-bot-author" >> "${GITHUB_OUTPUT}"
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
+
+  LAST_SUBJECT=$(git log -1 --pretty=%s 2>/dev/null || true)
+  if [[ "${LAST_SUBJECT}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
+    echo "Skipping autofix: synced HEAD already an autofix commit"
+    echo "attempted=false" >> "${GITHUB_OUTPUT}"
+    echo "status=skipped-head-autofix" >> "${GITHUB_OUTPUT}"
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
+
+  if has_reverted_autofix "${REVERT_BASE}"; then
+    echo "Skipping autofix: a previous autofix commit was reverted on this branch"
+    echo "This indicates the autofix output was incorrect — manual review required."
+    echo "attempted=false" >> "${GITHUB_OUTPUT}"
+    echo "status=skipped-reverted" >> "${GITHUB_OUTPUT}"
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
 }
 
 run_autofixes() {
@@ -275,11 +288,15 @@ else
   echo "Fetched latest PR head ${TARGET_REPO}:${TARGET_BRANCH}"
 fi
 
+guard_synced_pr_head
+
 PUSH_ATTEMPT=1
 while [ "${PUSH_ATTEMPT}" -le "${AUTOFIX_PUSH_ATTEMPTS}" ]; do
   if git show-ref --verify --quiet "${TARGET_REF}"; then
     reset_to_target_head
   fi
+
+  guard_synced_pr_head
 
   # Run code fixes only when under the cap
   if [ "${AUTOFIX_CAP_HIT}" = false ]; then
