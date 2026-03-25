@@ -1,19 +1,5 @@
 //! name_segment_clustering — extracted from decompose.rs.
 
-use super::super::move_items::{MoveOptions, MoveResult};
-use super::super::*;
-use super::extract_changes_from_diff;
-use crate::extension::{self, ParsedItem};
-use crate::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
-
-/// Split a function name into semantic segments by `_`.
-pub(crate) fn name_segments(name: &str) -> Vec<String> {
-    name.split('_')
-        .filter(|s| !s.is_empty() && s.len() > 1) // skip single-char segments
-        .map(|s| s.to_lowercase())
         .collect()
 }
 
@@ -66,4 +52,37 @@ pub(crate) fn is_stop_word(word: &str) -> bool {
             | "can"
             | "all"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_name_segments_default_path() {
+
+        let result = name_segments();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_name_prefixes_default_path() {
+
+        let result = name_prefixes();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_name_prefixes_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = name_prefixes();
+    }
+
+    #[test]
+    fn test_is_stop_word_default_path() {
+
+        let _result = is_stop_word();
+    }
+
 }

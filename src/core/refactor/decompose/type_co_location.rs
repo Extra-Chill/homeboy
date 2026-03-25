@@ -1,16 +1,5 @@
 //! type_co_location — extracted from decompose.rs.
 
-use super::super::move_items::{MoveOptions, MoveResult};
-use super::super::*;
-use super::item;
-use crate::extension::{self, ParsedItem};
-use crate::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
-
-/// Group type items (struct/enum/trait + their impls) together.
-///
 /// If there's only one type, everything goes in "types". If there are multiple,
 /// each type gets its own group named after it (snake_case).
 pub(crate) fn colocate_types(items: &[&ParsedItem]) -> Vec<(String, Vec<String>)> {
@@ -87,4 +76,44 @@ pub(crate) fn to_snake_case(name: &str) -> String {
         result.push(ch.to_lowercase().next().unwrap_or(ch));
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_colocate_types_match_item_kind_as_str() {
+
+        let result = colocate_types();
+        assert!(!result.is_empty(), "expected non-empty collection for: match item.kind.as_str()");
+    }
+
+    #[test]
+    fn test_colocate_types_if_let_some_impls_impl_targets_get_type_name() {
+
+        let result = colocate_types();
+        assert!(!result.is_empty(), "expected non-empty collection for: if let Some(impls) = impl_targets.get(type_name) {{");
+    }
+
+    #[test]
+    fn test_colocate_types_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = colocate_types();
+    }
+
+    #[test]
+    fn test_to_snake_case_default_path() {
+
+        let _result = to_snake_case();
+    }
+
+    #[test]
+    fn test_to_snake_case_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = to_snake_case();
+    }
+
 }

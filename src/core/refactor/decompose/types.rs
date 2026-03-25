@@ -1,17 +1,5 @@
 //! types — extracted from decompose.rs.
 
-use super::super::move_items::{MoveOptions, MoveResult};
-use super::super::*;
-use super::A;
-use crate::extension::{self, ParsedItem};
-use crate::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DecomposePlan {
-    pub file: String,
     pub strategy: String,
     pub total_items: usize,
     pub groups: Vec<DecomposeGroup>,

@@ -1,19 +1,12 @@
 //! section_header_parsing — extracted from decompose.rs.
 
-use super::super::move_items::{MoveOptions, MoveResult};
-use super::super::*;
-use super::cluster_by_name_segments;
-use super::colocate_types;
 use super::item;
 use super::to_snake_case;
 use super::DecomposeGroup;
 use super::DecomposePlan;
 use super::Foo;
 use super::Section;
-use crate::extension::{self, ParsedItem};
 use crate::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub fn apply_plan_skeletons(plan: &DecomposePlan, root: &Path) -> Result<Vec<String>> {

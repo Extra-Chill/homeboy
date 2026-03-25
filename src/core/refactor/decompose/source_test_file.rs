@@ -1,20 +1,10 @@
 //! source_test_file — extracted from decompose.rs.
 
-use super::super::move_items::{MoveOptions, MoveResult};
-use super::super::*;
-use super::DecomposeAuditImpact;
-use super::DecomposeGroup;
 use super::DecomposePlan;
 use crate::core::scaffold::load_extension_grammar;
 use crate::extension::grammar_items;
 use crate::extension::{self, ParsedItem};
 use crate::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
-
-pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePlan> {
-    if strategy != "grouped" {
         return Err(crate::Error::validation_invalid_argument(
             "strategy",
             format!("Unsupported strategy '{}'. Use: grouped", strategy),
@@ -134,4 +124,114 @@ pub(crate) fn parse_items(file: &str, content: &str) -> Option<Vec<ParsedItem>> 
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_build_plan_default_path() {
+        let file = "";
+        let root = Path::new("");
+        let strategy = "";
+        let _result = build_plan(&file, &root, &strategy);
+    }
+
+    #[test]
+    fn test_build_plan_has_expected_effects() {
+        // Expected effects: file_read, mutation
+        let file = "";
+        let root = Path::new("");
+        let strategy = "";
+        let _ = build_plan(&file, &root, &strategy);
+    }
+
+    #[test]
+    fn test_project_audit_impact_if_let_some_test_file_source_to_test_file_group_suggested_ta() {
+
+        let _result = project_audit_impact();
+    }
+
+    #[test]
+    fn test_project_audit_impact_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = project_audit_impact();
+    }
+
+    #[test]
+    fn test_source_to_test_file_target_starts_with_src_target_ends_with_rs() {
+
+        let result = source_to_test_file();
+        assert!(result.is_none(), "expected None for: !target.starts_with(\"src/\") || !target.ends_with(\".rs\")");
+    }
+
+    #[test]
+    fn test_source_to_test_file_target_starts_with_src_target_ends_with_rs_2() {
+
+        let _result = source_to_test_file();
+    }
+
+    #[test]
+    fn test_source_to_test_file_target_starts_with_src_target_ends_with_rs_3() {
+
+        let _result = source_to_test_file();
+    }
+
+    #[test]
+    fn test_source_to_test_file_some_format_tests_test_rs_without_ext() {
+
+        let result = source_to_test_file();
+        assert!(result.is_some(), "expected Some for: Some(format!(\"tests/{{}}_test.rs\", without_ext))");
+    }
+
+    #[test]
+    fn test_parse_items_default_path() {
+
+        let _result = parse_items();
+    }
+
+    #[test]
+    fn test_parse_items_if_let_some_manifest_extension_find_extension_for_file_ext_e() {
+
+        let result = parse_items();
+        assert!(result.is_some(), "expected Some for: if let Some(manifest) = extension::find_extension_for_file_ext(ext, \"refactor\") {{");
+    }
+
+    #[test]
+    fn test_parse_items_let_some_manifest_extension_find_extension_for_file_ext_ext_() {
+
+        let result = parse_items();
+        assert!(result.is_some(), "expected Some for: let Some(manifest) = extension::find_extension_for_file_ext(ext, \"refactor\")");
+    }
+
+    #[test]
+    fn test_parse_items_let_some_ext_path_manifest_extension_path() {
+
+        let result = parse_items();
+        assert!(result.is_some(), "expected Some for: let Some(ext_path) = &manifest.extension_path");
+    }
+
+    #[test]
+    fn test_parse_items_items_is_empty() {
+
+        let result = parse_items();
+        assert!(result.is_some(), "expected Some for: !items.is_empty()");
+    }
+
+    #[test]
+    fn test_parse_items_default_path_2() {
+
+        let _result = parse_items();
+    }
+
+    #[test]
+    fn test_parse_items_none() {
+
+        let result = parse_items();
+        assert!(result.is_none(), "expected None for: None");
+    }
+
 }

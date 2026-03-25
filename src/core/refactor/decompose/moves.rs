@@ -1,15 +1,6 @@
 //! moves — extracted from decompose.rs.
 
 use super::super::move_items::{MoveOptions, MoveResult};
-use super::super::*;
-use super::DecomposePlan;
-use crate::extension::{self, ParsedItem};
-use crate::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
-
-pub fn apply_plan(plan: &DecomposePlan, root: &Path, write: bool) -> Result<Vec<MoveResult>> {
     // Pre-write validation: check brace balance on all source files involved
     if write {
         validate_plan_sources(plan, root)?;

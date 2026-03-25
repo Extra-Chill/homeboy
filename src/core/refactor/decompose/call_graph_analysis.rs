@@ -1,21 +1,10 @@
 //! call_graph_analysis — extracted from decompose.rs.
 
-use super::super::move_items::{MoveOptions, MoveResult};
-use super::super::*;
-use super::find;
-use super::is_stop_word;
 use super::item;
 use super::truncate_module_name;
 use super::union;
 use super::A;
 use super::HUB_THRESHOLD;
-use crate::extension::{self, ParsedItem};
-use crate::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
-
-/// Build a map of which functions call which other functions in the same file.
 ///
 /// Returns: caller -> set of callees (only functions that exist in `fn_names`).
 pub(crate) fn build_call_graph(
@@ -203,4 +192,51 @@ pub(crate) fn find_dominant_prefix(members: &[String]) -> Option<String> {
     candidates.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| b.1.cmp(&a.1)));
 
     candidates.into_iter().next().map(|(prefix, _)| prefix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_call_graph_name_item_name_item_source_contains_name() {
+
+        let result = build_call_graph();
+        assert!(!result.is_empty(), "expected non-empty collection for: *name != item.name && item.source.contains(name)");
+    }
+
+    #[test]
+    fn test_build_call_graph_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = build_call_graph();
+    }
+
+    #[test]
+    fn test_call_graph_components_default_path() {
+
+        let result = call_graph_components();
+        assert!(!result.is_empty(), "expected non-empty collection for: default path");
+    }
+
+    #[test]
+    fn test_call_graph_components_has_expected_effects() {
+        // Expected effects: mutation
+
+        let _ = call_graph_components();
+    }
+
+    #[test]
+    fn test_pick_cluster_label_if_let_some_prefix_find_dominant_prefix_members() {
+
+        let _result = pick_cluster_label();
+    }
+
+    #[test]
+    fn test_find_dominant_prefix_members_len_2() {
+
+        let result = find_dominant_prefix();
+        assert!(result.is_none(), "expected None for: members.len() < 2");
+    }
+
 }

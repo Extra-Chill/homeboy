@@ -1,21 +1,11 @@
 //! group_refinement — extracted from decompose.rs.
 
-use super::super::move_items::{MoveOptions, MoveResult};
-use super::super::*;
-use super::cluster_by_name_segments;
-use super::item;
 use super::parse;
-use super::parse_items;
-use super::truncate_module_name;
 use super::DecomposePlan;
 use crate::core::scaffold::load_extension_grammar;
 use crate::extension::grammar_items;
 use crate::extension::{self, ParsedItem};
 use crate::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
-
 /// Merge groups with fewer than MERGE_THRESHOLD items into the nearest relative.
 ///
 /// Type groups (tracked by `type_keys`) are protected: they only merge into

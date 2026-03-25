@@ -1,22 +1,5 @@
 //! constants — extracted from decompose.rs.
 
-use super::super::move_items::{MoveOptions, MoveResult};
-use super::super::*;
-use crate::extension::{self, ParsedItem};
-use crate::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
-
-/// Maximum items per group before we attempt to split further.
-pub(crate) const MAX_GROUP_SIZE: usize = 15;
-
-/// Groups below this size get merged into the nearest related group.
-pub(crate) const MERGE_THRESHOLD: usize = 2;
-
-/// Minimum number of items sharing a word to form a name-based cluster.
-pub(crate) const MIN_CLUSTER_SIZE: usize = 2;
-
 /// Maximum number of meaningful words (non-stop-words) in a module name.
 ///
 /// Decompose generates module names from section headers, function names, and

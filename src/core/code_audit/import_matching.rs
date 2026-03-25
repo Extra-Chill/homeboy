@@ -548,4 +548,50 @@ fn default_true() -> bool {
         let result = contains_word();
         assert!(result, "expected true when: before_ok && after_ok");
     }
+
+    #[test]
+    fn test_grouped_import_contains_if_let_some_brace_start_import_find() {
+
+        let _result = grouped_import_contains();
+    }
+
+    #[test]
+    fn test_content_defines_name_if_let_some_rest_stripped_strip_prefix_kw() {
+
+        let _result = content_defines_name();
+    }
+
+    #[test]
+    fn test_content_defines_name_default_path() {
+
+        let result = content_defines_name();
+        assert!(result, "expected true when: default path");
+    }
+
+    #[test]
+    fn test_content_defines_name_is_attribute_context() {
+
+        let result = content_defines_name();
+        assert!(!result, "expected false when: !is_attribute_context");
+    }
+
+    #[test]
+    fn test_content_references_name_default_path() {
+
+        let _result = content_references_name();
+    }
+
+    #[test]
+    fn test_contains_word_while_let_some_pos_text_start_find_word() {
+
+        let _result = contains_word();
+    }
+
+    #[test]
+    fn test_contains_word_before_ok_after_ok() {
+
+        let result = contains_word();
+        assert!(result, "expected true when: before_ok && after_ok");
+    }
+
 }

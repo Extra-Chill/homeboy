@@ -8,10 +8,6 @@ mod source_test_file;
 mod type_co_location;
 mod types;
 
-pub use call_graph_analysis::*;
-pub use constants::*;
-pub use group_refinement::*;
-pub use moves::*;
 pub use name_segment_clustering::*;
 pub use section_header_parsing::*;
 pub use source_test_file::*;
@@ -19,21 +15,6 @@ pub use type_co_location::*;
 pub use types::*;
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
-
-use serde::{Deserialize, Serialize};
-
-use crate::core::scaffold::load_extension_grammar;
-use crate::extension::grammar_items;
-use crate::extension::{self, ParsedItem};
-use crate::Result;
-
-use super::move_items::{MoveOptions, MoveResult};
-
-// ============================================================================
-// Section header parsing
-// ============================================================================
-
 // ============================================================================
 // Call graph analysis
 // ============================================================================
