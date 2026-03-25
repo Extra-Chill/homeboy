@@ -482,10 +482,15 @@ pub fn move_items_with_options(
     };
 
     // ── Phase 7: Update caller imports across the codebase ──────────────
+    // Skip caller rewrites when the source file will generate pub use re-exports
+    // (e.g., decompose operations). The re-exports keep the original import paths
+    // valid, so rewriting siblings would produce incorrect paths.
     let mut imports_updated: usize = 0;
     let mut caller_rewrites: Vec<(PathBuf, Vec<ImportRewrite>)> = Vec::new();
 
-    if let Some(ref ext) = ext {
+    if options.skip_caller_rewrites {
+        // Decompose mode: source file gets pub use re-exports, callers don't need changes
+    } else if let Some(ref ext) = ext {
         // Walk source files to find callers that import the moved items
         let source_module = module_path_from_file(from);
         let dest_module = module_path_from_file(to);

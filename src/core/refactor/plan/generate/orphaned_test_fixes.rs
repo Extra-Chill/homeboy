@@ -385,7 +385,10 @@ pub(crate) fn generate_orphaned_test_fixes(
             }
         }
 
-        // Fallback: delete the orphaned test if no rename candidate found
+        // Fallback: delete the orphaned test if no rename candidate found.
+        // Use PlanOnly tier so deletions require human review — the orphan
+        // detection can produce false positives for behavioral tests that
+        // don't follow the test_<method> naming convention exactly.
         let mut ins = insertion(
             InsertionKind::FunctionRemoval {
                 start_line,
@@ -398,7 +401,7 @@ pub(crate) fn generate_orphaned_test_fixes(
                 test_method
             ),
         );
-        ins.safety_tier = FixSafetyTier::Safe;
+        ins.safety_tier = FixSafetyTier::PlanOnly;
 
         fixes.push(Fix {
             file: finding.file.clone(),

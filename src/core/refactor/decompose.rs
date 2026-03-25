@@ -220,6 +220,10 @@ fn run_moves(plan: &DecomposePlan, root: &Path, write: bool) -> Result<Vec<MoveR
             write,
             MoveOptions {
                 move_related_tests: false,
+                // Decompose generates pub use re-exports in the source file,
+                // so callers importing from the original module path still work.
+                // Rewriting sibling imports would produce incorrect submodule paths.
+                skip_caller_rewrites: true,
             },
         )?;
         results.push(result);

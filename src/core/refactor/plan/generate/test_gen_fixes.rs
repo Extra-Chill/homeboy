@@ -123,6 +123,15 @@ pub(crate) fn generate_test_file_fixes(
             }
         };
 
+        // Downgrade to PlanOnly when generated tests use unresolved type fallbacks
+        let has_unresolved_types = test_module.contains("Default::default()")
+            || test_module.contains("::default()");
+        let safety_tier = if has_unresolved_types {
+            FixSafetyTier::PlanOnly
+        } else {
+            FixSafetyTier::Safe
+        };
+
         fixes.push(Fix {
             file: source_file.clone(),
             required_methods: vec![],
@@ -130,9 +139,13 @@ pub(crate) fn generate_test_file_fixes(
             insertions: vec![Insertion {
                 kind: InsertionKind::TestModule,
                 finding: AuditFinding::MissingTestFile,
-                safety_tier: FixSafetyTier::Safe,
-                auto_apply: true,
-                blocked_reason: None,
+                safety_tier,
+                auto_apply: !has_unresolved_types,
+                blocked_reason: if has_unresolved_types {
+                    Some("Generated test uses Default::default() fallback — types not resolved, test may be meaningless".to_string())
+                } else {
+                    None
+                },
                 preflight: None,
                 code: test_module,
                 description: format!(
@@ -358,12 +371,27 @@ pub(crate) fn generate_test_method_fixes(
             }
         };
 
+        // If the generated test code uses Default::default() fallbacks, the
+        // type wasn't properly resolved and the test is likely meaningless.
+        // Downgrade to PlanOnly so it requires human review instead of auto-applying.
+        let has_unresolved_types = append_code.contains("Default::default()")
+            || append_code.contains("::default()");
+        let safety_tier = if has_unresolved_types {
+            FixSafetyTier::PlanOnly
+        } else {
+            FixSafetyTier::Safe
+        };
+
         let insertions = vec![Insertion {
             kind: InsertionKind::MethodStub,
             finding: AuditFinding::MissingTestMethod,
-            safety_tier: FixSafetyTier::Safe,
-            auto_apply: true,
-            blocked_reason: None,
+            safety_tier,
+            auto_apply: !has_unresolved_types,
+            blocked_reason: if has_unresolved_types {
+                Some("Generated test uses Default::default() fallback — types not resolved, test may be meaningless".to_string())
+            } else {
+                None
+            },
             preflight: None,
             code: append_code,
             description: format!(

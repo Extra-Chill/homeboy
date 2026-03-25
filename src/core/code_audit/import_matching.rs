@@ -161,18 +161,83 @@ pub(crate) fn content_defines_name(content: &str, name: &str) -> bool {
 }
 
 /// Check if file content references a name outside of import/use statements.
+///
+/// Skips references that only appear inside string literals within attribute macros
+/// (e.g., `#[serde(default = "default_true")]`), since those are resolved by the
+/// macro at compile time, not by Rust's import system.
 pub(crate) fn content_references_name(content: &str, name: &str) -> bool {
+    let mut found_real_reference = false;
+
     for line in content.lines() {
         let trimmed = line.trim();
         // Skip import/use lines — we're looking for usage, not declarations
         if trimmed.starts_with("use ") || trimmed.starts_with("import ") {
             continue;
         }
-        if contains_word(trimmed, name) {
-            return true;
+        if !contains_word(trimmed, name) {
+            continue;
         }
+        // If the name only appears inside a string literal on an attribute line,
+        // it's a macro-resolved reference (serde, clap, etc.), not a real import.
+        if is_only_in_attribute_string(trimmed, name) {
+            continue;
+        }
+        found_real_reference = true;
+        break;
     }
-    false
+    found_real_reference
+}
+
+/// Check if `name` only appears inside string literals on an attribute line.
+///
+/// Catches patterns like `#[serde(default = "default_true")]` where the name
+/// is referenced by a proc macro (serde, clap, etc.) via a string path, not
+/// by Rust's module/import system. These don't need a `use` statement.
+fn is_only_in_attribute_string(line: &str, name: &str) -> bool {
+    let trimmed = line.trim();
+
+    // Must be an attribute line or a field with an attribute
+    let is_attribute_context = trimmed.starts_with("#[")
+        || trimmed.starts_with("#![")
+        || trimmed.contains("#[");
+
+    if !is_attribute_context {
+        return false;
+    }
+
+    // Check if ALL occurrences of `name` on this line are inside quoted strings.
+    // Walk through the line tracking whether we're inside a string literal.
+    let name_bytes = name.as_bytes();
+    let line_bytes = trimmed.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut all_in_string = true;
+    let mut found_any = false;
+
+    while i < line_bytes.len() {
+        if line_bytes[i] == b'"' && (i == 0 || line_bytes[i - 1] != b'\\') {
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if i + name_bytes.len() <= line_bytes.len() && &line_bytes[i..i + name_bytes.len()] == name_bytes {
+            // Check word boundaries
+            let before_ok = i == 0
+                || (!line_bytes[i - 1].is_ascii_alphanumeric() && line_bytes[i - 1] != b'_');
+            let after = i + name_bytes.len();
+            let after_ok = after >= line_bytes.len()
+                || (!line_bytes[after].is_ascii_alphanumeric() && line_bytes[after] != b'_');
+            if before_ok && after_ok {
+                found_any = true;
+                if !in_string {
+                    all_in_string = false;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    found_any && all_in_string
 }
 
 /// Check if `text` contains `word` as a standalone word (not a substring).
@@ -380,6 +445,49 @@ fn default_true() -> bool {
         assert!(!contains_word("SerializeMe", "Serialize"));
         assert!(!contains_word("MySerialize", "Serialize"));
         assert!(!contains_word("_Serialize_ext", "Serialize"));
+    }
+
+    #[test]
+    fn serde_attribute_string_not_a_real_reference() {
+        // The name "default_true" only appears inside a serde attribute string —
+        // not a real code reference, so missing import should not be flagged.
+        let content = r#"    #[serde(default = "default_true")]
+    pub enabled: bool,
+"#;
+        assert!(!content_references_name(content, "default_true"));
+    }
+
+    #[test]
+    fn serde_attribute_string_with_real_usage_is_flagged() {
+        // Name appears both in a serde attribute string AND as a real call
+        let content = r#"    #[serde(default = "default_true")]
+    pub enabled: bool,
+    let x = default_true();
+"#;
+        assert!(content_references_name(content, "default_true"));
+    }
+
+    #[test]
+    fn non_attribute_reference_is_flagged() {
+        let content = "let x = default_true();\n";
+        assert!(content_references_name(content, "default_true"));
+    }
+
+    #[test]
+    fn attribute_string_detection_basics() {
+        assert!(is_only_in_attribute_string(
+            r#"#[serde(default = "default_true")]"#,
+            "default_true"
+        ));
+        assert!(!is_only_in_attribute_string(
+            "let x = default_true();",
+            "default_true"
+        ));
+        // Name outside quotes on an attribute line
+        assert!(!is_only_in_attribute_string(
+            r#"#[derive(default_true)]"#,
+            "default_true"
+        ));
     }
 
     #[test]
