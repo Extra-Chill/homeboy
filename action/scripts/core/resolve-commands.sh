@@ -42,5 +42,24 @@ else
   echo "Commands inferred from context (${SCOPE_CONTEXT}): ${RESOLVED_COMMANDS}"
 fi
 
+# Detect refactor-only command sets (e.g., "refactor --from all").
+# When all commands are refactor variants, the rerun after autofix is circular
+# because the autofix command IS the same refactor — rerunning it is pointless.
+REFACTOR_ONLY="false"
+IFS=',' read -ra _CHECK_ARRAY <<< "${RESOLVED_COMMANDS}"
+_ALL_REFACTOR=true
+for _cmd in "${_CHECK_ARRAY[@]}"; do
+  _base=$(echo "${_cmd}" | xargs | awk '{print $1}')
+  if [ "${_base}" != "refactor" ]; then
+    _ALL_REFACTOR=false
+    break
+  fi
+done
+if [ "${_ALL_REFACTOR}" = true ]; then
+  REFACTOR_ONLY="true"
+  echo "Commands are refactor-only — rerun after autofix will be skipped"
+fi
+
 echo "RESOLVED_COMMANDS=${RESOLVED_COMMANDS}" >> "${GITHUB_ENV}"
 echo "resolved-commands=${RESOLVED_COMMANDS}" >> "${GITHUB_OUTPUT}"
+echo "refactor-only=${REFACTOR_ONLY}" >> "${GITHUB_OUTPUT}"

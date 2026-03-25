@@ -302,9 +302,29 @@ runs:
 
     # ── Phase 5: Run commands ──
 
+    # Bail early if the PR was merged or closed while earlier jobs ran.
+    # The concurrency group cancels stale runs when a NEW push arrives,
+    # but merging doesn't trigger a new PR event — so the run continues.
+    # This guard prevents wasting CI minutes on zombie runs.
+    - name: Check PR state
+      id: check-pr-state
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
+        if ! pr_is_active; then
+          echo "::warning::PR #${PR_NUMBER} is no longer open (merged or closed) — skipping remaining steps"
+          echo "active=false" >> "${GITHUB_OUTPUT}"
+        else
+          echo "active=true" >> "${GITHUB_OUTPUT}"
+        fi
+
     - name: Run Homeboy commands
       id: run-commands
       continue-on-error: true
+      if: steps.check-pr-state.outputs.active != 'false'
       shell: bash
       env:
         COMPONENT_NAME: ${{ inputs.component }}
@@ -358,10 +378,18 @@ runs:
         APP_TOKEN: ${{ inputs.app-token }}
       run: bash ${{ github.action_path }}/scripts/autofix/prepare-autofix-branch.sh
 
+    # Rerun verifies that autofix actually repaired the failures. Skip when
+    # the command set is refactor-only — the autofix IS the same refactor
+    # command, so rerunning it is circular and wastes CI minutes.
     - name: Re-run Homeboy commands after autofix
       id: rerun-commands
       continue-on-error: true
-      if: (github.event_name == 'pull_request' && steps.autofix-commit.outputs.committed == 'true') || (github.event_name != 'pull_request' && steps.autofix-prepare-nonpr.outputs.committed == 'true')
+      if: |
+        steps.resolve-commands.outputs.refactor-only != 'true'
+        && (
+          (github.event_name == 'pull_request' && steps.autofix-commit.outputs.committed == 'true')
+          || (github.event_name != 'pull_request' && steps.autofix-prepare-nonpr.outputs.committed == 'true')
+        )
       shell: bash
       env:
         COMPONENT_NAME: ${{ inputs.component }}
@@ -412,6 +440,7 @@ runs:
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
+        PR_ACTIVE: ${{ steps.check-pr-state.outputs.active }}
       run: bash ${{ github.action_path }}/scripts/core/enforce-final-status.sh
 
     - name: Run release
@@ -426,7 +455,7 @@ runs:
       run: bash ${{ github.action_path }}/scripts/release/run-release.sh
 
     - name: Post PR comment
-      if: always() && github.event_name == 'pull_request'
+      if: always() && github.event_name == 'pull_request' && steps.check-pr-state.outputs.active != 'false'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token || github.token }}
