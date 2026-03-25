@@ -10,6 +10,8 @@ import os
 import re
 from typing import Optional
 
+from .parsing import find_matching_brace, parse_items
+
 
 def extract_use_names(use_stmt: str) -> list[str]:
     """Extract terminal name(s) from a Rust use statement.
@@ -197,40 +199,24 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
     needed = []
     warnings = []
 
-    # Collect all use statements from source
-    source_uses = [l.strip() for l in source_lines if l.strip().startswith("use ")]
+    # Collect all real top-level use statements from source.
+    # Never scan raw text with startswith("use ") here — test fixtures and raw
+    # strings can contain foreign-language `use` lines (e.g. PHP namespace imports)
+    # that are not Rust imports. Those bogus lines caused PR #1024 to inject
+    # `use DataMachine\Core\Pipeline;` into Rust files.
+    source_uses = extract_top_level_use_statements(source_lines)
 
-    # Collect all definitions in source file (types, functions, constants).
-    # These are items that were in scope for the moved code when it lived
-    # in the source file — the destination file needs imports for any it references.
-    source_definitions = set()
-    for line in source_lines:
-        trimmed = line.strip()
-        # Strip visibility
-        rest = trimmed
-        for vis in ("pub(crate) ", "pub(super) ", "pub "):
-            if rest.startswith(vis):
-                rest = rest[len(vis):]
-                break
-        # Strip function modifiers (async, unsafe) but NOT const —
-        # const can be both a modifier (`const fn`) and a keyword (`const X`).
-        for modifier in ("async ", "unsafe "):
-            if rest.startswith(modifier):
-                rest = rest[len(modifier):]
-        for keyword in ("struct ", "enum ", "type ", "trait ", "fn ",
-                        "const ", "static "):
-            if rest.startswith(keyword):
-                after = rest[len(keyword):]
-                # For `const fn`, extract the function name after `fn`
-                if keyword == "const " and after.startswith("fn "):
-                    after = after[3:]
-                name = re.split(r'[{(<;:\s]', after)[0].strip()
-                if name:
-                    source_definitions.add(name)
-                break
+    # Collect all real top-level definitions from the source file via the Rust
+    # parser instead of raw line scanning. Raw scanning picks up names from doc
+    # comments, fixtures, and impl method bodies, which caused bogus imports like
+    # `use super::get;` and `use super::visibility;` in autofix splits.
+    source_items = parse_items(source_content)
+    source_definitions = {item.name for item in source_items if item.name}
 
-    # Combined source of all moved items
+    # Combined source of all moved items, plus a stripped variant for dependency
+    # checks so comments/strings/docs don't invent fake references.
     combined_source = '\n'.join(item.get("source", "") for item in moved_items)
+    stripped_combined_source = strip_rust_non_code(combined_source)
     moved_item_names = {item.get("name", "") for item in moved_items}
 
     # Phase 1: Carry needed use statements (with proper filtering for #340)
@@ -239,7 +225,7 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
         # Check if any terminal name is actually used in the moved items
         # Use word-boundary matching to avoid false positives
         is_needed = any(
-            re.search(r'\b' + re.escape(name) + r'\b', combined_source)
+            re.search(r'\b' + re.escape(name) + r'\b', stripped_combined_source)
             for name in names
             if name not in moved_item_names  # Don't import the item itself
         )
@@ -259,7 +245,7 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
                     prefix = path[:brace_idx].rstrip(':').rstrip()
                     module_name = prefix.rsplit("::", 1)[-1] if "::" in prefix else prefix
                     # Check if the module is used as a path qualifier (e.g., `module_name::something`)
-                    if module_name and re.search(r'\b' + re.escape(module_name) + r'::', combined_source):
+                    if module_name and re.search(r'\b' + re.escape(module_name) + r'::', stripped_combined_source):
                         fixed = fix_import_path(use_stmt, source_path, dest_path)
                         if fixed not in needed:
                             needed.append(fixed)
@@ -288,7 +274,7 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
                 continue
             # If the name appears literally in the moved code, Phase 1 already
             # handled it (or it's a type, not a trait). Skip.
-            if re.search(r'\b' + re.escape(name) + r'\b', combined_source):
+            if re.search(r'\b' + re.escape(name) + r'\b', stripped_combined_source):
                 continue
             # This is likely a trait import needed for method dispatch — carry it
             fixed = fix_import_path(use_stmt, source_path, dest_path)
@@ -313,7 +299,7 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
         if def_name in moved_item_names:
             continue  # Item is being moved too, no import needed
         # Check if the moved items reference this definition
-        if re.search(r'\b' + re.escape(def_name) + r'\b', combined_source):
+        if re.search(r'\b' + re.escape(def_name) + r'\b', stripped_combined_source):
             # Need to add an import for this definition
             if dest_is_child:
                 # Decompose case: dest is inside source's module directory.
@@ -347,7 +333,7 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
         # Find identifiers in the moved code that look like they could be
         # unresolved references (uppercase constants or PascalCase types
         # are the most common glob-provided symbols)
-        all_idents = set(re.findall(r'\b([A-Z][A-Z_0-9]+|[A-Z][a-zA-Z0-9]+)\b', combined_source))
+        all_idents = set(re.findall(r'\b([A-Z][A-Z_0-9]+|[A-Z][a-zA-Z0-9]+)\b', stripped_combined_source))
         # Remove Rust keywords and known types
         rust_builtins = {"Some", "None", "Ok", "Err", "Self", "Vec", "String",
                          "Option", "Result", "Box", "Arc", "Rc", "HashMap",
@@ -366,3 +352,240 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
                     needed.append(fixed)
 
     return {"needed_imports": needed, "warnings": warnings}
+
+
+def extract_top_level_use_statements(lines: list[str]) -> list[str]:
+    """Extract real top-level Rust use statements from source lines.
+
+    Skips anything inside strings/comments by using the same structural scanning
+    approach as the Rust item parser. Handles both single-line and grouped
+    multi-line imports.
+    """
+    uses: list[str] = []
+    depth = 0
+    in_block_comment = False
+    raw_string_closing: Optional[str] = None
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        if raw_string_closing is not None:
+            if raw_string_closing in line:
+                raw_string_closing = None
+            i += 1
+            continue
+
+        trimmed = line.strip()
+
+        if depth == 0 and trimmed.startswith("use "):
+            block_depth = _scan_line_brace_delta(line)
+            if '{' in line and block_depth > 0 and not line.rstrip().endswith(';'):
+                end = find_matching_brace(lines, i)
+                use_source = "\n".join(lines[i:end + 1]).strip()
+                if use_source:
+                    uses.append(use_source)
+                i = end + 1
+                continue
+
+            uses.append(trimmed)
+            i += 1
+            continue
+
+        line_delta, in_block_comment, raw_string_closing = _scan_line_structure(
+            line,
+            depth,
+            in_block_comment,
+            raw_string_closing,
+        )
+        depth = max(0, depth + line_delta)
+        i += 1
+
+    return uses
+
+
+def _scan_line_brace_delta(line: str) -> int:
+    """Fast brace delta for a known top-level import line/group start."""
+    return line.count('{') - line.count('}')
+
+
+def _scan_line_structure(
+    line: str,
+    current_depth: int,
+    in_block_comment: bool,
+    raw_string_closing: Optional[str],
+) -> tuple[int, bool, Optional[str]]:
+    """Scan one Rust line structurally, ignoring comments and strings."""
+    if raw_string_closing is not None:
+        if raw_string_closing in line:
+            return 0, in_block_comment, None
+        return 0, in_block_comment, raw_string_closing
+
+    delta = 0
+    chars = list(line)
+    j = 0
+    while j < len(chars):
+        if in_block_comment:
+            if j + 1 < len(chars) and chars[j] == '*' and chars[j + 1] == '/':
+                in_block_comment = False
+                j += 2
+            else:
+                j += 1
+            continue
+
+        if j + 1 < len(chars) and chars[j] == '/' and chars[j + 1] == '*':
+            in_block_comment = True
+            j += 2
+            continue
+
+        if j + 1 < len(chars) and chars[j] == '/' and chars[j + 1] == '/':
+            break
+
+        if chars[j] == 'r' and j + 1 < len(chars):
+            hashes = 0
+            k = j + 1
+            while k < len(chars) and chars[k] == '#':
+                hashes += 1
+                k += 1
+            if k < len(chars) and chars[k] == '"':
+                closing = '"' + ('#' * hashes)
+                k += 1
+                while k < len(chars):
+                    if ''.join(chars[k:k + len(closing)]) == closing:
+                        k += len(closing)
+                        break
+                    k += 1
+                else:
+                    return delta, in_block_comment, closing
+                j = k
+                continue
+
+        if chars[j] == '"':
+            j += 1
+            while j < len(chars):
+                if chars[j] == '\\':
+                    j += 2
+                elif chars[j] == '"':
+                    j += 1
+                    break
+                else:
+                    j += 1
+            continue
+
+        if chars[j] == "'":
+            if j + 1 < len(chars) and (chars[j + 1].isalnum() or chars[j + 1] == '_'):
+                j += 1
+                continue
+            j += 1
+            while j < len(chars):
+                if chars[j] == '\\':
+                    j += 2
+                elif chars[j] == "'":
+                    j += 1
+                    break
+                else:
+                    j += 1
+            continue
+
+        if chars[j] == '{':
+            delta += 1
+        elif chars[j] == '}':
+            delta -= 1
+        j += 1
+
+    return delta, in_block_comment, None
+
+
+def strip_rust_non_code(content: str) -> str:
+    """Remove comments and string-ish literals for dependency scanning.
+
+    This is intentionally conservative: keep identifiers in actual code, strip
+    prose/fixtures/docs so import resolution only reacts to code references.
+    """
+    lines = content.split('\n')
+    out_lines: list[str] = []
+    in_block_comment = False
+    raw_string_closing: Optional[str] = None
+
+    for line in lines:
+        if raw_string_closing is not None:
+            if raw_string_closing in line:
+                raw_string_closing = None
+            out_lines.append("")
+            continue
+
+        chars = list(line)
+        j = 0
+        cleaned: list[str] = []
+
+        while j < len(chars):
+            if in_block_comment:
+                if j + 1 < len(chars) and chars[j] == '*' and chars[j + 1] == '/':
+                    in_block_comment = False
+                    j += 2
+                else:
+                    j += 1
+                continue
+
+            if j + 1 < len(chars) and chars[j] == '/' and chars[j + 1] == '*':
+                in_block_comment = True
+                j += 2
+                continue
+
+            if j + 1 < len(chars) and chars[j] == '/' and chars[j + 1] == '/':
+                break
+
+            if chars[j] == 'r' and j + 1 < len(chars):
+                hashes = 0
+                k = j + 1
+                while k < len(chars) and chars[k] == '#':
+                    hashes += 1
+                    k += 1
+                if k < len(chars) and chars[k] == '"':
+                    closing = '"' + ('#' * hashes)
+                    k += 1
+                    while k < len(chars):
+                        if ''.join(chars[k:k + len(closing)]) == closing:
+                            k += len(closing)
+                            break
+                        k += 1
+                    else:
+                        raw_string_closing = closing
+                        break
+                    j = k
+                    continue
+
+            if chars[j] == '"':
+                j += 1
+                while j < len(chars):
+                    if chars[j] == '\\':
+                        j += 2
+                    elif chars[j] == '"':
+                        j += 1
+                        break
+                    else:
+                        j += 1
+                continue
+
+            if chars[j] == "'":
+                if j + 1 < len(chars) and (chars[j + 1].isalnum() or chars[j + 1] == '_'):
+                    cleaned.append(chars[j])
+                    j += 1
+                    continue
+                j += 1
+                while j < len(chars):
+                    if chars[j] == '\\':
+                        j += 2
+                    elif chars[j] == "'":
+                        j += 1
+                        break
+                    else:
+                        j += 1
+                continue
+
+            cleaned.append(chars[j])
+            j += 1
+
+        out_lines.append(''.join(cleaned))
+
+    return '\n'.join(out_lines)

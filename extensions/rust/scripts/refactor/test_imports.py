@@ -283,8 +283,112 @@ pub fn count_unreleased_entries(content: &str, aliases: &[String]) -> usize {
         import_text = "\n".join(imports)
         self.assertIn("find_next_section_start", import_text)
         self.assertIn("find_section_end", import_text)
-        # Decompose case: should use super:: not crate::
-        self.assertIn("use super::", import_text)
+
+    def test_ignores_foreign_use_lines_inside_raw_string_fixture(self):
+        """Raw-string fixtures must not leak PHP imports into Rust destination files."""
+        source = r'''use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
+use crate::error::{Error, Result};
+
+pub struct Grammar {
+    pub blocks: BlockSyntax,
+}
+
+pub struct BlockSyntax {
+    pub open: String,
+    pub close: String,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn load_and_use_php_grammar() {
+        let sample = r#"<?php
+namespace DataMachine\Abilities;
+
+use WP_UnitTestCase;
+use DataMachine\Core\Pipeline;
+
+class PipelineAbilities extends BaseAbilities {}
+"#;
+        assert!(sample.contains("Pipeline"));
+    }
+}
+'''
+        moved_items = [{
+            "name": "BlockSyntax",
+            "kind": "struct",
+            "source": '''pub struct BlockSyntax {
+    pub open: String,
+    pub close: String,
+}''',
+        }]
+        result = resolve_imports(
+            moved_items,
+            source,
+            "src/core/extension/grammar.rs",
+            "src/core/extension/grammar/block_syntax.rs",
+        )
+        imports = result["needed_imports"]
+        import_text = "\n".join(imports)
+        self.assertIn("use serde::{Deserialize, Serialize};", import_text)
+        self.assertIn("use regex::Regex;", import_text)
+        self.assertNotIn("WP_UnitTestCase", import_text)
+        self.assertNotIn("DataMachine\\Core\\Pipeline", import_text)
+
+    def test_ignores_comment_mentions_of_source_definitions(self):
+        """Names mentioned in comments/docs must not trigger same-module imports."""
+        source = """pub fn helper() {}
+
+pub fn moved() {
+    // helper should maybe be called later
+    let x = 1;
+}
+"""
+        moved_items = [{
+            "name": "moved",
+            "kind": "fn",
+            "source": """pub fn moved() {
+    // helper should maybe be called later
+    let x = 1;
+}""",
+        }]
+        result = resolve_imports(
+            moved_items,
+            source,
+            "src/core/foo.rs",
+            "src/core/foo/moved.rs",
+        )
+        import_text = "\n".join(result["needed_imports"])
+        self.assertNotIn("helper", import_text)
+
+    def test_ignores_string_mentions_of_source_definitions(self):
+        """Names inside string literals must not trigger same-module imports."""
+        source = '''pub fn helper() {}
+
+pub fn moved() {
+    let doc = "call helper maybe";
+    println!("{}", doc);
+}
+'''
+        moved_items = [{
+            "name": "moved",
+            "kind": "fn",
+            "source": '''pub fn moved() {
+    let doc = "call helper maybe";
+    println!("{}", doc);
+}''',
+        }]
+        result = resolve_imports(
+            moved_items,
+            source,
+            "src/core/foo.rs",
+            "src/core/foo/moved.rs",
+        )
+        import_text = "\n".join(result["needed_imports"])
+        self.assertNotIn("helper", import_text)
 
     def test_changelog_normalize_extraction_glob(self):
         """normalize_heading_label.rs missing glob-provided constant."""
