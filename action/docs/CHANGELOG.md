@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.13.4] - 2026-03-25
+
+### Fixed
+- open non-PR autofix PRs without reruns
+
 ## [1.13.3] - 2026-03-25
 
 ### Fixed
