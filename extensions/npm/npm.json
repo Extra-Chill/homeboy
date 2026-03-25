@@ -39,6 +39,16 @@
   ],
   "actions": [
     {
+      "id": "release.package",
+      "label": "Package release artifacts",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/build-npm.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
       "id": "release.build",
       "label": "Build package",
       "type": "command",
