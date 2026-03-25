@@ -1122,7 +1122,10 @@ mod tests {
             expected_interfaces: vec![],
             expected_namespace: None,
             expected_imports: vec![],
-            conforming: vec!["undo/snapshot.rs".to_string(), "undo/rollback.rs".to_string()],
+            conforming: vec![
+                "undo/snapshot.rs".to_string(),
+                "undo/rollback.rs".to_string(),
+            ],
             outliers: vec![],
             total_files: 2,
             confidence: 1.0,

@@ -459,8 +459,7 @@ pub fn move_items_with_options(
             } else if prev.is_empty() && start >= 2 {
                 // Allow one blank line gap if an attribute is above it
                 let above = lines[start - 2].trim();
-                if above.starts_with("#[") || above.starts_with("///") || above.starts_with("//!")
-                {
+                if above.starts_with("#[") || above.starts_with("///") || above.starts_with("//!") {
                     start -= 1;
                 } else {
                     break;
