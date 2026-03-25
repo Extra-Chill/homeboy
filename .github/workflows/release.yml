@@ -262,7 +262,7 @@ jobs:
         run: |
           chmod +x .homeboy-bin/homeboy
           sudo cp .homeboy-bin/homeboy /usr/local/bin/homeboy
-          homeboy extension install rust --source https://github.com/Extra-Chill/homeboy-extensions
+          homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id rust
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
