@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.13.5] - 2026-03-25
+
+### Fixed
+- recheck synced PR head before autofix push
+
 ## [1.13.4] - 2026-03-25
 
 ### Fixed
