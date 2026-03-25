@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.13.2] - 2026-03-25
+
+### Fixed
+- skip circular rerun for refactor-only commands and bail early on merged PRs
+
 ## [1.13.1] - 2026-03-25
 
 ### Fixed
