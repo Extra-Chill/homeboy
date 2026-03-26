@@ -1,3 +1,31 @@
+mod collect;
+mod fix_accumulator;
+mod stage;
+mod summarize_audit_fix;
+mod types;
+
+pub use collect::{collect_fix_proposals, collect_stage_changed_files};
+pub use fix_accumulator::{FixAccumulator, FixAccumulator};
+pub use stage::{run_lint_stage, run_test_stage};
+pub use summarize_audit_fix::{
+    collect_audit_changed_files,
+    format_changed_files,
+    plan_audit_stage,
+    summarize_audit_fix_result_entries,
+};
+pub use types::{
+    FixProposal,
+    LintSourceOptions,
+    OUTPUT_DIR_ENV,
+    PlanOverlap,
+    PlanStageSummary,
+    PlanTotals,
+    PlannedStage,
+    RefactorPlan,
+    RefactorPlanRequest,
+    TestSourceOptions,
+};
+
 use crate::code_audit::CodeAuditResult;
 use crate::component::Component;
 use crate::engine::run_dir::{self, RunDir};
@@ -15,29 +43,6 @@ use std::path::{Path, PathBuf};
 use super::verify::AuditConvergenceScoring;
 
 pub const KNOWN_PLAN_SOURCES: &[&str] = &["audit", "lint", "test"];
-
-/// Name of the env var pointing to previous command output files.
-///
-/// When set, `--from audit` reads the cached audit result instead of
-/// re-running the audit. The action sets this during `run-homeboy-commands.sh`
-/// and it persists across steps via `GITHUB_ENV`.
-const OUTPUT_DIR_ENV: &str = "HOMEBOY_OUTPUT_DIR";
-
-#[derive(Debug, Clone)]
-pub struct RefactorPlanRequest {
-    pub component: Component,
-    pub root: PathBuf,
-    pub sources: Vec<String>,
-    pub changed_since: Option<String>,
-    pub only: Vec<crate::code_audit::AuditFinding>,
-    pub exclude: Vec<crate::code_audit::AuditFinding>,
-    pub settings: Vec<(String, String)>,
-    pub lint: LintSourceOptions,
-    pub test: TestSourceOptions,
-    pub write: bool,
-    /// Skip the clean working tree check (for CI or when you know what you're doing)
-    pub force: bool,
-}
 
 pub fn lint_refactor_request(
     component: Component,
@@ -107,90 +112,6 @@ pub fn run_test_refactor(
     ))
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct LintSourceOptions {
-    pub selected_files: Option<Vec<String>>,
-    pub file: Option<String>,
-    pub glob: Option<String>,
-    pub errors_only: bool,
-    pub sniffs: Option<String>,
-    pub exclude_sniffs: Option<String>,
-    pub category: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct TestSourceOptions {
-    pub selected_files: Option<Vec<String>>,
-    pub skip_lint: bool,
-    pub script_args: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RefactorPlan {
-    pub component_id: String,
-    pub source_path: String,
-    pub sources: Vec<String>,
-    pub dry_run: bool,
-    pub applied: bool,
-    pub merge_strategy: String,
-    pub proposals: Vec<FixProposal>,
-    pub stages: Vec<PlanStageSummary>,
-    pub plan_totals: PlanTotals,
-    pub overlaps: Vec<PlanOverlap>,
-    pub files_modified: usize,
-    pub changed_files: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fix_summary: Option<FixResultsSummary>,
-    pub warnings: Vec<String>,
-    pub hints: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PlanStageSummary {
-    pub stage: String,
-    pub planned: bool,
-    pub applied: bool,
-    pub fixes_proposed: usize,
-    pub files_modified: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detected_findings: Option<usize>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub changed_files: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fix_summary: Option<FixResultsSummary>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct PlanOverlap {
-    pub file: String,
-    pub earlier_stage: String,
-    pub later_stage: String,
-    pub resolution: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PlanTotals {
-    pub stages_with_proposals: usize,
-    pub total_fixes_proposed: usize,
-    pub total_files_selected: usize,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct FixProposal {
-    pub source: String,
-    pub file: String,
-    pub rule_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
-}
-
-#[derive(Default)]
-struct FixAccumulator {
-    fixes: Vec<FixApplied>,
-}
-
 impl FixAccumulator {
     fn extend(&mut self, items: Vec<FixApplied>) {
         self.fixes.extend(items);
@@ -203,12 +124,6 @@ impl FixAccumulator {
             Some(auto::summarize_fix_results(&self.fixes))
         }
     }
-}
-
-struct PlannedStage {
-    source: String,
-    summary: PlanStageSummary,
-    fix_results: Vec<FixApplied>,
 }
 
 pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<RefactorPlan> {
@@ -434,84 +349,6 @@ pub fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
     Ok(ordered)
 }
 
-/// Format modified files between refactor stages.
-///
-/// This ensures generated code (test files, refactored sources) is properly
-/// formatted before subsequent stages run. Without this, the lint stage's
-/// `cargo fmt --check` fails on unformatted auto-generated code — blocking
-/// the pipeline on problems it didn't create.
-///
-/// Uses the same `format_after_write` as the post-write step. Non-fatal:
-/// if formatting fails, it logs a warning and continues.
-fn format_changed_files(root: &Path, changed_files: &[String], warnings: &mut Vec<String>) {
-    if changed_files.is_empty() {
-        return;
-    }
-
-    let abs_changed: Vec<PathBuf> = changed_files.iter().map(|f| root.join(f)).collect();
-
-    match crate::engine::format_write::format_after_write(root, &abs_changed) {
-        Ok(fmt) => {
-            if let Some(cmd) = &fmt.command {
-                if fmt.success {
-                    crate::log_status!(
-                        "format",
-                        "Formatted {} file(s) via {} (inter-stage)",
-                        abs_changed.len(),
-                        cmd
-                    );
-                } else {
-                    warnings.push(format!(
-                        "Inter-stage formatter ({}) exited non-zero (continuing)",
-                        cmd
-                    ));
-                }
-            }
-        }
-        Err(e) => {
-            crate::log_status!(
-                "format",
-                "Warning: inter-stage format failed (continuing): {}",
-                e
-            );
-        }
-    }
-}
-
-fn collect_fix_proposals(stages: &[PlannedStage]) -> Vec<FixProposal> {
-    let mut proposals = Vec::new();
-
-    for stage in stages {
-        for fix in &stage.fix_results {
-            proposals.push(FixProposal {
-                source: stage.source.clone(),
-                file: fix.file.clone(),
-                rule_id: fix.rule.clone(),
-                action: fix.action.clone(),
-            });
-        }
-    }
-
-    proposals.sort_by(|a, b| {
-        a.source
-            .cmp(&b.source)
-            .then(a.file.cmp(&b.file))
-            .then(a.rule_id.cmp(&b.rule_id))
-    });
-
-    proposals
-}
-
-fn collect_stage_changed_files(stages: &[PlanStageSummary]) -> Vec<String> {
-    let mut final_changed_files = BTreeSet::new();
-    for stage in stages {
-        for file in &stage.changed_files {
-            final_changed_files.insert(file.clone());
-        }
-    }
-    final_changed_files.into_iter().collect()
-}
-
 /// Try to load a cached audit result from a previous `homeboy audit` run.
 ///
 /// Checks `HOMEBOY_OUTPUT_DIR/audit.json` for a `CliResponse<CodeAuditResult>`
@@ -547,330 +384,6 @@ fn try_load_cached_audit() -> Option<CodeAuditResult> {
     );
 
     Some(result)
-}
-
-fn plan_audit_stage(
-    component_id: &str,
-    root: &Path,
-    changed_files: Option<&[String]>,
-    only: &[crate::code_audit::AuditFinding],
-    exclude: &[crate::code_audit::AuditFinding],
-    write: bool,
-) -> crate::Result<PlannedStage> {
-    let result = if let Some(cached) = try_load_cached_audit() {
-        cached
-    } else if let Some(changed) = changed_files {
-        if changed.is_empty() {
-            CodeAuditResult {
-                component_id: component_id.to_string(),
-                source_path: root.to_string_lossy().to_string(),
-                summary: crate::code_audit::AuditSummary {
-                    files_scanned: 0,
-                    conventions_detected: 0,
-                    outliers_found: 0,
-                    alignment_score: None,
-                    files_skipped: 0,
-                    warnings: vec![],
-                },
-                conventions: vec![],
-                directory_conventions: vec![],
-                findings: vec![],
-                duplicate_groups: vec![],
-            }
-        } else {
-            crate::code_audit::audit_path_scoped(
-                component_id,
-                &root.to_string_lossy(),
-                changed,
-                None,
-            )?
-        }
-    } else {
-        crate::code_audit::audit_path_with_id(component_id, &root.to_string_lossy())?
-    };
-
-    let policy = fixer::FixPolicy {
-        only: (!only.is_empty()).then_some(only.to_vec()),
-        exclude: exclude.to_vec(),
-    };
-    let mut fix_result = super::generate::generate_audit_fixes(&result, root, &policy);
-    let preflight_context = fixer::PreflightContext { root };
-    let (fix_result, policy_summary, changed_files, stage_warnings): (
-        fixer::FixResult,
-        fixer::PolicySummary,
-        Vec<String>,
-        Vec<String>,
-    ) = if write {
-        // Single pass: generate fixes from the provided findings, apply, validate.
-        // The audit already ran and provided findings in `result` — the refactor
-        // command does not re-run the audit internally. The convergence loop
-        // (audit → fix → merge → re-audit) belongs in the full orchestration
-        // pipeline, not inside a single refactor invocation.
-        let outcome = super::verify::run_audit_refactor(
-            result.clone(),
-            only,
-            exclude,
-            AuditConvergenceScoring::default(),
-            1,
-            true,
-        )?;
-
-        let changed_files = outcome
-            .fix_result
-            .chunk_results
-            .iter()
-            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
-            .flat_map(|chunk| chunk.files.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-
-        let warnings = outcome
-            .iterations
-            .iter()
-            .filter(|iteration| iteration.status != "continued")
-            .map(|iteration| {
-                format!(
-                    "audit iteration {}: {}",
-                    iteration.iteration, iteration.status
-                )
-            })
-            .collect::<Vec<_>>();
-
-        (
-            outcome.fix_result,
-            outcome.policy_summary,
-            changed_files,
-            warnings,
-        )
-    } else {
-        let policy_summary =
-            fixer::apply_fix_policy(&mut fix_result, false, &policy, &preflight_context);
-        let changed_files = collect_audit_changed_files(&fix_result);
-        (fix_result, policy_summary, changed_files, Vec::new())
-    };
-
-    let fix_results = summarize_audit_fix_result_entries(&fix_result);
-    let fixes_proposed = fix_results.len();
-
-    Ok(PlannedStage {
-        source: "audit".to_string(),
-        summary: PlanStageSummary {
-            stage: "audit".to_string(),
-            planned: true,
-            applied: write && !changed_files.is_empty(),
-            fixes_proposed,
-            files_modified: changed_files.len(),
-            detected_findings: Some(result.findings.len()),
-            changed_files,
-            fix_summary: if write {
-                if fix_result.files_modified > 0 {
-                    Some(auto::summarize_audit_fix_result(&fix_result))
-                } else {
-                    None
-                }
-            } else if policy_summary.visible_insertions + policy_summary.visible_new_files > 0 {
-                Some(auto::summarize_audit_fix_result(&fix_result))
-            } else {
-                None
-            },
-            warnings: stage_warnings,
-        },
-        fix_results,
-    })
-}
-
-fn run_lint_stage(
-    component: &Component,
-    root: &Path,
-    settings: &[(String, String)],
-    options: &LintSourceOptions,
-    changed_files: Option<&[String]>,
-    write: bool,
-    run_dir: &RunDir,
-) -> crate::Result<PlannedStage> {
-    let root_str = root.to_string_lossy().to_string();
-    let findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
-    let fix_sidecars = auto::AutofixSidecarFiles::for_run_dir(run_dir);
-    let before_dirty = if write {
-        git::get_dirty_files(&root_str).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let selected_files = options.selected_files.as_deref().or(changed_files);
-    let effective_glob = if let Some(changed_files) = selected_files {
-        if changed_files.is_empty() {
-            None
-        } else {
-            let abs_files: Vec<String> = changed_files
-                .iter()
-                .map(|f| format!("{}/{}", root_str, f))
-                .collect();
-            if abs_files.len() == 1 {
-                Some(abs_files[0].clone())
-            } else {
-                Some(format!("{{{}}}", abs_files.join(",")))
-            }
-        }
-    } else {
-        options.glob.clone()
-    };
-
-    let runner = extension::lint::build_lint_runner(
-        component,
-        None,
-        settings,
-        false,
-        options.file.as_deref(),
-        effective_glob.as_deref(),
-        options.errors_only,
-        options.sniffs.as_deref(),
-        options.exclude_sniffs.as_deref(),
-        options.category.as_deref(),
-        run_dir,
-    )?
-    .env_if(write, "HOMEBOY_AUTO_FIX", "1");
-
-    runner.run()?;
-
-    let stage_changed_files = if write {
-        let after_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
-        let before_set: HashSet<&str> = before_dirty.iter().map(|s| s.as_str()).collect();
-        after_dirty
-            .into_iter()
-            .filter(|f| !before_set.contains(f.as_str()))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let fix_results = fix_sidecars.consume_fix_results();
-    let fixes_proposed = fix_results.len();
-    let lint_findings =
-        crate::extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default();
-
-    Ok(PlannedStage {
-        source: "lint".to_string(),
-        summary: PlanStageSummary {
-            stage: "lint".to_string(),
-            planned: true,
-            applied: write && !stage_changed_files.is_empty(),
-            fixes_proposed,
-            files_modified: stage_changed_files.len(),
-            detected_findings: Some(lint_findings.len()),
-            changed_files: stage_changed_files,
-            fix_summary: auto::summarize_optional_fix_results(&fix_results),
-            warnings: Vec::new(),
-        },
-        fix_results,
-    })
-}
-
-fn run_test_stage(
-    component: &Component,
-    root: &Path,
-    settings: &[(String, String)],
-    options: &TestSourceOptions,
-    changed_test_files: Option<&[String]>,
-    write: bool,
-    run_dir: &RunDir,
-) -> crate::Result<PlannedStage> {
-    let root_str = root.to_string_lossy().to_string();
-    let fix_sidecars = auto::AutofixSidecarFiles::for_run_dir(run_dir);
-    let before_dirty = if write {
-        git::get_dirty_files(&root_str).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let selected_test_files = options.selected_files.as_deref().or(changed_test_files);
-
-    let mut runner = extension::test::build_test_runner(
-        component,
-        None,
-        settings,
-        options.skip_lint,
-        false,
-        None,
-        selected_test_files,
-        run_dir,
-    )?
-    .env_if(write, "HOMEBOY_AUTO_FIX", "1");
-
-    if !options.script_args.is_empty() {
-        runner = runner.script_args(&options.script_args);
-    }
-
-    runner.run()?;
-
-    let stage_changed_files = if write {
-        let after_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
-        let before_set: HashSet<&str> = before_dirty.iter().map(|s| s.as_str()).collect();
-        after_dirty
-            .into_iter()
-            .filter(|f| !before_set.contains(f.as_str()))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let fix_results = fix_sidecars.consume_fix_results();
-    let fixes_proposed = fix_results.len();
-    Ok(PlannedStage {
-        source: "test".to_string(),
-        summary: PlanStageSummary {
-            stage: "test".to_string(),
-            planned: true,
-            applied: write && !stage_changed_files.is_empty(),
-            fixes_proposed,
-            files_modified: stage_changed_files.len(),
-            detected_findings: None,
-            changed_files: stage_changed_files,
-            fix_summary: auto::summarize_optional_fix_results(&fix_results),
-            warnings: Vec::new(),
-        },
-        fix_results,
-    })
-}
-
-fn collect_audit_changed_files(fix_result: &fixer::FixResult) -> Vec<String> {
-    let mut files = BTreeSet::new();
-    for fix in &fix_result.fixes {
-        if !fix.insertions.is_empty() {
-            files.insert(fix.file.clone());
-        }
-    }
-    for file in &fix_result.new_files {
-        files.insert(file.file.clone());
-    }
-    files.into_iter().collect()
-}
-
-fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) -> Vec<FixApplied> {
-    let mut entries = Vec::new();
-
-    for fix in &fix_result.fixes {
-        for insertion in &fix.insertions {
-            if insertion.auto_apply {
-                entries.push(FixApplied {
-                    file: fix.file.clone(),
-                    rule: format!("{:?}", insertion.finding).to_lowercase(),
-                    action: Some("insert".to_string()),
-                });
-            }
-        }
-    }
-
-    for new_file in &fix_result.new_files {
-        entries.push(FixApplied {
-            file: new_file.file.clone(),
-            rule: format!("{:?}", new_file.finding).to_lowercase(),
-            action: Some("create".to_string()),
-        });
-    }
-
-    entries
 }
 
 pub fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
