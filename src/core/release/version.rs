@@ -380,6 +380,20 @@ pub(crate) fn validate_and_finalize_changelog(
 
     if changelog_changed {
         local_files::local().write(&changelog_path, &finalized_changelog)?;
+    } else if component.changelog_target.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "changelog",
+            format!(
+                "Configured changelog target '{}' was not updated for release {}",
+                component.changelog_target.as_deref().unwrap_or("CHANGELOG.md"),
+                new_version
+            ),
+            None,
+            Some(vec![
+                "Release aborted before version files were modified because the configured changelog target stayed stale.".to_string(),
+                "Add unreleased entries or fix changelog generation before retrying homeboy release.".to_string(),
+            ]),
+        ));
     }
 
     Ok(ChangelogValidationResult {
@@ -532,7 +546,19 @@ pub(crate) fn bump_component_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::Component;
     use regex::Regex;
+    use std::fs;
+
+    fn make_test_component(temp_dir: &tempfile::TempDir) -> Component {
+        Component {
+            id: "test-component".to_string(),
+            local_path: temp_dir.path().to_string_lossy().to_string(),
+            remote_path: String::new(),
+            changelog_target: Some("CHANGELOG.md".to_string()),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn since_tag_regex_matches_placeholders() {
@@ -570,5 +596,24 @@ mod tests {
             result,
             " * @since 2.0.0\n * @since 1.0.0\n * @since 2.0.0\n"
         );
+    }
+
+    #[test]
+    fn validate_and_finalize_changelog_fails_when_configured_target_stays_stale() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let changelog_path = temp_dir.path().join("CHANGELOG.md");
+        fs::write(
+            &changelog_path,
+            "# Changelog\n\n## [0.4.16] - 2026-03-01\n\n### Fixed\n- old entry\n",
+        )
+        .unwrap();
+
+        let component = make_test_component(&temp_dir);
+        validate_and_finalize_changelog(&component, "0.4.16", "0.4.17", None)
+            .expect_err("configured stale changelog should block release");
+
+        let unchanged = fs::read_to_string(&changelog_path).unwrap();
+        assert!(unchanged.contains("## [0.4.16] - 2026-03-01"));
+        assert!(!unchanged.contains("0.4.17"));
     }
 }
