@@ -1,6 +1,5 @@
 use crate::code_audit::conventions::AuditFinding;
 use crate::core::refactor::decompose;
-use std::path::Path;
 
 /// Callback that verifies an applied chunk, returning Ok(message) or Err(reason).
 pub type ChunkVerifier<'a> = &'a dyn Fn(&ApplyChunkResult) -> Result<String, String>;
@@ -277,11 +276,6 @@ pub struct ApplyOptions<'a> {
 pub struct FixPolicy {
     pub only: Option<Vec<AuditFinding>>,
     pub exclude: Vec<AuditFinding>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PreflightContext<'a> {
-    pub root: &'a Path,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

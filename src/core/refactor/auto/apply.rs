@@ -1145,19 +1145,19 @@ mod tests {
     #[test]
     fn remove_from_single_line_pub_use() {
         let mut lines: Vec<String> = vec![
-            "pub use planner::{analyze_stage_overlaps, build_refactor_plan, normalize_sources};"
+            "pub use sources::{analyze_stage_overlaps, collect_refactor_sources, normalize_sources};"
                 .into(),
         ];
         remove_from_pub_use_block(&mut lines, "analyze_stage_overlaps");
         assert_eq!(lines.len(), 1);
         assert!(!lines[0].contains("analyze_stage_overlaps"));
-        assert!(lines[0].contains("build_refactor_plan"));
+        assert!(lines[0].contains("collect_refactor_sources"));
         assert!(lines[0].contains("normalize_sources"));
     }
 
     #[test]
     fn remove_last_item_deletes_entire_line() {
-        let mut lines: Vec<String> = vec!["pub use planner::{only_function};".into()];
+        let mut lines: Vec<String> = vec!["pub use sources::{only_function};".into()];
         remove_from_pub_use_block(&mut lines, "only_function");
         assert!(lines.is_empty(), "Empty pub use should be removed entirely");
     }

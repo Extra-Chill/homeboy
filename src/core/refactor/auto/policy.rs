@@ -1,5 +1,5 @@
 use crate::code_audit::AuditFinding;
-use crate::refactor::auto::{FixPolicy, FixResult, Insertion, NewFile, PolicySummary, PreflightContext};
+use crate::refactor::auto::{FixPolicy, FixResult, Insertion, NewFile, PolicySummary};
 
 fn finding_allowed(finding: &AuditFinding, policy: &FixPolicy) -> bool {
     let included = policy
@@ -27,12 +27,7 @@ fn blocked_reason(manual_only: bool) -> String {
     }
 }
 
-fn annotate_insertion_for_policy(
-    insertion: &mut Insertion,
-    write: bool,
-    policy: &FixPolicy,
-    _context: &PreflightContext<'_>,
-) -> bool {
+fn annotate_insertion_for_policy(insertion: &mut Insertion, write: bool, policy: &FixPolicy) -> bool {
     if !finding_allowed(&insertion.finding, policy) {
         return false;
     }
@@ -47,12 +42,7 @@ fn annotate_insertion_for_policy(
     true
 }
 
-fn annotate_new_file_for_policy(
-    new_file: &mut NewFile,
-    write: bool,
-    policy: &FixPolicy,
-    _context: &PreflightContext<'_>,
-) -> bool {
+fn annotate_new_file_for_policy(new_file: &mut NewFile, write: bool, policy: &FixPolicy) -> bool {
     if !finding_allowed(&new_file.finding, policy) {
         return false;
     }
@@ -67,21 +57,15 @@ fn annotate_new_file_for_policy(
     true
 }
 
-pub fn apply_fix_policy(
-    result: &mut FixResult,
-    write: bool,
-    policy: &FixPolicy,
-    context: &PreflightContext<'_>,
-) -> PolicySummary {
+pub fn apply_fix_policy(result: &mut FixResult, write: bool, policy: &FixPolicy) -> PolicySummary {
     let mut summary = PolicySummary::default();
 
     result.fixes = result
         .fixes
         .drain(..)
         .filter_map(|mut fix| {
-            fix.insertions.retain_mut(|insertion| {
-                annotate_insertion_for_policy(insertion, write, policy, context)
-            });
+            fix.insertions
+                .retain_mut(|insertion| annotate_insertion_for_policy(insertion, write, policy));
 
             for insertion in &mut fix.insertions {
                 insertion.auto_apply = should_auto_apply(insertion.manual_only, write);
@@ -116,7 +100,7 @@ pub fn apply_fix_policy(
         .new_files
         .drain(..)
         .filter_map(|mut pending| {
-            if !annotate_new_file_for_policy(&mut pending, write, policy, context) {
+            if !annotate_new_file_for_policy(&mut pending, write, policy) {
                 return None;
             }
 
