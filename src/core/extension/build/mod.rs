@@ -14,7 +14,7 @@ use crate::server::execute_local_command_in_dir;
 
 mod artifact;
 
-pub use artifact::resolve_artifact_path;
+pub use artifact::{resolve_artifact_path, resolve_artifact_path_from_root};
 
 // === Build Command Resolution ===
 

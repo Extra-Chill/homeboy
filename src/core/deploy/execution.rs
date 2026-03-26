@@ -4,7 +4,7 @@ use crate::build;
 use crate::component::Component;
 use crate::context::RemoteProjectContext;
 use crate::error::Result;
-use crate::extension::build::resolve_artifact_path;
+use crate::extension::build::resolve_artifact_path_from_root;
 use crate::git;
 use crate::paths as base_path;
 use crate::project::Project;
@@ -243,7 +243,10 @@ fn execute_artifact_deploy(
             }
         };
 
-        match resolve_artifact_path(artifact_pattern) {
+        match resolve_artifact_path_from_root(
+            artifact_pattern,
+            Some(Path::new(&component.local_path)),
+        ) {
             Ok(path) => path,
             Err(e) => {
                 let error_msg = if config.skip_build {
