@@ -191,8 +191,8 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
         only: None,
         exclude: Vec::new(),
     };
-    let context = crate::refactor::auto::PreflightContext { root: source_path };
-    crate::refactor::auto::apply_fix_policy(&mut fix_result, false, &policy, &context);
+    let _ = source_path;
+    crate::refactor::auto::apply_fix_policy(&mut fix_result, false, &policy);
 
     // Count by automation eligibility
     let mut automated_count = 0usize;

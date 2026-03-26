@@ -197,8 +197,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
 mod tests {
     use super::*;
     use homeboy::component::Component;
-    use homeboy::refactor::test_refactor_request;
-    use homeboy::refactor::TestSourceOptions;
+    use homeboy::refactor::plan::{test_refactor_request, TestSourceOptions};
     use std::path::PathBuf;
 
     #[test]
