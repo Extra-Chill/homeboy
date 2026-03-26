@@ -94,6 +94,33 @@ def _is_self_group_import(use_stmt: str) -> bool:
     return "self" in items
 
 
+def _is_group_import(use_stmt: str) -> bool:
+    """Check if a use statement uses grouped import syntax `{...}`."""
+    body = use_stmt.strip().rstrip(';')
+    if not body.startswith("use "):
+        return False
+    path = body[4:].strip()
+    return '{' in path and '}' in path
+
+
+def _group_import_matches_derive_usage(use_stmt: str, combined_source: str) -> bool:
+    """Carry grouped imports when moved code uses the names in derives/attrs."""
+    if not _is_group_import(use_stmt):
+        return False
+
+    names = extract_use_names(use_stmt)
+    if not names:
+        return False
+
+    for name in names:
+        if re.search(r'#\s*\[derive\([^\]]*\b' + re.escape(name) + r'\b', combined_source):
+            return True
+        if re.search(r'#\s*\[[^\]]*\b' + re.escape(name) + r'\b', combined_source):
+            return True
+
+    return False
+
+
 def module_stem(file_path: str) -> str:
     """Get the module name from a file path (e.g., 'conventions' from 'src/core/conventions.rs')."""
     base = os.path.basename(file_path)
@@ -111,6 +138,16 @@ def module_parent(file_path: str) -> str:
     if name == "mod":
         return os.path.dirname(parent)
     return parent
+
+
+def module_dir(file_path: str) -> str:
+    """Directory that holds a module's decomposed child files."""
+    base = os.path.basename(file_path)
+    name = os.path.splitext(base)[0]
+    parent = os.path.dirname(file_path)
+    if name == "mod":
+        return parent
+    return os.path.join(parent, name)
 
 
 def file_to_module_path(file_path: str) -> str:
@@ -218,6 +255,7 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
     combined_source = '\n'.join(item.get("source", "") for item in moved_items)
     stripped_combined_source = strip_rust_non_code(combined_source)
     moved_item_names = {item.get("name", "") for item in moved_items}
+    has_method_calls = bool(re.search(r'\.\s*[A-Za-z_][A-Za-z0-9_]*\s*\(', stripped_combined_source))
 
     # Phase 1: Carry needed use statements (with proper filtering for #340)
     for use_stmt in source_uses:
@@ -233,6 +271,10 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
             # Fix the import path relative to destination (#341)
             fixed = fix_import_path(use_stmt, source_path, dest_path)
             needed.append(fixed)
+        elif _group_import_matches_derive_usage(use_stmt, combined_source):
+            fixed = fix_import_path(use_stmt, source_path, dest_path)
+            if fixed not in needed:
+                needed.append(fixed)
         elif _is_self_group_import(use_stmt):
             # For `use foo::{self, Trait}` where `self` brings a module into scope:
             # if the module name (from `self`) is used via path syntax (e.g., `local_files::local()`),
@@ -261,27 +303,33 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
     for use_stmt in needed:
         already_carried.update(extract_use_names(use_stmt))
 
-    for use_stmt in source_uses:
-        if use_stmt in needed:
-            continue
-        names = extract_use_names(use_stmt)
-        for name in names:
-            if name in already_carried or name in moved_item_names:
+    if has_method_calls:
+        for use_stmt in source_uses:
+            if use_stmt in needed:
                 continue
-            # PascalCase heuristic: starts with uppercase, contains lowercase
-            # (excludes SCREAMING_CASE constants which are not traits)
-            if not name or not name[0].isupper() or name.isupper():
+            if _is_group_import(use_stmt):
+                # Grouped imports are too broad for Phase 1b. If they matter, they
+                # should already have been selected by literal usage in Phase 1 or by
+                # the explicit self-group path-qualifier handling above.
                 continue
-            # If the name appears literally in the moved code, Phase 1 already
-            # handled it (or it's a type, not a trait). Skip.
-            if re.search(r'\b' + re.escape(name) + r'\b', stripped_combined_source):
-                continue
-            # This is likely a trait import needed for method dispatch — carry it
-            fixed = fix_import_path(use_stmt, source_path, dest_path)
-            if fixed not in needed:
-                needed.append(fixed)
-                already_carried.update(extract_use_names(fixed))
-            break  # This use_stmt is handled, move to next
+            names = extract_use_names(use_stmt)
+            for name in names:
+                if name in already_carried or name in moved_item_names:
+                    continue
+                # PascalCase heuristic: starts with uppercase, contains lowercase
+                # (excludes SCREAMING_CASE constants which are not traits)
+                if not name or not name[0].isupper() or name.isupper():
+                    continue
+                # If the name appears literally in the moved code, Phase 1 already
+                # handled it (or it's a type, not a trait). Skip.
+                if re.search(r'\b' + re.escape(name) + r'\b', stripped_combined_source):
+                    continue
+                # This is likely a trait import needed for method dispatch — carry it
+                fixed = fix_import_path(use_stmt, source_path, dest_path)
+                if fixed not in needed:
+                    needed.append(fixed)
+                    already_carried.update(extract_use_names(fixed))
+                break  # This use_stmt is handled, move to next
 
     # Phase 2: Add imports for same-module definitions referenced by moved items (#339)
     # This covers types, functions, and constants that were in scope because
@@ -294,6 +342,7 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
     # Check if dest is a child of source (decompose case: foo.rs -> foo/bar.rs)
     # In this case, `super::` from dest points to source's module.
     dest_is_child = _dest_is_child_of_source(source_path, dest_path)
+    source_items_by_name = {item.name: item for item in source_items if getattr(item, "name", None)}
 
     for def_name in source_definitions:
         if def_name in moved_item_names:
@@ -302,9 +351,12 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
         if re.search(r'\b' + re.escape(def_name) + r'\b', stripped_combined_source):
             # Need to add an import for this definition
             if dest_is_child:
-                # Decompose case: dest is inside source's module directory.
-                # `super::` from dest points directly to the source module.
-                import_line = f"use super::{def_name};"
+                import_line = import_same_module_definition(
+                    def_name,
+                    source_items_by_name,
+                    source_path,
+                    dest_path,
+                )
             elif same_parent:
                 import_line = f"use super::{source_mod}::{def_name};"
             else:
@@ -352,6 +404,101 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
                     needed.append(fixed)
 
     return {"needed_imports": needed, "warnings": warnings}
+
+
+def import_same_module_definition(
+    def_name: str,
+    source_items_by_name: dict,
+    source_path: str,
+    dest_path: str,
+) -> str:
+    """Resolve a same-source definition import for decompose child files.
+
+    Prefer a specific sibling child-module path when the definition looks like it
+    belongs to a stable clustered child module, instead of always routing through
+    the parent barrel via `super::Name`.
+    """
+    item = source_items_by_name.get(def_name)
+    if item is None:
+        return f"use super::{def_name};"
+
+    target_child = child_module_for_item(item)
+    if target_child:
+        dest_mod = os.path.splitext(os.path.basename(dest_path))[0]
+        if dest_mod != target_child:
+            return f"use super::{target_child}::{def_name};"
+
+    return f"use super::{def_name};"
+
+
+def child_module_for_item(item) -> Optional[str]:
+    """Infer the likely decompose child module for a source item.
+
+    This mirrors the broad grouping tendencies in homeboy core just enough to avoid
+    broad parent-barrel imports when ownership is obvious.
+    """
+    name = item.name or ""
+    kind = item.kind or ""
+
+    if kind in ("struct", "enum", "trait", "type_alias"):
+        return snake_case(name) if name else None
+
+    if kind == "impl":
+        if " for " in name:
+            return snake_case(name.split(" for ", 1)[1])
+        return snake_case(name) if name else None
+
+    if kind in ("const", "static"):
+        return "constants"
+
+    if kind == "function":
+        if name.startswith("extract_"):
+            return "extract"
+        if name.startswith("generate_"):
+            return "generate"
+        if name.startswith("render_"):
+            return "render"
+        if name.startswith("resolve_"):
+            return "resolve"
+        if name.startswith("find_"):
+            return "find"
+        if name.startswith("build_"):
+            return "build"
+        if name.startswith("validate_"):
+            return "validate"
+        if name.startswith("normalize_"):
+            return "normalize"
+        if name.startswith("infer_"):
+            return "infer"
+        if name.startswith("split_"):
+            return "split"
+        if name.startswith("detect_"):
+            return "detect"
+        return None
+
+    return None
+
+
+def snake_case(name: str) -> str:
+    if not name:
+        return ""
+    out = []
+    prev_lower = False
+    for ch in name:
+        if ch.isupper():
+            if prev_lower:
+                out.append('_')
+            out.append(ch.lower())
+            prev_lower = False
+        elif ch.isalnum():
+            out.append(ch.lower())
+            prev_lower = ch.islower() or ch.isdigit()
+        else:
+            if out and out[-1] != '_':
+                out.append('_')
+            prev_lower = False
+    result = ''.join(out).strip('_')
+    return result
 
 
 def extract_top_level_use_statements(lines: list[str]) -> list[str]:

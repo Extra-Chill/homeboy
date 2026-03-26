@@ -128,6 +128,43 @@ pub fn move_me() { stay_here(); }
         self.assertIn("use super::stay_here;", import_text)
         self.assertNotIn("crate::", import_text)
 
+    def test_decompose_prefers_specific_child_module_over_parent_barrel(self):
+        """If ownership of a same-file symbol is obvious, import from the sibling child module."""
+        source = """pub fn build_plan() {}
+pub fn validate_plan() { build_plan(); }
+"""
+        moved_items = [{
+            "name": "validate_plan",
+            "kind": "fn",
+            "source": "pub fn validate_plan() { build_plan(); }",
+        }]
+        result = resolve_imports(
+            moved_items,
+            source,
+            "src/core/refactor/decompose.rs",
+            "src/core/refactor/decompose/validate.rs",
+        )
+        import_text = "\n".join(result["needed_imports"])
+        self.assertIn("use super::build::build_plan;", import_text)
+
+    def test_decompose_falls_back_to_parent_when_no_clear_child_owner(self):
+        source = """pub fn helper() {}
+pub fn moved() { helper(); }
+"""
+        moved_items = [{
+            "name": "moved",
+            "kind": "fn",
+            "source": "pub fn moved() { helper(); }",
+        }]
+        result = resolve_imports(
+            moved_items,
+            source,
+            "src/core/foo.rs",
+            "src/core/foo/bar.rs",
+        )
+        import_text = "\n".join(result["needed_imports"])
+        self.assertIn("use super::helper;", import_text)
+
 
 class TestResolveImportsPhase3Globs(unittest.TestCase):
     """Phase 3 should carry forward glob imports for unresolved references."""
@@ -333,8 +370,7 @@ class PipelineAbilities extends BaseAbilities {}
         )
         imports = result["needed_imports"]
         import_text = "\n".join(imports)
-        self.assertIn("use serde::{Deserialize, Serialize};", import_text)
-        self.assertIn("use regex::Regex;", import_text)
+        self.assertEqual(import_text, "")
         self.assertNotIn("WP_UnitTestCase", import_text)
         self.assertNotIn("DataMachine\\Core\\Pipeline", import_text)
 
@@ -766,6 +802,29 @@ pub fn copy_data(input: &mut impl Read, output: &mut impl Write) {
         # unless it's in the source. Read and Write are not used literally.
         self.assertIn("Read", import_text)
         self.assertIn("Write", import_text)
+
+    def test_grouped_pascalcase_imports_not_carried_by_trait_fallback(self):
+        """Grouped imports should not be hoisted by the broad trait-like fallback."""
+        source = """use serde::{Deserialize, Serialize};
+
+pub fn helper() -> usize {
+    1
+}
+"""
+        moved_items = [{
+            "name": "helper",
+            "kind": "fn",
+            "source": "pub fn helper() -> usize { 1 }",
+        }]
+        result = resolve_imports(
+            moved_items,
+            source,
+            "src/core/foo.rs",
+            "src/core/foo/helpers.rs",
+        )
+        import_text = "\n".join(result["needed_imports"])
+        self.assertNotIn("Deserialize", import_text)
+        self.assertNotIn("Serialize", import_text)
 
 
 if __name__ == "__main__":
