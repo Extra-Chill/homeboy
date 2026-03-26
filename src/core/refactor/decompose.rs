@@ -336,7 +336,10 @@ fn parse_items(file: &str, content: &str) -> Option<Vec<ParsedItem>> {
             "content": content,
         });
         if let Some(result) = extension::run_refactor_script(&manifest, &command) {
-            if let Some(items) = result.get("items").and_then(|value| serde_json::from_value::<Vec<ParsedItem>>(value.clone()).ok()) {
+            if let Some(items) = result
+                .get("items")
+                .and_then(|value| serde_json::from_value::<Vec<ParsedItem>>(value.clone()).ok())
+            {
                 if !items.is_empty() {
                     return Some(items);
                 }
@@ -1115,7 +1118,8 @@ fn group_items(file: &str, items: &[ParsedItem], content: &str) -> Vec<Decompose
         }
     }
 
-    let final_buckets = rebalance_for_viable_parent_surface(file, content, &fn_items, final_buckets);
+    let final_buckets =
+        rebalance_for_viable_parent_surface(file, content, &fn_items, final_buckets);
 
     let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("rs");
 
@@ -1491,7 +1495,8 @@ fn has_established_module_surface(content: &str) -> bool {
     let mut public_decl_count = 0usize;
 
     for line in content.lines().map(str::trim) {
-        if line.starts_with("pub use ") || line.starts_with("pub mod ") || line.starts_with("mod ") {
+        if line.starts_with("pub use ") || line.starts_with("pub mod ") || line.starts_with("mod ")
+        {
             return true;
         }
 
@@ -1668,7 +1673,10 @@ fn is_root_orchestrator_name(name: &str) -> bool {
 
 fn public_items_for_group(plan: &DecomposePlan, group: &DecomposeGroup) -> Vec<String> {
     let source_path = Path::new(&plan.file);
-    let ext = source_path.extension().and_then(|e| e.to_str()).unwrap_or("rs");
+    let ext = source_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("rs");
 
     let root = Path::new(".");
     let content = std::fs::read_to_string(source_path).unwrap_or_default();
@@ -1968,13 +1976,18 @@ macro_rules! entity_crud {
             kind: "function".to_string(),
             start_line: 3,
             end_line: 5,
-            source: "pub fn load(id: &str) -> Result<$Entity> {\n    config::load::<$Entity>(id)\n}"
-                .to_string(),
+            source:
+                "pub fn load(id: &str) -> Result<$Entity> {\n    config::load::<$Entity>(id)\n}"
+                    .to_string(),
             visibility: String::new(),
         }];
         let mut warnings = Vec::new();
-        let filtered = filter_extractable_items("src/core/config.rs", content, items, &mut warnings);
-        assert!(filtered.is_empty(), "macro template fragment should not be extractable");
+        let filtered =
+            filter_extractable_items("src/core/config.rs", content, items, &mut warnings);
+        assert!(
+            filtered.is_empty(),
+            "macro template fragment should not be extractable"
+        );
         assert_eq!(warnings.len(), 1);
     }
 
@@ -2086,7 +2099,10 @@ fn helper() {}
         let refs: Vec<&ParsedItem> = items.iter().collect();
         let mut buckets = BTreeMap::new();
         buckets.insert("alpha".to_string(), vec!["a".to_string()]);
-        buckets.insert("beta".to_string(), vec!["b".to_string(), "helper".to_string()]);
+        buckets.insert(
+            "beta".to_string(),
+            vec!["b".to_string(), "helper".to_string()],
+        );
 
         let rebalanced =
             rebalance_for_viable_parent_surface("src/core/config.rs", content, &refs, buckets);

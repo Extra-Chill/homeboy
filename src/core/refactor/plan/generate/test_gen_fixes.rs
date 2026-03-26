@@ -371,27 +371,23 @@ pub(crate) fn generate_test_method_fixes(
             }
         };
 
-        // If the generated test code uses Default::default() fallbacks, the
-        // type wasn't properly resolved and the test is likely meaningless.
-        // Downgrade to PlanOnly so it requires human review instead of auto-applying.
+        // Missing test-method generation is still not trustworthy enough for
+        // unattended CI autofix. Even without obvious unresolved-type fallbacks,
+        // generated methods can still drift semantically from the target source
+        // method or become invalid after branch sync.
         let has_unresolved_types =
             append_code.contains("Default::default()") || append_code.contains("::default()");
-        let safety_tier = if has_unresolved_types {
-            FixSafetyTier::PlanOnly
-        } else {
-            FixSafetyTier::Safe
-        };
 
         let insertions = vec![Insertion {
             kind: InsertionKind::MethodStub,
             finding: AuditFinding::MissingTestMethod,
-            safety_tier,
-            auto_apply: !has_unresolved_types,
-            blocked_reason: if has_unresolved_types {
-                Some("Generated test uses Default::default() fallback — types not resolved, test may be meaningless".to_string())
+            safety_tier: FixSafetyTier::PlanOnly,
+            auto_apply: false,
+            blocked_reason: Some(if has_unresolved_types {
+                "Generated test uses Default::default() fallback — types not resolved, test may be meaningless".to_string()
             } else {
-                None
-            },
+                "Generated test methods require human review before writing".to_string()
+            }),
             preflight: None,
             code: append_code,
             description: format!(

@@ -9,7 +9,7 @@ use crate::extension::{self, ExtensionManifest};
 use crate::{changelog, version};
 
 use super::types::{ReleaseContext, ReleaseStepType};
-use super::utils::extract_latest_notes;
+use super::utils::{extract_latest_notes, parse_release_artifacts};
 
 pub(crate) struct ReleaseStepExecutor {
     component_id: String,
@@ -277,6 +277,7 @@ impl ReleaseStepExecutor {
 
         let exit_code = response
             .get("exit_code")
+            .or_else(|| response.get("exitCode"))
             .and_then(|v| v.as_i64())
             .unwrap_or(-1);
 
@@ -303,13 +304,13 @@ impl ReleaseStepExecutor {
             return Err(Error::internal_unexpected(detail));
         }
 
-        let artifacts: Vec<super::types::ReleaseArtifact> =
-            serde_json::from_str(stdout).map_err(|e| {
-                Error::internal_json(
-                    e.to_string(),
-                    Some(format!("Failed to parse package artifacts: {}", stdout)),
-                )
-            })?;
+        let raw_artifacts: serde_json::Value = serde_json::from_str(stdout).map_err(|e| {
+            Error::internal_json(
+                e.to_string(),
+                Some(format!("Failed to parse package artifacts: {}", stdout)),
+            )
+        })?;
+        let artifacts = parse_release_artifacts(&raw_artifacts)?;
 
         let mut context = self.context.lock().map_err(|_| {
             Error::internal_unexpected("Failed to lock release context".to_string())

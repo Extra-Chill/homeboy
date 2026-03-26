@@ -1,5 +1,6 @@
 use crate::component;
 use crate::deploy::{self, DeployConfig};
+use crate::engine::command;
 use crate::error::{Error, Result};
 use crate::git;
 
@@ -22,6 +23,10 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             ..Default::default()
         },
     )?;
+
+    if !input.dry_run {
+        ensure_release_on_default_branch(&component.local_path)?;
+    }
 
     let monorepo = git::MonorepoContext::detect(&component.local_path, &input.component_id);
     let (auto_bump_type, releasable_count) =
@@ -286,6 +291,47 @@ fn format_tag(version: &str, monorepo: Option<&git::MonorepoContext>) -> String 
         Some(ctx) => ctx.format_tag(version),
         None => format!("v{}", version),
     }
+}
+
+fn ensure_release_on_default_branch(local_path: &str) -> Result<()> {
+    let current_branch =
+        command::run_in_optional(local_path, "git", &["symbolic-ref", "--short", "HEAD"])
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "release",
+                    "Refusing to release from detached HEAD",
+                    None,
+                    Some(vec![
+                        "Check out the default branch before releasing".to_string()
+                    ]),
+                )
+            })?;
+
+    let default_branch = command::run_in_optional(
+        local_path,
+        "git",
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .map(|value| value.trim().trim_start_matches("origin/").to_string())
+    .filter(|value| !value.is_empty())
+    .unwrap_or_else(|| "main".to_string());
+
+    if current_branch == default_branch {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "release",
+        format!(
+            "Refusing to release from non-default branch '{}' (default: '{}')",
+            current_branch, default_branch
+        ),
+        None,
+        Some(vec![
+            format!("Check out '{}' before releasing", default_branch),
+            "If you only want a preview, use --dry-run".to_string(),
+        ]),
+    ))
 }
 
 fn extract_new_version_from_plan(plan: &ReleasePlan) -> Option<String> {
