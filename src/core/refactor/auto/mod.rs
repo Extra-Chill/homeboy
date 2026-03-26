@@ -12,8 +12,7 @@ pub use apply::{
 };
 pub use contracts::{
     ApplyChunkResult, ApplyOptions, ChunkStatus, ChunkVerifier, DecomposeFixPlan, Fix, FixPolicy,
-    FixResult, Insertion, InsertionKind, NewFile, PolicySummary, PreflightContext,
-    RefactorPrimitive, SkippedFile,
+    FixResult, Insertion, InsertionKind, NewFile, PolicySummary, RefactorPrimitive, SkippedFile,
 };
 pub use outcome::{
     standard_outcome, AppliedAutofixCapture, AutofixMode, AutofixOutcome, AutofixSidecarFiles,

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use super::verify::AuditConvergenceScoring;
 
-pub const KNOWN_PLAN_SOURCES: &[&str] = &["audit", "lint", "test"];
+pub const KNOWN_REFACTOR_SOURCES: &[&str] = &["audit", "lint", "test"];
 
 /// Name of the env var pointing to previous command output files.
 ///
@@ -24,7 +24,7 @@ pub const KNOWN_PLAN_SOURCES: &[&str] = &["audit", "lint", "test"];
 const OUTPUT_DIR_ENV: &str = "HOMEBOY_OUTPUT_DIR";
 
 #[derive(Debug, Clone)]
-pub struct RefactorPlanRequest {
+pub struct RefactorSourceRequest {
     pub component: Component,
     pub root: PathBuf,
     pub sources: Vec<String>,
@@ -45,8 +45,8 @@ pub fn lint_refactor_request(
     settings: Vec<(String, String)>,
     options: LintSourceOptions,
     write: bool,
-) -> RefactorPlanRequest {
-    RefactorPlanRequest {
+) -> RefactorSourceRequest {
+    RefactorSourceRequest {
         component,
         root,
         sources: vec!["lint".to_string()],
@@ -67,8 +67,8 @@ pub fn test_refactor_request(
     settings: Vec<(String, String)>,
     options: TestSourceOptions,
     write: bool,
-) -> RefactorPlanRequest {
-    RefactorPlanRequest {
+) -> RefactorSourceRequest {
+    RefactorSourceRequest {
         component,
         root,
         sources: vec!["test".to_string()],
@@ -89,8 +89,8 @@ pub fn run_lint_refactor(
     settings: Vec<(String, String)>,
     options: LintSourceOptions,
     write: bool,
-) -> crate::Result<RefactorPlan> {
-    build_refactor_plan(lint_refactor_request(
+) -> crate::Result<RefactorSourceRun> {
+    collect_refactor_sources(lint_refactor_request(
         component, root, settings, options, write,
     ))
 }
@@ -101,8 +101,8 @@ pub fn run_test_refactor(
     settings: Vec<(String, String)>,
     options: TestSourceOptions,
     write: bool,
-) -> crate::Result<RefactorPlan> {
-    build_refactor_plan(test_refactor_request(
+) -> crate::Result<RefactorSourceRun> {
+    collect_refactor_sources(test_refactor_request(
         component, root, settings, options, write,
     ))
 }
@@ -126,17 +126,17 @@ pub struct TestSourceOptions {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct RefactorPlan {
+pub struct RefactorSourceRun {
     pub component_id: String,
     pub source_path: String,
     pub sources: Vec<String>,
     pub dry_run: bool,
     pub applied: bool,
     pub merge_strategy: String,
-    pub proposals: Vec<FixProposal>,
-    pub stages: Vec<PlanStageSummary>,
-    pub plan_totals: PlanTotals,
-    pub overlaps: Vec<PlanOverlap>,
+    pub collected_edits: Vec<CollectedEdit>,
+    pub stages: Vec<SourceStageSummary>,
+    pub source_totals: SourceTotals,
+    pub overlaps: Vec<SourceOverlap>,
     pub files_modified: usize,
     pub changed_files: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,11 +146,11 @@ pub struct RefactorPlan {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PlanStageSummary {
+pub struct SourceStageSummary {
     pub stage: String,
-    pub planned: bool,
+    pub collected: bool,
     pub applied: bool,
-    pub fixes_proposed: usize,
+    pub edit_count: usize,
     pub files_modified: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detected_findings: Option<usize>,
@@ -163,7 +163,7 @@ pub struct PlanStageSummary {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct PlanOverlap {
+pub struct SourceOverlap {
     pub file: String,
     pub earlier_stage: String,
     pub later_stage: String,
@@ -171,14 +171,14 @@ pub struct PlanOverlap {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PlanTotals {
-    pub stages_with_proposals: usize,
-    pub total_fixes_proposed: usize,
+pub struct SourceTotals {
+    pub stages_with_edits: usize,
+    pub total_edits: usize,
     pub total_files_selected: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct FixProposal {
+pub struct CollectedEdit {
     pub source: String,
     pub file: String,
     pub rule_id: String,
@@ -207,11 +207,11 @@ impl FixAccumulator {
 
 struct PlannedStage {
     source: String,
-    summary: PlanStageSummary,
+    summary: SourceStageSummary,
     fix_results: Vec<FixApplied>,
 }
 
-pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<RefactorPlan> {
+pub fn collect_refactor_sources(request: RefactorSourceRequest) -> crate::Result<RefactorSourceRun> {
     let sources = normalize_sources(&request.sources)?;
     let root_str = request.root.to_string_lossy().to_string();
     let original_changes = git::get_uncommitted_changes(&root_str).ok();
@@ -305,7 +305,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
                 request.write,
                 &run_dir,
             )?,
-            _ => unreachable!("sources are normalized before planning"),
+            _ => unreachable!("sources are normalized before orchestration"),
         };
 
         // Format generated/modified files so subsequent stages (especially lint)
@@ -318,8 +318,8 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
         planned_stages.push(stage);
     }
 
-    let proposals = collect_fix_proposals(&planned_stages);
-    let mut stage_summaries: Vec<PlanStageSummary> = planned_stages
+    let collected_edits = collect_collected_edits(&planned_stages);
+    let mut stage_summaries: Vec<SourceStageSummary> = planned_stages
         .into_iter()
         .map(|stage| stage.summary)
         .collect();
@@ -333,7 +333,7 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
         ));
     }
 
-    let plan_totals = summarize_plan_totals(&stage_summaries, changed_files.len());
+    let source_totals = summarize_source_totals(&stage_summaries, changed_files.len());
     let files_modified = changed_files.len();
     let applied = request.write && files_modified > 0;
 
@@ -373,16 +373,16 @@ pub fn build_refactor_plan(request: RefactorPlanRequest) -> crate::Result<Refact
         Vec::new()
     };
 
-    Ok(RefactorPlan {
+    Ok(RefactorSourceRun {
         component_id: request.component.id,
         source_path: root_str,
         sources,
         dry_run: !request.write,
         applied,
         merge_strategy: "sequential_source_merge".to_string(),
-        proposals,
+        collected_edits,
         stages: stage_summaries,
-        plan_totals,
+        source_totals,
         overlaps,
         files_modified,
         changed_files,
@@ -396,7 +396,7 @@ pub fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
     let lowered: Vec<String> = sources.iter().map(|source| source.to_lowercase()).collect();
 
     if lowered.iter().any(|source| source == "all") {
-        return Ok(KNOWN_PLAN_SOURCES
+        return Ok(KNOWN_REFACTOR_SOURCES
             .iter()
             .map(|source| source.to_string())
             .collect());
@@ -404,7 +404,7 @@ pub fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
 
     let unknown: Vec<String> = lowered
         .iter()
-        .filter(|source| !KNOWN_PLAN_SOURCES.contains(&source.as_str()))
+        .filter(|source| !KNOWN_REFACTOR_SOURCES.contains(&source.as_str()))
         .cloned()
         .collect();
 
@@ -415,13 +415,13 @@ pub fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
             None,
             Some(vec![format!(
                 "Known sources: {}",
-                KNOWN_PLAN_SOURCES.join(", ")
+                KNOWN_REFACTOR_SOURCES.join(", ")
             )]),
         ));
     }
 
     let mut ordered = Vec::new();
-    for known in KNOWN_PLAN_SOURCES {
+    for known in KNOWN_REFACTOR_SOURCES {
         if lowered.iter().any(|source| source == known) {
             ordered.push((*known).to_string());
         }
@@ -478,12 +478,12 @@ fn format_changed_files(root: &Path, changed_files: &[String], warnings: &mut Ve
     }
 }
 
-fn collect_fix_proposals(stages: &[PlannedStage]) -> Vec<FixProposal> {
-    let mut proposals = Vec::new();
+fn collect_collected_edits(stages: &[PlannedStage]) -> Vec<CollectedEdit> {
+    let mut edits = Vec::new();
 
     for stage in stages {
         for fix in &stage.fix_results {
-            proposals.push(FixProposal {
+            edits.push(CollectedEdit {
                 source: stage.source.clone(),
                 file: fix.file.clone(),
                 rule_id: fix.rule.clone(),
@@ -492,17 +492,17 @@ fn collect_fix_proposals(stages: &[PlannedStage]) -> Vec<FixProposal> {
         }
     }
 
-    proposals.sort_by(|a, b| {
+    edits.sort_by(|a, b| {
         a.source
             .cmp(&b.source)
             .then(a.file.cmp(&b.file))
             .then(a.rule_id.cmp(&b.rule_id))
     });
 
-    proposals
+    edits
 }
 
-fn collect_stage_changed_files(stages: &[PlanStageSummary]) -> Vec<String> {
+fn collect_stage_changed_files(stages: &[SourceStageSummary]) -> Vec<String> {
     let mut final_changed_files = BTreeSet::new();
     for stage in stages {
         for file in &stage.changed_files {
@@ -594,7 +594,6 @@ fn plan_audit_stage(
         exclude: exclude.to_vec(),
     };
     let mut fix_result = super::generate::generate_audit_fixes(&result, root, &policy);
-    let policy_context = fixer::PreflightContext { root };
     let (fix_result, policy_summary, changed_files, stage_warnings): (
         fixer::FixResult,
         fixer::PolicySummary,
@@ -644,22 +643,21 @@ fn plan_audit_stage(
             warnings,
         )
     } else {
-        let policy_summary =
-            fixer::apply_fix_policy(&mut fix_result, false, &policy, &policy_context);
+        let policy_summary = fixer::apply_fix_policy(&mut fix_result, false, &policy);
         let changed_files = collect_audit_changed_files(&fix_result);
         (fix_result, policy_summary, changed_files, Vec::new())
     };
 
     let fix_results = summarize_audit_fix_result_entries(&fix_result);
-    let fixes_proposed = fix_results.len();
+    let edit_count = fix_results.len();
 
     Ok(PlannedStage {
         source: "audit".to_string(),
-        summary: PlanStageSummary {
+        summary: SourceStageSummary {
             stage: "audit".to_string(),
-            planned: true,
+            collected: true,
             applied: write && !changed_files.is_empty(),
-            fixes_proposed,
+            edit_count,
             files_modified: changed_files.len(),
             detected_findings: Some(result.findings.len()),
             changed_files,
@@ -746,17 +744,17 @@ fn run_lint_stage(
     };
 
     let fix_results = fix_sidecars.consume_fix_results();
-    let fixes_proposed = fix_results.len();
+    let edit_count = fix_results.len();
     let lint_findings =
         crate::extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default();
 
     Ok(PlannedStage {
         source: "lint".to_string(),
-        summary: PlanStageSummary {
+        summary: SourceStageSummary {
             stage: "lint".to_string(),
-            planned: true,
+            collected: true,
             applied: write && !stage_changed_files.is_empty(),
-            fixes_proposed,
+            edit_count,
             files_modified: stage_changed_files.len(),
             detected_findings: Some(lint_findings.len()),
             changed_files: stage_changed_files,
@@ -816,14 +814,14 @@ fn run_test_stage(
     };
 
     let fix_results = fix_sidecars.consume_fix_results();
-    let fixes_proposed = fix_results.len();
+    let edit_count = fix_results.len();
     Ok(PlannedStage {
         source: "test".to_string(),
-        summary: PlanStageSummary {
+        summary: SourceStageSummary {
             stage: "test".to_string(),
-            planned: true,
+            collected: true,
             applied: write && !stage_changed_files.is_empty(),
-            fixes_proposed,
+            edit_count,
             files_modified: stage_changed_files.len(),
             detected_findings: None,
             changed_files: stage_changed_files,
@@ -875,7 +873,7 @@ fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) -> Vec<FixA
     entries
 }
 
-pub fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
+pub fn analyze_stage_overlaps(stages: &[SourceStageSummary]) -> Vec<SourceOverlap> {
     let mut overlaps = Vec::new();
 
     for (later_index, later_stage) in stages.iter().enumerate() {
@@ -896,7 +894,7 @@ pub fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
 
             for file in earlier_stage.changed_files.iter().map(String::as_str) {
                 if later_files.contains(file) {
-                    overlaps.push(PlanOverlap {
+                    overlaps.push(SourceOverlap {
                         file: file.to_string(),
                         earlier_stage: earlier_stage.stage.clone(),
                         later_stage: later_stage.stage.clone(),
@@ -920,16 +918,16 @@ pub fn analyze_stage_overlaps(stages: &[PlanStageSummary]) -> Vec<PlanOverlap> {
     overlaps
 }
 
-pub fn summarize_plan_totals(
-    stages: &[PlanStageSummary],
+pub fn summarize_source_totals(
+    stages: &[SourceStageSummary],
     total_files_selected: usize,
-) -> PlanTotals {
-    PlanTotals {
-        stages_with_proposals: stages
+) -> SourceTotals {
+    SourceTotals {
+        stages_with_edits: stages
             .iter()
-            .filter(|stage| stage.fixes_proposed > 0)
+            .filter(|stage| stage.edit_count > 0)
             .count(),
-        total_fixes_proposed: stages.iter().map(|stage| stage.fixes_proposed).sum(),
+        total_edits: stages.iter().map(|stage| stage.edit_count).sum(),
         total_files_selected,
     }
 }
@@ -946,7 +944,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("homeboy-refactor-planner-{name}-{nanos}"))
+        std::env::temp_dir().join(format!("homeboy-refactor-sources-{name}-{nanos}"))
     }
 
     fn test_component(root: &Path) -> Component {
@@ -961,33 +959,33 @@ mod tests {
     #[test]
     fn analyze_stage_overlaps_reports_later_stage_precedence() {
         let stages = vec![
-            PlanStageSummary {
+            SourceStageSummary {
                 stage: "audit".to_string(),
-                planned: true,
+                collected: true,
                 applied: true,
-                fixes_proposed: 1,
+                edit_count: 1,
                 files_modified: 1,
                 detected_findings: Some(1),
                 changed_files: vec!["src/lib.rs".to_string()],
                 fix_summary: None,
                 warnings: Vec::new(),
             },
-            PlanStageSummary {
+            SourceStageSummary {
                 stage: "lint".to_string(),
-                planned: true,
+                collected: true,
                 applied: true,
-                fixes_proposed: 1,
+                edit_count: 1,
                 files_modified: 2,
                 detected_findings: Some(2),
                 changed_files: vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
                 fix_summary: None,
                 warnings: Vec::new(),
             },
-            PlanStageSummary {
+            SourceStageSummary {
                 stage: "test".to_string(),
-                planned: true,
+                collected: true,
                 applied: true,
-                fixes_proposed: 1,
+                edit_count: 1,
                 files_modified: 1,
                 detected_findings: None,
                 changed_files: vec!["src/main.rs".to_string()],
@@ -1001,13 +999,13 @@ mod tests {
         assert_eq!(
             overlaps,
             vec![
-                PlanOverlap {
+                SourceOverlap {
                     file: "src/lib.rs".to_string(),
                     earlier_stage: "audit".to_string(),
                     later_stage: "lint".to_string(),
                     resolution: "lint pass ran after audit in pipeline sequence".to_string(),
                 },
-                PlanOverlap {
+                SourceOverlap {
                     file: "src/main.rs".to_string(),
                     earlier_stage: "lint".to_string(),
                     later_stage: "test".to_string(),
@@ -1020,22 +1018,22 @@ mod tests {
     #[test]
     fn analyze_stage_overlaps_ignores_disjoint_files() {
         let stages = vec![
-            PlanStageSummary {
+            SourceStageSummary {
                 stage: "audit".to_string(),
-                planned: true,
+                collected: true,
                 applied: true,
-                fixes_proposed: 1,
+                edit_count: 1,
                 files_modified: 1,
                 detected_findings: Some(1),
                 changed_files: vec!["src/lib.rs".to_string()],
                 fix_summary: None,
                 warnings: Vec::new(),
             },
-            PlanStageSummary {
+            SourceStageSummary {
                 stage: "lint".to_string(),
-                planned: true,
+                collected: true,
                 applied: true,
-                fixes_proposed: 1,
+                edit_count: 1,
                 files_modified: 1,
                 detected_findings: Some(1),
                 changed_files: vec!["src/main.rs".to_string()],
@@ -1048,35 +1046,35 @@ mod tests {
     }
 
     #[test]
-    fn summarize_plan_totals_counts_stage_and_fix_totals() {
+    fn summarize_source_totals_counts_stage_and_fix_totals() {
         let stages = vec![
-            PlanStageSummary {
+            SourceStageSummary {
                 stage: "audit".to_string(),
-                planned: true,
+                collected: true,
                 applied: false,
-                fixes_proposed: 2,
+                edit_count: 2,
                 files_modified: 1,
                 detected_findings: Some(2),
                 changed_files: vec!["src/lib.rs".to_string()],
                 fix_summary: None,
                 warnings: Vec::new(),
             },
-            PlanStageSummary {
+            SourceStageSummary {
                 stage: "lint".to_string(),
-                planned: true,
+                collected: true,
                 applied: false,
-                fixes_proposed: 0,
+                edit_count: 0,
                 files_modified: 0,
                 detected_findings: Some(1),
                 changed_files: Vec::new(),
                 fix_summary: None,
                 warnings: Vec::new(),
             },
-            PlanStageSummary {
+            SourceStageSummary {
                 stage: "test".to_string(),
-                planned: true,
+                collected: true,
                 applied: false,
-                fixes_proposed: 3,
+                edit_count: 3,
                 files_modified: 2,
                 detected_findings: None,
                 changed_files: vec!["tests/foo.rs".to_string(), "tests/bar.rs".to_string()],
@@ -1085,15 +1083,15 @@ mod tests {
             },
         ];
 
-        let totals = summarize_plan_totals(&stages, 3);
+        let totals = summarize_source_totals(&stages, 3);
 
-        assert_eq!(totals.stages_with_proposals, 2);
-        assert_eq!(totals.total_fixes_proposed, 5);
+        assert_eq!(totals.stages_with_edits, 2);
+        assert_eq!(totals.total_edits, 5);
         assert_eq!(totals.total_files_selected, 3);
     }
 
     #[test]
-    fn build_refactor_plan_audit_write_uses_audit_refactor_engine() {
+    fn collect_refactor_sources_audit_write_uses_audit_refactor_engine() {
         let root = tmp_dir("audit-write");
         fs::create_dir_all(root.join("commands")).unwrap();
         fs::write(
@@ -1109,7 +1107,7 @@ mod tests {
         fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
 
         let component = test_component(&root);
-        let plan = build_refactor_plan(RefactorPlanRequest {
+        let sources_run = collect_refactor_sources(RefactorSourceRequest {
             component,
             root: root.clone(),
             sources: vec!["audit".to_string()],
@@ -1124,15 +1122,15 @@ mod tests {
         })
         .unwrap();
 
-        let audit_stage = plan
+        let audit_stage = sources_run
             .stages
             .iter()
             .find(|stage| stage.stage == "audit")
             .expect("audit stage present");
 
-        assert!(audit_stage.planned);
-        assert!(plan.proposals.is_empty());
-        assert!(audit_stage.planned);
+        assert!(audit_stage.collected);
+        assert!(sources_run.collected_edits.is_empty());
+        assert!(audit_stage.collected);
         assert!(audit_stage
             .warnings
             .iter()
@@ -1143,6 +1141,7 @@ mod tests {
 
     #[test]
     fn try_load_cached_audit_reads_output_dir() {
+        std::env::remove_var(OUTPUT_DIR_ENV);
         let dir = tmp_dir("cached-audit");
         fs::create_dir_all(&dir).unwrap();
         let audit_result = CodeAuditResult {
@@ -1187,6 +1186,7 @@ mod tests {
 
     #[test]
     fn try_load_cached_audit_skips_failed_envelope() {
+        std::env::remove_var(OUTPUT_DIR_ENV);
         let dir = tmp_dir("cached-audit-fail");
         fs::create_dir_all(&dir).unwrap();
         let envelope = serde_json::json!({

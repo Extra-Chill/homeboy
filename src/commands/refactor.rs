@@ -380,8 +380,8 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
 #[derive(Serialize)]
 #[serde(tag = "command")]
 pub enum RefactorOutput {
-    #[serde(rename = "refactor.plan")]
-    Plan(homeboy::refactor::RefactorPlan),
+    #[serde(rename = "refactor.sources")]
+    Sources(homeboy::refactor::plan::RefactorSourceRun),
 
     #[serde(rename = "refactor.rename")]
     Rename {
@@ -712,7 +712,7 @@ fn run_refactor_sources_single(
     let requested_sources = from.to_vec();
     let only_findings = parse_audit_findings(only)?;
     let exclude_findings = parse_audit_findings(exclude)?;
-    let plan = homeboy::refactor::build_refactor_plan(homeboy::refactor::RefactorPlanRequest {
+    let sources = homeboy::refactor::plan::collect_refactor_sources(homeboy::refactor::plan::RefactorSourceRequest {
         component: ctx.component,
         root: ctx.source_path,
         sources: requested_sources,
@@ -720,14 +720,14 @@ fn run_refactor_sources_single(
         only: only_findings,
         exclude: exclude_findings,
         settings: settings.to_vec(),
-        lint: homeboy::refactor::LintSourceOptions::default(),
-        test: homeboy::refactor::TestSourceOptions::default(),
+        lint: homeboy::refactor::plan::LintSourceOptions::default(),
+        test: homeboy::refactor::plan::TestSourceOptions::default(),
         write,
         force,
     })?;
-    let exit_code = if plan.files_modified > 0 { 1 } else { 0 };
+    let exit_code = if sources.files_modified > 0 { 1 } else { 0 };
 
-    Ok((RefactorOutput::Plan(plan), exit_code))
+    Ok((RefactorOutput::Sources(sources), exit_code))
 }
 
 fn parse_audit_findings(values: &[String]) -> homeboy::Result<Vec<AuditFinding>> {

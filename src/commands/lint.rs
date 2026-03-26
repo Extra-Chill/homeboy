@@ -113,8 +113,7 @@ mod tests {
     use homeboy::component::Component;
     use homeboy::extension::lint as extension_lint;
     use homeboy::extension::lint::baseline::{self as lint_baseline, LintFinding};
-    use homeboy::refactor::lint_refactor_request;
-    use homeboy::refactor::LintSourceOptions;
+    use homeboy::refactor::plan::{lint_refactor_request, LintSourceOptions};
     use std::path::Path;
 
     #[test]

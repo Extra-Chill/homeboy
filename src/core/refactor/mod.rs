@@ -44,22 +44,14 @@ impl AppliedRefactor {
         }
     }
 
-    pub fn from_plan(plan: &RefactorPlan, rerun_recommended: bool) -> Self {
-        Self {
-            files_modified: plan.files_modified,
-            rerun_recommended,
-            changed_files: plan.changed_files.clone(),
-            fix_summary: plan.fix_summary.clone(),
-        }
-    }
 }
 
 pub use add::{add_import, fixes_from_audit, AddResult};
 pub use auto::{
     apply_decompose_plans, apply_fix_policy, apply_fixes, apply_fixes_chunked,
     apply_new_files_chunked, auto_apply_subset, ApplyChunkResult, ApplyOptions, ChunkStatus, Fix,
-    FixPolicy, FixResult, Insertion, InsertionKind, NewFile, PolicySummary, PreflightContext,
-    RefactorPrimitive, SkippedFile,
+    FixPolicy, FixResult, Insertion, InsertionKind, NewFile, PolicySummary, RefactorPrimitive,
+    SkippedFile,
 };
 pub use decompose::{
     apply_plan, apply_plan_skeletons, build_plan, DecomposeAuditImpact, DecomposeGroup,
@@ -67,10 +59,8 @@ pub use decompose::{
 };
 pub use move_items::{move_items, ImportRewrite, ItemKind, MoveResult, MovedItem};
 pub use plan::{
-    build_refactor_plan, finding_fingerprint, lint_refactor_request, run_audit_refactor,
-    score_delta, test_refactor_request, weighted_finding_score_with, AuditConvergenceScoring,
-    AuditRefactorIterationSummary, AuditRefactorOutcome, LintSourceOptions, PlanOverlap,
-    PlanStageSummary, RefactorPlan, RefactorPlanRequest, TestSourceOptions, KNOWN_PLAN_SOURCES,
+    finding_fingerprint, run_audit_refactor, score_delta, weighted_finding_score_with,
+    AuditConvergenceScoring, AuditRefactorIterationSummary, AuditRefactorOutcome,
 };
 pub use propagate::{propagate, PropagateConfig, PropagateEdit, PropagateField, PropagateResult};
 pub use rename::{
