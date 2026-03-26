@@ -540,7 +540,10 @@ fn generate_simple_duplicate_fixes(
         let Some(remove_surface) = module_surfaces.get(remove_file) else {
             skipped.push(SkippedFile {
                 file: remove_file.clone(),
-                reason: format!("Missing module surface for duplicate file '{}'", remove_file),
+                reason: format!(
+                    "Missing module surface for duplicate file '{}'",
+                    remove_file
+                ),
             });
             continue;
         };

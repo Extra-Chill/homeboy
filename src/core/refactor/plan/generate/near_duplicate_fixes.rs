@@ -88,12 +88,9 @@ pub(crate) fn generate_near_duplicate_fixes(
             continue;
         }
 
-        let Some((canonical_file, duplicate_file)) = choose_near_duplicate_pair(
-            fn_name,
-            &files,
-            module_surfaces,
-            skipped,
-        ) else {
+        let Some((canonical_file, duplicate_file)) =
+            choose_near_duplicate_pair(fn_name, &files, module_surfaces, skipped)
+        else {
             continue;
         };
 
@@ -170,12 +167,9 @@ pub(crate) fn generate_near_duplicate_fixes(
         // 3. Ensure the canonical copy is pub(crate).
         let canon_path = root.join(canonical_file);
         if let Ok(canon_content) = std::fs::read_to_string(&canon_path) {
-            if let Some(vis_fix) = build_visibility_upgrade(
-                &canon_content,
-                canonical_file,
-                fn_name,
-                module_surfaces,
-            ) {
+            if let Some(vis_fix) =
+                build_visibility_upgrade(&canon_content, canonical_file, fn_name, module_surfaces)
+            {
                 fixes.push(Fix {
                     file: canonical_file.to_string(),
                     required_methods: vec![],

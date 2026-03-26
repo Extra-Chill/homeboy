@@ -5,8 +5,8 @@ mod convention_fixes;
 mod doc_fixes;
 mod duplicate_fixes;
 mod intra_duplicate_fixes;
-mod near_duplicate_fixes;
 mod module_surface;
+mod near_duplicate_fixes;
 mod orphaned_test_fixes;
 mod parameter_fixes;
 mod signatures;
@@ -32,7 +32,11 @@ pub(crate) use signatures::{
     primary_type_name_from_declaration,
 };
 
-pub fn generate_audit_fixes(result: &CodeAuditResult, root: &Path, policy: &FixPolicy) -> FixResult {
+pub fn generate_audit_fixes(
+    result: &CodeAuditResult,
+    root: &Path,
+    policy: &FixPolicy,
+) -> FixResult {
     generate_fixes_impl(result, root, policy)
 }
 
@@ -65,7 +69,11 @@ pub(crate) fn merge_fixes_per_file(fixes: Vec<Fix>) -> Vec<Fix> {
         .collect()
 }
 
-pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path, policy: &FixPolicy) -> FixResult {
+pub(crate) fn generate_fixes_impl(
+    result: &CodeAuditResult,
+    root: &Path,
+    policy: &FixPolicy,
+) -> FixResult {
     let mut fixes = Vec::new();
     let mut skipped = Vec::new();
     let module_surfaces = ModuleSurfaceIndex::build(root);
@@ -106,7 +114,13 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path, policy:
 
     let mut new_files = Vec::new();
     if finding_enabled(&AuditFinding::UnreferencedExport) {
-        generate_unreferenced_export_fixes(result, root, &module_surfaces, &mut fixes, &mut skipped);
+        generate_unreferenced_export_fixes(
+            result,
+            root,
+            &module_surfaces,
+            &mut fixes,
+            &mut skipped,
+        );
     }
     if finding_enabled(&AuditFinding::DuplicateFunction) {
         generate_duplicate_function_fixes(
@@ -188,11 +202,14 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path, policy:
         test_gen_fixes::generate_test_method_fixes(result, root, &mut fixes, &mut skipped);
     }
     if finding_enabled(&AuditFinding::CompilerWarning) {
-        compiler_warning_fixes::generate_compiler_warning_fixes(result, root, &mut fixes, &mut skipped);
+        compiler_warning_fixes::generate_compiler_warning_fixes(
+            result,
+            root,
+            &mut fixes,
+            &mut skipped,
+        );
     }
-    if finding_enabled(&AuditFinding::TodoMarker)
-        || finding_enabled(&AuditFinding::LegacyComment)
-    {
+    if finding_enabled(&AuditFinding::TodoMarker) || finding_enabled(&AuditFinding::LegacyComment) {
         comment_fixes::generate_comment_fixes(result, root, &mut fixes, &mut skipped);
     }
     if finding_enabled(&AuditFinding::NearDuplicate) {
@@ -205,7 +222,12 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path, policy:
         );
     }
     if finding_enabled(&AuditFinding::IntraMethodDuplicate) {
-        intra_duplicate_fixes::generate_intra_duplicate_fixes(result, root, &mut fixes, &mut skipped);
+        intra_duplicate_fixes::generate_intra_duplicate_fixes(
+            result,
+            root,
+            &mut fixes,
+            &mut skipped,
+        );
     }
 
     let mut fixes = merge_fixes_per_file(fixes);

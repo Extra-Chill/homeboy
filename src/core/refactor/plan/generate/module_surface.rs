@@ -23,7 +23,10 @@ pub struct SymbolSurface {
 impl SymbolSurface {
     pub fn has_external_usage(&self, owner_file: &str) -> bool {
         self.incoming_callers.iter().any(|file| file != owner_file)
-            || self.incoming_importers.iter().any(|file| file != owner_file)
+            || self
+                .incoming_importers
+                .iter()
+                .any(|file| file != owner_file)
             || self.reexport_files.iter().any(|file| file != owner_file)
     }
 }
@@ -104,7 +107,12 @@ fn build_surface_for_fingerprint(root: &Path, fp: &FileFingerprint) -> ModuleSur
 
     let mut symbols = HashMap::new();
     for symbol in &public_api {
-        let callers = symbol_graph::trace_symbol_callers(symbol, &module_path, root, &file_extensions_for(&fp.language));
+        let callers = symbol_graph::trace_symbol_callers(
+            symbol,
+            &module_path,
+            root,
+            &file_extensions_for(&fp.language),
+        );
         let mut incoming_callers = Vec::new();
         let mut incoming_importers = Vec::new();
         for caller in callers {
@@ -144,7 +152,10 @@ fn build_surface_for_fingerprint(root: &Path, fp: &FileFingerprint) -> ModuleSur
 
 fn classify_file_role(file: &str) -> FileRole {
     let path = Path::new(file);
-    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
     if walker::is_index_file(path) {
         return FileRole::Index;
     }
@@ -225,9 +236,18 @@ mod tests {
 
     #[test]
     fn classify_public_api_role() {
-        assert_eq!(classify_file_role("src/core/code_audit/public_api.rs"), FileRole::PublicApi);
-        assert_eq!(classify_file_role("src/core/code_audit/mod.rs"), FileRole::Index);
-        assert_eq!(classify_file_role("src/core/code_audit/findings.rs"), FileRole::Regular);
+        assert_eq!(
+            classify_file_role("src/core/code_audit/public_api.rs"),
+            FileRole::PublicApi
+        );
+        assert_eq!(
+            classify_file_role("src/core/code_audit/mod.rs"),
+            FileRole::Index
+        );
+        assert_eq!(
+            classify_file_role("src/core/code_audit/findings.rs"),
+            FileRole::Regular
+        );
     }
 
     #[test]
