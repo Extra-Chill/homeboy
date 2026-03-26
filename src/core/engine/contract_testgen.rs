@@ -2270,11 +2270,6 @@ mod tests {
                     branch_condition: "None => return false (other arm)".to_string(),
                     expected_variant: "ok".to_string(),
                     expected_value: None,
-                    template_key: "default".to_string(),
-                    variables: HashMap::new(),
-                },
-                TestCase {
-                    test_name: "test_check_status_none_return_false".to_string(),
                     branch_condition: "None => return false (third arm)".to_string(),
                     expected_variant: "ok".to_string(),
                     expected_value: None,

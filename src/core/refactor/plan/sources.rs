@@ -211,7 +211,9 @@ struct PlannedStage {
     fix_results: Vec<FixApplied>,
 }
 
-pub fn collect_refactor_sources(request: RefactorSourceRequest) -> crate::Result<RefactorSourceRun> {
+pub fn collect_refactor_sources(
+    request: RefactorSourceRequest,
+) -> crate::Result<RefactorSourceRun> {
     let sources = normalize_sources(&request.sources)?;
     let root_str = request.root.to_string_lossy().to_string();
     let original_changes = git::get_uncommitted_changes(&root_str).ok();
@@ -923,10 +925,7 @@ pub fn summarize_source_totals(
     total_files_selected: usize,
 ) -> SourceTotals {
     SourceTotals {
-        stages_with_edits: stages
-            .iter()
-            .filter(|stage| stage.edit_count > 0)
-            .count(),
+        stages_with_edits: stages.iter().filter(|stage| stage.edit_count > 0).count(),
         total_edits: stages.iter().map(|stage| stage.edit_count).sum(),
         total_files_selected,
     }

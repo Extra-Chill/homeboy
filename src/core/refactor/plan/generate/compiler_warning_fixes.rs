@@ -11,9 +11,9 @@
 
 use std::path::Path;
 
+use super::{tagged_line_replacement, tagged_range_removal};
 use crate::code_audit::{AuditFinding, CodeAuditResult};
 use crate::core::refactor::auto::{Fix, RefactorPrimitive, SkippedFile};
-use super::{tagged_line_replacement, tagged_range_removal};
 
 /// A machine-applicable fix suggestion from the compiler.
 #[derive(Debug, Clone)]

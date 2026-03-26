@@ -24,4 +24,26 @@ fn test_validate_deploy_target_smoke() {
     // mapping for src/core/deploy.rs after decomposition.
     let ids = parse_bulk_component_ids(r#"{"component_ids":["my-component"]}"#).unwrap();
     assert_eq!(ids, vec!["my-component"]);
+
+    fn test_run() {
+    let (output, exit_code) = run(
+        SupportsArgs {
+            command: "test".to_string(),
+            option: "--changed-since".to_string(),
+        },
+        &homeboy::commands::GlobalArgs {},
+    )
+    .expect("supports command should run");
+
+    assert!(output.supported);
+    assert_eq!(exit_code, 0);
+    }
+
+    fn tmp_dir(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("homeboy-supports-{name}-{nanos}"))
+    }
 }
