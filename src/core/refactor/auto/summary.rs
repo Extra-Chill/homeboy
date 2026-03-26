@@ -79,6 +79,15 @@ pub fn summarize_audit_fix_result(fix_result: &FixResult) -> FixResultsSummary {
         }
     }
 
+    for plan in &fix_result.decompose_plans {
+        if plan.applied {
+            files.insert(plan.file.clone());
+            let rule = format!("{:?}", plan.source_finding).to_lowercase();
+            *rule_counts.entry(rule).or_insert(0) += 1;
+            total_fixes += 1;
+        }
+    }
+
     let rules = rule_counts
         .into_iter()
         .map(|(rule, count)| RuleFixCount { rule, count })

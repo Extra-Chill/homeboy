@@ -54,7 +54,7 @@ impl ItemKind {
 // ============================================================================
 
 /// Ask an extension to parse all top-level items in a source file.
-fn ext_parse_items(
+pub(crate) fn ext_parse_items(
     ext: &ExtensionManifest,
     content: &str,
     file_path: &str,
@@ -220,10 +220,15 @@ pub fn move_items_with_options(
     let mut warnings: Vec<String> = Vec::new();
 
     // ── Phase 1: Parse items ────────────────────────────────────────────
-    // Try core grammar engine first (faster, more robust), fall back to extension script
+    // Prefer the language extension's structural parser when available.
+    // Structural move/decompose quality depends on language-specific item
+    // boundaries and source extraction being authoritative. The core grammar
+    // parser remains the fallback for languages without a dedicated refactor
+    // parser, but broad autofix showed that for Rust structural splits the
+    // extension parser is currently more trustworthy.
     let all_items: Vec<ParsedItem> = if let Some(ref ext) = ext {
-        core_parse_items(ext, &content).unwrap_or_else(|| {
-            ext_parse_items(ext, &content, from).unwrap_or_else(|| {
+        ext_parse_items(ext, &content, from).unwrap_or_else(|| {
+            core_parse_items(ext, &content).unwrap_or_else(|| {
                 warnings.push("Extension parse_items failed, using fallback parser".to_string());
                 Vec::new()
             })

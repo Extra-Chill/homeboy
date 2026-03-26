@@ -5,13 +5,14 @@ mod convention_fixes;
 mod doc_fixes;
 mod duplicate_fixes;
 mod intra_duplicate_fixes;
+mod module_surface;
 mod near_duplicate_fixes;
 mod orphaned_test_fixes;
 mod parameter_fixes;
 mod signatures;
 
 use crate::code_audit::{AuditFinding, CodeAuditResult};
-use crate::core::refactor::auto::{DecomposeFixPlan, Fix, FixResult, SkippedFile};
+use crate::core::refactor::auto::{DecomposeFixPlan, Fix, FixPolicy, FixResult, SkippedFile};
 use crate::core::refactor::decompose;
 use crate::core::refactor::plan::file_intent::{FileIntent, FileIntentMap};
 use std::path::Path;
@@ -26,14 +27,19 @@ pub(crate) use doc_fixes::is_actionable_comment_finding;
 pub(crate) use duplicate_fixes::{
     generate_duplicate_function_fixes, generate_unreferenced_export_fixes,
 };
+pub(crate) use module_surface::{FileRole, ModuleSurfaceIndex};
 pub(crate) use signatures::{
     extract_signatures, extract_signatures_from_items, find_parsed_item_by_name,
     generate_fallback_signature, generate_method_stub, parse_items_for_dedup,
     primary_type_name_from_declaration,
 };
 
-pub fn generate_audit_fixes(result: &CodeAuditResult, root: &Path) -> FixResult {
-    generate_fixes_impl(result, root)
+pub fn generate_audit_fixes(
+    result: &CodeAuditResult,
+    root: &Path,
+    policy: &FixPolicy,
+) -> FixResult {
+    generate_fixes_impl(result, root, policy)
 }
 
 pub(crate) fn merge_fixes_per_file(fixes: Vec<Fix>) -> Vec<Fix> {
@@ -65,9 +71,21 @@ pub(crate) fn merge_fixes_per_file(fixes: Vec<Fix>) -> Vec<Fix> {
         .collect()
 }
 
-pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixResult {
+pub(crate) fn generate_fixes_impl(
+    result: &CodeAuditResult,
+    root: &Path,
+    policy: &FixPolicy,
+) -> FixResult {
     let mut fixes = Vec::new();
     let mut skipped = Vec::new();
+    let module_surfaces = ModuleSurfaceIndex::build(root);
+    let finding_enabled = |finding: &AuditFinding| {
+        policy
+            .only
+            .as_ref()
+            .is_none_or(|only| only.contains(finding))
+            && !policy.exclude.contains(finding)
+    };
 
     // ── Phase 0: Build file intent map ─────────────────────────────────
     // Identify structural operations (decompose, move, delete) planned for
@@ -77,6 +95,9 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
     // declarative conflict rules.
     let mut intent_map = FileIntentMap::new();
     for finding in &result.findings {
+        if !finding_enabled(&finding.kind) {
+            continue;
+        }
         if matches!(
             finding.kind,
             AuditFinding::GodFile | AuditFinding::HighItemCount
@@ -89,60 +110,116 @@ pub(crate) fn generate_fixes_impl(result: &CodeAuditResult, root: &Path) -> FixR
     // ── Phase 1: Generate all content fixes ────────────────────────────
     // Fixers run freely against the audit data. Conflicts with structural
     // intents are resolved after generation, not during.
-    apply_convention_fixes(result, root, &mut fixes, &mut skipped);
+    if policy.only.is_none() && policy.exclude.is_empty() {
+        apply_convention_fixes(result, root, &mut fixes, &mut skipped);
+    }
 
     let mut new_files = Vec::new();
-    generate_unreferenced_export_fixes(result, root, &mut fixes, &mut skipped);
-    generate_duplicate_function_fixes(result, root, &mut fixes, &mut new_files, &mut skipped);
-    orphaned_test_fixes::generate_orphaned_test_fixes(result, root, &mut fixes, &mut skipped);
+    if finding_enabled(&AuditFinding::UnreferencedExport) {
+        generate_unreferenced_export_fixes(
+            result,
+            root,
+            &module_surfaces,
+            &mut fixes,
+            &mut skipped,
+        );
+    }
+    if finding_enabled(&AuditFinding::DuplicateFunction) {
+        generate_duplicate_function_fixes(
+            result,
+            root,
+            &module_surfaces,
+            &mut fixes,
+            &mut new_files,
+            &mut skipped,
+        );
+    }
+    if finding_enabled(&AuditFinding::OrphanedTest) {
+        orphaned_test_fixes::generate_orphaned_test_fixes(result, root, &mut fixes, &mut skipped);
+    }
 
     // ── Phase 2: Build decompose plans ─────────────────────────────────
     let mut decompose_plans = Vec::new();
     let mut decompose_seen = std::collections::HashSet::new();
-    for finding in &result.findings {
-        if !matches!(
-            finding.kind,
-            AuditFinding::GodFile | AuditFinding::HighItemCount
-        ) {
-            continue;
-        }
-        // A file can trigger both GodFile and HighItemCount — only plan once.
-        if decompose_seen.contains(&finding.file) {
-            continue;
-        }
-        let is_test = crate::code_audit::walker::is_test_path(&finding.file);
-        if is_test {
-            continue;
-        }
-        match decompose::build_plan(&finding.file, root, "grouped") {
-            Ok(plan) => {
-                if plan.groups.len() > 1 {
+    if finding_enabled(&AuditFinding::GodFile) || finding_enabled(&AuditFinding::HighItemCount) {
+        for finding in &result.findings {
+            if !finding_enabled(&finding.kind) {
+                continue;
+            }
+            if !matches!(
+                finding.kind,
+                AuditFinding::GodFile | AuditFinding::HighItemCount
+            ) {
+                continue;
+            }
+            if decompose_seen.contains(&finding.file) {
+                continue;
+            }
+            let is_test = crate::code_audit::walker::is_test_path(&finding.file);
+            if is_test {
+                continue;
+            }
+            match decompose::build_plan(&finding.file, root, "grouped") {
+                Ok(plan) => {
+                    if plan.groups.len() > 1 {
+                        decompose_seen.insert(finding.file.clone());
+                        decompose_plans.push(DecomposeFixPlan {
+                            file: finding.file.clone(),
+                            plan,
+                            source_finding: finding.kind.clone(),
+                            applied: false,
+                        });
+                    }
+                }
+                Err(error) => {
                     decompose_seen.insert(finding.file.clone());
-                    decompose_plans.push(DecomposeFixPlan {
+                    skipped.push(SkippedFile {
                         file: finding.file.clone(),
-                        plan,
-                        source_finding: finding.kind.clone(),
-                        applied: false,
+                        reason: format!("Decompose plan failed: {}", error),
                     });
                 }
-            }
-            Err(error) => {
-                decompose_seen.insert(finding.file.clone());
-                skipped.push(SkippedFile {
-                    file: finding.file.clone(),
-                    reason: format!("Decompose plan failed: {}", error),
-                });
             }
         }
     }
 
-    doc_fixes::apply_stale_doc_reference_fixes(result, &mut fixes);
-    doc_fixes::apply_broken_doc_reference_fixes(result, root, &mut fixes);
-    parameter_fixes::generate_parameter_fixes(result, root, &mut fixes, &mut skipped);
-    compiler_warning_fixes::generate_compiler_warning_fixes(result, root, &mut fixes, &mut skipped);
-    comment_fixes::generate_comment_fixes(result, root, &mut fixes, &mut skipped);
-    near_duplicate_fixes::generate_near_duplicate_fixes(result, root, &mut fixes, &mut skipped);
-    intra_duplicate_fixes::generate_intra_duplicate_fixes(result, root, &mut fixes, &mut skipped);
+    if finding_enabled(&AuditFinding::StaleDocReference) {
+        doc_fixes::apply_stale_doc_reference_fixes(result, &mut fixes);
+    }
+    if finding_enabled(&AuditFinding::BrokenDocReference) {
+        doc_fixes::apply_broken_doc_reference_fixes(result, root, &mut fixes);
+    }
+    if finding_enabled(&AuditFinding::UnusedParameter) {
+        parameter_fixes::generate_parameter_fixes(result, root, &mut fixes, &mut skipped);
+    }
+    if finding_enabled(&AuditFinding::CompilerWarning) {
+        compiler_warning_fixes::generate_compiler_warning_fixes(
+            result,
+            root,
+            &mut fixes,
+            &mut skipped,
+        );
+    }
+    if finding_enabled(&AuditFinding::TodoMarker) || finding_enabled(&AuditFinding::LegacyComment)
+    {
+        comment_fixes::generate_comment_fixes(result, root, &mut fixes, &mut skipped);
+    }
+    if finding_enabled(&AuditFinding::NearDuplicate) {
+        near_duplicate_fixes::generate_near_duplicate_fixes(
+            result,
+            root,
+            &module_surfaces,
+            &mut fixes,
+            &mut skipped,
+        );
+    }
+    if finding_enabled(&AuditFinding::IntraMethodDuplicate) {
+        intra_duplicate_fixes::generate_intra_duplicate_fixes(
+            result,
+            root,
+            &mut fixes,
+            &mut skipped,
+        );
+    }
 
     let mut fixes = merge_fixes_per_file(fixes);
 

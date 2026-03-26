@@ -176,7 +176,11 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
     }
 
     // Generate fix plan (dry-run — never writes)
-    let mut fix_result = crate::refactor::plan::generate::generate_audit_fixes(result, source_path);
+    let mut fix_result = crate::refactor::plan::generate::generate_audit_fixes(
+        result,
+        source_path,
+        &crate::refactor::auto::FixPolicy::default(),
+    );
 
     if fix_result.fixes.is_empty() && fix_result.new_files.is_empty() {
         return None;

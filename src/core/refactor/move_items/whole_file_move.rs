@@ -83,8 +83,8 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
             // callers might import individually
             let source_content = std::fs::read_to_string(&source_abs).unwrap_or_default();
             let pub_item_names: Vec<String> = if let Some(items) =
-                core_parse_items(ext, &source_content)
-                    .or_else(|| ext_parse_items(ext, &source_content, from))
+                ext_parse_items(ext, &source_content, from)
+                    .or_else(|| core_parse_items(ext, &source_content))
             {
                 items
                     .iter()

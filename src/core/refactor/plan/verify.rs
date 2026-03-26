@@ -121,12 +121,12 @@ pub fn run_audit_refactor(
 
         iterations.push(iteration_summary);
     } else {
-        let root = Path::new(&current_result.source_path);
-        let mut fix_result = super::generate::generate_audit_fixes(&current_result, root);
         let policy = fixer::FixPolicy {
             only: (!only_kinds.is_empty()).then_some(only_kinds.to_vec()),
             exclude: exclude_kinds.to_vec(),
         };
+        let root = Path::new(&current_result.source_path);
+        let mut fix_result = super::generate::generate_audit_fixes(&current_result, root, &policy);
         let policy_context = fixer::PreflightContext { root };
         final_policy_summary =
             fixer::apply_fix_policy(&mut fix_result, false, &policy, &policy_context);
@@ -151,12 +151,12 @@ fn run_fix_iteration(
     fixer::PolicySummary,
     AuditRefactorIterationSummary,
 )> {
-    let root = Path::new(&audit_result.source_path);
-    let mut fix_result = super::generate::generate_audit_fixes(audit_result, root);
     let policy = fixer::FixPolicy {
         only: (!only_kinds.is_empty()).then_some(only_kinds.to_vec()),
         exclude: exclude_kinds.to_vec(),
     };
+    let root = Path::new(&audit_result.source_path);
+    let mut fix_result = super::generate::generate_audit_fixes(audit_result, root, &policy);
     let policy_context = fixer::PreflightContext { root };
     let policy_summary =
         fixer::apply_fix_policy(&mut fix_result, true, &policy, &policy_context);

@@ -26,7 +26,7 @@ impl Default for HomeboyConfig {
     }
 }
 
-fn default_true() -> bool {
+pub fn default_true() -> bool {
     true
 }
 

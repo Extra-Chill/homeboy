@@ -22,6 +22,8 @@ use crate::refactor::auto::{Fix, Insertion, InsertionKind, RefactorPrimitive, Sk
 
 use super::{tagged_import_add, tagged_range_removal, tagged_visibility_change};
 
+use super::{FileRole, ModuleSurfaceIndex};
+
 /// A parsed near-duplicate finding.
 struct NearDupInfo {
     /// The function name that's duplicated.
@@ -34,6 +36,7 @@ struct NearDupInfo {
 pub(crate) fn generate_near_duplicate_fixes(
     result: &CodeAuditResult,
     root: &Path,
+    module_surfaces: &ModuleSurfaceIndex,
     fixes: &mut Vec<Fix>,
     skipped: &mut Vec<SkippedFile>,
 ) {
@@ -80,17 +83,18 @@ pub(crate) fn generate_near_duplicate_fixes(
             continue;
         }
 
-        // Pick canonical: first file alphabetically.
         let mut files: Vec<&str> = members.iter().map(|m| m.file.as_str()).collect();
         files.sort();
         files.dedup();
-
         if files.len() < 2 {
             continue;
         }
 
-        let canonical_file = files[0];
-        let duplicate_file = files[1];
+        let Some((canonical_file, duplicate_file)) =
+            choose_near_duplicate_pair(fn_name, &files, module_surfaces, skipped)
+        else {
+            continue;
+        };
 
         // Read the duplicate file to find the function's line range.
         let dup_path = root.join(duplicate_file);
@@ -155,7 +159,8 @@ pub(crate) fn generate_near_duplicate_fixes(
         // 3. Ensure the canonical copy is pub(crate).
         let canon_path = root.join(canonical_file);
         if let Ok(canon_content) = std::fs::read_to_string(&canon_path) {
-            if let Some(vis_fix) = build_visibility_upgrade(&canon_content, canonical_file, fn_name)
+            if let Some(vis_fix) =
+                build_visibility_upgrade(&canon_content, canonical_file, fn_name, module_surfaces)
             {
                 fixes.push(Fix {
                     file: canonical_file.to_string(),
@@ -167,6 +172,71 @@ pub(crate) fn generate_near_duplicate_fixes(
             }
         }
     }
+}
+
+fn choose_near_duplicate_pair<'a>(
+    fn_name: &str,
+    files: &[&'a str],
+    module_surfaces: &ModuleSurfaceIndex,
+    skipped: &mut Vec<SkippedFile>,
+) -> Option<(&'a str, &'a str)> {
+    let mut ranked: Vec<(&'a str, i32)> = Vec::new();
+
+    for file in files {
+        let Some(surface) = module_surfaces.get(file) else {
+            skipped.push(SkippedFile {
+                file: (*file).to_string(),
+                reason: format!("Missing module surface for near-duplicate '{}'", fn_name),
+            });
+            continue;
+        };
+
+        let mut score = 0;
+        if matches!(surface.role, FileRole::Regular) {
+            score += 2;
+        } else {
+            score -= 4;
+        }
+        if surface.owns_public_symbol(fn_name) {
+            score += 3;
+        }
+        if surface
+            .symbol_surface(fn_name)
+            .is_some_and(|symbol| symbol.has_external_usage(file))
+        {
+            score += 4;
+        }
+        if surface.internal_calls.contains(fn_name) || surface.call_sites.contains(fn_name) {
+            score += 1;
+        }
+        ranked.push((file, score));
+    }
+
+    ranked.sort_by(|(file_a, score_a), (file_b, score_b)| {
+        score_b.cmp(score_a).then_with(|| file_a.cmp(file_b))
+    });
+
+    if ranked.len() < 2 {
+        return None;
+    }
+
+    let canonical_file = ranked[0].0;
+    let duplicate_file = ranked[1].0;
+
+    let canonical_surface = module_surfaces.get(canonical_file)?;
+    let duplicate_surface = module_surfaces.get(duplicate_file)?;
+    if canonical_surface.is_api_barrel() || duplicate_surface.is_api_barrel() {
+        skipped.push(SkippedFile {
+            file: duplicate_file.to_string(),
+            reason: format!(
+                "Near-duplicate '{}' crosses API/barrel module surface; keep ownership stable",
+                fn_name
+            ),
+        });
+        return None;
+    }
+
+    Some((canonical_file, duplicate_file))
 }
 
 /// Find the line range (1-indexed, inclusive) of a function in Rust source code.
@@ -221,7 +291,20 @@ fn file_to_module_path(file: &str) -> String {
 
 /// If the canonical function is not already `pub` or `pub(crate)`, generate a
 /// `VisibilityChange` insertion to make it `pub(crate)`.
-fn build_visibility_upgrade(content: &str, file: &str, fn_name: &str) -> Option<Insertion> {
+fn build_visibility_upgrade(
+    content: &str,
+    file: &str,
+    fn_name: &str,
+    module_surfaces: &ModuleSurfaceIndex,
+) -> Option<Insertion> {
+    let surface = module_surfaces.get(file)?;
+    if !surface
+        .symbol_surface(fn_name)
+        .is_some_and(|symbol| symbol.has_external_usage(file))
+    {
+        return None;
+    }
+
     let lines: Vec<&str> = content.lines().collect();
 
     // Find the function declaration line.
@@ -260,6 +343,7 @@ fn build_visibility_upgrade(content: &str, file: &str, fn_name: &str) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn find_function_range_simple() {
@@ -300,8 +384,29 @@ mod tests {
 
     #[test]
     fn build_visibility_upgrade_private_fn() {
+        let index = ModuleSurfaceIndex::from_surfaces(vec![
+            crate::core::refactor::plan::generate::module_surface::ModuleSurface {
+                file: "test.rs".to_string(),
+                module_path: "test".to_string(),
+                language: crate::code_audit::conventions::Language::Rust,
+                role: FileRole::Regular,
+                public_api: ["cache_path".to_string()].into_iter().collect(),
+                imports: vec![],
+                internal_calls: HashSet::new(),
+                call_sites: HashSet::new(),
+                symbols: HashMap::from([(
+                    "cache_path".to_string(),
+                    crate::core::refactor::plan::generate::module_surface::SymbolSurface {
+                        symbol: "cache_path".to_string(),
+                        incoming_callers: vec!["src/consumer.rs".to_string()],
+                        incoming_importers: vec![],
+                        reexport_files: vec![],
+                    },
+                )]),
+            },
+        ]);
         let content = "fn cache_path() -> PathBuf {\n    dirs::cache_dir().unwrap()\n}\n";
-        let ins = build_visibility_upgrade(content, "test.rs", "cache_path");
+        let ins = build_visibility_upgrade(content, "test.rs", "cache_path", &index);
         assert!(ins.is_some());
         let ins = ins.unwrap();
         assert!(matches!(
@@ -313,19 +418,75 @@ mod tests {
 
     #[test]
     fn build_visibility_upgrade_already_pub() {
+        let index = ModuleSurfaceIndex::default();
         let content = "pub fn cache_path() -> PathBuf {\n    dirs::cache_dir().unwrap()\n}\n";
-        let ins = build_visibility_upgrade(content, "test.rs", "cache_path");
+        let ins = build_visibility_upgrade(content, "test.rs", "cache_path", &index);
         assert!(ins.is_none(), "Should not upgrade already-pub function");
     }
 
     #[test]
     fn build_visibility_upgrade_already_pub_crate() {
+        let index = ModuleSurfaceIndex::default();
         let content =
             "pub(crate) fn cache_path() -> PathBuf {\n    dirs::cache_dir().unwrap()\n}\n";
-        let ins = build_visibility_upgrade(content, "test.rs", "cache_path");
+        let ins = build_visibility_upgrade(content, "test.rs", "cache_path", &index);
         assert!(
             ins.is_none(),
             "Should not upgrade already-pub(crate) function"
         );
+    }
+
+    #[test]
+    fn choose_near_duplicate_prefers_regular_externally_used_module() {
+        let index = ModuleSurfaceIndex::from_surfaces(vec![
+            crate::core::refactor::plan::generate::module_surface::ModuleSurface {
+                file: "src/core/public_api.rs".to_string(),
+                module_path: "core::public_api".to_string(),
+                language: crate::code_audit::conventions::Language::Rust,
+                role: FileRole::PublicApi,
+                public_api: ["run".to_string()].into_iter().collect(),
+                imports: vec![],
+                internal_calls: HashSet::new(),
+                call_sites: HashSet::new(),
+                symbols: HashMap::from([(
+                    "run".to_string(),
+                    crate::core::refactor::plan::generate::module_surface::SymbolSurface {
+                        symbol: "run".to_string(),
+                        incoming_callers: vec!["src/main.rs".to_string()],
+                        incoming_importers: vec![],
+                        reexport_files: vec![],
+                    },
+                )]),
+            },
+            crate::core::refactor::plan::generate::module_surface::ModuleSurface {
+                file: "src/core/runner.rs".to_string(),
+                module_path: "core::runner".to_string(),
+                language: crate::code_audit::conventions::Language::Rust,
+                role: FileRole::Regular,
+                public_api: ["run".to_string()].into_iter().collect(),
+                imports: vec![],
+                internal_calls: ["run".to_string()].into_iter().collect(),
+                call_sites: HashSet::new(),
+                symbols: HashMap::from([(
+                    "run".to_string(),
+                    crate::core::refactor::plan::generate::module_surface::SymbolSurface {
+                        symbol: "run".to_string(),
+                        incoming_callers: vec!["src/main.rs".to_string()],
+                        incoming_importers: vec!["src/core/public_api.rs".to_string()],
+                        reexport_files: vec![],
+                    },
+                )]),
+            },
+        ]);
+
+        let mut skipped = Vec::new();
+        let choice = choose_near_duplicate_pair(
+            "run",
+            &["src/core/public_api.rs", "src/core/runner.rs"],
+            &index,
+            &mut skipped,
+        );
+        assert_eq!(choice, None, "public API surface should cause skip");
+        assert_eq!(skipped.len(), 1);
     }
 }

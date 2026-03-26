@@ -488,6 +488,10 @@ fn insert_inline_type_conformance(content: &str, declaration: &str, language: &L
 }
 
 pub(crate) fn insert_import(content: &str, import_line: &str, language: &Language) -> String {
+    if import_already_present(content, import_line, language) {
+        return content.to_string();
+    }
+
     let lines: Vec<&str> = content.lines().collect();
 
     let import_prefix = match language {
@@ -587,6 +591,32 @@ pub(crate) fn insert_import(content: &str, import_line: &str, language: &Languag
     }
 
     result
+}
+
+fn import_already_present(content: &str, import_line: &str, language: &Language) -> bool {
+    let normalized_candidate = normalize_import_line(import_line);
+    if normalized_candidate.is_empty() {
+        return true;
+    }
+
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        if !is_import_line(trimmed, language) {
+            return false;
+        }
+        normalize_import_line(trimmed) == normalized_candidate
+    })
+}
+
+fn is_import_line(line: &str, language: &Language) -> bool {
+    match language {
+        Language::Rust | Language::Php | Language::Unknown => line.starts_with("use "),
+        Language::JavaScript | Language::TypeScript => line.starts_with("import "),
+    }
+}
+
+fn normalize_import_line(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub(crate) fn insert_before_closing_brace(
@@ -1153,6 +1183,24 @@ mod tests {
         let mut lines: Vec<String> = vec!["pub use other::{foo, bar};".into()];
         remove_from_pub_use_block(&mut lines, "baz");
         assert_eq!(lines[0], "pub use other::{foo, bar};");
+    }
+
+    #[test]
+    fn insert_import_skips_identical_existing_rust_import() {
+        let content = "use std::collections::HashMap;\n\npub fn run() {}\n";
+        let result = insert_import(content, "use std::collections::HashMap;", &Language::Rust);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn insert_import_skips_equivalent_rust_import_with_spacing_differences() {
+        let content = "use std::path::{Path, PathBuf};\n\npub fn run() {}\n";
+        let result = insert_import(
+            content,
+            "use  std::path::{Path,   PathBuf};",
+            &Language::Rust,
+        );
+        assert_eq!(result, content);
     }
 
     #[test]

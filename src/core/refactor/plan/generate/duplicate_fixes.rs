@@ -6,7 +6,10 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
 
-use super::{find_parsed_item_by_name, insertion, new_file, parse_items_for_dedup};
+use super::{
+    find_parsed_item_by_name, insertion, new_file, parse_items_for_dedup, FileRole,
+    ModuleSurfaceIndex,
+};
 
 pub(crate) fn extract_function_name_from_unreferenced(description: &str) -> Option<String> {
     let needle = "Public function '";
@@ -114,6 +117,7 @@ fn extract_php_fqcn(content: &str) -> Option<String> {
 pub(crate) fn generate_unreferenced_export_fixes(
     result: &CodeAuditResult,
     root: &Path,
+    module_surfaces: &ModuleSurfaceIndex,
     fixes: &mut Vec<Fix>,
     skipped: &mut Vec<SkippedFile>,
 ) {
@@ -129,6 +133,47 @@ pub(crate) fn generate_unreferenced_export_fixes(
         let abs_path = root.join(&finding.file);
         let language = Language::from_path(&abs_path);
         if !matches!(language, Language::Rust) {
+            continue;
+        }
+
+        let Some(surface) = module_surfaces.get(&finding.file) else {
+            skipped.push(SkippedFile {
+                file: finding.file.clone(),
+                reason: "Missing module surface for file".to_string(),
+            });
+            continue;
+        };
+
+        if matches!(surface.role, FileRole::Index | FileRole::PublicApi) {
+            skipped.push(SkippedFile {
+                file: finding.file.clone(),
+                reason: format!(
+                    "Module surface marks '{}' as API/barrel file — keep export in place",
+                    finding.file
+                ),
+            });
+            continue;
+        }
+
+        let Some(symbol_surface) = surface.symbol_surface(&fn_name) else {
+            skipped.push(SkippedFile {
+                file: finding.file.clone(),
+                reason: format!(
+                    "Module surface has no export record for '{}' in {}",
+                    fn_name, finding.file
+                ),
+            });
+            continue;
+        };
+
+        if symbol_surface.has_external_usage(&finding.file) {
+            skipped.push(SkippedFile {
+                file: finding.file.clone(),
+                reason: format!(
+                    "Module surface shows '{}' still has external callers/importers/re-exports",
+                    fn_name
+                ),
+            });
             continue;
         }
 
@@ -158,7 +203,7 @@ pub(crate) fn generate_unreferenced_export_fixes(
         // Collect mod.rs files that re-export this function via `pub use`.
         // We'll generate ReexportRemoval fixes for these alongside the
         // visibility change.
-        let reexport_files = find_reexport_files(&finding.file, &fn_name, root);
+        let reexport_files = symbol_surface.reexport_files.clone();
 
         let target_patterns = [
             format!("pub fn {}(", fn_name),
@@ -240,6 +285,7 @@ pub(crate) fn generate_unreferenced_export_fixes(
 pub(crate) fn generate_duplicate_function_fixes(
     result: &CodeAuditResult,
     root: &Path,
+    module_surfaces: &ModuleSurfaceIndex,
     fixes: &mut Vec<Fix>,
     new_files: &mut Vec<NewFile>,
     skipped: &mut Vec<SkippedFile>,
@@ -263,7 +309,7 @@ pub(crate) fn generate_duplicate_function_fixes(
         }
 
         if group_size < MIN_EXTRACT_GROUP_SIZE {
-            generate_simple_duplicate_fixes(group, root, fixes, skipped);
+            generate_simple_duplicate_fixes(group, root, module_surfaces, fixes, skipped);
             continue;
         }
 
@@ -297,7 +343,7 @@ pub(crate) fn generate_duplicate_function_fixes(
         };
 
         let Some(manifest) = manifest else {
-            generate_simple_duplicate_fixes(group, root, fixes, skipped);
+            generate_simple_duplicate_fixes(group, root, module_surfaces, fixes, skipped);
             continue;
         };
 
@@ -342,7 +388,7 @@ pub(crate) fn generate_duplicate_function_fixes(
 
         let Some(result_val) = crate::extension::run_refactor_script(&manifest, &extract_cmd)
         else {
-            generate_simple_duplicate_fixes(group, root, fixes, skipped);
+            generate_simple_duplicate_fixes(group, root, module_surfaces, fixes, skipped);
             continue;
         };
 
@@ -474,10 +520,60 @@ pub(crate) fn generate_duplicate_function_fixes(
 fn generate_simple_duplicate_fixes(
     group: &DuplicateGroup,
     root: &Path,
+    module_surfaces: &ModuleSurfaceIndex,
     fixes: &mut Vec<Fix>,
     skipped: &mut Vec<SkippedFile>,
 ) {
+    let Some(canonical_surface) = module_surfaces.get(&group.canonical_file) else {
+        skipped.push(SkippedFile {
+            file: group.canonical_file.clone(),
+            reason: format!(
+                "Missing module surface for canonical duplicate file '{}'",
+                group.canonical_file
+            ),
+        });
+        return;
+    };
+
     for remove_file in &group.remove_from {
+        let Some(remove_surface) = module_surfaces.get(remove_file) else {
+            skipped.push(SkippedFile {
+                file: remove_file.clone(),
+                reason: format!(
+                    "Missing module surface for duplicate file '{}'",
+                    remove_file
+                ),
+            });
+            continue;
+        };
+
+        if canonical_surface.is_api_barrel() || remove_surface.is_api_barrel() {
+            skipped.push(SkippedFile {
+                file: remove_file.clone(),
+                reason: format!(
+                    "Duplicate spans API/barrel module surface (canonical: {}, duplicate: {})",
+                    group.canonical_file, remove_file
+                ),
+            });
+            continue;
+        }
+
+        if canonical_surface.owns_public_symbol(&group.function_name)
+            && canonical_surface
+                .symbol_surface(&group.function_name)
+                .is_some_and(|surface| surface.has_external_usage(&group.canonical_file))
+            && remove_surface.owns_public_symbol(&group.function_name)
+        {
+            skipped.push(SkippedFile {
+                file: remove_file.clone(),
+                reason: format!(
+                    "Duplicate '{}' is externally surfaced in more than one module; keep ownership stable",
+                    group.function_name
+                ),
+            });
+            continue;
+        }
+
         let abs_path = root.join(remove_file.as_str());
         let ext = abs_path
             .extension()
@@ -555,65 +651,6 @@ fn generate_simple_duplicate_fixes(
             applied: false,
         });
     }
-}
-
-/// Find mod.rs/lib.rs files that re-export a function via `pub use`.
-/// Returns relative paths (e.g., "src/core/refactor/mod.rs").
-fn find_reexport_files(file_path: &str, fn_name: &str, root: &Path) -> Vec<String> {
-    let source_path = Path::new(file_path);
-    let mut result = Vec::new();
-
-    let mut current = source_path.parent();
-    while let Some(dir) = current {
-        for filename in &["mod.rs", "lib.rs"] {
-            let check_path = root.join(dir).join(filename);
-            if check_path.exists()
-                && std::fs::read_to_string(&check_path)
-                    .ok()
-                    .is_some_and(|content| has_pub_use_of(&content, fn_name))
-            {
-                result.push(format!("{}/{}", dir.display(), filename));
-            }
-        }
-        current = dir.parent();
-    }
-
-    result
-}
-
-pub(crate) fn has_pub_use_of(content: &str, fn_name: &str) -> bool {
-    let word_re = match Regex::new(&format!(r"\b{}\b", regex::escape(fn_name))) {
-        Ok(re) => re,
-        Err(_) => return false,
-    };
-
-    let mut in_pub_use_block = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if in_pub_use_block {
-            if word_re.is_match(trimmed) {
-                return true;
-            }
-            if trimmed.contains("};") || trimmed == "}" {
-                in_pub_use_block = false;
-            }
-        } else if trimmed.starts_with("pub use") {
-            // Skip glob re-exports like `pub use core::*;` — they make
-            // the name accessible but the audit already checked whether
-            // anyone actually references it.
-            if trimmed.contains("::*") {
-                continue;
-            }
-            if word_re.is_match(trimmed) {
-                return true;
-            }
-            if trimmed.contains('{') && !trimmed.contains('}') {
-                in_pub_use_block = true;
-            }
-        }
-    }
-    false
 }
 
 fn is_used_by_binary_crate(fn_name: &str, root: &Path) -> bool {

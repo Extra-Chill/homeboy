@@ -145,6 +145,14 @@ pub fn apply_fix_policy(
         .decompose_plans
         .retain(|p| !policy.exclude.contains(&p.source_finding));
 
+    // Structural decompose writes are still too risky for unattended autofix.
+    // Keep them visible in dry-run output, but do not auto-apply them in write
+    // mode until the engine is proven safe on real branches.
+    if write {
+        summary.dropped_manual_only += result.decompose_plans.len();
+        result.decompose_plans.clear();
+    }
+
     result.total_insertions = summary.visible_insertions + summary.visible_new_files;
     summary
 }

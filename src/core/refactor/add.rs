@@ -48,7 +48,7 @@ pub fn fixes_from_audit(audit: &CodeAuditResult, write: bool) -> Result<FixResul
         ));
     }
 
-    let mut fix_result = plan::generate_audit_fixes(audit, root);
+    let mut fix_result = plan::generate_audit_fixes(audit, root, &auto::FixPolicy::default());
 
     if write && !fix_result.fixes.is_empty() {
         let applied = auto::apply_fixes(&mut fix_result.fixes, root);
