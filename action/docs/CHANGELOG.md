@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.13.6] - 2026-03-26
+
+### Fixed
+- guard release and autofix against stale branch state
+
 ## [1.13.5] - 2026-03-25
 
 ### Fixed
