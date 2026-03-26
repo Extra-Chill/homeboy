@@ -29,6 +29,7 @@ use std::path::Path;
 
 use crate::engine::local_files;
 use crate::error::{Error, Result};
+use crate::core::defaults::default_true;
 
 // ============================================================================
 // Grammar definition (loaded from extension TOML/JSON)
