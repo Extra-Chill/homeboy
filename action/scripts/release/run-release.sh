@@ -75,6 +75,20 @@ if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
   exit 0
 fi
 
+DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)"
+if [ -z "${DEFAULT_BRANCH}" ]; then
+  DEFAULT_BRANCH="main"
+fi
+
+if [ "${CURRENT_BRANCH}" != "${DEFAULT_BRANCH}" ]; then
+  echo "::error::Refusing to release from non-default branch '${CURRENT_BRANCH}' (default: '${DEFAULT_BRANCH}')"
+  {
+    echo "released=false"
+    echo "skipped-reason=wrong-default-branch"
+  } >> "${GITHUB_OUTPUT}"
+  exit 1
+fi
+
 # --- Step 2b: Sync with remote ---
 # The quality gate runs in separate jobs that may push autofix commits
 # or new PRs may merge while the pipeline is in flight. Pull to ensure

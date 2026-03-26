@@ -8,14 +8,15 @@ HOMEBOY_CLI_VERSION="$(homeboy --version 2>/dev/null || echo 'unknown')"
 # "0.74.1 release" from "0.74.1+abc1234 built from HEAD"
 if [ -d ".git" ]; then
   HEAD_SHORT="$(git rev-parse --short HEAD 2>/dev/null || true)"
+  HEAD_FULL="$(git rev-parse HEAD 2>/dev/null || true)"
   if [ -n "${HEAD_SHORT}" ]; then
     VERSION_NUM="${HOMEBOY_CLI_VERSION#homeboy }"
     TAG_COMMIT="$(git rev-parse "v${VERSION_NUM}" 2>/dev/null || true)"
-    HEAD_FULL="$(git rev-parse HEAD 2>/dev/null || true)"
     if [ -n "${TAG_COMMIT}" ] && [ "${TAG_COMMIT}" != "${HEAD_FULL}" ]; then
       HOMEBOY_CLI_VERSION="${HOMEBOY_CLI_VERSION}+${HEAD_SHORT}"
     fi
   fi
+  echo "HOMEBOY_CLI_HEAD_SHA=${HEAD_FULL}" >> "${GITHUB_ENV}"
 fi
 
 # v2: use PORTABLE_EXTENSION (inferred from homeboy.json) as primary,
