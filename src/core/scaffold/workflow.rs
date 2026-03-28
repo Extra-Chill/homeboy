@@ -68,7 +68,12 @@ fn run_single_file_scaffold(
     mode_label: &str,
 ) -> crate::Result<ScaffoldOutput> {
     let file_path = source_path.join(file);
-    crate::log_status!("scaffold", "Scaffolding tests for {} ({})", file, mode_label);
+    crate::log_status!(
+        "scaffold",
+        "Scaffolding tests for {} ({})",
+        file,
+        mode_label
+    );
 
     let result = scaffold::scaffold_file(&file_path, source_path, config, write)?;
 

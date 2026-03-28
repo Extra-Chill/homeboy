@@ -124,7 +124,13 @@ pub fn tagged_import_add(
     code: String,
     description: String,
 ) -> Insertion {
-    tagged_insertion(primitive, InsertionKind::ImportAdd, finding, code, description)
+    tagged_insertion(
+        primitive,
+        InsertionKind::ImportAdd,
+        finding,
+        code,
+        description,
+    )
 }
 
 pub fn visibility_change(
@@ -164,7 +170,12 @@ pub fn manual_only(mut insertion: Insertion) -> Insertion {
     insertion
 }
 
-pub fn new_file(finding: AuditFinding, file: String, content: String, description: String) -> NewFile {
+pub fn new_file(
+    finding: AuditFinding,
+    file: String,
+    content: String,
+    description: String,
+) -> NewFile {
     NewFile {
         file,
         primitive: None,

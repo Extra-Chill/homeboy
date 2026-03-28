@@ -199,8 +199,7 @@ pub(crate) fn generate_fixes_impl(
             &mut skipped,
         );
     }
-    if finding_enabled(&AuditFinding::TodoMarker) || finding_enabled(&AuditFinding::LegacyComment)
-    {
+    if finding_enabled(&AuditFinding::TodoMarker) || finding_enabled(&AuditFinding::LegacyComment) {
         comment_fixes::generate_comment_fixes(result, root, &mut fixes, &mut skipped);
     }
     if finding_enabled(&AuditFinding::NearDuplicate) {

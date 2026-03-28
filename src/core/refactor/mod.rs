@@ -43,7 +43,6 @@ impl AppliedRefactor {
             fix_summary: capture.fix_summary,
         }
     }
-
 }
 
 pub use add::{add_import, fixes_from_audit, AddResult};

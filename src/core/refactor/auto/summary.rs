@@ -109,9 +109,7 @@ pub fn summarize_audit_fix_result(fix_result: &FixResult) -> FixResultsSummary {
 pub fn primitive_name(primitive: &crate::refactor::RefactorPrimitive) -> String {
     match primitive {
         crate::refactor::RefactorPrimitive::MoveTestFile => "move_test_file".to_string(),
-        crate::refactor::RefactorPrimitive::RenameTestMethod => {
-            "rename_test_method".to_string()
-        }
+        crate::refactor::RefactorPrimitive::RenameTestMethod => "rename_test_method".to_string(),
         crate::refactor::RefactorPrimitive::RemoveOrphanedTest => {
             "remove_orphaned_test".to_string()
         }

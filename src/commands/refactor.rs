@@ -712,19 +712,21 @@ fn run_refactor_sources_single(
     let requested_sources = from.to_vec();
     let only_findings = parse_audit_findings(only)?;
     let exclude_findings = parse_audit_findings(exclude)?;
-    let sources = homeboy::refactor::plan::collect_refactor_sources(homeboy::refactor::plan::RefactorSourceRequest {
-        component: ctx.component,
-        root: ctx.source_path,
-        sources: requested_sources,
-        changed_since: changed_since.map(ToOwned::to_owned),
-        only: only_findings,
-        exclude: exclude_findings,
-        settings: settings.to_vec(),
-        lint: homeboy::refactor::plan::LintSourceOptions::default(),
-        test: homeboy::refactor::plan::TestSourceOptions::default(),
-        write,
-        force,
-    })?;
+    let sources = homeboy::refactor::plan::collect_refactor_sources(
+        homeboy::refactor::plan::RefactorSourceRequest {
+            component: ctx.component,
+            root: ctx.source_path,
+            sources: requested_sources,
+            changed_since: changed_since.map(ToOwned::to_owned),
+            only: only_findings,
+            exclude: exclude_findings,
+            settings: settings.to_vec(),
+            lint: homeboy::refactor::plan::LintSourceOptions::default(),
+            test: homeboy::refactor::plan::TestSourceOptions::default(),
+            write,
+            force,
+        },
+    )?;
     let exit_code = if sources.files_modified > 0 { 1 } else { 0 };
 
     Ok((RefactorOutput::Sources(sources), exit_code))

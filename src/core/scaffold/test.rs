@@ -17,10 +17,10 @@ use std::path::{Path, PathBuf};
 
 use crate::code_audit::core_fingerprint::load_grammar_for_ext;
 use crate::core::engine::contract_testgen::GeneratedTestOutput;
-use crate::extension::grammar_items;
 use crate::engine::local_files;
 use crate::error::{Error, Result};
 use crate::extension::grammar;
+use crate::extension::grammar_items;
 
 /// A public method/function extracted from a source file.
 #[derive(Debug, Clone, Serialize)]

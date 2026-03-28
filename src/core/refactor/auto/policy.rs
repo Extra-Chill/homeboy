@@ -27,7 +27,11 @@ fn blocked_reason(manual_only: bool) -> String {
     }
 }
 
-fn annotate_insertion_for_policy(insertion: &mut Insertion, write: bool, policy: &FixPolicy) -> bool {
+fn annotate_insertion_for_policy(
+    insertion: &mut Insertion,
+    write: bool,
+    policy: &FixPolicy,
+) -> bool {
     if !finding_allowed(&insertion.finding, policy) {
         return false;
     }
