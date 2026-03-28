@@ -165,8 +165,28 @@ pub fn tagged_visibility_change(
     )
 }
 
+pub fn doc_line_removal(
+    finding: AuditFinding,
+    line: usize,
+    description: String,
+) -> Insertion {
+    insertion(
+        InsertionKind::DocLineRemoval { line },
+        finding,
+        String::new(),
+        description,
+    )
+}
+
 pub fn manual_only(mut insertion: Insertion) -> Insertion {
     insertion.manual_only = true;
+    insertion
+}
+
+/// Mark an insertion as manual-only with a specific blocked reason.
+pub fn manual_blocked(mut insertion: Insertion, reason: String) -> Insertion {
+    insertion.manual_only = true;
+    insertion.blocked_reason = Some(reason);
     insertion
 }
 

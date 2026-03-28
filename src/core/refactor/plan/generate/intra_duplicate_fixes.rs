@@ -18,7 +18,9 @@ use std::path::Path;
 
 use crate::code_audit::{AuditFinding, CodeAuditResult};
 use crate::engine::local_files;
-use crate::refactor::auto::{Fix, Insertion, InsertionKind, SkippedFile};
+use crate::refactor::auto::{Fix, SkippedFile};
+
+use super::{manual_blocked, range_removal};
 
 /// Structural relationship between two duplicated blocks.
 enum DupRelation {
@@ -162,26 +164,21 @@ pub(crate) fn generate_intra_duplicate_fixes(
                     continue;
                 }
 
+                let ins = range_removal(
+                    AuditFinding::IntraMethodDuplicate,
+                    removal_start,
+                    second_end,
+                    format!(
+                        "Remove duplicate block in `{}` (lines {}-{}) — identical to lines {}-{}",
+                        method_name, second_line, second_end, first_line, first_end,
+                    ),
+                );
+
                 fixes.push(Fix {
                     file: finding.file.clone(),
                     required_methods: vec![],
                     required_registrations: vec![],
-                    insertions: vec![Insertion {
-                        primitive: None,
-                        kind: InsertionKind::FunctionRemoval {
-                            start_line: removal_start,
-                            end_line: second_end,
-                        },
-                        finding: AuditFinding::IntraMethodDuplicate,
-                        manual_only: false,
-                        auto_apply: false,
-                        blocked_reason: None,
-                        code: String::new(),
-                        description: format!(
-                            "Remove duplicate block in `{}` (lines {}-{}) — identical to lines {}-{}",
-                            method_name, second_line, second_end, first_line, first_end,
-                        ),
-                    }],
+                    insertions: vec![ins],
                     applied: false,
                 });
             }
@@ -200,26 +197,24 @@ pub(crate) fn generate_intra_duplicate_fixes(
                     ),
                 };
 
+                let ins = manual_blocked(
+                    range_removal(
+                        AuditFinding::IntraMethodDuplicate,
+                        second_line,
+                        second_end,
+                        format!(
+                            "Duplicate block in `{}`: lines {}-{} and lines {}-{} are identical",
+                            method_name, first_line, first_end, second_line, second_end,
+                        ),
+                    ),
+                    reason,
+                );
+
                 fixes.push(Fix {
                     file: finding.file.clone(),
                     required_methods: vec![],
                     required_registrations: vec![],
-                    insertions: vec![Insertion {
-                        primitive: None,
-                        kind: InsertionKind::FunctionRemoval {
-                            start_line: second_line,
-                            end_line: second_end,
-                        },
-                        finding: AuditFinding::IntraMethodDuplicate,
-                        manual_only: true,
-                        auto_apply: false,
-                        blocked_reason: Some(reason),
-                        code: String::new(),
-                        description: format!(
-                            "Duplicate block in `{}`: lines {}-{} and lines {}-{} are identical",
-                            method_name, first_line, first_end, second_line, second_end,
-                        ),
-                    }],
+                    insertions: vec![ins],
                     applied: false,
                 });
             }
