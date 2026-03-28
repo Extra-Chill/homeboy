@@ -147,7 +147,10 @@ extract_fix_details_from_output() {
       else "unknown"
       end;
 
-    # Human-readable category names
+    # Human-readable category names.
+    # Keys come from two sources:
+    #   - InsertionKind (snake_case strings or object keys): function_removal, visibility_change, etc.
+    #   - AuditFinding (snake_case enum via serde): orphaned_test, god_file, etc.
     def humanize:
       {
         "function_removal": "Orphaned tests removed",
@@ -163,7 +166,19 @@ extract_fix_details_from_output() {
         "unreferenced_export": "Unreferenced exports narrowed",
         "duplicate_function": "Duplicate functions removed",
         "god_file": "God files decomposed",
-        "high_item_count": "Large files decomposed"
+        "high_item_count": "Large files decomposed",
+        "orphaned_test": "Orphaned tests removed",
+        "near_duplicate": "Near-duplicate functions consolidated",
+        "unused_parameter": "Unused parameters removed",
+        "compiler_warning": "Compiler warnings fixed",
+        "todo_marker": "TODO markers resolved",
+        "legacy_comment": "Legacy comments cleaned",
+        "intra_method_duplicate": "Intra-method duplicates extracted",
+        "stale_doc_reference": "Stale doc references fixed",
+        "broken_doc_reference": "Broken doc references fixed",
+        "missing_import": "Missing imports added",
+        "namespace_mismatch": "Namespace mismatches fixed",
+        "directory_sprawl": "Directory sprawl reduced"
       }[.] // .;
 
     # Collect insertions with normalized category (FixResult format)
@@ -177,8 +192,14 @@ extract_fix_details_from_output() {
     # Collect proposals (RefactorPlan format — from refactor --from all)
     [.[].proposals // [] | .[] | {cat: .rule_id, file}] as $proposals |
 
+    # Collect collected_edits (RefactorSourceRun format — from refactor --from all --write)
+    [.[].collected_edits // [] | .[] | {cat: .rule_id, file}] as $collected_edits |
+
+    # Collect decompose plans (FixResult format — structural decompose operations)
+    [.[].decompose_plans // [] | .[] | {cat: .source_finding, file}] as $decompose |
+
     # Combine all sources and group by category
-    ($insertions + $new_files + $proposals) | group_by(.cat) |
+    ($insertions + $new_files + $proposals + $collected_edits + $decompose) | group_by(.cat) |
     map({
       cat: .[0].cat,
       count: length,
