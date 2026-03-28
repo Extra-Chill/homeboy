@@ -507,7 +507,7 @@ pub fn find_unclosed_raw_string_on_line(line: &str) -> Option<String> {
             let hash_count = hash_end - hash_start;
 
             if hash_count > 0 && hash_end < len && bytes[hash_end] == b'"' {
-                let close_pattern = format!("\"{}",  "#".repeat(hash_count));
+                let close_pattern = format!("\"{}", "#".repeat(hash_count));
 
                 // Check if the closing pattern appears later on the SAME line
                 let after_open = &line[hash_end + 1..];

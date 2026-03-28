@@ -165,11 +165,7 @@ pub fn tagged_visibility_change(
     )
 }
 
-pub fn doc_line_removal(
-    finding: AuditFinding,
-    line: usize,
-    description: String,
-) -> Insertion {
+pub fn doc_line_removal(finding: AuditFinding, line: usize, description: String) -> Insertion {
     insertion(
         InsertionKind::DocLineRemoval { line },
         finding,

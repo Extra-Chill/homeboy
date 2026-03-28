@@ -338,11 +338,7 @@ pub fn propagate_edit_to_edit_op(
 pub fn propagate_result_to_edit_ops(
     result: &crate::core::refactor::propagate::PropagateResult,
 ) -> Vec<TaggedEditOp> {
-    result
-        .edits
-        .iter()
-        .map(propagate_edit_to_edit_op)
-        .collect()
+    result.edits.iter().map(propagate_edit_to_edit_op).collect()
 }
 
 /// Translate a `TransformMatch` into a `TaggedEditOp`.
@@ -602,13 +598,7 @@ mod tests {
             after: "new_name".to_string(),
         };
         let tagged = transform_match_to_edit_op(&m);
-        assert!(matches!(
-            tagged.op,
-            EditOp::ReplaceText {
-                line: 15,
-                ..
-            }
-        ));
+        assert!(matches!(tagged.op, EditOp::ReplaceText { line: 15, .. }));
         assert!(tagged.description.contains("old_name"));
         assert!(tagged.description.contains("new_name"));
     }
@@ -623,14 +613,12 @@ mod tests {
                 RuleResult {
                     id: "rule1".to_string(),
                     description: "Rename foo".to_string(),
-                    matches: vec![
-                        TransformMatch {
-                            file: "src/a.rs".to_string(),
-                            line: 1,
-                            before: "foo".to_string(),
-                            after: "bar".to_string(),
-                        },
-                    ],
+                    matches: vec![TransformMatch {
+                        file: "src/a.rs".to_string(),
+                        line: 1,
+                        before: "foo".to_string(),
+                        after: "bar".to_string(),
+                    }],
                     replacement_count: 1,
                 },
                 RuleResult {
