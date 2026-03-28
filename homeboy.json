@@ -3,11 +3,10 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-03-28T15:28:17Z",
-      "item_count": 1033,
+      "created_at": "2026-03-28T16:28:23Z",
+      "item_count": 1034,
       "known_fingerprints": [
-        "Commands (Tests)::tests/commands/deploy_test.rs::MissingMethod",
-        "Commands (Tests)::tests/commands/deploy_test.rs::MissingMethod",
+        "Commands (Tests)::tests/commands/deploy_test.rs::MissingImport",
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "comment_hygiene::src/commands/release.rs::LegacyComment",
         "comment_hygiene::src/core/refactor/plan/generate/comment_fixes.rs::TodoMarker",
@@ -1038,7 +1037,9 @@
         "test_coverage::src/core/upgrade/update_check.rs::MissingTestMethod",
         "test_coverage::src/core/upgrade/validation.rs::MissingTestFile",
         "test_coverage::tests/commands/supports_test.rs::OrphanedTest",
-        "test_coverage::tests/commands/test_scope_test.rs::OrphanedTest"
+        "test_coverage::tests/commands/test_scope_test.rs::OrphanedTest",
+        "Undo::src/core/engine/undo/snapshot.rs::SignatureMismatch",
+        "Undo::src/core/engine/undo/rollback.rs::SignatureMismatch"
       ],
       "metadata": {
         "alignment_score": 0.9487179517745972,
