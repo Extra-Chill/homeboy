@@ -4,6 +4,40 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.87.0] - 2026-03-28
+
+### Added
+- support multi-component refactors and root-aware artifact deploys
+- streamline gate-refactor — apply fixes directly, no dry-run
+- refactor --from audit reads cached output when available
+- add RunDir orchestration contract for pipeline step I/O
+
+### Changed
+- simplify source-driven automation flow
+- Refactor scaffold/autofix boundaries and remove safe-plan gating
+- replace inline release autofix with homeboy-action
+- --bump directive + BREAKING CHANGE body detection
+
+### Fixed
+- remove 3 broken auto-generated test stubs in git::changes
+- apply cargo fmt to resolve lint failures
+- fail release when changelog target stays stale
+- harden release packaging and unsafe autofix paths
+- scope refactor generation before planning fixes
+- keep decompose from extracting invalid root fragments
+- use engine symbol data in export and duplicate fixers
+- harden autofix structural parsing and import application
+- unblock release by applying rustfmt cleanups
+- stabilize audit signature mismatch baselines
+- decompose algorithm quality — 4 fixes for cross-fixer conflicts and item extraction
+- improve autofix fixer quality — prevent 4 classes of broken output
+- use positional arg for extension install in release workflow
+- always rebuild before deploy — remove stale artifact reuse (#991)
+- import_add fixer skips locally-defined symbols
+- apply cargo fmt to resolve CI lint failures
+- revert broken autofix decompose (second occurrence)
+- revert broken autofix decompose, add clean-tree guard for refactor
+
 ## [0.86.2] - 2026-03-24
 
 ### Changed
