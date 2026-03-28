@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.14.0] - 2026-03-28
+
+### Added
+- create GitHub Releases after successful version releases
+
 ## [1.13.7] - 2026-03-28
 
 ### Fixed
