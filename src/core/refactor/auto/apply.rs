@@ -728,14 +728,10 @@ fn merge_same_file_insertions(fixes: &mut [Fix]) {
         // Split the slice to get mutable references to both elements
         if donor_idx > target_idx {
             let (left, right) = fixes.split_at_mut(donor_idx);
-            left[target_idx]
-                .insertions
-                .extend(right[0].insertions.drain(..));
+            left[target_idx].insertions.append(&mut right[0].insertions);
         } else {
             let (left, right) = fixes.split_at_mut(target_idx);
-            right[0]
-                .insertions
-                .extend(left[donor_idx].insertions.drain(..));
+            right[0].insertions.append(&mut left[donor_idx].insertions);
         }
     }
 }

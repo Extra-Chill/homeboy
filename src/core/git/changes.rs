@@ -193,28 +193,28 @@ mod tests {
     #[test]
     fn test_get_uncommitted_changes_default_path() {
         let path = "";
-        let _result = get_uncommitted_changes(&path);
+        let _result = get_uncommitted_changes(path);
     }
 
     #[test]
     fn test_get_uncommitted_changes_has_expected_effects() {
         // Expected effects: mutation
         let path = "";
-        let _ = get_uncommitted_changes(&path);
+        let _ = get_uncommitted_changes(path);
     }
 
     #[test]
     fn test_get_files_changed_since_default_path() {
         let path = "";
         let git_ref = "";
-        let _result = get_files_changed_since(&path, &git_ref);
+        let _result = get_files_changed_since(path, git_ref);
     }
 
     #[test]
     fn test_get_files_changed_since_default_path_2() {
         let path = "";
         let git_ref = "";
-        let _result = get_files_changed_since(&path, &git_ref);
+        let _result = get_files_changed_since(path, git_ref);
     }
 
     #[test]
@@ -222,19 +222,19 @@ mod tests {
         // Expected effects: logging
         let path = "";
         let git_ref = "";
-        let _ = get_files_changed_since(&path, &git_ref);
+        let _ = get_files_changed_since(path, git_ref);
     }
 
     #[test]
     fn test_get_dirty_files_default_path() {
         let path = "";
-        let _result = get_dirty_files(&path);
+        let _result = get_dirty_files(path);
     }
 
     #[test]
     fn test_get_dirty_files_ok_files_into_iter_collect() {
         let path = "";
-        let result = get_dirty_files(&path);
+        let result = get_dirty_files(path);
         assert!(
             result.is_ok(),
             "expected Ok for: Ok(files.into_iter().collect())"
@@ -245,25 +245,25 @@ mod tests {
     fn test_get_dirty_files_has_expected_effects() {
         // Expected effects: mutation
         let path = "";
-        let _ = get_dirty_files(&path);
+        let _ = get_dirty_files(path);
     }
 
     #[test]
     fn test_get_diff_default_path() {
         let path = "";
-        let _result = get_diff(&path);
+        let _result = get_diff(path);
     }
 
     #[test]
     fn test_get_diff_default_path_2() {
         let path = "";
-        let _result = get_diff(&path);
+        let _result = get_diff(path);
     }
 
     #[test]
     fn test_get_diff_ok_result() {
         let path = "";
-        let result = get_diff(&path);
+        let result = get_diff(path);
         assert!(result.is_ok(), "expected Ok for: Ok(result)");
     }
 
@@ -271,21 +271,21 @@ mod tests {
     fn test_get_diff_has_expected_effects() {
         // Expected effects: mutation
         let path = "";
-        let _ = get_diff(&path);
+        let _ = get_diff(path);
     }
 
     #[test]
     fn test_get_range_diff_default_path() {
         let path = "";
         let baseline_ref = "";
-        let _result = get_range_diff(&path, &baseline_ref);
+        let _result = get_range_diff(path, baseline_ref);
     }
 
     #[test]
     fn test_get_range_diff_ok_string_from_utf8_lossy_output_stdout_to_string() {
         let path = "";
         let baseline_ref = "";
-        let result = get_range_diff(&path, &baseline_ref);
+        let result = get_range_diff(path, baseline_ref);
         assert!(
             result.is_ok(),
             "expected Ok for: Ok(String::from_utf8_lossy(&output.stdout).to_string())"
