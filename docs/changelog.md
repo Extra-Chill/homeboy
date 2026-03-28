@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.87.1] - 2026-03-28
+
+### Changed
+- Apply cargo fmt formatting
+- Move raw string detection to grammar engine, fix orphan heuristic
+- Add build provenance tracking and deploy warning for unreleased commits
+- Add EditOp conversions for propagate and transform commands
+- Add shared EditOp enum — canonical vocabulary for file edits
+- Migrate comment_fixes and intra_duplicate_fixes to use builder helpers
+- Promote orphaned test deletion when source file is deleted
+- Promote more intra-method duplicates to automated fix
+
+### Fixed
+- Fix two autofix false positives exposed by CI run
+- Fix orphaned test fixer matching functions inside string literals
+
 ## [0.87.0] - 2026-03-28
 
 ### Added
