@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.13.7] - 2026-03-28
+
+### Fixed
+- include collected_edits and decompose_plans in autofix commit summary
+
 ## [1.13.6] - 2026-03-26
 
 ### Fixed
