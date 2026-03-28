@@ -748,12 +748,7 @@ fn find_enclosing_fn_start(lines: &[String], from: usize) -> Option<usize> {
     static FN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+\w+").unwrap()
     });
-    for i in (0..=from).rev() {
-        if FN_RE.is_match(&lines[i]) {
-            return Some(i);
-        }
-    }
-    None
+    (0..=from).rev().find(|&i| FN_RE.is_match(&lines[i]))
 }
 
 /// Find the closing brace of a function starting at `fn_line`.

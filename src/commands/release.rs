@@ -165,7 +165,7 @@ pub fn run(
         deploy: args.deploy,
         recover: false,
         skip_checks: args.skip_checks,
-        bump_override: bump_override,
+        bump_override,
         skip_publish: args.skip_publish,
     };
 

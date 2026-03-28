@@ -2019,8 +2019,7 @@ fn audit_internal(component_id: &str, source_path: &str) -> Result<CodeAuditResu
     Ok(todo!())
 }
 "#;
-        let items = vec![
-            ParsedItem {
+        let items = [ParsedItem {
                 name: "audit_component".to_string(),
                 kind: "function".to_string(),
                 start_line: 2,
@@ -2043,8 +2042,7 @@ fn audit_internal(component_id: &str, source_path: &str) -> Result<CodeAuditResu
                 end_line: 13,
                 source: "fn audit_internal(component_id: &str, source_path: &str) -> Result<CodeAuditResult> {\n    let _ = (component_id, source_path);\n    Ok(todo!())\n}".to_string(),
                 visibility: String::new(),
-            },
-        ];
+            }];
         let refs: Vec<&ParsedItem> = items.iter().collect();
         let kept = identify_parent_kept_functions("src/core/code_audit/mod.rs", &refs, content);
         assert!(kept.contains("audit_component"));
@@ -2070,7 +2068,7 @@ pub fn a() {}
 pub fn b() {}
 fn helper() {}
 "#;
-        let items = vec![
+        let items = [
             ParsedItem {
                 name: "a".to_string(),
                 kind: "function".to_string(),

@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::error::{Error, Result};
 
 use super::discovery::{discover_attached_component, infer_attached_component_id};
-use crate::project::{load, save, Project, ProjectComponentAttachment, ProjectComponentOverrides};
+use crate::project::{load, save, Project, ProjectComponentAttachment};
 
 fn component_ids_from_attachments(components: &[ProjectComponentAttachment]) -> Vec<String> {
     components
@@ -172,7 +172,7 @@ fn preserve_remote_path_on_reattach(
     let overrides = project
         .component_overrides
         .entry(component_id.to_string())
-        .or_insert_with(ProjectComponentOverrides::default);
+        .or_default();
     overrides.remote_path = Some(current_remote_path);
 }
 
@@ -213,8 +213,7 @@ fn find_prefix_match(project: &Project, inferred_id: &str) -> Option<String> {
         if inferred_id.starts_with(existing_id.as_str()) && inferred_id.len() > existing_id.len() {
             let suffix = &inferred_id[existing_id.len()..];
             // The suffix should look like a version/clone qualifier: "-v...", "-0...", etc.
-            if suffix.starts_with('-') {
-                let after_dash = &suffix[1..];
+            if let Some(after_dash) = suffix.strip_prefix('-') {
                 let is_version_like = after_dash.starts_with('v')
                     || after_dash
                         .chars()

@@ -533,7 +533,7 @@ fn try_load_cached_audit() -> Option<CodeAuditResult> {
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
 
     // Only use cached results from successful runs
-    if json.get("success")?.as_bool()? != true {
+    if !json.get("success")?.as_bool()? {
         return None;
     }
 
