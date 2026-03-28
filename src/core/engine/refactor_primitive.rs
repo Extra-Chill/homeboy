@@ -19,7 +19,7 @@ pub fn insertion(
     }
 }
 
-pub fn tagged_insertion(
+pub(crate) fn tagged_insertion(
     primitive: RefactorPrimitive,
     kind: InsertionKind,
     finding: AuditFinding,

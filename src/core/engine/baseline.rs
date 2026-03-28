@@ -412,20 +412,7 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
     }
 
     let leap = is_leap_year(year);
-    let month_days = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31];
 
     let mut month = 1u64;
     for &month_days in &month_days {
