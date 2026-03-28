@@ -9,6 +9,7 @@
 
 pub mod baseline;
 pub mod cli_tool;
+pub mod edit_op;
 pub mod codebase_scan;
 pub mod command;
 pub mod contract;
