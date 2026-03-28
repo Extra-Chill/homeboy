@@ -386,8 +386,19 @@ pub(crate) fn generate_orphaned_test_fixes(
         }
 
         // Fallback: delete the orphaned test if no rename candidate found.
-        // Mark manual-only so automation via `refactor --from` cannot execute it.
-        let ins = manual_only(insertion_with_primitive(
+        //
+        // Safety gate: if the corresponding source file no longer exists at all,
+        // the test is unambiguously orphaned — there's no source to reference.
+        // In that case, skip the manual_only gate and allow automated removal.
+        //
+        // If the source file still exists (method was deleted but file remains),
+        // the test might be testing behavior via other code paths, so keep it
+        // manual-only for human review.
+        let source_file_exists = test_file_to_source_path(&finding.file)
+            .map(|p| root.join(p).exists())
+            .unwrap_or(false);
+
+        let ins = insertion_with_primitive(
             RefactorPrimitive::RemoveOrphanedTest,
             InsertionKind::FunctionRemoval {
                 start_line,
@@ -396,10 +407,20 @@ pub(crate) fn generate_orphaned_test_fixes(
             AuditFinding::OrphanedTest,
             String::new(),
             format!(
-                "Remove orphaned test `{}` — referenced source method no longer exists",
-                test_method
+                "Remove orphaned test `{}` — referenced source method no longer exists{}",
+                test_method,
+                if source_file_exists {
+                    ""
+                } else {
+                    " (source file deleted)"
+                },
             ),
-        ));
+        );
+        let ins = if source_file_exists {
+            manual_only(ins)
+        } else {
+            ins
+        };
 
         fixes.push(Fix {
             file: finding.file.clone(),
@@ -658,5 +679,94 @@ mod tests {
             Some("src/core/code_audit/bar.rs".to_string())
         );
         assert_eq!(test_file_to_source_path("src/foo.rs"), None);
+    }
+
+    // ── Integration tests: source-file-deleted promotion ──────────────
+
+    use crate::code_audit::test_helpers::empty_result;
+    use crate::code_audit::{Finding, Severity};
+    use crate::refactor::auto::{Fix, SkippedFile};
+
+    fn test_content() -> &'static str {
+        r#"#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_process_data() {
+        assert_eq!(1, 1);
+    }
+}
+"#
+    }
+
+    fn orphaned_finding(file: &str) -> Finding {
+        Finding {
+            convention: "test_coverage".to_string(),
+            severity: Severity::Warning,
+            file: file.to_string(),
+            description: "Test method 'test_process_data' references 'process_data' which no longer exists in the source".to_string(),
+            suggestion: "Remove orphaned test".to_string(),
+            kind: AuditFinding::OrphanedTest,
+        }
+    }
+
+    #[test]
+    fn orphaned_test_automated_when_source_file_deleted() {
+        // Source file does not exist → test is unambiguously orphaned → automated.
+        let dir = tempfile::tempdir().unwrap();
+        let test_file = dir.path().join("tests/core/process_test.rs");
+        std::fs::create_dir_all(test_file.parent().unwrap()).unwrap();
+        std::fs::write(&test_file, test_content()).unwrap();
+        // Deliberately do NOT create src/core/process.rs
+
+        let mut result = empty_result();
+        result.source_path = dir.path().to_string_lossy().to_string();
+        result.findings.push(orphaned_finding("tests/core/process_test.rs"));
+
+        let mut fixes: Vec<Fix> = Vec::new();
+        let mut skipped: Vec<SkippedFile> = Vec::new();
+        generate_orphaned_test_fixes(&result, dir.path(), &mut fixes, &mut skipped);
+
+        assert_eq!(fixes.len(), 1, "Expected 1 fix, got {}", fixes.len());
+        assert_eq!(fixes[0].insertions.len(), 1);
+        assert!(
+            !fixes[0].insertions[0].manual_only,
+            "Should be automated when source file is deleted"
+        );
+        assert!(
+            fixes[0].insertions[0].description.contains("source file deleted"),
+            "Description should note source file was deleted"
+        );
+    }
+
+    #[test]
+    fn orphaned_test_manual_when_source_file_exists() {
+        // Source file still exists → method might have been deliberately removed
+        // but test could still test valid behavior → manual-only.
+        let dir = tempfile::tempdir().unwrap();
+        let test_file = dir.path().join("tests/core/process_test.rs");
+        std::fs::create_dir_all(test_file.parent().unwrap()).unwrap();
+        std::fs::write(&test_file, test_content()).unwrap();
+
+        // Create the source file (without the referenced method)
+        let source_file = dir.path().join("src/core/process.rs");
+        std::fs::create_dir_all(source_file.parent().unwrap()).unwrap();
+        std::fs::write(&source_file, "pub fn other_method() {}\n").unwrap();
+
+        let mut result = empty_result();
+        result.source_path = dir.path().to_string_lossy().to_string();
+        result.findings.push(orphaned_finding("tests/core/process_test.rs"));
+
+        let mut fixes: Vec<Fix> = Vec::new();
+        let mut skipped: Vec<SkippedFile> = Vec::new();
+        generate_orphaned_test_fixes(&result, dir.path(), &mut fixes, &mut skipped);
+
+        assert_eq!(fixes.len(), 1, "Expected 1 fix, got {}", fixes.len());
+        assert_eq!(fixes[0].insertions.len(), 1);
+        assert!(
+            fixes[0].insertions[0].manual_only,
+            "Should be manual-only when source file still exists"
+        );
     }
 }

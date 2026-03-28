@@ -270,9 +270,11 @@ fn classify_relation(
     }
 
     // Same indent with code in the gap.
-    // Small gap (≤ 3 lines of real code): likely copy-paste with minor context between.
-    // Large gap: different enough to need human review.
-    if code_lines_in_gap <= 3 {
+    // Small gap (≤ 8 lines of real code): likely copy-paste with minor context between.
+    // The brace-balance check in the caller prevents corrupted output even for
+    // larger gap removals, so we can safely promote more cases to automation.
+    // Large gap (> 8): different enough to need human review.
+    if code_lines_in_gap <= 8 {
         DupRelation::SameIndentSmallGap
     } else {
         DupRelation::SameIndentLargeGap
@@ -345,7 +347,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_same_indent_large_gap() {
+    fn classify_same_indent_medium_gap_now_promoted() {
+        // 4 lines of code in gap — was SameIndentLargeGap at threshold 3,
+        // now SameIndentSmallGap at threshold 8 (automation-eligible).
         let lines = vec![
             "    let x = 1;", // line 1
             "    let y = 2;", // line 2
@@ -357,6 +361,28 @@ mod tests {
             "    let y = 2;", // line 8
         ];
         let rel = classify_relation(&lines, 1, 7, 2);
+        assert!(matches!(rel, DupRelation::SameIndentSmallGap));
+    }
+
+    #[test]
+    fn classify_same_indent_large_gap() {
+        // 9 lines of code in gap — exceeds threshold of 8, stays manual.
+        let lines = vec![
+            "    let x = 1;", // line 1
+            "    let y = 2;", // line 2
+            "    a();",       // line 3
+            "    b();",       // line 4
+            "    c();",       // line 5
+            "    d();",       // line 6
+            "    e();",       // line 7
+            "    f();",       // line 8
+            "    g();",       // line 9
+            "    h();",       // line 10
+            "    i();",       // line 11  — 9 lines of code in gap
+            "    let x = 1;", // line 12
+            "    let y = 2;", // line 13
+        ];
+        let rel = classify_relation(&lines, 1, 12, 2);
         assert!(matches!(rel, DupRelation::SameIndentLargeGap));
     }
 
