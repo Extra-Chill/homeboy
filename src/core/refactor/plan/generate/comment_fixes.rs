@@ -21,7 +21,9 @@ use std::path::Path;
 use regex::Regex;
 
 use crate::code_audit::{AuditFinding, CodeAuditResult};
-use crate::refactor::auto::{Fix, Insertion, InsertionKind, SkippedFile};
+use crate::refactor::auto::{Fix, SkippedFile};
+
+use super::{doc_line_removal, manual_blocked, range_removal};
 
 /// Classification of the code block a legacy comment annotates.
 #[derive(Debug, PartialEq)]
@@ -106,26 +108,23 @@ pub(crate) fn generate_comment_fixes(
 
         // TODO markers describe work to be done — always needs human review.
         if finding_kind == AuditFinding::TodoMarker {
+            let ins = manual_blocked(
+                doc_line_removal(
+                    AuditFinding::TodoMarker,
+                    line_num,
+                    format!(
+                        "TODO marker on line {} in {} — resolve before removing",
+                        line_num, finding.file
+                    ),
+                ),
+                "TODO markers require human judgment — resolve the TODO, then remove".to_string(),
+            );
+
             fixes.push(Fix {
                 file: finding.file.clone(),
                 required_methods: vec![],
                 required_registrations: vec![],
-                insertions: vec![Insertion {
-                    primitive: None,
-                    kind: InsertionKind::DocLineRemoval { line: line_num },
-                    finding: AuditFinding::TodoMarker,
-                    manual_only: true,
-                    auto_apply: false,
-                    blocked_reason: Some(
-                        "TODO markers require human judgment — resolve the TODO, then remove"
-                            .to_string(),
-                    ),
-                    code: String::new(),
-                    description: format!(
-                        "TODO marker on line {} in {} — resolve before removing",
-                        line_num, finding.file
-                    ),
-                }],
+                insertions: vec![ins],
                 applied: false,
             });
             continue;
@@ -198,23 +197,23 @@ pub(crate) fn generate_comment_fixes(
             &finding.description
         );
 
+        let ins = range_removal(
+            AuditFinding::LegacyComment,
+            start_line,
+            end_line,
+            description,
+        );
+        let ins = if manual_only {
+            manual_blocked(ins, blocked_reason.unwrap_or_default())
+        } else {
+            ins
+        };
+
         fixes.push(Fix {
             file: finding.file.clone(),
             required_methods: vec![],
             required_registrations: vec![],
-            insertions: vec![Insertion {
-                primitive: None,
-                kind: InsertionKind::FunctionRemoval {
-                    start_line,
-                    end_line,
-                },
-                finding: AuditFinding::LegacyComment,
-                manual_only,
-                auto_apply: false,
-                blocked_reason,
-                code: String::new(),
-                description,
-            }],
+            insertions: vec![ins],
             applied: false,
         });
     }
@@ -558,6 +557,7 @@ mod tests {
     use super::*;
     use crate::code_audit::test_helpers::empty_result;
     use crate::code_audit::{Finding, Severity};
+    use crate::refactor::auto::InsertionKind;
 
     // ── classify_and_bound tests ──────────────────────────────────────
 

@@ -20,8 +20,9 @@ use std::path::Path;
 use convention_fixes::apply_convention_fixes;
 
 pub(crate) use builders::{
-    insertion, insertion_with_primitive, manual_only, new_file, tagged_import_add,
-    tagged_line_replacement, tagged_range_removal, tagged_visibility_change,
+    doc_line_removal, insertion, insertion_with_primitive, manual_blocked, manual_only, new_file,
+    range_removal, tagged_import_add, tagged_line_replacement, tagged_range_removal,
+    tagged_visibility_change,
 };
 pub(crate) use doc_fixes::is_actionable_comment_finding;
 pub(crate) use duplicate_fixes::{
