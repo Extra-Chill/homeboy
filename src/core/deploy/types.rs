@@ -53,6 +53,8 @@ pub struct DeployConfig {
     pub no_pull: bool,
     /// Deploy from current branch HEAD instead of latest tag
     pub head: bool,
+    /// Force tag-based deploy, ignoring any reusable build artifacts
+    pub tagged: bool,
 }
 
 /// Reason why a component was selected for deployment.

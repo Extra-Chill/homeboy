@@ -2,6 +2,7 @@ mod execution;
 mod orchestration;
 pub(crate) mod permissions;
 mod planning;
+pub(crate) mod provenance;
 pub mod release_download;
 mod safety_and_artifact;
 mod transfer;
@@ -142,6 +143,7 @@ pub fn run_multi(
             // Only pull on first project
             no_pull: config.no_pull || !first_project,
             head: config.head,
+            tagged: config.tagged,
         };
 
         match run(project_id, &project_config) {

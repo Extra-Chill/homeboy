@@ -51,6 +51,7 @@ fn collect_component_versions(project_id: &str) -> Option<Vec<ProjectComponentSt
         expected_version: None,
         no_pull: true,
         head: true,
+        tagged: false,
     };
 
     deploy::run(project_id, &config).ok().map(|result| {

@@ -363,6 +363,16 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
     let validated_path = component::validate_local_path(comp)?;
     let local_path_str = validated_path.to_string_lossy().to_string();
 
+    // Warn when HEAD is ahead of the latest tag — the build will include
+    // unreleased commits that won't be deployed unless using `deploy --head`.
+    if let Some(gap) = crate::deploy::provenance::detect_tag_gap(comp) {
+        crate::deploy::provenance::warn_tag_gap(&comp.id, &gap, "build");
+        log_status!(
+            "build",
+            "Build uses current working tree. To deploy these commits: use `deploy --head` or run `homeboy release`."
+        );
+    }
+
     let resolved = resolve_build_command(comp)?;
     let build_cmd = resolved.command().to_string();
     let build_context = match &resolved {
@@ -411,13 +421,24 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
             .run()?
     };
 
+    let success = runner_output.success;
+
+    // Record build provenance on success so deploy can detect fresh artifacts
+    if success {
+        if let Some(prov) = crate::deploy::provenance::capture(comp) {
+            if let Err(e) = crate::deploy::provenance::write(comp, &prov) {
+                log_status!("build", "Warning: could not write build provenance: {}", e);
+            }
+        }
+    }
+
     Ok((
         BuildOutput {
             command: "build.run".to_string(),
             component_id: comp.id.clone(),
             build_command: build_cmd,
             output: CapturedOutput::new(runner_output.stdout, runner_output.stderr),
-            success: runner_output.success,
+            success,
         },
         runner_output.exit_code,
     ))

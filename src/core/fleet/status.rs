@@ -274,6 +274,7 @@ fn collect_project_component_statuses(
         expected_version: None,
         no_pull: true,
         head: true,
+        tagged: false,
     };
 
     match deploy::run(project_id, &config) {

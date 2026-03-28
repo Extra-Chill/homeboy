@@ -68,6 +68,9 @@ pub struct DeployArgs {
     /// Deploy from current branch HEAD instead of the latest tag
     #[arg(long)]
     pub head: bool,
+    /// Force tag-based deploy, ignoring any reusable build artifacts
+    #[arg(long)]
+    pub tagged: bool,
 }
 
 #[derive(Serialize)]
@@ -272,6 +275,7 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         expected_version: args.version.clone(),
         no_pull: args.no_pull,
         head: args.head,
+        tagged: args.tagged,
     }
 }
 

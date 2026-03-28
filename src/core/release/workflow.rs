@@ -466,6 +466,7 @@ fn execute_deployment(
             expected_version: None,
             no_pull: true,
             head: true,
+            tagged: true,
         };
 
         match deploy::run(project_id, &config) {

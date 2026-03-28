@@ -355,6 +355,7 @@ fn fetch_project_remote_versions(project_id: &str) -> std::collections::HashMap<
         expected_version: None,
         no_pull: true,
         head: true,
+        tagged: false,
     };
 
     match deploy::run(project_id, &config) {
