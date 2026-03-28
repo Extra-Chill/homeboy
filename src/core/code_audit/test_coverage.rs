@@ -544,13 +544,22 @@ fn find_orphaned_test_methods(
         // longer compound names (3+ segments like "detects_exact_duplicate" or
         // "audit_metadata_roundtrips") are probably behavioral descriptions
         // unless the first segment matches a source method.
+        //
+        // The check uses exact first-segment matching against source method
+        // names. We require the first segment to exactly equal a source method
+        // or be an exact prefix of one (not just starts_with — "helpers" should
+        // not match source method "helper").
         let segment_count = expected_source.split('_').count();
         if segment_count >= 3 {
             let first_word = expected_source.split('_').next().unwrap_or(expected_source);
-            let any_method_starts_with_first_word = source_methods
-                .iter()
-                .any(|m| m.starts_with(first_word) || first_word.starts_with(m));
-            if !any_method_starts_with_first_word {
+            let first_segment_matches_source = source_methods.iter().any(|m| {
+                // Exact match: first segment IS a source method name
+                *m == first_word
+                // Or: source method starts with first_word followed by '_'
+                // (e.g., first_word "exact" matches source "exact_hash")
+                || m.starts_with(&format!("{}_", first_word))
+            });
+            if !first_segment_matches_source {
                 continue;
             }
         }
@@ -1141,6 +1150,64 @@ mod tests {
         let orphaned_names: Vec<&str> = orphaned.iter().map(|f| f.description.as_str()).collect();
         assert!(orphaned_names.iter().any(|d| d.contains("pause")));
         assert!(orphaned_names.iter().any(|d| d.contains("resume")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn behavioral_test_names_not_flagged_as_orphaned() {
+        // Regression: test_helpers_without_test_attr_not_counted_as_test_methods
+        // was flagged as orphaned. The behavior-driven heuristic should skip
+        // test names with 3+ segments where the first word doesn't match any
+        // source method.
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_behavioral");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        let source = make_fp(
+            "src/core/engine.rs",
+            vec![
+                "fingerprint_from_grammar",
+                "extract_functions",
+                "exact_hash",
+                // Behavioral test names — these should NOT be flagged
+                "test_helpers_without_test_attr_not_counted_as_test_methods",
+                "test_replace_string_literals",
+                "test_exact_hash_deterministic",
+            ],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
+            })
+            .collect();
+
+        // test_replace_string_literals → "replace_string_literals" — not a source method but
+        // 3 segments, first word "replace" — no source method starts with "replace" → should skip
+        //
+        // test_exact_hash_deterministic → "exact_hash_deterministic" — 3 segments,
+        // first word "exact" — source method "exact_hash" starts with "exact" → should match
+        // via prefix match (exact_hash_ is a prefix of exact_hash_deterministic) → NOT orphaned
+        //
+        // test_helpers_without_test_attr_not_counted_as_test_methods → 9 segments,
+        // first word "helpers" — no source method starts with "helpers" → should skip
+
+        let orphaned_names: Vec<String> = orphaned.iter().map(|f| f.description.clone()).collect();
+        assert!(
+            !orphaned_names.iter().any(|d| d.contains("helpers_without")),
+            "Behavioral test name should NOT be flagged as orphaned. Orphaned: {:?}",
+            orphaned_names
+        );
+        assert!(
+            !orphaned_names.iter().any(|d| d.contains("replace_string")),
+            "Behavioral test name should NOT be flagged as orphaned. Orphaned: {:?}",
+            orphaned_names
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

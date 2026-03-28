@@ -472,6 +472,63 @@ pub struct ContextualLine<'a> {
     pub region: Region,
 }
 
+/// Check if a line opens a Rust raw string (`r#"`, `r##"`, etc.) that doesn't
+/// close on the same line. Returns the closing delimiter pattern if found.
+///
+/// This is the shared implementation used by both the grammar walker (to mark
+/// lines as `StringLiteral` during extraction) and the orphaned test fixer
+/// (to skip function declarations inside test fixture strings).
+pub fn find_unclosed_raw_string_on_line(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0;
+
+    while pos < len {
+        // Skip regular strings — don't confuse `"..."` with raw string opening.
+        if bytes[pos] == b'"' && (pos == 0 || bytes[pos - 1] != b'r') {
+            pos += 1;
+            while pos < len {
+                if bytes[pos] == b'"' && bytes[pos - 1] != b'\\' {
+                    pos += 1;
+                    break;
+                }
+                pos += 1;
+            }
+            continue;
+        }
+
+        // Look for r followed by one or more # then "
+        if bytes[pos] == b'r' && pos + 1 < len {
+            let hash_start = pos + 1;
+            let mut hash_end = hash_start;
+            while hash_end < len && bytes[hash_end] == b'#' {
+                hash_end += 1;
+            }
+            let hash_count = hash_end - hash_start;
+
+            if hash_count > 0 && hash_end < len && bytes[hash_end] == b'"' {
+                let close_pattern = format!("\"{}",  "#".repeat(hash_count));
+
+                // Check if the closing pattern appears later on the SAME line
+                let after_open = &line[hash_end + 1..];
+                if !after_open.contains(&close_pattern) {
+                    return Some(close_pattern);
+                }
+
+                // Closed on same line — skip past the close and continue
+                if let Some(close_pos) = after_open.find(&close_pattern) {
+                    pos = hash_end + 1 + close_pos + close_pattern.len();
+                    continue;
+                }
+            }
+        }
+
+        pos += 1;
+    }
+
+    None
+}
+
 /// Iterate lines with structural context, tracking brace depth and regions.
 ///
 /// This is the core primitive — it walks the file line-by-line, tracking
@@ -482,13 +539,21 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
     let mut result = Vec::new();
     let mut in_block_comment = false;
     let mut block_comment_end = String::new();
+    let mut in_raw_string = false;
+    let mut raw_string_close = String::new();
 
     for (i, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         let depth_at_start = ctx.depth;
 
         // Determine region for this line
-        let region = if in_block_comment {
+        let region = if in_raw_string {
+            // Inside a multi-line raw string — check if closing delimiter appears
+            if line.contains(&raw_string_close) {
+                in_raw_string = false;
+            }
+            Region::StringLiteral
+        } else if in_block_comment {
             // Check if block comment ends on this line
             if let Some(pos) = trimmed.find(block_comment_end.as_str()) {
                 // Comment ends partway through this line
@@ -518,6 +583,13 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
             if in_block_comment {
                 Region::BlockComment
             } else {
+                // Check for multi-line raw string opening (Rust r#"..."#, r##"..."##, etc.)
+                if let Some(close) = find_unclosed_raw_string_on_line(line) {
+                    in_raw_string = true;
+                    raw_string_close = close;
+                }
+                // The opening line itself is Code (it has real code on it);
+                // subsequent lines inside the string are StringLiteral.
                 Region::Code
             }
         };
@@ -636,6 +708,12 @@ pub fn extract(content: &str, grammar: &Grammar) -> Vec<Symbol> {
         };
 
         for ctx_line in &lines {
+            // Always skip lines inside string literals — function declarations,
+            // imports, etc. inside raw strings are not real code.
+            if ctx_line.region == Region::StringLiteral {
+                continue;
+            }
+
             // Skip based on region
             if pattern.skip_comments
                 && (ctx_line.region == Region::LineComment
@@ -1199,6 +1277,53 @@ mod tests {
         // since our simple grammar doesn't capture visibility
         let pub_syms = public_symbols(&symbols);
         assert_eq!(pub_syms.len(), 3); // All pass because no "visibility" capture
+    }
+
+    // ── Raw string region detection tests ─────────────────────────────
+
+    #[test]
+    fn walk_lines_detects_raw_string_regions() {
+        let content = "fn real() {}\nlet s = r#\"\nfn fake_inside_string() {}\nanother line\n\"#;\nfn also_real() {}\n";
+        let grammar = rust_grammar();
+        let lines = walk_lines(content, &grammar);
+
+        assert_eq!(lines[0].region, Region::Code, "fn real()");
+        assert_eq!(lines[1].region, Region::Code, "opening line has real code");
+        assert_eq!(lines[2].region, Region::StringLiteral, "inside raw string");
+        assert_eq!(lines[3].region, Region::StringLiteral, "inside raw string");
+        assert_eq!(lines[4].region, Region::StringLiteral, "closing delimiter");
+        assert_eq!(lines[5].region, Region::Code, "fn also_real()");
+    }
+
+    #[test]
+    fn extract_skips_functions_inside_raw_strings() {
+        // Regression: the grammar extracted fn declarations from inside raw
+        // strings used as test fixtures, polluting the fingerprint with fake
+        // source methods like "helper", "load", "write" etc.
+        let content = "pub fn real_function() -> bool {\n    true\n}\nlet fixture = r#\"\npub fn fake_function() -> bool {\n    false\n}\nfn another_fake() {}\n\"#;\n";
+        let grammar = rust_grammar();
+        let symbols = extract(content, &grammar);
+        let fn_names: Vec<&str> = symbols
+            .iter()
+            .filter(|s| s.concept == "function")
+            .filter_map(|s| s.name())
+            .collect();
+
+        assert!(
+            fn_names.contains(&"real_function"),
+            "Should find real_function. Found: {:?}",
+            fn_names
+        );
+        assert!(
+            !fn_names.contains(&"fake_function"),
+            "Should NOT find fake_function inside raw string. Found: {:?}",
+            fn_names
+        );
+        assert!(
+            !fn_names.contains(&"another_fake"),
+            "Should NOT find another_fake inside raw string. Found: {:?}",
+            fn_names
+        );
     }
 }
 

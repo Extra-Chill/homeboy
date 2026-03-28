@@ -119,13 +119,7 @@ fn is_method_level_orphan(description: &str) -> bool {
 /// literals. These lines should be skipped when scanning for function declarations
 /// to avoid matching `fn foo()` patterns embedded in test fixture strings.
 ///
-/// Handles:
-/// - `r#"..."#` and `r##"..."##` etc. (Rust raw strings with any number of `#`)
-/// - Regular `"..."` strings that span multiple lines
-///
-/// A line is considered "inside a string" if it falls between the opening and
-/// closing delimiters (exclusive of the line containing the opening delimiter
-/// itself, since that line has real code on it).
+/// Uses the shared `find_unclosed_raw_string_on_line` from the grammar engine.
 fn lines_inside_string_literals(lines: &[&str]) -> Vec<bool> {
     let mut inside = vec![false; lines.len()];
     let mut i = 0;
@@ -134,8 +128,9 @@ fn lines_inside_string_literals(lines: &[&str]) -> Vec<bool> {
         let line = lines[i];
 
         // Check for raw string opening: r#"  r##"  r###" etc.
-        // We scan each line for a raw string that opens but doesn't close on the same line.
-        if let Some(close_pattern) = find_unclosed_raw_string(line) {
+        if let Some(close_pattern) =
+            crate::extension::grammar::find_unclosed_raw_string_on_line(line)
+        {
             // Mark subsequent lines as inside the string until we find the close.
             let mut j = i + 1;
             while j < lines.len() {
@@ -154,62 +149,6 @@ fn lines_inside_string_literals(lines: &[&str]) -> Vec<bool> {
     }
 
     inside
-}
-
-/// Check if a line opens a raw string that doesn't close on the same line.
-/// Returns the closing pattern (e.g., `"#` or `"##`) if found, None otherwise.
-fn find_unclosed_raw_string(line: &str) -> Option<String> {
-    let bytes = line.as_bytes();
-    let len = bytes.len();
-    let mut pos = 0;
-
-    while pos < len {
-        // Skip regular strings — they rarely span lines in Rust and we don't want
-        // to confuse `"..."` with the opening of a raw string.
-        if bytes[pos] == b'"' && (pos == 0 || bytes[pos - 1] != b'r') {
-            // Regular string — find closing quote on same line
-            pos += 1;
-            while pos < len {
-                if bytes[pos] == b'"' && bytes[pos - 1] != b'\\' {
-                    pos += 1;
-                    break;
-                }
-                pos += 1;
-            }
-            continue;
-        }
-
-        // Look for r followed by zero or more # then "
-        if bytes[pos] == b'r' && pos + 1 < len {
-            let hash_start = pos + 1;
-            let mut hash_end = hash_start;
-            while hash_end < len && bytes[hash_end] == b'#' {
-                hash_end += 1;
-            }
-            let hash_count = hash_end - hash_start;
-
-            if hash_count > 0 && hash_end < len && bytes[hash_end] == b'"' {
-                // Found r#..." — build the closing pattern: "followed by hash_count #'s
-                let close_pattern = format!("\"{}",  "#".repeat(hash_count));
-
-                // Check if the closing pattern appears later on the SAME line
-                let after_open = &line[hash_end + 1..];
-                if !after_open.contains(&close_pattern) {
-                    return Some(close_pattern);
-                }
-
-                // Closed on same line — skip past the close and continue
-                if let Some(close_pos) = after_open.find(&close_pattern) {
-                    pos = hash_end + 1 + close_pos + close_pattern.len();
-                    continue;
-                }
-            }
-        }
-
-        pos += 1;
-    }
-
-    None
 }
 
 /// Find a function's line range by name within source content.
