@@ -1,4 +1,5 @@
 use homeboy::deploy::parse_bulk_component_ids;
+use std::path::PathBuf;
 
 #[test]
 fn test_parse_bulk_component_ids_supports_json_array() {

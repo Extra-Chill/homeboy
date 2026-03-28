@@ -3,14 +3,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use homeboy::refactor;
-
-fn tmp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("homeboy-refactor-{name}-{nanos}"))
-}
+use crate::tests::commands::deploy_test::tmp_dir;
 
 #[test]
 fn test_build_plan() {
