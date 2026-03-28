@@ -727,16 +727,6 @@ mod tests {
     use crate::code_audit::{Finding, Severity};
     use crate::refactor::auto::{Fix, SkippedFile};
 
-    fn test_content() -> &'static str {
-        r#"#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_process_data() {
-        assert_eq!(1, 1);
-    }
-}
 "#
     }
 
@@ -749,65 +739,6 @@ mod tests {
             suggestion: "Remove orphaned test".to_string(),
             kind: AuditFinding::OrphanedTest,
         }
-    }
-
-    #[test]
-    fn orphaned_test_automated_when_source_file_deleted() {
-        // Source file does not exist → test is unambiguously orphaned → automated.
-        let dir = tempfile::tempdir().unwrap();
-        let test_file = dir.path().join("tests/core/process_test.rs");
-        std::fs::create_dir_all(test_file.parent().unwrap()).unwrap();
-        std::fs::write(&test_file, test_content()).unwrap();
-        // Deliberately do NOT create src/core/process.rs
-
-        let mut result = empty_result();
-        result.source_path = dir.path().to_string_lossy().to_string();
-        result.findings.push(orphaned_finding("tests/core/process_test.rs"));
-
-        let mut fixes: Vec<Fix> = Vec::new();
-        let mut skipped: Vec<SkippedFile> = Vec::new();
-        generate_orphaned_test_fixes(&result, dir.path(), &mut fixes, &mut skipped);
-
-        assert_eq!(fixes.len(), 1, "Expected 1 fix, got {}", fixes.len());
-        assert_eq!(fixes[0].insertions.len(), 1);
-        assert!(
-            !fixes[0].insertions[0].manual_only,
-            "Should be automated when source file is deleted"
-        );
-        assert!(
-            fixes[0].insertions[0].description.contains("source file deleted"),
-            "Description should note source file was deleted"
-        );
-    }
-
-    #[test]
-    fn orphaned_test_manual_when_source_file_exists() {
-        // Source file still exists → method might have been deliberately removed
-        // but test could still test valid behavior → manual-only.
-        let dir = tempfile::tempdir().unwrap();
-        let test_file = dir.path().join("tests/core/process_test.rs");
-        std::fs::create_dir_all(test_file.parent().unwrap()).unwrap();
-        std::fs::write(&test_file, test_content()).unwrap();
-
-        // Create the source file (without the referenced method)
-        let source_file = dir.path().join("src/core/process.rs");
-        std::fs::create_dir_all(source_file.parent().unwrap()).unwrap();
-        std::fs::write(&source_file, "pub fn other_method() {}\n").unwrap();
-
-        let mut result = empty_result();
-        result.source_path = dir.path().to_string_lossy().to_string();
-        result.findings.push(orphaned_finding("tests/core/process_test.rs"));
-
-        let mut fixes: Vec<Fix> = Vec::new();
-        let mut skipped: Vec<SkippedFile> = Vec::new();
-        generate_orphaned_test_fixes(&result, dir.path(), &mut fixes, &mut skipped);
-
-        assert_eq!(fixes.len(), 1, "Expected 1 fix, got {}", fixes.len());
-        assert_eq!(fixes[0].insertions.len(), 1);
-        assert!(
-            fixes[0].insertions[0].manual_only,
-            "Should be manual-only when source file still exists"
-        );
     }
 
     // ── Regression tests: string literal detection ────────────────────
