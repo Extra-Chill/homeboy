@@ -125,6 +125,14 @@ pub enum InsertAnchor {
     },
     /// Add a type conformance to the primary type declaration.
     TypeDeclaration,
+    /// Insert at a specific 1-indexed line number.
+    ///
+    /// Used by manual commands like `propagate` that compute exact
+    /// insertion points from structural analysis.
+    AtLine {
+        /// 1-indexed line number to insert before.
+        line: usize,
+    },
 }
 
 /// An `EditOp` with metadata about its origin.
@@ -305,6 +313,73 @@ pub fn fix_result_to_edit_ops(
     ops
 }
 
+// ============================================================================
+// Manual command conversions
+// ============================================================================
+
+/// Translate a `PropagateEdit` into a `TaggedEditOp`.
+pub fn propagate_edit_to_edit_op(
+    edit: &crate::core::refactor::propagate::PropagateEdit,
+) -> TaggedEditOp {
+    TaggedEditOp {
+        op: EditOp::InsertLines {
+            file: edit.file.clone(),
+            anchor: InsertAnchor::AtLine { line: edit.line },
+            code: edit.insert_text.clone(),
+        },
+        primitive: None,
+        finding: None,
+        description: edit.description.clone(),
+        manual_only: false,
+    }
+}
+
+/// Translate a `PropagateResult` into a list of `TaggedEditOp`s.
+pub fn propagate_result_to_edit_ops(
+    result: &crate::core::refactor::propagate::PropagateResult,
+) -> Vec<TaggedEditOp> {
+    result
+        .edits
+        .iter()
+        .map(propagate_edit_to_edit_op)
+        .collect()
+}
+
+/// Translate a `TransformMatch` into a `TaggedEditOp`.
+pub fn transform_match_to_edit_op(
+    m: &crate::core::refactor::transform::TransformMatch,
+) -> TaggedEditOp {
+    TaggedEditOp {
+        op: EditOp::ReplaceText {
+            file: m.file.clone(),
+            line: m.line,
+            old_text: m.before.clone(),
+            new_text: m.after.clone(),
+        },
+        primitive: None,
+        finding: None,
+        description: format!("Transform: {} → {}", m.before, m.after),
+        manual_only: false,
+    }
+}
+
+/// Translate a `TransformResult` into a list of `TaggedEditOp`s.
+pub fn transform_result_to_edit_ops(
+    result: &crate::core::refactor::transform::TransformResult,
+) -> Vec<TaggedEditOp> {
+    result
+        .rules
+        .iter()
+        .flat_map(|rule| {
+            rule.matches.iter().map(|m| {
+                let mut op = transform_match_to_edit_op(m);
+                op.description = format!("{}: {}", rule.description, op.description);
+                op
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +517,152 @@ mod tests {
         assert_eq!(ops.len(), 2);
         assert!(matches!(ops[0].op, EditOp::RemoveLines { .. }));
         assert!(matches!(ops[1].op, EditOp::InsertLines { .. }));
+    }
+
+    // ── Manual command conversion tests ───────────────────────────────
+
+    #[test]
+    fn propagate_edit_maps_to_insert_at_line() {
+        use crate::core::refactor::propagate::PropagateEdit;
+
+        let edit = PropagateEdit {
+            file: "src/config.rs".to_string(),
+            line: 42,
+            insert_text: "    new_field: Default::default(),".to_string(),
+            description: "Insert missing field `new_field`".to_string(),
+        };
+        let tagged = propagate_edit_to_edit_op(&edit);
+        assert!(matches!(
+            tagged.op,
+            EditOp::InsertLines {
+                anchor: InsertAnchor::AtLine { line: 42 },
+                ..
+            }
+        ));
+        assert!(tagged.description.contains("new_field"));
+        assert!(tagged.primitive.is_none());
+        assert!(tagged.finding.is_none());
+    }
+
+    #[test]
+    fn propagate_result_produces_one_op_per_edit() {
+        use crate::core::refactor::propagate::{PropagateEdit, PropagateResult};
+
+        let result = PropagateResult {
+            struct_name: "Config".to_string(),
+            definition_file: "src/config.rs".to_string(),
+            fields: vec![],
+            files_scanned: 10,
+            instantiations_found: 3,
+            instantiations_needing_fix: 2,
+            edits: vec![
+                PropagateEdit {
+                    file: "src/a.rs".to_string(),
+                    line: 10,
+                    insert_text: "    field: 0,".to_string(),
+                    description: "Insert `field`".to_string(),
+                },
+                PropagateEdit {
+                    file: "src/b.rs".to_string(),
+                    line: 20,
+                    insert_text: "    field: 0,".to_string(),
+                    description: "Insert `field`".to_string(),
+                },
+            ],
+            applied: false,
+        };
+        let ops = propagate_result_to_edit_ops(&result);
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(
+            &ops[0].op,
+            EditOp::InsertLines {
+                file,
+                anchor: InsertAnchor::AtLine { line: 10 },
+                ..
+            } if file == "src/a.rs"
+        ));
+        assert!(matches!(
+            &ops[1].op,
+            EditOp::InsertLines {
+                file,
+                anchor: InsertAnchor::AtLine { line: 20 },
+                ..
+            } if file == "src/b.rs"
+        ));
+    }
+
+    #[test]
+    fn transform_match_maps_to_replace_text() {
+        use crate::core::refactor::transform::TransformMatch;
+
+        let m = TransformMatch {
+            file: "src/lib.rs".to_string(),
+            line: 15,
+            before: "old_name".to_string(),
+            after: "new_name".to_string(),
+        };
+        let tagged = transform_match_to_edit_op(&m);
+        assert!(matches!(
+            tagged.op,
+            EditOp::ReplaceText {
+                line: 15,
+                ..
+            }
+        ));
+        assert!(tagged.description.contains("old_name"));
+        assert!(tagged.description.contains("new_name"));
+    }
+
+    #[test]
+    fn transform_result_flattens_rules_into_ops() {
+        use crate::core::refactor::transform::{RuleResult, TransformMatch, TransformResult};
+
+        let result = TransformResult {
+            name: "test".to_string(),
+            rules: vec![
+                RuleResult {
+                    id: "rule1".to_string(),
+                    description: "Rename foo".to_string(),
+                    matches: vec![
+                        TransformMatch {
+                            file: "src/a.rs".to_string(),
+                            line: 1,
+                            before: "foo".to_string(),
+                            after: "bar".to_string(),
+                        },
+                    ],
+                    replacement_count: 1,
+                },
+                RuleResult {
+                    id: "rule2".to_string(),
+                    description: "Rename baz".to_string(),
+                    matches: vec![
+                        TransformMatch {
+                            file: "src/b.rs".to_string(),
+                            line: 5,
+                            before: "baz".to_string(),
+                            after: "qux".to_string(),
+                        },
+                        TransformMatch {
+                            file: "src/c.rs".to_string(),
+                            line: 10,
+                            before: "baz".to_string(),
+                            after: "qux".to_string(),
+                        },
+                    ],
+                    replacement_count: 2,
+                },
+            ],
+            total_replacements: 3,
+            total_files: 3,
+            written: false,
+        };
+        let ops = transform_result_to_edit_ops(&result);
+        assert_eq!(ops.len(), 3);
+        // First op is from rule1
+        assert!(ops[0].description.contains("Rename foo"));
+        // Second and third are from rule2
+        assert!(ops[1].description.contains("Rename baz"));
+        assert!(ops[2].description.contains("Rename baz"));
     }
 }
