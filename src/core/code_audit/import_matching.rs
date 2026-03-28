@@ -141,8 +141,7 @@ pub(crate) fn content_defines_name(content: &str, name: &str) -> bool {
             if let Some(rest) = stripped.strip_prefix(kw) {
                 // The name should appear right after the keyword, followed by
                 // a non-identifier char (paren, brace, colon, angle bracket, etc.)
-                if rest.starts_with(name) {
-                    let after = &rest[name.len()..];
+                if let Some(after) = rest.strip_prefix(name) {
                     if after.is_empty()
                         || after.starts_with('(')
                         || after.starts_with('<')
