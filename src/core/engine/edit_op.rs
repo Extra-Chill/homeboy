@@ -150,7 +150,7 @@ pub struct TaggedEditOp {
 ///
 /// Most insertions map 1:1 to an EditOp. The `file` parameter is the
 /// relative file path from the parent `Fix`.
-pub fn from_insertion(insertion: &Insertion, file: &str) -> TaggedEditOp {
+pub(crate) fn from_insertion(insertion: &Insertion, file: &str) -> TaggedEditOp {
     let op = match &insertion.kind {
         InsertionKind::VisibilityChange { line, from, to } => EditOp::ReplaceText {
             file: file.to_string(),
@@ -268,7 +268,7 @@ pub fn from_insertion(insertion: &Insertion, file: &str) -> TaggedEditOp {
 }
 
 /// Translate an entire `Fix` into a list of `TaggedEditOp`s.
-pub fn fix_to_edit_ops(fix: &crate::core::refactor::auto::Fix) -> Vec<TaggedEditOp> {
+pub(crate) fn fix_to_edit_ops(fix: &crate::core::refactor::auto::Fix) -> Vec<TaggedEditOp> {
     fix.insertions
         .iter()
         .map(|ins| from_insertion(ins, &fix.file))
@@ -276,7 +276,7 @@ pub fn fix_to_edit_ops(fix: &crate::core::refactor::auto::Fix) -> Vec<TaggedEdit
 }
 
 /// Translate a `NewFile` into a `TaggedEditOp`.
-pub fn new_file_to_edit_op(nf: &crate::core::refactor::auto::NewFile) -> TaggedEditOp {
+pub(crate) fn new_file_to_edit_op(nf: &crate::core::refactor::auto::NewFile) -> TaggedEditOp {
     TaggedEditOp {
         op: EditOp::CreateFile {
             file: nf.file.clone(),
@@ -293,7 +293,7 @@ pub fn new_file_to_edit_op(nf: &crate::core::refactor::auto::NewFile) -> TaggedE
 ///
 /// This is the primary reporting/debugging surface — it shows every edit
 /// the refactor engine would perform, in a unified format.
-pub fn fix_result_to_edit_ops(
+pub(crate) fn fix_result_to_edit_ops(
     result: &crate::core::refactor::auto::FixResult,
 ) -> Vec<TaggedEditOp> {
     let mut ops: Vec<TaggedEditOp> = result.fixes.iter().flat_map(fix_to_edit_ops).collect();
@@ -310,19 +310,6 @@ mod tests {
     use super::*;
     use crate::code_audit::AuditFinding;
     use crate::core::refactor::auto::{Fix, Insertion, InsertionKind, RefactorPrimitive};
-
-    fn test_insertion(kind: InsertionKind) -> Insertion {
-        Insertion {
-            primitive: None,
-            kind,
-            finding: AuditFinding::UnreferencedExport,
-            manual_only: false,
-            auto_apply: false,
-            blocked_reason: None,
-            code: String::new(),
-            description: "test".to_string(),
-        }
-    }
 
     #[test]
     fn visibility_change_maps_to_replace_text() {

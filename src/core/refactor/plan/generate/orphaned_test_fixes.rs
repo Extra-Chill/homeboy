@@ -190,7 +190,7 @@ fn find_unclosed_raw_string(line: &str) -> Option<String> {
 
             if hash_count > 0 && hash_end < len && bytes[hash_end] == b'"' {
                 // Found r#..." — build the closing pattern: "followed by hash_count #'s
-                let close_pattern = format!("\"{}",  "#".repeat(hash_count));
+                let close_pattern = format!("\"{}", "#".repeat(hash_count));
 
                 // Check if the closing pattern appears later on the SAME line
                 let after_open = &line[hash_end + 1..];
@@ -823,7 +823,9 @@ mod tests {
 
         let mut result = empty_result();
         result.source_path = dir.path().to_string_lossy().to_string();
-        result.findings.push(orphaned_finding("tests/core/process_test.rs"));
+        result
+            .findings
+            .push(orphaned_finding("tests/core/process_test.rs"));
 
         let mut fixes: Vec<Fix> = Vec::new();
         let mut skipped: Vec<SkippedFile> = Vec::new();
@@ -836,7 +838,9 @@ mod tests {
             "Should be automated when source file is deleted"
         );
         assert!(
-            fixes[0].insertions[0].description.contains("source file deleted"),
+            fixes[0].insertions[0]
+                .description
+                .contains("source file deleted"),
             "Description should note source file was deleted"
         );
     }
@@ -857,7 +861,9 @@ mod tests {
 
         let mut result = empty_result();
         result.source_path = dir.path().to_string_lossy().to_string();
-        result.findings.push(orphaned_finding("tests/core/process_test.rs"));
+        result
+            .findings
+            .push(orphaned_finding("tests/core/process_test.rs"));
 
         let mut fixes: Vec<Fix> = Vec::new();
         let mut skipped: Vec<SkippedFile> = Vec::new();
@@ -946,10 +952,7 @@ fn test_phantom() {
 
         // The real function should be found.
         let range = find_test_function_range(content, "test_actual_function");
-        assert!(
-            range.is_some(),
-            "Should find the real test_actual_function"
-        );
+        assert!(range.is_some(), "Should find the real test_actual_function");
     }
 
     #[test]
