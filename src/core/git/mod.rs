@@ -59,7 +59,10 @@ pub fn parse_git_identity(identity: Option<&str>) -> GitIdentity {
 
 /// Configure git user.name and user.email in a repository.
 pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::Result<()> {
-    for (key, value) in [("user.name", identity.name.as_str()), ("user.email", identity.email.as_str())] {
+    for (key, value) in [
+        ("user.name", identity.name.as_str()),
+        ("user.email", identity.email.as_str()),
+    ] {
         let output = execute_git(path, &["config", key, value])
             .map_err(|e| Error::git_command_failed(format!("git config {key}: {e}")))?;
         if !output.status.success() {
@@ -70,6 +73,30 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::R
         }
     }
     Ok(())
+}
+
+fn resolve_target(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+) -> crate::error::Result<(String, String)> {
+    let id = component_id.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "componentId",
+            "Missing componentId",
+            None,
+            Some(vec![
+                "Provide a component ID: homeboy git <command> <component-id>".to_string(),
+                "List available components: homeboy component list".to_string(),
+            ]),
+        )
+    })?;
+    let path = if let Some(p) = path_override {
+        p.to_string()
+    } else {
+        let comp = crate::component::resolve_effective(Some(id), None, None)?;
+        comp.local_path
+    };
+    Ok((id.to_string(), path))
 }
 
 #[cfg(test)]
@@ -103,28 +130,4 @@ mod identity_tests {
         assert_eq!(id.name, "My Service");
         assert_eq!(id.email, BOT_EMAIL);
     }
-}
-
-fn resolve_target(
-    component_id: Option<&str>,
-    path_override: Option<&str>,
-) -> crate::error::Result<(String, String)> {
-    let id = component_id.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "componentId",
-            "Missing componentId",
-            None,
-            Some(vec![
-                "Provide a component ID: homeboy git <command> <component-id>".to_string(),
-                "List available components: homeboy component list".to_string(),
-            ]),
-        )
-    })?;
-    let path = if let Some(p) = path_override {
-        p.to_string()
-    } else {
-        let comp = crate::component::resolve_effective(Some(id), None, None)?;
-        comp.local_path
-    };
-    Ok((id.to_string(), path))
 }
