@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.0] - 2026-03-29
+
+### Added
+- detect PHP/Node versions via homeboy component env
+
 ## [1.15.0] - 2026-03-29
 
 ### Added
