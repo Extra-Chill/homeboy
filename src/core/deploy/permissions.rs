@@ -68,7 +68,7 @@ pub(crate) fn fix_deployed_permissions(
 }
 
 /// Fix ownership of deployed files via chown.
-/// Uses configured remote_owner if provided, otherwise auto-detects from existing ownership.
+/// Uses configured remote_owner if provided, otherwise auto-detects from the parent directory.
 fn fix_deployed_ownership(
     ssh_client: &SshClient,
     remote_path: &str,
@@ -78,22 +78,46 @@ fn fix_deployed_ownership(
     let owner = if let Some(configured) = remote_owner {
         configured.to_string()
     } else {
-        // Auto-detect: stat the remote_path to get current owner:group
-        let stat_cmd = format!("stat -c '%U:%G' {} 2>/dev/null", quoted_path);
+        // Auto-detect ownership from the PARENT directory, not the target itself.
+        // After deployment, the target dir is owned by whoever ran the deploy (usually root).
+        // The parent directory (e.g. wp-content/plugins/) retains the correct web server
+        // ownership (e.g. www-data:www-data) and is the reliable source of truth.
+        let parent_path = remote_path
+            .trim_end_matches('/')
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or(remote_path);
+        let quoted_parent = shell::quote_path(parent_path);
+        let stat_cmd = format!(
+            "stat -c '%U:%G' {} 2>/dev/null || stat -f '%Su:%Sg' {} 2>/dev/null",
+            quoted_parent, quoted_parent
+        );
         let stat_output = ssh_client.execute(&stat_cmd);
         if !stat_output.success || stat_output.stdout.trim().is_empty() {
             log_status!(
                 "deploy",
-                "Could not detect ownership of {}, skipping chown",
-                remote_path
+                "Could not detect ownership of parent {}, skipping chown",
+                parent_path
             );
             return;
         }
         let detected = stat_output.stdout.trim().to_string();
-        // Skip chown if already root:root (no point changing to same)
+        // If the parent is root:root, there's nothing meaningful to inherit —
+        // the web server ownership is unknown, so skip chown.
         if detected == "root:root" {
+            log_status!(
+                "deploy",
+                "Parent directory {} is root:root — set remote_owner on the component to fix ownership",
+                parent_path
+            );
             return;
         }
+        log_status!(
+            "deploy",
+            "Auto-detected ownership {} from parent {}",
+            detected,
+            parent_path
+        );
         detected
     };
 
