@@ -15,6 +15,7 @@ use super::run::LintRunWorkflowResult;
 /// fields; unused fields are `None` and skipped in serialization.
 #[derive(Serialize)]
 pub struct LintCommandOutput {
+    pub passed: bool,
     pub status: String,
     pub component: String,
     pub exit_code: i32,
@@ -40,6 +41,7 @@ pub fn from_main_workflow(result: LintRunWorkflowResult) -> (LintCommandOutput, 
     };
     (
         LintCommandOutput {
+            passed: exit_code == 0,
             status: result.status,
             component: result.component,
             exit_code,

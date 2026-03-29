@@ -48,6 +48,7 @@ pub fn run_main_audit_workflow(
         None => {
             return Ok(AuditRunWorkflowResult {
                 output: AuditCommandOutput::Full {
+                    passed: true,
                     result: CodeAuditResult {
                         component_id: args.component_id,
                         source_path: args.source_path,
@@ -212,7 +213,11 @@ fn run_comparison_workflow(
     } else {
         let fixability = report::compute_fixability(&result);
         Ok(AuditRunWorkflowResult {
-            output: AuditCommandOutput::Full { result, fixability },
+            output: AuditCommandOutput::Full {
+                passed: exit_code == 0,
+                result,
+                fixability,
+            },
             exit_code,
         })
     }
@@ -253,6 +258,7 @@ fn build_comparison_output(
 
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Compared {
+                passed: exit_code == 0,
                 result,
                 baseline_comparison: comparison,
                 summary: None,

@@ -20,6 +20,7 @@ use super::workflow::{AutoFixDriftOutput, AutoFixDriftWorkflowResult, DriftWorkf
 /// populates its relevant fields; unused fields are `None` and skipped in serialization.
 #[derive(Serialize)]
 pub struct TestCommandOutput {
+    pub passed: bool,
     pub status: String,
     pub component: String,
     pub exit_code: i32,
@@ -50,6 +51,7 @@ pub fn from_main_workflow(result: TestRunWorkflowResult) -> (TestCommandOutput, 
     let exit_code = result.exit_code;
     (
         TestCommandOutput {
+            passed: exit_code == 0,
             status: result.status,
             component: result.component,
             exit_code: result.exit_code,
@@ -73,6 +75,7 @@ pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i
     let exit_code = result.exit_code;
     (
         TestCommandOutput {
+            passed: exit_code == 0,
             status: "drift".to_string(),
             component: result.component,
             exit_code: result.exit_code,
@@ -108,6 +111,7 @@ pub fn from_auto_fix_drift_workflow(
 
     (
         TestCommandOutput {
+            passed: true,
             status,
             component: result.component,
             exit_code: 0,

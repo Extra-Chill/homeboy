@@ -61,8 +61,11 @@ enum ComponentCommand {
     },
     /// Display component configuration
     Show {
-        /// Component ID
-        id: String,
+        /// Component ID (optional when --path is provided)
+        id: Option<String>,
+        /// Discover component from a directory's homeboy.json instead of the registry
+        #[arg(long)]
+        path: Option<String>,
     },
     /// Update component configuration fields
     ///
@@ -122,6 +125,18 @@ enum ComponentCommand {
     Shared {
         /// Specific component ID to check (optional, shows all if omitted)
         id: Option<String>,
+    },
+    /// Detect runtime environment requirements from the component's source files.
+    ///
+    /// Reads extension-specific metadata (e.g., WordPress "Requires PHP" header)
+    /// to determine what runtime versions the component needs. Outputs JSON
+    /// suitable for CI environment setup.
+    Env {
+        /// Component ID (optional when --path is provided)
+        id: Option<String>,
+        /// Discover component from a directory's homeboy.json
+        #[arg(long)]
+        path: Option<String>,
     },
     /// Add a version target to a component
     AddVersionTarget {
@@ -278,7 +293,7 @@ pub fn run(
                 0,
             ))
         }
-        ComponentCommand::Show { id } => show(&id),
+        ComponentCommand::Show { id, path } => show(id.as_deref(), path.as_deref()),
         ComponentCommand::Set {
             args,
             local_path,
@@ -305,6 +320,7 @@ pub fn run(
         ComponentCommand::List => list(),
         ComponentCommand::Projects { id } => projects(&id),
         ComponentCommand::Shared { id } => shared(id.as_deref()),
+        ComponentCommand::Env { id, path } => env(id.as_deref(), path.as_deref()),
         ComponentCommand::AddVersionTarget { id, file, pattern } => {
             add_version_target(&id, &file, &pattern)
         }
@@ -333,13 +349,40 @@ fn suggest_project_for_path(local_path: &str) -> Option<String> {
     None
 }
 
-fn show(id: &str) -> CmdResult<ComponentOutput> {
-    let component = component::load(id).map_err(|e| e.with_contextual_hint())?;
+fn show(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
+    let component = match (id, path) {
+        // --path: discover from directory's homeboy.json
+        (_, Some(dir)) => {
+            let dir_path = std::path::Path::new(dir);
+            component::resolve_effective(id, Some(dir), None).map_err(|_| {
+                homeboy::Error::validation_invalid_argument(
+                    "path",
+                    format!(
+                        "No homeboy.json found at {} and no registered component matches",
+                        dir_path.display()
+                    ),
+                    None,
+                    Some(vec![
+                        format!("Create homeboy.json in {}", dir_path.display()),
+                        "Or provide a registered component ID".to_string(),
+                    ]),
+                )
+            })?
+        }
+        // ID only: load from registry
+        (Some(comp_id), None) => component::load(comp_id).map_err(|e| e.with_contextual_hint())?,
+        // Neither: try CWD discovery
+        (None, None) => component::resolve_effective(None, None, None).map_err(|_| {
+            homeboy::Error::validation_missing_argument(vec!["id or --path".to_string()])
+        })?,
+    };
+
+    let resolved_id = component.id.clone();
 
     Ok((
         ComponentOutput {
             command: "component.show".to_string(),
-            id: Some(id.to_string()),
+            id: Some(resolved_id.clone()),
             entity: Some({
                 let mut value = serde_json::to_value(&component).map_err(|error| {
                     homeboy::Error::validation_invalid_argument(
@@ -350,7 +393,7 @@ fn show(id: &str) -> CmdResult<ComponentOutput> {
                     )
                 })?;
                 if let Value::Object(ref mut map) = value {
-                    map.insert("id".to_string(), Value::String(component.id.clone()));
+                    map.insert("id".to_string(), Value::String(resolved_id));
                 }
                 value
             }),
@@ -358,6 +401,159 @@ fn show(id: &str) -> CmdResult<ComponentOutput> {
         },
         0,
     ))
+}
+
+/// Runtime environment requirements detected from the component's source files.
+#[derive(Debug, Serialize)]
+struct ComponentEnvOutput {
+    command: String,
+    id: String,
+    extension: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    php: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<String>,
+}
+
+fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
+    let component = match (id, path) {
+        // --path with explicit ID
+        (Some(comp_id), Some(dir)) => component::resolve_effective(Some(comp_id), Some(dir), None)
+            .map_err(|e| e.with_contextual_hint())?,
+        // --path without ID: discover from the directory's homeboy.json
+        (None, Some(dir)) => {
+            let dir_path = Path::new(dir);
+            component::portable::discover_from_portable(dir_path).ok_or_else(|| {
+                homeboy::Error::validation_invalid_argument(
+                    "path",
+                    format!("No homeboy.json found at {}", dir_path.display()),
+                    None,
+                    Some(vec![format!(
+                        "Create homeboy.json in {}",
+                        dir_path.display()
+                    )]),
+                )
+            })?
+        }
+        // ID only
+        (Some(comp_id), None) => component::resolve_effective(Some(comp_id), None, None)
+            .map_err(|e| e.with_contextual_hint())?,
+        // Neither: try CWD discovery
+        (None, None) => component::resolve_effective(None, None, None).map_err(|_| {
+            homeboy::Error::validation_missing_argument(vec!["id or --path".to_string()])
+        })?,
+    };
+
+    let comp_id = component.id.clone();
+    let local_path = Path::new(&component.local_path);
+
+    // Determine the primary extension
+    let extension_id = component
+        .extensions
+        .as_ref()
+        .and_then(|exts| exts.keys().next().cloned());
+
+    let mut php_version: Option<String> = None;
+    let mut node_version: Option<String> = None;
+
+    // Read node version from raw homeboy.json (the Rust struct drops unknown
+    // fields like "php" and "node" from the extension config during deserialization).
+    if let Some(ref ext_id) = extension_id {
+        let config_path = local_path.join("homeboy.json");
+        if let Ok(raw) = std::fs::read_to_string(&config_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(ext_obj) = json.get("extensions").and_then(|e| e.get(ext_id.as_str())) {
+                    if let Some(v) = ext_obj.get("node").and_then(|v| v.as_str()) {
+                        node_version = Some(v.to_string());
+                    }
+                    // Read php from homeboy.json as fallback (overridden below by header detection)
+                    if let Some(v) = ext_obj.get("php").and_then(|v| v.as_str()) {
+                        php_version = Some(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // For WordPress extensions: detect Requires PHP from plugin/theme header.
+    // This takes priority over homeboy.json since the header is the source of truth.
+    if extension_id.as_deref() == Some("wordpress") {
+        if let Some(detected_php) = detect_wordpress_requires_php(local_path) {
+            php_version = Some(detected_php);
+        }
+    }
+
+    let env_output = ComponentEnvOutput {
+        command: "component.env".to_string(),
+        id: comp_id.clone(),
+        extension: extension_id,
+        php: php_version,
+        node: node_version,
+    };
+
+    let entity = serde_json::to_value(&env_output).map_err(|error| {
+        homeboy::Error::validation_invalid_argument(
+            "component",
+            "Failed to serialize env output",
+            Some(error.to_string()),
+            None,
+        )
+    })?;
+
+    Ok((
+        ComponentOutput {
+            command: "component.env".to_string(),
+            id: Some(comp_id),
+            entity: Some(entity),
+            ..Default::default()
+        },
+        0,
+    ))
+}
+
+/// Parse "Requires PHP: X.Y" from a WordPress plugin or theme header.
+fn detect_wordpress_requires_php(component_path: &Path) -> Option<String> {
+    // Check theme first (style.css)
+    let style_css = component_path.join("style.css");
+    if style_css.exists() {
+        if let Some(version) = grep_header_value(&style_css, "Requires PHP:") {
+            if grep_header_value(&style_css, "Theme Name:").is_some() {
+                return Some(version);
+            }
+        }
+    }
+
+    // Check plugin (*.php files in root with "Plugin Name:" header)
+    if let Ok(entries) = std::fs::read_dir(component_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("php")
+                && grep_header_value(&path, "Plugin Name:").is_some()
+            {
+                if let Some(version) = grep_header_value(&path, "Requires PHP:") {
+                    return Some(version);
+                }
+                // Found plugin file but no Requires PHP header
+                return None;
+            }
+        }
+    }
+
+    None
+}
+
+/// Read a "Key: Value" header line from a file (first 100 lines only).
+fn grep_header_value(file: &Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(file).ok()?;
+    for line in content.lines().take(100) {
+        if let Some(pos) = line.find(key) {
+            let value = line[pos + key.len()..].trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 /// Dedicated flags for common component fields on `component set`.

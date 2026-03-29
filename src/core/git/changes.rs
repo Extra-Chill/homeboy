@@ -74,12 +74,18 @@ pub fn get_uncommitted_changes(path: &str) -> Result<UncommittedChanges> {
 /// (excludes Deleted files since there's nothing to lint).
 /// Returns repo-relative paths.
 ///
-/// Prefers triple-dot (`ref...HEAD`) to get only changes on the current branch
-/// relative to the merge base. Falls back to two-dot (`ref..HEAD`) when the
-/// merge base is unavailable (e.g. shallow clones in CI).
+/// Uses triple-dot (`ref...HEAD`) to get only changes on the current branch
+/// relative to the merge base. In shallow clones (common in CI), the merge base
+/// may not be reachable — the function progressively deepens the repository
+/// until the ancestry is available.
+///
+/// Fails explicitly if the merge base cannot be resolved. No silent fallbacks.
 pub fn get_files_changed_since(path: &str, git_ref: &str) -> Result<Vec<String>> {
-    // Try triple-dot first (merge-base diff) — shows only changes on the
-    // current branch, not changes on the ref's branch.
+    // Ensure the ref's ancestry is reachable (handles shallow CI clones).
+    ensure_ancestry_for_ref(path, git_ref)?;
+
+    // Triple-dot (merge-base diff) — shows only changes on the current
+    // branch, not changes on the ref's branch.
     let output = execute_git(
         path,
         &[
@@ -95,34 +101,87 @@ pub fn get_files_changed_since(path: &str, git_ref: &str) -> Result<Vec<String>>
         return parse_diff_output(&output.stdout);
     }
 
-    // Triple-dot failed (likely shallow clone — no merge base available).
-    // Fall back to two-dot diff which only needs both commits to exist.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    eprintln!(
-        "Three-dot diff failed ({}), falling back to two-dot diff",
+    Err(Error::git_command_failed(format!(
+        "git diff {}...HEAD failed: {}",
+        git_ref,
         stderr.trim()
-    );
+    )))
+}
 
-    let fallback = execute_git(
-        path,
-        &[
-            "diff",
-            "--name-only",
-            "--diff-filter=ACMR",
-            &format!("{}..HEAD", git_ref),
-        ],
-    )
-    .map_err(|e| Error::git_command_failed(e.to_string()))?;
+/// Check whether the repo is a shallow clone.
+fn is_shallow_repo(path: &str) -> bool {
+    execute_git(path, &["rev-parse", "--is-shallow-repository"])
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .map(|s| s == "true")
+        .unwrap_or(false)
+}
 
-    if !fallback.status.success() {
-        let fallback_stderr = String::from_utf8_lossy(&fallback.stderr);
+/// Check whether `git merge-base <ref> HEAD` succeeds (the ref's ancestry
+/// is reachable from HEAD).
+fn has_merge_base(path: &str, git_ref: &str) -> bool {
+    execute_git(path, &["merge-base", git_ref, "HEAD"])
+        .ok()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// In shallow clones, the merge base between a ref and HEAD may not be
+/// reachable. This function progressively deepens the repository until the
+/// merge base is available.
+///
+/// Deepening strategy: 50 → 200 → full unshallow. This matches what CI
+/// environments typically need — most PRs have <50 commits, so the first
+/// deepen usually suffices.
+///
+/// Returns an error if the merge base cannot be resolved after all attempts.
+fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
+    // Fast path: merge base already reachable (full clone or sufficient depth).
+    if has_merge_base(path, git_ref) {
+        return Ok(());
+    }
+
+    // Only deepen if this is actually a shallow clone. In a full clone,
+    // a missing merge base means the ref itself is invalid — deepening won't help.
+    if !is_shallow_repo(path) {
         return Err(Error::git_command_failed(format!(
-            "git diff --name-only {}..HEAD failed: {}",
-            git_ref, fallback_stderr
+            "Cannot resolve merge base for {git_ref}: ref is not reachable and repository is not shallow (is the ref valid?)"
         )));
     }
 
-    parse_diff_output(&fallback.stdout)
+    eprintln!("Shallow clone detected — deepening to resolve merge base for {git_ref}");
+
+    // Fetch the ref itself if it's not already present.
+    let _ = execute_git(path, &["fetch", "origin", git_ref, "--depth=50"]);
+
+    // Progressive deepening: try increasingly generous depths.
+    for depth in &["50", "200"] {
+        let _ = execute_git(path, &["fetch", "--deepen", depth]);
+        if has_merge_base(path, git_ref) {
+            eprintln!("Merge base found after deepening by {depth} commits");
+            return Ok(());
+        }
+    }
+
+    // Last resort: full unshallow.
+    eprintln!("Merge base not found with depth 200, unshallowing repository");
+    let _ = execute_git(path, &["fetch", "--unshallow"]);
+
+    if has_merge_base(path, git_ref) {
+        eprintln!("Merge base found after full unshallow");
+        Ok(())
+    } else {
+        Err(Error::git_command_failed(format!(
+            "Cannot resolve merge base for {git_ref} even after full unshallow — the ref may not exist in the remote"
+        )))
+    }
 }
 
 /// Get all dirty files in the working tree (modified, new, deleted).

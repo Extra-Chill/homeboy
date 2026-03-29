@@ -48,6 +48,7 @@ pub struct AuditSummaryFinding {
 pub enum AuditCommandOutput {
     #[serde(rename = "audit")]
     Full {
+        passed: bool,
         #[serde(flatten)]
         result: CodeAuditResult,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,6 +75,7 @@ pub enum AuditCommandOutput {
 
     #[serde(rename = "audit.compared")]
     Compared {
+        passed: bool,
         #[serde(flatten)]
         result: CodeAuditResult,
         baseline_comparison: baseline::BaselineComparison,
