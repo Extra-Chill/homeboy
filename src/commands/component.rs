@@ -341,35 +341,27 @@ fn show(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
         // --path: discover from directory's homeboy.json
         (_, Some(dir)) => {
             let dir_path = std::path::Path::new(dir);
-            component::resolve_effective(id, Some(dir), None)
-                .map_err(|_| {
-                    homeboy::Error::validation_invalid_argument(
-                        "path",
-                        format!(
-                            "No homeboy.json found at {} and no registered component matches",
-                            dir_path.display()
-                        ),
-                        None,
-                        Some(vec![
-                            format!("Create homeboy.json in {}", dir_path.display()),
-                            "Or provide a registered component ID".to_string(),
-                        ]),
-                    )
-                })?
+            component::resolve_effective(id, Some(dir), None).map_err(|_| {
+                homeboy::Error::validation_invalid_argument(
+                    "path",
+                    format!(
+                        "No homeboy.json found at {} and no registered component matches",
+                        dir_path.display()
+                    ),
+                    None,
+                    Some(vec![
+                        format!("Create homeboy.json in {}", dir_path.display()),
+                        "Or provide a registered component ID".to_string(),
+                    ]),
+                )
+            })?
         }
         // ID only: load from registry
-        (Some(comp_id), None) => {
-            component::load(comp_id).map_err(|e| e.with_contextual_hint())?
-        }
+        (Some(comp_id), None) => component::load(comp_id).map_err(|e| e.with_contextual_hint())?,
         // Neither: try CWD discovery
-        (None, None) => {
-            component::resolve_effective(None, None, None)
-                .map_err(|_| {
-                    homeboy::Error::validation_missing_argument(vec![
-                        "id or --path".to_string(),
-                    ])
-                })?
-        }
+        (None, None) => component::resolve_effective(None, None, None).map_err(|_| {
+            homeboy::Error::validation_missing_argument(vec!["id or --path".to_string()])
+        })?,
     };
 
     let resolved_id = component.id.clone();

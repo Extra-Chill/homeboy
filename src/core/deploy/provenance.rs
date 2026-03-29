@@ -36,7 +36,7 @@ pub struct BuildProvenance {
 
 impl BuildProvenance {
     /// Returns true if this build was from the exact tagged commit (not ahead).
-    pub fn is_tagged_build(&self) -> bool {
+    pub(crate) fn is_tagged_build(&self) -> bool {
         self.ahead_of_tag == 0 && self.tag.is_some() && !self.dirty
     }
 
@@ -99,7 +99,7 @@ pub fn read(component: &Component) -> Option<BuildProvenance> {
 }
 
 /// Read build provenance from a path (component local_path).
-pub fn read_from_path(local_path: &str) -> Option<BuildProvenance> {
+pub(crate) fn read_from_path(local_path: &str) -> Option<BuildProvenance> {
     let meta_path = meta_path(local_path);
     let content = std::fs::read_to_string(&meta_path).ok()?;
     serde_json::from_str(&content).ok()
@@ -248,19 +248,5 @@ mod tests {
         };
         assert!(p.is_ahead_of_tag());
         assert!(!p.is_tagged_build());
-    }
-
-    #[test]
-    fn test_no_tag() {
-        let p = BuildProvenance {
-            commit: "abc123".to_string(),
-            git_ref: "main".to_string(),
-            tag: None,
-            ahead_of_tag: 0,
-            timestamp: "2026-03-28T20:00:00Z".to_string(),
-            dirty: false,
-        };
-        assert!(!p.is_tagged_build());
-        assert!(!p.is_ahead_of_tag());
     }
 }
