@@ -176,8 +176,6 @@ runs:
       env:
         COMPONENT_NAME: ${{ inputs.component }}
         EXTENSION_INPUT: ${{ inputs.extension }}
-        PHP_INPUT: ${{ inputs.php-version }}
-        NODE_INPUT: ${{ inputs.node-version }}
       run: bash ${{ github.action_path }}/scripts/setup/read-portable-config.sh
 
     # ── Phase 2: Resolve execution context ──
@@ -197,40 +195,10 @@ runs:
         COMMANDS_INPUT: ${{ inputs.commands }}
       run: bash ${{ github.action_path }}/scripts/core/resolve-commands.sh
 
-    # ── Phase 3: Environment setup ──
-
-    - name: Setup PHP
-      if: steps.read-config.outputs.portable-php != ''
-      uses: shivammathur/setup-php@v2
-      with:
-        php-version: ${{ steps.read-config.outputs.portable-php }}
-        extensions: mbstring, intl, pdo_sqlite, mysqli
-        tools: composer:v2
-        coverage: none
-
-    - name: Setup Node.js
-      if: steps.read-config.outputs.portable-node != ''
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ steps.read-config.outputs.portable-node }}
-
-    - name: Auto-setup environment
-      if: inputs.auto-setup == 'true'
-      shell: bash
-      run: bash ${{ github.action_path }}/scripts/setup/auto-setup-environment.sh
-
-    # ── Phase 3b: SSH setup (for fleet/deploy) ──
-
-    - name: Setup SSH
-      id: setup-ssh
-      if: contains(steps.resolve-commands.outputs.operations-commands, 'fleet') || contains(steps.resolve-commands.outputs.operations-commands, 'deploy') || inputs.ssh-key != ''
-      shell: bash
-      env:
-        SSH_KEY: ${{ inputs.ssh-key }}
-        SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
-      run: bash ${{ github.action_path }}/scripts/setup/setup-ssh.sh
-
-    # ── Phase 4: Install Homeboy ──
+    # ── Phase 3: Install Homeboy ──
+    # Homeboy installs before PHP/Node so we can use `homeboy component env`
+    # to detect runtime requirements from the source files (e.g., WordPress
+    # "Requires PHP" header).
 
     - name: Install pre-built binary
       id: install-prebuilt
@@ -323,6 +291,51 @@ runs:
         ACTION_REF: ${{ github.action_ref }}
         ACTION_REPOSITORY: ${{ github.action_repository }}
       run: bash ${{ github.action_path }}/scripts/setup/capture-tooling-metadata.sh
+
+    # ── Phase 4: Detect runtime + setup environment ──
+    # Uses `homeboy component env` to detect PHP/Node versions from source
+    # files. For WordPress, reads "Requires PHP" from the plugin/theme header.
+    # Action input overrides take priority over detected values.
+
+    - name: Detect runtime environment
+      id: detect-env
+      shell: bash
+      env:
+        PHP_INPUT: ${{ inputs.php-version }}
+        NODE_INPUT: ${{ inputs.node-version }}
+        COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
+      run: bash ${{ github.action_path }}/scripts/setup/detect-runtime-env.sh
+
+    - name: Setup PHP
+      if: steps.detect-env.outputs.portable-php != ''
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ steps.detect-env.outputs.portable-php }}
+        extensions: mbstring, intl, pdo_sqlite, mysqli
+        tools: composer:v2
+        coverage: none
+
+    - name: Setup Node.js
+      if: steps.detect-env.outputs.portable-node != ''
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ steps.detect-env.outputs.portable-node }}
+
+    - name: Auto-setup environment
+      if: inputs.auto-setup == 'true'
+      shell: bash
+      run: bash ${{ github.action_path }}/scripts/setup/auto-setup-environment.sh
+
+    # ── Phase 4b: SSH setup (for fleet/deploy) ──
+
+    - name: Setup SSH
+      id: setup-ssh
+      if: contains(steps.resolve-commands.outputs.operations-commands, 'fleet') || contains(steps.resolve-commands.outputs.operations-commands, 'deploy') || inputs.ssh-key != ''
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh-key }}
+        SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
+      run: bash ${{ github.action_path }}/scripts/setup/setup-ssh.sh
 
     # ── Phase 5: Run commands ──
 

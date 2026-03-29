@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 
-# Read homeboy.json — the single source of truth for project configuration.
+# Read homeboy.json for component identity (ID, extension, directory).
 #
-# Reads:
+# This runs early (Phase 1) before homeboy is installed, so it only reads
+# the minimal fields needed for cache keys and command routing. Runtime
+# version detection (PHP, Node) is handled later by detect-runtime-env.sh
+# after the homeboy binary is available.
+#
+# Outputs:
 #   PORTABLE_ID         — component id
 #   PORTABLE_EXTENSION  — extension id (first key from extensions object)
-#   PORTABLE_PHP        — php version (from extensions.<ext>.php)
-#   PORTABLE_NODE       — node version (from extensions.<ext>.node)
-#
-# Action inputs can override php and node versions. Everything else
-# comes from homeboy.json or it doesn't exist.
+#   COMPONENT_DIR       — directory containing homeboy.json
 #
 # All values are written to GITHUB_ENV and GITHUB_OUTPUT for use by subsequent steps.
 
@@ -42,7 +43,7 @@ if [ -z "${PORTABLE_ID}" ]; then
   exit 1
 fi
 
-# ── Extension inference ──
+# ── Extension ──
 # If the action input specifies an extension, use that. Otherwise infer from
 # the first (usually only) key in the extensions object.
 
@@ -53,47 +54,17 @@ else
   PORTABLE_EXTENSION="$(jq -r '.extensions // {} | keys | first // empty' "${CONFIG_FILE}" 2>/dev/null || true)"
 fi
 
-# ── PHP version ──
-# Source: action input override > extensions.<ext>.php in homeboy.json
-
-PHP_INPUT="${PHP_INPUT:-}"
-PORTABLE_PHP=""
-
-if [ -n "${PHP_INPUT}" ]; then
-  PORTABLE_PHP="${PHP_INPUT}"
-elif [ -n "${PORTABLE_EXTENSION}" ]; then
-  PORTABLE_PHP="$(jq -r --arg ext "${PORTABLE_EXTENSION}" '.extensions[$ext].php // empty' "${CONFIG_FILE}" 2>/dev/null || true)"
-fi
-
-# ── Node version ──
-# Source: action input override > extensions.<ext>.node in homeboy.json
-
-NODE_INPUT="${NODE_INPUT:-}"
-PORTABLE_NODE=""
-
-if [ -n "${NODE_INPUT}" ]; then
-  PORTABLE_NODE="${NODE_INPUT}"
-elif [ -n "${PORTABLE_EXTENSION}" ]; then
-  PORTABLE_NODE="$(jq -r --arg ext "${PORTABLE_EXTENSION}" '.extensions[$ext].node // empty' "${CONFIG_FILE}" 2>/dev/null || true)"
-fi
-
 # ── Write outputs ──
 
 echo "PORTABLE_ID=${PORTABLE_ID}" >> "${GITHUB_ENV}"
 echo "PORTABLE_EXTENSION=${PORTABLE_EXTENSION}" >> "${GITHUB_ENV}"
-echo "PORTABLE_PHP=${PORTABLE_PHP}" >> "${GITHUB_ENV}"
-echo "PORTABLE_NODE=${PORTABLE_NODE}" >> "${GITHUB_ENV}"
 echo "COMPONENT_DIR=${CONFIG_DIR}" >> "${GITHUB_ENV}"
 
 echo "portable-id=${PORTABLE_ID}" >> "${GITHUB_OUTPUT}"
 echo "portable-extension=${PORTABLE_EXTENSION}" >> "${GITHUB_OUTPUT}"
-echo "portable-php=${PORTABLE_PHP}" >> "${GITHUB_OUTPUT}"
-echo "portable-node=${PORTABLE_NODE}" >> "${GITHUB_OUTPUT}"
 echo "component-dir=${CONFIG_DIR}" >> "${GITHUB_OUTPUT}"
 
 echo "Config resolved from ${CONFIG_FILE}:"
 echo "  id:        ${PORTABLE_ID}"
 echo "  extension: ${PORTABLE_EXTENSION:-none}"
-echo "  php:       ${PORTABLE_PHP:-skip}"
-echo "  node:      ${PORTABLE_NODE:-skip}"
 echo "  dir:       ${CONFIG_DIR}"
