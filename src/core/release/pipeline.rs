@@ -885,11 +885,12 @@ fn build_release_steps(
         missing: vec![],
     });
 
+    let mut publish_step_ids: Vec<String> = Vec::new();
+
     if !publish_targets.is_empty() && !options.skip_publish {
         // 6. Publish steps (all run independently after git.push)
         // Package already ran before tagging; publish needs the push to have
         // completed (e.g., crates.io/Homebrew need the tag on the remote).
-        let mut publish_step_ids: Vec<String> = Vec::new();
         for target in &publish_targets {
             let step_id = format!("publish.{}", target);
             let step_type = format!("publish.{}", target);
@@ -915,7 +916,7 @@ fn build_release_steps(
                 id: "cleanup".to_string(),
                 step_type: "cleanup".to_string(),
                 label: Some("Clean up release artifacts".to_string()),
-                needs: publish_step_ids,
+                needs: publish_step_ids.clone(),
                 config: std::collections::HashMap::new(),
                 status: ReleasePlanStatus::Ready,
                 missing: vec![],
@@ -933,7 +934,14 @@ fn build_release_steps(
         crate::engine::hooks::resolve_hooks(component, crate::engine::hooks::events::POST_RELEASE);
     if !post_release_hooks.is_empty() {
         let post_release_needs = if !options.skip_publish && !publish_targets.is_empty() {
-            vec!["cleanup".to_string()]
+            if options.deploy {
+                // When --deploy is set, cleanup was removed from the pipeline
+                // (deploy needs the build artifact). Depend on the last publish
+                // steps directly.
+                publish_step_ids.clone()
+            } else {
+                vec!["cleanup".to_string()]
+            }
         } else {
             vec!["git.push".to_string()]
         };

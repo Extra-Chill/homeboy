@@ -620,7 +620,16 @@ pub fn find_references_with_targeting(
     root: &Path,
     targeting: &RenameTargeting,
 ) -> Vec<Reference> {
-    let config = scan_config_for_scope(&spec.scope);
+    // When --files globs are provided, bypass the default extension filter
+    // so any file type can be targeted explicitly.
+    let config = if !targeting.include_globs.is_empty() {
+        ScanConfig {
+            extensions: ExtensionFilter::All,
+            ..ScanConfig::default()
+        }
+    } else {
+        scan_config_for_scope(&spec.scope)
+    };
     let files = target_files(codebase_scan::walk_files(root, &config), root, targeting);
 
     // Build the working variant list — may be extended by discovery

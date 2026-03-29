@@ -115,8 +115,8 @@ pub(super) fn deploy_components(
         Vec::new()
     };
 
-    // Warn about HEAD-vs-tag gap before the tag checkout.
-    // Skip warning for components that will reuse their build artifact.
+    // Check for HEAD-vs-tag gap before the tag checkout.
+    // Skip check for components that will reuse their build artifact.
     if !config.head && !config.skip_build {
         let non_reuse: Vec<_> = components
             .iter()
@@ -124,7 +124,7 @@ pub(super) fn deploy_components(
             .cloned()
             .collect();
         if !non_reuse.is_empty() {
-            warn_unreleased_commits(&non_reuse, config);
+            check_unreleased_commits(&non_reuse, config)?;
         }
     }
 
@@ -523,34 +523,55 @@ fn restore_branches(checkouts: &[TagCheckout]) {
     }
 }
 
-/// Warn about unreleased commits ahead of the latest tag.
+/// Check for unreleased commits ahead of the latest tag.
 ///
 /// Checks each component for commits between the latest tag and HEAD.
-/// When found, logs a warning with the commit count and subjects so
-/// the user knows their recent work won't be in this deploy.
-fn warn_unreleased_commits(components: &[Component], config: &DeployConfig) {
-    let mut any_gap = false;
+/// When found and `--force` is not set, returns an error to prevent
+/// silently deploying stale code. Use `deploy --head` to deploy
+/// unreleased commits, or `homeboy release` to tag them first.
+fn check_unreleased_commits(
+    components: &[Component],
+    config: &DeployConfig,
+) -> crate::Result<()> {
+    let mut gaps = Vec::new();
 
     for component in components {
         if let Some(gap) = super::provenance::detect_tag_gap(component) {
             super::provenance::warn_tag_gap(&component.id, &gap, "deploy");
-            any_gap = true;
+            gaps.push((component.id.clone(), gap));
         }
     }
 
-    if any_gap {
-        if config.force {
-            log_status!(
-                "deploy",
-                "Deploying from tagged releases. Use `deploy --head` to include unreleased commits, or `homeboy release` to tag them."
-            );
-        } else {
-            log_status!(
-                "deploy",
-                "Deploy will use tagged releases (not HEAD). Use `deploy --head` to include unreleased commits, or `homeboy release` to tag them."
-            );
-        }
+    if gaps.is_empty() {
+        return Ok(());
     }
+
+    if config.force {
+        log_status!(
+            "deploy",
+            "Deploying from tagged releases (--force). Use `deploy --head` to include unreleased commits, or `homeboy release` to tag them."
+        );
+        return Ok(());
+    }
+
+    let component_list: Vec<String> = gaps
+        .iter()
+        .map(|(id, gap)| format!("{} ({} commits ahead of {})", id, gap.ahead, gap.tag))
+        .collect();
+
+    Err(crate::Error::validation_invalid_argument(
+        "deploy",
+        format!(
+            "Refusing to deploy: HEAD has unreleased commits for: {}",
+            component_list.join(", ")
+        ),
+        None,
+        Some(vec![
+            "Run `homeboy release` to tag the commits first".to_string(),
+            "Use `deploy --head` to deploy unreleased commits directly".to_string(),
+            "Use `deploy --force` to deploy the stale tag anyway".to_string(),
+        ]),
+    ))
 }
 
 /// Detect components with reusable build artifacts.

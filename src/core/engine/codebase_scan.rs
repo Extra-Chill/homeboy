@@ -29,6 +29,7 @@ pub const ROOT_ONLY_SKIP_DIRS: &[&str] = &["build", "dist", "target", "cache", "
 pub const SOURCE_EXTENSIONS: &[&str] = &[
     "rs", "php", "js", "jsx", "ts", "tsx", "mjs", "json", "toml", "yaml", "yml", "md", "txt", "sh",
     "bash", "py", "rb", "go", "swift", "kt", "java", "c", "cpp", "h", "lock",
+    "css", "scss", "sass", "less", "html", "vue", "svelte",
 ];
 
 // ============================================================================

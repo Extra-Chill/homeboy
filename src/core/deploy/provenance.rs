@@ -182,28 +182,30 @@ pub fn detect_tag_gap(component: &Component) -> Option<TagGap> {
 }
 
 /// Log a warning about the HEAD-vs-tag gap for a component.
-/// Used by both `build` and `deploy` commands.
+/// Format a tag gap as a human-readable warning string.
 ///
-/// Uses `eprintln` directly because `log_status!` requires literal prefixes
-/// and this function accepts a runtime `context` parameter.
-pub fn warn_tag_gap(component_id: &str, gap: &TagGap, context: &str) {
-    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-        return;
-    }
-    eprintln!(
-        "[{}] ⚠️  '{}': HEAD is {} commit(s) ahead of latest tag {}",
+/// Used by both `build` and `deploy` commands.
+pub fn format_tag_gap(component_id: &str, gap: &TagGap, context: &str) -> String {
+    let mut lines = vec![format!(
+        "[{}] '{}': HEAD is {} commit(s) ahead of latest tag {}",
         context, component_id, gap.ahead, gap.tag
-    );
+    )];
     for commit in &gap.commits {
-        eprintln!("[{}]      {}", context, commit);
+        lines.push(format!("[{}]      {}", context, commit));
     }
     if gap.ahead > 10 {
-        eprintln!(
+        lines.push(format!(
             "[{}]      ... and {} more",
             context,
             gap.ahead - gap.commits.len() as u32
-        );
+        ));
     }
+    lines.join("\n")
+}
+
+/// Print a tag gap warning to stderr. Always prints regardless of TTY.
+pub fn warn_tag_gap(component_id: &str, gap: &TagGap, context: &str) {
+    eprintln!("{}", format_tag_gap(component_id, gap, context));
 }
 
 #[cfg(test)]
