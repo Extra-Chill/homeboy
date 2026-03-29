@@ -529,10 +529,7 @@ fn restore_branches(checkouts: &[TagCheckout]) {
 /// When found and `--force` is not set, returns an error to prevent
 /// silently deploying stale code. Use `deploy --head` to deploy
 /// unreleased commits, or `homeboy release` to tag them first.
-fn check_unreleased_commits(
-    components: &[Component],
-    config: &DeployConfig,
-) -> crate::Result<()> {
+fn check_unreleased_commits(components: &[Component], config: &DeployConfig) -> crate::Result<()> {
     let mut gaps = Vec::new();
 
     for component in components {
