@@ -428,15 +428,16 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
                     "path",
                     format!("No homeboy.json found at {}", dir_path.display()),
                     None,
-                    Some(vec![format!("Create homeboy.json in {}", dir_path.display())]),
+                    Some(vec![format!(
+                        "Create homeboy.json in {}",
+                        dir_path.display()
+                    )]),
                 )
             })?
         }
         // ID only
-        (Some(comp_id), None) => {
-            component::resolve_effective(Some(comp_id), None, None)
-                .map_err(|e| e.with_contextual_hint())?
-        }
+        (Some(comp_id), None) => component::resolve_effective(Some(comp_id), None, None)
+            .map_err(|e| e.with_contextual_hint())?,
         // Neither: try CWD discovery
         (None, None) => component::resolve_effective(None, None, None).map_err(|_| {
             homeboy::Error::validation_missing_argument(vec!["id or --path".to_string()])
@@ -526,14 +527,14 @@ fn detect_wordpress_requires_php(component_path: &Path) -> Option<String> {
     if let Ok(entries) = std::fs::read_dir(component_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("php") {
-                if grep_header_value(&path, "Plugin Name:").is_some() {
-                    if let Some(version) = grep_header_value(&path, "Requires PHP:") {
-                        return Some(version);
-                    }
-                    // Found plugin file but no Requires PHP header
-                    return None;
+            if path.extension().and_then(|e| e.to_str()) == Some("php")
+                && grep_header_value(&path, "Plugin Name:").is_some()
+            {
+                if let Some(version) = grep_header_value(&path, "Requires PHP:") {
+                    return Some(version);
                 }
+                // Found plugin file but no Requires PHP header
+                return None;
             }
         }
     }
