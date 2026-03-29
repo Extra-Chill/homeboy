@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 
-# Read homeboy.json and infer configuration that consumers no longer need to specify.
+# Read homeboy.json — the single source of truth for project configuration.
 #
-# Infers:
+# Reads:
 #   PORTABLE_ID         — component id
 #   PORTABLE_EXTENSION  — extension id (first key from extensions object)
-#   PORTABLE_PHP        — php version (from extensions.<ext>.php or composer.json)
-#   PORTABLE_NODE       — node version (from extensions.<ext>.node or package.json)
+#   PORTABLE_PHP        — php version (from extensions.<ext>.php)
+#   PORTABLE_NODE       — node version (from extensions.<ext>.node)
+#
+# Action inputs can override php and node versions. Everything else
+# comes from homeboy.json or it doesn't exist.
 #
 # All values are written to GITHUB_ENV and GITHUB_OUTPUT for use by subsequent steps.
 
@@ -50,9 +53,8 @@ else
   PORTABLE_EXTENSION="$(jq -r '.extensions // {} | keys | first // empty' "${CONFIG_FILE}" 2>/dev/null || true)"
 fi
 
-# ── PHP version inference ──
-# Priority: action input > extensions.<ext>.php > composer.json require.php > default
-# Default is only set when extension is wordpress (PHP extensions need PHP).
+# ── PHP version ──
+# Source: action input override > extensions.<ext>.php in homeboy.json
 
 PHP_INPUT="${PHP_INPUT:-}"
 PORTABLE_PHP=""
@@ -60,26 +62,11 @@ PORTABLE_PHP=""
 if [ -n "${PHP_INPUT}" ]; then
   PORTABLE_PHP="${PHP_INPUT}"
 elif [ -n "${PORTABLE_EXTENSION}" ]; then
-  # Check extensions.<ext>.php in homeboy.json
   PORTABLE_PHP="$(jq -r --arg ext "${PORTABLE_EXTENSION}" '.extensions[$ext].php // empty' "${CONFIG_FILE}" 2>/dev/null || true)"
 fi
 
-if [ -z "${PORTABLE_PHP}" ] && [ -f "composer.json" ]; then
-  # Parse minimum PHP version from composer.json require.php constraint
-  # Handles: ">=8.2", "^8.2", "~8.2", "8.2.*", ">=8.2 <8.4", "8.2"
-  RAW_PHP="$(jq -r '.require.php // empty' composer.json 2>/dev/null || true)"
-  if [ -n "${RAW_PHP}" ]; then
-    PORTABLE_PHP="$(printf '%s' "${RAW_PHP}" | grep -oP '\d+\.\d+' | head -1 || true)"
-  fi
-fi
-
-# Default for WordPress extension when nothing else resolved
-if [ -z "${PORTABLE_PHP}" ] && [ "${PORTABLE_EXTENSION}" = "wordpress" ]; then
-  PORTABLE_PHP="8.2"
-fi
-
-# ── Node version inference ──
-# Priority: action input > extensions.<ext>.node > package.json engines.node > skip
+# ── Node version ──
+# Source: action input override > extensions.<ext>.node in homeboy.json
 
 NODE_INPUT="${NODE_INPUT:-}"
 PORTABLE_NODE=""
@@ -88,13 +75,6 @@ if [ -n "${NODE_INPUT}" ]; then
   PORTABLE_NODE="${NODE_INPUT}"
 elif [ -n "${PORTABLE_EXTENSION}" ]; then
   PORTABLE_NODE="$(jq -r --arg ext "${PORTABLE_EXTENSION}" '.extensions[$ext].node // empty' "${CONFIG_FILE}" 2>/dev/null || true)"
-fi
-
-if [ -z "${PORTABLE_NODE}" ] && [ -f "package.json" ]; then
-  RAW_NODE="$(jq -r '.engines.node // empty' package.json 2>/dev/null || true)"
-  if [ -n "${RAW_NODE}" ]; then
-    PORTABLE_NODE="$(printf '%s' "${RAW_NODE}" | grep -oP '\d+' | head -1 || true)"
-  fi
 fi
 
 # ── Write outputs ──
