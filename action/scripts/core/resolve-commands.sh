@@ -5,12 +5,20 @@
 # If the COMMANDS input is explicitly set (non-empty and not the old v1 default),
 # use it as-is. Otherwise, infer from the GitHub event context.
 #
+# Commands are split into two categories:
+#   1. Quality commands: audit, lint, test, refactor, release
+#      These run in canonical order with component/workspace/scope handling.
+#   2. Operations commands: fleet, deploy
+#      These are passthrough commands that talk to remote servers via SSH.
+#      They're never auto-inferred — must be explicitly specified.
+#
 # Reads:
 #   COMMANDS_INPUT     — raw input from action consumer (may be empty)
 #   SCOPE_CONTEXT      — pr | push | cron | manual (set by scope/resolve.sh)
 #
 # Outputs (GITHUB_ENV + GITHUB_OUTPUT):
-#   RESOLVED_COMMANDS  — comma-separated command list
+#   RESOLVED_COMMANDS     — comma-separated quality command list
+#   OPERATIONS_COMMANDS   — comma-separated operations command list (fleet/deploy)
 
 set -euo pipefail
 
@@ -18,48 +26,92 @@ COMMANDS_INPUT="${COMMANDS_INPUT:-}"
 SCOPE_CONTEXT="${SCOPE_CONTEXT:-manual}"
 
 if [ -n "${COMMANDS_INPUT}" ]; then
-  RESOLVED_COMMANDS="${COMMANDS_INPUT}"
-  echo "Commands from input: ${RESOLVED_COMMANDS}"
+  ALL_COMMANDS="${COMMANDS_INPUT}"
+  echo "Commands from input: ${ALL_COMMANDS}"
 else
-  # Context-aware defaults
+  # Context-aware defaults (never include operations commands)
   case "${SCOPE_CONTEXT}" in
     pr)
-      RESOLVED_COMMANDS="audit,lint,test"
+      ALL_COMMANDS="audit,lint,test"
       ;;
     push)
-      RESOLVED_COMMANDS="audit,lint,test"
+      ALL_COMMANDS="audit,lint,test"
       ;;
     cron)
-      RESOLVED_COMMANDS="release"
+      ALL_COMMANDS="release"
       ;;
     manual)
-      RESOLVED_COMMANDS="audit,lint,test"
+      ALL_COMMANDS="audit,lint,test"
       ;;
     *)
-      RESOLVED_COMMANDS="audit,lint,test"
+      ALL_COMMANDS="audit,lint,test"
       ;;
   esac
-  echo "Commands inferred from context (${SCOPE_CONTEXT}): ${RESOLVED_COMMANDS}"
+  echo "Commands inferred from context (${SCOPE_CONTEXT}): ${ALL_COMMANDS}"
+fi
+
+# Split commands into quality vs operations categories.
+# Operations commands (fleet/deploy) are passthrough — they use their own
+# argument structure and don't take component/workspace/scope flags.
+QUALITY_COMMANDS=()
+OPS_COMMANDS=()
+
+IFS=',' read -ra _ALL_ARRAY <<< "${ALL_COMMANDS}"
+for _cmd in "${_ALL_ARRAY[@]}"; do
+  _cmd="$(echo "${_cmd}" | xargs)"
+  [ -z "${_cmd}" ] && continue
+  _base=$(echo "${_cmd}" | awk '{print $1}')
+  case "${_base}" in
+    fleet|deploy)
+      OPS_COMMANDS+=("${_cmd}")
+      ;;
+    *)
+      QUALITY_COMMANDS+=("${_cmd}")
+      ;;
+  esac
+done
+
+# Join arrays back to comma-separated strings
+RESOLVED_COMMANDS=""
+if [ ${#QUALITY_COMMANDS[@]} -gt 0 ]; then
+  RESOLVED_COMMANDS="$(IFS=','; printf '%s' "${QUALITY_COMMANDS[*]}")"
+fi
+
+OPERATIONS_COMMANDS=""
+if [ ${#OPS_COMMANDS[@]} -gt 0 ]; then
+  OPERATIONS_COMMANDS="$(IFS=','; printf '%s' "${OPS_COMMANDS[*]}")"
+fi
+
+if [ -n "${RESOLVED_COMMANDS}" ]; then
+  echo "Quality commands: ${RESOLVED_COMMANDS}"
+fi
+if [ -n "${OPERATIONS_COMMANDS}" ]; then
+  echo "Operations commands: ${OPERATIONS_COMMANDS}"
 fi
 
 # Detect refactor-only command sets (e.g., "refactor --from all").
 # When all commands are refactor variants, the rerun after autofix is circular
 # because the autofix command IS the same refactor — rerunning it is pointless.
 REFACTOR_ONLY="false"
-IFS=',' read -ra _CHECK_ARRAY <<< "${RESOLVED_COMMANDS}"
-_ALL_REFACTOR=true
-for _cmd in "${_CHECK_ARRAY[@]}"; do
-  _base=$(echo "${_cmd}" | xargs | awk '{print $1}')
-  if [ "${_base}" != "refactor" ]; then
-    _ALL_REFACTOR=false
-    break
+if [ -n "${RESOLVED_COMMANDS}" ]; then
+  IFS=',' read -ra _CHECK_ARRAY <<< "${RESOLVED_COMMANDS}"
+  _ALL_REFACTOR=true
+  for _cmd in "${_CHECK_ARRAY[@]}"; do
+    _base=$(echo "${_cmd}" | xargs | awk '{print $1}')
+    if [ "${_base}" != "refactor" ]; then
+      _ALL_REFACTOR=false
+      break
+    fi
+  done
+  if [ "${_ALL_REFACTOR}" = true ]; then
+    REFACTOR_ONLY="true"
+    echo "Commands are refactor-only — rerun after autofix will be skipped"
   fi
-done
-if [ "${_ALL_REFACTOR}" = true ]; then
-  REFACTOR_ONLY="true"
-  echo "Commands are refactor-only — rerun after autofix will be skipped"
 fi
 
 echo "RESOLVED_COMMANDS=${RESOLVED_COMMANDS}" >> "${GITHUB_ENV}"
 echo "resolved-commands=${RESOLVED_COMMANDS}" >> "${GITHUB_OUTPUT}"
 echo "refactor-only=${REFACTOR_ONLY}" >> "${GITHUB_OUTPUT}"
+
+echo "OPERATIONS_COMMANDS=${OPERATIONS_COMMANDS}" >> "${GITHUB_ENV}"
+echo "operations-commands=${OPERATIONS_COMMANDS}" >> "${GITHUB_OUTPUT}"

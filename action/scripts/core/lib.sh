@@ -295,7 +295,8 @@ resolve_push_target() {
 
 # Sort commands into canonical order: audit → lint → test → refactor.
 # Audit/lint/test are the core quality gates; real refactor commands run after
-# them when explicitly requested.
+# them when explicitly requested. Fleet/deploy are operations commands handled
+# separately by run-operations.sh and are filtered out here.
 canonicalize_commands() {
   local commands="$1"
   local audit="" lint="" test="" refactor="" others=()
@@ -310,6 +311,8 @@ canonicalize_commands() {
       lint)    lint="lint" ;;
       test)    test="test" ;;
       refactor) refactor="${cmd}" ;;
+      # Fleet/deploy are operations commands — handled by run-operations.sh
+      fleet|deploy) ;;
       *)       others+=("${cmd}") ;;
     esac
   done

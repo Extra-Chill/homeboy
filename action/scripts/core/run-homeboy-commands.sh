@@ -4,14 +4,21 @@ set -euo pipefail
 
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
+# v2: prefer RESOLVED_COMMANDS (from resolve-commands.sh), fall back to COMMANDS for compat
+EFFECTIVE_COMMANDS="${RESOLVED_COMMANDS:-${COMMANDS:-audit,lint,test}}"
+
+# If no quality commands to run (e.g. operations-only mode), exit cleanly
+if [ -z "${EFFECTIVE_COMMANDS}" ]; then
+  echo "No quality commands to run"
+  echo "results={}" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
 COMP_ID="$(resolve_component_id)"
 WORKSPACE="$(resolve_workspace)"
 RESULTS='{}'
 OVERALL_EXIT=0
 GROUP_PREFIX="${RUN_GROUP_PREFIX:-homeboy}"
-
-# v2: prefer RESOLVED_COMMANDS (from resolve-commands.sh), fall back to COMMANDS for compat
-EFFECTIVE_COMMANDS="${RESOLVED_COMMANDS:-${COMMANDS:-audit,lint,test}}"
 
 HOMEBOY_OUTPUT_DIR=$(mktemp -d)
 echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "${GITHUB_ENV}"

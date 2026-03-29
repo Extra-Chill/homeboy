@@ -113,6 +113,16 @@ inputs:
     required: false
     default: ''
 
+  # ── SSH (for fleet/deploy) ──
+  ssh-key:
+    description: 'SSH private key for fleet/deploy commands. Writes to ~/.ssh, starts ssh-agent, configures known_hosts. If empty, assumes SSH is pre-configured.'
+    required: false
+    default: ''
+  ssh-known-hosts:
+    description: 'Extra known_hosts entries for SSH connections to your servers.'
+    required: false
+    default: ''
+
   # ── Release ──
   release-dry-run:
     description: 'Preview the release without making changes.'
@@ -139,6 +149,9 @@ outputs:
   scope-is-fork:
     description: 'Whether the PR is from a fork (true/false)'
     value: ${{ steps.resolve-scope.outputs.scope-is-fork }}
+  operations-results:
+    description: 'JSON object with pass/fail results for each fleet/deploy command'
+    value: ${{ steps.run-operations.outputs.results }}
   released:
     description: 'Whether a release was created (true/false)'
     value: ${{ steps.release.outputs.released }}
@@ -205,6 +218,17 @@ runs:
       if: inputs.auto-setup == 'true'
       shell: bash
       run: bash ${{ github.action_path }}/scripts/setup/auto-setup-environment.sh
+
+    # ── Phase 3b: SSH setup (for fleet/deploy) ──
+
+    - name: Setup SSH
+      id: setup-ssh
+      if: contains(steps.resolve-commands.outputs.operations-commands, 'fleet') || contains(steps.resolve-commands.outputs.operations-commands, 'deploy') || inputs.ssh-key != ''
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh-key }}
+        SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
+      run: bash ${{ github.action_path }}/scripts/setup/setup-ssh.sh
 
     # ── Phase 4: Install Homeboy ──
 
@@ -324,7 +348,7 @@ runs:
     - name: Run Homeboy commands
       id: run-commands
       continue-on-error: true
-      if: steps.check-pr-state.outputs.active != 'false'
+      if: steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != ''
       shell: bash
       env:
         COMPONENT_NAME: ${{ inputs.component }}
@@ -412,16 +436,6 @@ runs:
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
       run: bash ${{ github.action_path }}/scripts/digest/generate-failure-digest.sh
 
-    - name: Enforce final status
-      id: enforce-status
-      if: always()
-      shell: bash
-      env:
-        RESULTS: ${{ steps.select-results.outputs.results }}
-        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
-        PR_ACTIVE: ${{ steps.check-pr-state.outputs.active }}
-      run: bash ${{ github.action_path }}/scripts/core/enforce-final-status.sh
-
     - name: Run release
       id: release
       if: contains(steps.resolve-commands.outputs.resolved-commands, 'release') && github.event_name != 'pull_request'
@@ -432,6 +446,33 @@ runs:
         RELEASE_BRANCH: ${{ inputs.release-branch }}
         COMPONENT_NAME: ${{ inputs.component }}
       run: bash ${{ github.action_path }}/scripts/release/run-release.sh
+
+    # ── Phase 7b: Operations (fleet/deploy) ──
+    # Runs after quality gates and release — the primary use case is
+    # "release then deploy" or "release then fleet exec upgrade".
+    # Only runs when operations commands are present.
+
+    - name: Run operations (fleet/deploy)
+      id: run-operations
+      if: steps.resolve-commands.outputs.operations-commands != ''
+      continue-on-error: true
+      shell: bash
+      env:
+        OPERATIONS_COMMANDS: ${{ steps.resolve-commands.outputs.operations-commands }}
+        EXTRA_ARGS: ${{ inputs.args }}
+        RUN_GROUP_PREFIX: homeboy
+      run: bash ${{ github.action_path }}/scripts/operations/run-operations.sh
+
+    - name: Enforce final status
+      id: enforce-status
+      if: always()
+      shell: bash
+      env:
+        RESULTS: ${{ steps.select-results.outputs.results }}
+        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
+        OPERATIONS_RESULTS: ${{ steps.run-operations.outputs.results }}
+        PR_ACTIVE: ${{ steps.check-pr-state.outputs.active }}
+      run: bash ${{ github.action_path }}/scripts/core/enforce-final-status.sh
 
     - name: Post PR comment
       if: always() && github.event_name == 'pull_request' && steps.check-pr-state.outputs.active != 'false'

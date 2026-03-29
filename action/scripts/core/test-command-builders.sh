@@ -156,4 +156,26 @@ assert_equals \
   "$(resolve_push_target "some-contributor/homeboy-action" "secret123")" \
   "fork push with token uses authenticated remote url"
 
+# ── Canonicalize: fleet/deploy commands are filtered out ──
+
+assert_equals \
+  "audit,lint,test" \
+  "$(canonicalize_commands "audit,lint,test,fleet exec my-fleet -- homeboy upgrade")" \
+  "canonicalize strips fleet commands"
+
+assert_equals \
+  "audit,lint,test" \
+  "$(canonicalize_commands "audit,deploy my-project --all,lint,test")" \
+  "canonicalize strips deploy commands"
+
+assert_equals \
+  "audit,lint,test,refactor --all" \
+  "$(canonicalize_commands "deploy --fleet prod data-machine,audit,lint,test,fleet status my-fleet,refactor --all")" \
+  "canonicalize strips all operations and preserves order"
+
+assert_equals \
+  "" \
+  "$(canonicalize_commands "fleet exec my-fleet -- homeboy upgrade,deploy my-project --all")" \
+  "canonicalize returns empty when only operations commands"
+
 printf 'All command builder checks passed.\n'
