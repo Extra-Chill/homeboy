@@ -551,6 +551,87 @@ fn try_load_cached_audit() -> Option<CodeAuditResult> {
     Some(result)
 }
 
+/// Try to load cached lint findings from a previous `homeboy lint` run.
+///
+/// Checks `HOMEBOY_OUTPUT_DIR/lint.json` for a `CliResponse<LintCommandOutput>`
+/// envelope. If found and the run passed (zero findings), returns an empty
+/// finding list — the fix stage can be skipped entirely since there's nothing
+/// to fix. If findings exist, returns None so the fix stage runs normally
+/// (fixes require actual file modification that can't be cached).
+fn try_load_cached_lint() -> Option<CachedLintResult> {
+    let output_dir = std::env::var(OUTPUT_DIR_ENV).ok()?;
+    let lint_file = PathBuf::from(&output_dir).join("lint.json");
+
+    let content = std::fs::read_to_string(&lint_file).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let success = json.get("success")?.as_bool()?;
+    let data = json.get("data")?;
+    let passed = data.get("passed")?.as_bool()?;
+    let finding_count = data
+        .get("lint_findings")
+        .and_then(|f| f.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    if success && passed && finding_count == 0 {
+        crate::log_status!(
+            "refactor",
+            "Cached lint result is clean (0 findings from {}) — skipping lint fix stage",
+            lint_file.display()
+        );
+        return Some(CachedLintResult::Clean);
+    }
+
+    crate::log_status!(
+        "refactor",
+        "Cached lint result has {} findings — fix stage will re-run linter with auto-fix",
+        finding_count
+    );
+    None
+}
+
+/// Try to load cached test results from a previous `homeboy test` run.
+///
+/// Same pattern as lint: if the test run passed, skip the test fix stage.
+/// If tests failed, return None so the fix stage runs to attempt auto-fixes.
+fn try_load_cached_test() -> Option<CachedTestResult> {
+    let output_dir = std::env::var(OUTPUT_DIR_ENV).ok()?;
+    let test_file = PathBuf::from(&output_dir).join("test.json");
+
+    let content = std::fs::read_to_string(&test_file).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let success = json.get("success")?.as_bool()?;
+    let data = json.get("data")?;
+    let passed = data.get("passed")?.as_bool()?;
+
+    if success && passed {
+        crate::log_status!(
+            "refactor",
+            "Cached test result is clean (passed from {}) — skipping test fix stage",
+            test_file.display()
+        );
+        return Some(CachedTestResult::Clean);
+    }
+
+    crate::log_status!(
+        "refactor",
+        "Cached test result has failures — fix stage will re-run tests with auto-fix"
+    );
+    None
+}
+
+enum CachedLintResult {
+    /// Lint passed with zero findings — nothing to fix.
+    Clean,
+}
+
+enum CachedTestResult {
+    /// Tests passed — nothing to fix.
+    Clean,
+}
+
 fn plan_audit_stage(
     component_id: &str,
     root: &Path,
@@ -689,6 +770,26 @@ fn run_lint_stage(
     write: bool,
     run_dir: &RunDir,
 ) -> crate::Result<PlannedStage> {
+    // Check for cached lint results — if the quality gate already passed clean,
+    // there's nothing to fix and we can skip re-running the linter entirely.
+    if let Some(CachedLintResult::Clean) = try_load_cached_lint() {
+        return Ok(PlannedStage {
+            source: "lint".to_string(),
+            summary: SourceStageSummary {
+                stage: "lint".to_string(),
+                collected: true,
+                applied: false,
+                edit_count: 0,
+                files_modified: 0,
+                detected_findings: Some(0),
+                changed_files: Vec::new(),
+                fix_summary: None,
+                warnings: Vec::new(),
+            },
+            fix_results: Vec::new(),
+        });
+    }
+
     let root_str = root.to_string_lossy().to_string();
     let findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
     let fix_sidecars = auto::AutofixSidecarFiles::for_run_dir(run_dir);
@@ -776,6 +877,26 @@ fn run_test_stage(
     write: bool,
     run_dir: &RunDir,
 ) -> crate::Result<PlannedStage> {
+    // Check for cached test results — if the quality gate already passed,
+    // there's nothing to fix and we can skip re-running the test suite entirely.
+    if let Some(CachedTestResult::Clean) = try_load_cached_test() {
+        return Ok(PlannedStage {
+            source: "test".to_string(),
+            summary: SourceStageSummary {
+                stage: "test".to_string(),
+                collected: true,
+                applied: false,
+                edit_count: 0,
+                files_modified: 0,
+                detected_findings: None,
+                changed_files: Vec::new(),
+                fix_summary: None,
+                warnings: Vec::new(),
+            },
+            fix_results: Vec::new(),
+        });
+    }
+
     let root_str = root.to_string_lossy().to_string();
     let fix_sidecars = auto::AutofixSidecarFiles::for_run_dir(run_dir);
     let before_dirty = if write {
