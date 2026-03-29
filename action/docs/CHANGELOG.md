@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.15.0] - 2026-03-29
+
+### Added
+- add fleet and deploy as first-class action commands
+
+### Fixed
+- remove composer.json and package.json config fallbacks
+
 ## [1.14.0] - 2026-03-28
 
 ### Added
