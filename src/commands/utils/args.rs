@@ -261,20 +261,31 @@ impl ComponentArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct PositionalComponentArgs {
-    pub component: String,
+    /// Component ID (optional — auto-detected from CWD if omitted)
+    pub component: Option<String>,
 
     #[arg(long)]
     pub path: Option<String>,
 }
 
+#[allow(dead_code)]
 impl PositionalComponentArgs {
-    #[cfg(test)]
     pub fn load(&self) -> homeboy::Result<Component> {
-        component::resolve_effective(Some(&self.component), self.path.as_deref(), None)
+        component::resolve_effective(self.component.as_deref(), self.path.as_deref(), None)
     }
 
-    pub fn id(&self) -> &str {
-        &self.component
+    pub fn id(&self) -> Option<&str> {
+        self.component.as_deref()
+    }
+
+    /// Resolve the component ID, falling back to CWD auto-discovery.
+    /// Returns the effective component ID string for display/logging.
+    pub fn resolve_id(&self) -> homeboy::Result<String> {
+        if let Some(ref id) = self.component {
+            return Ok(id.clone());
+        }
+        let component = self.load()?;
+        Ok(component.id)
     }
 }
 
@@ -285,7 +296,7 @@ mod positional_tests {
     #[test]
     fn load_uses_path_when_component_missing() {
         let args = PositionalComponentArgs {
-            component: "missing-component".to_string(),
+            component: Some("missing-component".to_string()),
             path: Some("/tmp/homeboy-missing-component".to_string()),
         };
 
@@ -296,6 +307,24 @@ mod positional_tests {
         assert_eq!(loaded.id, "missing-component");
         assert_eq!(loaded.local_path, "/tmp/homeboy-missing-component");
         assert_eq!(loaded.remote_path, "");
+    }
+
+    #[test]
+    fn id_returns_none_when_omitted() {
+        let args = PositionalComponentArgs {
+            component: None,
+            path: None,
+        };
+        assert!(args.id().is_none());
+    }
+
+    #[test]
+    fn id_returns_some_when_provided() {
+        let args = PositionalComponentArgs {
+            component: Some("my-comp".to_string()),
+            path: None,
+        };
+        assert_eq!(args.id(), Some("my-comp"));
     }
 }
 

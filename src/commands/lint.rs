@@ -62,8 +62,11 @@ pub struct LintArgs {
 }
 
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput> {
+    // Resolve component ID — auto-discover from CWD if omitted
+    let effective_id = args.comp.resolve_id()?;
+
     let ctx = execution_context::resolve(&ResolveOptions::with_capability(
-        args.comp.id(),
+        &effective_id,
         args.comp.path.clone(),
         ExtensionCapability::Lint,
         args.setting_args.setting.clone(),
@@ -74,7 +77,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         &ctx.component,
         &ctx.source_path,
         LintRunWorkflowArgs {
-            component_label: args.comp.component.clone(),
+            component_label: effective_id.clone(),
             component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
             settings: ctx

@@ -139,8 +139,11 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 }
 
 pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput> {
+    // Resolve component ID — auto-discover from CWD if omitted
+    let effective_id = args.comp.resolve_id()?;
+
     let ctx = execution_context::resolve(&ResolveOptions::with_capability(
-        args.comp.id(),
+        &effective_id,
         args.comp.path.clone(),
         ExtensionCapability::Test,
         args.setting_args.setting.clone(),
@@ -149,7 +152,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
     // Drift detection mode — delegate to core drift workflow (read-only)
     // Fixes are owned by `homeboy refactor --from test --write`.
     if args.drift {
-        let result = detect_test_drift(args.comp.id(), &ctx.component, &args.since)?;
+        let result = detect_test_drift(&effective_id, &ctx.component, &args.since)?;
         return Ok(report::from_drift_workflow(result));
     }
 
@@ -160,7 +163,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         &ctx.component,
         &ctx.source_path,
         TestRunWorkflowArgs {
-            component_label: args.comp.component.clone(),
+            component_label: effective_id.clone(),
             component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
             settings: ctx

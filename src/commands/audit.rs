@@ -63,32 +63,37 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
     // Run extension audit reference setup if configured.
     // This resolves framework dependencies (e.g. WordPress core) so their
     // fingerprints are included in cross-reference analysis (dead code detection).
-    run_audit_reference_setup(&args.comp.component);
+    if let Some(ref component_id) = args.comp.component {
+        run_audit_reference_setup(component_id);
+    }
 
-    // Resolve component ID and source path
-    let (resolved_id, resolved_path) = if Path::new(&args.comp.component).is_dir() {
-        // Bare directory path — no registered component
-        let effective = args
-            .comp
-            .path
-            .as_deref()
-            .unwrap_or(&args.comp.component)
-            .to_string();
-        let name = Path::new(&effective)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        (name, effective)
+    // Resolve component ID and source path.
+    // When component is omitted, auto-discover from CWD via homeboy.json.
+    let (resolved_id, resolved_path) = if let Some(ref comp_arg) = args.comp.component {
+        if Path::new(comp_arg).is_dir() {
+            // Bare directory path — no registered component
+            let effective = args.comp.path.as_deref().unwrap_or(comp_arg).to_string();
+            let name = Path::new(&effective)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            (name, effective)
+        } else {
+            // Registered component — use unified resolver
+            let ctx = execution_context::resolve(&ResolveOptions::source_only(
+                comp_arg,
+                args.comp.path.clone(),
+            ))?;
+            (
+                ctx.component_id,
+                ctx.source_path.to_string_lossy().to_string(),
+            )
+        }
     } else {
-        // Registered component — use unified resolver
-        let ctx = execution_context::resolve(&ResolveOptions::source_only(
-            &args.comp.component,
-            args.comp.path.clone(),
-        ))?;
-        (
-            ctx.component_id,
-            ctx.source_path.to_string_lossy().to_string(),
-        )
+        // No component specified — auto-discover from CWD
+        let component = args.comp.load()?;
+        let source_path = component.local_path.clone();
+        (component.id, source_path)
     };
 
     let workflow = run_main_audit_workflow(AuditRunWorkflowArgs {
@@ -234,7 +239,7 @@ mod tests {
 
         let args = AuditArgs {
             comp: PositionalComponentArgs {
-                component: root.to_string_lossy().to_string(),
+                component: Some(root.to_string_lossy().to_string()),
                 path: None,
             },
             conventions: false,

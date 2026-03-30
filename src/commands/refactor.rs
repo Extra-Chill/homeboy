@@ -567,26 +567,33 @@ fn resolve_top_level_targets(
     let flagged_ids = collect_component_ids(component_ids, components);
 
     if let Some(comp) = comp {
-        if !flagged_ids.is_empty() {
-            return Err(homeboy::Error::validation_invalid_argument(
-                "component",
-                "Use either positional component syntax or --component/--components, not both",
-                None,
-                None,
-            ));
-        }
+        if let Some(ref component_id) = comp.component {
+            if !flagged_ids.is_empty() {
+                return Err(homeboy::Error::validation_invalid_argument(
+                    "component",
+                    "Use either positional component syntax or --component/--components, not both",
+                    None,
+                    None,
+                ));
+            }
 
-        return Ok(vec![RefactorTarget {
-            component_id: Some(comp.component.clone()),
-            path: comp.path.clone(),
-            label: comp.component.clone(),
-        }]);
+            return Ok(vec![RefactorTarget {
+                component_id: Some(component_id.clone()),
+                path: comp.path.clone(),
+                label: component_id.clone(),
+            }]);
+        }
+        // Component omitted — fall through to flagged_ids or CWD auto-discovery
     }
 
     if flagged_ids.is_empty() {
-        return Err(homeboy::Error::validation_missing_argument(vec![
-            "component".to_string(),
-        ]));
+        // No component specified anywhere — try CWD auto-discovery
+        let component = homeboy::component::resolution::resolve(None)?;
+        return Ok(vec![RefactorTarget {
+            label: component.id.clone(),
+            component_id: Some(component.id),
+            path: None,
+        }]);
     }
 
     Ok(flagged_ids

@@ -41,13 +41,15 @@ pub fn run(args: ScaffoldArgs, _global: &GlobalArgs) -> CmdResult<ScaffoldWorkfl
 }
 
 fn run_test_scaffold(args: TestScaffoldArgs) -> CmdResult<ScaffoldWorkflowOutput> {
+    let effective_id = args.comp.resolve_id()?;
+
     let ctx = execution_context::resolve(&ResolveOptions::source_only(
-        args.comp.id(),
+        &effective_id,
         args.comp.path.clone(),
     ))?;
 
     let result = run_scaffold_workflow(
-        args.comp.id(),
+        &effective_id,
         &ctx.component,
         args.file.as_deref(),
         args.write,
