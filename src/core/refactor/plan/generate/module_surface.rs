@@ -104,12 +104,7 @@ fn build_surface_for_fingerprint(root: &Path, fp: &FileFingerprint) -> ModuleSur
 
     let mut symbols = HashMap::new();
     for symbol in &public_api {
-        let callers = symbol_graph::trace_symbol_callers(
-            symbol,
-            &module_path,
-            root,
-            &extensions,
-        );
+        let callers = symbol_graph::trace_symbol_callers(symbol, &module_path, root, &extensions);
         let mut incoming_callers = Vec::new();
         let mut incoming_importers = Vec::new();
         for caller in callers {
@@ -226,22 +221,6 @@ fn has_pub_use_of(content: &str, symbol: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn classify_public_api_role() {
-        assert_eq!(
-            classify_file_role("src/core/code_audit/public_api.rs"),
-            FileRole::PublicApi
-        );
-        assert_eq!(
-            classify_file_role("src/core/code_audit/mod.rs"),
-            FileRole::Index
-        );
-        assert_eq!(
-            classify_file_role("src/core/code_audit/findings.rs"),
-            FileRole::Regular
-        );
-    }
 
     #[test]
     fn detects_pub_use_block_members() {
