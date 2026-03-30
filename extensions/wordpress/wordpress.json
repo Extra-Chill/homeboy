@@ -135,15 +135,13 @@
         "path_pattern": "/wp-content/plugins/",
         "staging_path": "/tmp/homeboy-staging",
         "install_command": "cd {{siteRoot}} && plugin_slug=$(basename {{targetDir}}) && rm -rf {{targetDir}}.bak && ([ -d {{targetDir}} ] && echo 'Backing up existing plugin to {{targetDir}}.bak' && mv {{targetDir}} {{targetDir}}.bak || true) && ({{cliPath}} plugin install {{stagingArtifact}} --force --url={{domain}} {{allowRootFlag}} && zip_root=$(unzip -qql {{stagingArtifact}} | head -1 | awk '{print $4}' | cut -d/ -f1) && if [ \"$zip_root\" != \"$plugin_slug\" ] && [ -d \"wp-content/plugins/$zip_root\" ] && [ ! -d {{targetDir}} ]; then echo \"Renaming extracted folder $zip_root to $plugin_slug\" && mv \"wp-content/plugins/$zip_root\" {{targetDir}}; fi) || (echo 'ERROR: Plugin install failed — restoring backup' && rm -rf {{targetDir}} && ([ -d {{targetDir}}.bak ] && mv {{targetDir}}.bak {{targetDir}} || true) && exit 1)",
-        "cleanup_command": "rm -f {{stagingArtifact}} && rm -rf {{targetDir}}.bak",
-        "skip_permissions_fix": true
+        "cleanup_command": "rm -f {{stagingArtifact}} && rm -rf {{targetDir}}.bak"
       },
       {
         "path_pattern": "/wp-content/themes/",
         "staging_path": "/tmp/homeboy-staging",
         "install_command": "cd {{siteRoot}} && theme_slug=$(basename {{targetDir}}) && rm -rf {{targetDir}}.bak && ([ -d {{targetDir}} ] && echo 'Backing up existing theme to {{targetDir}}.bak' && mv {{targetDir}} {{targetDir}}.bak || true) && ({{cliPath}} theme install {{stagingArtifact}} --force --url={{domain}} {{allowRootFlag}} && zip_root=$(unzip -qql {{stagingArtifact}} | head -1 | awk '{print $4}' | cut -d/ -f1) && if [ \"$zip_root\" != \"$theme_slug\" ] && [ -d \"wp-content/themes/$zip_root\" ] && [ ! -d {{targetDir}} ]; then echo \"Renaming extracted folder $zip_root to $theme_slug\" && mv \"wp-content/themes/$zip_root\" {{targetDir}}; fi) || (echo 'ERROR: Theme install failed — restoring backup' && rm -rf {{targetDir}} && ([ -d {{targetDir}}.bak ] && mv {{targetDir}}.bak {{targetDir}} || true) && exit 1)",
-        "cleanup_command": "rm -f {{stagingArtifact}} && rm -rf {{targetDir}}.bak",
-        "skip_permissions_fix": true
+        "cleanup_command": "rm -f {{stagingArtifact}} && rm -rf {{targetDir}}.bak"
       }
     ],
     "version_patterns": [
