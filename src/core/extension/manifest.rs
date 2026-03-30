@@ -345,12 +345,6 @@ impl ExtensionManifest {
             .and_then(|c| c.extension_script.as_deref())
     }
 
-    pub fn test_script(&self) -> Option<&str> {
-        self.test
-            .as_ref()
-            .and_then(|c| c.extension_script.as_deref())
-    }
-
     pub fn build_script(&self) -> Option<&str> {
         self.build
             .as_ref()
@@ -450,11 +444,6 @@ impl ExtensionManifest {
             .as_ref()
             .map(|a| &a.feature_context)
             .unwrap_or(&EMPTY)
-    }
-
-    /// Convenience: get test mapping config from audit capability.
-    pub fn test_mapping(&self) -> Option<&TestMappingConfig> {
-        self.audit.as_ref().and_then(|a| a.test_mapping.as_ref())
     }
 
     /// Convenience: get database config from platform capability.

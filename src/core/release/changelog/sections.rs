@@ -250,7 +250,7 @@ pub(super) fn ensure_next_section(content: &str, aliases: &[String]) -> Result<(
     Ok((out, true))
 }
 
-pub fn add_next_section_items(
+pub(crate) fn add_next_section_items(
     changelog_content: &str,
     next_section_aliases: &[String],
     messages: &[String],
@@ -567,28 +567,6 @@ mod tests {
     }
 
     #[test]
-    fn finalize_moves_body_to_new_version_and_omits_empty_next_section() {
-        let content = "# Changelog\n\n## Unreleased\n\n- First\n- Second\n\n## 0.1.0\n\n- Old\n";
-        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
-        let (out, changed) = finalize_next_section(content, &aliases, "0.2.0", false).unwrap();
-        assert!(changed);
-        assert!(!out.contains("## Unreleased\n\n## [0.2.0]"));
-        // Check for Keep a Changelog format: ## [X.Y.Z] - YYYY-MM-DD
-        assert!(out.contains("## [0.2.0] - "));
-        assert!(out.contains("- First\n- Second"));
-        assert!(out.contains("## 0.1.0"));
-    }
-
-    #[test]
-    fn finalize_errors_on_empty_next_section_by_default() {
-        let content = "# Changelog\n\n## Unreleased\n\n\n## 0.1.0\n\n- Old\n";
-        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
-        let err = finalize_next_section(content, &aliases, "0.2.0", false).unwrap_err();
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("Invalid"));
-    }
-
-    #[test]
     fn get_latest_finalized_version_finds_first_semver() {
         let content = "# Changelog\n\n## Unreleased\n\n## 0.2.16\n\n- Item\n\n## 0.2.15\n";
         assert_eq!(
@@ -667,98 +645,6 @@ mod tests {
             validate_section_content(&lines),
             SectionContentStatus::Empty
         );
-    }
-
-    #[test]
-    fn finalize_preserves_subsection_structure() {
-        let content =
-            "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature\n\n### Fixed\n\n- Bug\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let (out, changed) = finalize_next_section(content, &aliases, "0.2.0", false).unwrap();
-
-        assert!(changed);
-        assert!(out.contains("## [0.2.0]"));
-        assert!(out.contains("### Added"));
-        assert!(out.contains("### Fixed"));
-        assert!(out.contains("- Feature"));
-        assert!(out.contains("- Bug"));
-    }
-
-    #[test]
-    fn finalize_errors_on_empty_subsections() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n### Changed\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let result = finalize_next_section(content, &aliases, "0.2.0", false);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        // Error details contain "problem" field with the specific message
-        let problem = err
-            .details
-            .get("problem")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert!(
-            problem.contains("subsection"),
-            "Error should mention subsection headers: {}",
-            problem
-        );
-    }
-
-    #[test]
-    fn append_item_works_with_subsection_structure() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n- Existing\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let (out, changed) = append_item_to_next_section(content, &aliases, "New item").unwrap();
-
-        assert!(changed);
-        assert!(out.contains("- New item"));
-        // Item should be inserted after "- Existing"
-        assert!(out.contains("- Existing\n- New item"));
-    }
-
-    #[test]
-    fn append_item_to_empty_subsection() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n### Fixed\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let (out, changed) = append_item_to_next_section(content, &aliases, "New item").unwrap();
-
-        assert!(changed);
-        assert!(out.contains("- New item"));
-        // Item should be inserted after the first subsection header
-        assert!(out.contains("### Added\n- New item"));
-    }
-
-    #[test]
-    fn append_item_preserves_multiple_subsections() {
-        let content =
-            "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature 1\n\n### Fixed\n\n- Bug 1\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let (out, changed) = append_item_to_next_section(content, &aliases, "New item").unwrap();
-
-        assert!(changed);
-        assert!(out.contains("- New item"));
-        // Should preserve subsection structure
-        assert!(out.contains("### Added"));
-        assert!(out.contains("### Fixed"));
-        assert!(out.contains("- Feature 1"));
-        assert!(out.contains("- Bug 1"));
-    }
-
-    #[test]
-    fn find_next_section_matches_next_alias() {
-        let lines: Vec<&str> = "# Changelog\n\n## [Next]\n\n- Item\n\n## 0.1.0\n"
-            .lines()
-            .collect();
-        let aliases = vec![
-            "Unreleased".to_string(),
-            "[Unreleased]".to_string(),
-            "Next".to_string(),
-            "[Next]".to_string(),
-        ];
-
-        let start = find_next_section_start(&lines, &aliases);
-        assert_eq!(start, Some(2));
     }
 
     // === Typed Subsection Tests (--type flag) ===

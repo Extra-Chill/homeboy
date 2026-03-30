@@ -13,6 +13,11 @@ use crate::paths;
 use crate::upgrade;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::core::extension::update_check::cache_path;
+use crate::core::extension::update_check::is_disabled_by_config;
+use crate::core::extension::update_check::now_unix;
+use crate::core::extension::update_check::read_cache;
+use crate::core::extension::update_check::write_cache;
 
 const CACHE_FILENAME: &str = "update_check.json";
 const CHECK_INTERVAL_SECS: u64 = 86400;
@@ -26,31 +31,6 @@ pub struct UpdateCheckCache {
     pub checked_at: u64,
 }
 
-pub(crate) fn cache_path() -> Option<std::path::PathBuf> {
-    paths::homeboy().ok().map(|path| path.join(CACHE_FILENAME))
-}
-
-fn read_cache() -> Option<UpdateCheckCache> {
-    let path = cache_path()?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-fn write_cache(cache: &UpdateCheckCache) {
-    let Some(path) = cache_path() else { return };
-    let Ok(content) = serde_json::to_string_pretty(cache) else {
-        return;
-    };
-    let _ = std::fs::write(&path, content);
-}
-
-pub(crate) fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
 fn is_cache_fresh(cache: &UpdateCheckCache) -> bool {
     let elapsed = now_unix().saturating_sub(cache.checked_at);
     elapsed < CHECK_INTERVAL_SECS && cache.current_version == upgrade::current_version()
@@ -60,10 +40,6 @@ fn is_disabled_by_env() -> bool {
     std::env::var(ENV_VAR_DISABLE)
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
-}
-
-pub(crate) fn is_disabled_by_config() -> bool {
-    !crate::defaults::load_config().update_check
 }
 
 fn print_hint(latest: &str, current: &str) {

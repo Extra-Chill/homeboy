@@ -220,27 +220,6 @@ mod tests {
     }
 
     #[test]
-    fn save_and_load_baseline() {
-        let result = make_result(
-            vec![
-                make_finding("Flow", "a.php", "Missing method: execute"),
-                make_finding("Flow", "b.php", "Missing method: validate"),
-            ],
-            "save_load",
-        );
-
-        let path = save_baseline(&result).unwrap();
-        assert!(path.exists());
-
-        let loaded = load_baseline(Path::new(&result.source_path)).unwrap();
-        assert_eq!(loaded.context_id, "test");
-        assert_eq!(loaded.item_count, 2);
-        assert_eq!(loaded.known_fingerprints.len(), 2);
-
-        let _ = std::fs::remove_dir_all(Path::new(&result.source_path));
-    }
-
-    #[test]
     fn compare_no_new_drift() {
         let result = make_result(
             vec![

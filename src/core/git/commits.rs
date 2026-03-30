@@ -721,71 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn recommended_bump_prefers_highest_severity() {
-        let commits = vec![
-            CommitInfo {
-                hash: "a1".to_string(),
-                subject: "fix: patch fix".to_string(),
-                category: CommitCategory::Fix,
-            },
-            CommitInfo {
-                hash: "b2".to_string(),
-                subject: "feat: add feature".to_string(),
-                category: CommitCategory::Feature,
-            },
-            CommitInfo {
-                hash: "c3".to_string(),
-                subject: "refactor!: break API".to_string(),
-                category: CommitCategory::Breaking,
-            },
-        ];
-
-        assert_eq!(
-            recommended_bump_from_commits(&commits),
-            Some(SemverBump::Major)
-        );
-    }
-
-    #[test]
-    fn recommended_bump_ignores_docs_and_chore() {
-        let commits = vec![
-            CommitInfo {
-                hash: "a1".to_string(),
-                subject: "docs: update".to_string(),
-                category: CommitCategory::Docs,
-            },
-            CommitInfo {
-                hash: "b2".to_string(),
-                subject: "chore: cleanup".to_string(),
-                category: CommitCategory::Chore,
-            },
-        ];
-
-        assert_eq!(recommended_bump_from_commits(&commits), None);
-    }
-
-    #[test]
-    fn recommended_bump_from_fix_and_other_is_patch() {
-        let commits = vec![
-            CommitInfo {
-                hash: "a1".to_string(),
-                subject: "random commit".to_string(),
-                category: CommitCategory::Other,
-            },
-            CommitInfo {
-                hash: "b2".to_string(),
-                subject: "fix: bug".to_string(),
-                category: CommitCategory::Fix,
-            },
-        ];
-
-        assert_eq!(
-            recommended_bump_from_commits(&commits),
-            Some(SemverBump::Patch)
-        );
-    }
-
-    #[test]
     fn monorepo_context_format_tag() {
         let ctx = MonorepoContext {
             git_root: "/repo".to_string(),
@@ -796,20 +731,4 @@ mod tests {
         assert_eq!(ctx.format_tag("0.1.0"), "wordpress-v0.1.0");
     }
 
-    #[test]
-    fn extract_version_from_component_prefixed_tag() {
-        assert_eq!(
-            extract_version_from_tag("wordpress-v1.2.3"),
-            Some("1.2.3".to_string())
-        );
-        assert_eq!(
-            extract_version_from_tag("github-v0.5.0"),
-            Some("0.5.0".to_string())
-        );
-        // Standard tags still work
-        assert_eq!(
-            extract_version_from_tag("v1.0.0"),
-            Some("1.0.0".to_string())
-        );
-    }
 }

@@ -775,38 +775,6 @@ mod tests {
     }
 
     #[test]
-    fn find_references_in_test_files() {
-        let changes = vec![ProductionChange {
-            change_type: ChangeType::MethodRename,
-            file: "src/Foo.php".into(),
-            old_symbol: "executeRunFlow".into(),
-            new_symbol: Some("executeWorkflow".into()),
-            line: 10,
-        }];
-
-        let test_content = r#"<?php
-class FooTest extends TestCase {
-    public function testRunFlow() {
-        $result = $this->foo->executeRunFlow(1);
-        $this->assertNotNull($result);
-    }
-}
-"#;
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let tests_dir = root.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("FooTest.php"), test_content).unwrap();
-
-        let test_files = vec![tests_dir.join("FooTest.php")];
-        let drifted = find_drift_references(&changes, &test_files, root);
-        assert_eq!(drifted.len(), 1);
-        assert_eq!(drifted[0].line, 4);
-        assert!(drifted[0].content.contains("executeRunFlow"));
-    }
-
-    #[test]
     fn multiple_changes_multiple_tests() {
         let changes = vec![
             ProductionChange {

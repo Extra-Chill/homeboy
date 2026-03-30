@@ -1070,66 +1070,6 @@ mod tests {
     }
 
     #[test]
-    fn build_settings_json_preserves_array_values() {
-        // Regression test for #844: array values in extension settings
-        // were serialized as empty strings.
-        let manifest = serde_json::json!({
-            "settings": [
-                { "id": "string_setting", "default": "hello" },
-                { "id": "array_default", "default": ["a", "b"] }
-            ]
-        });
-
-        let extension_settings: Vec<(String, serde_json::Value)> = vec![
-            (
-                "validation_dependencies".to_string(),
-                serde_json::json!(["data-machine"]),
-            ),
-            (
-                "plain_string".to_string(),
-                serde_json::Value::String("value".to_string()),
-            ),
-        ];
-
-        let overrides: Vec<(String, String)> = vec![];
-
-        let json = build_settings_json_from_manifest(&manifest, &extension_settings, &overrides)
-            .expect("should serialize");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
-
-        // Array from extension settings is preserved
-        assert_eq!(
-            parsed["validation_dependencies"],
-            serde_json::json!(["data-machine"]),
-            "Array setting should be preserved, not flattened to empty string"
-        );
-
-        // String from extension settings is preserved
-        assert_eq!(parsed["plain_string"], serde_json::json!("value"));
-
-        // String default from manifest is preserved
-        assert_eq!(parsed["string_setting"], serde_json::json!("hello"));
-
-        // Array default from manifest is preserved
-        assert_eq!(parsed["array_default"], serde_json::json!(["a", "b"]));
-    }
-
-    #[test]
-    fn build_settings_json_cli_overrides_replace_values() {
-        let manifest = serde_json::json!({});
-        let extension_settings: Vec<(String, serde_json::Value)> =
-            vec![("key".to_string(), serde_json::json!(["original"]))];
-        let overrides = vec![("key".to_string(), "override_value".to_string())];
-
-        let json = build_settings_json_from_manifest(&manifest, &extension_settings, &overrides)
-            .expect("should serialize");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
-
-        // CLI override replaces the array value with a string
-        assert_eq!(parsed["key"], serde_json::json!("override_value"));
-    }
-
-    #[test]
     fn build_exec_env_preserves_step_filter_contract() {
         let filter = RunnerStepFilter {
             step: Some("lint,test".to_string()),

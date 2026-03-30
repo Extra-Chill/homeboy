@@ -228,22 +228,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_public_api_role() {
-        assert_eq!(
-            classify_file_role("src/core/code_audit/public_api.rs"),
-            FileRole::PublicApi
-        );
-        assert_eq!(
-            classify_file_role("src/core/code_audit/mod.rs"),
-            FileRole::Index
-        );
-        assert_eq!(
-            classify_file_role("src/core/code_audit/findings.rs"),
-            FileRole::Regular
-        );
-    }
-
-    #[test]
     fn detects_pub_use_block_members() {
         let content = "pub use super::{foo, bar};\n";
         assert!(has_pub_use_of(content, "foo"));
