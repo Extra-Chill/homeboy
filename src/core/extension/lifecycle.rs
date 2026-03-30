@@ -521,14 +521,7 @@ fn update_linked_extension(
 /// Checks `refs/remotes/origin/HEAD` first, then tries `main` and `master`.
 fn detect_default_branch(repo_dir: &Path) -> Option<String> {
     // Try symbolic-ref first (most reliable)
-    let output = Command::new("git")
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .current_dir(repo_dir)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
+    let output = git_silent(repo_dir, &["symbolic-ref", "refs/remotes/origin/HEAD"])?;
     if output.status.success() {
         let refname = String::from_utf8_lossy(&output.stdout).trim().to_string();
         // refs/remotes/origin/main → main
@@ -537,19 +530,24 @@ fn detect_default_branch(repo_dir: &Path) -> Option<String> {
 
     // Fallback: check if main or master exist as local branches
     for branch in &["main", "master"] {
-        let check = Command::new("git")
-            .args(["rev-parse", "--verify", branch])
-            .current_dir(repo_dir)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
+        let check = git_silent(repo_dir, &["rev-parse", "--verify", branch])?;
         if check.status.success() {
             return Some(branch.to_string());
         }
     }
 
     None
+}
+
+/// Run a git command silently (no stdin/stderr) and return the output.
+fn git_silent(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
 }
 
 /// Uninstall a extension. Automatically detects symlinks vs cloned directories.
