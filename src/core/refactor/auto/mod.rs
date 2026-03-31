@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod contracts;
+pub mod guard;
 pub mod outcome;
 pub mod policy;
 pub mod sidecar;
@@ -14,6 +15,7 @@ pub use contracts::{
     ApplyChunkResult, ApplyOptions, ChunkStatus, ChunkVerifier, DecomposeFixPlan, Fix, FixPolicy,
     FixResult, Insertion, InsertionKind, NewFile, PolicySummary, RefactorPrimitive, SkippedFile,
 };
+pub use guard::{GuardBlock, GuardConfig, GuardResult};
 pub use outcome::{
     standard_outcome, AppliedAutofixCapture, AutofixMode, AutofixOutcome, AutofixSidecarFiles,
     FixApplied, FixResultsSummary, RuleFixCount,

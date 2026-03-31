@@ -143,6 +143,10 @@ pub struct RefactorSourceRun {
     pub fix_summary: Option<FixResultsSummary>,
     pub warnings: Vec<String>,
     pub hints: Vec<String>,
+    /// When set, autofix was blocked by a safety guard. The pipeline
+    /// short-circuited without modifying any files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guard_block: Option<crate::refactor::auto::guard::GuardBlock>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +238,45 @@ pub fn collect_refactor_sources(
                         "Or use --force to proceed anyway".to_string(),
                     ]),
                 ));
+            }
+        }
+    }
+
+    // Autofix safety guards — check whether writing is safe in CI context.
+    // Guards detect reverted/force-pushed bot commits and PR labels that
+    // permanently disable autofix. Outside CI, guards are no-ops.
+    if request.write {
+        let guard_config = crate::refactor::auto::guard::GuardConfig::from_env();
+        match crate::refactor::auto::guard::check_guards(&root_str, &guard_config) {
+            crate::refactor::auto::guard::GuardResult::Proceed => {}
+            crate::refactor::auto::guard::GuardResult::Blocked(block) => {
+                eprintln!(
+                    "[refactor] autofix blocked: {} (status: {})",
+                    block.message(),
+                    block.status()
+                );
+                return Ok(RefactorSourceRun {
+                    component_id: String::new(),
+                    source_path: root_str.clone(),
+                    sources: normalize_sources(&request.sources)?,
+                    dry_run: false,
+                    applied: false,
+                    merge_strategy: String::new(),
+                    collected_edits: Vec::new(),
+                    stages: Vec::new(),
+                    source_totals: SourceTotals {
+                        stages_with_edits: 0,
+                        total_edits: 0,
+                        total_files_selected: 0,
+                    },
+                    overlaps: Vec::new(),
+                    files_modified: 0,
+                    changed_files: Vec::new(),
+                    fix_summary: None,
+                    warnings: Vec::new(),
+                    hints: Vec::new(),
+                    guard_block: Some(block),
+                });
             }
         }
     }
@@ -391,6 +434,7 @@ pub fn collect_refactor_sources(
         fix_summary: accumulator.summary(),
         warnings,
         hints,
+        guard_block: None,
     })
 }
 
