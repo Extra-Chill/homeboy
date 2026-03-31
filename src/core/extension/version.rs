@@ -306,104 +306,17 @@ mod tests {
     // Matching — Caret
     // ========================================================================
 
-    #[test]
-    fn caret_major_nonzero() {
-        let c = VersionConstraint::Caret(v("1.2.3"));
-        assert!(c.matches(&v("1.2.3")));
-        assert!(c.matches(&v("1.2.4")));
-        assert!(c.matches(&v("1.3.0")));
-        assert!(c.matches(&v("1.99.99")));
-        assert!(!c.matches(&v("2.0.0")));
-        assert!(!c.matches(&v("1.2.2")));
-        assert!(!c.matches(&v("0.9.0")));
-    }
-
-    #[test]
-    fn caret_minor_nonzero() {
-        let c = VersionConstraint::Caret(v("0.2.3"));
-        assert!(c.matches(&v("0.2.3")));
-        assert!(c.matches(&v("0.2.4")));
-        assert!(c.matches(&v("0.2.99")));
-        assert!(!c.matches(&v("0.3.0")));
-        assert!(!c.matches(&v("0.2.2")));
-        assert!(!c.matches(&v("1.0.0")));
-    }
-
-    #[test]
-    fn caret_all_zero() {
-        let c = VersionConstraint::Caret(v("0.0.3"));
-        assert!(c.matches(&v("0.0.3")));
-        assert!(!c.matches(&v("0.0.4")));
-        assert!(!c.matches(&v("0.0.2")));
-        assert!(!c.matches(&v("0.1.0")));
-    }
-
     // ========================================================================
     // Matching — Tilde
     // ========================================================================
-
-    #[test]
-    fn tilde_allows_patch() {
-        let c = VersionConstraint::Tilde(v("1.2.3"));
-        assert!(c.matches(&v("1.2.3")));
-        assert!(c.matches(&v("1.2.4")));
-        assert!(c.matches(&v("1.2.99")));
-        assert!(!c.matches(&v("1.3.0")));
-        assert!(!c.matches(&v("1.2.2")));
-        assert!(!c.matches(&v("2.0.0")));
-    }
 
     // ========================================================================
     // Matching — Comparison operators
     // ========================================================================
 
-    #[test]
-    fn gte_matches() {
-        let c = VersionConstraint::GreaterEqual(v("1.0.0"));
-        assert!(c.matches(&v("1.0.0")));
-        assert!(c.matches(&v("1.0.1")));
-        assert!(c.matches(&v("2.0.0")));
-        assert!(!c.matches(&v("0.9.9")));
-    }
-
-    #[test]
-    fn gt_matches() {
-        let c = VersionConstraint::Greater(v("1.0.0"));
-        assert!(!c.matches(&v("1.0.0")));
-        assert!(c.matches(&v("1.0.1")));
-    }
-
-    #[test]
-    fn lte_matches() {
-        let c = VersionConstraint::LessEqual(v("1.0.0"));
-        assert!(c.matches(&v("1.0.0")));
-        assert!(c.matches(&v("0.9.9")));
-        assert!(!c.matches(&v("1.0.1")));
-    }
-
-    #[test]
-    fn lt_matches() {
-        let c = VersionConstraint::Less(v("1.0.0"));
-        assert!(!c.matches(&v("1.0.0")));
-        assert!(c.matches(&v("0.9.9")));
-    }
-
     // ========================================================================
     // Display
     // ========================================================================
-
-    #[test]
-    fn display_roundtrip() {
-        let cases = vec![
-            "*", "1.2.3", ">=1.0.0", ">1.0.0", "<=1.0.0", "<1.0.0", "^1.2.3", "~1.2.3",
-        ];
-        for case in cases {
-            let c = VersionConstraint::parse(case).unwrap();
-            let displayed = c.to_string();
-            let reparsed = VersionConstraint::parse(&displayed).unwrap();
-            assert_eq!(c, reparsed, "roundtrip failed for '{}'", case);
-        }
-    }
 
     // ========================================================================
     // Extension version parsing

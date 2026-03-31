@@ -12,6 +12,7 @@ use crate::code_audit::CodeAuditResult;
 use crate::refactor::auto::{self, Fix, FixResult, Insertion, InsertionKind};
 use crate::refactor::plan;
 use crate::{component, Result};
+use crate::core::refactor::move_items::whole_file_move::resolve_root;
 
 /// Result of an explicit import addition (not from audit).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -138,25 +139,6 @@ pub fn add_import(
 // ============================================================================
 
 /// Resolve the root directory from component ID or explicit path.
-fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> Result<PathBuf> {
-    if let Some(p) = path {
-        let pb = PathBuf::from(p);
-        if !pb.is_dir() {
-            return Err(crate::Error::validation_invalid_argument(
-                "path",
-                format!("Not a directory: {}", p),
-                None,
-                None,
-            ));
-        }
-        Ok(pb)
-    } else {
-        let comp = component::resolve(component_id)?;
-        let validated = component::validate_local_path(&comp)?;
-        Ok(validated)
-    }
-}
-
 /// Resolve target files from a glob pattern or direct file path.
 ///
 /// Returns relative paths from root.

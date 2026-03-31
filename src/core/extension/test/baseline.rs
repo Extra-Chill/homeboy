@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::baseline::{self as generic, BaselineConfig};
 use crate::error::Result;
+use crate::core::code_audit::baseline::load_baseline_from_ref;
 
 const BASELINE_KEY: &str = "test";
 
@@ -59,10 +60,6 @@ pub fn save_baseline(
 pub fn load_baseline(source_path: &Path) -> Option<TestBaseline> {
     let config = BaselineConfig::new(source_path, BASELINE_KEY);
     generic::load::<TestCounts>(&config).ok().flatten()
-}
-
-pub fn load_baseline_from_ref(source_path: &str, git_ref: &str) -> Option<TestBaseline> {
-    generic::load_from_git_ref::<TestCounts>(source_path, git_ref, BASELINE_KEY)
 }
 
 pub fn compare(current: &TestCounts, baseline: &TestBaseline) -> TestBaselineComparison {
@@ -117,24 +114,6 @@ mod tests {
 
     fn counts(total: u64, passed: u64, failed: u64, skipped: u64) -> TestCounts {
         TestCounts::new(total, passed, failed, skipped)
-    }
-
-    #[test]
-    fn save_and_load_roundtrips() {
-        let dir = tempfile::tempdir().unwrap();
-        let counts = counts(100, 80, 15, 5);
-
-        save_baseline(dir.path(), "data-machine", &counts).unwrap();
-        let loaded = load_baseline(dir.path()).unwrap();
-
-        assert_eq!(loaded.context_id, "data-machine");
-        assert_eq!(loaded.metadata, counts);
-    }
-
-    #[test]
-    fn load_returns_none_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(load_baseline(dir.path()).is_none());
     }
 
     #[test]

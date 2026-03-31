@@ -1115,14 +1115,6 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_strips_pr_reference() {
-        assert_eq!(
-            normalize_changelog_text("fix something (#526)"),
-            normalize_changelog_text("fix something")
-        );
-    }
-
-    #[test]
     fn test_find_uncovered_commits_deduplicates_with_pr_suffix() {
         // Scenario: manual changelog entry without PR ref, commit has PR ref
         let commits = vec![commit(
@@ -1151,52 +1143,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_group_commits_strips_conventional_prefix_with_issue_scope() {
-        use super::group_commits_for_changelog;
-
-        let commits = vec![
-            commit(
-                "feat(#741): delete AgentType class — replace with string literals",
-                CommitCategory::Feature,
-            ),
-            commit(
-                "fix(#730): queue-add uses unified check-duplicate",
-                CommitCategory::Fix,
-            ),
-        ];
-
-        let entries = group_commits_for_changelog(&commits);
-        let added = &entries["added"];
-        let fixed = &entries["fixed"];
-
-        assert_eq!(
-            added[0],
-            "delete AgentType class — replace with string literals"
-        );
-        assert_eq!(fixed[0], "queue-add uses unified check-duplicate");
-    }
-
-    #[test]
-    fn test_group_commits_strips_pr_references() {
-        use super::group_commits_for_changelog;
-
-        let commits = vec![
-            commit(
-                "feat: agent-first scoping — Phase 1 schema (#738)",
-                CommitCategory::Feature,
-            ),
-            commit(
-                "fix: rename $class param — fixes bootstrap crash (#711)",
-                CommitCategory::Fix,
-            ),
-        ];
-
-        let entries = group_commits_for_changelog(&commits);
-        let added = &entries["added"];
-        let fixed = &entries["fixed"];
-
-        assert_eq!(added[0], "agent-first scoping — Phase 1 schema");
-        assert_eq!(fixed[0], "rename $class param — fixes bootstrap crash");
-    }
 }

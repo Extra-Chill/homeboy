@@ -402,29 +402,6 @@ fn extract_rust_free_functions(content: &str) -> Vec<ExtractedMethod> {
     methods
 }
 
-pub fn test_file_path(source_path: &Path, root: &Path) -> PathBuf {
-    let relative = source_path.strip_prefix(root).unwrap_or(source_path);
-    let rel_str = relative.to_string_lossy();
-
-    if rel_str.ends_with(".php") {
-        let stripped = rel_str
-            .strip_prefix("src/")
-            .or_else(|| rel_str.strip_prefix("inc/"))
-            .or_else(|| rel_str.strip_prefix("lib/"))
-            .unwrap_or(&rel_str);
-        let without_ext = stripped.strip_suffix(".php").unwrap_or(stripped);
-        return root.join(format!("tests/Unit/{}Test.php", without_ext));
-    }
-
-    if rel_str.ends_with(".rs") {
-        let stripped = rel_str.strip_prefix("src/").unwrap_or(&rel_str);
-        let without_ext = stripped.strip_suffix(".rs").unwrap_or(stripped);
-        return root.join(format!("tests/{}_test.rs", without_ext));
-    }
-
-    root.join("tests").join(relative)
-}
-
 pub fn find_test_location(source_file: &str, root: &Path, ext: &str) -> Option<TestLocation> {
     let source_path = root.join(source_file);
     let test_path = test_file_path(&source_path, root);
@@ -681,11 +658,6 @@ pub fn scaffold_file(
 
     if !passes_scaffold_quality_gate(&generated_names) {
         return Ok(ScaffoldResult {
-            source_file: relative,
-            test_file: test_relative,
-            stub_count: 0,
-            content: String::new(),
-            written: false,
             skipped: false,
             classes,
         });

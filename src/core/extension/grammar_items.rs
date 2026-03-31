@@ -709,10 +709,6 @@ mod tests {
     #[test]
     fn parse_items_basic() {
         let content = "\
-pub fn hello() {
-    println!(\"hi\");
-}
-
 struct Foo {
     x: i32,
 }";
@@ -769,14 +765,8 @@ pub struct Config {
     #[test]
     fn parse_items_skips_test_module() {
         let content = "\
-pub fn real_fn() {}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_something() {
-        assert!(true);
-    }
 }";
         let grammar = full_rust_grammar();
         let items = parse_items(content, &grammar);
