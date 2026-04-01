@@ -106,41 +106,14 @@ pub(super) fn deploy_components(
         check_uncommitted_changes(&components)?;
     }
 
-    // Smart artifact reuse: check if any component has a fresh build artifact
-    // from a recent `homeboy build`. If so, skip the tag checkout and rebuild
-    // for that component — deploy what was already built.
-    let reuse_artifact_ids = if !config.head && !config.skip_build && !config.tagged {
-        detect_reusable_artifacts(&components)
-    } else {
-        Vec::new()
-    };
-
     // Check for HEAD-vs-tag gap before the tag checkout.
-    // Skip check for components that will reuse their build artifact.
     if !config.head && !config.skip_build {
-        let non_reuse: Vec<_> = components
-            .iter()
-            .filter(|c| !reuse_artifact_ids.contains(&c.id))
-            .cloned()
-            .collect();
-        if !non_reuse.is_empty() {
-            check_unreleased_commits(&non_reuse, config)?;
-        }
+        check_unreleased_commits(&components, config)?;
     }
 
-    // Checkout latest tag for each component (unless --head or reusing artifact).
-    // Components with reusable build artifacts are excluded from tag checkout.
+    // Checkout latest tag for each component (unless --head or --skip-build).
     let tag_checkouts = if !config.head && !config.skip_build {
-        let checkout_components: Vec<_> = components
-            .iter()
-            .filter(|c| !reuse_artifact_ids.contains(&c.id))
-            .cloned()
-            .collect();
-        if checkout_components.is_empty() {
-            Vec::new()
-        } else {
-            checkout_latest_tags(&checkout_components)?
-        }
+        checkout_latest_tags(&components)?
     } else {
         Vec::new()
     };
@@ -159,15 +132,7 @@ pub(super) fn deploy_components(
         // Apply per-project overrides (e.g. different extract_command or remote_owner)
         let component = crate::project::apply_component_overrides(component, project);
 
-        // For components reusing a build artifact, skip the build step
-        let effective_config = if reuse_artifact_ids.contains(&component.id) {
-            DeployConfig {
-                skip_build: true,
-                ..clone_config(config)
-            }
-        } else {
-            clone_config(config)
-        };
+        let effective_config = clone_config(config);
 
         let mut result = execute_component_deploy(
             &component,
@@ -180,22 +145,7 @@ pub(super) fn deploy_components(
         );
 
         // Record which git ref was deployed
-        if reuse_artifact_ids.contains(&component.id) {
-            // Artifact was reused from a prior build — record the provenance ref
-            if let Some(prov) = super::provenance::read(&component) {
-                let ref_label = if prov.is_ahead_of_tag() {
-                    format!(
-                        "{} (HEAD, {} ahead of {})",
-                        prov.git_ref,
-                        prov.ahead_of_tag,
-                        prov.tag.as_deref().unwrap_or("?")
-                    )
-                } else {
-                    format!("{} (build artifact)", prov.git_ref)
-                };
-                result = result.with_deployed_ref(ref_label);
-            }
-        } else if let Some(checkout) = tag_checkouts
+        if let Some(checkout) = tag_checkouts
             .iter()
             .find(|c| c.component_id == component.id)
         {
@@ -569,46 +519,6 @@ fn check_unreleased_commits(components: &[Component], config: &DeployConfig) -> 
             "Use `deploy --force` to deploy the stale tag anyway".to_string(),
         ]),
     ))
-}
-
-/// Detect components with reusable build artifacts.
-///
-/// A build artifact is reusable when:
-/// 1. A `.homeboy-build-meta.json` sidecar exists
-/// 2. The recorded commit matches the current HEAD (the artifact is current)
-///
-/// When a reusable artifact is found, the component skips tag checkout
-/// and rebuild — deploying whatever was already built by `homeboy build`.
-fn detect_reusable_artifacts(components: &[Component]) -> Vec<String> {
-    let mut reuse_ids = Vec::new();
-
-    for component in components {
-        if let Some(prov) = super::provenance::read(component) {
-            if super::provenance::is_current(component, &prov) {
-                if prov.is_ahead_of_tag() {
-                    log_status!(
-                        "deploy",
-                        "ℹ️  '{}': reusing build artifact from {} ({} commit(s) ahead of {})",
-                        component.id,
-                        &prov.commit[..prov.commit.len().min(8)],
-                        prov.ahead_of_tag,
-                        prov.tag.as_deref().unwrap_or("?")
-                    );
-                } else {
-                    log_status!(
-                        "deploy",
-                        "ℹ️  '{}': reusing build artifact from {} (at tag {})",
-                        component.id,
-                        &prov.commit[..prov.commit.len().min(8)],
-                        prov.tag.as_deref().unwrap_or("?")
-                    );
-                }
-                reuse_ids.push(component.id.clone());
-            }
-        }
-    }
-
-    reuse_ids
 }
 
 /// Create a value copy of DeployConfig for per-component overrides.
