@@ -423,15 +423,6 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
 
     let success = runner_output.success;
 
-    // Record build provenance on success so deploy can detect fresh artifacts
-    if success {
-        if let Some(prov) = crate::deploy::provenance::capture(comp) {
-            if let Err(e) = crate::deploy::provenance::write(comp, &prov) {
-                log_status!("build", "Warning: could not write build provenance: {}", e);
-            }
-        }
-    }
-
     Ok((
         BuildOutput {
             command: "build.run".to_string(),
