@@ -33,15 +33,56 @@ pub struct VersionTarget {
     pub pattern: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ScopedExtensionConfig {
     /// Version constraint string (e.g., ">=2.0.0", "^1.0").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// Settings passed to the extension at runtime.
+    ///
+    /// Populated from both an explicit `"settings": { ... }` sub-object AND
+    /// any flat keys that aren't `version` or `settings`.  This lets both
+    /// formats work:
+    ///
+    /// ```json
+    /// // flat (current convention)
+    /// { "database_type": "mysql", "mysql_host": "localhost" }
+    /// // nested
+    /// { "settings": { "database_type": "mysql" } }
+    /// // mixed (flat keys merged into settings)
+    /// { "settings": { "a": 1 }, "b": 2 }
+    /// ```
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub settings: HashMap<String, serde_json::Value>,
+}
+
+impl<'de> serde::Deserialize<'de> for ScopedExtensionConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialize the whole object as a generic JSON map first.
+        let mut map: serde_json::Map<String, serde_json::Value> =
+            serde::Deserialize::deserialize(deserializer)?;
+
+        // Extract known struct fields.
+        let version = map
+            .remove("version")
+            .and_then(|v| v.as_str().map(String::from));
+
+        // Start with the explicit "settings" sub-object (if present).
+        let mut settings: HashMap<String, serde_json::Value> = map
+            .remove("settings")
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+
+        // Merge remaining flat keys — flat keys do NOT overwrite explicit settings.
+        for (key, value) in map {
+            settings.entry(key).or_insert(value);
+        }
+
+        Ok(ScopedExtensionConfig { version, settings })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -775,5 +816,95 @@ mod tests {
         );
         assert_eq!(comp.changelog_target.as_deref(), Some("docs/CHANGELOG.md"));
         assert!(comp.version_targets.is_some());
+    }
+
+    #[test]
+    fn scoped_extension_config_captures_flat_settings() {
+        // Flat keys (the current convention in homeboy.json) must be captured
+        // as settings — not silently dropped.
+        let json = serde_json::json!({
+            "database_type": "mysql",
+            "mysql_host": "localhost",
+            "mysql_user": "root"
+        });
+
+        let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            config.settings.get("database_type").and_then(|v| v.as_str()),
+            Some("mysql")
+        );
+        assert_eq!(
+            config.settings.get("mysql_host").and_then(|v| v.as_str()),
+            Some("localhost")
+        );
+        assert_eq!(
+            config.settings.get("mysql_user").and_then(|v| v.as_str()),
+            Some("root")
+        );
+        assert!(config.version.is_none());
+    }
+
+    #[test]
+    fn scoped_extension_config_nested_settings_still_work() {
+        // Explicit "settings" sub-object must still work.
+        let json = serde_json::json!({
+            "version": ">=2.0.0",
+            "settings": {
+                "database_type": "mysql",
+                "mysql_host": "localhost"
+            }
+        });
+
+        let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(config.version.as_deref(), Some(">=2.0.0"));
+        assert_eq!(
+            config.settings.get("database_type").and_then(|v| v.as_str()),
+            Some("mysql")
+        );
+        assert_eq!(
+            config.settings.get("mysql_host").and_then(|v| v.as_str()),
+            Some("localhost")
+        );
+    }
+
+    #[test]
+    fn scoped_extension_config_mixed_flat_and_nested() {
+        // Flat keys merge with nested settings. Explicit settings win on conflict.
+        let json = serde_json::json!({
+            "settings": {
+                "database_type": "mysql"
+            },
+            "mysql_host": "localhost",
+            "database_type": "sqlite"
+        });
+
+        let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
+        // Explicit settings win over flat keys.
+        assert_eq!(
+            config.settings.get("database_type").and_then(|v| v.as_str()),
+            Some("mysql"),
+            "explicit settings sub-object should take precedence over flat keys"
+        );
+        // Flat-only key is captured.
+        assert_eq!(
+            config.settings.get("mysql_host").and_then(|v| v.as_str()),
+            Some("localhost")
+        );
+    }
+
+    #[test]
+    fn scoped_extension_config_empty_object() {
+        let json = serde_json::json!({});
+        let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
+        assert!(config.version.is_none());
+        assert!(config.settings.is_empty());
+    }
+
+    #[test]
+    fn scoped_extension_config_version_only() {
+        let json = serde_json::json!({ "version": "^1.0" });
+        let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(config.version.as_deref(), Some("^1.0"));
+        assert!(config.settings.is_empty());
     }
 }
