@@ -1,0 +1,79 @@
+{
+  "name": "Go",
+  "id": "go",
+  "version": "1.0.0",
+  "icon": "g.circle.fill",
+  "description": "Go CLI integration for services, bridges, and binaries",
+  "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["go", "mod", "sum"],
+    "capabilities": ["fingerprint"]
+  },
+  "scripts": {
+    "fingerprint": "scripts/fingerprint.sh"
+  },
+  "build": {
+    "script_names": [
+      "build.sh"
+    ],
+    "command_template": "bash {{script}}",
+    "extension_script": "scripts/build.sh",
+    "cleanup_paths": [
+      "bin",
+      "dist"
+    ]
+  },
+  "lint": {
+    "extension_script": "scripts/lint-runner.sh"
+  },
+  "test": {
+    "extension_script": "scripts/test-runner.sh"
+  },
+  "cli": {
+    "tool": "go",
+    "display_name": "Go",
+    "command_template": "{{cliPath}} {{args}}",
+    "working_dir_template": "{{sitePath}}",
+    "default_cli_path": "go"
+  },
+  "audit": {
+    "feature_patterns": [
+      "func\\s+(\\w+)\\s*\\(",
+      "type\\s+(\\w+)\\s+struct\\s*\\{",
+      "type\\s+(\\w+)\\s+interface\\s*\\{"
+    ],
+    "feature_labels": {
+      "func\\s+": "Functions",
+      "struct\\s*\\{": "Structs",
+      "interface\\s*\\{": "Interfaces"
+    },
+    "doc_targets": {
+      "Functions": {
+        "file": "api-reference.md",
+        "heading": "## Functions",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Structs": {
+        "file": "api-reference.md",
+        "heading": "## Structs",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
+      "Interfaces": {
+        "file": "api-reference.md",
+        "heading": "## Interfaces",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      }
+    },
+    "test_mapping": {
+      "source_dirs": ["."],
+      "test_dirs": ["."],
+      "test_file_pattern": "{dir}/{name}_test.{ext}",
+      "method_prefix": "Test",
+      "inline_tests": false,
+      "critical_patterns": ["cmd/", "pkg/", "internal/"]
+    }
+  },
+  "docs": [
+    "extensions/go.md"
+  ]
+}

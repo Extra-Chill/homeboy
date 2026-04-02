@@ -11,6 +11,7 @@ This is a **monorepo** — each subdirectory is a standalone extension. Install 
 | `wordpress` | `homeboy extension install … --id wordpress` | WP-CLI integration, build, test, lint |
 | `nodejs` | `homeboy extension install … --id nodejs` | PM2 process management |
 | `rust` | `homeboy extension install … --id rust` | Cargo CLI integration |
+| `go` | `homeboy extension install … --id go` | Go CLI integration for services and binaries |
 | `github` | `homeboy extension install … --id github` | GitHub CLI for issues, PRs, and repos |
 | `homebrew` | `homeboy extension install … --id homebrew` | Homebrew tap publishing |
 | `openclaw` | `homeboy extension install … --id openclaw` | OpenClaw AI agent integration |
