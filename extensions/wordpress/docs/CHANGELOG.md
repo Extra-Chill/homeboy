@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.5] - 2026-04-02
+
+### Fixed
+- enable post-deploy permission fix for WordPress plugins and themes
+
 ## [2.10.4] - 2026-03-23
 
 ### Fixed
