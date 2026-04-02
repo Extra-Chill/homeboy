@@ -28,10 +28,12 @@ pub(super) fn execute_component_deploy(
     remote_version: Option<String>,
 ) -> ComponentDeployResult {
     let is_git_deploy = component.deploy_strategy.as_deref() == Some("git");
+    let is_file_deploy = component.deploy_strategy.as_deref() == Some("file");
 
     // Try downloading release artifact from GitHub instead of building locally.
     // This is the preferred path when the component has remote_url set.
     let release_artifact: Option<PathBuf> = if !is_git_deploy
+        && !is_file_deploy
         && !config.skip_build
         && release_download::supports_release_deploy(component)
     {
@@ -40,9 +42,9 @@ pub(super) fn execute_component_deploy(
         None
     };
 
-    // Build (git-deploy, skip-build, and release-download skip this step)
+    // Build (git-deploy, file-deploy, skip-build, and release-download skip this step)
     let (build_exit_code, build_error) =
-        if is_git_deploy || config.skip_build || release_artifact.is_some() {
+        if is_git_deploy || is_file_deploy || config.skip_build || release_artifact.is_some() {
             (Some(0), None)
         } else {
             build::build_component(component)
@@ -129,6 +131,17 @@ pub(super) fn execute_component_deploy(
         );
     }
 
+    if strategy == "file" {
+        return execute_file_deploy(
+            component,
+            ctx,
+            base_path,
+            &install_dir,
+            local_version,
+            remote_version,
+        );
+    }
+
     execute_artifact_deploy(
         component,
         config,
@@ -179,6 +192,138 @@ fn execute_git_deploy(
                 .with_deploy_exit_code(Some(exit_code))
         }
         Ok(DeployResult {
+            error, exit_code, ..
+        }) => ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            error.unwrap_or_default(),
+        )
+        .with_remote_path(install_dir.to_string())
+        .with_deploy_exit_code(Some(exit_code)),
+        Err(err) => ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            err.to_string(),
+        )
+        .with_remote_path(install_dir.to_string()),
+    }
+}
+
+/// Deploy a single file component via atomic SCP.
+///
+/// File components (`deploy_strategy: "file"`) skip build entirely — the
+/// `local_path` IS the artifact. The `remote_path` (resolved into `install_dir`)
+/// is treated as the full destination file path, not a directory.
+///
+/// The parent directory is created on the remote if it doesn't exist.
+/// Upload uses atomic SCP (temp file + mv) to prevent partial writes.
+fn execute_file_deploy(
+    component: &Component,
+    ctx: &RemoteProjectContext,
+    base_path: &str,
+    install_dir: &str,
+    local_version: Option<String>,
+    remote_version: Option<String>,
+) -> ComponentDeployResult {
+    let local_path = Path::new(&component.local_path);
+
+    if !local_path.exists() {
+        return ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            format!("Source file does not exist: {}", component.local_path),
+        );
+    }
+
+    if !local_path.is_file() {
+        return ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            format!(
+                "Component '{}' has deploy_strategy 'file' but local_path is not a file: {}",
+                component.id, component.local_path
+            ),
+        );
+    }
+
+    // Create the parent directory on the remote (not the file path itself!)
+    let remote_parent = Path::new(install_dir)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or(".");
+
+    let mkdir_cmd = format!(
+        "mkdir -p {}",
+        crate::engine::shell::quote_path(remote_parent)
+    );
+    log_status!("deploy", "Ensuring remote directory: {}", remote_parent);
+    let mkdir_output = ctx.client.execute(&mkdir_cmd);
+    if !mkdir_output.success {
+        return ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            format!("Failed to create remote directory: {}", mkdir_output.stderr),
+        );
+    }
+
+    // Upload via atomic SCP (temp file + mv)
+    log_status!(
+        "deploy",
+        "Deploying file: {} -> {}",
+        local_path.display(),
+        install_dir
+    );
+
+    let deploy_result = super::transfer::upload_file(&ctx.client, local_path, install_dir);
+
+    match deploy_result {
+        Ok(super::types::DeployResult {
+            success: true,
+            exit_code,
+            ..
+        }) => {
+            // Fix ownership if configured
+            if let Some(owner) = component.remote_owner.as_deref() {
+                let chown_cmd = format!(
+                    "chown {} {}",
+                    crate::engine::shell::quote_arg(owner),
+                    crate::engine::shell::quote_path(install_dir)
+                );
+                let chown_output = ctx.client.execute(&chown_cmd);
+                if !chown_output.success {
+                    log_status!(
+                        "deploy",
+                        "Warning: could not set ownership to {}: {}",
+                        owner,
+                        chown_output.stderr
+                    );
+                }
+            }
+
+            super::version_overrides::run_post_deploy_hooks(
+                &ctx.client,
+                component,
+                install_dir,
+                base_path,
+            );
+
+            ComponentDeployResult::new(component, base_path)
+                .with_status("deployed")
+                .with_versions(local_version.clone(), local_version)
+                .with_remote_path(install_dir.to_string())
+                .with_deploy_exit_code(Some(exit_code))
+        }
+        Ok(super::types::DeployResult {
             error, exit_code, ..
         }) => ComponentDeployResult::failed(
             component,

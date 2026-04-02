@@ -263,7 +263,7 @@ fn check_cap(path: &str, config: &GuardConfig) -> Option<GuardBlock> {
     let output = Command::new("git")
         .args([
             "log",
-            &format!("--format=%s"),
+            "--format=%s",
             &format!("-n{}", config.max_commits + 1),
         ])
         .current_dir(path)

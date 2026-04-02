@@ -268,6 +268,7 @@ fn run_dry_run_mode(
 fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
     let dirty: Vec<&str> = components
         .iter()
+        .filter(|c| !c.is_file_component())
         .filter(|c| !git::is_workdir_clean(Path::new(&c.local_path)))
         .map(|c| c.id.as_str())
         .collect();
@@ -294,6 +295,11 @@ fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
 /// Aborts if pull fails (e.g., merge conflicts).
 fn sync_components(components: &[Component]) -> Result<()> {
     for component in components {
+        // File components are not git repos — skip sync
+        if component.is_file_component() {
+            continue;
+        }
+
         let path = &component.local_path;
 
         // Check if behind remote
@@ -351,6 +357,11 @@ fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
     let mut checkouts = Vec::new();
 
     for component in components {
+        // File components don't have tags — skip
+        if component.is_file_component() {
+            continue;
+        }
+
         let path = &component.local_path;
 
         // Get the latest tag

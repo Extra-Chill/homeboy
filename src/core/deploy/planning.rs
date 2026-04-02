@@ -297,11 +297,12 @@ pub(super) fn load_project_components(
         // Resolve effective artifact (component value OR extension pattern)
         let effective_artifact = component::resolve_artifact(&loaded);
 
-        // Git-deploy components don't need a build artifact
+        // Git-deploy and file-deploy components don't need a build artifact
         let is_git_deploy = loaded.deploy_strategy.as_deref() == Some("git");
+        let is_file_deploy = loaded.deploy_strategy.as_deref() == Some("file");
 
         match effective_artifact {
-            Some(artifact) if !is_git_deploy => {
+            Some(artifact) if !is_git_deploy && !is_file_deploy => {
                 let resolved_artifact =
                     crate::paths::resolve_path_string(&loaded.local_path, &artifact);
                 loaded.build_artifact = Some(resolved_artifact);
@@ -309,6 +310,10 @@ pub(super) fn load_project_components(
             }
             _ if is_git_deploy => {
                 // Git-deploy components are deployable without an artifact
+                deployable.push(loaded);
+            }
+            _ if is_file_deploy => {
+                // File-deploy components use local_path as the artifact — no build needed
                 deployable.push(loaded);
             }
             Some(_) | None => {

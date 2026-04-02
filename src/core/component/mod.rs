@@ -356,6 +356,11 @@ impl Component {
     ///
     /// Returns `Some(path)` if auto-resolved, `None` if not applicable or not detectable.
     pub fn auto_resolve_remote_path(&self) -> Option<String> {
+        // File components cannot auto-resolve — they must have explicit remote_path.
+        if std::path::Path::new(&self.local_path).is_file() {
+            return None;
+        }
+
         // Only applies to components with the wordpress extension.
         let extensions = self.extensions.as_ref()?;
         if !extensions.contains_key("wordpress") {
@@ -395,6 +400,15 @@ impl Component {
         }
 
         None
+    }
+
+    /// Check if this component's local_path points to a file (not a directory).
+    ///
+    /// File components use `deploy_strategy: "file"` and are deployed via
+    /// atomic SCP instead of rsync. They skip build, git sync, and tag checkout.
+    pub fn is_file_component(&self) -> bool {
+        self.deploy_strategy.as_deref() == Some("file")
+            || (std::path::Path::new(&self.local_path).is_file() && self.deploy_strategy.is_none())
     }
 
     /// Ensure `remote_path` is populated. If empty, attempt auto-resolution.
