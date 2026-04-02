@@ -37,14 +37,14 @@ fi
 PUBLISHED_VERSION=$(npm view "$PACKAGE_NAME" version --registry "$REGISTRY" 2>/dev/null || echo "")
 
 if [[ "$CURRENT_VERSION" == "$PUBLISHED_VERSION" ]]; then
-  echo "Version $CURRENT_VERSION of $PACKAGE_NAME already published, skipping..."
+  echo "Version $CURRENT_VERSION of $PACKAGE_NAME already published, skipping..." >&2
   exit 0
 fi
 
-echo "Publishing $PACKAGE_NAME@$CURRENT_VERSION to $REGISTRY (access: $ACCESS)..."
+echo "Publishing $PACKAGE_NAME@$CURRENT_VERSION to $REGISTRY (access: $ACCESS)..." >&2
 
 publish_args=(--access "$ACCESS" --registry "$REGISTRY")
 
-npm publish "${publish_args[@]}"
+npm publish "${publish_args[@]}" >&2
 
-echo "Successfully published $PACKAGE_NAME@$CURRENT_VERSION"
+echo "Successfully published $PACKAGE_NAME@$CURRENT_VERSION" >&2

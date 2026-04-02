@@ -17,9 +17,9 @@ has_validate=$(node -e "
 " 2>/dev/null || echo "no")
 
 if [[ "$has_validate" == "yes" ]]; then
-  echo "Running npm run validate..."
-  npm run validate
+  echo "Running npm run validate..." >&2
+  npm run validate >&2
 else
-  echo "No validate script defined, running npm pack --dry-run..."
-  npm pack --dry-run
+  echo "No validate script defined, running npm pack --dry-run..." >&2
+  npm pack --dry-run >&2
 fi

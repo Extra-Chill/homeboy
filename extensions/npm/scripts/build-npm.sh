@@ -36,7 +36,20 @@ else
   echo "No build script defined in package.json, skipping build" >&2
 fi
 
-PACK_TARBALL=$(npm pack --json | jq -r '.[0].filename // empty')
+# npm pack --json can emit lifecycle script output (prepack, prepare, etc.) to
+# stdout before the JSON array. Capture the full output, then extract only the
+# JSON portion so jq doesn't choke on leading non-JSON text.
+PACK_OUTPUT=$(npm pack --json)
+PACK_JSON=$(echo "${PACK_OUTPUT}" | sed -n '/^\[/,$p')
+
+if [[ -z "${PACK_JSON}" ]]; then
+  echo "npm pack --json did not produce valid JSON output" >&2
+  echo "Raw output:" >&2
+  echo "${PACK_OUTPUT}" >&2
+  exit 1
+fi
+
+PACK_TARBALL=$(echo "${PACK_JSON}" | jq -r '.[0].filename // empty')
 
 if [[ -z "${PACK_TARBALL}" || ! -f "${PACK_TARBALL}" ]]; then
   echo "npm pack did not produce a tarball" >&2
