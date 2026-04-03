@@ -598,10 +598,11 @@ fn try_load_cached_audit() -> Option<CodeAuditResult> {
 /// Try to load cached lint findings from a previous `homeboy lint` run.
 ///
 /// Checks `HOMEBOY_OUTPUT_DIR/lint.json` for a `CliResponse<LintCommandOutput>`
-/// envelope. If found and the run passed (zero findings), returns an empty
-/// finding list — the fix stage can be skipped entirely since there's nothing
-/// to fix. If findings exist, returns None so the fix stage runs normally
-/// (fixes require actual file modification that can't be cached).
+/// envelope. If found and the run passed (zero findings), returns `Clean`
+/// — the fix stage can be skipped entirely.
+///
+/// If findings exist, returns `HasFindings(count)` so the fix stage knows
+/// to invoke fix-only mode without re-running the diagnostic pass.
 fn try_load_cached_lint() -> Option<CachedLintResult> {
     let output_dir = std::env::var(OUTPUT_DIR_ENV).ok()?;
     let lint_file = PathBuf::from(&output_dir).join("lint.json");
@@ -618,7 +619,11 @@ fn try_load_cached_lint() -> Option<CachedLintResult> {
         .map(|a| a.len())
         .unwrap_or(0);
 
-    if success && passed && finding_count == 0 {
+    if !success {
+        return None;
+    }
+
+    if passed && finding_count == 0 {
         crate::log_status!(
             "refactor",
             "Cached lint result is clean (0 findings from {}) — skipping lint fix stage",
@@ -627,11 +632,15 @@ fn try_load_cached_lint() -> Option<CachedLintResult> {
         return Some(CachedLintResult::Clean);
     }
 
-    crate::log_status!(
-        "refactor",
-        "Cached lint result has {} findings — fix stage will re-run linter with auto-fix",
-        finding_count
-    );
+    if finding_count > 0 {
+        crate::log_status!(
+            "refactor",
+            "Cached lint result has {} findings — fix stage will invoke fix-only mode",
+            finding_count
+        );
+        return Some(CachedLintResult::HasFindings(finding_count));
+    }
+
     None
 }
 
@@ -669,6 +678,8 @@ fn try_load_cached_test() -> Option<CachedTestResult> {
 enum CachedLintResult {
     /// Lint passed with zero findings — nothing to fix.
     Clean,
+    /// Lint had findings — the fix stage should invoke fix-only mode.
+    HasFindings(usize),
 }
 
 enum CachedTestResult {
@@ -814,9 +825,11 @@ fn run_lint_stage(
     write: bool,
     run_dir: &RunDir,
 ) -> crate::Result<PlannedStage> {
-    // Check for cached lint results — if the quality gate already passed clean,
-    // there's nothing to fix and we can skip re-running the linter entirely.
-    if let Some(CachedLintResult::Clean) = try_load_cached_lint() {
+    // Check for cached lint results from the quality gate.
+    let cached = try_load_cached_lint();
+
+    // If clean, nothing to fix — skip entirely.
+    if let Some(CachedLintResult::Clean) = cached {
         return Ok(PlannedStage {
             source: "lint".to_string(),
             summary: SourceStageSummary {
@@ -837,11 +850,6 @@ fn run_lint_stage(
     let root_str = root.to_string_lossy().to_string();
     let findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
     let fix_sidecars = auto::AutofixSidecarFiles::for_run_dir(run_dir);
-    let before_dirty = if write {
-        git::get_dirty_files(&root_str).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
 
     let selected_files = options.selected_files.as_deref().or(changed_files);
     let effective_glob = if let Some(changed_files) = selected_files {
@@ -862,38 +870,103 @@ fn run_lint_stage(
         options.glob.clone()
     };
 
-    let runner = extension::lint::build_lint_runner(
-        component,
-        None,
-        settings,
-        false,
-        options.file.as_deref(),
-        effective_glob.as_deref(),
-        options.errors_only,
-        options.sniffs.as_deref(),
-        options.exclude_sniffs.as_deref(),
-        options.category.as_deref(),
-        run_dir,
-    )?
-    .env_if(write, "HOMEBOY_AUTO_FIX", "1");
-
-    runner.run()?;
-
-    let stage_changed_files = if write {
-        let after_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
-        let before_set: HashSet<&str> = before_dirty.iter().map(|s| s.as_str()).collect();
-        after_dirty
-            .into_iter()
-            .filter(|f| !before_set.contains(f.as_str()))
-            .collect()
+    // ── Phase 1: Diagnose ──────────────────────────────────────────────
+    // Run the linter WITHOUT auto-fix. The extension reports findings but
+    // does NOT modify files. This separates diagnosis from fix application
+    // so the engine controls the full lifecycle.
+    //
+    // When cached findings exist from the quality gate, skip the diagnostic
+    // pass entirely — the engine already knows what needs fixing.
+    let lint_findings = if let Some(CachedLintResult::HasFindings(count)) = cached {
+        crate::log_status!(
+            "refactor",
+            "Using {} cached lint findings — skipping diagnostic pass",
+            count
+        );
+        // Parse cached findings for reporting
+        let output_dir = std::env::var(OUTPUT_DIR_ENV).ok();
+        let cached_findings = output_dir
+            .and_then(|dir| {
+                let file = PathBuf::from(&dir).join("lint.json");
+                let content = std::fs::read_to_string(&file).ok()?;
+                let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+                let data = json.get("data")?;
+                let findings: Vec<crate::extension::lint::LintFinding> =
+                    serde_json::from_value(data.get("lint_findings")?.clone()).ok()?;
+                Some(findings)
+            })
+            .unwrap_or_default();
+        cached_findings
     } else {
-        Vec::new()
+        // No cached findings — run the diagnostic pass.
+        let runner = extension::lint::build_lint_runner(
+            component,
+            None,
+            settings,
+            false,
+            options.file.as_deref(),
+            effective_glob.as_deref(),
+            options.errors_only,
+            options.sniffs.as_deref(),
+            options.exclude_sniffs.as_deref(),
+            options.category.as_deref(),
+            run_dir,
+        )?;
+
+        runner.run()?;
+
+        crate::extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default()
     };
 
-    let fix_results = fix_sidecars.consume_fix_results();
+    // ── Phase 2: Apply fixes (only when --write) ───────────────────────
+    // The engine controls fix application. The extension's fix-mode
+    // invocation runs ONLY the fixers, not the diagnostic pass. The engine
+    // tracks what changed via undo snapshots and git diff.
+    let (stage_changed_files, fix_results) = if write && !lint_findings.is_empty() {
+        let before_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
+
+        // Save undo snapshot before applying lint fixes.
+        let mut snap = UndoSnapshot::new(root, "lint fix");
+        for file in &before_dirty {
+            snap.capture_file(file);
+        }
+        if let Err(error) = snap.save() {
+            crate::log_status!("undo", "Warning: failed to save undo snapshot: {}", error);
+        }
+
+        // Invoke the extension in fix-only mode — runs fixers without
+        // re-running the diagnostic pass.
+        let fix_runner = extension::lint::build_lint_runner(
+            component,
+            None,
+            settings,
+            false,
+            options.file.as_deref(),
+            effective_glob.as_deref(),
+            options.errors_only,
+            options.sniffs.as_deref(),
+            options.exclude_sniffs.as_deref(),
+            options.category.as_deref(),
+            run_dir,
+        )?
+        .env("HOMEBOY_FIX_ONLY", "1");
+
+        fix_runner.run()?;
+
+        let after_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
+        let before_set: HashSet<&str> = before_dirty.iter().map(|s| s.as_str()).collect();
+        let changed: Vec<String> = after_dirty
+            .into_iter()
+            .filter(|f| !before_set.contains(f.as_str()))
+            .collect();
+
+        let fix_results = fix_sidecars.consume_fix_results();
+        (changed, fix_results)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     let edit_count = fix_results.len();
-    let lint_findings =
-        crate::extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default();
 
     Ok(PlannedStage {
         source: "lint".to_string(),
@@ -943,15 +1016,12 @@ fn run_test_stage(
 
     let root_str = root.to_string_lossy().to_string();
     let fix_sidecars = auto::AutofixSidecarFiles::for_run_dir(run_dir);
-    let before_dirty = if write {
-        git::get_dirty_files(&root_str).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
     let selected_test_files = options.selected_files.as_deref().or(changed_test_files);
 
-    let mut runner = extension::test::build_test_runner(
+    // ── Phase 1: Diagnose ──────────────────────────────────────────────
+    // Run tests WITHOUT auto-fix. The extension reports failures but does
+    // NOT modify files. This separates diagnosis from fix application.
+    let runner = extension::test::build_test_runner(
         component,
         None,
         settings,
@@ -960,27 +1030,63 @@ fn run_test_stage(
         None,
         selected_test_files,
         run_dir,
-    )?
-    .env_if(write, "HOMEBOY_AUTO_FIX", "1");
+    )?;
 
+    let mut runner = runner;
     if !options.script_args.is_empty() {
         runner = runner.script_args(&options.script_args);
     }
 
     runner.run()?;
 
-    let stage_changed_files = if write {
+    // ── Phase 2: Apply fixes (only when --write) ───────────────────────
+    // The engine controls fix application. The extension's fix-mode
+    // invocation runs ONLY the fixers, not the diagnostic pass.
+    let (stage_changed_files, fix_results) = if write {
+        let before_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
+
+        // Save undo snapshot before applying test fixes.
+        let mut snap = UndoSnapshot::new(root, "test fix");
+        for file in &before_dirty {
+            snap.capture_file(file);
+        }
+        if let Err(error) = snap.save() {
+            crate::log_status!("undo", "Warning: failed to save undo snapshot: {}", error);
+        }
+
+        // Invoke the extension in fix-only mode.
+        let fix_runner = extension::test::build_test_runner(
+            component,
+            None,
+            settings,
+            options.skip_lint,
+            false,
+            None,
+            selected_test_files,
+            run_dir,
+        )?
+        .env("HOMEBOY_FIX_ONLY", "1");
+
+        let mut fix_runner = fix_runner;
+        if !options.script_args.is_empty() {
+            fix_runner = fix_runner.script_args(&options.script_args);
+        }
+
+        fix_runner.run()?;
+
         let after_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
         let before_set: HashSet<&str> = before_dirty.iter().map(|s| s.as_str()).collect();
-        after_dirty
+        let changed: Vec<String> = after_dirty
             .into_iter()
             .filter(|f| !before_set.contains(f.as_str()))
-            .collect()
+            .collect();
+
+        let fix_results = fix_sidecars.consume_fix_results();
+        (changed, fix_results)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
-    let fix_results = fix_sidecars.consume_fix_results();
     let edit_count = fix_results.len();
     Ok(PlannedStage {
         source: "test".to_string(),

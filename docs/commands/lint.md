@@ -63,7 +63,7 @@ The following environment variables are set for lint runners:
 - `HOMEBOY_MODULE_PATH`: Absolute path to extension directory
 - `HOMEBOY_COMPONENT_PATH`: Absolute path to component directory
 - `HOMEBOY_PLUGIN_PATH`: Same as component path
-- `HOMEBOY_AUTO_FIX`: Set to `1` when running via `refactor --from lint --write`
+- `HOMEBOY_FIX_ONLY`: Set to `1` when running in fix-only mode (refactor --from lint --write) — extension should apply fixes without re-running diagnostics
 - `HOMEBOY_SUMMARY_MODE`: Set to `1` when `--summary` flag is used
 - `HOMEBOY_LINT_FILE`: Single file path when `--file` is used
 - `HOMEBOY_LINT_GLOB`: Glob pattern when `--glob` or `--changed-only` is used
