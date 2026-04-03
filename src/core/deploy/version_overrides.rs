@@ -282,10 +282,7 @@ pub(super) fn deploy_with_override(
     vars.insert("siteRoot".to_string(), site_root.unwrap_or("").to_string());
     vars.insert("cliPath".to_string(), cli_path.to_string());
     vars.insert("domain".to_string(), domain.unwrap_or("").to_string());
-    vars.insert(
-        "allowRootFlag".to_string(),
-        "--allow-root".to_string(),
-    );
+    vars.insert("allowRootFlag".to_string(), "--allow-root".to_string());
 
     let install_cmd = render_map(&override_config.install_command, &vars);
     log_status!("deploy", "Running install command: {}", install_cmd);
