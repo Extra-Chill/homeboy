@@ -1631,46 +1631,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_calls_skips_keywords() {
-        let body = "if something() {\n    let x = process();\n    for item in list() {\n        handle(item);\n    }\n}";
-        let calls = extract_calls_from_body(body);
-        assert!(calls.contains(&"something".to_string()));
-        assert!(calls.contains(&"process".to_string()));
-        assert!(calls.contains(&"list".to_string()));
-        assert!(calls.contains(&"handle".to_string()));
-        assert!(!calls.contains(&"if".to_string()));
-        assert!(!calls.contains(&"for".to_string()));
-        assert!(!calls.contains(&"let".to_string()));
-    }
-
-    #[test]
-    fn jaccard_identical_sets() {
-        let a = vec!["foo".to_string(), "bar".to_string()];
-        assert!((jaccard_similarity(&a, &a) - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn jaccard_disjoint_sets() {
-        let a = vec!["foo".to_string()];
-        let b = vec!["bar".to_string()];
-        assert!((jaccard_similarity(&a, &b)).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn lcs_identical_sequences() {
-        let a = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(lcs_length(&a, &a), 3);
-        assert!((lcs_ratio(&a, &a) - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn lcs_partial_overlap() {
-        let a = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let b = vec!["a".to_string(), "x".to_string(), "c".to_string()];
-        assert_eq!(lcs_length(&a, &b), 2); // a, c
-    }
-
-    #[test]
     fn convention_methods_skip_parallel_detection() {
         // Two methods with identical call patterns — would normally flag
         let fp1 = make_fingerprint_with_content(

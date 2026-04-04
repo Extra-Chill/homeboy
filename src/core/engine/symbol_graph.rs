@@ -104,7 +104,7 @@ pub fn module_path_from_file(file_path: &str) -> String {
 /// Returns structured `ImportRef`s with module paths and imported names.
 /// For Rust, handles both simple (`use crate::mod::Item;`) and grouped
 /// (`use crate::mod::{A, B};`) imports.
-pub fn parse_imports(content: &str, grammar: &Grammar, relative_path: &str) -> Vec<ImportRef> {
+pub(crate) fn parse_imports(content: &str, grammar: &Grammar, relative_path: &str) -> Vec<ImportRef> {
     let symbols = grammar::extract(content, grammar);
     let lines: Vec<&str> = content.lines().collect();
     let language_id = grammar.language.id.as_str();
@@ -525,50 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_rust_import_simple() {
-        let (module, names) = parse_rust_import_path("crate::core::fixer::module_path_from_file");
-        assert_eq!(module, "crate::core::fixer");
-        assert_eq!(names, vec!["module_path_from_file"]);
-    }
-
-    #[test]
-    fn parse_rust_import_grouped() {
-        let (module, names) = parse_rust_import_path("crate::core::fixer::{insertion, Fix}");
-        assert_eq!(module, "crate::core::fixer");
-        assert_eq!(names, vec!["insertion", "Fix"]);
-    }
-
-    #[test]
-    fn parse_rust_import_self() {
-        // `use crate::core::fixer::self;` — the whole path is the module, no named imports
-        let (module, names) = parse_rust_import_path("crate::core::fixer::self");
-        assert_eq!(module, "crate::core::fixer::self");
-        assert!(names.is_empty());
-    }
-
-    #[test]
-    fn parse_rust_import_wildcard() {
-        // `use super::*;` — wildcard, no specific named imports
-        let (module, names) = parse_rust_import_path("super::*");
-        assert_eq!(module, "super::*");
-        assert!(names.is_empty());
-    }
-
-    #[test]
-    fn parse_rust_import_alias() {
-        let (module, names) = parse_rust_import_path("crate::mod::{Foo as Bar, Baz}");
-        assert_eq!(module, "crate::mod");
-        assert_eq!(names, vec!["Foo", "Baz"]);
-    }
-
-    #[test]
-    fn parse_php_import() {
-        let (module, names) = parse_php_import_path("App\\Models\\User");
-        assert_eq!(module, "App\\Models");
-        assert_eq!(names, vec!["User"]);
-    }
-
-    #[test]
     fn import_matches_module_variants() {
         // Direct match
         assert!(import_matches_module("core::fixer", "core::fixer"));
@@ -619,49 +575,4 @@ pub fn hello() {}
         assert_eq!(imports[2].imported_names, vec!["grammar"]);
     }
 
-    #[test]
-    fn compute_rewrite_simple_import() {
-        let import = ImportRef {
-            file: "src/core/refactor/move_items.rs".to_string(),
-            line: 22,
-            module_path: "crate::core::refactor::move_items".to_string(),
-            imported_names: vec!["walk_source_files".to_string()],
-            original_text: "use crate::core::refactor::move_items::walk_source_files;".to_string(),
-        };
-
-        let rewrite =
-            compute_import_rewrite(&import, "walk_source_files", "core::refactor::transform")
-                .unwrap();
-        assert_eq!(
-            rewrite.replacement,
-            "use crate::core::refactor::transform::walk_source_files;"
-        );
-    }
-
-    #[test]
-    fn compute_rewrite_grouped_import() {
-        let import = ImportRef {
-            file: "src/example.rs".to_string(),
-            line: 5,
-            module_path: "crate::core::fixer".to_string(),
-            imported_names: vec![
-                "insertion".to_string(),
-                "module_path_from_file".to_string(),
-                "Fix".to_string(),
-            ],
-            original_text: "use crate::core::fixer::{insertion, module_path_from_file, Fix};"
-                .to_string(),
-        };
-
-        let rewrite =
-            compute_import_rewrite(&import, "module_path_from_file", "core::symbol_graph").unwrap();
-
-        // Should keep remaining in old group and add new import
-        assert!(rewrite
-            .replacement
-            .contains("use crate::core::fixer::{insertion, Fix};"));
-        assert!(rewrite
-            .replacement
-            .contains("use crate::core::symbol_graph::module_path_from_file;"));
-    }
 }

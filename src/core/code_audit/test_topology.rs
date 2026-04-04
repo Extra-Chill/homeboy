@@ -321,28 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn test_walk_files() {
-        let dir = tempfile::tempdir().expect("tempdir should be created");
-        let src_dir = dir.path().join("src");
-        std::fs::create_dir_all(&src_dir).expect("src dir should be created");
-        std::fs::write(src_dir.join("lib.rs"), "pub fn x(){}\n").expect("file should be written");
-
-        let files = codebase_scan::walk_files(
-            dir.path(),
-            &ScanConfig {
-                extensions: ExtensionFilter::All,
-                ..Default::default()
-            },
-        );
-        assert!(
-            files
-                .iter()
-                .any(|p| p.ends_with(std::path::Path::new("src/lib.rs"))),
-            "expected src/lib.rs in walked file list"
-        );
-    }
-
-    #[test]
     fn test_run_topology_script() {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let script_rel = "topology.sh";

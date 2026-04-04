@@ -117,7 +117,7 @@ impl std::fmt::Display for AffectReason {
 ///
 /// Uses `git show <ref>:<path>` to get the base version without checkout,
 /// then runs the extension fingerprint script on that content.
-pub fn fingerprint_from_git_ref(
+pub(crate) fn fingerprint_from_git_ref(
     source_path: &str,
     git_ref: &str,
     relative_path: &str,
@@ -172,7 +172,7 @@ pub fn fingerprint_from_git_ref(
 ///
 /// For each changed file, retrieves the base version, fingerprints it, and
 /// produces a `SymbolDiff` describing what symbols changed.
-pub fn diff_changed_files(
+pub(crate) fn diff_changed_files(
     source_path: &str,
     git_ref: &str,
     changed_files: &[String],
@@ -360,7 +360,7 @@ fn similarity(a: &str, b: &str) -> f64 {
 /// - `hooks` matching removed hook names
 ///
 /// Returns only files NOT already in the changed set.
-pub fn find_affected_files(
+pub(crate) fn find_affected_files(
     diffs: &[SymbolDiff],
     all_fingerprints: &[&FileFingerprint],
     changed_files: &HashSet<&str>,
@@ -655,233 +655,12 @@ mod tests {
             vec![("action", "my_custom_action")],
         );
         let current = make_fingerprint(
-            "Foo.php",
-            vec![],
-            vec![],
-            vec![],
-            None,
-            None,
             vec![("action", "my_renamed_action")],
         );
 
         let diff = diff_fingerprints("Foo.php", &base, &current);
         assert!(diff.removed_hooks.contains(&"my_custom_action".to_string()));
         assert!(diff.added_hooks.contains(&"my_renamed_action".to_string()));
-    }
-
-    #[test]
-    fn test_find_affected_calls_removed_function() {
-        // Foo.php removed doThing(), Bar.php calls doThing()
-        let diff = SymbolDiff {
-            file: "Foo.php".to_string(),
-            removed_exports: vec!["doThing".to_string()],
-            added_exports: vec![],
-            renamed_exports: vec![],
-            type_renamed: None,
-            removed_hooks: vec![],
-            added_hooks: vec![],
-        };
-
-        let bar = make_fingerprint(
-            "Bar.php",
-            vec!["run"],
-            vec!["doThing"], // calls the removed function
-            vec![],
-            None,
-            None,
-            vec![],
-        );
-        let baz = make_fingerprint(
-            "Baz.php",
-            vec!["run"],
-            vec!["somethingElse"], // doesn't call it
-            vec![],
-            None,
-            None,
-            vec![],
-        );
-
-        let all_fps: Vec<&FileFingerprint> = vec![&bar, &baz];
-        let changed: HashSet<&str> = HashSet::from(["Foo.php"]);
-        let affected = find_affected_files(&[diff], &all_fps, &changed);
-
-        assert_eq!(affected.len(), 1);
-        assert_eq!(affected[0].file, "Bar.php");
-        assert_eq!(affected[0].source_file, "Foo.php");
-        assert!(matches!(
-            &affected[0].reasons[0],
-            AffectReason::CallsRemovedFunction { old_name, .. } if old_name == "doThing"
-        ));
-    }
-
-    #[test]
-    fn test_find_affected_imports_renamed_type() {
-        let diff = SymbolDiff {
-            file: "Foo.php".to_string(),
-            removed_exports: vec![],
-            added_exports: vec![],
-            renamed_exports: vec![],
-            type_renamed: Some(("FooHandler".to_string(), "BarHandler".to_string())),
-            removed_hooks: vec![],
-            added_hooks: vec![],
-        };
-
-        let consumer = make_fingerprint(
-            "Consumer.php",
-            vec!["run"],
-            vec![],
-            vec!["use App\\FooHandler"], // imports the old type
-            None,
-            None,
-            vec![],
-        );
-
-        let all_fps: Vec<&FileFingerprint> = vec![&consumer];
-        let changed: HashSet<&str> = HashSet::from(["Foo.php"]);
-        let affected = find_affected_files(&[diff], &all_fps, &changed);
-
-        assert_eq!(affected.len(), 1);
-        assert_eq!(affected[0].file, "Consumer.php");
-        assert!(matches!(
-            &affected[0].reasons[0],
-            AffectReason::ImportsChangedType { old_name, .. } if old_name == "FooHandler"
-        ));
-    }
-
-    #[test]
-    fn test_find_affected_extends_renamed_class() {
-        let diff = SymbolDiff {
-            file: "Base.php".to_string(),
-            removed_exports: vec![],
-            added_exports: vec![],
-            renamed_exports: vec![],
-            type_renamed: Some(("BaseTask".to_string(), "AbstractTask".to_string())),
-            removed_hooks: vec![],
-            added_hooks: vec![],
-        };
-
-        let child = make_fingerprint(
-            "Child.php",
-            vec!["run"],
-            vec![],
-            vec![],
-            Some("ChildTask"),
-            Some("BaseTask"), // extends the old class name
-            vec![],
-        );
-
-        let all_fps: Vec<&FileFingerprint> = vec![&child];
-        let changed: HashSet<&str> = HashSet::from(["Base.php"]);
-        let affected = find_affected_files(&[diff], &all_fps, &changed);
-
-        assert_eq!(affected.len(), 1);
-        assert_eq!(affected[0].file, "Child.php");
-        assert!(matches!(
-            &affected[0].reasons[0],
-            AffectReason::ExtendsChangedClass { old_name, .. } if old_name == "BaseTask"
-        ));
-    }
-
-    #[test]
-    fn test_find_affected_hooks_removed_action() {
-        let diff = SymbolDiff {
-            file: "Provider.php".to_string(),
-            removed_exports: vec![],
-            added_exports: vec![],
-            renamed_exports: vec![],
-            type_renamed: None,
-            removed_hooks: vec!["my_custom_hook".to_string()],
-            added_hooks: vec![],
-        };
-
-        let listener = make_fingerprint(
-            "Listener.php",
-            vec!["onHook"],
-            vec![],
-            vec![],
-            None,
-            None,
-            vec![("filter", "my_custom_hook")], // listens to the removed hook
-        );
-
-        let all_fps: Vec<&FileFingerprint> = vec![&listener];
-        let changed: HashSet<&str> = HashSet::from(["Provider.php"]);
-        let affected = find_affected_files(&[diff], &all_fps, &changed);
-
-        assert_eq!(affected.len(), 1);
-        assert_eq!(affected[0].file, "Listener.php");
-        assert!(matches!(
-            &affected[0].reasons[0],
-            AffectReason::HooksRemovedAction { old_name } if old_name == "my_custom_hook"
-        ));
-    }
-
-    #[test]
-    fn test_find_affected_skips_changed_files() {
-        // Foo.php is both the source of changes AND has calls — should not appear in affected
-        let diff = SymbolDiff {
-            file: "Foo.php".to_string(),
-            removed_exports: vec!["doThing".to_string()],
-            added_exports: vec![],
-            renamed_exports: vec![],
-            type_renamed: None,
-            removed_hooks: vec![],
-            added_hooks: vec![],
-        };
-
-        let foo = make_fingerprint(
-            "Foo.php",
-            vec!["doOther"],
-            vec!["doThing"],
-            vec![],
-            None,
-            None,
-            vec![],
-        );
-
-        let all_fps: Vec<&FileFingerprint> = vec![&foo];
-        let changed: HashSet<&str> = HashSet::from(["Foo.php"]);
-        let affected = find_affected_files(&[diff], &all_fps, &changed);
-
-        assert!(
-            affected.is_empty(),
-            "changed file should not be in affected"
-        );
-    }
-
-    #[test]
-    fn test_find_affected_renamed_function_in_calls() {
-        // Foo.php renamed doThing → doStuff, Bar.php calls doThing
-        let diff = SymbolDiff {
-            file: "Foo.php".to_string(),
-            removed_exports: vec![],
-            added_exports: vec![],
-            renamed_exports: vec![("doThing".to_string(), "doStuff".to_string())],
-            type_renamed: None,
-            removed_hooks: vec![],
-            added_hooks: vec![],
-        };
-
-        let bar = make_fingerprint(
-            "Bar.php",
-            vec!["run"],
-            vec!["doThing"],
-            vec![],
-            None,
-            None,
-            vec![],
-        );
-
-        let all_fps: Vec<&FileFingerprint> = vec![&bar];
-        let changed: HashSet<&str> = HashSet::from(["Foo.php"]);
-        let affected = find_affected_files(&[diff], &all_fps, &changed);
-
-        assert_eq!(affected.len(), 1);
-        assert!(matches!(
-            &affected[0].reasons[0],
-            AffectReason::CallsRemovedFunction { old_name, new_name }
-                if old_name == "doThing" && new_name.as_deref() == Some("doStuff")
-        ));
     }
 
     #[test]

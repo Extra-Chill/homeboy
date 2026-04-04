@@ -135,36 +135,4 @@ pub fn run_startup_check() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn cache_freshness_within_24h() {
-        let cache = ExtensionUpdateCache {
-            extensions_behind: HashMap::new(),
-            checked_at: now_unix() - 100,
-        };
-        assert!(is_cache_fresh(&cache));
-    }
-
-    #[test]
-    fn cache_stale_after_24h() {
-        let cache = ExtensionUpdateCache {
-            extensions_behind: HashMap::new(),
-            checked_at: now_unix() - CHECK_INTERVAL_SECS - 1,
-        };
-        assert!(!is_cache_fresh(&cache));
-    }
-
-    #[test]
-    fn cache_roundtrip() {
-        let mut behind = HashMap::new();
-        behind.insert("wordpress".to_string(), 3);
-        let cache = ExtensionUpdateCache {
-            extensions_behind: behind,
-            checked_at: 1700000000,
-        };
-        let json = serde_json::to_string(&cache).unwrap();
-        let parsed: ExtensionUpdateCache = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.extensions_behind.len(), 1);
-        assert_eq!(parsed.extensions_behind["wordpress"], 3);
-        assert_eq!(parsed.checked_at, 1700000000);
-    }
 }

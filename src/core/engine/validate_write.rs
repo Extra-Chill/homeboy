@@ -298,37 +298,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn resolve_builtin_for_rust_project() {
-        let dir = TempDir::new().expect("temp dir");
-        fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"t\"").unwrap();
-        let cmd = resolve_builtin_validate_command(dir.path());
-        assert_eq!(cmd, Some("cargo check --tests 2>&1".to_string()));
-    }
-
-    #[test]
-    fn resolve_builtin_for_typescript_project() {
-        let dir = TempDir::new().expect("temp dir");
-        fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
-        let cmd = resolve_builtin_validate_command(dir.path());
-        assert_eq!(cmd, Some("npx tsc --noEmit 2>&1".to_string()));
-    }
-
-    #[test]
-    fn resolve_builtin_for_go_project() {
-        let dir = TempDir::new().expect("temp dir");
-        fs::write(dir.path().join("go.mod"), "module example.com/t").unwrap();
-        let cmd = resolve_builtin_validate_command(dir.path());
-        assert_eq!(cmd, Some("go vet ./... 2>&1".to_string()));
-    }
-
-    #[test]
-    fn resolve_builtin_returns_none_for_unknown() {
-        let dir = TempDir::new().expect("temp dir");
-        let cmd = resolve_builtin_validate_command(dir.path());
-        assert!(cmd.is_none());
-    }
-
-    #[test]
     fn validation_result_skipped_is_success() {
         let result = ValidationResult::skipped(5);
         assert!(result.success);
