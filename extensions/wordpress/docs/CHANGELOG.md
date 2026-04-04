@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.6] - 2026-04-04
+
+### Fixed
+- PSR-4 aware trait placement + body comparison guard
+
 ## [2.10.5] - 2026-04-02
 
 ### Fixed
