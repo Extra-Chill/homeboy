@@ -9,6 +9,7 @@ Commands:
 """
 
 import json
+import os
 import re
 import sys
 
@@ -194,30 +195,118 @@ def detect_class_name(content):
     return m.group(1) if m else None
 
 
-def namespace_to_path(namespace):
-    """Convert a PHP namespace to a directory path.
+# ============================================================================
+# PSR-4 Autoloader Resolution
+# ============================================================================
 
-    DataMachine\\Abilities\\Traits -> inc/Abilities/Traits
-    The root namespace (DataMachine) maps to inc/.
+def load_psr4_mappings(project_root):
+    """Load PSR-4 namespace-to-directory mappings from composer.json.
+
+    Returns a dict of {namespace_prefix: directory_path} sorted by
+    specificity (longest prefix first) for correct matching.
     """
+    if not project_root:
+        return {}
+
+    composer_path = os.path.join(project_root, 'composer.json')
+    if not os.path.isfile(composer_path):
+        return {}
+
+    try:
+        with open(composer_path, 'r') as f:
+            composer = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    mappings = {}
+
+    # Read autoload.psr-4
+    psr4 = composer.get('autoload', {}).get('psr-4', {})
+    for ns_prefix, dir_path in psr4.items():
+        # Normalize: strip trailing backslash from namespace
+        ns_prefix = ns_prefix.rstrip('\\')
+        # Handle array of directories (take first)
+        if isinstance(dir_path, list):
+            dir_path = dir_path[0] if dir_path else ''
+        # Normalize: strip trailing slash from directory
+        dir_path = dir_path.rstrip('/')
+        if ns_prefix and dir_path:
+            mappings[ns_prefix] = dir_path
+
+    # Also check autoload-dev.psr-4
+    psr4_dev = composer.get('autoload-dev', {}).get('psr-4', {})
+    for ns_prefix, dir_path in psr4_dev.items():
+        ns_prefix = ns_prefix.rstrip('\\')
+        if isinstance(dir_path, list):
+            dir_path = dir_path[0] if dir_path else ''
+        dir_path = dir_path.rstrip('/')
+        if ns_prefix and dir_path:
+            mappings[ns_prefix] = dir_path
+
+    return mappings
+
+
+def namespace_to_path(namespace, psr4_mappings=None):
+    """Convert a PHP namespace to a directory path using PSR-4 mappings.
+
+    With PSR-4 mappings from composer.json:
+        DataMachineSocials\\Abilities\\Traits -> inc/Abilities/Traits
+        (if composer.json has "DataMachineSocials\\": "inc/")
+
+    Falls back to heuristic for DataMachine -> inc/ when no mappings found.
+    """
+    if psr4_mappings:
+        # Sort by specificity — longest namespace prefix first
+        sorted_mappings = sorted(
+            psr4_mappings.items(),
+            key=lambda x: x[0].count('\\'),
+            reverse=True,
+        )
+
+        for ns_prefix, dir_path in sorted_mappings:
+            # Check if the namespace starts with this PSR-4 prefix
+            if namespace == ns_prefix:
+                return dir_path
+            if namespace.startswith(ns_prefix + '\\'):
+                remainder = namespace[len(ns_prefix) + 1:]
+                return dir_path + '/' + remainder.replace('\\', '/')
+
+    # Fallback: hardcoded DataMachine -> inc/ for backwards compatibility
     parts = namespace.split('\\')
     if parts and parts[0] == 'DataMachine':
         parts[0] = 'inc'
     return '/'.join(parts)
 
 
-def path_to_namespace(file_path, root_mapping='inc:DataMachine'):
-    """Convert a file path to a PHP namespace.
+def path_to_namespace(file_path, psr4_mappings=None, root_mapping='inc:DataMachine'):
+    """Convert a file path to a PHP namespace using PSR-4 mappings.
 
     inc/Abilities/Traits/HasPermissionCheck.php -> DataMachine\\Abilities\\Traits
     """
-    root_dir, root_ns = root_mapping.split(':')
     # Strip the file extension
     path = re.sub(r'\.php$', '', file_path)
     # Get directory (namespace comes from dir, not filename)
     parts = path.split('/')
     dir_parts = parts[:-1]
+    dir_path = '/'.join(dir_parts)
 
+    if psr4_mappings:
+        # Sort by specificity — longest directory path first
+        sorted_mappings = sorted(
+            psr4_mappings.items(),
+            key=lambda x: x[1].count('/'),
+            reverse=True,
+        )
+
+        for ns_prefix, mapped_dir in sorted_mappings:
+            if dir_path == mapped_dir:
+                return ns_prefix
+            if dir_path.startswith(mapped_dir + '/'):
+                remainder = dir_path[len(mapped_dir) + 1:]
+                return ns_prefix + '\\' + remainder.replace('/', '\\')
+
+    # Fallback: use root_mapping
+    root_dir, root_ns = root_mapping.split(':')
     if dir_parts and dir_parts[0] == root_dir:
         dir_parts[0] = root_ns
 
@@ -269,6 +358,51 @@ def extract_method_dependencies(method_source, canonical_content):
             needed.append(stmt)
 
     return needed
+
+
+def normalize_method_body(source):
+    """Normalize a method body for comparison.
+
+    Strips doc comments, collapses whitespace, and normalizes indentation
+    so that semantically identical methods compare equal regardless of
+    formatting differences.
+    """
+    lines = source.split('\n')
+    result_lines = []
+    in_doc = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Skip doc comments
+        if stripped.startswith('/**'):
+            in_doc = True
+            continue
+        if in_doc:
+            if stripped.endswith('*/'):
+                in_doc = False
+            continue
+
+        # Skip single-line comments
+        if stripped.startswith('//'):
+            continue
+
+        # Skip empty lines
+        if not stripped:
+            continue
+
+        result_lines.append(stripped)
+
+    return ' '.join(result_lines)
+
+
+def methods_are_identical(source_a, source_b):
+    """Compare two method sources to determine if they are semantically identical.
+
+    Normalizes both sources (strips doc comments, whitespace) before comparison.
+    Returns True if the method bodies are the same.
+    """
+    return normalize_method_body(source_a) == normalize_method_body(source_b)
 
 
 def generate_trait_file(function_name, method_source, namespace_base, trait_name,
@@ -358,18 +492,24 @@ def extract_shared(data):
         canonical_file: str — file chosen to keep the original
         canonical_content: str — content of the canonical file
         files: list of {path, content} — all files containing the duplicate
-        all_file_paths: list of str — all file paths in the group (for namespace computation)
+        all_file_paths: list of str — all file paths in the group
+        project_root: str — absolute path to the project root (for composer.json)
 
     Output:
         trait_file: str — path for the new trait file
         trait_content: str — full content of the trait file
         file_edits: list of {file, remove_lines, add_use_trait, add_import}
+        skipped_files: list of {file, reason} — files skipped due to body mismatch
     """
     function_name = data['function_name']
     canonical_file = data['canonical_file']
     canonical_content = data['canonical_content']
     files = data.get('files', [])
     all_file_paths = data.get('all_file_paths', [canonical_file])
+    project_root = data.get('project_root', '')
+
+    # Load PSR-4 mappings from composer.json
+    psr4_mappings = load_psr4_mappings(project_root)
 
     # Parse the canonical file to get the method source
     items = parse_php_items(canonical_content, canonical_file, item_filter=[function_name])
@@ -404,8 +544,6 @@ def extract_shared(data):
         return {'error': f'Cannot determine namespace for {function_name}'}
 
     # Compute the common ancestor namespace for trait placement
-    # e.g., if files are in DataMachine\Abilities\Flow, DataMachine\Abilities\Job,
-    # DataMachine\Abilities — the common ancestor is DataMachine\Abilities
     trait_namespace_base = common_namespace_prefix(namespaces)
 
     # If common prefix is too short (just the root namespace), use canonical's namespace
@@ -414,7 +552,7 @@ def extract_shared(data):
 
     trait_name = function_name_to_trait_name(function_name)
     trait_namespace = f'{trait_namespace_base}\\Traits'
-    trait_file_path = namespace_to_path(trait_namespace) + f'/{trait_name}.php'
+    trait_file_path = namespace_to_path(trait_namespace, psr4_mappings) + f'/{trait_name}.php'
 
     # Generate the trait file content
     trait_content = generate_trait_file(
@@ -422,8 +560,9 @@ def extract_shared(data):
         dependency_imports=dependency_imports,
     )
 
-    # Generate edit instructions for each file
+    # Generate edit instructions for each file, verifying body matches
     file_edits = []
+    skipped_files = []
     all_files = [{'path': canonical_file, 'content': canonical_content}] + files
 
     for file_info in all_files:
@@ -436,6 +575,22 @@ def extract_shared(data):
             continue
 
         fi = file_items[0]
+
+        # Verify the method body in this file actually matches the canonical
+        # method body before generating edit instructions. Methods with the
+        # same name but different implementations should not be extracted
+        # into a shared trait.
+        if fpath != canonical_file:
+            if not methods_are_identical(method_source, fi['source']):
+                skipped_files.append({
+                    'file': fpath,
+                    'reason': (
+                        f'Method body differs from canonical — '
+                        f'`{function_name}` in {fpath} has a different '
+                        f'implementation than {canonical_file}'
+                    ),
+                })
+                continue
 
         # Build the import statement
         fqn = f'{trait_namespace}\\{trait_name}'
@@ -472,13 +627,31 @@ def extract_shared(data):
 
         file_edits.append(edit)
 
-    return {
+    # If all non-canonical files were skipped due to body mismatch,
+    # the trait extraction is not useful — skip entirely.
+    non_canonical_edits = [e for e in file_edits if e['file'] != canonical_file]
+    if not non_canonical_edits and skipped_files:
+        return {
+            'skip': True,
+            'reason': (
+                f'All files have different implementations of `{function_name}` '
+                f'— cannot extract shared trait'
+            ),
+            'skipped_files': skipped_files,
+        }
+
+    result = {
         'trait_file': trait_file_path,
         'trait_content': trait_content,
         'trait_name': trait_name,
         'trait_namespace': trait_namespace,
         'file_edits': file_edits,
     }
+
+    if skipped_files:
+        result['skipped_files'] = skipped_files
+
+    return result
 
 
 # ============================================================================
