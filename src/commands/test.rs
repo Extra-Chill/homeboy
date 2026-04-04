@@ -200,7 +200,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
 mod tests {
     use super::*;
     use homeboy::component::Component;
-    use homeboy::refactor::plan::{test_refactor_request, TestSourceOptions};
+    use homeboy::refactor::plan::{build_test_refactor_request, TestSourceOptions};
     use std::path::PathBuf;
 
     #[test]
@@ -341,7 +341,7 @@ mod tests {
             None,
         );
 
-        let request = test_refactor_request(
+        let request = build_test_refactor_request(
             component.clone(),
             PathBuf::from("/tmp/demo"),
             vec![("runner".to_string(), "ci".to_string())],

@@ -61,6 +61,28 @@ pub fn lint_refactor_request(
     }
 }
 
+pub fn build_test_refactor_request(
+    component: Component,
+    root: PathBuf,
+    settings: Vec<(String, String)>,
+    options: TestSourceOptions,
+    write: bool,
+) -> RefactorSourceRequest {
+    RefactorSourceRequest {
+        component,
+        root,
+        sources: vec!["test".to_string()],
+        changed_since: None,
+        only: Vec::new(),
+        exclude: Vec::new(),
+        settings,
+        lint: LintSourceOptions::default(),
+        test: options,
+        write,
+        force: false,
+    }
+}
+
 pub fn run_lint_refactor(
     component: Component,
     root: PathBuf,
@@ -80,7 +102,7 @@ pub fn run_test_refactor(
     options: TestSourceOptions,
     write: bool,
 ) -> crate::Result<RefactorSourceRun> {
-    collect_refactor_sources(test_refactor_request(
+    collect_refactor_sources(build_test_refactor_request(
         component, root, settings, options, write,
     ))
 }
