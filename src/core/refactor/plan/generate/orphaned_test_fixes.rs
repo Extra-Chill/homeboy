@@ -212,14 +212,59 @@ fn find_test_function_range(content: &str, fn_name: &str) -> Option<(usize, usiz
     // Walk forward to find the matching closing brace using string-aware brace
     // counting. We must skip braces inside string literals (e.g., regex patterns
     // in `r"...\{..."`) to avoid miscounting and producing broken removals.
+    //
+    // Raw strings (r#"..."#, r##"..."##) are handled by checking each line for
+    // an unclosed raw string opener and then skipping all lines until the
+    // matching close pattern. This reuses the grammar engine's detection.
     let mut depth: i32 = 0;
     let mut found_open = false;
+    let mut raw_string_close: Option<String> = None;
 
     for i in decl_idx..lines.len() {
+        let line = lines[i];
+
+        // If we're inside a raw string, skip until we find the close pattern.
+        if let Some(ref close_pattern) = raw_string_close {
+            if line.contains(close_pattern.as_str()) {
+                raw_string_close = None;
+            }
+            continue;
+        }
+
+        // Check if this line opens a raw string that isn't closed on the same line.
+        if let Some(close_pattern) =
+            crate::extension::grammar::find_unclosed_raw_string_on_line(line)
+        {
+            raw_string_close = Some(close_pattern);
+            // Still count braces on this line BEFORE the raw string opens.
+            // The opening line may have `let x = r#"` preceded by real braces.
+            // For safety, count braces up to the `r` of the raw string literal.
+            if let Some(r_pos) = line.find("r#\"").or_else(|| line.find("r\"")) {
+                let prefix = &line[..r_pos];
+                for ch in prefix.chars() {
+                    match ch {
+                        '{' => {
+                            depth += 1;
+                            found_open = true;
+                        }
+                        '}' => {
+                            depth -= 1;
+                            if found_open && depth == 0 {
+                                return Some((start_idx + 1, i + 1));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Regular line — count braces, skipping those inside regular strings.
         let mut in_string: Option<char> = None;
         let mut prev_char = '\0';
 
-        for ch in lines[i].chars() {
+        for ch in line.chars() {
             if let Some(quote) = in_string {
                 // Inside a string — look for the closing quote (unescaped).
                 if ch == quote && prev_char != '\\' {
@@ -727,7 +772,7 @@ mod tests {
     use crate::code_audit::{Finding, Severity};
     use crate::refactor::auto::{Fix, SkippedFile};
 
-    fn test_content() -> &'static str {
+    fn fixture_content() -> &'static str {
         r#"#[cfg(test)]
 mod tests {
     use super::*;
@@ -752,12 +797,12 @@ mod tests {
     }
 
     #[test]
-    fn orphaned_test_automated_when_source_file_deleted() {
+    fn generate_orphaned_test_fixes_automated_when_source_deleted() {
         // Source file does not exist → test is unambiguously orphaned → automated.
         let dir = tempfile::tempdir().unwrap();
         let test_file = dir.path().join("tests/core/process_test.rs");
         std::fs::create_dir_all(test_file.parent().unwrap()).unwrap();
-        std::fs::write(&test_file, test_content()).unwrap();
+        std::fs::write(&test_file, fixture_content()).unwrap();
         // Deliberately do NOT create src/core/process.rs
 
         let mut result = empty_result();
@@ -785,13 +830,13 @@ mod tests {
     }
 
     #[test]
-    fn orphaned_test_manual_when_source_file_exists() {
+    fn generate_orphaned_test_fixes_manual_when_source_exists() {
         // Source file still exists → method might have been deliberately removed
         // but test could still test valid behavior → manual-only.
         let dir = tempfile::tempdir().unwrap();
         let test_file = dir.path().join("tests/core/process_test.rs");
         std::fs::create_dir_all(test_file.parent().unwrap()).unwrap();
-        std::fs::write(&test_file, test_content()).unwrap();
+        std::fs::write(&test_file, fixture_content()).unwrap();
 
         // Create the source file (without the referenced method)
         let source_file = dir.path().join("src/core/process.rs");
@@ -895,6 +940,78 @@ fn test_phantom() {
             range.is_some(),
             "should find the real test_actual_function fn"
         );
+    }
+
+    #[test]
+    fn find_test_function_range_skips_braces_inside_raw_strings() {
+        // Regression: test function body contains r#"..."# with braces inside.
+        // The brace counter must skip raw string content to find the correct
+        // closing brace. Without this fix, the counter exits too early and
+        // produces a short line range — the FunctionRemoval then corrupts the
+        // file by leaving orphaned closing braces.
+        let content = r##"
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apply_regex_pattern() {
+        let content = r#"
+use std::collections::HashMap;
+
+fn helper() {
+    let x = HashMap::new();
+}
+"#;
+        let result = apply_pattern(content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_other() {
+        assert!(true);
+    }
+}
+"##;
+        // test_apply_regex_pattern spans from #[test] (line 6) to its closing } (line 16)
+        let range = find_test_function_range(content, "test_apply_regex_pattern");
+        assert!(range.is_some(), "Should find test_apply_regex_pattern");
+        let (start, end) = range.unwrap();
+        assert_eq!(start, 6, "Should start at #[test] attribute");
+        assert_eq!(end, 17, "Should end at closing brace AFTER raw string");
+
+        // test_other should also be findable with correct range
+        let range2 = find_test_function_range(content, "test_other");
+        assert!(range2.is_some(), "Should find test_other");
+        let (start2, end2) = range2.unwrap();
+        assert_eq!(start2, 19);
+        assert_eq!(end2, 22);
+    }
+
+    #[test]
+    fn find_test_function_range_handles_nested_braces_in_raw_string() {
+        // Raw string with deeply nested braces — the kind that causes the
+        // original brace counter to lose track of depth.
+        let content = r##"
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_grammar_pattern() {
+        let pattern = r#"
+            match ch {
+                '{' => { depth += 1; }
+                '}' => { depth -= 1; }
+            }
+        "#;
+        assert!(!pattern.is_empty());
+    }
+}
+"##;
+        let range = find_test_function_range(content, "test_grammar_pattern");
+        assert!(range.is_some());
+        let (start, end) = range.unwrap();
+        assert_eq!(start, 4);
+        assert_eq!(end, 13);
     }
 
     #[test]

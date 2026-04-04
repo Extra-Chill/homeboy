@@ -4,7 +4,7 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-04-02T05:11:55Z",
-      "item_count": 963,
+      "item_count": 964,
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "comment_hygiene::src/commands/release.rs::LegacyComment",
@@ -326,6 +326,7 @@
         "structural::src/core/refactor/auto/contracts.rs::HighItemCount",
         "structural::src/core/refactor/decompose.rs::GodFile",
         "structural::src/core/refactor/decompose.rs::HighItemCount",
+        "structural::src/core/refactor/plan/generate/orphaned_test_fixes.rs::GodFile",
         "structural::src/core/refactor/plan/sources.rs::GodFile",
         "structural::src/core/refactor/plan/sources.rs::HighItemCount",
         "structural::src/core/refactor/rename/mod.rs::GodFile",
