@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.7] - 2026-04-07
+
+### Fixed
+- load plugins at muplugins_loaded instead of plugins_loaded in test bootstrap
+
 ## [2.10.6] - 2026-04-04
 
 ### Fixed
