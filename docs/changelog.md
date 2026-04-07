@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.88.6] - 2026-04-07
+
+### Fixed
+- skip import insertion when alias collides with existing import
+
 ## [0.88.5] - 2026-04-04
 
 ### Fixed
