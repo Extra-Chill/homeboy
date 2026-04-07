@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.1] - 2026-04-07
+
+### Fixed
+- remove push retry loop from autofix commit pipeline
+
 ## [1.16.0] - 2026-03-29
 
 ### Added
