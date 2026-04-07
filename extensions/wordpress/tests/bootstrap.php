@@ -167,7 +167,7 @@ if (getenv('HOMEBOY_DEBUG') === '1') {
 
 // Load component at the appropriate WordPress hook
 if ($component_type === 'theme') {
-    tests_add_filter('plugins_loaded', function() use ($_dependency_paths) {
+    tests_add_filter('muplugins_loaded', function() use ($_dependency_paths) {
         homeboy_load_dependency_components($_dependency_paths);
     });
 
@@ -186,8 +186,14 @@ if ($component_type === 'theme') {
         }
     });
 } else {
-    // Load plugins on plugins_loaded hook
-    tests_add_filter('plugins_loaded', function() use ($component_file, $_dependency_paths) {
+    // Load plugins on muplugins_loaded hook (fires BEFORE plugins_loaded).
+    //
+    // This is critical: many plugins register their own add_action('plugins_loaded', ...)
+    // callbacks to defer loading (autoloaders, function includes, etc.). If we load
+    // the plugin file *during* plugins_loaded, those callbacks never fire because the
+    // hook has already been dispatched. Loading at muplugins_loaded ensures the plugin's
+    // top-level code runs first, then its plugins_loaded callbacks fire normally.
+    tests_add_filter('muplugins_loaded', function() use ($component_file, $_dependency_paths) {
         homeboy_load_dependency_components($_dependency_paths);
         require_once $component_file;
     });
