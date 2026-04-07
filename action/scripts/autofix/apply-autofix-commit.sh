@@ -10,11 +10,6 @@ if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then
   AUTOFIX_MAX_COMMITS=2
 fi
 
-AUTOFIX_PUSH_ATTEMPTS="${AUTOFIX_PUSH_ATTEMPTS:-3}"
-if ! [[ "${AUTOFIX_PUSH_ATTEMPTS}" =~ ^[0-9]+$ ]]; then
-  AUTOFIX_PUSH_ATTEMPTS=3
-fi
-
 BASE="$(scope_base_ref)"
 AUTOFIX_CAP_HIT=false
 
@@ -310,59 +305,39 @@ fi
 
 guard_synced_pr_head
 
-PUSH_ATTEMPT=1
-while [ "${PUSH_ATTEMPT}" -le "${AUTOFIX_PUSH_ATTEMPTS}" ]; do
-  if git show-ref --verify --quiet "${TARGET_REF}"; then
-    reset_to_target_head
-  fi
+if git show-ref --verify --quiet "${TARGET_REF}"; then
+  reset_to_target_head
+fi
 
-  guard_synced_pr_head
+guard_synced_pr_head
 
-  # Run code fixes only when under the cap
-  if [ "${AUTOFIX_CAP_HIT}" = false ]; then
-    run_autofixes
-  else
-    echo "Skipping code fixes (autofix cap reached)"
-  fi
+# Run code fixes only when under the cap
+if [ "${AUTOFIX_CAP_HIT}" = false ]; then
+  run_autofixes
+else
+  echo "Skipping code fixes (autofix cap reached)"
+fi
 
-  maybe_update_baseline
+maybe_update_baseline
 
-  if ! stage_autofix_changes; then
-    echo "No autofix changes detected"
-    echo "status=no-changes" >> "${GITHUB_OUTPUT}"
-    echo "committed=false" >> "${GITHUB_OUTPUT}"
-    exit 0
-  fi
+if ! stage_autofix_changes; then
+  echo "No autofix changes detected"
+  echo "status=no-changes" >> "${GITHUB_OUTPUT}"
+  echo "committed=false" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
 
-  commit_autofix_changes
+commit_autofix_changes
 
-  if push_autofix_commit; then
-    echo "committed=true" >> "${GITHUB_OUTPUT}"
-    echo "status=pushed" >> "${GITHUB_OUTPUT}"
-    echo "target-repo=${TARGET_REPO}" >> "${GITHUB_OUTPUT}"
-    echo "target-branch=${TARGET_BRANCH}" >> "${GITHUB_OUTPUT}"
-    echo "autofix-file-count=${AUTOFIX_FILE_COUNT}" >> "${GITHUB_OUTPUT}"
-    echo "autofix-fix-types=${AUTOFIX_FIX_TYPES}" >> "${GITHUB_OUTPUT}"
-    exit 0
-  fi
-
-  if [ "${PUSH_ATTEMPT}" -ge "${AUTOFIX_PUSH_ATTEMPTS}" ]; then
-    break
-  fi
-
-  echo "Autofix push failed on attempt ${PUSH_ATTEMPT}/${AUTOFIX_PUSH_ATTEMPTS}; refetching latest PR head and recomputing"
-
-  # Re-check PR state before retrying — it may have been merged while we were fixing
-  if ! pr_is_active; then
-    echo "PR #${PR_NUMBER} was merged or closed during autofix — aborting retries"
-    echo "committed=false" >> "${GITHUB_OUTPUT}"
-    echo "status=skipped-pr-closed" >> "${GITHUB_OUTPUT}"
-    exit 0
-  fi
-
-  fetch_latest_target_head || true
-  PUSH_ATTEMPT=$((PUSH_ATTEMPT + 1))
-done
+if push_autofix_commit; then
+  echo "committed=true" >> "${GITHUB_OUTPUT}"
+  echo "status=pushed" >> "${GITHUB_OUTPUT}"
+  echo "target-repo=${TARGET_REPO}" >> "${GITHUB_OUTPUT}"
+  echo "target-branch=${TARGET_BRANCH}" >> "${GITHUB_OUTPUT}"
+  echo "autofix-file-count=${AUTOFIX_FILE_COUNT}" >> "${GITHUB_OUTPUT}"
+  echo "autofix-fix-types=${AUTOFIX_FIX_TYPES}" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
 
 echo "::warning::Autofix changes were generated but could not be pushed to ${TARGET_REPO}:${TARGET_BRANCH}"
 echo "committed=false" >> "${GITHUB_OUTPUT}"
