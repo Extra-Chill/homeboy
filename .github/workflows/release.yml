@@ -1,6 +1,6 @@
 # Continuous release pipeline for Homeboy.
 #
-# Runs every 15 minutes (and on manual dispatch). Checks for releasable
+# Triggers on push to main (and manual dispatch). Checks for releasable
 # conventional commits since the last tag. If found:
 #   1. Quality gate (audit, lint, test)
 #   2. Version bump + changelog generation from conventional commits
@@ -20,8 +20,8 @@ permissions:
   pull-requests: write
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry-run:
@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
 
-# Only one release pipeline at a time. If a cron fires while a release
+# Only one release pipeline at a time. If a push arrives while a release
 # is already running, it queues (never cancels). The queued run starts
 # after the first finishes and its check job exits in seconds because
 # HEAD is already tagged — zero wasted work.
@@ -39,7 +39,7 @@ concurrency:
 
 jobs:
   # ── Step 1: Check for releasable commits ──
-  # Fast exit if nothing to release (most cron runs hit this).
+  # Fast exit if nothing to release (e.g. chore-only commits).
   check:
     name: Check for releasable commits
     runs-on: ubuntu-latest
@@ -50,16 +50,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      # Restore last-failed SHA to avoid retrying the same broken commit
-      - name: Restore failure cache
-        id: failure-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .release-last-failed
-          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
-          restore-keys: |
-            release-last-failed-${{ github.ref_name }}-
 
       - name: Dry-run release check
         id: release-check
@@ -72,17 +62,7 @@ jobs:
       - name: Decide whether to release
         id: check
         run: |
-          # Skip if HEAD matches the last failed attempt (no new commits to retry)
           HEAD_SHA="$(git rev-parse HEAD)"
-          if [ -f .release-last-failed ]; then
-            LAST_FAILED="$(tr -d '[:space:]' < .release-last-failed)"
-            if [ "${HEAD_SHA}" = "${LAST_FAILED}" ]; then
-              echo "::notice::HEAD ${HEAD_SHA:0:8} matches last failed release attempt — skipping until new commits"
-              echo "should-release=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-
           RELEASE_VERSION="${{ steps.release-check.outputs.release-version }}"
           BUMP_TYPE="${{ steps.release-check.outputs.release-bump-type }}"
 
@@ -657,47 +637,4 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-  # ── Record failed SHA to prevent retry loops ──
-  # If gate or prepare failed, cache HEAD SHA so the next cron run
-  # skips retrying until new commits arrive.
-  record-failure:
-    name: Record failure
-    needs:
-      - check
-      - gate-build
-      - gate-lint
-      - gate-test
-      - gate-audit
-      - prepare
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && (needs.gate-build.result == 'failure' || needs.gate-lint.result == 'failure' || needs.gate-test.result == 'failure' || needs.gate-audit.result == 'failure' || needs.prepare.result == 'failure') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Save failed SHA
-        run: git rev-parse HEAD > .release-last-failed
-
-      - name: Cache failed SHA
-        uses: actions/cache/save@v4
-        with:
-          path: .release-last-failed
-          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
-
-  # ── Clear failure cache on success ──
-  # If release succeeded, clear the failure cache so it doesn't
-  # interfere with future runs.
-  clear-failure:
-    name: Clear failure cache
-    needs:
-      - prepare
-    if: ${{ needs.prepare.outputs.released == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Clear failure cache
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Delete release-last-failed cache entries for this ref only
-          gh cache list --json id,key --jq '.[] | select(.key | startswith("release-last-failed-${{ github.ref_name }}-")) | .id' | while read -r id; do
-            gh cache delete "$id" 2>/dev/null || true
-          done
