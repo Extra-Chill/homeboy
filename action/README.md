@@ -31,18 +31,18 @@ jobs:
 
 ### Continuous Release
 
-Fully automated releases — no human input needed. CI checks for releasable commits every 15 minutes, computes the version from conventional commits, generates changelog, bumps version targets, tags, and publishes.
+Fully automated releases — no human input needed. Triggers on every push to main, checks for releasable conventional commits since the last tag, computes the version, generates changelog, bumps version targets, tags, and publishes.
 
 ```yaml
 name: Release
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
   group: release
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -259,8 +259,8 @@ Full example with quality checks before release and cargo-dist builds after:
 ```yaml
 name: Release
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry-run:
@@ -269,7 +269,7 @@ on:
 
 concurrency:
   group: release
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # Fast exit if nothing to release
@@ -336,7 +336,7 @@ Use two workflows:
    - `concurrency` group per PR number to cancel stale runs
 
 2. **Release workflow** (continuous)
-   - trigger on `schedule` (every 15 min) + `workflow_dispatch`
+   - trigger on `push` to `main` + `workflow_dispatch`
    - `commands: lint,test,audit` with `auto-issue: 'true'`
    - separate release workflow uses `commands: release`
    - quality gate before release
