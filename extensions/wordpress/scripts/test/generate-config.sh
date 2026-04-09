@@ -113,6 +113,11 @@ if ( ! defined( 'WP_PHP_BINARY' ) ) define('WP_PHP_BINARY', 'php');
 
 // ABSPATH points to the cached WordPress installation
 if ( ! defined( 'ABSPATH' ) ) define('ABSPATH', '${ABSPATH}/');
+
+// Filesystem constants required by plugins using WP_Filesystem during activation.
+if ( ! defined( 'FS_CHMOD_FILE' ) ) define('FS_CHMOD_FILE', 0644);
+if ( ! defined( 'FS_CHMOD_DIR' ) ) define('FS_CHMOD_DIR', 0755);
+if ( ! defined( 'FS_METHOD' ) ) define('FS_METHOD', 'direct');
 PHP
 
 echo "wp-tests-config.php generated"
