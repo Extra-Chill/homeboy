@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.8] - 2026-04-09
+
+### Changed
+- Add FS_CHMOD and FS_METHOD constants to test wp-tests-config
+
 ## [2.10.7] - 2026-04-07
 
 ### Fixed
