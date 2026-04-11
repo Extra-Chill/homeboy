@@ -542,24 +542,23 @@ fn find_orphaned_test_methods(
         // behavior, not a method reference. Short names (1-2 segments like
         // "old_function" or "pause") are likely real method references. But
         // longer compound names (3+ segments like "detects_exact_duplicate" or
-        // "audit_metadata_roundtrips") are probably behavioral descriptions
-        // unless the first segment matches a source method.
+        // "apply_replace_text") are usually behavioral/scenario descriptions.
         //
-        // The check uses exact first-segment matching against source method
-        // names. We require the first segment to exactly equal a source method
-        // or be an exact prefix of one (not just starts_with — "helpers" should
-        // not match source method "helper").
+        // For 3+ segment names, we skip (treat as behavioral) UNLESS the
+        // expected source name is a direct prefix of a source method. This
+        // prevents false positives where common verbs like "apply", "resolve",
+        // "build" happen to match source methods (e.g., "apply" matching
+        // "apply_edit_ops" would falsely flag "apply_replace_text" as orphaned).
         let segment_count = expected_source.split('_').count();
         if segment_count >= 3 {
-            let first_word = expected_source.split('_').next().unwrap_or(expected_source);
-            let first_segment_matches_source = source_methods.iter().any(|m| {
-                // Exact match: first segment IS a source method name
-                *m == first_word
-                // Or: source method starts with first_word followed by '_'
-                // (e.g., first_word "exact" matches source "exact_hash")
-                || m.starts_with(&format!("{}_", first_word))
+            // Only flag if the expected source is itself a prefix of some source
+            // method (suggesting it really names a method that was truncated or
+            // renamed). A single first-word match is too loose.
+            let is_direct_prefix_of_source = source_methods.iter().any(|m| {
+                // "apply_edit_ops" would match source "apply_edit_ops_to_content"
+                m.starts_with(&format!("{}_", expected_source))
             });
-            if !first_segment_matches_source {
+            if !is_direct_prefix_of_source {
                 continue;
             }
         }
@@ -1008,9 +1007,8 @@ mod tests {
     fn orphaned_test_method_inline_detected() {
         // Source has discover_from_portable and has_portable_config.
         // Tests: test_discover_from_portable (valid — exact match),
-        //        test_discover_stale_data (orphaned — 3+ segments, first word "discover"
-        //          matches source method "discover_from_portable", but "discover_stale_data"
-        //          doesn't match any source method by exact or prefix match),
+        //        test_discover_stale_data (behavioral — 3+ segments, "discover_stale_data"
+        //          is not a direct prefix of any source method → treated as behavioral),
         //        test_load_config (orphaned — "load_config" is 2 segments, no exact/prefix match).
         let config = make_rust_config();
         let dir = std::env::temp_dir().join("homeboy_test_coverage_orphaned_inline");
@@ -1023,7 +1021,7 @@ mod tests {
                 "discover_from_portable",
                 "has_portable_config",
                 "test_discover_from_portable", // valid — source method exists
-                "test_discover_stale_data",    // orphaned — first word matches but no prefix match
+                "test_discover_stale_data",    // behavioral — 3+ segments, not a direct prefix
                 "test_load_config",            // orphaned — short name, no match at all
             ],
         );
@@ -1038,13 +1036,10 @@ mod tests {
             .collect();
         assert_eq!(
             orphaned.len(),
-            2,
-            "Should detect 2 orphaned test methods, found: {:?}",
+            1,
+            "Should detect 1 orphaned test method (load_config), found: {:?}",
             orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
         );
-        assert!(orphaned
-            .iter()
-            .any(|f| f.description.contains("discover_stale_data")));
         assert!(orphaned
             .iter()
             .any(|f| f.description.contains("load_config")));
@@ -1187,15 +1182,16 @@ mod tests {
             })
             .collect();
 
-        // test_replace_string_literals → "replace_string_literals" — not a source method but
-        // 3 segments, first word "replace" — no source method starts with "replace" → should skip
+        // test_replace_string_literals → "replace_string_literals" — 3 segments,
+        // not a direct prefix of any source method → skip (behavioral)
         //
         // test_exact_hash_deterministic → "exact_hash_deterministic" — 3 segments,
-        // first word "exact" — source method "exact_hash" starts with "exact" → should match
-        // via prefix match (exact_hash_ is a prefix of exact_hash_deterministic) → NOT orphaned
+        // not a direct prefix of any source method → skip (behavioral).
+        // Even though "exact_hash" is a source method, "exact_hash_deterministic"
+        // is a scenario description, not a method reference.
         //
         // test_helpers_without_test_attr_not_counted_as_test_methods → 9 segments,
-        // first word "helpers" — no source method starts with "helpers" → should skip
+        // not a direct prefix of any source method → skip (behavioral)
 
         let orphaned_names: Vec<String> = orphaned.iter().map(|f| f.description.clone()).collect();
         assert!(
@@ -1207,6 +1203,60 @@ mod tests {
             !orphaned_names.iter().any(|d| d.contains("replace_string")),
             "Behavioral test name should NOT be flagged as orphaned. Orphaned: {:?}",
             orphaned_names
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scenario_test_names_not_flagged_as_orphaned() {
+        // Regression for #1120 / PR #1119: tests like "apply_replace_text" were
+        // flagged as orphaned because the first word "apply" matched source
+        // method "apply_edit_ops". These are scenario/behavioral tests for
+        // apply_edit_ops_to_content(), not references to a deleted method.
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_scenario");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core/engine")).unwrap();
+
+        let source = make_fp(
+            "src/core/engine/edit_op_apply.rs",
+            vec![
+                "resolve_anchor",
+                "apply_edit_ops_to_content",
+                "apply_edit_ops",
+                "remove_from_reexport_block",
+                // Scenario tests — none of these should be flagged
+                "test_apply_replace_text",
+                "test_apply_replace_text_not_found_errors",
+                "test_apply_replace_text_line_out_of_range",
+                "test_apply_remove_lines",
+                "test_apply_insert_lines_at_line",
+                "test_apply_insert_lines_after_imports",
+                "test_apply_insert_lines_file_end",
+                "test_apply_reexport_removal",
+                "test_apply_multiple_ops_same_file",
+                "test_apply_multiple_removals_bottom_to_top",
+                "test_apply_combined_remove_and_insert",
+                "test_resolve_anchor_at_line",
+                "test_resolve_anchor_file_top",
+                "test_resolve_anchor_after_imports_rust",
+            ],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
+            })
+            .collect();
+
+        assert!(
+            orphaned.is_empty(),
+            "Scenario test names should NOT be flagged as orphaned. Flagged: {:?}",
+            orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
         );
 
         let _ = std::fs::remove_dir_all(&dir);
