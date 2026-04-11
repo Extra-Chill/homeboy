@@ -5,7 +5,7 @@
 //! are missing, and inserts them with sensible defaults. Uses the Rust extension's
 //! `propagate_struct_fields` refactor script to do the actual analysis.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -211,10 +211,27 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
         }
     }
 
-    // Step 5: Apply edits if write mode
+    // Step 5: Apply edits if write mode — route through shared EditOp engine
     let applied = if config.write && !all_edits.is_empty() {
-        apply_propagate_edits(&all_edits, root)?;
-        true
+        use crate::engine::edit_op::propagate_result_to_edit_ops;
+        use crate::engine::edit_op_apply::apply_edit_ops;
+
+        // Build a temporary PropagateResult to convert edits
+        let tmp_result = PropagateResult {
+            struct_name: struct_name.to_string(),
+            definition_file: String::new(),
+            fields: vec![],
+            files_scanned: 0,
+            instantiations_found: 0,
+            instantiations_needing_fix: 0,
+            edits: all_edits.clone(),
+            applied: false,
+        };
+        let ops = propagate_result_to_edit_ops(&tmp_result);
+        let report = apply_edit_ops(&ops, root).map_err(|e| {
+            Error::internal_io(e.to_string(), Some("apply propagate edits".to_string()))
+        })?;
+        report.files_modified > 0 || report.ops_applied > 0
     } else {
         false
     };
@@ -343,48 +360,7 @@ fn extract_struct_source(struct_name: &str, content: &str) -> Option<String> {
     Some(lines[start..=end_line].join("\n"))
 }
 
-/// Apply propagate edits to disk. Edits are line-based insertions, applied
-/// bottom-to-top to preserve line numbers.
-fn apply_propagate_edits(edits: &[PropagateEdit], root: &Path) -> Result<(), Error> {
-    let mut edits_by_file: HashMap<&str, Vec<&PropagateEdit>> = HashMap::new();
-    for edit in edits {
-        edits_by_file.entry(&edit.file).or_default().push(edit);
-    }
 
-    for (file, file_edits) in &edits_by_file {
-        let file_path = root.join(file);
-        let content = std::fs::read_to_string(&file_path)
-            .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", file))))?;
-
-        let lines: Vec<&str> = content.lines().collect();
-        let mut sorted_edits: Vec<&&PropagateEdit> = file_edits.iter().collect();
-        sorted_edits.sort_by(|a, b| b.line.cmp(&a.line));
-
-        let mut mutable_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-
-        for edit in &sorted_edits {
-            let insert_idx = edit.line.saturating_sub(1);
-            if insert_idx <= mutable_lines.len() {
-                mutable_lines.insert(insert_idx, edit.insert_text.clone());
-            }
-        }
-
-        let new_content = mutable_lines.join("\n");
-
-        let final_content = if content.ends_with('\n') && !new_content.ends_with('\n') {
-            format!("{}\n", new_content)
-        } else {
-            new_content
-        };
-
-        std::fs::write(&file_path, &final_content)
-            .map_err(|e| Error::internal_io(e.to_string(), Some(format!("write {}", file))))?;
-
-        crate::log_status!("write", "{} ({} edits)", file, file_edits.len());
-    }
-
-    Ok(())
-}
 
 /// Extract field information from propagation edits.
 ///

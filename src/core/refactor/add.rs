@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::code_audit::CodeAuditResult;
-use crate::refactor::auto::{self, Fix, FixResult, Insertion, InsertionKind};
+use crate::refactor::auto::{self, ChunkStatus, Fix, FixResult, Insertion, InsertionKind, NewFile};
 use crate::refactor::plan;
 use crate::{component, Result};
 
@@ -51,8 +51,16 @@ pub fn fixes_from_audit(audit: &CodeAuditResult, write: bool) -> Result<FixResul
     let mut fix_result = plan::generate_audit_fixes(audit, root, &auto::FixPolicy::default());
 
     if write && !fix_result.fixes.is_empty() {
-        let applied = auto::apply_fixes(&mut fix_result.fixes, root);
-        fix_result.files_modified = applied;
+        let chunk_results = auto::apply_fixes_via_edit_ops(
+            &mut fix_result.fixes,
+            &mut Vec::<NewFile>::new(),
+            root,
+        );
+        fix_result.files_modified = chunk_results
+            .iter()
+            .filter(|c| matches!(c.status, ChunkStatus::Applied))
+            .map(|c| c.applied_files)
+            .sum();
     }
 
     Ok(fix_result)
@@ -123,7 +131,16 @@ pub fn add_import(
     let mut files_modified = 0;
 
     if write && !fixes.is_empty() {
-        files_modified = auto::apply_fixes(&mut fixes, &root);
+        let chunk_results = auto::apply_fixes_via_edit_ops(
+            &mut fixes,
+            &mut Vec::<NewFile>::new(),
+            &root,
+        );
+        files_modified = chunk_results
+            .iter()
+            .filter(|c| matches!(c.status, ChunkStatus::Applied))
+            .map(|c| c.applied_files)
+            .sum();
     }
 
     Ok(AddResult {

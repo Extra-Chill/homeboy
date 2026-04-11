@@ -18,12 +18,12 @@
 //! summaries, undo, and debugging all speak the same vocabulary regardless
 //! of whether the edit came from a fixer or a manual command.
 //!
-//! ## Current integration
+//! ## Integration
 //!
-//! The fixer pipeline still uses `InsertionKind` internally for apply logic.
-//! `EditOp` provides a parallel representation via `from_insertion()` for
-//! reporting and cross-system compatibility. Manual commands will produce
-//! `EditOp` directly in a future phase.
+//! Fixers produce `Insertion` objects with `InsertionKind` variants.
+//! `from_insertion()` converts these to `EditOp`s, and `apply_edit_ops()`
+//! executes them against the filesystem. Manual refactor commands (propagate,
+//! transform) produce `EditOp` directly.
 
 use crate::code_audit::AuditFinding;
 use crate::core::refactor::auto::{Insertion, InsertionKind, RefactorPrimitive};
