@@ -15,6 +15,7 @@ pub mod contract;
 pub mod contract_extract;
 pub mod contract_testgen;
 pub mod edit_op;
+pub mod edit_op_apply;
 pub mod execution_context;
 pub mod executor;
 pub mod format_write;
