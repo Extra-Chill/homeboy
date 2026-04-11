@@ -67,15 +67,33 @@ pub fn resolve_anchor(content: &str, anchor: &InsertAnchor, language: &Language)
             // For Rust, stop scanning at definition starts to avoid matching
             // `use` inside function bodies.
             let rust_definition_starts = [
-                "fn ", "pub fn ", "pub(crate) fn ", "pub(super) fn ",
-                "struct ", "pub struct ", "pub(crate) struct ",
-                "enum ", "pub enum ", "pub(crate) enum ",
-                "impl ", "impl<",
-                "mod ", "pub mod ", "pub(crate) mod ",
-                "trait ", "pub trait ", "pub(crate) trait ",
-                "const ", "pub const ", "pub(crate) const ",
-                "static ", "pub static ", "pub(crate) static ",
-                "type ", "pub type ", "pub(crate) type ",
+                "fn ",
+                "pub fn ",
+                "pub(crate) fn ",
+                "pub(super) fn ",
+                "struct ",
+                "pub struct ",
+                "pub(crate) struct ",
+                "enum ",
+                "pub enum ",
+                "pub(crate) enum ",
+                "impl ",
+                "impl<",
+                "mod ",
+                "pub mod ",
+                "pub(crate) mod ",
+                "trait ",
+                "pub trait ",
+                "pub(crate) trait ",
+                "const ",
+                "pub const ",
+                "pub(crate) const ",
+                "static ",
+                "pub static ",
+                "pub(crate) static ",
+                "type ",
+                "pub type ",
+                "pub(crate) type ",
                 "#[cfg(test)]",
             ];
 
@@ -84,7 +102,9 @@ pub fn resolve_anchor(content: &str, anchor: &InsertAnchor, language: &Language)
                 let trimmed = line.trim();
 
                 if *language == Language::Rust
-                    && rust_definition_starts.iter().any(|prefix| trimmed.starts_with(prefix))
+                    && rust_definition_starts
+                        .iter()
+                        .any(|prefix| trimmed.starts_with(prefix))
                 {
                     break;
                 }
@@ -122,8 +142,12 @@ pub fn resolve_anchor(content: &str, anchor: &InsertAnchor, language: &Language)
 
         InsertAnchor::AfterClassOpen => {
             let class_re = match language {
-                Language::Php => regex::Regex::new(r"(?:class|trait|interface)\s+\w+[^\{]*\{").ok()?,
-                Language::Rust => regex::Regex::new(r"(?:pub\s+)?(?:struct|enum|impl)\s+\w+[^\{]*\{").ok()?,
+                Language::Php => {
+                    regex::Regex::new(r"(?:class|trait|interface)\s+\w+[^\{]*\{").ok()?
+                }
+                Language::Rust => {
+                    regex::Regex::new(r"(?:pub\s+)?(?:struct|enum|impl)\s+\w+[^\{]*\{").ok()?
+                }
                 Language::JavaScript | Language::TypeScript => {
                     regex::Regex::new(r"class\s+\w+[^\{]*\{").ok()?
                 }
@@ -139,8 +163,12 @@ pub fn resolve_anchor(content: &str, anchor: &InsertAnchor, language: &Language)
 
         InsertAnchor::InConstructor => {
             let constructor_re = match language {
-                Language::Php => regex::Regex::new(r"function\s+__construct\s*\([^)]*\)\s*\{").ok()?,
-                Language::Rust => regex::Regex::new(r"fn\s+new\s*\([^)]*\)\s*(?:->[^{]*)?\{").ok()?,
+                Language::Php => {
+                    regex::Regex::new(r"function\s+__construct\s*\([^)]*\)\s*\{").ok()?
+                }
+                Language::Rust => {
+                    regex::Regex::new(r"fn\s+new\s*\([^)]*\)\s*(?:->[^{]*)?\{").ok()?
+                }
                 Language::JavaScript | Language::TypeScript => {
                     regex::Regex::new(r"constructor\s*\([^)]*\)\s*\{").ok()?
                 }
@@ -167,15 +195,17 @@ pub fn resolve_anchor(content: &str, anchor: &InsertAnchor, language: &Language)
             // Find the primary type declaration line. For Rust this is struct/enum,
             // for PHP/TS this is class.
             let type_re = match language {
-                Language::Php => regex::Regex::new(
-                    r"^\s*(?:abstract\s+)?(?:class|interface|trait)\s+\w+"
-                ).ok()?,
-                Language::Rust => regex::Regex::new(
-                    r"^\s*(?:pub(?:\(crate\))?\s+)?(?:struct|enum|trait)\s+\w+"
-                ).ok()?,
-                Language::JavaScript | Language::TypeScript => regex::Regex::new(
-                    r"^\s*(?:export\s+)?(?:abstract\s+)?class\s+\w+"
-                ).ok()?,
+                Language::Php => {
+                    regex::Regex::new(r"^\s*(?:abstract\s+)?(?:class|interface|trait)\s+\w+")
+                        .ok()?
+                }
+                Language::Rust => {
+                    regex::Regex::new(r"^\s*(?:pub(?:\(crate\))?\s+)?(?:struct|enum|trait)\s+\w+")
+                        .ok()?
+                }
+                Language::JavaScript | Language::TypeScript => {
+                    regex::Regex::new(r"^\s*(?:export\s+)?(?:abstract\s+)?class\s+\w+").ok()?
+                }
                 Language::Unknown => return None,
             };
 
@@ -634,7 +664,8 @@ mod tests {
 
     #[test]
     fn resolve_anchor_after_imports_php() {
-        let content = "<?php\n\nnamespace App;\n\nuse Foo\\Bar;\nuse Baz\\Qux;\n\nclass MyClass {}\n";
+        let content =
+            "<?php\n\nnamespace App;\n\nuse Foo\\Bar;\nuse Baz\\Qux;\n\nclass MyClass {}\n";
         let resolved = resolve_anchor(content, &InsertAnchor::AfterImports, &Language::Php);
         assert_eq!(resolved, Some(7)); // After line 6 (last use)
     }
@@ -1064,8 +1095,7 @@ fn keep_me() {}
             code: "use crate::new_dep;".to_string(),
         };
         let result =
-            apply_edit_ops_to_content(content, &[&remove_op, &insert_op], &Language::Rust)
-                .unwrap();
+            apply_edit_ops_to_content(content, &[&remove_op, &insert_op], &Language::Rust).unwrap();
         assert!(!result.contains("to_remove"));
         assert!(result.contains("use crate::new_dep;"));
         assert!(result.contains("fn keep_me()"));
