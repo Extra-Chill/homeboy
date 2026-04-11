@@ -312,8 +312,6 @@ pub fn apply_decompose_plans(
     results
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,22 +320,6 @@ mod tests {
 
     #[test]
     fn merge_same_file_insertions_combines_removals() {
-        fn removal_insertion(start: usize, end: usize, desc: &str) -> Insertion {
-            Insertion {
-                primitive: None,
-                kind: InsertionKind::FunctionRemoval {
-                    start_line: start,
-                    end_line: end,
-                },
-                finding: AuditFinding::OrphanedTest,
-                manual_only: false,
-                code: String::new(),
-                description: desc.into(),
-                auto_apply: true,
-                blocked_reason: None,
-            }
-        }
-
         let mut fixes = vec![
             Fix {
                 file: "src/engine/temp.rs".into(),
