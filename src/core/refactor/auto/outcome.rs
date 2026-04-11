@@ -17,7 +17,6 @@ pub struct AutofixOutcome {
 #[derive(Debug, Clone)]
 pub struct AutofixSidecarFiles {
     pub results_file: PathBuf,
-    pub plan_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]

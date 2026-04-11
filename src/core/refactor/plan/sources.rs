@@ -748,7 +748,6 @@ fn plan_audit_stage(
             only,
             exclude,
             AuditConvergenceScoring::default(),
-            1,
             true,
         )?;
 
@@ -763,15 +762,10 @@ fn plan_audit_stage(
             .collect::<Vec<_>>();
 
         let warnings = outcome
-            .iterations
+            .iteration_summary
             .iter()
-            .filter(|iteration| iteration.status != "continued")
-            .map(|iteration| {
-                format!(
-                    "audit iteration {}: {}",
-                    iteration.iteration, iteration.status
-                )
-            })
+            .filter(|summary| summary.status != "continued")
+            .map(|summary| format!("audit refactor: {}", summary.status))
             .collect::<Vec<_>>();
 
         (
@@ -1386,7 +1380,7 @@ mod tests {
         assert!(audit_stage
             .warnings
             .iter()
-            .any(|warning| warning.starts_with("audit iteration ")));
+            .any(|warning| warning.starts_with("audit refactor: ")));
 
         let _ = fs::remove_dir_all(root);
     }

@@ -1,5 +1,5 @@
 use homeboy::utils::autofix::{
-    read_fix_results, standard_outcome, summarize_optional_fix_results, AutofixMode,
+    parse_fix_results_file, standard_outcome, summarize_optional_fix_results, AutofixMode,
 };
 
 #[test]
@@ -49,17 +49,15 @@ fn test_standard_outcome_noop() {
 }
 
 #[test]
-fn test_read_fix_results_prefers_plan_file() {
+fn test_parse_fix_results_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let results = dir.path().join("results.json");
-    let plan = dir.path().join("plan.json");
 
     std::fs::write(&results, r#"[{"file":"src/results.rs","rule":"results"}]"#).expect("results");
-    std::fs::write(&plan, r#"[{"file":"src/plan.rs","rule":"plan"}]"#).expect("plan");
 
-    let parsed = read_fix_results(&results, Some(&plan));
+    let parsed = parse_fix_results_file(&results);
     assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].file, "src/plan.rs");
+    assert_eq!(parsed[0].file, "src/results.rs");
 }
 
 #[test]

@@ -61,7 +61,6 @@ pub(crate) fn rewrite_callers_after_dedup(fix: &fixer::Fix, root: &Path) {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditRefactorIterationSummary {
-    pub iteration: usize,
     pub findings_before: usize,
     pub findings_after: usize,
     pub weighted_score_before: usize,
@@ -78,7 +77,7 @@ pub struct AuditRefactorOutcome {
     pub current_result: CodeAuditResult,
     pub fix_result: fixer::FixResult,
     pub policy_summary: fixer::PolicySummary,
-    pub iterations: Vec<AuditRefactorIterationSummary>,
+    pub iteration_summary: Option<AuditRefactorIterationSummary>,
 }
 
 pub fn run_audit_refactor(
@@ -86,13 +85,12 @@ pub fn run_audit_refactor(
     only_kinds: &[crate::code_audit::AuditFinding],
     exclude_kinds: &[crate::code_audit::AuditFinding],
     scoring: AuditConvergenceScoring,
-    _max_iterations: usize,
     write: bool,
 ) -> crate::Result<AuditRefactorOutcome> {
     let current_result = initial_result;
-    let mut iterations = Vec::new();
     let final_fix_result;
     let final_policy_summary;
+    let final_iteration_summary;
 
     if write {
         // Single pass: take the provided findings, generate fixes, apply, validate.
@@ -107,7 +105,6 @@ pub fn run_audit_refactor(
         final_fix_result = fix_result;
         final_policy_summary = policy_summary;
 
-        iteration_summary.iteration = 1;
         iteration_summary.findings_after = current_result.findings.len();
         iteration_summary.weighted_score_after =
             weighted_finding_score_with(&current_result, scoring);
@@ -119,7 +116,7 @@ pub fn run_audit_refactor(
             iteration_summary.status = "completed".to_string();
         }
 
-        iterations.push(iteration_summary);
+        final_iteration_summary = Some(iteration_summary);
     } else {
         let policy = fixer::FixPolicy {
             only: (!only_kinds.is_empty()).then_some(only_kinds.to_vec()),
@@ -129,13 +126,14 @@ pub fn run_audit_refactor(
         let mut fix_result = super::generate::generate_audit_fixes(&current_result, root, &policy);
         final_policy_summary = fixer::apply_fix_policy(&mut fix_result, false, &policy);
         final_fix_result = fix_result;
+        final_iteration_summary = None;
     }
 
     Ok(AuditRefactorOutcome {
         current_result,
         fix_result: final_fix_result,
         policy_summary: final_policy_summary,
-        iterations,
+        iteration_summary: final_iteration_summary,
     })
 }
 
@@ -191,7 +189,9 @@ fn run_fix_iteration(
         .filter(|nf| nf.auto_apply)
         .cloned()
         .collect();
-    let mut auto_decompose_plans = fix_result.decompose_plans.clone();
+    // Note: decompose_plans are always cleared by apply_fix_policy() in write
+    // mode, so there are never any decompose plans to apply here. Decompose
+    // application goes through explicit manual commands (`refactor decompose`).
     let changed_files: Vec<String> = auto_fixes
         .iter()
         .map(|fix| fix.file.clone())
@@ -233,13 +233,6 @@ fn run_fix_iteration(
         fix_result.chunk_results.extend(chunk_results);
     }
 
-    // Decompose plans use their own apply path (out of scope for EditOp migration)
-    if !auto_decompose_plans.is_empty() {
-        let decompose_chunk_results =
-            fixer::apply_decompose_plans(&mut auto_decompose_plans, root);
-        fix_result.chunk_results.extend(decompose_chunk_results);
-    }
-
     for applied_fix in auto_fixes {
         if let Some(original) = fix_result
             .fixes
@@ -260,16 +253,6 @@ fn run_fix_iteration(
         }
     }
 
-    for plan in &auto_decompose_plans {
-        if let Some(original) = fix_result
-            .decompose_plans
-            .iter_mut()
-            .find(|candidate| candidate.file == plan.file)
-        {
-            original.applied = plan.applied;
-        }
-    }
-
     fix_result.files_modified = total_modified;
 
     let changed_files: Vec<String> = fix_result
@@ -283,7 +266,6 @@ fn run_fix_iteration(
         fix_result,
         policy_summary,
         AuditRefactorIterationSummary {
-            iteration: 0,
             findings_before: audit_result.findings.len(),
             findings_after: 0,
             weighted_score_before: weighted_finding_score_with(audit_result, scoring),

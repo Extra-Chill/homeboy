@@ -13,7 +13,6 @@
 //!   test-results.json      ← test step output
 //!   test-failures.json     ← test failure details
 //!   coverage.json          ← test coverage data
-//!   fix-plan.json          ← planned fixes (autofix)
 //!   fix-results.json       ← applied fixes (autofix)
 //!   annotations/           ← CI annotation files
 //! ```
@@ -34,7 +33,6 @@ pub mod files {
     pub const TEST_RESULTS: &str = "test-results.json";
     pub const TEST_FAILURES: &str = "test-failures.json";
     pub const COVERAGE: &str = "coverage.json";
-    pub const FIX_PLAN: &str = "fix-plan.json";
     pub const FIX_RESULTS: &str = "fix-results.json";
     pub const ANNOTATIONS_DIR: &str = "annotations";
 }
@@ -126,12 +124,6 @@ impl RunDir {
             (
                 "HOMEBOY_COVERAGE_FILE".to_string(),
                 self.step_file(files::COVERAGE)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                "HOMEBOY_FIX_PLAN_FILE".to_string(),
-                self.step_file(files::FIX_PLAN)
                     .to_string_lossy()
                     .to_string(),
             ),

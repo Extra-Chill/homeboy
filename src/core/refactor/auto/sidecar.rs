@@ -7,12 +7,11 @@ impl AutofixSidecarFiles {
     pub fn for_run_dir(run_dir: &RunDir) -> Self {
         Self {
             results_file: run_dir.step_file(run_dir::files::FIX_RESULTS),
-            plan_file: Some(run_dir.step_file(run_dir::files::FIX_PLAN)),
         }
     }
 
     pub fn consume_fix_results(&self) -> Vec<FixApplied> {
-        read_fix_results(&self.results_file, self.plan_file.as_deref())
+        parse_fix_results_file(&self.results_file)
     }
 }
 
@@ -31,19 +30,4 @@ pub fn parse_fix_results_file(path: &Path) -> Vec<FixApplied> {
     }
 
     serde_json::from_str(&content).unwrap_or_default()
-}
-
-pub fn parse_fix_plan_file(path: &Path) -> Vec<FixApplied> {
-    parse_fix_results_file(path)
-}
-
-pub fn read_fix_results(results_file: &Path, plan_file: Option<&Path>) -> Vec<FixApplied> {
-    if let Some(plan_file) = plan_file {
-        let planned_fix_results = parse_fix_plan_file(plan_file);
-        if !planned_fix_results.is_empty() {
-            return planned_fix_results;
-        }
-    }
-
-    parse_fix_results_file(results_file)
 }

@@ -133,9 +133,12 @@ pub fn apply_fix_policy(result: &mut FixResult, write: bool, policy: &FixPolicy)
         .decompose_plans
         .retain(|p| !policy.exclude.contains(&p.source_finding));
 
-    // Structural decompose writes are still too risky for unattended autofix.
-    // Keep them visible in dry-run output, but do not auto-apply them in write
-    // mode until the engine is proven safe on real branches.
+    // Structural decompose writes are too risky for unattended autofix.
+    // In dry-run mode they remain visible for preview; in write mode they are
+    // dropped entirely. Because this clearing happens before `run_fix_iteration`
+    // clones `decompose_plans`, the decompose apply path in verify.rs is
+    // unreachable in write mode — any decompose application must go through
+    // explicit manual commands (e.g. `refactor decompose`).
     if write {
         summary.dropped_manual_only += result.decompose_plans.len();
         result.decompose_plans.clear();

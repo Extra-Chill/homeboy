@@ -18,7 +18,7 @@ pub use outcome::{
     FixApplied, FixResultsSummary, RuleFixCount,
 };
 pub use policy::apply_fix_policy;
-pub use sidecar::{parse_fix_plan_file, parse_fix_results_file, read_fix_results};
+pub use sidecar::parse_fix_results_file;
 pub use summary::{
     primitive_name, summarize_audit_fix_result, summarize_fix_results,
     summarize_optional_fix_results,
