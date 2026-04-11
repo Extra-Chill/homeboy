@@ -8,8 +8,8 @@ pub mod summary;
 pub mod tracking;
 
 pub use apply::{
-    apply_decompose_plans, apply_file_moves, apply_fixes, apply_fixes_chunked, apply_new_files,
-    apply_new_files_chunked, auto_apply_subset,
+    apply_decompose_plans, apply_file_moves, apply_fixes, apply_fixes_chunked,
+    apply_fixes_via_edit_ops, apply_new_files, apply_new_files_chunked, auto_apply_subset,
 };
 pub use contracts::{
     ApplyChunkResult, ApplyOptions, ChunkStatus, ChunkVerifier, DecomposeFixPlan, Fix, FixPolicy,

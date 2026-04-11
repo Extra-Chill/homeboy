@@ -709,6 +709,178 @@ pub(crate) fn insert_before_closing_brace(
     }
 }
 
+// ============================================================================
+// EditOp-based apply path (Phase 2 of #1041)
+// ============================================================================
+
+/// Apply fixes by converting them to `EditOp`s and routing through
+/// `apply_edit_ops()`.
+///
+/// This is the new apply path that replaces `apply_fixes_chunked()`. It:
+/// 1. Converts `Fix` → `Vec<TaggedEditOp>` via `fix_to_edit_ops()`
+/// 2. Optionally converts `NewFile` → `TaggedEditOp` via `new_file_to_edit_op()`
+/// 3. Calls `apply_edit_ops()` for the unified execution
+/// 4. Runs `format_after_write()` on all modified files
+/// 5. Runs `rewrite_callers_after_dedup()` for duplicate function fixes
+/// 6. Returns `Vec<ApplyChunkResult>` for compatibility with existing reporting
+pub fn apply_fixes_via_edit_ops(
+    fixes: &mut [Fix],
+    new_files: &mut [NewFile],
+    root: &Path,
+) -> Vec<ApplyChunkResult> {
+    use crate::engine::edit_op::{fix_to_edit_ops, new_file_to_edit_op, TaggedEditOp};
+    use crate::engine::edit_op_apply::apply_edit_ops;
+
+    // Merge same-file insertions (same as old path)
+    merge_same_file_insertions(fixes);
+
+    // Convert all Fix objects to TaggedEditOps
+    let mut all_ops: Vec<TaggedEditOp> = Vec::new();
+    let mut fix_file_index: Vec<(String, usize)> = Vec::new(); // (file, fix_index)
+
+    for (index, fix) in fixes.iter().enumerate() {
+        if fix.insertions.is_empty() {
+            continue;
+        }
+        fix_file_index.push((fix.file.clone(), index));
+        all_ops.extend(fix_to_edit_ops(fix));
+    }
+
+    // Convert NewFile objects to TaggedEditOps
+    let mut new_file_index: Vec<(String, usize)> = Vec::new();
+    for (index, nf) in new_files.iter().enumerate() {
+        new_file_index.push((nf.file.clone(), index));
+        all_ops.push(new_file_to_edit_op(nf));
+    }
+
+    if all_ops.is_empty() {
+        return Vec::new();
+    }
+
+    // Execute all ops through the unified apply path
+    let report = match apply_edit_ops(&all_ops, root) {
+        Ok(r) => r,
+        Err(e) => {
+            // Fatal error — return a single reverted chunk
+            return vec![ApplyChunkResult {
+                chunk_id: "edit_ops:all".to_string(),
+                files: fix_file_index
+                    .iter()
+                    .map(|(f, _)| f.clone())
+                    .chain(new_file_index.iter().map(|(f, _)| f.clone()))
+                    .collect(),
+                status: ChunkStatus::Reverted,
+                applied_files: 0,
+                reverted_files: 0,
+                verification: None,
+                error: Some(format!("apply_edit_ops failed: {}", e)),
+            }];
+        }
+    };
+
+    // Collect all modified/created files for formatting
+    let mut formatted_files: Vec<std::path::PathBuf> = Vec::new();
+
+    // Build per-fix ApplyChunkResults
+    let mut results: Vec<ApplyChunkResult> = Vec::new();
+
+    // Track which files had errors
+    let error_files: std::collections::HashSet<&str> = report
+        .errors
+        .iter()
+        .map(|e| e.file.as_str())
+        .collect();
+
+    for (file, fix_index) in &fix_file_index {
+        let fix = &mut fixes[*fix_index];
+        if error_files.contains(file.as_str()) {
+            let error_msg = report
+                .errors
+                .iter()
+                .find(|e| e.file == *file)
+                .map(|e| e.message.clone())
+                .unwrap_or_default();
+            results.push(ApplyChunkResult {
+                chunk_id: format!("fix:{}", fix_index + 1),
+                files: vec![file.clone()],
+                status: ChunkStatus::Reverted,
+                applied_files: 0,
+                reverted_files: 0,
+                verification: None,
+                error: Some(error_msg),
+            });
+        } else {
+            let abs_path = root.join(file);
+            formatted_files.push(abs_path);
+            fix.applied = true;
+
+            log_status!(
+                "fix",
+                "Applied {} fix(es) to {}",
+                fix.insertions.len(),
+                fix.file
+            );
+
+            results.push(ApplyChunkResult {
+                chunk_id: format!("fix:{}", fix_index + 1),
+                files: vec![file.clone()],
+                status: ChunkStatus::Applied,
+                applied_files: 1,
+                reverted_files: 0,
+                verification: Some("write_ok".to_string()),
+                error: None,
+            });
+        }
+    }
+
+    // Build per-new-file ApplyChunkResults
+    for (file, nf_index) in &new_file_index {
+        let nf = &mut new_files[*nf_index];
+        if error_files.contains(file.as_str()) {
+            let error_msg = report
+                .errors
+                .iter()
+                .find(|e| e.file == *file)
+                .map(|e| e.message.clone())
+                .unwrap_or_default();
+            results.push(ApplyChunkResult {
+                chunk_id: format!("new_file:{}", nf_index + 1),
+                files: vec![file.clone()],
+                status: ChunkStatus::Reverted,
+                applied_files: 0,
+                reverted_files: 0,
+                verification: None,
+                error: Some(error_msg),
+            });
+        } else {
+            nf.written = true;
+            log_status!("fix", "Created {}", nf.file);
+
+            results.push(ApplyChunkResult {
+                chunk_id: format!("new_file:{}", nf_index + 1),
+                files: vec![file.clone()],
+                status: ChunkStatus::Applied,
+                applied_files: 1,
+                reverted_files: 0,
+                verification: Some("write_ok".to_string()),
+                error: None,
+            });
+        }
+    }
+
+    // Format all modified/created files in one batch
+    if !formatted_files.is_empty() {
+        let _ = crate::engine::format_write::format_after_write(root, &formatted_files);
+    }
+
+    // Run post-apply hooks for duplicate function fixes (caller rewriting)
+    for fix in fixes.iter().filter(|f| f.applied) {
+        rewrite_callers_after_dedup(fix, root);
+    }
+
+    results
+}
+
 pub fn auto_apply_subset(result: &FixResult) -> FixResult {
     let fixes: Vec<Fix> = result
         .fixes
@@ -1525,5 +1697,231 @@ mod tests {
             ),
             "Same import is not a collision (handled by import_already_present)"
         );
+    }
+
+    // ── Parity tests: old path vs new EditOp path ─────────────────────
+    //
+    // These tests run the same insertions through both:
+    //   1. apply_insertions_to_content() (old InsertionKind dispatch)
+    //   2. apply_edit_ops_to_content() (new EditOp path via from_insertion())
+    // and assert identical output.
+
+    use crate::code_audit::AuditFinding;
+    use crate::engine::edit_op::from_insertion;
+    use crate::engine::edit_op_apply::apply_edit_ops_to_content;
+
+    fn parity_check(content: &str, insertions: &[Insertion], language: &Language) {
+        // Old path
+        let old_result = apply_insertions_to_content(content, insertions, language);
+
+        // New path: convert each insertion → EditOp, then apply
+        let file = "parity_test_file";
+        let edit_ops: Vec<_> = insertions.iter().map(|ins| from_insertion(ins, file)).collect();
+        let op_refs: Vec<_> = edit_ops.iter().map(|t| &t.op).collect();
+        let new_result = apply_edit_ops_to_content(content, &op_refs, language)
+            .expect("EditOp apply should not error");
+
+        assert_eq!(
+            old_result, new_result,
+            "\nParity mismatch!\n--- Old path ---\n{}\n--- New path ---\n{}",
+            old_result, new_result
+        );
+    }
+
+    fn make_insertion(kind: InsertionKind, code: &str) -> Insertion {
+        Insertion {
+            primitive: None,
+            kind,
+            finding: AuditFinding::UnreferencedExport,
+            manual_only: false,
+            auto_apply: true,
+            blocked_reason: None,
+            code: code.to_string(),
+            description: "parity test".to_string(),
+        }
+    }
+
+    #[test]
+    fn parity_visibility_change() {
+        let content = "pub fn old_func() {}\n\npub fn other() {}\n";
+        let insertions = vec![make_insertion(
+            InsertionKind::VisibilityChange {
+                line: 1,
+                from: "pub fn".to_string(),
+                to: "pub(crate) fn".to_string(),
+            },
+            "",
+        )];
+        parity_check(content, &insertions, &Language::Rust);
+    }
+
+    #[test]
+    fn parity_line_replacement() {
+        let content = "fn old_name() {}\nfn other() {}\n";
+        let insertions = vec![make_insertion(
+            InsertionKind::LineReplacement {
+                line: 1,
+                old_text: "old_name".to_string(),
+                new_text: "new_name".to_string(),
+            },
+            "",
+        )];
+        parity_check(content, &insertions, &Language::Rust);
+    }
+
+    #[test]
+    fn parity_doc_reference_update() {
+        let content = "/// See src/old/config.rs for details\nfn foo() {}\n";
+        let insertions = vec![make_insertion(
+            InsertionKind::DocReferenceUpdate {
+                line: 1,
+                old_ref: "src/old/config.rs".to_string(),
+                new_ref: "src/new/config.rs".to_string(),
+            },
+            "",
+        )];
+        parity_check(content, &insertions, &Language::Rust);
+    }
+
+    #[test]
+    fn parity_function_removal() {
+        let content = "fn keep() {}\n\nfn remove_me() {\n    let x = 1;\n}\n\nfn also_keep() {}\n";
+        let insertions = vec![make_insertion(
+            InsertionKind::FunctionRemoval {
+                start_line: 3,
+                end_line: 5,
+            },
+            "",
+        )];
+        parity_check(content, &insertions, &Language::Rust);
+    }
+
+    #[test]
+    fn parity_doc_line_removal() {
+        let content = "/// Line 1\n/// Line 2 (dead ref)\n/// Line 3\nfn foo() {}\n";
+        let insertions = vec![make_insertion(
+            InsertionKind::DocLineRemoval { line: 2 },
+            "",
+        )];
+        parity_check(content, &insertions, &Language::Rust);
+    }
+
+    #[test]
+    fn parity_import_add_rust() {
+        let content = "use std::io;\n\nfn main() {}\n";
+        let insertions = vec![make_insertion(
+            InsertionKind::ImportAdd,
+            "use crate::config;",
+        )];
+        parity_check(content, &insertions, &Language::Rust);
+    }
+
+    #[test]
+    fn parity_import_add_skips_duplicate() {
+        let content = "use std::io;\nuse crate::config;\n\nfn main() {}\n";
+        let insertions = vec![make_insertion(
+            InsertionKind::ImportAdd,
+            "use crate::config;",
+        )];
+        parity_check(content, &insertions, &Language::Rust);
+    }
+
+    #[test]
+    fn parity_reexport_removal() {
+        let content = "pub use sources::{alpha, beta, gamma};\n\nfn main() {}\n";
+        let insertions = vec![make_insertion(
+            InsertionKind::ReexportRemoval {
+                fn_name: "beta".to_string(),
+            },
+            "",
+        )];
+        parity_check(content, &insertions, &Language::Rust);
+    }
+
+    #[test]
+    fn parity_multiple_removals() {
+        let content = "\
+fn source_fn() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn helper() -> i32 {
+        42
+    }
+
+    #[test]
+    fn test_alpha() {
+        assert_eq!(helper(), 42);
+    }
+
+    #[test]
+    fn test_beta() {
+        let x = 1;
+        assert_eq!(x, 1);
+    }
+}
+";
+        let insertions = vec![
+            make_insertion(
+                InsertionKind::FunctionRemoval {
+                    start_line: 11,
+                    end_line: 14,
+                },
+                "",
+            ),
+            make_insertion(
+                InsertionKind::FunctionRemoval {
+                    start_line: 16,
+                    end_line: 20,
+                },
+                "",
+            ),
+        ];
+        parity_check(content, &insertions, &Language::Rust);
+    }
+
+    #[test]
+    fn parity_test_module_append() {
+        let content = "pub fn foo() {}\n";
+        let insertions = vec![make_insertion(
+            InsertionKind::TestModule,
+            "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_foo() {\n        assert!(true);\n    }\n}\n",
+        )];
+        parity_check(content, &insertions, &Language::Rust);
+    }
+
+    #[test]
+    fn parity_mixed_ops_same_file() {
+        // Combine removal + import add + visibility change in one file
+        let content = "\
+use std::io;
+
+pub fn duplicate_func() {
+    let x = 1;
+}
+
+pub fn keep_this() {}
+";
+        let insertions = vec![
+            make_insertion(
+                InsertionKind::FunctionRemoval {
+                    start_line: 3,
+                    end_line: 5,
+                },
+                "",
+            ),
+            make_insertion(InsertionKind::ImportAdd, "use crate::canonical;"),
+            make_insertion(
+                InsertionKind::VisibilityChange {
+                    line: 7,
+                    from: "pub fn".to_string(),
+                    to: "pub(crate) fn".to_string(),
+                },
+                "",
+            ),
+        ];
+        parity_check(content, &insertions, &Language::Rust);
     }
 }

@@ -183,35 +183,14 @@ fn run_fix_iteration(
         }
     }
 
-    // Apply all fixes without per-chunk verification. Validation belongs
-    // downstream (PR CI pipeline), not inside the refactor command.
-    if !auto_apply_result.fixes.is_empty() {
-        let chunk_results = fixer::apply_fixes_chunked(
+    // Apply content fixes, new files, and file moves through the unified
+    // EditOp pipeline. This converts Fix/NewFile → TaggedEditOp, applies them
+    // via apply_edit_ops(), then runs format_after_write and caller rewriting.
+    if !auto_apply_result.fixes.is_empty() || !auto_apply_result.new_files.is_empty() {
+        let chunk_results = fixer::apply_fixes_via_edit_ops(
             &mut auto_apply_result.fixes,
-            root,
-            fixer::ApplyOptions { verifier: None },
-        );
-        applied_chunks += chunk_results
-            .iter()
-            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
-            .count();
-        reverted_chunks += chunk_results
-            .iter()
-            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Reverted))
-            .count();
-        total_modified += chunk_results
-            .iter()
-            .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
-            .map(|chunk| chunk.applied_files)
-            .sum::<usize>();
-        fix_result.chunk_results.extend(chunk_results);
-    }
-
-    if !auto_apply_result.new_files.is_empty() {
-        let chunk_results = fixer::apply_new_files_chunked(
             &mut auto_apply_result.new_files,
             root,
-            fixer::ApplyOptions { verifier: None },
         );
         applied_chunks += chunk_results
             .iter()
@@ -229,6 +208,7 @@ fn run_fix_iteration(
         fix_result.chunk_results.extend(chunk_results);
     }
 
+    // Decompose plans use their own apply path (out of scope for EditOp migration)
     if !auto_apply_result.decompose_plans.is_empty() {
         let decompose_chunk_results = fixer::apply_decompose_plans(
             &mut auto_apply_result.decompose_plans,
@@ -236,25 +216,6 @@ fn run_fix_iteration(
             fixer::ApplyOptions { verifier: None },
         );
         fix_result.chunk_results.extend(decompose_chunk_results);
-    }
-
-    // Apply file moves (e.g., misplaced test files → correct paths).
-    // Runs after content fixes so moved files contain updated content.
-    {
-        let move_results = fixer::apply_file_moves(&auto_apply_result.fixes, root);
-        let move_count: usize = move_results
-            .iter()
-            .filter(|c| matches!(c.status, fixer::ChunkStatus::Applied))
-            .map(|c| c.applied_files)
-            .sum();
-        if move_count > 0 {
-            total_modified += move_count;
-            applied_chunks += move_results
-                .iter()
-                .filter(|c| matches!(c.status, fixer::ChunkStatus::Applied))
-                .count();
-        }
-        fix_result.chunk_results.extend(move_results);
     }
 
     for applied_fix in auto_apply_result.fixes {
