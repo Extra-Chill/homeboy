@@ -272,50 +272,23 @@ pub(crate) fn validate_and_finalize_changelog(
     let settings = changelog::resolve_effective_settings(Some(component));
     let changelog_path = changelog::resolve_changelog_path(component)?;
 
+    // resolve_changelog_path() already handles fallback discovery when the
+    // configured path doesn't exist, so the path here should be valid.
     let changelog_content = match local_files::local().read(&changelog_path) {
         Ok(content) => content,
         Err(e) => {
-            // When the configured changelog_target doesn't exist, search for
-            // the file in common locations and suggest a config fix.
             let error_str = e.to_string();
             if error_str.contains("File not found") || error_str.contains("No such file") {
-                let mut hints = vec![format!(
-                    "Configured changelog_target resolved to: {}",
-                    changelog_path.display()
-                )];
-
-                let common_locations = [
-                    "CHANGELOG.md",
-                    "docs/CHANGELOG.md",
-                    "changelog.md",
-                    "docs/changelog.md",
-                    "CHANGES.md",
-                ];
-
-                for location in &common_locations {
-                    let candidate = std::path::Path::new(&component.local_path).join(location);
-                    if candidate.exists() && candidate != changelog_path {
-                        hints.push(format!(
-                            "Found changelog at {}. Fix with:\n  homeboy component set {} --changelog-target \"{}\"",
-                            location, component.id, location
-                        ));
-                        break;
-                    }
-                }
-
-                if hints.len() == 1 {
-                    // No existing file found — suggest creating one
-                    hints.push(format!(
-                        "Create a new changelog:\n  homeboy changelog init {} --configure",
-                        component.id
-                    ));
-                }
-
                 return Err(Error::validation_invalid_argument(
                     "changelog",
                     format!("Changelog file not found: {}", changelog_path.display()),
                     None,
-                    Some(hints),
+                    Some(vec![
+                        format!(
+                            "Create a new changelog:\n  homeboy changelog init {} --configure",
+                            component.id
+                        ),
+                    ]),
                 ));
             }
             return Err(e);

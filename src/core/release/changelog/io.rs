@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::component::{self, Component};
 use crate::engine::local_files;
@@ -8,6 +8,17 @@ use crate::paths::resolve_path;
 
 use super::sections::*;
 use super::settings::*;
+
+/// Common changelog file locations to check when the configured path doesn't exist.
+/// Ordered by convention preference.
+const CHANGELOG_CANDIDATES: &[&str] = &[
+    "CHANGELOG.md",
+    "docs/CHANGELOG.md",
+    "changelog.md",
+    "docs/changelog.md",
+    "doc/CHANGELOG.md",
+    "CHANGES.md",
+];
 
 pub fn resolve_changelog_path(component: &Component) -> Result<PathBuf> {
     // Validate local_path is absolute and exists before any file operations
@@ -30,11 +41,33 @@ pub fn resolve_changelog_path(component: &Component) -> Result<PathBuf> {
         ],
     )?;
 
-    resolve_target_path(&component.local_path, target)
-}
+    let configured_path = resolve_path(&component.local_path, target);
 
-fn resolve_target_path(local_path: &str, file: &str) -> Result<PathBuf> {
-    Ok(resolve_path(local_path, file))
+    // If the configured path exists, use it directly
+    if configured_path.exists() {
+        return Ok(configured_path);
+    }
+
+    // Configured path doesn't exist — try common fallback locations
+    let local_path = Path::new(&component.local_path);
+    for candidate in CHANGELOG_CANDIDATES {
+        let candidate_path = local_path.join(candidate);
+        if candidate_path.exists() && candidate_path != configured_path {
+            log_status!(
+                "changelog",
+                "Configured changelog_target '{}' not found, using discovered '{}'. Fix with:\n  homeboy component set {} --changelog-target \"{}\"",
+                target,
+                candidate,
+                component.id,
+                candidate
+            );
+            return Ok(candidate_path);
+        }
+    }
+
+    // Nothing found — return the configured path (will fail downstream with a
+    // clear "file not found" error from the caller that tries to read it)
+    Ok(configured_path)
 }
 
 #[derive(Debug, Clone)]

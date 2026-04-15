@@ -68,6 +68,7 @@ pub enum CommitCategory {
     Docs,
     Chore,
     Merge,
+    Release,
     Other,
 }
 
@@ -115,12 +116,13 @@ impl CommitCategory {
             CommitCategory::Docs => Some("docs"),
             CommitCategory::Chore => Some("chore"),
             CommitCategory::Merge => None,
+            CommitCategory::Release => None,
             CommitCategory::Other => None,
         }
     }
 
     /// Map commit category to changelog entry type.
-    /// Returns None for categories that should be skipped (docs, chore, merge).
+    /// Returns None for categories that should be skipped (docs, chore, merge, release).
     pub fn to_changelog_entry_type(&self) -> Option<&'static str> {
         match self {
             CommitCategory::Feature => Some("added"),
@@ -129,6 +131,7 @@ impl CommitCategory {
             CommitCategory::Docs => None,
             CommitCategory::Chore => None,
             CommitCategory::Merge => None,
+            CommitCategory::Release => None,
             CommitCategory::Other => Some("changed"),
         }
     }
@@ -152,6 +155,12 @@ pub(crate) fn classify_commit(subject: &str, body: Option<&str>) -> CommitCatego
         || lower.starts_with("merge remote-tracking")
     {
         return CommitCategory::Merge;
+    }
+
+    // Detect version bump / release commits - these are release infrastructure noise.
+    // Uses the same patterns as find_version_commit() and find_version_release_commit().
+    if is_release_commit(&lower) {
+        return CommitCategory::Release;
     }
 
     // Check subject for breaking change markers
@@ -179,6 +188,55 @@ pub(crate) fn classify_commit(subject: &str, body: Option<&str>) -> CommitCatego
         CommitCategory::Other
     }
 }
+
+/// Check if a lowercased commit subject looks like a version bump or release commit.
+/// Matches patterns like: "v0.2.3", "bump version to 0.2.3", "release: v1.0.0",
+/// "version 0.2.2", "release v0.4.0", "chore(release): v1.0.0".
+fn is_release_commit(lower: &str) -> bool {
+    // Bare version tag: "v0.2.3" or "0.2.3" (entire subject is just a version)
+    if BARE_VERSION_RE
+        .is_match(lower)
+    {
+        return true;
+    }
+
+    // "bump version to 0.2.3", "bump to v0.2.3", "version bump to 0.2.3"
+    if lower.starts_with("bump") || lower.starts_with("version bump") || lower.starts_with("version ") {
+        if VERSION_NUMBER_RE.is_match(lower) {
+            return true;
+        }
+    }
+
+    // "release: v0.2.3", "release v0.2.3", "chore(release): v0.2.3"
+    if RELEASE_PREFIX_RE.is_match(lower) {
+        return true;
+    }
+
+    false
+}
+
+// Lazy regex patterns for release commit detection.
+// These mirror the patterns in find_version_commit() and find_version_release_commit()
+// but are compiled once for use in the hot path of classify_commit().
+use std::sync::LazyLock;
+
+/// Matches a subject that is just a version number: "v0.2.3", "0.2.3"
+static BARE_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^v?\d+\.\d+(?:\.\d+)?$").expect("Invalid regex")
+});
+
+/// Matches any string containing a semver-like version number
+static VERSION_NUMBER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\d+\.\d+(?:\.\d+)?").expect("Invalid regex")
+});
+
+/// Matches release-prefixed subjects: "release: v0.2.3", "release v0.2.3",
+/// "chore(release): v0.2.3"
+static RELEASE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:chore\([^)]*\):\s*v?\d+\.\d+(?:\.\d+)?|release:?\s*v?\d+\.\d+(?:\.\d+)?)"
+    ).expect("Invalid regex")
+});
 
 /// Parse raw git log output that uses FIELD_SEP / RECORD_SEP delimiters
 /// into a list of CommitInfo structs with body-aware category classification.
@@ -479,7 +537,10 @@ pub fn recommended_bump_from_commits(commits: &[CommitInfo]) -> Option<SemverBum
             CommitCategory::Breaking => SemverBump::Major,
             CommitCategory::Feature => SemverBump::Minor,
             CommitCategory::Fix | CommitCategory::Other => SemverBump::Patch,
-            CommitCategory::Docs | CommitCategory::Chore | CommitCategory::Merge => continue,
+            CommitCategory::Docs
+            | CommitCategory::Chore
+            | CommitCategory::Merge
+            | CommitCategory::Release => continue,
         };
 
         recommended = match recommended {
@@ -713,10 +774,123 @@ mod tests {
     }
 
     #[test]
-    fn merge_category_skipped_in_changelog() {
+    fn classify_release_bare_version() {
+        // Bare version tags: "v0.2.3", "0.2.3"
+        assert_eq!(
+            parse_conventional_commit("v0.2.3"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("0.2.3"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("v1.0.0"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("1.0"),
+            CommitCategory::Release
+        );
+    }
+
+    #[test]
+    fn classify_release_bump_patterns() {
+        // "Bump version to X.Y.Z" and variants
+        assert_eq!(
+            parse_conventional_commit("Bump version to 0.2.2"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("bump to v0.3.0"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("Bump version to 0.2.2 and add error logging"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("version bump to 0.2.1"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("Version 0.4.0"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("Bump version to 0.2.1"),
+            CommitCategory::Release
+        );
+    }
+
+    #[test]
+    fn classify_release_prefix_patterns() {
+        // "release: vX.Y.Z" and variants
+        assert_eq!(
+            parse_conventional_commit("release: v0.2.3"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("release v0.4.0"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("chore(release): v1.0.0"),
+            CommitCategory::Release
+        );
+        assert_eq!(
+            parse_conventional_commit("Release 0.5.0"),
+            CommitCategory::Release
+        );
+    }
+
+    #[test]
+    fn classify_release_does_not_match_feature_commits() {
+        // These should NOT be classified as Release
+        assert_eq!(
+            parse_conventional_commit("feat: add version display"),
+            CommitCategory::Feature
+        );
+        assert_eq!(
+            parse_conventional_commit("fix: version parsing bug"),
+            CommitCategory::Fix
+        );
+        assert_eq!(
+            parse_conventional_commit("Update plugin URI"),
+            CommitCategory::Other
+        );
+        assert_eq!(
+            parse_conventional_commit("added claude.md"),
+            CommitCategory::Other
+        );
+        assert_eq!(
+            parse_conventional_commit("Initial plan"),
+            CommitCategory::Other
+        );
+        // chore: without a version number should still be Chore
+        assert_eq!(
+            parse_conventional_commit("chore: cleanup"),
+            CommitCategory::Chore
+        );
+        // chore(deps) with a version-like number should still be Chore
+        // (only chore(release)-style with a bare version after colon is Release)
+        assert_eq!(
+            parse_conventional_commit("chore(deps): bump lodash to 4.17.21"),
+            CommitCategory::Chore
+        );
+    }
+
+    #[test]
+    fn release_category_skipped_in_changelog() {
+        assert!(CommitCategory::Release.to_changelog_entry_type().is_none());
+    }
+
+    #[test]
+    fn merge_and_release_categories_skipped_in_changelog() {
         assert!(CommitCategory::Merge.to_changelog_entry_type().is_none());
         assert!(CommitCategory::Docs.to_changelog_entry_type().is_none());
         assert!(CommitCategory::Chore.to_changelog_entry_type().is_none());
+        assert!(CommitCategory::Release.to_changelog_entry_type().is_none());
         assert!(CommitCategory::Feature.to_changelog_entry_type().is_some());
     }
 

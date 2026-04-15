@@ -275,6 +275,7 @@ fn build_semver_recommendation(
                 git::CommitCategory::Docs => "docs",
                 git::CommitCategory::Chore => "chore",
                 git::CommitCategory::Merge => "merge",
+                git::CommitCategory::Release => "release",
                 git::CommitCategory::Other => "other",
             }
             .to_string(),
@@ -709,7 +710,7 @@ fn group_commits_for_changelog(
         }
     }
 
-    // If no entries generated (all docs/chore/merge), use first non-skip commit or fallback
+    // If no entries generated (all docs/chore/merge/release), use first non-skip commit or fallback
     if entries_by_type.is_empty() {
         let fallback = commits
             .iter()
@@ -719,6 +720,7 @@ fn group_commits_for_changelog(
                     git::CommitCategory::Docs
                         | git::CommitCategory::Chore
                         | git::CommitCategory::Merge
+                        | git::CommitCategory::Release
                 )
             })
             .map(|c| strip_pr_reference(git::strip_conventional_prefix(&c.subject)))
