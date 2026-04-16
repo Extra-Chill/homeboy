@@ -9,7 +9,10 @@ pub mod resolution;
 pub mod scope;
 pub mod versioning;
 
-pub use inventory::{exists, extension_provides_artifact_pattern, inventory, list, list_ids, load};
+pub use inventory::{
+    exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,
+    write_standalone_registration,
+};
 pub use mutations::{delete_safe, merge, rename, set_changelog_target};
 pub use portable::{
     discover_from_portable, has_portable_config, infer_portable_component_id, mutate_portable,

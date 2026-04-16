@@ -253,6 +253,15 @@ pub fn run(
 
             component::write_portable_config(repo_path, &new_component)?;
 
+            // Always persist a standalone registration so the component is
+            // discoverable by ID from any directory (#1131). This is a
+            // lightweight pointer file in ~/.config/homeboy/components/<id>.json.
+            if let Err(e) =
+                homeboy::component::inventory::write_standalone_registration(&new_component)
+            {
+                eprintln!("Warning: could not write standalone registration: {}", e);
+            }
+
             // Attach to project if --project was specified (#900)
             let mut attached_project: Option<String> = None;
             if let Some(ref project_id) = project {
@@ -268,11 +277,11 @@ pub fn run(
                 let suggestion = suggest_project_for_path(&local_path);
                 Some(match suggestion {
                     Some(project_id) => format!(
-                        "Attach to a project to enable release/deploy:\n  homeboy project components attach-path {} {}",
+                        "Attach to a project to enable deploy:\n  homeboy project components attach-path {} {}",
                         project_id, local_path
                     ),
                     None => format!(
-                        "Attach to a project to enable release/deploy:\n  homeboy project components attach-path <project> {}",
+                        "Component registered. Attach to a project for deploy:\n  homeboy project components attach-path <project> {}",
                         local_path
                     ),
                 })
