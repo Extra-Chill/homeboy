@@ -440,6 +440,7 @@ fn execute_artifact_deploy(
                 Some(base_path),
                 project.domain.as_deref(),
                 component.remote_owner.as_deref(),
+                component.cli_path.as_deref(),
             )
         } else {
             deploy_artifact(

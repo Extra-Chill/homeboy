@@ -986,8 +986,23 @@ pub(crate) fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
     let entries = local_files::local().list(&dir)?;
     let mut ids: Vec<String> = entries
         .into_iter()
-        .filter(|e| e.is_json() && !e.is_dir)
-        .filter_map(|e| e.path.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .filter_map(|e| {
+            if e.is_dir {
+                // For directories: check for {dir}/{dir}.json (same logic as list())
+                let dir_name = e.path.file_name()?.to_string_lossy().to_string();
+                let nested_json = e.path.join(format!("{}.json", dir_name));
+                if nested_json.exists() {
+                    Some(dir_name)
+                } else {
+                    None
+                }
+            } else if e.is_json() {
+                // For flat files: use existing behavior
+                e.path.file_stem().map(|s| s.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
         .collect();
     ids.sort();
     Ok(ids)

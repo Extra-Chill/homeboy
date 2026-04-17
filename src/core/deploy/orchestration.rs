@@ -102,6 +102,11 @@ pub(super) fn deploy_components(
         sync_components(&components)?;
     }
 
+    // Warn when --head deploys from a non-default branch (safety guardrail)
+    if config.head && !config.skip_build {
+        warn_non_default_branch(&components, config)?;
+    }
+
     if !config.force {
         check_uncommitted_changes(&components)?;
     }
@@ -265,6 +270,74 @@ fn run_dry_run_mode(
 }
 
 /// Verify no components have uncommitted changes before deployment.
+/// Warn when `--head` would deploy from a non-default branch.
+///
+/// Detects the current branch for each component and compares it against the
+/// default branch (via `git symbolic-ref refs/remotes/origin/HEAD`, falling
+/// back to "main"). If a component is on a feature branch, this is likely
+/// unintentional — the user probably meant to deploy the default branch.
+///
+/// With `--force`, this emits a log warning but proceeds. Without `--force`,
+/// it returns an error so the user can switch branches or confirm intent.
+fn warn_non_default_branch(components: &[Component], config: &DeployConfig) -> Result<()> {
+    for component in components {
+        if component.is_file_component() {
+            continue;
+        }
+
+        let path = &component.local_path;
+
+        // Get current branch
+        let current_branch = match crate::engine::command::run_in_optional(
+            path,
+            "git",
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+        ) {
+            Some(branch) if branch != "HEAD" => branch, // "HEAD" means detached
+            _ => continue,                               // detached or error — skip
+        };
+
+        // Detect default branch from remote HEAD symref, fallback to "main"
+        let default_branch = crate::engine::command::run_in_optional(
+            path,
+            "git",
+            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        )
+        .map(|s| {
+            // Output is like "origin/main" — strip the remote prefix
+            s.strip_prefix("origin/")
+                .unwrap_or(&s)
+                .to_string()
+        })
+        .unwrap_or_else(|| "main".to_string());
+
+        if current_branch != default_branch {
+            let message = format!(
+                "Component '{}' is on branch '{}', not '{}' (default)",
+                component.id, current_branch, default_branch
+            );
+
+            if config.force {
+                log_status!("deploy", "Warning: {}", message);
+            } else {
+                return Err(Error::validation_invalid_argument(
+                    "head",
+                    message,
+                    None,
+                    Some(vec![
+                        format!(
+                            "Switch to the default branch: git -C {} checkout {}",
+                            component.local_path, default_branch
+                        ),
+                        "Use --force to deploy from the current branch anyway".to_string(),
+                    ]),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
     let dirty: Vec<&str> = components
         .iter()

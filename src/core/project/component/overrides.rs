@@ -32,6 +32,9 @@ fn apply_overrides_layer(
     if let Some(scopes) = &overrides.scopes {
         component.scopes = Some(scopes.clone());
     }
+    if let Some(cli_path) = &overrides.cli_path {
+        component.cli_path = Some(cli_path.clone());
+    }
 }
 
 /// Apply component overrides with fleet → project cascade.
@@ -213,5 +216,37 @@ mod tests {
 
         let result = apply_component_overrides(&component, &project);
         assert_eq!(result.remote_path, "original/path");
+    }
+
+    #[test]
+    fn apply_overrides_layer_sets_cli_path() {
+        let mut component = base_component("my-plugin");
+        assert_eq!(component.cli_path, None);
+
+        let overrides = ProjectComponentOverrides {
+            cli_path: Some("studio wp".to_string()),
+            ..Default::default()
+        };
+
+        apply_overrides_layer(&mut component, &overrides);
+        assert_eq!(component.cli_path, Some("studio wp".to_string()));
+    }
+
+    #[test]
+    fn cli_path_override_applied_via_project() {
+        let component = base_component("my-plugin");
+
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "my-plugin".to_string(),
+            ProjectComponentOverrides {
+                cli_path: Some("studio wp".to_string()),
+                ..Default::default()
+            },
+        );
+        let project = project_with_overrides("my-studio-site", overrides);
+
+        let result = apply_component_overrides(&component, &project);
+        assert_eq!(result.cli_path, Some("studio wp".to_string()));
     }
 }
