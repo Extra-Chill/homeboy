@@ -143,6 +143,9 @@ pub struct Component {
     pub docs_dir: Option<String>,
     pub docs_dirs: Vec<String>,
     pub scopes: Option<ScopeConfig>,
+    /// Override the CLI path used by extension deploy install steps.
+    /// For example, Studio sites need "studio wp" instead of the default "wp".
+    pub cli_path: Option<String>,
 }
 
 /// Raw JSON shape for Component — handles backward-compatible deserialization
@@ -200,6 +203,8 @@ struct RawComponent {
     docs_dirs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scopes: Option<ScopeConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cli_path: Option<String>,
 }
 
 /// Insert legacy commands into hooks map if the event key doesn't already exist.
@@ -245,6 +250,7 @@ impl From<RawComponent> for Component {
             docs_dir: raw.docs_dir,
             docs_dirs: raw.docs_dirs,
             scopes: raw.scopes,
+            cli_path: raw.cli_path,
         }
     }
 }
@@ -275,6 +281,7 @@ impl From<Component> for RawComponent {
             docs_dir: c.docs_dir,
             docs_dirs: c.docs_dirs,
             scopes: c.scopes,
+            cli_path: c.cli_path,
         }
     }
 }
@@ -342,6 +349,7 @@ impl Component {
             docs_dir: None,
             docs_dirs: Vec::new(),
             scopes: None,
+            cli_path: None,
         }
     }
 

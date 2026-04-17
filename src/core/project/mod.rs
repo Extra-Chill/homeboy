@@ -63,6 +63,10 @@ pub struct ProjectComponentOverrides {
     pub hooks: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<crate::component::ScopeConfig>,
+    /// Override the CLI path used by extension deploy install steps.
+    /// For example, Studio sites need "studio wp" instead of the default "wp".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

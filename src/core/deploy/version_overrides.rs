@@ -221,6 +221,7 @@ pub(super) fn deploy_with_override(
     site_root: Option<&str>,
     domain: Option<&str>,
     remote_owner: Option<&str>,
+    cli_path_override: Option<&str>,
 ) -> Result<DeployResult> {
     let artifact_filename = local_path
         .file_name()
@@ -269,10 +270,14 @@ pub(super) fn deploy_with_override(
     }
 
     // Step 3: Render and execute install command
-    let cli_path = extension
-        .cli
-        .as_ref()
-        .and_then(|c| c.default_cli_path.as_deref())
+    // Resolution order: component/project cli_path override → extension default → "wp"
+    let cli_path = cli_path_override
+        .or_else(|| {
+            extension
+                .cli
+                .as_ref()
+                .and_then(|c| c.default_cli_path.as_deref())
+        })
         .unwrap_or("wp");
 
     let mut vars = HashMap::new();
