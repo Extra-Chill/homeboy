@@ -11,7 +11,7 @@ use crate::extension::test::{
 use crate::refactor::AppliedRefactor;
 use serde::Serialize;
 
-use super::run::TestRunWorkflowResult;
+use super::run::{RawTestOutput, TestRunWorkflowResult};
 use super::workflow::{AutoFixDriftOutput, AutoFixDriftWorkflowResult, DriftWorkflowResult};
 
 /// Unified output envelope for all test command modes.
@@ -44,6 +44,10 @@ pub struct TestCommandOutput {
     pub test_scope: Option<TestScopeOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<TestSummaryOutput>,
+    /// Tail of runner stdout/stderr when tests fail — lets CI wrappers and
+    /// users see the actual PHPUnit/cargo output. (#1143)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<RawTestOutput>,
 }
 
 /// Build output from a main test workflow result.
@@ -65,6 +69,7 @@ pub fn from_main_workflow(result: TestRunWorkflowResult) -> (TestCommandOutput, 
             auto_fix_drift: None,
             test_scope: result.test_scope,
             summary: result.summary,
+            raw_output: result.raw_output,
         },
         exit_code,
     )
@@ -89,6 +94,7 @@ pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i
             auto_fix_drift: None,
             test_scope: None,
             summary: None,
+            raw_output: None,
         },
         exit_code,
     )
@@ -125,6 +131,7 @@ pub fn from_auto_fix_drift_workflow(
             auto_fix_drift: Some(result.output),
             test_scope: None,
             summary: None,
+            raw_output: None,
         },
         0,
     )

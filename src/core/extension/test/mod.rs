@@ -35,7 +35,7 @@ pub use parsing::{
     parse_test_results_text, CoverageOutput, TestSummaryOutput,
 };
 pub use report::TestCommandOutput;
-pub use run::{run_main_test_workflow, TestRunWorkflowArgs, TestRunWorkflowResult};
+pub use run::{run_main_test_workflow, RawTestOutput, TestRunWorkflowArgs, TestRunWorkflowResult};
 pub use workflow::{
     auto_fix_test_drift, detect_test_drift, AutoFixDriftOutput, AutoFixDriftWorkflowResult,
     DriftWorkflowResult, MainTestWorkflowResult,

@@ -42,6 +42,39 @@ pub struct TestRunWorkflowResult {
     pub hints: Option<Vec<String>>,
     pub test_scope: Option<TestScopeOutput>,
     pub summary: Option<TestSummaryOutput>,
+    /// Tail of the runner's stdout/stderr, surfaced when tests fail so users
+    /// can see PHPUnit/cargo output (bootstrap errors, stack traces) without
+    /// having to re-run with a different flag. (#1143)
+    pub raw_output: Option<RawTestOutput>,
+}
+
+/// Captured tail of a test runner's stdout/stderr.
+///
+/// Surfaced on failure so the actual tool output (PHPUnit, cargo test, etc.)
+/// is visible in the structured JSON response. The tail is bounded by
+/// `RAW_OUTPUT_TAIL_LINES` to keep JSON payloads small while still showing
+/// the last error / stack frame, which is almost always the relevant part
+/// for bootstrap failures. (#1143)
+#[derive(Debug, Clone, Serialize)]
+pub struct RawTestOutput {
+    /// Last N lines of stdout. Empty string if the runner emitted no stdout.
+    pub stdout_tail: String,
+    /// Last N lines of stderr. Empty string if the runner emitted no stderr.
+    pub stderr_tail: String,
+    /// Whether either tail was truncated from the original output.
+    pub truncated: bool,
+}
+
+const RAW_OUTPUT_TAIL_LINES: usize = 80;
+
+fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= max_lines {
+        (s.to_string(), false)
+    } else {
+        let start = lines.len() - max_lines;
+        (lines[start..].join("\n"), true)
+    }
 }
 
 pub fn run_main_test_workflow(
@@ -102,6 +135,7 @@ pub fn run_main_test_workflow(
                 } else {
                     None
                 },
+                raw_output: None,
             });
         }
     }
@@ -259,6 +293,46 @@ pub fn run_main_test_workflow(
         None
     };
 
+    // When the run failed, surface a tail of the runner's stdout/stderr so the
+    // user can see the actual PHPUnit / cargo / etc. output — including
+    // bootstrap errors like database connection failures that produce zero
+    // parsed test results. Without this, `status: failed, exit_code: 1, 0
+    // tests ran` leaves the user guessing. (#1143)
+    let raw_output = if status == "failed" {
+        let (stdout_tail, stdout_truncated) = tail_lines(&output.stdout, RAW_OUTPUT_TAIL_LINES);
+        let (stderr_tail, stderr_truncated) = tail_lines(&output.stderr, RAW_OUTPUT_TAIL_LINES);
+        if stdout_tail.is_empty() && stderr_tail.is_empty() {
+            None
+        } else {
+            Some(RawTestOutput {
+                stdout_tail,
+                stderr_tail,
+                truncated: stdout_truncated || stderr_truncated,
+            })
+        }
+    } else {
+        None
+    };
+
+    // When tests failed with no parseable counts, surface a dedicated hint so
+    // the user understands `raw_output` is the only signal about what went
+    // wrong (typically a bootstrap error). (#1143)
+    let mut hints_vec = hints.unwrap_or_default();
+    if status == "failed" && test_counts.is_none() && raw_output.is_some() {
+        hints_vec.insert(
+            0,
+            "No tests ran — the runner failed before producing results. \
+             See raw_output.stderr_tail / raw_output.stdout_tail for the underlying error \
+             (bootstrap failure, missing deps, DB connection, etc.)."
+                .to_string(),
+        );
+    }
+    let hints = if hints_vec.is_empty() {
+        None
+    } else {
+        Some(hints_vec)
+    };
+
     Ok(TestRunWorkflowResult {
         status: status.to_string(),
         component: args.component_label,
@@ -271,5 +345,49 @@ pub fn run_main_test_workflow(
         hints,
         test_scope: changed_scope,
         summary,
+        raw_output,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tail_lines_returns_full_text_when_under_limit() {
+        let input = "line 1\nline 2\nline 3";
+        let (tail, truncated) = tail_lines(input, 10);
+        assert_eq!(tail, input);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn tail_lines_trims_to_last_n_lines() {
+        let input: String = (1..=20)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (tail, truncated) = tail_lines(&input, 5);
+        assert!(truncated);
+        let kept: Vec<&str> = tail.lines().collect();
+        assert_eq!(
+            kept,
+            vec!["line 16", "line 17", "line 18", "line 19", "line 20"]
+        );
+    }
+
+    #[test]
+    fn tail_lines_handles_empty_input() {
+        let (tail, truncated) = tail_lines("", 10);
+        assert_eq!(tail, "");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn tail_lines_at_exact_limit_is_not_truncated() {
+        let input = "a\nb\nc";
+        let (tail, truncated) = tail_lines(input, 3);
+        assert_eq!(tail, input);
+        assert!(!truncated);
+    }
 }

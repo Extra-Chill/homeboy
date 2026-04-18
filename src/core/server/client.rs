@@ -329,13 +329,22 @@ pub fn execute_local_command_interactive(
     }
 }
 
-/// Execute local command with stdout/stderr passed through to terminal.
-/// Returns only exit status, not captured output.
+/// Execute local command with stdout/stderr tee'd to terminal *and* captured.
+///
+/// Originally this function just inherited stdout/stderr and returned empty
+/// strings — which meant callers like the test runner had no way to surface
+/// PHPUnit output when tests failed (#1143). We now pipe both streams, copy
+/// each chunk to the parent's stdout/stderr as it arrives (so the user still
+/// sees live progress), and retain the full text in `CommandOutput` for
+/// downstream processing.
 pub fn execute_local_command_passthrough(
     command: &str,
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
 ) -> CommandOutput {
+    use std::io::{Read, Write};
+    use std::thread;
+
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = Command::new("cmd");
@@ -358,20 +367,73 @@ pub fn execute_local_command_passthrough(
         cmd.envs(env_pairs.iter().copied());
     }
 
-    // Passthrough to terminal instead of capturing
-    cmd.stdout(Stdio::inherit());
-    cmd.stderr(Stdio::inherit());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
 
-    match cmd.status() {
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandOutput {
+                stdout: String::new(),
+                stderr: format!("Command error: {}", e),
+                success: false,
+                exit_code: -1,
+            };
+        }
+    };
+
+    // Tee each stream: copy every chunk to the parent's stdout/stderr as it
+    // arrives (preserving the live-progress UX) while buffering it for the
+    // caller. Using 4 KiB reads keeps latency low without excess syscalls.
+    fn tee_to<R, W>(mut src: R, mut sink: W) -> String
+    where
+        R: Read,
+        W: Write,
+    {
+        let mut captured = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match src.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = sink.write_all(&buf[..n]);
+                    let _ = sink.flush();
+                    captured.extend_from_slice(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&captured).to_string()
+    }
+
+    let stdout_handle = child
+        .stdout
+        .take()
+        .map(|pipe| thread::spawn(move || tee_to(pipe, std::io::stdout())));
+    let stderr_handle = child
+        .stderr
+        .take()
+        .map(|pipe| thread::spawn(move || tee_to(pipe, std::io::stderr())));
+
+    let status = child.wait();
+
+    let stdout = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+
+    match status {
         Ok(status) => CommandOutput {
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout,
+            stderr,
             success: status.success(),
             exit_code: status.code().unwrap_or(-1),
         },
         Err(e) => CommandOutput {
-            stdout: String::new(),
-            stderr: format!("Command error: {}", e),
+            stdout,
+            stderr: format!("{stderr}\nCommand error: {}", e),
             success: false,
             exit_code: -1,
         },
