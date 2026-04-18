@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.10] - 2026-04-18
+
+### Fixed
+- allow leading whitespace on top-level namespace/class/use (#1134)
+
 ## [2.10.9] - 2026-04-18
 
 ### Fixed
