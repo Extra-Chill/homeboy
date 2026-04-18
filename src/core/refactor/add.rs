@@ -51,11 +51,8 @@ pub fn fixes_from_audit(audit: &CodeAuditResult, write: bool) -> Result<FixResul
     let mut fix_result = plan::generate_audit_fixes(audit, root, &auto::FixPolicy::default());
 
     if write && !fix_result.fixes.is_empty() {
-        let chunk_results = auto::apply_fixes_via_edit_ops(
-            &mut fix_result.fixes,
-            &mut Vec::<NewFile>::new(),
-            root,
-        );
+        let chunk_results =
+            auto::apply_fixes_via_edit_ops(&mut fix_result.fixes, &mut Vec::<NewFile>::new(), root);
         fix_result.files_modified = chunk_results
             .iter()
             .filter(|c| matches!(c.status, ChunkStatus::Applied))
@@ -131,11 +128,8 @@ pub fn add_import(
     let mut files_modified = 0;
 
     if write && !fixes.is_empty() {
-        let chunk_results = auto::apply_fixes_via_edit_ops(
-            &mut fixes,
-            &mut Vec::<NewFile>::new(),
-            &root,
-        );
+        let chunk_results =
+            auto::apply_fixes_via_edit_ops(&mut fixes, &mut Vec::<NewFile>::new(), &root);
         files_modified = chunk_results
             .iter()
             .filter(|c| matches!(c.status, ChunkStatus::Applied))

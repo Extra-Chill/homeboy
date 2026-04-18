@@ -294,7 +294,7 @@ fn warn_non_default_branch(components: &[Component], config: &DeployConfig) -> R
             &["rev-parse", "--abbrev-ref", "HEAD"],
         ) {
             Some(branch) if branch != "HEAD" => branch, // "HEAD" means detached
-            _ => continue,                               // detached or error — skip
+            _ => continue,                              // detached or error — skip
         };
 
         // Detect default branch from remote HEAD symref, fallback to "main"
@@ -305,9 +305,7 @@ fn warn_non_default_branch(components: &[Component], config: &DeployConfig) -> R
         )
         .map(|s| {
             // Output is like "origin/main" — strip the remote prefix
-            s.strip_prefix("origin/")
-                .unwrap_or(&s)
-                .to_string()
+            s.strip_prefix("origin/").unwrap_or(&s).to_string()
         })
         .unwrap_or_else(|| "main".to_string());
 

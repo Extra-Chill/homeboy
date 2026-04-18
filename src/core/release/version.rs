@@ -283,12 +283,10 @@ pub(crate) fn validate_and_finalize_changelog(
                     "changelog",
                     format!("Changelog file not found: {}", changelog_path.display()),
                     None,
-                    Some(vec![
-                        format!(
-                            "Create a new changelog:\n  homeboy changelog init {} --configure",
-                            component.id
-                        ),
-                    ]),
+                    Some(vec![format!(
+                        "Create a new changelog:\n  homeboy changelog init {} --configure",
+                        component.id
+                    )]),
                 ));
             }
             return Err(e);

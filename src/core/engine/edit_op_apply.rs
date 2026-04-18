@@ -172,11 +172,9 @@ fn is_type_declaration_line(line: &str, language: &Language) -> bool {
                 .ok()
                 .map_or(false, |re| re.is_match(trimmed))
         }
-        Language::Rust => {
-            regex::Regex::new(r"\b(?:pub\s+)?(?:struct|enum|trait)\s+\w+")
-                .ok()
-                .map_or(false, |re| re.is_match(trimmed))
-        }
+        Language::Rust => regex::Regex::new(r"\b(?:pub\s+)?(?:struct|enum|trait)\s+\w+")
+            .ok()
+            .map_or(false, |re| re.is_match(trimmed)),
         Language::JavaScript => regex::Regex::new(r"\bclass\s+\w+")
             .ok()
             .map_or(false, |re| re.is_match(trimmed)),
@@ -188,11 +186,7 @@ fn is_type_declaration_line(line: &str, language: &Language) -> bool {
 /// inline (add `implements Foo`) rather than inserting a new line.
 /// For Rust, appends as a standalone impl block at end of file.
 /// Returns `Some(modified_content)` if handled, `None` otherwise.
-fn try_inline_type_conformance(
-    content: &str,
-    code: &str,
-    language: &Language,
-) -> Option<String> {
+fn try_inline_type_conformance(content: &str, code: &str, language: &Language) -> Option<String> {
     let conformance = code.trim();
     if conformance.is_empty() {
         return None;
@@ -1374,7 +1368,10 @@ mod tests {
             code: "use  std::path::{Path,   PathBuf};".to_string(),
         };
         let result = apply_edit_ops_to_content(content, &[&op], &Language::Rust).unwrap();
-        assert_eq!(result, content, "Whitespace-equivalent import should be skipped");
+        assert_eq!(
+            result, content,
+            "Whitespace-equivalent import should be skipped"
+        );
     }
 
     #[test]
@@ -1551,7 +1548,8 @@ mod tests {
         let op = EditOp::InsertLines {
             file: "test.rs".to_string(),
             anchor: InsertAnchor::TypeDeclaration,
-            code: "impl Default for Config {\n    fn default() -> Self { Config {} }\n}".to_string(),
+            code: "impl Default for Config {\n    fn default() -> Self { Config {} }\n}"
+                .to_string(),
         };
         let result = apply_edit_ops_to_content(content, &[&op], &Language::Rust).unwrap();
         assert_eq!(

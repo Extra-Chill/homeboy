@@ -1173,8 +1173,16 @@ fn detect_unused_params(functions: &[FunctionInfo], _lang_id: &str) -> Vec<Unuse
             continue;
         }
 
-        // Parse parameter names from the params string
-        let param_names = parse_param_names(&f.params);
+        // Skip contract methods entirely. These have a fixed signature imposed
+        // by a framework/interface (WordPress abilities, REST callbacks,
+        // common PHP magic methods) and the parameters cannot be removed
+        // even when unused. Flagging them produces churny CI noise (#1136).
+        if is_contract_method_by_name(&f.name) {
+            continue;
+        }
+
+        // Parse parameter names with their (optional) type hints
+        let params = parse_params(&f.params);
 
         // Extract body-only text (after first opening brace)
         let body_after_brace = if let Some(pos) = f.body.find('{') {
@@ -1183,10 +1191,22 @@ fn detect_unused_params(functions: &[FunctionInfo], _lang_id: &str) -> Vec<Unuse
             continue;
         };
 
-        for (idx, pname) in param_names.iter().enumerate() {
+        for (idx, p) in params.iter().enumerate() {
+            let pname = &p.name;
+
             // Skip self, mut, underscore-prefixed
             if pname == "self" || pname == "mut" || pname == "Self" || pname.starts_with('_') {
                 continue;
+            }
+
+            // Skip params whose type hint is a known framework contract type.
+            // e.g. \WP_REST_Request, WP_REST_Request, WP_Post, WP_User, etc.
+            // The parameter exists to satisfy the framework callback signature,
+            // not because the function must use it (#1136).
+            if let Some(type_hint) = &p.type_hint {
+                if is_contract_type_hint(type_hint) {
+                    continue;
+                }
             }
 
             // Check if the parameter name appears as a word in the body
@@ -1206,38 +1226,167 @@ fn detect_unused_params(functions: &[FunctionInfo], _lang_id: &str) -> Vec<Unuse
     unused
 }
 
-/// Parse parameter names from a params string like "&self, key: &str, value: String".
-fn parse_param_names(params: &str) -> Vec<String> {
-    let mut names = Vec::new();
+/// A parameter with its (optional) type hint and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Param {
+    name: String,
+    /// Type hint as it appeared in source, if any. For PHP, leading backslashes
+    /// and nullable markers are preserved (e.g. `\WP_REST_Request`, `?WP_Post`).
+    /// For Rust, this is the type after the colon (e.g. `&str`).
+    type_hint: Option<String>,
+}
+
+/// Parse parameters from a params string into (name, type_hint) pairs.
+///
+/// Supports both Rust (`name: Type`) and PHP (`Type $name`) signatures.
+fn parse_params(params: &str) -> Vec<Param> {
+    let mut out = Vec::new();
     for chunk in params.split(',') {
         let chunk = chunk.trim();
         if chunk.is_empty() {
             continue;
         }
-        // Rust: "name: Type" or "mut name: Type"
-        // PHP: "TypeHint $name" — handled by checking for $ prefix
         if chunk.contains(':') {
-            // Rust-style: everything before the colon is the pattern
-            let before_colon = chunk.split(':').next().unwrap_or("").trim();
-            // Strip "mut" prefix
+            // Rust-style: "name: Type" or "mut name: Type" or "&self"
+            let mut parts = chunk.splitn(2, ':');
+            let before_colon = parts.next().unwrap_or("").trim();
+            let after_colon = parts.next().unwrap_or("").trim();
             let name = before_colon.trim_start_matches("mut").trim();
-            if !name.is_empty() && name != "&self" && name != "self" {
-                // Handle & prefix
-                let name = name.trim_start_matches('&');
-                if !name.is_empty() {
-                    names.push(name.to_string());
-                }
+            if name.is_empty() || name == "&self" || name == "self" {
+                continue;
             }
+            let name = name.trim_start_matches('&');
+            if name.is_empty() {
+                continue;
+            }
+            let type_hint = if after_colon.is_empty() {
+                None
+            } else {
+                Some(after_colon.to_string())
+            };
+            out.push(Param {
+                name: name.to_string(),
+                type_hint,
+            });
         } else if chunk.contains('$') {
-            // PHP-style: $name
-            static RE: std::sync::LazyLock<regex::Regex> =
-                std::sync::LazyLock::new(|| regex::Regex::new(r"\$(\w+)").unwrap());
+            // PHP-style: "TypeHint $name" or "$name" or "array $input" or "?\WP_Post $post"
+            static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+                regex::Regex::new(r"^([?]?[\\\w|&]+)?\s*\$(\w+)").unwrap()
+            });
             if let Some(caps) = RE.captures(chunk) {
-                names.push(caps[1].to_string());
+                let type_hint = caps
+                    .get(1)
+                    .map(|m| m.as_str().trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let name = caps[2].to_string();
+                out.push(Param { name, type_hint });
             }
         }
     }
-    names
+    out
+}
+
+/// Parse parameter names from a params string.
+///
+/// Retained as a thin wrapper over [`parse_params`] for tests and callers
+/// that only care about names.
+#[cfg(test)]
+fn parse_param_names(params: &str) -> Vec<String> {
+    parse_params(params).into_iter().map(|p| p.name).collect()
+}
+
+/// Whether a method name corresponds to a framework/contract callback where
+/// the parameter list is imposed by the contract and cannot be adjusted.
+///
+/// Covers:
+/// - WordPress Abilities API: `execute`, `checkPermission`
+/// - REST controller callbacks: `register_routes`, `permission_callback_*`
+/// - PHP magic methods: `__construct`, `__get`, `__call`, etc.
+///
+/// This is intentionally a small, conservative list — we only match on
+/// names that are almost universally contract-driven. Specific type-hint
+/// checks (see `is_contract_type_hint`) handle the long tail.
+fn is_contract_method_by_name(name: &str) -> bool {
+    matches!(
+        name,
+        // WordPress Abilities API (WP_Ability contract)
+        "execute"
+        | "checkPermission"
+        | "check_permission"
+        // PHP magic methods — signatures are fixed by PHP itself
+        | "__construct"
+        | "__destruct"
+        | "__get"
+        | "__set"
+        | "__isset"
+        | "__unset"
+        | "__call"
+        | "__callStatic"
+        | "__toString"
+        | "__invoke"
+        | "__clone"
+        | "__sleep"
+        | "__wakeup"
+        | "__serialize"
+        | "__unserialize"
+        | "__set_state"
+        | "__debugInfo"
+    )
+}
+
+/// Whether a PHP type hint names a framework contract type whose presence
+/// in a parameter list indicates the signature is callback-shaped.
+///
+/// When a parameter's type hint matches one of these, the parameter exists
+/// to satisfy a framework callback contract (e.g. WordPress hook callback,
+/// REST route callback) and cannot be removed even when unused.
+///
+/// Handles leading `\` and nullable `?` markers. Matches on the *terminal*
+/// class name only so namespaced references like `\MyPlugin\WP_REST_Request`
+/// are still caught.
+fn is_contract_type_hint(type_hint: &str) -> bool {
+    // Strip nullable marker and leading backslashes
+    let hint = type_hint.trim_start_matches('?').trim_start_matches('\\');
+    // Split on union/intersection markers and check each alternative
+    for alt in hint.split(['|', '&']) {
+        let alt = alt.trim().trim_start_matches('\\');
+        // Extract terminal class name (last backslash-separated segment)
+        let terminal = alt.rsplit('\\').next().unwrap_or(alt);
+        if is_contract_class_name(terminal) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a bare class name refers to a WordPress/PHP framework type that
+/// commonly appears in callback signatures.
+fn is_contract_class_name(name: &str) -> bool {
+    matches!(
+        name,
+        // REST API
+        "WP_REST_Request"
+        | "WP_REST_Response"
+        | "WP_REST_Server"
+        // Core models
+        | "WP_Post"
+        | "WP_User"
+        | "WP_Term"
+        | "WP_Comment"
+        | "WP_Site"
+        | "WP_Network"
+        | "WP_Query"
+        | "WP_Block"
+        | "WP_Block_Type"
+        // Errors
+        | "WP_Error"
+        // HTTP
+        | "WP_Http_Response"
+        | "WP_HTTP_Requests_Response"
+        // CLI / admin
+        | "WP_CLI_Command"
+        | "WP_List_Table"
+    )
 }
 
 // ============================================================================
@@ -1679,6 +1828,155 @@ fn write(msg: &str) -> bool {
         assert_eq!(
             replace_string_literals(r#"let x = "hello" + 'world'"#),
             "let x = STR + STR"
+        );
+    }
+
+    /// Load the WordPress (PHP) grammar for reproducer tests.
+    ///
+    /// Tests that need real PHP parsing are gated on the grammar being
+    /// available in the local workspace. In CI, the grammar is checked out
+    /// alongside this repo via the standard workspace layout.
+    fn php_grammar() -> Option<Grammar> {
+        let grammar_path = std::path::Path::new(
+            "/var/lib/datamachine/workspace/homeboy-extensions/wordpress/grammar.toml",
+        );
+        if !grammar_path.exists() {
+            return None;
+        }
+        grammar::load_grammar(grammar_path).ok()
+    }
+
+    #[test]
+    fn namespace_with_php_reserved_word_segment_is_extracted() {
+        // Regression test for #1134.
+        //
+        // PHP 7.0+ allows reserved words as namespace segments via context-
+        // sensitive lexing. The auditor must not lose the namespace just
+        // because `Global`, `List`, `Class`, etc. appear in it.
+        let Some(grammar) = php_grammar() else {
+            eprintln!("Skipping — wordpress grammar not available");
+            return;
+        };
+
+        let content = "<?php\nnamespace DataMachine\\Engine\\AI\\Tools\\Global;\n\nclass WebFetch {\n    public function handle() {}\n}\n";
+
+        let fp =
+            fingerprint_from_grammar(content, &grammar, "inc/Engine/AI/Tools/Global/WebFetch.php")
+                .expect("fingerprint should succeed");
+
+        assert_eq!(
+            fp.namespace.as_deref(),
+            Some("DataMachine\\Engine\\AI\\Tools\\Global"),
+            "Namespace with reserved word segment 'Global' should be extracted. Got: {:?}",
+            fp.namespace
+        );
+    }
+
+    #[test]
+    fn namespace_with_leading_whitespace_is_extracted() {
+        // Regression test for #1134 (real-world case).
+        //
+        // data-machine has files like Engine/AI/Tools/Global/AgentMemory.php
+        // where the namespace line has a leading tab/indent (stylistic choice
+        // after a docblock). The grammar regex is anchored to `^namespace`,
+        // which fails when the line has leading whitespace.
+        //
+        // The auditor must handle this — PHP is insensitive to indentation
+        // of the namespace declaration, and indented namespace declarations
+        // are valid PHP.
+        let Some(grammar) = php_grammar() else {
+            eprintln!("Skipping — wordpress grammar not available");
+            return;
+        };
+
+        let content = "<?php\n/**\n * Docblock.\n */\n\n\tnamespace DataMachine\\Engine\\AI\\Tools\\Global;\n\nclass AgentMemory {}\n";
+
+        let fp = fingerprint_from_grammar(
+            content,
+            &grammar,
+            "inc/Engine/AI/Tools/Global/AgentMemory.php",
+        )
+        .expect("fingerprint should succeed");
+
+        assert_eq!(
+            fp.namespace.as_deref(),
+            Some("DataMachine\\Engine\\AI\\Tools\\Global"),
+            "Namespace with leading whitespace (valid PHP) should be extracted. Got: {:?}",
+            fp.namespace
+        );
+    }
+
+    #[test]
+    fn unused_param_not_flagged_for_wp_rest_request_contract() {
+        // Regression test for #1136.
+        //
+        // A REST route callback receives a WP_REST_Request $request but may
+        // not use it (e.g., reads directly from options). The contract is
+        // fixed by register_rest_route(); the parameter cannot be removed.
+        let Some(grammar) = php_grammar() else {
+            eprintln!("Skipping — wordpress grammar not available");
+            return;
+        };
+
+        let content = "<?php\nnamespace X;\n\nclass Tokens {\n    public function list_external_tokens( \\WP_REST_Request $request ): \\WP_REST_Response {\n        $tokens = get_option( 'keys', array() );\n        return rest_ensure_response( $tokens );\n    }\n}\n";
+
+        let fp = fingerprint_from_grammar(content, &grammar, "inc/Tokens.php")
+            .expect("fingerprint should succeed");
+
+        assert!(
+            !fp.unused_parameters
+                .iter()
+                .any(|p| p.function == "list_external_tokens" && p.param == "request"),
+            "WP_REST_Request contract param should not be flagged as unused. Got: {:?}",
+            fp.unused_parameters
+        );
+    }
+
+    #[test]
+    fn unused_param_not_flagged_for_ability_execute_contract() {
+        // A WP_Ability execute() method has a fixed signature that receives
+        // array $input. Even when the method doesn't use $input (checks global
+        // caps), the parameter is required by the ability contract.
+        let Some(grammar) = php_grammar() else {
+            eprintln!("Skipping — wordpress grammar not available");
+            return;
+        };
+
+        let content = "<?php\nnamespace X;\n\nclass PermissionHelper {\n    public function checkPermission( array $input ): bool {\n        return current_user_can( 'manage_options' );\n    }\n}\n";
+
+        let fp = fingerprint_from_grammar(content, &grammar, "inc/PermissionHelper.php")
+            .expect("fingerprint should succeed");
+
+        assert!(
+            !fp.unused_parameters
+                .iter()
+                .any(|p| p.function == "checkPermission" && p.param == "input"),
+            "Ability checkPermission() $input contract param should not be flagged. Got: {:?}",
+            fp.unused_parameters
+        );
+    }
+
+    #[test]
+    fn unused_param_still_flagged_for_normal_helper_method() {
+        // Sanity check: genuine unused params in normal helper methods
+        // should still be flagged. The contract-aware exclusions must not
+        // swallow real findings.
+        let Some(grammar) = php_grammar() else {
+            eprintln!("Skipping — wordpress grammar not available");
+            return;
+        };
+
+        let content = "<?php\nnamespace X;\n\nclass Helper {\n    public function compute( int $left, int $right ): int {\n        return $left * 2;\n    }\n}\n";
+
+        let fp = fingerprint_from_grammar(content, &grammar, "inc/Helper.php")
+            .expect("fingerprint should succeed");
+
+        assert!(
+            fp.unused_parameters
+                .iter()
+                .any(|p| p.function == "compute" && p.param == "right"),
+            "Genuine unused param should still be flagged. Got: {:?}",
+            fp.unused_parameters
         );
     }
 

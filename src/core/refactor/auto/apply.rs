@@ -78,11 +78,8 @@ pub fn apply_fixes_via_edit_ops(
     let mut results: Vec<ApplyChunkResult> = Vec::new();
 
     // Track which files had errors
-    let error_files: std::collections::HashSet<&str> = report
-        .errors
-        .iter()
-        .map(|e| e.file.as_str())
-        .collect();
+    let error_files: std::collections::HashSet<&str> =
+        report.errors.iter().map(|e| e.file.as_str()).collect();
 
     for (file, fix_index) in &fix_file_index {
         let fix = &mut fixes[*fix_index];
@@ -210,10 +207,7 @@ fn merge_same_file_insertions(fixes: &mut [Fix]) {
     }
 }
 
-pub fn apply_decompose_plans(
-    plans: &mut [DecomposeFixPlan],
-    root: &Path,
-) -> Vec<ApplyChunkResult> {
+pub fn apply_decompose_plans(plans: &mut [DecomposeFixPlan], root: &Path) -> Vec<ApplyChunkResult> {
     let mut results = Vec::new();
     for (index, dfp) in plans.iter_mut().enumerate() {
         let source_abs = root.join(&dfp.file);

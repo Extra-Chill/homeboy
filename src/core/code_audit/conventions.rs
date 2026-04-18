@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::fingerprint::FileFingerprint;
-use super::import_matching::has_import;
+use super::import_matching::has_import_with_context;
 use super::naming::{detect_naming_suffix, suffix_matches};
 use super::signatures::{compute_signature_skeleton, tokenize_signature};
 
@@ -476,9 +476,17 @@ pub fn discover_conventions(
             }
         }
 
-        // Check missing imports (aware of grouped imports, path equivalence, and usage)
+        // Check missing imports (aware of grouped imports, path equivalence, usage,
+        // self-imports, and same-namespace references).
         for expected_imp in &expected_imports {
-            if !has_import(expected_imp, &fp.imports, &fp.content) {
+            if !has_import_with_context(
+                expected_imp,
+                &fp.imports,
+                &fp.content,
+                fp.namespace.as_deref(),
+                fp.type_name.as_deref(),
+                &fp.type_names,
+            ) {
                 deviations.push(Deviation {
                     kind: AuditFinding::MissingImport,
                     description: format!("Missing import: {}", expected_imp),
@@ -1229,6 +1237,132 @@ mod tests {
             .deviations
             .iter()
             .any(|d| { d.kind == AuditFinding::NamespaceMismatch }));
+    }
+
+    #[test]
+    fn missing_import_not_flagged_for_same_namespace_reference() {
+        // Regression test for #1135 (case 2).
+        //
+        // Two classes in the same namespace don't need `use` statements to
+        // reference each other. PHP resolves unqualified same-namespace
+        // references automatically.
+        let fingerprints = vec![
+            FileFingerprint {
+                relative_path: "abilities/AgentTokenAbilities.php".to_string(),
+                language: Language::Php,
+                methods: vec!["register".to_string()],
+                type_name: Some("AgentTokenAbilities".to_string()),
+                namespace: Some("DataMachine\\Abilities".to_string()),
+                // Imports PermissionHelper via fully-qualified name in the import list
+                // in most files, but THIS file relies on same-namespace resolution.
+                imports: vec![],
+                content: "namespace DataMachine\\Abilities;\n\nclass AgentTokenAbilities {\n    public function register() { PermissionHelper::can_manage(); }\n}".to_string(),
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "abilities/FlowAbilities.php".to_string(),
+                language: Language::Php,
+                methods: vec!["register".to_string()],
+                type_name: Some("FlowAbilities".to_string()),
+                namespace: Some("DataMachine\\Abilities".to_string()),
+                imports: vec!["DataMachine\\Abilities\\PermissionHelper".to_string()],
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "abilities/JobAbilities.php".to_string(),
+                language: Language::Php,
+                methods: vec!["register".to_string()],
+                type_name: Some("JobAbilities".to_string()),
+                namespace: Some("DataMachine\\Abilities".to_string()),
+                imports: vec!["DataMachine\\Abilities\\PermissionHelper".to_string()],
+                ..Default::default()
+            },
+        ];
+
+        let convention = discover_conventions("Abilities", "abilities/*", &fingerprints).unwrap();
+
+        assert!(convention
+            .expected_imports
+            .contains(&"DataMachine\\Abilities\\PermissionHelper".to_string()));
+
+        // AgentTokenAbilities references PermissionHelper (same namespace) —
+        // it should NOT be flagged as a missing import.
+        let agent_outlier = convention
+            .outliers
+            .iter()
+            .find(|o| o.file == "abilities/AgentTokenAbilities.php");
+
+        if let Some(outlier) = agent_outlier {
+            assert!(
+                !outlier.deviations.iter().any(|d| {
+                    d.kind == AuditFinding::MissingImport
+                        && d.description.contains("PermissionHelper")
+                }),
+                "Same-namespace reference should not be flagged as missing import. Got: {:?}",
+                outlier.deviations
+            );
+        }
+    }
+
+    #[test]
+    fn missing_import_not_flagged_for_self_import() {
+        // Regression test for #1135 (case 1).
+        //
+        // A file that *defines* class Foo in namespace X\Y should never be
+        // flagged as needing `use X\Y\Foo;` — that's a self-import.
+        let fingerprints = vec![
+            FileFingerprint {
+                relative_path: "abilities/PermissionHelper.php".to_string(),
+                language: Language::Php,
+                methods: vec!["can_manage".to_string()],
+                type_name: Some("PermissionHelper".to_string()),
+                type_names: vec!["PermissionHelper".to_string()],
+                namespace: Some("DataMachine\\Abilities".to_string()),
+                // File defines the class; its convention peers might import it,
+                // but self-import is nonsensical.
+                imports: vec![],
+                content: "namespace DataMachine\\Abilities;\n\nclass PermissionHelper { public function can_manage() {} }".to_string(),
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "abilities/FlowAbilities.php".to_string(),
+                language: Language::Php,
+                methods: vec!["can_manage".to_string()],
+                type_name: Some("FlowAbilities".to_string()),
+                namespace: Some("DataMachine\\Abilities".to_string()),
+                imports: vec!["DataMachine\\Abilities\\PermissionHelper".to_string()],
+                content: "use DataMachine\\Abilities\\PermissionHelper;".to_string(),
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "abilities/JobAbilities.php".to_string(),
+                language: Language::Php,
+                methods: vec!["can_manage".to_string()],
+                type_name: Some("JobAbilities".to_string()),
+                namespace: Some("DataMachine\\Abilities".to_string()),
+                imports: vec!["DataMachine\\Abilities\\PermissionHelper".to_string()],
+                content: "use DataMachine\\Abilities\\PermissionHelper;".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let convention = discover_conventions("Abilities", "abilities/*", &fingerprints).unwrap();
+
+        let helper_outlier = convention
+            .outliers
+            .iter()
+            .find(|o| o.file == "abilities/PermissionHelper.php");
+
+        if let Some(outlier) = helper_outlier {
+            assert!(
+                !outlier.deviations.iter().any(|d| {
+                    d.kind == AuditFinding::MissingImport
+                        && d.description.contains("PermissionHelper")
+                }),
+                "Self-import should not be flagged. Got deviations: {:?}",
+                outlier.deviations
+            );
+        }
     }
 
     #[test]

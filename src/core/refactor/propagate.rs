@@ -360,8 +360,6 @@ fn extract_struct_source(struct_name: &str, content: &str) -> Option<String> {
     Some(lines[start..=end_line].join("\n"))
 }
 
-
-
 /// Extract field information from propagation edits.
 ///
 /// Each edit's `description` contains the field name (between backticks) and the

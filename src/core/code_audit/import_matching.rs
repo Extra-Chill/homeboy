@@ -10,7 +10,35 @@
 ///    (e.g., `crate::commands::CmdResult` satisfies `super::CmdResult`)
 /// 4. The file doesn't reference the terminal name outside import lines
 ///    (the import would be unused — not a real convention violation)
+#[cfg(test)]
 pub(crate) fn has_import(expected: &str, actual_imports: &[String], file_content: &str) -> bool {
+    has_import_with_context(expected, actual_imports, file_content, None, None, &[])
+}
+
+/// Like [`has_import`], but aware of the current file's namespace and type name.
+///
+/// Adds two additional same-namespace / self-import exclusions on top of
+/// the behavior of [`has_import`] (#1135):
+///
+/// 5. **Self-import**: if the expected import's terminal name matches the
+///    current file's own type name (`self_type_name`), the import is nonsensical.
+///    PHP classes cannot and need not `use` themselves.
+/// 6. **Same-namespace reference**: if the expected import's namespace
+///    (everything before the terminal name) matches the current file's namespace
+///    (`current_namespace`), no `use` statement is needed — PHP/Rust resolve
+///    same-namespace references automatically.
+///
+/// `self_type_names` lets callers pass all public type names defined in the file
+/// (not just the primary `type_name`), so files that declare multiple types
+/// are also protected from self-import false positives.
+pub(crate) fn has_import_with_context(
+    expected: &str,
+    actual_imports: &[String],
+    file_content: &str,
+    current_namespace: Option<&str>,
+    self_type_name: Option<&str>,
+    self_type_names: &[String],
+) -> bool {
     // 1. Exact match
     if actual_imports.iter().any(|imp| imp == expected) {
         return true;
@@ -24,6 +52,29 @@ pub(crate) fn has_import(expected: &str, actual_imports: &[String], file_content
         .rsplit('\\')
         .next()
         .unwrap_or(expected);
+
+    // 5. Self-import: the expected import points at a type defined in this file.
+    //    A class cannot import itself, and PHP/Rust don't need it to.
+    if let Some(name) = self_type_name {
+        if !terminal.is_empty() && terminal == name {
+            return true;
+        }
+    }
+    if !terminal.is_empty() && self_type_names.iter().any(|n| n == terminal) {
+        return true;
+    }
+
+    // 6. Same-namespace reference: if the expected import's namespace part
+    //    equals this file's namespace, no import statement is needed. PHP
+    //    resolves unqualified references within the same namespace, and Rust
+    //    resolves same-module references without a `use`.
+    if let Some(current_ns) = current_namespace {
+        // Compute the expected import's namespace (everything before the terminal)
+        let expected_ns = namespace_of(expected);
+        if !expected_ns.is_empty() && expected_ns == current_ns {
+            return true;
+        }
+    }
     // Extract prefix (everything before the terminal name)
     let prefix_len = expected.len() - terminal.len();
     let prefix = if prefix_len > 2 {
@@ -238,6 +289,28 @@ fn is_only_in_attribute_string(line: &str, name: &str) -> bool {
     }
 
     found_any && all_in_string
+}
+
+/// Extract the namespace (prefix) portion of a fully-qualified import path.
+///
+/// Splits on either `::` (Rust) or `\` (PHP) and returns everything before
+/// the last segment. Returns an empty string for single-segment paths
+/// (e.g., global-namespace `ClassName`).
+///
+/// Examples:
+/// - `DataMachine\Abilities\PermissionHelper` → `DataMachine\Abilities`
+/// - `crate::commands::CmdResult` → `crate::commands`
+/// - `PermissionHelper` → `` (no namespace)
+pub(crate) fn namespace_of(path: &str) -> String {
+    // Try :: first (Rust), then \ (PHP). Use the separator that actually
+    // appears in the path.
+    if let Some(idx) = path.rfind("::") {
+        return path[..idx].to_string();
+    }
+    if let Some(idx) = path.rfind('\\') {
+        return path[..idx].to_string();
+    }
+    String::new()
 }
 
 /// Check if `text` contains `word` as a standalone word (not a substring).
@@ -487,6 +560,74 @@ fn default_true() -> bool {
         assert!(!is_only_in_attribute_string(
             r#"#[derive(default_true)]"#,
             "default_true"
+        ));
+    }
+
+    #[test]
+    fn namespace_of_splits_php_style() {
+        assert_eq!(
+            namespace_of("DataMachine\\Abilities\\PermissionHelper"),
+            "DataMachine\\Abilities"
+        );
+    }
+
+    #[test]
+    fn namespace_of_splits_rust_style() {
+        assert_eq!(
+            namespace_of("crate::commands::CmdResult"),
+            "crate::commands"
+        );
+    }
+
+    #[test]
+    fn namespace_of_empty_for_bare_name() {
+        assert_eq!(namespace_of("PermissionHelper"), "");
+    }
+
+    #[test]
+    fn has_import_self_import_satisfied() {
+        // A file defining PermissionHelper doesn't need to import itself.
+        let imports = vec![];
+        let content = "class PermissionHelper {}";
+        assert!(has_import_with_context(
+            "DataMachine\\Abilities\\PermissionHelper",
+            &imports,
+            content,
+            Some("DataMachine\\Abilities"),
+            Some("PermissionHelper"),
+            &["PermissionHelper".to_string()],
+        ));
+    }
+
+    #[test]
+    fn has_import_same_namespace_satisfied() {
+        // A class in DataMachine\Abilities can reference another class in
+        // DataMachine\Abilities without a `use` statement.
+        let imports = vec![];
+        let content = "class AgentTokenAbilities { function r() { PermissionHelper::x(); } }";
+        assert!(has_import_with_context(
+            "DataMachine\\Abilities\\PermissionHelper",
+            &imports,
+            content,
+            Some("DataMachine\\Abilities"),
+            Some("AgentTokenAbilities"),
+            &["AgentTokenAbilities".to_string()],
+        ));
+    }
+
+    #[test]
+    fn has_import_cross_namespace_still_flagged() {
+        // A class in DataMachine\Core that uses DataMachine\Abilities\Foo
+        // still needs an import.
+        let imports = vec![];
+        let content = "class Something { function r() { Foo::x(); } }";
+        assert!(!has_import_with_context(
+            "DataMachine\\Abilities\\Foo",
+            &imports,
+            content,
+            Some("DataMachine\\Core"),
+            Some("Something"),
+            &["Something".to_string()],
         ));
     }
 

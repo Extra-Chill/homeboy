@@ -194,14 +194,15 @@ pub(crate) fn classify_commit(subject: &str, body: Option<&str>) -> CommitCatego
 /// "version 0.2.2", "release v0.4.0", "chore(release): v1.0.0".
 fn is_release_commit(lower: &str) -> bool {
     // Bare version tag: "v0.2.3" or "0.2.3" (entire subject is just a version)
-    if BARE_VERSION_RE
-        .is_match(lower)
-    {
+    if BARE_VERSION_RE.is_match(lower) {
         return true;
     }
 
     // "bump version to 0.2.3", "bump to v0.2.3", "version bump to 0.2.3"
-    if lower.starts_with("bump") || lower.starts_with("version bump") || lower.starts_with("version ") {
+    if lower.starts_with("bump")
+        || lower.starts_with("version bump")
+        || lower.starts_with("version ")
+    {
         if VERSION_NUMBER_RE.is_match(lower) {
             return true;
         }
@@ -221,21 +222,18 @@ fn is_release_commit(lower: &str) -> bool {
 use std::sync::LazyLock;
 
 /// Matches a subject that is just a version number: "v0.2.3", "0.2.3"
-static BARE_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^v?\d+\.\d+(?:\.\d+)?$").expect("Invalid regex")
-});
+static BARE_VERSION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^v?\d+\.\d+(?:\.\d+)?$").expect("Invalid regex"));
 
 /// Matches any string containing a semver-like version number
-static VERSION_NUMBER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\d+\.\d+(?:\.\d+)?").expect("Invalid regex")
-});
+static VERSION_NUMBER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\d+\.\d+(?:\.\d+)?").expect("Invalid regex"));
 
 /// Matches release-prefixed subjects: "release: v0.2.3", "release v0.2.3",
 /// "chore(release): v0.2.3"
 static RELEASE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^(?:chore\([^)]*\):\s*v?\d+\.\d+(?:\.\d+)?|release:?\s*v?\d+\.\d+(?:\.\d+)?)"
-    ).expect("Invalid regex")
+    Regex::new(r"^(?:chore\([^)]*\):\s*v?\d+\.\d+(?:\.\d+)?|release:?\s*v?\d+\.\d+(?:\.\d+)?)")
+        .expect("Invalid regex")
 });
 
 /// Parse raw git log output that uses FIELD_SEP / RECORD_SEP delimiters
@@ -776,22 +774,10 @@ mod tests {
     #[test]
     fn classify_release_bare_version() {
         // Bare version tags: "v0.2.3", "0.2.3"
-        assert_eq!(
-            parse_conventional_commit("v0.2.3"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("0.2.3"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("v1.0.0"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("1.0"),
-            CommitCategory::Release
-        );
+        assert_eq!(parse_conventional_commit("v0.2.3"), CommitCategory::Release);
+        assert_eq!(parse_conventional_commit("0.2.3"), CommitCategory::Release);
+        assert_eq!(parse_conventional_commit("v1.0.0"), CommitCategory::Release);
+        assert_eq!(parse_conventional_commit("1.0"), CommitCategory::Release);
     }
 
     #[test]

@@ -212,11 +212,8 @@ fn run_fix_iteration(
     // EditOp pipeline. This converts Fix/NewFile → TaggedEditOp, applies them
     // via apply_edit_ops(), then runs format_after_write and caller rewriting.
     if !auto_fixes.is_empty() || !auto_new_files.is_empty() {
-        let chunk_results = fixer::apply_fixes_via_edit_ops(
-            &mut auto_fixes,
-            &mut auto_new_files,
-            root,
-        );
+        let chunk_results =
+            fixer::apply_fixes_via_edit_ops(&mut auto_fixes, &mut auto_new_files, root);
         applied_chunks += chunk_results
             .iter()
             .filter(|chunk| matches!(chunk.status, fixer::ChunkStatus::Applied))
