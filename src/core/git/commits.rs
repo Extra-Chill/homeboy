@@ -199,14 +199,12 @@ fn is_release_commit(lower: &str) -> bool {
     }
 
     // "bump version to 0.2.3", "bump to v0.2.3", "version bump to 0.2.3"
-    if lower.starts_with("bump")
+    if (lower.starts_with("bump")
         || lower.starts_with("version bump")
-        || lower.starts_with("version ")
-    {
-        if VERSION_NUMBER_RE.is_match(lower) {
+        || lower.starts_with("version "))
+        && VERSION_NUMBER_RE.is_match(lower) {
             return true;
         }
-    }
 
     // "release: v0.2.3", "release v0.2.3", "chore(release): v0.2.3"
     if RELEASE_PREFIX_RE.is_match(lower) {

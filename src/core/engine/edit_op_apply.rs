@@ -82,7 +82,7 @@ fn extract_import_alias(import_line: &str) -> Option<String> {
 
     // Extract the last segment: `Foo\Bar\Baz` → `Baz`, `foo::bar::Baz` → `Baz`
     let last = path
-        .rsplit(|c: char| c == '\\' || c == ':')
+        .rsplit(['\\', ':'])
         .find(|s| !s.is_empty())?;
     if last.is_empty() {
         return None;
@@ -104,11 +104,10 @@ fn import_alias_collides(content: &str, import_line: &str, language: &Language) 
             continue;
         }
         if let Some(existing_alias) = extract_import_alias(trimmed) {
-            if existing_alias == candidate_alias {
-                if normalize_import_line(trimmed) != normalize_import_line(import_line) {
+            if existing_alias == candidate_alias
+                && normalize_import_line(trimmed) != normalize_import_line(import_line) {
                     return true;
                 }
-            }
         }
     }
 
@@ -170,14 +169,14 @@ fn is_type_declaration_line(line: &str, language: &Language) -> bool {
         Language::Php | Language::TypeScript => {
             regex::Regex::new(r"\b(?:class|interface|trait)\s+\w+")
                 .ok()
-                .map_or(false, |re| re.is_match(trimmed))
+                .is_some_and(|re| re.is_match(trimmed))
         }
         Language::Rust => regex::Regex::new(r"\b(?:pub\s+)?(?:struct|enum|trait)\s+\w+")
             .ok()
-            .map_or(false, |re| re.is_match(trimmed)),
+            .is_some_and(|re| re.is_match(trimmed)),
         Language::JavaScript => regex::Regex::new(r"\bclass\s+\w+")
             .ok()
-            .map_or(false, |re| re.is_match(trimmed)),
+            .is_some_and(|re| re.is_match(trimmed)),
         Language::Unknown => false,
     }
 }
@@ -546,7 +545,7 @@ pub fn apply_edit_ops_to_content(
         let idx = line_num.saturating_sub(1);
         if idx < lines.len() {
             if lines[idx].contains(*old_text) {
-                lines[idx] = lines[idx].replacen(*old_text, *new_text, 1);
+                lines[idx] = lines[idx].replacen(*old_text, new_text, 1);
             } else {
                 return Err(format!(
                     "ReplaceText: old_text {:?} not found on line {}",
@@ -772,7 +771,7 @@ pub fn apply_edit_ops(ops: &[TaggedEditOp], root: &Path) -> Result<ApplyReport> 
         };
 
         let language = Language::from_path(&abs_path);
-        let op_refs: Vec<&EditOp> = file_ops.iter().copied().collect();
+        let op_refs: Vec<&EditOp> = file_ops.to_vec();
 
         match apply_edit_ops_to_content(&content, &op_refs, &language) {
             Ok(modified) => {
