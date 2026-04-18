@@ -376,10 +376,6 @@ fn default_context() -> String {
     "any".to_string()
 }
 
-fn default_true() -> bool {
-    true
-}
-
 // ============================================================================
 // Structural parser — context-aware iteration over source text
 // ============================================================================

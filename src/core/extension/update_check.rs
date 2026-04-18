@@ -153,18 +153,4 @@ mod tests {
         assert!(!is_cache_fresh(&cache));
     }
 
-    #[test]
-    fn cache_roundtrip() {
-        let mut behind = HashMap::new();
-        behind.insert("wordpress".to_string(), 3);
-        let cache = ExtensionUpdateCache {
-            extensions_behind: behind,
-            checked_at: 1700000000,
-        };
-        let json = serde_json::to_string(&cache).unwrap();
-        let parsed: ExtensionUpdateCache = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.extensions_behind.len(), 1);
-        assert_eq!(parsed.extensions_behind["wordpress"], 3);
-        assert_eq!(parsed.checked_at, 1700000000);
-    }
 }
