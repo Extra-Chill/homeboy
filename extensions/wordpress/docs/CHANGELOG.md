@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.11] - 2026-04-18
+
+### Fixed
+- make HOMEBOY_FIX_ONLY the single auto-fix contract for all runners (#1145)
+
 ## [2.10.10] - 2026-04-18
 
 ### Fixed
