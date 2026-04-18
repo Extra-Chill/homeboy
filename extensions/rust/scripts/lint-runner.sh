@@ -7,7 +7,10 @@ set -euo pipefail
 # Supports the standard homeboy extension env vars:
 #   HOMEBOY_EXTENSION_PATH  — path to this extension
 #   HOMEBOY_COMPONENT_PATH  — path to the Rust project
-#   HOMEBOY_AUTO_FIX        — if "1", run cargo fmt (fix mode) instead of --check
+#   HOMEBOY_FIX_ONLY        — if "1", run cargo fmt + clippy --fix + cargo fix,
+#                             then exit without the validation pass (the engine
+#                             runs validation separately). Sent by
+#                             `homeboy refactor --from lint --write`.
 #   HOMEBOY_SUMMARY_MODE    — if "1", show compact output
 #   HOMEBOY_CHANGED_SINCE   — git ref to scope fmt check to changed files only
 #   HOMEBOY_LINT_GLOB       — file glob (currently unused for Rust — cargo operates on crates)
@@ -51,7 +54,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Rust Lint Environment:"
     echo "HOMEBOY_EXTENSION_PATH=${HOMEBOY_EXTENSION_PATH:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
-    echo "HOMEBOY_AUTO_FIX=${HOMEBOY_AUTO_FIX:-NOT_SET}"
+    echo "HOMEBOY_FIX_ONLY=${HOMEBOY_FIX_ONLY:-NOT_SET}"
     echo "HOMEBOY_SUMMARY_MODE=${HOMEBOY_SUMMARY_MODE:-NOT_SET}"
     echo "HOMEBOY_ERRORS_ONLY=${HOMEBOY_ERRORS_ONLY:-NOT_SET}"
     echo "PROJECT_PATH=${PROJECT_PATH}"
@@ -68,7 +71,7 @@ echo "Running Rust lint checks..."
 
 # ── Step 1: cargo fmt ──
 if should_run_step "fmt"; then
-    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+    if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         echo ""
         echo "Running cargo fmt (fix mode)..."
         set +e
@@ -182,8 +185,8 @@ if should_run_step "clippy"; then
         --all-targets
     )
 
-    # In fix mode, apply clippy suggestions
-    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+    # In fix-only mode, apply clippy suggestions
+    if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         CLIPPY_ARGS+=(--fix --allow-dirty --allow-staged)
     fi
 
@@ -274,7 +277,7 @@ fi
 # Only in fix mode — applies compiler suggestions for dead_code, unused_imports,
 # unused_variables, etc. These are the warnings that `cargo check` reports.
 if should_run_step "fix"; then
-    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+    if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         echo ""
         echo "Running cargo fix (compiler warnings)..."
 
@@ -289,7 +292,7 @@ if should_run_step "fix"; then
         if [ $FIX_EXIT -eq 0 ]; then
             echo "cargo fix: applied compiler warning fixes"
         else
-            # cargo fix failure is non-fatal in fix mode — some warnings
+            # cargo fix failure is non-fatal in fix-only mode — some warnings
             # can't be auto-fixed (e.g., dead_code on pub items).
             echo "cargo fix: exited non-zero (${FIX_EXIT}), continuing"
             if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -299,7 +302,7 @@ if should_run_step "fix"; then
         fi
     else
         echo ""
-        echo "Skipping cargo fix (only runs in fix mode)"
+        echo "Skipping cargo fix (only runs in fix-only mode)"
     fi
 else
     echo "Skipping cargo fix (step filter)"

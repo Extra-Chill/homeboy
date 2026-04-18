@@ -2,8 +2,11 @@
 set -euo pipefail
 
 # Standalone JavaScript linting script using ESLint
-# Supports auto-fix mode via HOMEBOY_AUTO_FIX=1
+# Supports fix-only mode via HOMEBOY_FIX_ONLY=1 (sent by `homeboy refactor`)
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
+#
+# HOMEBOY_FIX_ONLY=1 is the single auto-fix contract: the runner executes
+# ESLint --fix and exits before the validation pass (#1145).
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -11,7 +14,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "HOMEBOY_EXTENSION_PATH=${HOMEBOY_EXTENSION_PATH:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_ID=${HOMEBOY_COMPONENT_ID:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
-    echo "HOMEBOY_AUTO_FIX=${HOMEBOY_AUTO_FIX:-NOT_SET}"
+    echo "HOMEBOY_FIX_ONLY=${HOMEBOY_FIX_ONLY:-NOT_SET}"
     echo "HOMEBOY_SUMMARY_MODE=${HOMEBOY_SUMMARY_MODE:-NOT_SET}"
     echo "HOMEBOY_ERRORS_ONLY=${HOMEBOY_ERRORS_ONLY:-NOT_SET}"
 fi
@@ -83,7 +86,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "Extension path: $EXTENSION_PATH"
     echo "Plugin path: $PLUGIN_PATH"
     echo "Lint files: ${LINT_FILES[*]}"
-    echo "Auto-fix: ${HOMEBOY_AUTO_FIX:-0}"
+    echo "Fix-only: ${HOMEBOY_FIX_ONLY:-0}"
 fi
 
 ESLINT_BIN="${EXTENSION_PATH}/node_extensions/.bin/eslint"
@@ -125,8 +128,9 @@ fi
 # Run from plugin directory to ensure jsconfig.json is found by import resolver
 cd "$PLUGIN_PATH"
 
-# Auto-fix mode
-if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
+# Fix-only mode: run ESLint --fix and exit before the validation pass.
+# Sent by `homeboy refactor --from lint --write` — the engine validates separately.
+if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
     echo "Running ESLint auto-fix..."
     set +e
     "$ESLINT_BIN" "${eslint_base_args[@]}" --fix "${LINT_FILES[@]}"
@@ -137,7 +141,10 @@ if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
         echo ""
         echo "WARNING: Some ESLint errors could not be auto-fixed."
     fi
+
     echo ""
+    echo "Fix-only mode: skipping validation (run 'homeboy lint' separately to validate)"
+    exit 0
 fi
 
 # Get JSON report for summary

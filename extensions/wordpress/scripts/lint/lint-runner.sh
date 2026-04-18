@@ -22,9 +22,13 @@ if ((BASH_VERSINFO[0] < 4)); then
 fi
 
 # Standalone PHP linting script using PHPCS/PHPCBF
-# Supports auto-fix mode via HOMEBOY_AUTO_FIX=1
+# Supports fix-only mode via HOMEBOY_FIX_ONLY=1 (sent by `homeboy refactor`)
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
 # Supports step filtering via HOMEBOY_STEP/HOMEBOY_SKIP (steps: phpcs, eslint, phpstan)
+#
+# HOMEBOY_FIX_ONLY=1 is the single auto-fix contract: the runner executes
+# fixers (phpcbf + custom) and skips its own validation pass. All auto-fix
+# flows go through `homeboy refactor --from lint --write` (#1145).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
@@ -37,7 +41,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "HOMEBOY_EXTENSION_PATH=${HOMEBOY_EXTENSION_PATH:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_ID=${HOMEBOY_COMPONENT_ID:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
-    echo "HOMEBOY_AUTO_FIX=${HOMEBOY_AUTO_FIX:-NOT_SET}"
+    echo "HOMEBOY_FIX_ONLY=${HOMEBOY_FIX_ONLY:-NOT_SET}"
     echo "HOMEBOY_SUMMARY_MODE=${HOMEBOY_SUMMARY_MODE:-NOT_SET}"
     echo "HOMEBOY_SNIFFS=${HOMEBOY_SNIFFS:-NOT_SET}"
     echo "HOMEBOY_EXCLUDE_SNIFFS=${HOMEBOY_EXCLUDE_SNIFFS:-NOT_SET}"
@@ -129,7 +133,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "Extension path: $EXTENSION_PATH"
     echo "Plugin path: $PLUGIN_PATH"
     echo "Lint files: ${LINT_FILES[*]}"
-    echo "Auto-fix: ${HOMEBOY_AUTO_FIX:-0}"
+    echo "Fix-only: ${HOMEBOY_FIX_ONLY:-0}"
 fi
 
 PHPCS_BIN="${EXTENSION_PATH}/vendor/bin/phpcs"
@@ -227,8 +231,9 @@ if [ -n "$PHP_VERSION" ]; then
     echo "PHP compatibility target: ${PHP_VERSION}-"
 fi
 
-# Auto-fix mode: run custom fixers, then phpcbf, then phpcs
-if [[ "${HOMEBOY_AUTO_FIX:-}" == "1" ]]; then
+# Fix-only mode: run custom fixers, then phpcbf, then exit before validation.
+# Sent by `homeboy refactor --from lint --write` — the engine validates separately.
+if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
     # --- Fix results sidecar ---
     # Track what each fixer does so homeboy can report structured fix output.
     # Each fixer prints "NAME fixer: Fixed N thing(s) in N file(s)" on success.
@@ -463,13 +468,12 @@ print(json.dumps(results))
     fi
     echo "Syntax OK — all PHP files pass php -l"
 
-    # In fix-only mode, skip the validation pass — the caller will validate separately.
-    # This saves ~35s on large codebases by avoiding a redundant PHPCS scan.
-    if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
-        echo ""
-        echo "Fix-only mode: skipping validation (run 'homeboy lint' separately to validate)"
-        exit 0
-    fi
+    # Fix-only mode always skips the validation pass — `homeboy refactor`
+    # validates separately via the diagnose phase. Saves ~35s on large
+    # codebases by avoiding a redundant PHPCS scan.
+    echo ""
+    echo "Fix-only mode: skipping validation (run 'homeboy lint' separately to validate)"
+    exit 0
 fi
 
 # Validation

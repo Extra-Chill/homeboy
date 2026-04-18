@@ -406,7 +406,7 @@ run_lint() {
 
     # Capture lint output to detect issues (lint-runner.sh always exits 0 in summary mode)
     local lint_output
-    lint_output=$(HOMEBOY_SUMMARY_MODE=1 HOMEBOY_AUTO_FIX="${HOMEBOY_AUTO_FIX:-}" bash "$lint_runner" 2>&1)
+    lint_output=$(HOMEBOY_SUMMARY_MODE=1 HOMEBOY_FIX_ONLY="${HOMEBOY_FIX_ONLY:-}" bash "$lint_runner" 2>&1)
     echo "$lint_output"
 
     # Detect if lint reported issues
@@ -481,7 +481,7 @@ if [ -f "$LOCAL_BOOTSTRAP" ]; then
     echo "⚠ Warning: Local bootstrap.php found and will be IGNORED"
     echo "  Location: $LOCAL_BOOTSTRAP"
     echo "  Homeboy WordPress extension provides complete test infrastructure."
-    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+    if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         echo "  → Auto-fix: Removing $LOCAL_BOOTSTRAP"
         rm -f "$LOCAL_BOOTSTRAP"
         echo "  ✓ Removed"
@@ -497,7 +497,7 @@ if [ -f "$LOCAL_PHPUNIT_XML" ]; then
     echo "⚠ Warning: Local phpunit.xml found in tests/ and will be IGNORED"
     echo "  Location: $LOCAL_PHPUNIT_XML"
     echo "  Homeboy WordPress extension provides PHPUnit configuration."
-    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+    if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         echo "  → Auto-fix: Removing $LOCAL_PHPUNIT_XML"
         rm -f "$LOCAL_PHPUNIT_XML"
         echo "  ✓ Removed"
@@ -512,7 +512,7 @@ if [ -f "$LOCAL_PHPUNIT_XML_ROOT" ]; then
     echo ""
     echo "⚠ Warning: Local phpunit.xml found in root and will be IGNORED"
     echo "  Location: $LOCAL_PHPUNIT_XML_ROOT"
-    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+    if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         echo "  → Auto-fix: Removing $LOCAL_PHPUNIT_XML_ROOT"
         rm -f "$LOCAL_PHPUNIT_XML_ROOT"
         echo "  ✓ Removed"
@@ -527,7 +527,7 @@ if [ -f "$LOCAL_PHPUNIT_XML_DIST_ROOT" ]; then
     echo ""
     echo "⚠ Warning: Local phpunit.xml.dist found in root and will be IGNORED"
     echo "  Location: $LOCAL_PHPUNIT_XML_DIST_ROOT"
-    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+    if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         echo "  → Auto-fix: Removing $LOCAL_PHPUNIT_XML_DIST_ROOT"
         rm -f "$LOCAL_PHPUNIT_XML_DIST_ROOT"
         echo "  ✓ Removed"
@@ -546,14 +546,14 @@ if [ -f "$LOCAL_PHPUNIT_BIN" ]; then
     echo "  Location: $LOCAL_PHPUNIT_BIN"
     echo "  Homeboy WordPress extension provides PHPUnit through its own vendor directory."
     echo "  Having two PHPUnit versions can cause version mismatches and confusing failures."
-    if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+    if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         echo "  → Auto-fix: Removing local phpunit from require-dev and vendor..."
         (cd "$PLUGIN_PATH" && composer remove --dev phpunit/phpunit 2>/dev/null || true)
         echo "  ✓ Removed"
         TEST_FIX_ENTRIES+=("{\"file\": \"composer.json\", \"rule\": \"test-infra-cleanup\", \"action\": \"remove-phpunit-dep\"}")
     else
         echo "  Fix: composer remove --dev phpunit/phpunit (in $PLUGIN_PATH)"
-        echo "  Or run: homeboy test ${COMPONENT_ID:-} --fix"
+        echo "  Or run: homeboy refactor ${COMPONENT_ID:-} --from test --write"
     fi
     echo ""
 fi
@@ -564,14 +564,14 @@ if [ ! -f "$LOCAL_PHPUNIT_BIN" ] && [ -f "${PLUGIN_PATH}/composer.json" ]; then
         echo ""
         echo "⚠ Warning: phpunit/phpunit found in composer.json require-dev"
         echo "  Homeboy WordPress extension provides PHPUnit — the local dependency is redundant."
-        if [ "${HOMEBOY_AUTO_FIX:-}" = "1" ]; then
+        if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
             echo "  → Auto-fix: Removing phpunit from require-dev..."
             (cd "$PLUGIN_PATH" && composer remove --dev phpunit/phpunit 2>/dev/null || true)
             echo "  ✓ Removed"
             TEST_FIX_ENTRIES+=("{\"file\": \"composer.json\", \"rule\": \"test-infra-cleanup\", \"action\": \"remove-phpunit-dep\"}")
         else
             echo "  Fix: composer remove --dev phpunit/phpunit (in $PLUGIN_PATH)"
-            echo "  Or run: homeboy test ${COMPONENT_ID:-} --fix"
+            echo "  Or run: homeboy refactor ${COMPONENT_ID:-} --from test --write"
         fi
         echo ""
     fi

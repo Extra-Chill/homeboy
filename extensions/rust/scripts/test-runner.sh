@@ -7,7 +7,9 @@ set -euo pipefail
 #   HOMEBOY_EXTENSION_PATH  — path to this extension
 #   HOMEBOY_COMPONENT_PATH  — path to the Rust project
 #   HOMEBOY_SKIP_LINT       — if "1", skip the pre-test lint step
-#   HOMEBOY_AUTO_FIX        — if "1", auto-fix before testing
+#   HOMEBOY_FIX_ONLY        — if "1", propagates to the nested lint-runner so
+#                             the pre-test lint step runs in fix mode. Sent by
+#                             `homeboy refactor --from test --write`.
 #   HOMEBOY_STEP            — comma-separated steps to run (lint, test)
 #   HOMEBOY_SKIP            — comma-separated steps to skip
 #   HOMEBOY_DEBUG           — if "1", show debug output
@@ -55,7 +57,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "HOMEBOY_EXTENSION_PATH=${HOMEBOY_EXTENSION_PATH:-NOT_SET}"
     echo "HOMEBOY_COMPONENT_PATH=${HOMEBOY_COMPONENT_PATH:-NOT_SET}"
     echo "HOMEBOY_SKIP_LINT=${HOMEBOY_SKIP_LINT:-NOT_SET}"
-    echo "HOMEBOY_AUTO_FIX=${HOMEBOY_AUTO_FIX:-NOT_SET}"
+    echo "HOMEBOY_FIX_ONLY=${HOMEBOY_FIX_ONLY:-NOT_SET}"
     echo "PROJECT_PATH=${PROJECT_PATH}"
     echo "Passthrough args: $*"
 fi
