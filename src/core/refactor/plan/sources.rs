@@ -932,8 +932,12 @@ fn run_lint_stage(
             crate::log_status!("undo", "Warning: failed to save undo snapshot: {}", error);
         }
 
-        // Invoke the extension in fix-only mode — runs fixers without
-        // re-running the diagnostic pass.
+        // Invoke the extension in fix-only mode.
+        //
+        // HOMEBOY_FIX_ONLY=1 is the single contract: the extension runs its
+        // fixers and skips its own validation pass (the engine validates
+        // separately via the diagnose phase). Auto-fixing lives exclusively
+        // under `homeboy refactor` — there is no other entry point.
         build_lint_runner()?.env("HOMEBOY_FIX_ONLY", "1").run()?;
 
         let after_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
@@ -1042,7 +1046,8 @@ fn run_test_stage(
         }
 
         // Invoke the extension in fix-only mode. Reuses the same builder
-        // as the diagnostic pass with HOMEBOY_FIX_ONLY=1.
+        // as the diagnostic pass with HOMEBOY_FIX_ONLY=1 — the single env-var
+        // contract for running fixers. See `run_lint_stage` for context.
         let mut fix_runner = build_runner()?.env("HOMEBOY_FIX_ONLY", "1");
         if !options.script_args.is_empty() {
             fix_runner = fix_runner.script_args(&options.script_args);
