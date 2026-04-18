@@ -30,7 +30,10 @@ close = '}'
 
 [patterns.namespace]
 # Matches: namespace DataMachine\Abilities;
-regex = '^namespace\s+([\w\\\\]+)\s*;'
+# Allows optional leading whitespace — PHP accepts indented top-level
+# namespace declarations (e.g. after a docblock), and `context = top_level`
+# already guarantees brace depth 0.
+regex = '^\s*namespace\s+([\w\\\\]+)\s*;'
 context = "top_level"
 skip_comments = true
 skip_strings = true
@@ -41,7 +44,8 @@ name = 1
 [patterns.class]
 # Matches: class Foo, abstract class Bar, final class Baz
 # Also: interface Qux, trait Quux
-regex = '^(?:abstract\s+)?(?:final\s+)?(class|trait|interface)\s+(\w+)(?:\s+extends\s+([\w\\\\]+))?'
+# Allows optional leading whitespace for the same reason as namespace.
+regex = '^\s*(?:abstract\s+)?(?:final\s+)?(class|trait|interface)\s+(\w+)(?:\s+extends\s+([\w\\\\]+))?'
 context = "top_level"
 skip_comments = true
 skip_strings = true
@@ -66,7 +70,8 @@ params = 3
 
 [patterns.import]
 # Matches: use App\Models\User; use App\Models\User as UserModel;
-regex = '^use\s+([\w\\\\]+)(?:\s+as\s+\w+)?\s*;'
+# Allows optional leading whitespace (valid PHP, see namespace note).
+regex = '^\s*use\s+([\w\\\\]+)(?:\s+as\s+\w+)?\s*;'
 context = "top_level"
 skip_comments = true
 skip_strings = true

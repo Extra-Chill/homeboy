@@ -60,10 +60,12 @@ methods = [m for m in methods if m not in seen and not seen.add(m)]
 type_name = None
 type_kind = None
 type_names = []
+# Allow optional leading whitespace — valid PHP accepts indented top-level
+# class/interface/trait declarations (see #1134 for namespace equivalent).
 for kind, pattern in [
-    ('class', r'^(?:abstract\s+|final\s+)?class\s+(\w+)'),
-    ('interface', r'^interface\s+(\w+)'),
-    ('trait', r'^trait\s+(\w+)'),
+    ('class', r'^\s*(?:abstract\s+|final\s+)?class\s+(\w+)'),
+    ('interface', r'^\s*interface\s+(\w+)'),
+    ('trait', r'^\s*trait\s+(\w+)'),
 ]:
     match = re.search(pattern, content, re.MULTILINE)
     if match:
@@ -73,16 +75,16 @@ for kind, pattern in [
 
 # Collect all class/interface/trait names in the file
 for pattern in [
-    r'^(?:abstract\s+|final\s+)?class\s+(\w+)',
-    r'^interface\s+(\w+)',
-    r'^trait\s+(\w+)',
+    r'^\s*(?:abstract\s+|final\s+)?class\s+(\w+)',
+    r'^\s*interface\s+(\w+)',
+    r'^\s*trait\s+(\w+)',
 ]:
     type_names.extend(m.group(1) for m in re.finditer(pattern, content, re.MULTILINE))
 
 # --- Extends ---
 # Extract the parent class separately (anchored to actual declaration)
 extends = None
-ext_match = re.search(r'^(?:abstract\s+|final\s+)?class\s+\w+\s+extends\s+([\w\\\\]+)', content, re.MULTILINE)
+ext_match = re.search(r'^\s*(?:abstract\s+|final\s+)?class\s+\w+\s+extends\s+([\w\\\\]+)', content, re.MULTILINE)
 if ext_match:
     extends = ext_match.group(1).split('\\\\')[-1]
 
@@ -91,7 +93,7 @@ if ext_match:
 implements = []
 
 # implements (can be comma-separated, on a class/interface declaration line)
-impl_match = re.search(r'^(?:abstract\s+|final\s+)?(?:class|interface)\s+\w+(?:\s+extends\s+[\w\\\\]+)?\s+implements\s+([\w\\\\,\s]+?)(?:\s*\{)', content, re.MULTILINE)
+impl_match = re.search(r'^\s*(?:abstract\s+|final\s+)?(?:class|interface)\s+\w+(?:\s+extends\s+[\w\\\\]+)?\s+implements\s+([\w\\\\,\s]+?)(?:\s*\{)', content, re.MULTILINE)
 if impl_match:
     for iface in impl_match.group(1).split(','):
         iface = iface.strip()
