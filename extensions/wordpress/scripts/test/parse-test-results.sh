@@ -29,9 +29,17 @@ FAILED=0
 SKIPPED=0
 PARTIAL=""
 
+# Portable helper: extract the number after a label like "Tests: 42"
+# Usage: extract_count "label" "text"
+# Uses sed instead of grep -P (Perl regex) for macOS compatibility.
+extract_count() {
+    echo "$2" | sed -n "s/.*$1 *\([0-9][0-9]*\).*/\1/p" | head -1
+}
+
 # Pattern 1: "OK (N tests, N assertions)"
 if echo "$OUTPUT" | grep -qE 'OK \([0-9]+ test'; then
-    TOTAL=$(echo "$OUTPUT" | grep -oP 'OK \(\K[0-9]+' || echo "0")
+    TOTAL=$(echo "$OUTPUT" | sed -n 's/.*OK (\([0-9][0-9]*\) test.*/\1/p' | head -1)
+    TOTAL="${TOTAL:-0}"
     PASSED="$TOTAL"
     FAILED=0
     SKIPPED=0
@@ -40,14 +48,21 @@ if echo "$OUTPUT" | grep -qE 'OK \([0-9]+ test'; then
 elif echo "$OUTPUT" | grep -qE '^Tests: [0-9]+'; then
     SUMMARY_LINE=$(echo "$OUTPUT" | grep -E '^Tests: [0-9]+' | tail -1)
 
-    TOTAL=$(echo "$SUMMARY_LINE" | grep -oP 'Tests: \K[0-9]+' || echo "0")
+    TOTAL=$(extract_count "Tests:" "$SUMMARY_LINE")
+    TOTAL="${TOTAL:-0}"
 
-    ERRORS=$(echo "$SUMMARY_LINE" | grep -oP 'Errors: \K[0-9]+' || echo "0")
-    FAILURES=$(echo "$SUMMARY_LINE" | grep -oP 'Failures: \K[0-9]+' || echo "0")
-    WARNINGS=$(echo "$SUMMARY_LINE" | grep -oP 'Warnings: \K[0-9]+' || echo "0")
-    SKIP_COUNT=$(echo "$SUMMARY_LINE" | grep -oP 'Skipped: \K[0-9]+' || echo "0")
-    INCOMPLETE=$(echo "$SUMMARY_LINE" | grep -oP 'Incomplete: \K[0-9]+' || echo "0")
-    RISKY=$(echo "$SUMMARY_LINE" | grep -oP 'Risky: \K[0-9]+' || echo "0")
+    ERRORS=$(extract_count "Errors:" "$SUMMARY_LINE")
+    ERRORS="${ERRORS:-0}"
+    FAILURES=$(extract_count "Failures:" "$SUMMARY_LINE")
+    FAILURES="${FAILURES:-0}"
+    WARNINGS=$(extract_count "Warnings:" "$SUMMARY_LINE")
+    WARNINGS="${WARNINGS:-0}"
+    SKIP_COUNT=$(extract_count "Skipped:" "$SUMMARY_LINE")
+    SKIP_COUNT="${SKIP_COUNT:-0}"
+    INCOMPLETE=$(extract_count "Incomplete:" "$SUMMARY_LINE")
+    INCOMPLETE="${INCOMPLETE:-0}"
+    RISKY=$(extract_count "Risky:" "$SUMMARY_LINE")
+    RISKY="${RISKY:-0}"
 
     FAILED=$((ERRORS + FAILURES))
     SKIPPED=$((SKIP_COUNT + INCOMPLETE + RISKY + WARNINGS))

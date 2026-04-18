@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Bash 4.0+ required — lint-runner.sh (called during test runs) uses
+# associative arrays which are bash 4+ only. Fail early with a clear
+# message rather than producing misleading cascading errors.
+if ((BASH_VERSINFO[0] < 4)); then
+    echo "============================================" >&2
+    echo "ERROR: bash 4.0+ required (found ${BASH_VERSION})" >&2
+    echo "============================================" >&2
+    case "$(uname -s)" in
+        Darwin)
+            echo "macOS ships bash 3.2. Fix: brew install bash" >&2
+            echo "Then restart your terminal (Homebrew bash takes priority on PATH)." >&2
+            ;;
+        *)
+            echo "Update bash via your package manager." >&2
+            ;;
+    esac
+    exit 1
+fi
+
 FAILED_STEP=""
 FAILURE_OUTPUT=""
 FAILURE_REPLAY_MODE="full"
@@ -268,8 +287,10 @@ if [ "$DATABASE_TYPE" = "auto" ]; then
         done
 
         if [ -n "$WP_CONFIG_PATH" ]; then
+            # Extract a define() value from wp-config.php.
+            # Uses sed instead of grep -P for macOS (BSD grep) compatibility.
             _extract_wp_define() {
-                grep -oP "define\s*\(\s*['\"]$1['\"]\s*,\s*['\"]\\K[^'\"]*" "$WP_CONFIG_PATH" 2>/dev/null | head -1
+                sed -n "s/.*define\s*(\s*['\"]$1['\"]\s*,\s*['\"]\([^'\"]*\).*/\1/p" "$WP_CONFIG_PATH" 2>/dev/null | head -1
             }
             WP_DB_HOST=$(_extract_wp_define DB_HOST)
             WP_DB_USER=$(_extract_wp_define DB_USER)
