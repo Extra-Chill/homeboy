@@ -337,12 +337,57 @@ fn warn_non_default_branch(components: &[Component], config: &DeployConfig) -> R
 }
 
 fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
-    let dirty: Vec<&str> = components
-        .iter()
-        .filter(|c| !c.is_file_component())
-        .filter(|c| !git::is_workdir_clean(Path::new(&c.local_path)))
-        .map(|c| c.id.as_str())
-        .collect();
+    // Partition components into "non-git local_path" vs "dirty git repo" so we can
+    // emit the right diagnostic. Conflating the two leaves users chasing a
+    // nonexistent uncommitted-changes problem when the real issue is that
+    // local_path doesn't point at a git checkout. (#1141)
+    let mut non_git: Vec<&Component> = Vec::new();
+    let mut dirty: Vec<&str> = Vec::new();
+
+    for component in components {
+        if component.is_file_component() {
+            continue;
+        }
+        let path = Path::new(&component.local_path);
+        if !git::is_git_repo(&component.local_path) {
+            non_git.push(component);
+            continue;
+        }
+        if !git::is_workdir_clean(path) {
+            dirty.push(component.id.as_str());
+        }
+    }
+
+    if !non_git.is_empty() {
+        let ids: Vec<&str> = non_git.iter().map(|c| c.id.as_str()).collect();
+        let mut hints: Vec<String> = non_git
+            .iter()
+            .map(|c| {
+                format!(
+                    "Repoint '{}' at a git checkout: homeboy component set {} --local-path <path-to-git-workspace>",
+                    c.id, c.id
+                )
+            })
+            .collect();
+        hints.push(
+            "Initialize a git repo at the existing local_path if the contents are the source of truth: git -C <local_path> init && git add . && git commit -m 'initial'"
+                .to_string(),
+        );
+        hints.push("Or deploy with --force to bypass the git-clean check".to_string());
+        let paths: Vec<String> = non_git
+            .iter()
+            .map(|c| format!("{} ({})", c.id, c.local_path))
+            .collect();
+        return Err(Error::validation_invalid_argument(
+            "components",
+            format!(
+                "local_path is not a git repository for: {}. The uncommitted-changes check requires a git checkout.",
+                paths.join(", ")
+            ),
+            Some(ids.join(",")),
+            Some(hints),
+        ));
+    }
 
     if !dirty.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -652,4 +697,64 @@ fn verify_expected_version(components: &[Component], expected: &str) -> Result<(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn make_component(id: &str, local_path: &str) -> Component {
+        Component::new(id.to_string(), local_path.to_string(), String::new(), None)
+    }
+
+    #[test]
+    fn check_uncommitted_changes_reports_non_git_local_path() {
+        // A directory exists but is not a git repo — the error must say so clearly
+        // instead of reporting "uncommitted changes". (#1141)
+        let dir = TempDir::new().expect("temp dir");
+        let component = make_component("test", &dir.path().to_string_lossy());
+
+        let result = check_uncommitted_changes(&[component]);
+        let err = result.expect_err("should fail for non-git local_path");
+        let message = format!("{}", err);
+        assert!(
+            message.contains("not a git repository"),
+            "error should identify the non-git local_path issue, got: {message}"
+        );
+        assert!(
+            !message.contains("uncommitted changes"),
+            "error must not conflate non-git with dirty git, got: {message}"
+        );
+    }
+
+    #[test]
+    fn check_uncommitted_changes_passes_for_clean_git_repo() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path();
+
+        // Initialize an empty git repo with one commit so the working dir is clean.
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command")
+        };
+        assert!(run(&["init", "-q"]).status.success());
+        assert!(
+            run(&["config", "user.email", "test@example.com"])
+                .status
+                .success()
+        );
+        assert!(run(&["config", "user.name", "Test"]).status.success());
+        assert!(
+            run(&["commit", "--allow-empty", "-q", "-m", "init"])
+                .status
+                .success()
+        );
+
+        let component = make_component("test", &path.to_string_lossy());
+        check_uncommitted_changes(&[component]).expect("clean git repo should pass");
+    }
 }
