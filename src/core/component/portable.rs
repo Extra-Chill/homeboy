@@ -201,6 +201,15 @@ where
     }
 
     mutator(&mut component)?;
+
+    // Defensive: if the mutator wiped `id` (for example via `config::merge_config`,
+    // which round-trips through serde and `RawComponent.id` is `skip_serializing`),
+    // restore it from the caller-provided id. Legitimate rename mutations set a
+    // non-empty new id inside the closure, so this check does not clobber them. (#1140)
+    if component.id.trim().is_empty() {
+        component.id = id.to_string();
+    }
+
     write_portable_config(&local_path, &component)?;
     Ok(component)
 }
@@ -344,6 +353,32 @@ mod tests {
         );
         let result = portable_json(&component);
         assert!(result.is_err(), "blank id should be rejected");
+    }
+
+    #[test]
+    fn merge_config_roundtrip_wipes_id_regression() {
+        // Regression test for #1140: `Component` serializes via `RawComponent`
+        // which has `#[serde(skip_serializing)]` on `id`. A `merge_config` round
+        // trip (serialize → deep_merge → deserialize) therefore drops `id`,
+        // leaving the component with a blank string. Callers like
+        // `mutate_portable` must restore the caller-provided id before writing
+        // to homeboy.json, or `portable_json` will refuse the write with
+        // "Cannot write portable config with a blank component ID".
+        let mut component = Component::new(
+            "intelligence".to_string(),
+            "/tmp/intelligence".to_string(),
+            "wp-content/plugins/intelligence".to_string(),
+            None,
+        );
+
+        let patch = serde_json::json!({ "local_path": "/new/path" });
+        crate::config::merge_config(&mut component, patch, &[]).expect("merge should succeed");
+
+        assert!(
+            component.id.trim().is_empty(),
+            "documented failure mode — remove this assert and the restore hack in mutate_portable if serde behavior changes"
+        );
+        assert_eq!(component.local_path, "/new/path");
     }
 
     #[test]

@@ -36,13 +36,20 @@ pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Re
         ));
     }
 
-    let patch: Value = config::from_str(&raw)?;
+    let mut patch: Value = config::from_str(&raw)?;
 
     if let Some(json_id) = patch.get("id").and_then(|v| v.as_str()) {
         if json_id != id {
             rename(id, json_id)?;
             return merge(Some(json_id), json_spec, replace_fields);
         }
+    }
+
+    // `id` does not survive the `merge_config` serde round-trip (RawComponent.id
+    // is `skip_serializing`) and would surface as a spurious "Unknown field 'id'"
+    // error. Strip it here — any rename intent has already been handled above. (#1140)
+    if let Value::Object(ref mut map) = patch {
+        map.remove("id");
     }
 
     let component = mutate_portable(id, |component| {
