@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.9] - 2026-04-18
+
+### Fixed
+- macOS portability — replace grep -P with sed, add bash 4+ gate to test-runner (#1144, #1146)
+
 ## [2.10.8] - 2026-04-09
 
 ### Changed
