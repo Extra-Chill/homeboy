@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.12] - 2026-04-19
+
+### Fixed
+- correct database default docs (#206) + bypass PHPStan parallel worker crash (#207)
+
 ## [2.10.11] - 2026-04-18
 
 ### Fixed
