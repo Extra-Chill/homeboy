@@ -325,7 +325,7 @@
       "sqlite",
       "mysql"
     ],
-    "default_database": "sqlite"
+    "default_database": "auto"
   },
   "settings": [
     {

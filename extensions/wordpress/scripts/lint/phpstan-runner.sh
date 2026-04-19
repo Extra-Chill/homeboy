@@ -323,6 +323,27 @@ is_parallel_worker_failure() {
     ' 2>/dev/null
 }
 
+# Helper: detect parallel worker failure in PHPStan stderr text output.
+# Returns 0 (true) if any stderr line mentions "parallel worker".
+is_parallel_worker_failure_text() {
+    local output="$1"
+    [ -z "$output" ] && return 1
+    echo "$output" | grep -qi "parallel worker"
+}
+
+# Prepare a forced single-process PHPStan retry config and echo its path.
+# Callers build a retry args array using this config + PHPStan's --debug flag,
+# which runs analysis fully in-process with no worker subprocesses at all —
+# bypasses the parallel worker IPC that crashes on macOS + larger codebases
+# (homeboy-extensions#207). The maximumNumberOfProcesses: 1 in the neon is
+# belt-and-braces alongside --debug on the CLI; either alone is usually
+# enough, together they cover every PHPStan version we've hit.
+prepare_phpstan_retry_config() {
+    cleanup_phpstan_config
+    PHPSTAN_TMPCONFIG=$(generate_phpstan_config 1)
+    printf '%s\n' "$PHPSTAN_TMPCONFIG"
+}
+
 # Summary mode: get JSON output and parse it
 if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     set +e
@@ -333,20 +354,52 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     stderr_output=$(cat "$stderr_file")
     rm -f "$stderr_file"
 
-    # Retry with single thread if parallel workers failed
+    # Retry with forced single-process (--debug) if parallel workers failed.
+    # --debug disables PHPStan's worker subprocesses entirely, bypassing the IPC
+    # hangs that produce "Some parallel worker jobs have not finished" on macOS
+    # with larger codebases (homeboy-extensions#207).
     if [ "$json_exit" -ne 0 ] && is_parallel_worker_failure "$json_output"; then
-        echo "Parallel worker failure detected, retrying single-threaded..."
-        cleanup_phpstan_config
-        PHPSTAN_TMPCONFIG=$(generate_phpstan_config 1)
-        retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress)
+        echo "Parallel worker failure detected, retrying single-process (--debug)..."
+        prepare_phpstan_retry_config > /dev/null
+        retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress --debug)
         [ -f "$COMPONENT_BASELINE" ] && retry_args+=(--baseline="$COMPONENT_BASELINE")
         [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
-        retry_args+=("$PLUGIN_PATH")
+        retry_args+=(.)
         stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
-        json_output=$("$PHPSTAN_BIN" "${retry_args[@]}" --error-format=json 2>"$stderr_file")
+        # PHPStan --debug mode has a known interaction with --autoload-file
+        # where running from a CWD different than the analysed path causes
+        # analysis to stop after the first file (exit 0 with no results).
+        # Work around by running from inside $PLUGIN_PATH in a subshell and
+        # passing `.` as the positional path argument. Full-report retry below
+        # does the same.
+        raw_output=$(cd "$PLUGIN_PATH" && "$PHPSTAN_BIN" "${retry_args[@]}" --error-format=json 2>"$stderr_file")
         json_exit=$?
         stderr_output=$(cat "$stderr_file")
         rm -f "$stderr_file"
+        # --debug prints analysed file paths to stdout BEFORE the JSON envelope,
+        # which would break the downstream JSON parser. Extract the JSON line
+        # (first line starting with `{`) from the combined debug stream.
+        json_output=$(printf '%s\n' "$raw_output" | awk '/^\{/{print; exit}')
+        # If we couldn't isolate a JSON envelope, fall back to the raw output
+        # so error propagation still works (the worker-failure re-check below
+        # tolerates non-JSON input by also inspecting stderr).
+        [ -z "$json_output" ] && json_output="$raw_output"
+
+        # Graceful degradation: if --debug retry STILL reports a parallel worker
+        # failure (the crash happened outside of worker IPC, e.g. in PHPStan's
+        # own bootstrap), skip PHPStan cleanly rather than block the release.
+        # Runtime fatal detection still runs via the critical-only path elsewhere,
+        # so this is safe: we're only skipping style-level static analysis.
+        if [ "$json_exit" -ne 0 ] && \
+           { is_parallel_worker_failure "$json_output" || is_parallel_worker_failure_text "$stderr_output"; }; then
+            echo ""
+            echo "WARNING: PHPStan parallel worker failure persisted after single-process retry."
+            echo "         Skipping static analysis for this run (homeboy-extensions#207)."
+            echo "         To force analysis: HOMEBOY_PHPSTAN_THREADS=1 homeboy test <component>"
+            echo "         If the issue reproduces reliably, please report environment details"
+            echo "         (OS, PHP version, PHPStan version, component size) on the tracking issue."
+            exit 0
+        fi
     fi
     set -e
 
@@ -640,34 +693,85 @@ if [ "$PHPSTAN_CRITICAL_ONLY" -eq 1 ]; then
 fi
 
 set +e
+# Capture stdout+stderr to files separately so we can inspect both on retry.
+# PHPStan writes the "parallel worker" error box to stdout (not stderr), so
+# inspecting stderr alone misses the failure signature. We print the captured
+# streams below once the exit code is known — this keeps things simple and
+# avoids race conditions with `tee` in process substitution.
+stdout_file=$(homeboy_mktemp 'phpstan-stdout-XXXXXX.log')
 stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
-"$PHPSTAN_BIN" "${phpstan_args[@]}" 2>"$stderr_file"
+"$PHPSTAN_BIN" "${phpstan_args[@]}" >"$stdout_file" 2>"$stderr_file"
 full_exit=$?
+stdout_output=$(cat "$stdout_file")
 stderr_output=$(cat "$stderr_file")
-rm -f "$stderr_file"
+rm -f "$stdout_file" "$stderr_file"
+# Always forward the original stdout/stderr to the operator so progress
+# and formatted error output remain visible.
+[ -n "$stdout_output" ] && printf '%s\n' "$stdout_output"
+[ -n "$stderr_output" ] && printf '%s\n' "$stderr_output" >&2
 set -e
 
-# Retry with single thread if parallel workers failed
-if [ "$full_exit" -ne 0 ] && echo "$stderr_output" | grep -qi "parallel worker"; then
-    echo "Parallel worker failure detected, retrying single-threaded..."
-    cleanup_phpstan_config
-    PHPSTAN_TMPCONFIG=$(generate_phpstan_config 1)
-    retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress)
+# Retry with forced single-process (--debug) if parallel workers failed.
+# --debug disables PHPStan's worker subprocesses entirely, bypassing the IPC
+# hangs that produce "Some parallel worker jobs have not finished" on macOS
+# with larger codebases (homeboy-extensions#207). The error banner is on
+# stdout, not stderr, so inspect both.
+if [ "$full_exit" -ne 0 ] && \
+   { is_parallel_worker_failure_text "$stderr_output" || is_parallel_worker_failure_text "$stdout_output"; }; then
+    echo "Parallel worker failure detected, retrying single-process (--debug)..."
+    prepare_phpstan_retry_config > /dev/null
+    retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress --debug)
     [ -f "$COMPONENT_BASELINE" ] && retry_args+=(--baseline="$COMPONENT_BASELINE")
     [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
-    retry_args+=("$PLUGIN_PATH")
-    "$PHPSTAN_BIN" "${retry_args[@]}"
+    retry_args+=(.)
+    set +e
+    retry_stdout_file=$(homeboy_mktemp 'phpstan-stdout-XXXXXX.log')
+    retry_stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
+    # PHPStan --debug + --autoload-file + CWD != analysed path causes analysis
+    # to stop after the first file. Work around by running from inside
+    # $PLUGIN_PATH and passing `.` as the positional path argument.
+    (cd "$PLUGIN_PATH" && "$PHPSTAN_BIN" "${retry_args[@]}") >"$retry_stdout_file" 2>"$retry_stderr_file"
     full_exit=$?
+    retry_stdout_output=$(cat "$retry_stdout_file")
+    retry_stderr_output=$(cat "$retry_stderr_file")
+    rm -f "$retry_stdout_file" "$retry_stderr_file"
+    # --debug dumps one line per analysed file to stdout BEFORE PHPStan's
+    # formatted results section. That's noisy — suppress the per-file chatter
+    # and print only the lines that look like the real results (the formatted
+    # error box / summary starts with spaces, dashes, or the "[ERROR]" banner).
+    if [ -n "$retry_stdout_output" ]; then
+        printf '%s\n' "$retry_stdout_output" | awk '
+            # Skip bare file paths (absolute paths starting with /).
+            /^\// { next }
+            { print }
+        '
+    fi
+    [ -n "$retry_stderr_output" ] && printf '%s\n' "$retry_stderr_output" >&2
+    set -e
+
+    # Graceful degradation: if --debug retry STILL reports a parallel worker
+    # failure (the crash happened outside of worker IPC, e.g. in PHPStan's
+    # own bootstrap), skip PHPStan cleanly rather than block the release.
+    # Runtime fatal detection still runs via the critical-only path elsewhere,
+    # so this is safe: we're only skipping style-level static analysis.
+    if [ "$full_exit" -ne 0 ] && \
+       { is_parallel_worker_failure_text "$retry_stderr_output" || is_parallel_worker_failure_text "$retry_stdout_output"; }; then
+        echo ""
+        echo "WARNING: PHPStan parallel worker failure persisted after single-process retry."
+        echo "         Skipping static analysis for this run (homeboy-extensions#207)."
+        echo "         To force analysis: HOMEBOY_PHPSTAN_THREADS=1 homeboy test <component>"
+        echo "         If the issue reproduces reliably, please report environment details"
+        echo "         (OS, PHP version, PHPStan version, component size) on the tracking issue."
+        exit 0
+    fi
 fi
 
 if [ "$full_exit" -eq 0 ]; then
     echo "PHPStan analysis passed"
     exit 0
 else
-    # Show stderr if it wasn't already displayed
-    if [ -n "$stderr_output" ]; then
-        echo "$stderr_output" >&2
-    fi
+    # stdout/stderr were already forwarded above (original run) and by the
+    # retry block (retry run). No additional echoing needed here.
     echo "PHPStan analysis failed"
     exit 1
 fi

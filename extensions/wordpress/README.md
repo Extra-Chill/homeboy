@@ -127,14 +127,28 @@ The WordPress test framework provides factories for creating test data:
 
 ### Database Options
 
-The extension supports SQLite (default) or MySQL for tests:
+The extension supports MySQL or SQLite for tests. The default is **`auto`**: the
+test runner tries to connect to MySQL first (using explicit settings, then a
+`wp-config.php` discovered in the component's parent tree, then `root@127.0.0.1`
+with no password) and falls back to SQLite if none of those succeed.
 
 ```bash
-# SQLite (default, no setup required)
+# Auto (default): MySQL if reachable, otherwise SQLite
 homeboy test my-plugin
 
-# MySQL (requires database setup)
-homeboy test my-plugin --database mysql
+# Force SQLite — useful on machines without a MySQL server
+homeboy test my-plugin --setting database_type=sqlite
+
+# Force MySQL — fails loudly if MySQL isn't reachable
+homeboy test my-plugin --setting database_type=mysql
+```
+
+Configure MySQL credentials with `homeboy component set <id> mysql_host ...`
+(also `mysql_user`, `mysql_password`, `mysql_database`). To make SQLite the
+default for a specific component, set it once:
+
+```bash
+homeboy component set my-plugin database_type sqlite
 ```
 
 ## Migration from Local Infrastructure
