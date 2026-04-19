@@ -777,7 +777,23 @@ fn plan_audit_stage(
     } else {
         let policy_summary = fixer::apply_fix_policy(&mut fix_result, false, &policy);
         let changed_files = collect_audit_changed_files(&fix_result);
-        (fix_result, policy_summary, changed_files, Vec::new())
+
+        // Surface findings whose collected edits are all manual-only — these
+        // are visible in preview but `--write` will decline to apply them.
+        // Without this hint the divergence between dry-run and --write is
+        // invisible (homeboy#1159).
+        let manual_only_count = count_manual_only_fixes(&fix_result);
+        let stage_warnings = if manual_only_count > 0 {
+            vec![format!(
+                "{} finding(s) produced manual-only edits — visible in preview but will NOT be applied by --write. \
+                 Resolve manually or acknowledge via baseline.",
+                manual_only_count
+            )]
+        } else {
+            Vec::new()
+        };
+
+        (fix_result, policy_summary, changed_files, stage_warnings)
     };
 
     let fix_results = summarize_audit_fix_result_entries(&fix_result);
@@ -1086,15 +1102,50 @@ fn run_test_stage(
     })
 }
 
+/// Count fixes whose edits are ALL manual-only — i.e., they'd be dropped
+/// entirely by `apply_fix_policy(write=true)`. Used to surface a warning
+/// when dry-run previews edits that `--write` will silently decline.
+/// (homeboy#1159)
+fn count_manual_only_fixes(fix_result: &fixer::FixResult) -> usize {
+    let manual_only_fixes = fix_result
+        .fixes
+        .iter()
+        .filter(|fix| !fix.insertions.is_empty() && fix.insertions.iter().all(|ins| ins.manual_only))
+        .count();
+    let manual_only_new_files = fix_result
+        .new_files
+        .iter()
+        .filter(|nf| nf.manual_only)
+        .count();
+    manual_only_fixes + manual_only_new_files
+}
+
+/// Count only files that `--write` mode would actually modify.
+///
+/// In dry-run mode, `apply_fix_policy` marks manual-only insertions as
+/// `auto_apply = true` so they appear in preview output — but a subsequent
+/// `--write` invocation drops any fix whose insertions are ALL manual-only
+/// (policy.rs line ~94). Counting a file here as "would be modified" when
+/// `--write` would silently decline it produces the CI deadlock described in
+/// homeboy#1159: dry-run exits 1 (triggering autofix), autofix re-runs with
+/// `--write` and applies nothing, the skipped-bot-loop guard fires, and the
+/// PR is stuck.
+///
+/// Filter to fixes that have at least one non-manual-only insertion — the
+/// same predicate `apply_fix_policy(write=true)` uses to keep a fix. This
+/// aligns dry-run `files_modified` with what a subsequent `--write` run
+/// would actually produce. New files follow the same rule.
 fn collect_audit_changed_files(fix_result: &fixer::FixResult) -> Vec<String> {
     let mut files = BTreeSet::new();
     for fix in &fix_result.fixes {
-        if !fix.insertions.is_empty() {
+        if fix.insertions.iter().any(|ins| !ins.manual_only) {
             files.insert(fix.file.clone());
         }
     }
-    for file in &fix_result.new_files {
-        files.insert(file.file.clone());
+    for new_file in &fix_result.new_files {
+        if !new_file.manual_only {
+            files.insert(new_file.file.clone());
+        }
     }
     files.into_iter().collect()
 }
@@ -1483,5 +1534,198 @@ mod tests {
         let err =
             normalize_sources(&["weird".to_string()]).expect_err("unknown source should fail");
         assert!(err.to_string().contains("Unknown refactor source"));
+    }
+
+    // ============================================================================
+    // homeboy#1159 — dry-run vs --write contract alignment
+    // ============================================================================
+    //
+    // Regression tests for the CI deadlock where dry-run reports files_modified>0
+    // for edits that `--write` silently declines (cascading findings, manual-only
+    // fixes). Before the fix, dry-run exit 1 + write applies nothing = stuck PR.
+
+    use crate::code_audit::AuditFinding;
+    use crate::refactor::auto::{Fix, FixResult, Insertion, InsertionKind, NewFile};
+
+    fn auto_insertion() -> Insertion {
+        Insertion {
+            primitive: None,
+            kind: InsertionKind::MethodStub,
+            finding: AuditFinding::MissingMethod,
+            manual_only: false,
+            auto_apply: true,
+            blocked_reason: None,
+            code: "fn foo() {}".to_string(),
+            description: "stub method".to_string(),
+        }
+    }
+
+    fn manual_only_insertion() -> Insertion {
+        Insertion {
+            primitive: None,
+            kind: InsertionKind::MethodStub,
+            finding: AuditFinding::IntraMethodDuplicate,
+            manual_only: true,
+            // In dry-run mode, `should_auto_apply(manual_only=true, write=false)`
+            // returns true so the edit stays visible for preview. That's the
+            // state `collect_audit_changed_files` must guard against.
+            auto_apply: true,
+            blocked_reason: Some(
+                "Blocked: manual-only edit, not eligible for --from auto-write".to_string(),
+            ),
+            code: String::new(),
+            description: "manual-only duplicate flag".to_string(),
+        }
+    }
+
+    fn fix_result_with(fixes: Vec<Fix>, new_files: Vec<NewFile>) -> FixResult {
+        let total_insertions = fixes.iter().map(|f| f.insertions.len()).sum();
+        FixResult {
+            fixes,
+            new_files,
+            decompose_plans: Vec::new(),
+            skipped: Vec::new(),
+            chunk_results: Vec::new(),
+            total_insertions,
+            files_modified: 0,
+        }
+    }
+
+    #[test]
+    fn collect_audit_changed_files_excludes_manual_only_only_fixes() {
+        // The cascading-finding scenario from #1159 reproduction:
+        //   dry-run: intramethodduplicate × edit_op_apply.rs — 2 collected edits
+        //   --write: audit applied=false fixes_applied=0 files_modified=0
+        // If every insertion in a fix is manual_only, --write drops the fix
+        // entirely (policy.rs line ~94) — so dry-run must not count that file
+        // as "would be modified".
+        let fix = Fix {
+            file: "src/core/engine/edit_op_apply.rs".to_string(),
+            required_methods: Vec::new(),
+            required_registrations: Vec::new(),
+            insertions: vec![manual_only_insertion(), manual_only_insertion()],
+            applied: false,
+        };
+        let result = fix_result_with(vec![fix], Vec::new());
+        assert!(
+            collect_audit_changed_files(&result).is_empty(),
+            "Fix with only manual-only insertions should not count as would-modify"
+        );
+    }
+
+    #[test]
+    fn collect_audit_changed_files_includes_mixed_fixes() {
+        // A fix that has at least one auto-apply insertion WILL be partially
+        // applied by --write (the manual-only insertions get filtered during
+        // apply, but the fix as a whole survives), so dry-run correctly
+        // reports the file as would-modify.
+        let fix = Fix {
+            file: "src/lib.rs".to_string(),
+            required_methods: Vec::new(),
+            required_registrations: Vec::new(),
+            insertions: vec![manual_only_insertion(), auto_insertion()],
+            applied: false,
+        };
+        let result = fix_result_with(vec![fix], Vec::new());
+        assert_eq!(
+            collect_audit_changed_files(&result),
+            vec!["src/lib.rs".to_string()],
+            "Mixed fix (manual-only + auto) should count as would-modify"
+        );
+    }
+
+    #[test]
+    fn collect_audit_changed_files_includes_auto_apply_fixes() {
+        // Baseline: the normal case, fully auto-apply, still counted.
+        let fix = Fix {
+            file: "src/lib.rs".to_string(),
+            required_methods: Vec::new(),
+            required_registrations: Vec::new(),
+            insertions: vec![auto_insertion()],
+            applied: false,
+        };
+        let result = fix_result_with(vec![fix], Vec::new());
+        assert_eq!(
+            collect_audit_changed_files(&result),
+            vec!["src/lib.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_audit_changed_files_excludes_manual_only_new_files() {
+        let nf = NewFile {
+            file: "src/generated.rs".to_string(),
+            primitive: None,
+            finding: AuditFinding::MissingMethod,
+            manual_only: true,
+            auto_apply: true, // dry-run preview state
+            blocked_reason: Some("manual-only".to_string()),
+            content: String::new(),
+            description: "would create".to_string(),
+            written: false,
+        };
+        let result = fix_result_with(Vec::new(), vec![nf]);
+        assert!(collect_audit_changed_files(&result).is_empty());
+    }
+
+    #[test]
+    fn collect_audit_changed_files_includes_auto_apply_new_files() {
+        let nf = NewFile {
+            file: "src/generated.rs".to_string(),
+            primitive: None,
+            finding: AuditFinding::MissingMethod,
+            manual_only: false,
+            auto_apply: true,
+            blocked_reason: None,
+            content: "// generated".to_string(),
+            description: "create".to_string(),
+            written: false,
+        };
+        let result = fix_result_with(Vec::new(), vec![nf]);
+        assert_eq!(
+            collect_audit_changed_files(&result),
+            vec!["src/generated.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn count_manual_only_fixes_counts_both_fixes_and_new_files() {
+        let manual_fix = Fix {
+            file: "src/a.rs".to_string(),
+            required_methods: Vec::new(),
+            required_registrations: Vec::new(),
+            insertions: vec![manual_only_insertion(), manual_only_insertion()],
+            applied: false,
+        };
+        let mixed_fix = Fix {
+            file: "src/b.rs".to_string(),
+            required_methods: Vec::new(),
+            required_registrations: Vec::new(),
+            insertions: vec![manual_only_insertion(), auto_insertion()],
+            applied: false,
+        };
+        let auto_fix = Fix {
+            file: "src/c.rs".to_string(),
+            required_methods: Vec::new(),
+            required_registrations: Vec::new(),
+            insertions: vec![auto_insertion()],
+            applied: false,
+        };
+        let manual_nf = NewFile {
+            file: "src/d.rs".to_string(),
+            primitive: None,
+            finding: AuditFinding::MissingMethod,
+            manual_only: true,
+            auto_apply: true,
+            blocked_reason: None,
+            content: String::new(),
+            description: String::new(),
+            written: false,
+        };
+        let result =
+            fix_result_with(vec![manual_fix, mixed_fix, auto_fix], vec![manual_nf]);
+        // Only the entirely-manual-only fix + the manual-only new file count.
+        // The mixed fix survives --write, the fully-auto fix is normal.
+        assert_eq!(count_manual_only_fixes(&result), 2);
     }
 }
