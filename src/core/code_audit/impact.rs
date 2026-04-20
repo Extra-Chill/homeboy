@@ -117,7 +117,7 @@ impl std::fmt::Display for AffectReason {
 ///
 /// Uses `git show <ref>:<path>` to get the base version without checkout,
 /// then runs the extension fingerprint script on that content.
-pub fn fingerprint_from_git_ref(
+pub(crate) fn fingerprint_from_git_ref(
     source_path: &str,
     git_ref: &str,
     relative_path: &str,
@@ -173,7 +173,7 @@ pub fn fingerprint_from_git_ref(
 ///
 /// For each changed file, retrieves the base version, fingerprints it, and
 /// produces a `SymbolDiff` describing what symbols changed.
-pub fn diff_changed_files(
+pub(crate) fn diff_changed_files(
     source_path: &str,
     git_ref: &str,
     changed_files: &[String],
@@ -361,7 +361,7 @@ fn similarity(a: &str, b: &str) -> f64 {
 /// - `hooks` matching removed hook names
 ///
 /// Returns only files NOT already in the changed set.
-pub fn find_affected_files(
+pub(crate) fn find_affected_files(
     diffs: &[SymbolDiff],
     all_fingerprints: &[&FileFingerprint],
     changed_files: &HashSet<&str>,
