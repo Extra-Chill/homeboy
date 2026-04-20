@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.88.9] - 2026-04-20
+
+### Fixed
+- align dry-run files_modified with what --write actually applies (#1159)
+
 ## [0.88.8] - 2026-04-18
 
 ### Changed
