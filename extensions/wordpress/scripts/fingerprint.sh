@@ -172,48 +172,82 @@ for pat in reg_patterns:
 seen = set()
 registrations = [r for r in registrations if r not in seen and not seen.add(r)]
 
-# --- Hook Callbacks (#118) ---
-# Extract functions/methods registered as WordPress hook callbacks.
-# These are externally invoked by WordPress core, not directly referenced.
+# --- Hook Callbacks (#118, #1149) ---
+# Extract functions/methods registered as WordPress hook/callback targets.
+# These are externally invoked by the WordPress runtime (hook system, REST
+# route dispatcher, block render pipeline, etc.), not by direct function
+# calls from other source files. A function that is BOTH defined in this
+# file AND registered as a callback here is live code — homeboy core uses
+# this set to suppress unreferenced_export false positives on plugin
+# bootstrap files.
+#
 # Note: use dollar_esc for regex matching of literal PHP dollar signs.
 hook_callbacks = set()
 this_pat = dollar_esc + r'this'
-# add_action/add_filter with array( this, 'method' )
+# Common string fragments reused below:
+#   STR   — a single- or double-quoted PHP string with a captured word
+#   SELF  — PHP class-reference tokens that resolve to the current class
+STR = r'[\x27\x22](\w+)[\x27\x22]'
+SELF = r'(?:__CLASS__|self::class|static::class)'
+
+# add_action / add_filter / add_shortcode with string callback: 'function_name'
+# Also catches add_action/add_filter with a trailing priority+arity (the
+# comma branch) or a terminating close-paren.
 for m in re.finditer(
-    r'(?:add_action|add_filter)\s*\([^,]+,\s*array\s*\(\s*' + this_pat + r'\s*,\s*[\x27\x22](\w+)[\x27\x22]\s*\)',
+    r'(?:add_action|add_filter|add_shortcode)\s*\([^,]+,\s*' + STR + r'\s*[,)]',
     content
 ):
     hook_callbacks.add(m.group(1))
-# add_action/add_filter with [ this, 'method' ]
+# add_action / add_filter / add_shortcode with array( this, 'method' )
 for m in re.finditer(
-    r'(?:add_action|add_filter)\s*\([^,]+,\s*\[\s*' + this_pat + r'\s*,\s*[\x27\x22](\w+)[\x27\x22]\s*\]',
+    r'(?:add_action|add_filter|add_shortcode)\s*\([^,]+,\s*array\s*\(\s*' + this_pat + r'\s*,\s*' + STR + r'\s*\)',
     content
 ):
     hook_callbacks.add(m.group(1))
-# add_action/add_filter with string callback: 'function_name'
+# add_action / add_filter / add_shortcode with [ this, 'method' ]
 for m in re.finditer(
-    r'(?:add_action|add_filter)\s*\([^,]+,\s*[\x27\x22](\w+)[\x27\x22]\s*[,)]',
+    r'(?:add_action|add_filter|add_shortcode)\s*\([^,]+,\s*\[\s*' + this_pat + r'\s*,\s*' + STR + r'\s*\]',
     content
 ):
     hook_callbacks.add(m.group(1))
-# add_action/add_filter with __CLASS__/self::class/static::class
+# add_action / add_filter / add_shortcode with __CLASS__ / self::class / static::class
 for m in re.finditer(
-    r'(?:add_action|add_filter)\s*\([^,]+,\s*(?:array\s*\(|[\[])\s*(?:__CLASS__|self::class|static::class)\s*,\s*[\x27\x22](\w+)[\x27\x22]',
+    r'(?:add_action|add_filter|add_shortcode)\s*\([^,]+,\s*(?:array\s*\(|\[)\s*' + SELF + r'\s*,\s*' + STR,
     content
 ):
     hook_callbacks.add(m.group(1))
-# register_activation_hook / register_deactivation_hook
+# register_activation_hook / register_deactivation_hook / register_uninstall_hook
 for m in re.finditer(
-    r'register_(?:activation|deactivation)_hook\s*\([^,]+,\s*[\x27\x22](\w+)[\x27\x22]',
+    r'register_(?:activation|deactivation|uninstall)_hook\s*\([^,]+,\s*' + STR,
     content
 ):
     hook_callbacks.add(m.group(1))
-# Ability execute_callback and permission_callback arrays
+# Any  'some_callback' => 'function_name'  or  'some_callback' => [ this, 'method' ]
+# pattern in an array literal. One regex covers the whole family of callback
+# keys used by register_rest_route, register_block_type, register_post_type,
+# register_taxonomy, Ability definitions, etc.
+# Key names end in _callback or are exactly 'callback' / 'render_callback'
+# (already covered by the _callback suffix) / 'permission_callback'.
+CALLBACK_KEY = r'[\x27\x22](?:callback|[a-z_]+_callback)[\x27\x22]'
+# String callback: 'callback' => 'function_name'
 for m in re.finditer(
-    r'[\x27\x22](?:execute_callback|permission_callback)[\x27\x22]\s*=>\s*(?:array\s*\(|[\[])\s*' + this_pat + r'\s*,\s*[\x27\x22](\w+)[\x27\x22]',
+    CALLBACK_KEY + r'\s*=>\s*' + STR,
     content
 ):
     hook_callbacks.add(m.group(1))
+# Array callback with this: 'callback' => array( this, 'method' )
+for m in re.finditer(
+    CALLBACK_KEY + r'\s*=>\s*(?:array\s*\(|\[)\s*' + this_pat + r'\s*,\s*' + STR,
+    content
+):
+    hook_callbacks.add(m.group(1))
+# Array callback with self::class / __CLASS__: 'callback' => array( self::class, 'method' )
+for m in re.finditer(
+    CALLBACK_KEY + r'\s*=>\s*(?:array\s*\(|\[)\s*' + SELF + r'\s*,\s*' + STR,
+    content
+):
+    hook_callbacks.add(m.group(1))
+
 hook_callbacks = sorted(hook_callbacks)
 
 # --- Namespace ---
