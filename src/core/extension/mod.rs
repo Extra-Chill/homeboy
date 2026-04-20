@@ -476,6 +476,22 @@ pub struct FingerprintOutput {
     /// Public functions/methods exported from this file (the file's API surface).
     #[serde(default)]
     pub public_api: Vec<String>,
+    /// Functions/methods registered as hook/callback targets from WITHIN
+    /// this file. These names are invoked by the framework runtime (e.g.,
+    /// WordPress's hook system, `register_activation_hook`, REST callbacks,
+    /// block render callbacks), not by direct calls from other source files.
+    ///
+    /// When a file both defines a function AND registers it as a hook
+    /// callback, the function IS live code — it's just invoked through the
+    /// framework rather than through a direct function call. The dead-code
+    /// check uses this field to suppress false positives on such functions.
+    ///
+    /// Populated by extension fingerprint scripts; older scripts may not
+    /// emit it (defaults to empty Vec). Extensions should populate this for
+    /// ALL framework-runtime invocation patterns they can detect in the
+    /// language/framework they support — not just WordPress hooks.
+    #[serde(default)]
+    pub hook_callbacks: Vec<String>,
 }
 
 // ============================================================================

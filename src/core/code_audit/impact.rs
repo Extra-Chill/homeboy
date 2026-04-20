@@ -117,7 +117,7 @@ impl std::fmt::Display for AffectReason {
 ///
 /// Uses `git show <ref>:<path>` to get the base version without checkout,
 /// then runs the extension fingerprint script on that content.
-pub fn fingerprint_from_git_ref(
+pub(crate) fn fingerprint_from_git_ref(
     source_path: &str,
     git_ref: &str,
     relative_path: &str,
@@ -160,6 +160,7 @@ pub fn fingerprint_from_git_ref(
         internal_calls: output.internal_calls,
         call_sites: output.call_sites,
         public_api: output.public_api,
+        hook_callbacks: output.hook_callbacks,
         trait_impl_methods: Vec::new(),
     })
 }
@@ -172,7 +173,7 @@ pub fn fingerprint_from_git_ref(
 ///
 /// For each changed file, retrieves the base version, fingerprints it, and
 /// produces a `SymbolDiff` describing what symbols changed.
-pub fn diff_changed_files(
+pub(crate) fn diff_changed_files(
     source_path: &str,
     git_ref: &str,
     changed_files: &[String],
@@ -360,7 +361,7 @@ fn similarity(a: &str, b: &str) -> f64 {
 /// - `hooks` matching removed hook names
 ///
 /// Returns only files NOT already in the changed set.
-pub fn find_affected_files(
+pub(crate) fn find_affected_files(
     diffs: &[SymbolDiff],
     all_fingerprints: &[&FileFingerprint],
     changed_files: &HashSet<&str>,
@@ -643,26 +644,23 @@ mod tests {
         );
     }
 
+    /// Helper for hook-diff tests: minimal fingerprint carrying only a single hook.
+    fn fingerprint_with_hook(hook_type: &str, hook_name: &str) -> FileFingerprint {
+        make_fingerprint(
+            "Foo.php",
+            vec![],
+            vec![],
+            vec![],
+            None,
+            None,
+            vec![(hook_type, hook_name)],
+        )
+    }
+
     #[test]
     fn test_diff_fingerprints_detects_removed_hook() {
-        let base = make_fingerprint(
-            "Foo.php",
-            vec![],
-            vec![],
-            vec![],
-            None,
-            None,
-            vec![("action", "my_custom_action")],
-        );
-        let current = make_fingerprint(
-            "Foo.php",
-            vec![],
-            vec![],
-            vec![],
-            None,
-            None,
-            vec![("action", "my_renamed_action")],
-        );
+        let base = fingerprint_with_hook("action", "my_custom_action");
+        let current = fingerprint_with_hook("action", "my_renamed_action");
 
         let diff = diff_fingerprints("Foo.php", &base, &current);
         assert!(diff.removed_hooks.contains(&"my_custom_action".to_string()));

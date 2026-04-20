@@ -272,6 +272,7 @@ mod tests {
             internal_calls: vec![],
             call_sites: vec![],
             public_api: vec![],
+            hook_callbacks: vec![],
             trait_impl_methods: vec![],
         }
     }

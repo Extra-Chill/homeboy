@@ -439,6 +439,7 @@ pub fn fingerprint_from_grammar(
         internal_calls,
         call_sites: Vec::new(), // Core grammar engine doesn't extract call sites yet
         public_api,
+        hook_callbacks: Vec::new(), // Core grammar engine doesn't extract hook callbacks yet
         trait_impl_methods,
     })
 }

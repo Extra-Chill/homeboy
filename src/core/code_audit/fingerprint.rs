@@ -53,6 +53,12 @@ pub struct FileFingerprint {
     pub call_sites: Vec<crate::extension::CallSite>,
     /// Public functions/methods exported from this file.
     pub public_api: Vec<String>,
+    /// Functions/methods registered as hook/callback targets from WITHIN
+    /// this file (populated by extension fingerprint scripts). Used by the
+    /// dead-code check to recognize that a function defined and
+    /// hook-registered in the same file IS live code — invoked by the
+    /// framework runtime rather than direct calls from other files.
+    pub hook_callbacks: Vec<String>,
     /// Method names that are trait implementations (called via trait dispatch).
     pub trait_impl_methods: Vec<String>,
 }
@@ -119,6 +125,7 @@ fn fingerprint_via_extension(
         internal_calls: output.internal_calls,
         call_sites: output.call_sites,
         public_api: output.public_api,
+        hook_callbacks: output.hook_callbacks,
         trait_impl_methods: Vec::new(), // Extension scripts don't track this
     })
 }

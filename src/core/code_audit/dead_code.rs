@@ -115,7 +115,40 @@ pub(crate) fn analyze_dead_code(
         // Skip test files — test methods are invoked by the test runner via
         // reflection/convention, not by direct calls from other source files.
         if !is_test_path(&fp.relative_path) {
+            // For languages without finer-grained visibility than "public" (PHP
+            // top-level functions, for example), a public function called from
+            // anywhere in its own file IS referenced — the "make it private"
+            // suggestion doesn't apply, because PHP top-level functions are
+            // always globally accessible. Rust, by contrast, supports
+            // `pub(crate)` / `pub(super)` narrowing, so a self-only public
+            // function IS actionably dead code.
+            let language_allows_self_reference = matches!(
+                fp.language,
+                super::conventions::Language::Php
+                    | super::conventions::Language::JavaScript
+                    | super::conventions::Language::TypeScript
+            );
+
             for export in &fp.public_api {
+                // Skip if this function is registered as a hook/callback target
+                // from within this same file. Such functions ARE referenced —
+                // just by the framework runtime (WordPress hook system, REST
+                // route callbacks, activation hooks, block render callbacks,
+                // etc.) rather than by direct calls from other source files.
+                // (homeboy#1149 — WP plugin bootstrap files)
+                if fp.hook_callbacks.contains(export) {
+                    continue;
+                }
+
+                // For languages without finer visibility, same-file direct
+                // calls count as references. This catches WP plugin bootstrap
+                // patterns where a top-level helper is called from the main
+                // plugin file (e.g., the top-level WPINC guard that runs
+                // `datamachine_check_requirements()` before continuing).
+                if language_allows_self_reference && fp.internal_calls.contains(export) {
+                    continue;
+                }
+
                 // Check if any OTHER file (owned or reference) references this export.
                 let referenced_elsewhere = owned.iter().chain(reference.iter()).any(|other| {
                     // Skip self
@@ -716,6 +749,94 @@ mod tests {
             findings.is_empty(),
             "Reference fingerprints should not produce findings, got: {:?}",
             findings.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn php_hook_callback_suppresses_unreferenced_export() {
+        // data-machine.php pattern: function is defined and registered as a
+        // WordPress hook callback in the same file. The hook system invokes
+        // it, but no other file has a direct call. This is NOT dead code.
+        let mut fp = make_fingerprint(
+            "data-machine.php",
+            vec!["datamachine_activate_plugin"],
+            vec!["datamachine_activate_plugin"],
+            vec![], // no self-calls
+            vec![],
+        );
+        fp.language = Language::Php;
+        fp.hook_callbacks = vec!["datamachine_activate_plugin".to_string()];
+
+        let findings = analyze_dead_code(&[&fp], &[]);
+        let unreferenced: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::UnreferencedExport)
+            .collect();
+        assert!(
+            unreferenced.is_empty(),
+            "Hook-callback registrations should suppress unreferenced_export, got: {:?}",
+            unreferenced
+                .iter()
+                .map(|f| &f.description)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn php_same_file_internal_call_suppresses_unreferenced_export() {
+        // data-machine.php pattern: top-level bootstrap file calls its own
+        // helper functions directly. PHP has no finer visibility than
+        // "public" for top-level functions, so "make it private" is not
+        // actionable advice — the reference IS the justification for export.
+        let mut fp = make_fingerprint(
+            "data-machine.php",
+            vec!["datamachine_check_requirements"],
+            vec!["datamachine_check_requirements"],
+            // Same-file call (e.g., line-20 WPINC guard)
+            vec!["datamachine_check_requirements"],
+            vec![],
+        );
+        fp.language = Language::Php;
+
+        let findings = analyze_dead_code(&[&fp], &[]);
+        let unreferenced: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::UnreferencedExport)
+            .collect();
+        assert!(
+            unreferenced.is_empty(),
+            "PHP same-file internal calls should suppress unreferenced_export, got: {:?}",
+            unreferenced
+                .iter()
+                .map(|f| &f.description)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rust_same_file_internal_call_still_flags_unreferenced_export() {
+        // Rust has pub(crate) / pub(super) for narrowing visibility. A
+        // public function only called from its own file IS actionable dead
+        // code: the suggestion to narrow visibility is concrete and useful.
+        // This test guards against overcorrection from the PHP fix above.
+        let fp = make_fingerprint(
+            "src/foo.rs",
+            vec!["compute"],
+            vec!["compute"],
+            vec!["compute"], // same-file call
+            vec![],
+        );
+        // language defaults to Rust in make_fingerprint
+
+        let findings = analyze_dead_code(&[&fp], &[]);
+        let unreferenced: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::UnreferencedExport)
+            .collect();
+        assert_eq!(
+            unreferenced.len(),
+            1,
+            "Rust public functions called only from their own file should still be flagged for visibility narrowing"
         );
     }
 }
