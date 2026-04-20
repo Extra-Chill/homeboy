@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.13] - 2026-04-20
+
+### Fixed
+- extend hook_callbacks coverage to all WP registration patterns (homeboy#1149)
+
 ## [2.10.12] - 2026-04-19
 
 ### Fixed
