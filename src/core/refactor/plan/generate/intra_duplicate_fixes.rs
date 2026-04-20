@@ -140,25 +140,46 @@ pub(crate) fn generate_intra_duplicate_fixes(
                 // block corrupts the file's delimiter structure.
                 let removal_lines =
                     &lines[removal_start.saturating_sub(1)..second_end.min(lines.len())];
-                let mut brace_depth: i32 = 0;
-                let mut paren_depth: i32 = 0;
-                for line in removal_lines {
-                    for ch in line.chars() {
-                        match ch {
-                            '{' => brace_depth += 1,
-                            '}' => brace_depth -= 1,
-                            '(' => paren_depth += 1,
-                            ')' => paren_depth -= 1,
-                            _ => {}
-                        }
-                    }
-                }
-                if brace_depth != 0 || paren_depth != 0 {
+                let DelimCounts {
+                    brace: brace_depth,
+                    paren: paren_depth,
+                    bracket: bracket_depth,
+                } = count_delimiters(removal_lines);
+                if brace_depth != 0 || paren_depth != 0 || bracket_depth != 0 {
                     skipped.push(SkippedFile {
                         file: finding.file.clone(),
                         reason: format!(
-                            "Duplicate block in `{}` (lines {}-{}) has unbalanced delimiters (braces: {}, parens: {}) — removal would corrupt file",
-                            method_name, second_line, second_end, brace_depth, paren_depth,
+                            "Duplicate block in `{}` (lines {}-{}) has unbalanced delimiters (braces: {}, parens: {}, brackets: {}) — removal would corrupt file",
+                            method_name, second_line, second_end, brace_depth, paren_depth, bracket_depth,
+                        ),
+                    });
+                    continue;
+                }
+
+                // Boundary-depth check: even when the removed slice is internally
+                // balanced, we may be cutting into the middle of an open expression
+                // (e.g. a multi-line function call, array literal, or match arm).
+                // Walk cumulative paren/bracket depth from the top of the file to
+                // the line immediately before `removal_start`. If either depth is
+                // positive, we're mid-expression and removing the slice would
+                // delete arguments/elements that belong to the enclosing call.
+                //
+                // Brace depth is intentionally ignored — method bodies always sit
+                // inside a `{`, so brace depth is expected to be > 0 at the
+                // boundary. Parens and brackets, by contrast, should be 0 at any
+                // statement boundary.
+                let prefix = &lines[..removal_start.saturating_sub(1).min(lines.len())];
+                let DelimCounts {
+                    paren: prefix_paren,
+                    bracket: prefix_bracket,
+                    ..
+                } = count_delimiters(prefix);
+                if prefix_paren > 0 || prefix_bracket > 0 {
+                    skipped.push(SkippedFile {
+                        file: finding.file.clone(),
+                        reason: format!(
+                            "Duplicate block in `{}` starts inside an open expression (paren depth: {}, bracket depth: {}) — auto-removal would corrupt the enclosing call/array. Resolve manually by extracting a helper.",
+                            method_name, prefix_paren, prefix_bracket,
                         ),
                     });
                     continue;
@@ -273,6 +294,72 @@ fn classify_relation(
         DupRelation::SameIndentSmallGap
     } else {
         DupRelation::SameIndentLargeGap
+    }
+}
+
+/// Net delimiter depths for a slice of source lines.
+///
+/// Computed by scanning each line character-by-character while skipping
+/// `//` line comments and `"…"` / `'…'` string literals. This is a
+/// language-agnostic approximation — it handles Rust, PHP, and JS well enough
+/// for the safety checks in this file. It intentionally does NOT handle:
+/// Rust raw strings (`r#"..."#`), block comments (`/* … */`), or nested
+/// string interpolation. False positives from those cases downgrade an
+/// autofix to manual-only, which is the safe direction.
+struct DelimCounts {
+    brace: i32,
+    paren: i32,
+    bracket: i32,
+}
+
+fn count_delimiters(lines: &[&str]) -> DelimCounts {
+    let mut brace = 0i32;
+    let mut paren = 0i32;
+    let mut bracket = 0i32;
+
+    for line in lines {
+        let mut chars = line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                // Skip `//` line comments — everything else on this line is comment.
+                '/' if chars.peek() == Some(&'/') => break,
+                // Skip `#` line comments (shell/PHP hash comments).
+                '#' => break,
+                // Skip string literals — walk to the matching quote, honoring
+                // backslash escapes. This keeps delimiters inside strings
+                // from skewing the depth count (e.g. a `"("` literal).
+                '"' | '\'' => {
+                    let quote = ch;
+                    let mut prev_was_backslash = false;
+                    for inner in chars.by_ref() {
+                        if prev_was_backslash {
+                            prev_was_backslash = false;
+                            continue;
+                        }
+                        if inner == '\\' {
+                            prev_was_backslash = true;
+                            continue;
+                        }
+                        if inner == quote {
+                            break;
+                        }
+                    }
+                }
+                '{' => brace += 1,
+                '}' => brace -= 1,
+                '(' => paren += 1,
+                ')' => paren -= 1,
+                '[' => bracket += 1,
+                ']' => bracket -= 1,
+                _ => {}
+            }
+        }
+    }
+
+    DelimCounts {
+        brace,
+        paren,
+        bracket,
     }
 }
 
@@ -404,6 +491,124 @@ mod tests {
             "        more();", // indent 8
         ];
         assert_eq!(median_indent(&lines, 1, 3), 8);
+    }
+
+    #[test]
+    fn count_delimiters_balanced_block() {
+        let lines = vec![
+            "    let x = foo(1, 2);",
+            "    let y = bar([3, 4]);",
+            "    { let z = 5; }",
+        ];
+        let c = count_delimiters(&lines);
+        assert_eq!(c.brace, 0);
+        assert_eq!(c.paren, 0);
+        assert_eq!(c.bracket, 0);
+    }
+
+    #[test]
+    fn count_delimiters_ignores_delimiters_in_strings() {
+        // A line containing "(" inside a string literal should not change
+        // paren depth.
+        let lines = vec![r#"    let s = "value is (bogus";"#, "    let t = 1;"];
+        let c = count_delimiters(&lines);
+        assert_eq!(c.paren, 0);
+    }
+
+    #[test]
+    fn count_delimiters_ignores_line_comments() {
+        // Delimiters after `//` are inside a comment — must not count.
+        let lines = vec!["    let x = 1; // trailing ( paren", "    let y = 2;"];
+        let c = count_delimiters(&lines);
+        assert_eq!(c.paren, 0);
+    }
+
+    #[test]
+    fn count_delimiters_handles_escaped_quotes_in_strings() {
+        // The escaped quote must not close the string early.
+        let lines = vec![r#"    let s = "with \"quoted\" ( paren";"#];
+        let c = count_delimiters(&lines);
+        assert_eq!(c.paren, 0);
+    }
+
+    #[test]
+    fn count_delimiters_open_paren_increments() {
+        // Multi-line open paren — one line with `(` and nothing to close it.
+        let lines = vec!["    foo(", "        arg,"];
+        let c = count_delimiters(&lines);
+        assert_eq!(c.paren, 1);
+    }
+
+    #[test]
+    fn count_delimiters_open_bracket_increments() {
+        let lines = vec!["    let v = [", "        1,"];
+        let c = count_delimiters(&lines);
+        assert_eq!(c.bracket, 1);
+    }
+
+    // Regression test for issue #1164 — intra_method_duplicate Adjacent
+    // autofix collapsed a multi-line make_fingerprint(…) call by removing
+    // the duplicated prefix lines, which sat *inside* an open `(` boundary.
+    // The boundary-depth check must reject this kind of removal so the fix
+    // is demoted to manual_only instead of shipping compile-broken code.
+    //
+    // Shape (reduced from the real seed):
+    //
+    //   let base = make_fingerprint(
+    //       "Foo.php",
+    //       vec![], vec![], vec![],
+    //       None, None,
+    //       vec![("action", "a")],
+    //   );
+    //   let current = make_fingerprint(
+    //       "Foo.php",
+    //       vec![], vec![], vec![],
+    //       None, None,
+    //       vec![("action", "b")],
+    //   );
+    //
+    // The 5-line window `"Foo.php", / vec![], vec![], vec![], / None, None,`
+    // hashes identically in both calls. Without the boundary-depth check the
+    // fixer would delete the second block, leaving `make_fingerprint( vec![…] )`
+    // with the wrong argument count.
+    #[test]
+    fn boundary_depth_check_blocks_removal_inside_open_call() {
+        // Lines up to and including the line *before* the removal point
+        // (`removal_start - 1`). For the duplicated-second-call case, the
+        // removal would start on the `"Foo.php",` line of the second call,
+        // which sits inside an open `make_fingerprint(` paren opened above.
+        let prefix = vec![
+            "fn demo() {",
+            "    let base = make_fingerprint(",
+            "        \"Foo.php\",",
+            "        vec![], vec![], vec![],",
+            "        None, None,",
+            "        vec![(\"action\", \"a\")],",
+            "    );",
+            "    let current = make_fingerprint(",
+            // Removal would start on the next line — this prefix should
+            // end here with paren depth = 1.
+        ];
+        let c = count_delimiters(&prefix);
+        assert_eq!(
+            c.paren, 1,
+            "removal starts inside open make_fingerprint(…) — paren depth must be > 0",
+        );
+    }
+
+    #[test]
+    fn boundary_depth_check_allows_removal_at_statement_boundary() {
+        // Same overall shape but the removal point is after the closing `);` —
+        // the removal boundary is at statement level, paren depth should be 0.
+        let prefix = vec![
+            "fn demo() {",
+            "    let base = some_call();",
+            "    let first = compute();",
+            // Removal would start below — paren depth must be 0.
+        ];
+        let c = count_delimiters(&prefix);
+        assert_eq!(c.paren, 0);
+        assert_eq!(c.bracket, 0);
     }
 
     #[test]
