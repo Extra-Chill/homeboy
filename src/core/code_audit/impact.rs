@@ -644,18 +644,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_diff_fingerprints_detects_removed_hook() {
-        let base = make_fingerprint(
+    /// Helper for hook-diff tests: minimal fingerprint carrying only a single hook.
+    fn fingerprint_with_hook(hook_type: &str, hook_name: &str) -> FileFingerprint {
+        make_fingerprint(
             "Foo.php",
             vec![],
             vec![],
             vec![],
             None,
             None,
-            vec![("action", "my_custom_action")],
-        );
-        let current = make_fingerprint(vec![("action", "my_renamed_action")]);
+            vec![(hook_type, hook_name)],
+        )
+    }
+
+    #[test]
+    fn test_diff_fingerprints_detects_removed_hook() {
+        let base = fingerprint_with_hook("action", "my_custom_action");
+        let current = fingerprint_with_hook("action", "my_renamed_action");
 
         let diff = diff_fingerprints("Foo.php", &base, &current);
         assert!(diff.removed_hooks.contains(&"my_custom_action".to_string()));
