@@ -78,10 +78,25 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
 
     let mut v = ValidationCollector::new();
 
-    // === Stage 0: Remote sync check (preflight) ===
+    // === Stage 0: Working-tree check (fail-fast) ===
+    //
+    // Run this BEFORE remote sync (which fast-forwards and mutates the tree)
+    // and BEFORE the lint/test gate (which can dump tens of thousands of lines
+    // to stdout, drowning out the real reason a release was blocked).
+    //
+    // The full file-list comparison still happens in Stage 3 once we know the
+    // resolved changelog and version-target paths — at this stage we only know
+    // there's *some* dirty file we can't account for, but that's enough to
+    // bail before doing expensive work. We filter out homeboy-managed
+    // scratch paths (.homeboy-build/, .homeboy-bin/, .homeboy/) here too so
+    // noisy build artifacts don't trigger the early exit.
+    v.capture(validate_working_tree_fail_fast(&component), "working_tree");
+    v.finish_if_errors()?;
+
+    // === Stage 0.5: Remote sync check (preflight) ===
     v.capture(validate_remote_sync(&component), "remote_sync");
 
-    // === Stage 0.5: Code quality checks (lint + test) ===
+    // === Stage 0.6: Code quality checks (lint + test) ===
     if options.skip_checks {
         log_status!("release", "Skipping code quality checks (--skip-checks)");
     } else {
@@ -974,6 +989,89 @@ fn build_release_steps(
     Ok(steps)
 }
 
+/// Path prefixes that are always treated as homeboy-managed scratch space
+/// and should never count as "dirty" during release/version-bump checks.
+///
+/// These are tool-owned artifacts a release should be able to leave on disk
+/// without blocking the next run. Components are not required to gitignore
+/// them (and many don't), so the release pipeline filters them out itself.
+///
+/// Currently:
+/// - `.homeboy-build/` — build staging directory
+/// - `.homeboy-bin/` — locally-built binaries
+/// - `.homeboy/` — generic per-repo scratch directory
+const HOMEBOY_MANAGED_PREFIXES: &[&str] = &[
+    ".homeboy-build/",
+    ".homeboy-build",
+    ".homeboy-bin/",
+    ".homeboy-bin",
+    ".homeboy/",
+    ".homeboy",
+];
+
+/// Returns true if a repo-relative path lives under homeboy-managed scratch space.
+fn is_homeboy_managed_path(rel_path: &str) -> bool {
+    HOMEBOY_MANAGED_PREFIXES
+        .iter()
+        .any(|prefix| rel_path == *prefix || rel_path.starts_with(prefix))
+}
+
+/// Filter out homeboy-managed scratch paths from a list of uncommitted files.
+fn filter_homeboy_managed(files: Vec<String>) -> Vec<String> {
+    files
+        .into_iter()
+        .filter(|f| !is_homeboy_managed_path(f))
+        .collect()
+}
+
+/// Stage 0 fail-fast: refuse to run any release work when the working tree
+/// has unexplained dirty files.
+///
+/// At this stage we don't yet know the resolved changelog path or version-target
+/// paths (Stage 3 does the precise allow-list comparison), so we conservatively
+/// allow only homeboy-managed scratch space. If anything else is dirty we bail
+/// before lint/test/build can dump tens of thousands of lines and drown out
+/// the real error.
+fn validate_working_tree_fail_fast(component: &Component) -> Result<()> {
+    let uncommitted = crate::git::get_uncommitted_changes(&component.local_path)?;
+    if !uncommitted.has_changes {
+        return Ok(());
+    }
+
+    let all_files: Vec<String> = uncommitted
+        .staged
+        .iter()
+        .chain(uncommitted.unstaged.iter())
+        .chain(uncommitted.untracked.iter())
+        .cloned()
+        .collect();
+
+    let unexpected = filter_homeboy_managed(all_files);
+    if unexpected.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "working_tree",
+        "Uncommitted changes detected — refusing to release",
+        None,
+        Some(vec![
+            "Commit, stash, or discard changes before releasing".to_string(),
+            format!(
+                "Unexpected dirty files ({}): {}{}",
+                unexpected.len(),
+                unexpected
+                    .iter()
+                    .take(10)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if unexpected.len() > 10 { ", …" } else { "" }
+            ),
+        ]),
+    ))
+}
+
 /// Get list of files allowed to be dirty during release (relative paths).
 fn get_release_allowed_files(
     changelog_path: &std::path::Path,
@@ -1006,6 +1104,9 @@ fn get_release_allowed_files(
 }
 
 /// Get uncommitted files that are NOT in the allowed list.
+///
+/// Homeboy-managed scratch paths (`.homeboy-build/`, `.homeboy-bin/`, etc.)
+/// are filtered out here too, mirroring the Stage 0 fail-fast filter.
 fn get_unexpected_uncommitted_files(
     uncommitted: &UncommittedChanges,
     allowed: &[String],
@@ -1019,6 +1120,7 @@ fn get_unexpected_uncommitted_files(
 
     all_uncommitted
         .into_iter()
+        .filter(|f| !is_homeboy_managed_path(f))
         .filter(|f| !allowed.iter().any(|a| f.ends_with(a) || a.ends_with(*f)))
         .cloned()
         .collect()
@@ -1026,8 +1128,11 @@ fn get_unexpected_uncommitted_files(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_uncovered_commits, normalize_changelog_text, strip_pr_reference};
-    use crate::git::{CommitCategory, CommitInfo};
+    use super::{
+        filter_homeboy_managed, find_uncovered_commits, get_unexpected_uncommitted_files,
+        is_homeboy_managed_path, normalize_changelog_text, strip_pr_reference,
+    };
+    use crate::git::{CommitCategory, CommitInfo, UncommittedChanges};
 
     fn commit(subject: &str, category: CommitCategory) -> CommitInfo {
         CommitInfo {
@@ -1177,6 +1282,94 @@ mod tests {
             "delete AgentType class — replace with string literals"
         );
         assert_eq!(fixed[0], "queue-add uses unified check-duplicate");
+    }
+
+    // ---- homeboy-managed scratch path filtering (issue #1162) ----
+
+    #[test]
+    fn homeboy_build_dir_is_managed_path() {
+        assert!(is_homeboy_managed_path(".homeboy-build/artifact.zip"));
+        assert!(is_homeboy_managed_path(".homeboy-build/"));
+        assert!(is_homeboy_managed_path(".homeboy-build"));
+    }
+
+    #[test]
+    fn homeboy_bin_dir_is_managed_path() {
+        assert!(is_homeboy_managed_path(".homeboy-bin/homeboy"));
+        assert!(is_homeboy_managed_path(".homeboy-bin"));
+    }
+
+    #[test]
+    fn homeboy_scratch_dir_is_managed_path() {
+        assert!(is_homeboy_managed_path(".homeboy/cache"));
+    }
+
+    #[test]
+    fn user_paths_are_not_managed() {
+        assert!(!is_homeboy_managed_path("src/main.rs"));
+        assert!(!is_homeboy_managed_path("docs/changelog.md"));
+        assert!(!is_homeboy_managed_path("homeboy.json"));
+        assert!(!is_homeboy_managed_path(".gitignore"));
+        // Defensive — a file that merely contains the string should not match.
+        assert!(!is_homeboy_managed_path("src/.homeboy-build/foo"));
+    }
+
+    #[test]
+    fn filter_homeboy_managed_drops_only_managed_paths() {
+        let files = vec![
+            ".homeboy-build/artifact.zip".to_string(),
+            "src/main.rs".to_string(),
+            ".homeboy-bin/homeboy".to_string(),
+            "Cargo.toml".to_string(),
+        ];
+        let filtered = filter_homeboy_managed(files);
+        assert_eq!(filtered, vec!["src/main.rs", "Cargo.toml"]);
+    }
+
+    fn uncommitted(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> UncommittedChanges {
+        UncommittedChanges {
+            has_changes: !staged.is_empty() || !unstaged.is_empty() || !untracked.is_empty(),
+            staged: staged.iter().map(|s| s.to_string()).collect(),
+            unstaged: unstaged.iter().map(|s| s.to_string()).collect(),
+            untracked: untracked.iter().map(|s| s.to_string()).collect(),
+            hint: None,
+        }
+    }
+
+    /// The headline regression for #1162: a stale `.homeboy-build/` directory
+    /// from a previous build must not block the next release.
+    #[test]
+    fn unexpected_files_skip_homeboy_build_dir() {
+        let changes = uncommitted(&[], &[], &[".homeboy-build/data-machine-0.70.1.zip"]);
+        let unexpected = get_unexpected_uncommitted_files(&changes, &[]);
+        assert!(
+            unexpected.is_empty(),
+            "homeboy-managed scratch should never trigger working_tree error, got: {:?}",
+            unexpected
+        );
+    }
+
+    #[test]
+    fn unexpected_files_still_catch_user_changes() {
+        let changes = uncommitted(&["src/lib.rs"], &[], &[".homeboy-build/foo"]);
+        let unexpected = get_unexpected_uncommitted_files(&changes, &[]);
+        assert_eq!(unexpected, vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn unexpected_files_honor_allowed_list_alongside_homeboy_filter() {
+        let changes = uncommitted(
+            &["docs/changelog.md", "Cargo.toml"],
+            &[],
+            &[".homeboy-build/foo"],
+        );
+        let allowed = vec!["docs/changelog.md".to_string(), "Cargo.toml".to_string()];
+        let unexpected = get_unexpected_uncommitted_files(&changes, &allowed);
+        assert!(
+            unexpected.is_empty(),
+            "allowed files + homeboy scratch should yield clean result, got: {:?}",
+            unexpected
+        );
     }
 
     #[test]
