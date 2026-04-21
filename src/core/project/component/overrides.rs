@@ -41,14 +41,22 @@ fn apply_overrides_layer(
 ///
 /// Resolution order: component (repo portable config) → fleet defaults → project overrides.
 /// Fleet-level overrides provide defaults, project-level overrides take precedence.
+///
+/// `cli_path` has an extra fallback step: if no explicit override at any layer
+/// sets it, the project-scoped `Project::cli_path` (or Studio auto-detect) fills
+/// it in via [`crate::project::project_cli_path`]. This makes "every component
+/// on this site uses `studio wp`" a one-line project config instead of a per-
+/// component repeat. Component-level `cli_path` still wins as the most-specific
+/// escape hatch.
 pub fn apply_component_overrides(
     component: &crate::component::Component,
     project: &Project,
 ) -> crate::component::Component {
     let fleet_overrides = resolve_fleet_overrides(project, &component.id);
     let project_overrides = project.component_overrides.get(&component.id);
+    let project_cli_fallback = crate::project::project_cli_path(project);
 
-    if fleet_overrides.is_none() && project_overrides.is_none() {
+    if fleet_overrides.is_none() && project_overrides.is_none() && project_cli_fallback.is_none() {
         return component.clone();
     }
 
@@ -59,9 +67,19 @@ pub fn apply_component_overrides(
         apply_overrides_layer(&mut merged, overrides);
     }
 
-    // Apply project-level overrides on top (highest precedence)
+    // Apply project-level component overrides on top (highest precedence
+    // among explicit overrides)
     if let Some(overrides) = project_overrides {
         apply_overrides_layer(&mut merged, overrides);
+    }
+
+    // cli_path-only fallback: project-scoped CLI path (and Studio auto-detect)
+    // fills in the gap when no explicit override at any layer set it. This is
+    // intentionally last so any explicit override above wins.
+    if merged.cli_path.is_none() {
+        if let Some(cli_path) = project_cli_fallback {
+            merged.cli_path = Some(cli_path);
+        }
     }
 
     merged
@@ -248,5 +266,77 @@ mod tests {
 
         let result = apply_component_overrides(&component, &project);
         assert_eq!(result.cli_path, Some("studio wp".to_string()));
+    }
+
+    /// Project-scoped `cli_path` fills in when no explicit component override sets it.
+    /// This is the headline of #1165 — one config line on the project, not per component.
+    #[test]
+    fn project_cli_path_fills_in_for_unset_components() {
+        let component = base_component("my-plugin");
+        let project = Project {
+            id: "my-site".to_string(),
+            cli_path: Some("studio wp".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_component_overrides(&component, &project);
+        assert_eq!(result.cli_path, Some("studio wp".to_string()));
+    }
+
+    /// Component-level override is the most-specific escape hatch and wins
+    /// over project-scoped `cli_path`.
+    #[test]
+    fn component_override_wins_over_project_cli_path() {
+        let component = base_component("my-plugin");
+
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "my-plugin".to_string(),
+            ProjectComponentOverrides {
+                cli_path: Some("lando wp".to_string()),
+                ..Default::default()
+            },
+        );
+        let project = Project {
+            id: "my-site".to_string(),
+            cli_path: Some("studio wp".to_string()),
+            component_overrides: overrides,
+            ..Default::default()
+        };
+
+        let result = apply_component_overrides(&component, &project);
+        assert_eq!(result.cli_path, Some("lando wp".to_string()));
+    }
+
+    /// Component's own (homeboy.json) `cli_path` is the highest-precedence
+    /// escape hatch and should not be clobbered by project-scoped fallback.
+    #[test]
+    fn component_repo_cli_path_wins_over_project_cli_path() {
+        let mut component = base_component("my-plugin");
+        component.cli_path = Some("docker wp".to_string());
+
+        let project = Project {
+            id: "my-site".to_string(),
+            cli_path: Some("studio wp".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_component_overrides(&component, &project);
+        assert_eq!(result.cli_path, Some("docker wp".to_string()));
+    }
+
+    /// When neither explicit overrides nor project-scoped `cli_path` are set,
+    /// `cli_path` stays `None` and downstream resolution falls through to the
+    /// extension default (or `"wp"`).
+    #[test]
+    fn unset_everywhere_stays_none() {
+        let component = base_component("my-plugin");
+        let project = Project {
+            id: "my-site".to_string(),
+            ..Default::default()
+        };
+
+        let result = apply_component_overrides(&component, &project);
+        assert_eq!(result.cli_path, None);
     }
 }

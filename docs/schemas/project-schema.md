@@ -25,6 +25,7 @@ Project configuration defines deployable environments stored in `projects/<id>.j
   "table_groupings": [],
   "sub_targets": [],
   "component_groupings": [],
+  "cli_path": "string",
   "tools": {},
   "extensions": {}
 }
@@ -81,6 +82,7 @@ Project configuration defines deployable environments stored in `projects/<id>.j
   - **`id`** (string): Unique grouping identifier
   - **`name`** (string): Grouping name
   - **`member_ids`** (array): Component IDs in this group
+- **`cli_path`** (string): Project-scoped CLI path used by extension deploy install steps. On any given site the WP-CLI entrypoint is fixed (`wp`, `studio wp`, a Lando wrapper, etc.) and shared by every component deployed there, so this lives at the project layer instead of being repeated per component. Component-level `component_overrides[id].cli_path` still wins as the most-specific escape hatch. If unset, the deploy resolver auto-detects Studio sites (projects whose `base_path` is under `~/Studio/`) and defaults them to `"studio wp"`.
 - **`tools`** (object): Project-specific tool configurations
   - Keys are tool identifiers (e.g., `"newsletter"`, `"bandcamp_scraper"`)
   - Values are tool-specific setting objects
