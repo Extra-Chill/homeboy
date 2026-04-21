@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.89.0] - 2026-04-21
+
+### Added
+- project-scoped cli_path with Studio auto-detect (#1165)
+
 ## [0.88.11] - 2026-04-20
 
 ### Fixed
