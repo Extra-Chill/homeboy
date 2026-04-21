@@ -1115,8 +1115,7 @@ fn ensure_changelog_initialized(component: &Component) -> Result<()> {
         return Ok(());
     };
 
-    let configured_path =
-        crate::paths::resolve_path(&component.local_path, target);
+    let configured_path = crate::paths::resolve_path(&component.local_path, target);
     if configured_path.exists() {
         return Ok(());
     }
@@ -1134,10 +1133,7 @@ fn ensure_changelog_initialized(component: &Component) -> Result<()> {
     }
 
     let settings = changelog::resolve_effective_settings(Some(component));
-    let template = format!(
-        "# Changelog\n\n## {}\n\n",
-        settings.next_section_label,
-    );
+    let template = format!("# Changelog\n\n## {}\n\n", settings.next_section_label,);
 
     crate::engine::local_files::local().write(&configured_path, &template)?;
 
@@ -1481,7 +1477,11 @@ mod tests {
 
         let content = std::fs::read_to_string(&changelog_path).expect("file created");
         assert!(content.contains("# Changelog"), "has title: {}", content);
-        assert!(content.contains("## Unreleased"), "has unreleased: {}", content);
+        assert!(
+            content.contains("## Unreleased"),
+            "has unreleased: {}",
+            content
+        );
     }
 
     /// Nested targets like `docs/CHANGELOG.md` must have the parent directory
@@ -1510,8 +1510,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
         let changelog_path = temp.path().join("CHANGELOG.md");
-        let original =
-            "# Changelog\n\n## [1.0.0] - 2026-01-01\n\n### Added\n- real release\n";
+        let original = "# Changelog\n\n## [1.0.0] - 2026-01-01\n\n### Added\n- real release\n";
         std::fs::write(&changelog_path, original).unwrap();
 
         ensure_changelog_initialized(&component).expect("no-op on existing file");

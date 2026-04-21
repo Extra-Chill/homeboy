@@ -621,9 +621,8 @@ mod tests {
             vec!["initial public release".to_string()],
         );
 
-        let result =
-            validate_and_finalize_changelog(&component, "0.1.0", "0.1.0", Some(&entries))
-                .expect("bootstrap finalize should succeed");
+        let result = validate_and_finalize_changelog(&component, "0.1.0", "0.1.0", Some(&entries))
+            .expect("bootstrap finalize should succeed");
 
         assert!(result.changelog_finalized);
         assert!(result.changelog_changed);
@@ -644,11 +643,7 @@ mod tests {
     fn validate_changelog_for_bump_does_not_require_prior_version() {
         let temp_dir = tempfile::tempdir().unwrap();
         let changelog_path = temp_dir.path().join("CHANGELOG.md");
-        fs::write(
-            &changelog_path,
-            "# Changelog\n\n## Unreleased\n- seed\n",
-        )
-        .unwrap();
+        fs::write(&changelog_path, "# Changelog\n\n## Unreleased\n- seed\n").unwrap();
 
         let component = make_test_component(&temp_dir);
         let err = validate_changelog_for_bump(&component, "0.1.0", "0.2.0");
