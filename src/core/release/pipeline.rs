@@ -103,6 +103,22 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         v.capture(validate_code_quality(&component), "code_quality");
     }
 
+    // === Stage 0.7: Auto-initialize changelog (first-release bootstrap) ===
+    //
+    // If `changelog_target` is configured but the file doesn't exist on disk,
+    // synthesize a minimal changelog so downstream stages have something to
+    // read and finalize. Without this, three stages below all fail with
+    // "File not found" for the same root cause and none of their hints
+    // mention `homeboy changelog init`. See #1172.
+    //
+    // Skipped in dry-run to avoid mutating the working tree during a preview.
+    if !options.dry_run {
+        v.capture(
+            ensure_changelog_initialized(&component),
+            "changelog_bootstrap",
+        );
+    }
+
     // Detect monorepo context for path-scoped commits and component-prefixed tags.
     let monorepo = git::MonorepoContext::detect(&component.local_path, component_id);
 
@@ -1072,6 +1088,69 @@ fn validate_working_tree_fail_fast(component: &Component) -> Result<()> {
     ))
 }
 
+/// First-release bootstrap: if the component's configured `changelog_target`
+/// doesn't exist on disk (and no fallback candidate exists either), synthesize
+/// a minimal changelog so the downstream release stages have a file to read
+/// and finalize.
+///
+/// Without this, three stages below all fail with the same `File not found`
+/// error — `commits`, `changelog`, and `changelog_sync` each read the
+/// changelog independently — and none of their hints point at
+/// `homeboy changelog init`. See #1172.
+///
+/// Writes a template matching `homeboy changelog init`: a `# Changelog` title
+/// and a `## Unreleased` section. The downstream `finalize_with_generated_entries`
+/// or `finalize_next_section` then replaces `## Unreleased` with the real
+/// `## [x.y.z] - YYYY-MM-DD` section, so the template is transient — it
+/// lands on disk only for the span of one release run.
+///
+/// No-op when:
+/// - `changelog_target` is unset (resolver already fails with a teaching error),
+/// - the configured path exists,
+/// - a fallback candidate exists (resolver's discovery covers this case).
+fn ensure_changelog_initialized(component: &Component) -> Result<()> {
+    let Some(ref target) = component.changelog_target else {
+        // No target configured — let resolve_changelog_path() emit its
+        // existing "No changelog configured" teaching error downstream.
+        return Ok(());
+    };
+
+    let configured_path =
+        crate::paths::resolve_path(&component.local_path, target);
+    if configured_path.exists() {
+        return Ok(());
+    }
+
+    // If a fallback candidate exists, resolve_changelog_path() will pick
+    // it up — don't overwrite it with a fresh template.
+    let repo_root = std::path::Path::new(&component.local_path);
+    if changelog::discover_changelog_relative_path(repo_root).is_some() {
+        return Ok(());
+    }
+
+    // Create the parent directory (e.g. `docs/`) before writing the file.
+    if let Some(parent) = configured_path.parent() {
+        crate::engine::local_files::local().ensure_dir(parent)?;
+    }
+
+    let settings = changelog::resolve_effective_settings(Some(component));
+    let template = format!(
+        "# Changelog\n\n## {}\n\n",
+        settings.next_section_label,
+    );
+
+    crate::engine::local_files::local().write(&configured_path, &template)?;
+
+    log_status!(
+        "release",
+        "Initialized changelog at {} (first release for {})",
+        configured_path.display(),
+        component.id
+    );
+
+    Ok(())
+}
+
 /// Get list of files allowed to be dirty during release (relative paths).
 fn get_release_allowed_files(
     changelog_path: &std::path::Path,
@@ -1129,9 +1208,11 @@ fn get_unexpected_uncommitted_files(
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_homeboy_managed, find_uncovered_commits, get_unexpected_uncommitted_files,
-        is_homeboy_managed_path, normalize_changelog_text, strip_pr_reference,
+        ensure_changelog_initialized, filter_homeboy_managed, find_uncovered_commits,
+        get_unexpected_uncommitted_files, is_homeboy_managed_path, normalize_changelog_text,
+        strip_pr_reference,
     };
+    use crate::component::Component;
     use crate::git::{CommitCategory, CommitInfo, UncommittedChanges};
 
     fn commit(subject: &str, category: CommitCategory) -> CommitInfo {
@@ -1370,6 +1451,113 @@ mod tests {
             "allowed files + homeboy scratch should yield clean result, got: {:?}",
             unexpected
         );
+    }
+
+    fn component_with_changelog_target(
+        temp_dir: &tempfile::TempDir,
+        target: Option<&str>,
+    ) -> Component {
+        Component {
+            id: "test-component".to_string(),
+            local_path: temp_dir.path().to_string_lossy().to_string(),
+            remote_path: String::new(),
+            changelog_target: target.map(|s| s.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Regression for #1172: first release with `changelog_target` configured
+    /// but no file on disk. The preflight must create the file so downstream
+    /// stages don't all fail with "File not found".
+    #[test]
+    fn ensure_changelog_initialized_creates_missing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
+
+        let changelog_path = temp.path().join("CHANGELOG.md");
+        assert!(!changelog_path.exists(), "precondition: no changelog yet");
+
+        ensure_changelog_initialized(&component).expect("preflight should bootstrap");
+
+        let content = std::fs::read_to_string(&changelog_path).expect("file created");
+        assert!(content.contains("# Changelog"), "has title: {}", content);
+        assert!(content.contains("## Unreleased"), "has unreleased: {}", content);
+    }
+
+    /// Nested targets like `docs/CHANGELOG.md` must have the parent directory
+    /// created before the file is written.
+    #[test]
+    fn ensure_changelog_initialized_creates_parent_dir_for_nested_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = component_with_changelog_target(&temp, Some("docs/CHANGELOG.md"));
+
+        let docs_dir = temp.path().join("docs");
+        assert!(!docs_dir.exists(), "precondition: no docs/ yet");
+
+        ensure_changelog_initialized(&component).expect("preflight should bootstrap");
+
+        assert!(docs_dir.is_dir(), "docs/ parent should be created");
+        assert!(
+            temp.path().join("docs/CHANGELOG.md").exists(),
+            "changelog should land at docs/CHANGELOG.md"
+        );
+    }
+
+    /// Idempotent: if the configured path already exists, leave it alone.
+    /// A second release run must not overwrite an existing changelog.
+    #[test]
+    fn ensure_changelog_initialized_leaves_existing_file_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
+        let changelog_path = temp.path().join("CHANGELOG.md");
+        let original =
+            "# Changelog\n\n## [1.0.0] - 2026-01-01\n\n### Added\n- real release\n";
+        std::fs::write(&changelog_path, original).unwrap();
+
+        ensure_changelog_initialized(&component).expect("no-op on existing file");
+
+        let after = std::fs::read_to_string(&changelog_path).unwrap();
+        assert_eq!(after, original, "existing changelog must not be rewritten");
+    }
+
+    /// If a fallback candidate (e.g. `docs/CHANGELOG.md`) exists but the
+    /// configured target points elsewhere, prefer the fallback (the resolver
+    /// already does this) instead of creating a second changelog alongside.
+    #[test]
+    fn ensure_changelog_initialized_defers_to_existing_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
+
+        // Create a fallback candidate at a different location.
+        std::fs::create_dir_all(temp.path().join("docs")).unwrap();
+        let fallback = temp.path().join("docs/CHANGELOG.md");
+        std::fs::write(&fallback, "# Changelog\n\n## [0.1.0] - 2026-01-01\n").unwrap();
+
+        ensure_changelog_initialized(&component).expect("defer to fallback");
+
+        // The configured target should NOT have been created — the resolver
+        // will pick up the fallback instead.
+        assert!(
+            !temp.path().join("CHANGELOG.md").exists(),
+            "should not create duplicate when fallback exists"
+        );
+    }
+
+    /// If no `changelog_target` is configured at all, the preflight is a
+    /// no-op — `resolve_changelog_path()` downstream emits its existing
+    /// "No changelog configured" teaching error.
+    #[test]
+    fn ensure_changelog_initialized_is_noop_without_configured_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = component_with_changelog_target(&temp, None);
+
+        ensure_changelog_initialized(&component).expect("no-op without target");
+
+        // No file created.
+        for entry in std::fs::read_dir(temp.path()).unwrap() {
+            let path = entry.unwrap().path();
+            panic!("should have created nothing, but found: {}", path.display());
+        }
     }
 
     #[test]
