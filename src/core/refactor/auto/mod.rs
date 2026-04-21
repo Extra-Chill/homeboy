@@ -22,12 +22,12 @@ pub use outcome::{
 };
 pub use policy::apply_fix_policy;
 pub use sidecar::parse_fix_results_file;
-pub use verify::{
-    applied_files_from_chunks, capture_pre_apply_snapshot, run_verify_gate, VerifyOutcome,
-    VERIFY_ENV_VAR,
-};
 pub use summary::{
     primitive_name, summarize_audit_fix_result, summarize_fix_results,
     summarize_optional_fix_results,
 };
 pub use tracking::{changed_file_set, count_newly_changed, newly_changed_files};
+pub use verify::{
+    applied_files_from_chunks, capture_pre_apply_snapshot, run_verify_gate, VerifyOutcome,
+    VERIFY_ENV_VAR,
+};
