@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.2] - 2026-04-22
+
+### Changed
+- strip duplicated guard logic, delegate to homeboy core
+
 ## [1.16.1] - 2026-04-07
 
 ### Fixed
