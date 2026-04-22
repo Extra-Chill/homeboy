@@ -5,26 +5,16 @@ set -euo pipefail
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 source "${GITHUB_ACTION_PATH}/scripts/scope/context.sh"
 
-AUTOFIX_MAX_COMMITS="${AUTOFIX_MAX_COMMITS:-2}"
-if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then
-  AUTOFIX_MAX_COMMITS=2
-fi
-
-BASE="$(scope_base_ref)"
-AUTOFIX_CAP_HIT=false
+# ── CI-only pre-flight guards ──
+# These guards are CI-specific (actor identity, stale binary, PR state)
+# and have no equivalent in homeboy core. Domain guards (revert detection,
+# bot HEAD detection, cap enforcement, disabled-label) live in core's
+# guard.rs and are checked during `homeboy refactor --write`.
 
 if [ "${GITHUB_ACTOR:-}" = "github-actions[bot]" ] || [ "${GITHUB_ACTOR:-}" = "homeboy-ci[bot]" ]; then
   echo "Skipping autofix: workflow actor is ${GITHUB_ACTOR} (bot loop guard)"
   echo "attempted=false" >> "${GITHUB_OUTPUT}"
   echo "status=skipped-bot-loop" >> "${GITHUB_OUTPUT}"
-  echo "committed=false" >> "${GITHUB_OUTPUT}"
-  exit 0
-fi
-
-if head_commit_is_autofix_bot; then
-  echo "Skipping autofix: HEAD commit author is ${AUTOFIX_BOT_NAME} (human-commit-only guard)"
-  echo "attempted=false" >> "${GITHUB_OUTPUT}"
-  echo "status=skipped-head-bot-author" >> "${GITHUB_OUTPUT}"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
   exit 0
 fi
@@ -37,11 +27,6 @@ if [ -n "${AUTOFIX_LABEL:-}" ]; then
     echo "committed=false" >> "${GITHUB_OUTPUT}"
     exit 0
   fi
-fi
-
-REVERT_BASE="${BASE:-}"
-if [ -z "${REVERT_BASE}" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
-  REVERT_BASE="origin/${GITHUB_BASE_REF}"
 fi
 
 COMP_ID="$(resolve_component_id)"
@@ -71,42 +56,9 @@ reset_to_target_head() {
   git clean -fd
 }
 
-compute_autofix_commit_count() {
-  if [ -n "${BASE}" ]; then
-    git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "${BASE}..HEAD" 2>/dev/null | wc -l | xargs
-  elif [ -n "${GITHUB_BASE_REF:-}" ]; then
-    git log --oneline --grep "^${AUTOFIX_COMMIT_PREFIX}" "origin/${GITHUB_BASE_REF}..HEAD" 2>/dev/null | wc -l | xargs
-  else
-    local count=0
-    while IFS= read -r subject; do
-      if [[ "${subject}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
-        count=$((count + 1))
-      else
-        break
-      fi
-    done < <(git log --format=%s -n "$((AUTOFIX_MAX_COMMITS + 1))" 2>/dev/null)
-    printf '%s\n' "${count}"
-  fi
-}
-
-refresh_autofix_cap_state() {
-  AUTOFIX_COMMIT_COUNT="$(compute_autofix_commit_count)"
-  AUTOFIX_CAP_HIT=false
-
-  if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
-    echo "Autofix cap reached: ${AUTOFIX_COMMIT_COUNT} autofix commits on this branch (max ${AUTOFIX_MAX_COMMITS})"
-    if [ "$(scope_context)" = "pr" ]; then
-      echo "Skipping autofix entirely (PR context — baseline updates also skip on PRs)"
-      echo "attempted=false" >> "${GITHUB_OUTPUT}"
-      echo "status=skipped-cap-reached" >> "${GITHUB_OUTPUT}"
-      echo "committed=false" >> "${GITHUB_OUTPUT}"
-      exit 0
-    fi
-    echo "Skipping code fixes but will still attempt baseline update (non-PR context)"
-    AUTOFIX_CAP_HIT=true
-  fi
-}
-
+# CI-only post-sync guards: PR state and bot-subject detection.
+# Domain guards (revert, cap, disabled-label, force-push) run inside
+# homeboy refactor --write via guard.rs and surface as guard_block in JSON.
 guard_synced_pr_head() {
   if ! pr_is_active; then
     echo "Skipping autofix: PR #${PR_NUMBER} is no longer open (merged or closed)"
@@ -115,34 +67,42 @@ guard_synced_pr_head() {
     echo "committed=false" >> "${GITHUB_OUTPUT}"
     exit 0
   fi
+}
 
-  refresh_autofix_cap_state
+# Check the refactor JSON output for a guard_block from homeboy core.
+# Returns 0 if blocked (and sets guard status outputs), 1 if clear.
+check_core_guard_block() {
+  local output_dir="$1"
 
-  if head_commit_is_autofix_bot; then
-    echo "Skipping autofix: synced HEAD commit author is ${AUTOFIX_BOT_NAME} (human-commit-only guard)"
-    echo "attempted=false" >> "${GITHUB_OUTPUT}"
-    echo "status=skipped-head-bot-author" >> "${GITHUB_OUTPUT}"
+  local json_files
+  json_files=$(find "${output_dir}" -name '*.json' -type f 2>/dev/null)
+  [ -n "${json_files}" ] || return 1
+
+  local guard_status
+  guard_status="$(jq -r '[.[] | .data // . | select(type == "object") | .guard_block // empty | .reason] | first // empty' ${json_files} 2>/dev/null || true)"
+
+  if [ -n "${guard_status}" ]; then
+    # Map core's kebab-case reason to the action's skipped-* status convention
+    local status="skipped-guard"
+    case "${guard_status}" in
+      reverted)        status="skipped-reverted" ;;
+      force-pushed)    status="skipped-force-pushed" ;;
+      disabled-label)  status="skipped-disabled-label" ;;
+      head-is-bot-commit) status="skipped-head-bot-author" ;;
+      cap-reached)     status="skipped-cap-reached" ;;
+    esac
+
+    local guard_message
+    guard_message="$(jq -r '[.[] | .data // . | select(type == "object") | .guard_block // empty | .message // .reason] | first // "unknown"' ${json_files} 2>/dev/null || echo "unknown")"
+
+    echo "Skipping autofix: core guard blocked — ${guard_message}"
+    echo "attempted=true" >> "${GITHUB_OUTPUT}"
+    echo "status=${status}" >> "${GITHUB_OUTPUT}"
     echo "committed=false" >> "${GITHUB_OUTPUT}"
-    exit 0
+    return 0
   fi
 
-  LAST_SUBJECT=$(git log -1 --pretty=%s 2>/dev/null || true)
-  if [[ "${LAST_SUBJECT}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
-    echo "Skipping autofix: synced HEAD already an autofix commit"
-    echo "attempted=false" >> "${GITHUB_OUTPUT}"
-    echo "status=skipped-head-autofix" >> "${GITHUB_OUTPUT}"
-    echo "committed=false" >> "${GITHUB_OUTPUT}"
-    exit 0
-  fi
-
-  if has_reverted_autofix "${REVERT_BASE}"; then
-    echo "Skipping autofix: a previous autofix commit was reverted on this branch"
-    echo "This indicates the autofix output was incorrect — manual review required."
-    echo "attempted=false" >> "${GITHUB_OUTPUT}"
-    echo "status=skipped-reverted" >> "${GITHUB_OUTPUT}"
-    echo "committed=false" >> "${GITHUB_OUTPUT}"
-    exit 0
-  fi
+  return 1
 }
 
 run_autofixes() {
@@ -202,47 +162,31 @@ commit_autofix_changes() {
   AUTOFIX_FIX_TYPES=""
   AUTOFIX_FINDING_TYPES=""
 
-  # Detect baseline-only changes: only homeboy.json modified while cap was hit
-  local baseline_only=false
-  if [ "${AUTOFIX_CAP_HIT}" = true ]; then
-    if echo "${AUTOFIX_CHANGED_FILES}" | grep -qx "homeboy.json" && [ "${AUTOFIX_FILE_COUNT}" -eq 1 ]; then
-      baseline_only=true
+  for FIX_CMD in "${FIX_ARRAY[@]}"; do
+    FIX_CMD=$(echo "${FIX_CMD}" | xargs)
+    BASE=$(echo "${FIX_CMD}" | awk '{print $1}')
+    if [ -n "${AUTOFIX_FIX_TYPES}" ]; then
+      AUTOFIX_FIX_TYPES+=", "
+    fi
+    AUTOFIX_FIX_TYPES+="${BASE}"
+  done
+
+  AUTOFIX_DETAILS=""
+  AUTOFIX_TOTAL_FIXES=""
+  # Read fix details from the autofix run's own output (AUTOFIX_OUTPUT_DIR),
+  # not the diagnostic run's output (HOMEBOY_OUTPUT_DIR). The autofix run
+  # captures --output with the actual fix results and fixer categories.
+  local details_dir="${AUTOFIX_OUTPUT_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
+  if [ -n "${details_dir}" ] && [ -d "${details_dir}" ]; then
+    local raw_details
+    raw_details="$(extract_fix_details_from_output "${details_dir}")"
+    if [ -n "${raw_details}" ]; then
+      AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
+      AUTOFIX_DETAILS="$(echo "${raw_details}" | tail -n +2)"
     fi
   fi
 
-  if [ "${baseline_only}" = true ]; then
-    # Use a distinct commit prefix so it doesn't count toward the autofix cap
-    COMMIT_MSG="chore(ci): update audit baseline
-
-Baseline-only update (autofix cap reached, code fixes skipped).
-homeboy.json"
-  else
-    for FIX_CMD in "${FIX_ARRAY[@]}"; do
-      FIX_CMD=$(echo "${FIX_CMD}" | xargs)
-      BASE=$(echo "${FIX_CMD}" | awk '{print $1}')
-      if [ -n "${AUTOFIX_FIX_TYPES}" ]; then
-        AUTOFIX_FIX_TYPES+=", "
-      fi
-      AUTOFIX_FIX_TYPES+="${BASE}"
-    done
-
-    AUTOFIX_DETAILS=""
-    AUTOFIX_TOTAL_FIXES=""
-    # Read fix details from the autofix run's own output (AUTOFIX_OUTPUT_DIR),
-    # not the diagnostic run's output (HOMEBOY_OUTPUT_DIR). The autofix run
-    # captures --output with the actual fix results and fixer categories.
-    local details_dir="${AUTOFIX_OUTPUT_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
-    if [ -n "${details_dir}" ] && [ -d "${details_dir}" ]; then
-      local raw_details
-      raw_details="$(extract_fix_details_from_output "${details_dir}")"
-      if [ -n "${raw_details}" ]; then
-        AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
-        AUTOFIX_DETAILS="$(echo "${raw_details}" | tail -n +2)"
-      fi
-    fi
-
-    COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_DETAILS}" "${AUTOFIX_TOTAL_FIXES}")"
-  fi
+  COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_DETAILS}" "${AUTOFIX_TOTAL_FIXES}")"
 
   BOT_NAME="homeboy-ci[bot]"
   BOT_EMAIL="266378653+homeboy-ci[bot]@users.noreply.github.com"
@@ -311,11 +255,13 @@ fi
 
 guard_synced_pr_head
 
-# Run code fixes only when under the cap
-if [ "${AUTOFIX_CAP_HIT}" = false ]; then
-  run_autofixes
-else
-  echo "Skipping code fixes (autofix cap reached)"
+run_autofixes
+
+# Check if homeboy core's guards blocked the refactor.
+# This reads the JSON output from the autofix run. Core's guard.rs runs
+# inside refactor --write and surfaces guard_block when blocked.
+if [ -n "${AUTOFIX_OUTPUT_DIR:-}" ] && check_core_guard_block "${AUTOFIX_OUTPUT_DIR}"; then
+  exit 0
 fi
 
 maybe_update_baseline

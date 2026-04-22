@@ -4,32 +4,9 @@ set -euo pipefail
 
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
-AUTOFIX_MAX_COMMITS="${AUTOFIX_MAX_COMMITS:-2}"
-if ! [[ "${AUTOFIX_MAX_COMMITS}" =~ ^[0-9]+$ ]]; then
-  AUTOFIX_MAX_COMMITS=2
-fi
-
-# Count consecutive autofix commits at HEAD. A human commit resets the counter.
-# This prevents runaway autofix-PR loops while allowing autofix to resume after
-# any human merge. The old approach (count all autofix commits since last tag)
-# permanently tripped the guard after N total historical autofix commits across
-# all PRs, blocking all future autofix even after human intervention.
-# When the cap is hit, code fixes are skipped but baseline updates still run —
-# baseline updates use a distinct commit prefix and don't count toward the cap.
-AUTOFIX_COMMIT_COUNT=0
-while IFS= read -r subject; do
-  if [[ "${subject}" == "${AUTOFIX_COMMIT_PREFIX}"* ]]; then
-    AUTOFIX_COMMIT_COUNT=$((AUTOFIX_COMMIT_COUNT + 1))
-  else
-    break
-  fi
-done < <(git log --format=%s -n "$((AUTOFIX_MAX_COMMITS + 1))" 2>/dev/null)
-AUTOFIX_CAP_HIT=false
-if [ "${AUTOFIX_COMMIT_COUNT}" -ge "${AUTOFIX_MAX_COMMITS}" ]; then
-  echo "Autofix cap reached: ${AUTOFIX_COMMIT_COUNT} consecutive autofix commits at HEAD (max ${AUTOFIX_MAX_COMMITS})"
-  echo "Skipping code fixes but will still attempt baseline update"
-  AUTOFIX_CAP_HIT=true
-fi
+# ── CI-only pre-flight guards ──
+# Domain guards (revert detection, bot HEAD detection, cap enforcement)
+# live in homeboy core's guard.rs and run during `homeboy refactor --write`.
 
 # Hard guards — these always exit (no baseline bypass). Bot actors and autofix
 # branches risk infinite loops, so bail entirely.
@@ -41,15 +18,6 @@ fi
 
 if [[ "${GITHUB_REF_NAME:-}" == ci/autofix/* ]]; then
   echo "Skipping non-PR autofix: already on an autofix branch (${GITHUB_REF_NAME})"
-  echo "committed=false" >> "${GITHUB_OUTPUT}"
-  exit 0
-fi
-
-# Check if a previous autofix commit was reverted in recent history.
-# A revert signals broken autofix output — back off until a human intervenes.
-if has_reverted_autofix; then
-  echo "Skipping non-PR autofix: a previous autofix commit was reverted in recent history"
-  echo "This indicates the autofix output was incorrect — manual review required."
   echo "committed=false" >> "${GITHUB_OUTPUT}"
   exit 0
 fi
@@ -93,35 +61,43 @@ git checkout -b "${AUTOFIX_BRANCH}"
 
 AUTOFIX_OUTPUT_DIR=$(mktemp -d)
 
-# Run code fixes only when under the cap
-if [ "${AUTOFIX_CAP_HIT}" = false ]; then
-  echo "Applying non-PR autofixes..."
-  FIX_INDEX=0
-  for FIX_CMD in "${FIX_ARRAY[@]}"; do
-    FIX_CMD=$(echo "${FIX_CMD}" | xargs)
-    OUTPUT_FILE="${AUTOFIX_OUTPUT_DIR}/fix-${FIX_INDEX}.json"
-    BASE_CMD="$(build_autofix_command "${FIX_CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_FILE}")"
+echo "Applying non-PR autofixes..."
+FIX_INDEX=0
+for FIX_CMD in "${FIX_ARRAY[@]}"; do
+  FIX_CMD=$(echo "${FIX_CMD}" | xargs)
+  OUTPUT_FILE="${AUTOFIX_OUTPUT_DIR}/fix-${FIX_INDEX}.json"
+  BASE_CMD="$(build_autofix_command "${FIX_CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_FILE}")"
 
-    echo "Running autofix: ${BASE_CMD}"
-    set +e
-    eval "${BASE_CMD}"
-    FIX_EXIT=$?
-    set -e
+  echo "Running autofix: ${BASE_CMD}"
+  set +e
+  eval "${BASE_CMD}"
+  FIX_EXIT=$?
+  set -e
 
-    if [ "${FIX_EXIT}" -ne 0 ]; then
-      echo "Autofix command exited non-zero (${FIX_EXIT}), continuing to inspect generated changes"
-    fi
-    FIX_INDEX=$((FIX_INDEX + 1))
-  done
-else
-  echo "Skipping code fixes (autofix cap reached)"
+  if [ "${FIX_EXIT}" -ne 0 ]; then
+    echo "Autofix command exited non-zero (${FIX_EXIT}), continuing to inspect generated changes"
+  fi
+  FIX_INDEX=$((FIX_INDEX + 1))
+done
+
+# Check if homeboy core's guards blocked the refactor.
+# This reads the JSON output from the autofix run.
+json_files=$(find "${AUTOFIX_OUTPUT_DIR}" -name '*.json' -type f 2>/dev/null)
+if [ -n "${json_files}" ]; then
+  guard_status="$(jq -r '[.[] | .data // . | select(type == "object") | .guard_block // empty | .reason] | first // empty' ${json_files} 2>/dev/null || true)"
+  if [ -n "${guard_status}" ]; then
+    echo "Skipping non-PR autofix: core guard blocked — ${guard_status}"
+    rm -rf "${AUTOFIX_OUTPUT_DIR}"
+    git checkout - 2>/dev/null || true
+    git branch -D "${AUTOFIX_BRANCH}" 2>/dev/null || true
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
 fi
 
 # Update baseline so it stays current when this commit merges to main.
 # Full (unscoped) audit ensures the baseline reflects the entire codebase,
 # not just changed files. Tolerate failure — baseline update is best-effort.
-# This runs even when the autofix cap is hit — baseline updates use a distinct
-# commit prefix and don't count toward the cap.
 echo "Updating audit baseline..."
 set +e
 homeboy audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
@@ -150,45 +126,28 @@ fi
 
 # Capture autofix summary: file count, fix commands, and finding categories
 AUTOFIX_FILE_COUNT=$(git diff --cached --name-only | wc -l | xargs)
-AUTOFIX_CHANGED_FILES="$(git diff --cached --name-only | sort)"
 
-# Detect baseline-only changes: only homeboy.json modified while cap was hit
-BASELINE_ONLY=false
-if [ "${AUTOFIX_CAP_HIT}" = true ]; then
-  if echo "${AUTOFIX_CHANGED_FILES}" | grep -qx "homeboy.json" && [ "${AUTOFIX_FILE_COUNT}" -eq 1 ]; then
-    BASELINE_ONLY=true
+AUTOFIX_FIX_TYPES=""
+for FIX_CMD in "${FIX_ARRAY[@]}"; do
+  FIX_CMD=$(echo "${FIX_CMD}" | xargs)
+  BASE=$(echo "${FIX_CMD}" | awk '{print $1}')
+  if [ -n "${AUTOFIX_FIX_TYPES}" ]; then
+    AUTOFIX_FIX_TYPES+=", "
+  fi
+  AUTOFIX_FIX_TYPES+="${BASE}"
+done
+
+AUTOFIX_DETAILS=""
+AUTOFIX_TOTAL_FIXES=""
+if [ -d "${AUTOFIX_OUTPUT_DIR}" ]; then
+  raw_details="$(extract_fix_details_from_output "${AUTOFIX_OUTPUT_DIR}")"
+  if [ -n "${raw_details}" ]; then
+    AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
+    AUTOFIX_DETAILS="$(echo "${raw_details}" | tail -n +2)"
   fi
 fi
 
-if [ "${BASELINE_ONLY}" = true ]; then
-  # Use a distinct commit prefix so it doesn't count toward the autofix cap
-  COMMIT_MSG="chore(ci): update audit baseline
-
-Baseline-only update (autofix cap reached, code fixes skipped).
-homeboy.json"
-else
-  AUTOFIX_FIX_TYPES=""
-  for FIX_CMD in "${FIX_ARRAY[@]}"; do
-    FIX_CMD=$(echo "${FIX_CMD}" | xargs)
-    BASE=$(echo "${FIX_CMD}" | awk '{print $1}')
-    if [ -n "${AUTOFIX_FIX_TYPES}" ]; then
-      AUTOFIX_FIX_TYPES+=", "
-    fi
-    AUTOFIX_FIX_TYPES+="${BASE}"
-  done
-
-  AUTOFIX_DETAILS=""
-  AUTOFIX_TOTAL_FIXES=""
-  if [ -d "${AUTOFIX_OUTPUT_DIR}" ]; then
-    raw_details="$(extract_fix_details_from_output "${AUTOFIX_OUTPUT_DIR}")"
-    if [ -n "${raw_details}" ]; then
-      AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
-      AUTOFIX_DETAILS="$(echo "${raw_details}" | tail -n +2)"
-    fi
-  fi
-
-  COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_DETAILS}" "${AUTOFIX_TOTAL_FIXES}")"
-fi
+COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_DETAILS}" "${AUTOFIX_TOTAL_FIXES}")"
 rm -rf "${AUTOFIX_OUTPUT_DIR}"
 
 BOT_NAME="homeboy-ci[bot]"
