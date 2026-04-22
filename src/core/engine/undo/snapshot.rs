@@ -112,7 +112,8 @@ impl UndoSnapshot {
         let state = FileStateEntry::capture(&abs);
 
         if let Some(ref content) = state.original_content {
-            self.contents.push((relative_path.to_string(), content.clone()));
+            self.contents
+                .push((relative_path.to_string(), content.clone()));
         }
 
         self.entries.push(SnapshotEntry {

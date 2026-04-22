@@ -19,7 +19,7 @@
 //! }
 //! ```
 
-use super::entry::{restore_entries, is_tracked, FileStateEntry};
+use super::entry::{is_tracked, restore_entries, FileStateEntry};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default)]

@@ -715,8 +715,7 @@ mod tests {
         // installs (no `.git`) must be treated as clean, since there is no
         // working tree to be dirty in the first place.
         let temp = TempDir::new().expect("create tempdir");
-        std::fs::write(temp.path().join("some-file.txt"), "content")
-            .expect("write file");
+        std::fs::write(temp.path().join("some-file.txt"), "content").expect("write file");
 
         assert!(
             is_workdir_clean(temp.path()),
@@ -756,8 +755,7 @@ mod tests {
             return;
         }
 
-        std::fs::write(temp.path().join("untracked.txt"), "hi")
-            .expect("write untracked file");
+        std::fs::write(temp.path().join("untracked.txt"), "hi").expect("write untracked file");
 
         assert!(
             !is_workdir_clean(temp.path()),

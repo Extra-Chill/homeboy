@@ -294,9 +294,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
     // Fetch upstream drift for all components
     let upstream_drift_map: std::collections::HashMap<String, UpstreamDrift> = components
         .iter()
-        .filter_map(|c| {
-            fetch_upstream_drift_for(&c.local_path, &c.id).map(|d| (c.id.clone(), d))
-        })
+        .filter_map(|c| fetch_upstream_drift_for(&c.local_path, &c.id).map(|d| (c.id.clone(), d)))
         .collect();
 
     // Build per-component rows
@@ -451,7 +449,11 @@ fn get_latest_tag_overall(path: &str) -> Option<String> {
         &["tag", "-l", "--sort=-v:refname"],
     )?;
 
-    output.lines().next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    output
+        .lines()
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Like `fetch_upstream_drift` but sets the component ID in the result.
