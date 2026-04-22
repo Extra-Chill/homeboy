@@ -51,15 +51,41 @@ pub fn is_git_url(source: &str) -> bool {
         || source.ends_with(".git")
 }
 
-/// Check if a git working directory is clean (no uncommitted changes).
+/// Check if an extension directory is safe to overwrite on update.
+///
+/// Treats the directory as "clean" when:
+/// - It is not a git working tree (tarball / plain-directory installs have no
+///   `.git`, so there is no working tree to be dirty in the first place), or
+/// - It is a git working tree with no uncommitted changes.
+///
+/// Returns `false` only when the directory is a git working tree **and** has
+/// uncommitted changes. This avoids the historical false positive where
+/// `git status` returning a non-zero exit on a non-repo directory was treated
+/// as "dirty" (see Extra-Chill/homeboy#1181).
 fn is_workdir_clean(path: &Path) -> bool {
-    let output = Command::new("git")
+    // If the directory is not a git working tree, there is nothing that can
+    // be "uncommitted". Short-circuit to clean before running `git status`.
+    let inside_tree = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(path)
+        .output();
+
+    match inside_tree {
+        Ok(output) if output.status.success() => {
+            // Fall through: this is a git working tree; check for changes.
+        }
+        _ => return true,
+    }
+
+    let status = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(path)
         .output();
 
-    match output {
+    match status {
         Ok(output) => output.status.success() && output.stdout.is_empty(),
+        // If `status` unexpectedly fails after `rev-parse` succeeded, err on
+        // the side of blocking an overwrite so the user can investigate.
         Err(_) => false,
     }
 }
@@ -675,4 +701,67 @@ pub fn read_source_revision(extension_id: &str) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_workdir_clean;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    #[test]
+    fn is_workdir_clean_non_git_dir_returns_true() {
+        // Regression test for Extra-Chill/homeboy#1181: tarball / plain-directory
+        // installs (no `.git`) must be treated as clean, since there is no
+        // working tree to be dirty in the first place.
+        let temp = TempDir::new().expect("create tempdir");
+        std::fs::write(temp.path().join("some-file.txt"), "content")
+            .expect("write file");
+
+        assert!(
+            is_workdir_clean(temp.path()),
+            "non-git directory should be treated as clean"
+        );
+    }
+
+    #[test]
+    fn is_workdir_clean_clean_git_repo_returns_true() {
+        let temp = TempDir::new().expect("create tempdir");
+
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status();
+        if init.map(|s| !s.success()).unwrap_or(true) {
+            // git not available in this environment; skip.
+            return;
+        }
+
+        assert!(
+            is_workdir_clean(temp.path()),
+            "freshly-initialized git repo with no changes should be clean"
+        );
+    }
+
+    #[test]
+    fn is_workdir_clean_dirty_git_repo_returns_false() {
+        let temp = TempDir::new().expect("create tempdir");
+
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status();
+        if init.map(|s| !s.success()).unwrap_or(true) {
+            // git not available in this environment; skip.
+            return;
+        }
+
+        std::fs::write(temp.path().join("untracked.txt"), "hi")
+            .expect("write untracked file");
+
+        assert!(
+            !is_workdir_clean(temp.path()),
+            "git repo with untracked file should be reported as dirty"
+        );
+    }
 }
