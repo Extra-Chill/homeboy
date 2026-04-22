@@ -356,6 +356,18 @@ impl ExtensionManifest {
             .and_then(|c| c.extension_script.as_deref())
     }
 
+    pub fn test_script(&self) -> Option<&str> {
+        self.test
+            .as_ref()
+            .and_then(|c| c.extension_script.as_deref())
+    }
+
+    /// Convenience accessor for the optional test mapping config
+    /// declared under the audit capability.
+    pub fn test_mapping(&self) -> Option<&TestMappingConfig> {
+        self.audit.as_ref().and_then(|a| a.test_mapping.as_ref())
+    }
+
     /// Convenience: autofix verify config, if this extension declares one.
     /// See [`AutofixVerifyConfig`] for the contract.
     pub fn autofix_verify(&self) -> Option<&AutofixVerifyConfig> {
