@@ -2,6 +2,7 @@ use clap::Args;
 use homeboy::component;
 use homeboy::context;
 use homeboy::deploy::{self, DeployConfig, ReleaseStateStatus};
+use homeboy::git;
 use homeboy::project;
 use homeboy::version;
 use serde::Serialize;
@@ -42,6 +43,26 @@ pub struct StatusArgs {
     pub outdated: bool,
 }
 
+/// Per-component upstream drift info.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpstreamDrift {
+    pub component_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind: Option<u32>,
+    /// Latest tag on origin (e.g. "v0.8.0").
+    /// Differs from local version when the local checkout is stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_origin_tag: Option<String>,
+}
+
+impl UpstreamDrift {
+    fn is_behind(&self) -> bool {
+        self.behind.unwrap_or(0) > 0
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct StatusOutput {
     pub command: &'static str,
@@ -54,6 +75,10 @@ pub struct StatusOutput {
     pub ready_to_deploy: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub docs_only: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub behind_upstream: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub upstream_drift: Vec<UpstreamDrift>,
     pub clean: usize,
 }
 
@@ -63,7 +88,15 @@ pub struct ProjectStatusRow {
     pub component_id: String,
     pub local_version: Option<String>,
     pub remote_version: Option<String>,
+    /// Latest tag on origin. When this differs from local_version, the local
+    /// checkout is stale and needs a pull.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_version: Option<String>,
     pub unreleased_commits: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ahead_upstream: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind_upstream: Option<u32>,
     pub status: ProjectComponentDashboardStatus,
 }
 
@@ -81,6 +114,8 @@ pub enum ProjectComponentDashboardStatus {
     DocsOnly,
     /// Uncommitted changes in working directory
     Uncommitted,
+    /// Local branch is behind upstream (needs pull)
+    BehindUpstream,
     /// Cannot determine status
     Unknown,
 }
@@ -103,6 +138,7 @@ pub struct ProjectDashboardSummary {
     pub needs_bump: usize,
     pub docs_only: usize,
     pub uncommitted: usize,
+    pub behind_upstream: usize,
     pub unknown: usize,
 }
 
@@ -165,7 +201,19 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
     let mut needs_bump = Vec::new();
     let mut ready_to_deploy = Vec::new();
     let mut docs_only = Vec::new();
+    let mut behind_upstream = Vec::new();
+    let mut upstream_drift = Vec::new();
     let mut clean: usize = 0;
+
+    // Fetch from origin and detect upstream drift for each component
+    for comp in &components {
+        if let Some(drift) = fetch_upstream_drift_for(&comp.local_path, &comp.id) {
+            if drift.is_behind() {
+                behind_upstream.push(comp.id.clone());
+            }
+            upstream_drift.push(drift);
+        }
+    }
 
     for comp in &components {
         let status = deploy::calculate_release_state(comp)
@@ -207,6 +255,8 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
             needs_bump,
             ready_to_deploy,
             docs_only,
+            behind_upstream,
+            upstream_drift,
             clean,
         }),
         0,
@@ -215,8 +265,8 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
 
 /// Project dashboard: show version drift across all components in a project.
 ///
-/// Combines local version, remote (deployed) version, release state, and
-/// unreleased commit count into a single view per component.
+/// Combines local version, remote (deployed) version, release state, upstream
+/// drift, and unreleased commit count into a single view per component.
 fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<StatusResult> {
     let proj = project::load(project_id)?;
     let components = project::resolve_project_components(&proj)?;
@@ -241,6 +291,14 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
     // Gather remote versions via deploy check mode (handles SSH internally)
     let remote_versions = fetch_project_remote_versions(project_id);
 
+    // Fetch upstream drift for all components
+    let upstream_drift_map: std::collections::HashMap<String, UpstreamDrift> = components
+        .iter()
+        .filter_map(|c| {
+            fetch_upstream_drift_for(&c.local_path, &c.id).map(|d| (c.id.clone(), d))
+        })
+        .collect();
+
     // Build per-component rows
     let mut rows: Vec<ProjectStatusRow> = Vec::new();
     let mut summary = ProjectDashboardSummary {
@@ -249,12 +307,14 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
         needs_bump: 0,
         docs_only: 0,
         uncommitted: 0,
+        behind_upstream: 0,
         unknown: 0,
     };
 
     for comp in &components {
         let local_ver = local_versions.get(&comp.id).cloned();
         let remote_ver = remote_versions.get(&comp.id).cloned();
+        let drift = upstream_drift_map.get(&comp.id);
 
         let release_state = deploy::calculate_release_state(comp);
         let release_status = release_state
@@ -268,19 +328,35 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
             .unwrap_or(0);
 
         // Determine dashboard status.
-        // Priority: uncommitted > needs_bump > docs_only > outdated > current > unknown
+        // Priority: uncommitted > needs_bump > docs_only > behind_upstream > outdated > current > unknown
         let dashboard_status = match release_status {
             ReleaseStateStatus::Uncommitted => ProjectComponentDashboardStatus::Uncommitted,
             ReleaseStateStatus::NeedsBump => ProjectComponentDashboardStatus::NeedsBump,
             ReleaseStateStatus::DocsOnly => ProjectComponentDashboardStatus::DocsOnly,
             ReleaseStateStatus::Clean => {
-                // Clean release state — check if deployed version matches local
-                match (&local_ver, &remote_ver) {
-                    (Some(local), Some(remote)) if local != remote => {
-                        ProjectComponentDashboardStatus::Outdated
+                // Check upstream drift first
+                if let Some(d) = drift {
+                    if d.is_behind() {
+                        ProjectComponentDashboardStatus::BehindUpstream
+                    } else {
+                        // Not behind upstream — check deployed version
+                        match (&local_ver, &remote_ver) {
+                            (Some(local), Some(remote)) if local != remote => {
+                                ProjectComponentDashboardStatus::Outdated
+                            }
+                            (Some(_), None) => ProjectComponentDashboardStatus::Outdated,
+                            _ => ProjectComponentDashboardStatus::Current,
+                        }
                     }
-                    (Some(_), None) => ProjectComponentDashboardStatus::Outdated,
-                    _ => ProjectComponentDashboardStatus::Current,
+                } else {
+                    // No upstream data — check deployed version
+                    match (&local_ver, &remote_ver) {
+                        (Some(local), Some(remote)) if local != remote => {
+                            ProjectComponentDashboardStatus::Outdated
+                        }
+                        (Some(_), None) => ProjectComponentDashboardStatus::Outdated,
+                        _ => ProjectComponentDashboardStatus::Current,
+                    }
                 }
             }
             ReleaseStateStatus::Unknown => ProjectComponentDashboardStatus::Unknown,
@@ -292,6 +368,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
             ProjectComponentDashboardStatus::NeedsBump => summary.needs_bump += 1,
             ProjectComponentDashboardStatus::DocsOnly => summary.docs_only += 1,
             ProjectComponentDashboardStatus::Uncommitted => summary.uncommitted += 1,
+            ProjectComponentDashboardStatus::BehindUpstream => summary.behind_upstream += 1,
             ProjectComponentDashboardStatus::Unknown => summary.unknown += 1,
         }
 
@@ -299,7 +376,10 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
             component_id: comp.id.clone(),
             local_version: local_ver,
             remote_version: remote_ver,
+            origin_version: drift.and_then(|d| d.latest_origin_tag.clone()),
             unreleased_commits,
+            ahead_upstream: drift.and_then(|d| d.ahead),
+            behind_upstream: drift.and_then(|d| d.behind),
             status: dashboard_status,
         });
     }
@@ -336,6 +416,49 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
         }),
         0,
     ))
+}
+
+/// Fetch from origin and compute upstream drift for a component.
+///
+/// Returns `None` if the path is not a git repo or has no upstream configured.
+fn fetch_upstream_drift(path: &str) -> Option<UpstreamDrift> {
+    // Best-effort fetch — silently proceeds if no remote or network issue.
+    let _ = homeboy::engine::command::run_in_optional(path, "git", &["fetch", "--tags", "--quiet"]);
+
+    let snapshot = git::get_repo_snapshot(path).ok()?;
+
+    // After fetching tags, find the latest tag across ALL refs (not just HEAD).
+    // `git describe --tags --abbrev=0` only returns tags reachable from HEAD,
+    // which misses newer tags when the local checkout is behind.
+    let latest_origin_tag = get_latest_tag_overall(path);
+
+    Some(UpstreamDrift {
+        component_id: String::new(), // caller sets component_id after
+        ahead: snapshot.ahead,
+        behind: snapshot.behind,
+        latest_origin_tag,
+    })
+}
+
+/// Get the latest version tag in the repo regardless of what HEAD points to.
+///
+/// Unlike `get_latest_tag()` which uses `git describe` (reachable from HEAD),
+/// this lists all tags and picks the one with the highest semver version.
+fn get_latest_tag_overall(path: &str) -> Option<String> {
+    let output = homeboy::engine::command::run_in_optional(
+        path,
+        "git",
+        &["tag", "-l", "--sort=-v:refname"],
+    )?;
+
+    output.lines().next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Like `fetch_upstream_drift` but sets the component ID in the result.
+fn fetch_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
+    let mut drift = fetch_upstream_drift(path)?;
+    drift.component_id = id.to_string();
+    Some(drift)
 }
 
 /// Fetch remote (deployed) versions for all components in a project.
@@ -400,20 +523,31 @@ fn log_dashboard_table(rows: &[ProjectStatusRow]) {
         .max()
         .unwrap_or(6)
         .max(6);
+    let origin_width = rows
+        .iter()
+        .map(|r| r.origin_version.as_deref().unwrap_or("-").len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
 
     // Header
     eprintln!(
-        "{:<id_w$}  {:<local_w$}  {:<remote_w$}  {:>10}  Status",
+        "{:<id_w$}  {:<local_w$}  {:<remote_w$}  {:<origin_w$}  {:>10}  {:>8}  Status",
         "Component",
         "Local",
         "Remote",
+        "Origin",
         "Unreleased",
+        "Upstream",
         id_w = id_width,
         local_w = local_width,
         remote_w = remote_width,
+        origin_w = origin_width,
     );
     eprintln!(
-        "{:-<id_w$}  {:-<local_w$}  {:-<remote_w$}  {:->10}  {:-<10}",
+        "{:-<id_w$}  {:-<local_w$}  {:-<remote_w$}  {:-<origin_w$}  {:->10}  {:->8}  {:-<10}",
+        "",
+        "",
         "",
         "",
         "",
@@ -422,30 +556,50 @@ fn log_dashboard_table(rows: &[ProjectStatusRow]) {
         id_w = id_width,
         local_w = local_width,
         remote_w = remote_width,
+        origin_w = origin_width,
     );
 
     for row in rows {
         let local = row.local_version.as_deref().unwrap_or("-");
         let remote = row.remote_version.as_deref().unwrap_or("-");
+        let origin = row.origin_version.as_deref().unwrap_or("-");
+        let upstream = format_upstream(&row.ahead_upstream, &row.behind_upstream);
         let status_icon = match &row.status {
             ProjectComponentDashboardStatus::Current => "✅ current",
             ProjectComponentDashboardStatus::Outdated => "⚠️  outdated",
             ProjectComponentDashboardStatus::NeedsBump => "🔶 needs bump",
             ProjectComponentDashboardStatus::DocsOnly => "📝 docs only",
             ProjectComponentDashboardStatus::Uncommitted => "🔴 uncommitted",
+            ProjectComponentDashboardStatus::BehindUpstream => "⬇️  behind upstream",
             ProjectComponentDashboardStatus::Unknown => "❓ unknown",
         };
 
         eprintln!(
-            "{:<id_w$}  {:<local_w$}  {:<remote_w$}  {:>10}  {}",
+            "{:<id_w$}  {:<local_w$}  {:<remote_w$}  {:<origin_w$}  {:>10}  {:>8}  {}",
             row.component_id,
             local,
             remote,
+            origin,
             row.unreleased_commits,
+            upstream,
             status_icon,
             id_w = id_width,
             local_w = local_width,
             remote_w = remote_width,
+            origin_w = origin_width,
         );
+    }
+}
+
+/// Format upstream ahead/behind as a compact string like "↓3" or "↑1↓2" or "=".
+fn format_upstream(ahead: &Option<u32>, behind: &Option<u32>) -> String {
+    match (ahead, behind) {
+        (Some(a), Some(b)) if *a > 0 && *b > 0 => format!("↑{}↓{}", a, b),
+        (Some(a), Some(_)) if *a > 0 => format!("↑{}", a),
+        (Some(_), Some(b)) if *b > 0 => format!("↓{}", b),
+        (None, Some(b)) if *b > 0 => format!("↓{}", b),
+        (Some(a), None) if *a > 0 => format!("↑{}", a),
+        (Some(0), Some(0)) | (None, Some(0)) | (Some(0), None) => "=".to_string(),
+        _ => "-".to_string(),
     }
 }
