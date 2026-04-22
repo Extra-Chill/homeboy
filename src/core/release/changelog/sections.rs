@@ -250,7 +250,7 @@ pub(super) fn ensure_next_section(content: &str, aliases: &[String]) -> Result<(
     Ok((out, true))
 }
 
-pub fn add_next_section_items(
+pub(crate) fn add_next_section_items(
     changelog_content: &str,
     next_section_aliases: &[String],
     messages: &[String],

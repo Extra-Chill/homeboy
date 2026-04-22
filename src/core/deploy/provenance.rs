@@ -65,7 +65,7 @@ pub fn detect_tag_gap(component: &Component) -> Option<TagGap> {
 /// Format a tag gap as a human-readable warning string.
 ///
 /// Used by both `build` and `deploy` commands.
-pub fn format_tag_gap(component_id: &str, gap: &TagGap, context: &str) -> String {
+pub(crate) fn format_tag_gap(component_id: &str, gap: &TagGap, context: &str) -> String {
     let mut lines = vec![format!(
         "[{}] '{}': HEAD is {} commit(s) ahead of latest tag {}",
         context, component_id, gap.ahead, gap.tag

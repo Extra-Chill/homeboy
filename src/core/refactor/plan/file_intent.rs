@@ -34,7 +34,7 @@ pub enum FileIntent {
 impl FileIntent {
     /// Returns which `InsertionKind` categories are dominated (should be dropped)
     /// when this intent is active on a file.
-    pub fn dominated_insertion_kinds(&self) -> Vec<DominatedKind> {
+    pub(crate) fn dominated_insertion_kinds(&self) -> Vec<DominatedKind> {
         match self {
             FileIntent::Normal => vec![],
             FileIntent::Decompose => vec![
@@ -88,7 +88,7 @@ pub enum InsertionKindCategory {
 
 impl InsertionKindCategory {
     /// Classify an `InsertionKind` into its coarse category.
-    pub fn from_kind(kind: &InsertionKind) -> Self {
+    pub(crate) fn from_kind(kind: &InsertionKind) -> Self {
         match kind {
             InsertionKind::ImportAdd => Self::ImportAdd,
             InsertionKind::VisibilityChange { .. } => Self::VisibilityChange,
@@ -131,7 +131,7 @@ impl FileIntentMap {
     }
 
     /// Check if a file has a structural intent (anything other than Normal).
-    pub fn has_structural_intent(&self, file: &str) -> bool {
+    pub(crate) fn has_structural_intent(&self, file: &str) -> bool {
         matches!(
             self.intents.get(file),
             Some(FileIntent::Decompose | FileIntent::Move { .. } | FileIntent::Delete)

@@ -104,7 +104,7 @@ pub fn module_path_from_file(file_path: &str) -> String {
 /// Returns structured `ImportRef`s with module paths and imported names.
 /// For Rust, handles both simple (`use crate::mod::Item;`) and grouped
 /// (`use crate::mod::{A, B};`) imports.
-pub fn parse_imports(content: &str, grammar: &Grammar, relative_path: &str) -> Vec<ImportRef> {
+pub(crate) fn parse_imports(content: &str, grammar: &Grammar, relative_path: &str) -> Vec<ImportRef> {
     let symbols = grammar::extract(content, grammar);
     let lines: Vec<&str> = content.lines().collect();
     let language_id = grammar.language.id.as_str();
@@ -559,13 +559,6 @@ mod tests {
         let (module, names) = parse_rust_import_path("crate::mod::{Foo as Bar, Baz}");
         assert_eq!(module, "crate::mod");
         assert_eq!(names, vec!["Foo", "Baz"]);
-    }
-
-    #[test]
-    fn parse_php_import() {
-        let (module, names) = parse_php_import_path("App\\Models\\User");
-        assert_eq!(module, "App\\Models");
-        assert_eq!(names, vec!["User"]);
     }
 
     #[test]

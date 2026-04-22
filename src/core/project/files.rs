@@ -417,12 +417,6 @@ pub fn grep(
     } else {
         // Single file grep (no -r flag)
         let flags = if case_insensitive { "-ni" } else { "-n" };
-        format!(
-            "grep {} {} {} 2>/dev/null",
-            flags,
-            shell::quote_path(pattern),
-            shell::quote_path(&full_path)
-        )
     };
 
     let output = execute_for_project(&project, &cmd)?;
