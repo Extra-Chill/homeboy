@@ -4,6 +4,10 @@
 //! ephemeral — used by the fixer's chunk verifier to rollback individual chunks
 //! that fail verification without affecting the persistent undo stack.
 //!
+//! Uses [`FileStateEntry`] from the shared undo primitives module for capture
+//! and restore logic, so the in-memory and persistent undo paths share the
+//! same underlying file-state tracking.
+//!
 //! Usage:
 //! ```ignore
 //! let mut rollback = InMemoryRollback::new();
@@ -15,18 +19,12 @@
 //! }
 //! ```
 
-use std::path::{Path, PathBuf};
+use super::entry::{restore_entries, is_tracked, FileStateEntry};
+use std::path::Path;
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryRollback {
-    entries: Vec<RollbackEntry>,
-}
-
-#[derive(Debug, Clone)]
-struct RollbackEntry {
-    path: PathBuf,
-    /// Original content if the file existed, None if it was newly created.
-    original: Option<Vec<u8>>,
+    entries: Vec<FileStateEntry>,
 }
 
 impl InMemoryRollback {
@@ -39,33 +37,16 @@ impl InMemoryRollback {
     /// Capture a file's current state before modification.
     /// Deduplicates — capturing the same path twice is a no-op.
     pub fn capture(&mut self, path: &Path) {
-        if self.entries.iter().any(|e| e.path == path) {
+        if is_tracked(&self.entries, path) {
             return;
         }
-        let original = if path.is_file() {
-            std::fs::read(path).ok()
-        } else {
-            None
-        };
-        self.entries.push(RollbackEntry {
-            path: path.to_path_buf(),
-            original,
-        });
+        self.entries.push(FileStateEntry::capture(path));
     }
 
     /// Restore all captured files to their original state.
     /// Files that existed are restored. Files that were created are removed.
     pub fn restore_all(&self) {
-        for entry in &self.entries {
-            match &entry.original {
-                Some(content) => {
-                    let _ = std::fs::write(&entry.path, content);
-                }
-                None => {
-                    let _ = std::fs::remove_file(&entry.path);
-                }
-            }
-        }
+        let _ = restore_entries(&self.entries);
     }
 
     /// Number of files captured.
@@ -83,6 +64,7 @@ impl InMemoryRollback {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_root(name: &str) -> PathBuf {

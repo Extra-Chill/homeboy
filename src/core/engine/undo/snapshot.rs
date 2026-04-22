@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use super::entry::FileStateEntry;
 use crate::Result;
 
 /// Maximum number of snapshots to keep. Oldest are expired on save.
@@ -105,17 +106,18 @@ impl UndoSnapshot {
         }
 
         let abs = self.root.join(relative_path);
-        let had_content = abs.is_file();
 
-        if had_content {
-            if let Ok(content) = std::fs::read(&abs) {
-                self.contents.push((relative_path.to_string(), content));
-            }
+        // Use shared FileStateEntry for capture, then extract what we need
+        // for persistent storage.
+        let state = FileStateEntry::capture(&abs);
+
+        if let Some(ref content) = state.original_content {
+            self.contents.push((relative_path.to_string(), content.clone()));
         }
 
         self.entries.push(SnapshotEntry {
             relative_path: relative_path.to_string(),
-            had_content,
+            had_content: state.had_content(),
         });
     }
 
