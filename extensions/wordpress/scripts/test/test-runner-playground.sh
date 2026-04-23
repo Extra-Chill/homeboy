@@ -147,9 +147,35 @@ if [ -n "$DEPENDENCY_PATHS" ]; then
     done <<< "$DEPENDENCY_PATHS"
 fi
 
+# ---------------------------------------------------------------------------
+# db.php drop-in coexistence with Playground's built-in SQLite
+#
+# Playground ships an internal mu-plugin at
+# /internal/shared/mu-plugins/sqlite-database-integration.php that normally
+# wires up WordPress to its bundled SQLite implementation. That mu-plugin
+# begins with a self-deactivation guard:
+#
+#     if ( file_exists( '/wordpress/wp-content/db.php' ) ) {
+#         return;
+#     }
+#
+# So when we mount a plugin's db.php drop-in at /wordpress/wp-content/db.php,
+# the mu-plugin voluntarily steps aside and the drop-in owns $wpdb. No
+# --skip-sqlite-setup flag is required. The drop-in can still *reuse*
+# Playground's bundled SQLite classes (available at
+# /internal/shared/sqlite-database-integration/) — that's what
+# markdown-database-integration's db.php does.
+#
+# See docs/PLAYGROUND_DROPIN.md for the full coexistence model and a minimal
+# example drop-in that verifies the plumbing end-to-end.
+# ---------------------------------------------------------------------------
 PLUGIN_DB_PHP="${PLUGIN_PATH}/db.php"
 if [ -f "$PLUGIN_DB_PHP" ]; then
     MOUNT_ARGS+=("--mount" "${PLUGIN_DB_PHP}:/wordpress/wp-content/db.php")
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: [playground] Plugin db.php drop-in detected at $PLUGIN_DB_PHP"
+        echo "DEBUG: [playground] Playground's built-in SQLite mu-plugin will step aside"
+    fi
 fi
 
 MOUNT_ARGS+=("--mount" "${EXTENSION_PATH}:/homeboy-extension")

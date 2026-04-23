@@ -240,6 +240,13 @@ try {
         $loaded = false;
         $main_files = glob("$plugin_path/*.php") ?: [];
         foreach ($main_files as $mf) {
+            // db.php is a WordPress drop-in, not a plugin entry file. It's
+            // already been loaded by wp-settings.php earlier in the request
+            // lifecycle. Including it again would re-run its side effects
+            // (define() warnings, $wpdb re-init) for no reason.
+            if (basename($mf) === 'db.php') {
+                continue;
+            }
             if (strpos(file_get_contents($mf), 'Plugin Name:') !== false) {
                 pg_log("PLUGIN_DETECTED " . basename($mf));
                 require_once $mf;

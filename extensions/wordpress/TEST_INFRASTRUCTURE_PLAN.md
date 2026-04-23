@@ -469,7 +469,7 @@ SQLite) instead of host PHP. Does not replace the host backend.
 | PHPUnit stdout forwarding | — | ✅ Complete |
 | Structured stage logging + diagnostics | scripts/test/playground-runner.php, test-runner-playground.sh | ✅ Complete (Phase 2) |
 | Parse extension phpunit.xml.dist + recursive discovery | scripts/test/playground-runner.php | ✅ Complete (Phase 2) |
-| db.php drop-in support (MDI test) | — | 🔲 Pending |
+| db.php drop-in coexistence + smoke test | scripts/test/test-runner-playground.sh, tests/fixtures/dropin-coexistence/, scripts/test/playground-dropin-smoke.sh, docs/PLAYGROUND_DROPIN.md | ✅ Complete (Phase 2) |
 
 **Diagnostics contract (Phase 2):**
 
@@ -515,28 +515,32 @@ with the playground's own exit code.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Known Gaps (remaining after Phase 2 diagnostics):**
+**Known Gaps (remaining after Phase 2):**
 
 1. **WP version pinning.** The `--wp` flag must match the wp-phpunit package
    version (currently 6.9.x). Mismatch causes missing class errors in the
    wp-phpunit bootstrap.
 
-2. **db.php drop-in support.** Custom `db.php` drop-ins (e.g., markdown-database-
-   integration) can be mounted into the Playground VFS, but Playground's built-in
-   SQLite integration may conflict. Needs per-case testing.
-
-3. **No host bootstrap.** The Playground backend does not use `tests/bootstrap.php`.
+2. **No host bootstrap.** The Playground backend does not use `tests/bootstrap.php`.
    It runs `install.php` in-process and loads test case classes directly. Any
    customizations in the host bootstrap (e.g., additional `tests_add_filter`
    calls) won't apply.
 
-4. **Partial phpunit.xml.dist consumption.** The runner reads the extension's
+3. **Partial phpunit.xml.dist consumption.** The runner reads the extension's
    `phpunit.xml.dist` for `<testsuite><directory>` entries (with optional
    `suffix` / `prefix` attributes) and `<testsuite><exclude>` entries. Other
    elements (coverage config, bootstrap attribute, `<php>` env vars, groups,
    listeners, extensions) are intentionally not honored — they either refer
    to host-filesystem paths that have no meaning in the VFS, or they describe
    behavior our template already provides.
+
+4. **db.php drop-in coexistence depends on Playground upstream.** The
+   mechanism relies on Playground's internal SQLite mu-plugin voluntarily
+   stepping aside when `/wordpress/wp-content/db.php` exists. If upstream
+   removes or changes that guard, the coexistence model breaks.
+   `scripts/test/playground-dropin-smoke.sh` catches this regression via the
+   `test_playground_mu_plugin_stepped_aside` assertion. See
+   `docs/PLAYGROUND_DROPIN.md` for the full mechanism.
 
 **References:**
 - Issue: Extra-Chill/homeboy-extensions#214
