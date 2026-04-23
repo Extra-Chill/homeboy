@@ -1,11 +1,6 @@
-//! Generic pipeline execution infrastructure.
-//!
-//! This extension provides the core pipeline framework:
-//! - `pipeline` - Traits, topological sorting, batch execution
-//! - `executor` - Command routing (local vs SSH), CLI tool templating
-//!
-//! Domain-specific implementations (release, deploy, etc.) use these primitives
-//! to build their orchestration logic.
+//! Engine primitives: filesystem I/O, command execution, refactor helpers,
+//! lint/test runners, and other cross-cutting infrastructure used by domain
+//! modules (release, deploy, audit, refactor, …).
 
 pub mod baseline;
 pub mod cli_tool;
@@ -23,7 +18,6 @@ pub mod hooks;
 pub mod identifier;
 pub(crate) mod local_files;
 pub mod output_parse;
-pub mod pipeline;
 pub mod refactor_primitive;
 pub mod run_dir;
 pub mod shell;
