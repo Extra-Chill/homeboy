@@ -468,7 +468,7 @@ SQLite) instead of host PHP. Does not replace the host backend.
 | In-process WP install (replace `system()` call) | — | ✅ Complete |
 | PHPUnit stdout forwarding | — | ✅ Complete |
 | Structured stage logging + diagnostics | scripts/test/playground-runner.php, test-runner-playground.sh | ✅ Complete (Phase 2) |
-| Parse extension phpunit.xml.dist in runner | — | 🔲 Pending |
+| Parse extension phpunit.xml.dist + recursive discovery | scripts/test/playground-runner.php | ✅ Complete (Phase 2) |
 | db.php drop-in support (MDI test) | — | 🔲 Pending |
 
 **Diagnostics contract (Phase 2):**
@@ -525,12 +525,18 @@ with the playground's own exit code.
    integration) can be mounted into the Playground VFS, but Playground's built-in
    SQLite integration may conflict. Needs per-case testing.
 
-3. **No host bootstrap, no phpunit.xml.dist parsing.** The Playground backend
-   does not use `tests/bootstrap.php` or the extension's `phpunit.xml.dist`.
-   It runs `install.php` in-process and discovers test files via hand-rolled
-   glob (`test-*.php`, `*Test.php`). Any customizations in the host bootstrap
-   or phpunit config (e.g., additional `tests_add_filter` calls, custom
-   suites, coverage rules) won't apply. Tracked as a follow-up task above.
+3. **No host bootstrap.** The Playground backend does not use `tests/bootstrap.php`.
+   It runs `install.php` in-process and loads test case classes directly. Any
+   customizations in the host bootstrap (e.g., additional `tests_add_filter`
+   calls) won't apply.
+
+4. **Partial phpunit.xml.dist consumption.** The runner reads the extension's
+   `phpunit.xml.dist` for `<testsuite><directory>` entries (with optional
+   `suffix` / `prefix` attributes) and `<testsuite><exclude>` entries. Other
+   elements (coverage config, bootstrap attribute, `<php>` env vars, groups,
+   listeners, extensions) are intentionally not honored — they either refer
+   to host-filesystem paths that have no meaning in the VFS, or they describe
+   behavior our template already provides.
 
 **References:**
 - Issue: Extra-Chill/homeboy-extensions#214
