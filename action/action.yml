@@ -65,17 +65,17 @@ inputs:
 
   # ── Autofix ──
   autofix:
-    description: 'Override autofix behavior. Default: auto-enabled when app-token is provided.'
+    description: 'Enable autofix. Set to "true" to enable; disabled by default.'
     required: false
-    default: ''
+    default: 'false'
   autofix-mode:
     description: 'When to run autofix: "on-failure" (default) or "always" (for baseline auto-ratchet).'
     required: false
     default: 'on-failure'
   autofix-open-pr:
-    description: 'Override non-PR autofix PR creation. Default: auto-enabled when app-token is provided on non-PR events.'
+    description: 'Enable non-PR autofix PR creation. Set to "true" to enable; disabled by default.'
     required: false
-    default: ''
+    default: 'false'
   autofix-max-commits:
     description: 'Maximum autofix commits per branch (loop safety).'
     required: false
@@ -91,7 +91,7 @@ inputs:
 
   # ── GitHub integration ──
   app-token:
-    description: 'GitHub App token. Enables autofix pushes, auto-issue filing, and workflow re-triggers. Generate with actions/create-github-app-token.'
+    description: 'GitHub App token. Enables auto-issue filing and workflow re-triggers. Generate with actions/create-github-app-token.'
     required: false
     default: ''
   auto-issue:
@@ -379,7 +379,7 @@ runs:
         always()
         && github.event_name == 'pull_request'
         && steps.run-commands.outputs.results != ''
-        && (inputs.autofix == 'true' || (inputs.autofix == '' && inputs.app-token != ''))
+        && inputs.autofix == 'true'
         && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
       shell: bash
       env:
@@ -402,8 +402,8 @@ runs:
         always()
         && github.event_name != 'pull_request'
         && steps.run-commands.outputs.results != ''
-        && (inputs.autofix == 'true' || (inputs.autofix == '' && inputs.app-token != ''))
-        && (inputs.autofix-open-pr == 'true' || (inputs.autofix-open-pr == '' && inputs.app-token != ''))
+        && inputs.autofix == 'true'
+        && inputs.autofix-open-pr == 'true'
         && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
       shell: bash
       env:
@@ -444,7 +444,7 @@ runs:
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
-        AUTOFIX_ENABLED: ${{ inputs.autofix == 'true' || (inputs.autofix == '' && inputs.app-token != '') }}
+        AUTOFIX_ENABLED: ${{ inputs.autofix == 'true' }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-commit.outputs.committed == 'true' || steps.autofix-prepare-nonpr.outputs.committed == 'true' }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
       run: bash ${{ github.action_path }}/scripts/digest/generate-failure-digest.sh
@@ -497,7 +497,7 @@ runs:
         RESULTS: ${{ steps.select-results.outputs.results }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
-        AUTOFIX_ENABLED: ${{ inputs.autofix == 'true' || (inputs.autofix == '' && inputs.app-token != '') }}
+        AUTOFIX_ENABLED: ${{ inputs.autofix == 'true' }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-commit.outputs.attempted }}
         AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
         AUTOFIX_STATUS: ${{ steps.autofix-commit.outputs.status }}
