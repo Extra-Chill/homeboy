@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.18] - 2026-04-23
+
+### Changed
+- replace wp plugin/theme install with pure unzip + atomic rename
+
 ## [2.10.17] - 2026-04-23
 
 ### Changed
