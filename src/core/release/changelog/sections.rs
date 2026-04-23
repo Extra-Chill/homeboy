@@ -13,27 +13,6 @@ use crate::error::{Error, Result};
 
 use super::settings::*;
 
-pub fn check_next_section_content(
-    changelog_content: &str,
-    next_section_aliases: &[String],
-) -> Result<Option<String>> {
-    let lines: Vec<&str> = changelog_content.lines().collect();
-    let start = match find_next_section_start(&lines, next_section_aliases) {
-        Some(idx) => idx,
-        None => return Ok(None),
-    };
-
-    let end = find_section_end(&lines, start);
-    let body_lines = &lines[start + 1..end];
-    let content_status = validate_section_content(body_lines);
-
-    match content_status {
-        SectionContentStatus::Valid => Ok(None),
-        SectionContentStatus::SubsectionsOnly => Ok(Some(String::from("subsection_headers_only"))),
-        SectionContentStatus::Empty => Ok(Some(String::from("empty"))),
-    }
-}
-
 pub fn finalize_next_section(
     changelog_content: &str,
     next_section_aliases: &[String],

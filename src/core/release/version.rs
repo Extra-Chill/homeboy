@@ -185,72 +185,6 @@ fn pre_validate_version_targets(
     Ok(target_infos)
 }
 
-/// Read-only changelog validation for version bump operations.
-/// Validates that changelog can be finalized without making any changes.
-/// Returns the same validation results as validate_and_finalize_changelog but without modifying files.
-pub fn validate_changelog_for_bump(
-    component: &Component,
-    current_version: &str,
-    new_version: &str,
-) -> Result<ChangelogValidationResult> {
-    let settings = changelog::resolve_effective_settings(Some(component));
-    let changelog_path = changelog::resolve_changelog_path(component)?;
-
-    let changelog_content = local_files::local().read(&changelog_path)?;
-
-    // A changelog with no finalized versions is the **bootstrap case** (first
-    // release for this component). The release pipeline is about to write the
-    // first `## [x.y.z] - YYYY-MM-DD` section itself — there's no prior version
-    // to compare against, so the version-gap check below doesn't apply and
-    // requiring a pre-existing finalized section creates a chicken-and-egg
-    // loop. See #1172.
-    let latest_changelog_version = changelog::get_latest_finalized_version(&changelog_content);
-
-    // Check if changelog is already finalized for the target version.
-    if latest_changelog_version.as_deref() == Some(new_version) {
-        return Ok(ChangelogValidationResult {
-            changelog_path: changelog_path.to_string_lossy().to_string(),
-            changelog_finalized: true,
-            changelog_changed: false, // Already finalized, no changes needed
-        });
-    }
-
-    // Reject if changelog is ahead of files (version gap). Skipped on the
-    // bootstrap case (no prior finalized version).
-    if let Some(ref prev) = latest_changelog_version {
-        let changelog_ver = semver::Version::parse(prev);
-        let file_ver = semver::Version::parse(current_version);
-        if let (Ok(clv), Ok(fv)) = (changelog_ver, file_ver) {
-            if clv > fv {
-                return Err(Error::validation_invalid_argument(
-                    "version",
-                    format!(
-                        "Version mismatch: changelog is at {} but files are at {}. Setting version would create a version gap.",
-                        prev, current_version
-                    ),
-                    None,
-                    Some(vec![
-                        "Ensure changelog and version files are in sync before updating version.".to_string(),
-                    ]),
-                ));
-            }
-        }
-    }
-
-    let (_, changelog_changed) = changelog::finalize_next_section(
-        &changelog_content,
-        &settings.next_section_aliases,
-        new_version,
-        false,
-    )?;
-
-    Ok(ChangelogValidationResult {
-        changelog_path: changelog_path.to_string_lossy().to_string(),
-        changelog_finalized: true,
-        changelog_changed,
-    })
-}
-
 /// Validate and finalize changelog for a version operation.
 /// Ensures changelog is in sync with current version and has valid unreleased content.
 ///
@@ -290,9 +224,9 @@ pub(crate) fn validate_and_finalize_changelog(
         }
     };
 
-    // See validate_changelog_for_bump() for the bootstrap rationale — a fresh
-    // changelog with no finalized versions is a legitimate first-release state,
-    // not an error. The finalize step below writes the first version section.
+    // Bootstrap case: a fresh changelog with no finalized versions is a
+    // legitimate first-release state, not an error. The finalize step below
+    // writes the first version section. See #1172.
     let latest_changelog_version = changelog::get_latest_finalized_version(&changelog_content);
 
     // Reject if changelog is ahead of files (version gap). Skipped on the
@@ -579,28 +513,6 @@ mod tests {
         assert!(!unchanged.contains("0.4.17"));
     }
 
-    /// Regression for #1172: a changelog with only an `## Unreleased` section
-    /// and no prior finalized versions is the bootstrap case (first release),
-    /// not an error. `validate_changelog_for_bump` used to fail with
-    /// "Changelog has no finalized versions", blocking every first release.
-    #[test]
-    fn validate_changelog_for_bump_accepts_bootstrap_with_no_prior_versions() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let changelog_path = temp_dir.path().join("CHANGELOG.md");
-        fs::write(
-            &changelog_path,
-            "# Changelog\n\n## Unreleased\n- first feature\n",
-        )
-        .unwrap();
-
-        let component = make_test_component(&temp_dir);
-        let result = validate_changelog_for_bump(&component, "0.1.0", "0.2.0")
-            .expect("bootstrap changelog should validate");
-
-        assert!(result.changelog_finalized);
-        assert!(result.changelog_changed);
-    }
-
     /// Bootstrap with generated entries (the release pipeline's common path):
     /// no prior finalized version on disk, entries coming from conventional
     /// commits. `validate_and_finalize_changelog` should write the first
@@ -635,26 +547,5 @@ mod tests {
         );
     }
 
-    /// Even with no entries, `validate_changelog_for_bump` should not throw
-    /// the "no finalized versions" gate — downstream finalization handles the
-    /// empty-content case with its own error. This test just confirms the
-    /// bootstrap path no longer short-circuits at the version check.
-    #[test]
-    fn validate_changelog_for_bump_does_not_require_prior_version() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let changelog_path = temp_dir.path().join("CHANGELOG.md");
-        fs::write(&changelog_path, "# Changelog\n\n## Unreleased\n- seed\n").unwrap();
 
-        let component = make_test_component(&temp_dir);
-        let err = validate_changelog_for_bump(&component, "0.1.0", "0.2.0");
-
-        // Should NOT fail with the specific "no finalized versions" error.
-        if let Err(e) = &err {
-            assert!(
-                !e.message.contains("no finalized versions"),
-                "bootstrap case should not trip the finalized-versions gate; got: {}",
-                e.message
-            );
-        }
-    }
 }

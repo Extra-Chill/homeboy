@@ -453,25 +453,29 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     let semver_recommendation =
         build_semver_recommendation(&component, &options.bump_type, monorepo.as_ref())?;
 
-    // === Stage 1: Determine changelog entries from conventional commits ===
-    // Returns Some(entries) when commits need changelog entries generated.
-    // Never writes to disk — entries are passed to the executor via step config.
-    // When auto-generation will handle the changelog, skip downstream changelog
-    // validations (they would false-fail since entries don't exist on disk yet).
+    // === Stage 1: Generate changelog entries from conventional commits ===
+    //
+    // Homeboy owns the changelog end-to-end: entries come from commits, get
+    // finalized into a `## [X.Y.Z]` section by `bump_component_version`, and
+    // are written to disk in one shot. Users never hand-curate entries.
+    //
+    // An empty commit set is a clean gate — a zero-commit release makes no
+    // sense in the automation model, so the generator errors out.
     let pending_entries = v
         .capture(
-            validate_commits_vs_changelog(&component, options.dry_run, monorepo.as_ref()),
+            generate_changelog_entries(
+                &component,
+                component_id,
+                options.dry_run,
+                monorepo.as_ref(),
+            ),
             "commits",
         )
-        .flatten();
-    let will_auto_generate = pending_entries.is_some();
+        .unwrap_or_default();
 
-    if !will_auto_generate {
-        v.capture(validate_changelog(&component), "changelog");
-    }
     let version_info = v.capture(version::read_component_version(&component), "version");
 
-    // === Stage 2: Version-dependent validations ===
+    // === Stage 2: Version bump math ===
     let new_version = if let Some(ref info) = version_info {
         match version::increment_version(&info.version, &options.bump_type) {
             Some(ver) => Some(ver),
@@ -487,15 +491,6 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     } else {
         None
     };
-
-    if !will_auto_generate {
-        if let (Some(ref info), Some(ref new_ver)) = (&version_info, &new_version) {
-            v.capture(
-                version::validate_changelog_for_bump(&component, &info.version, new_ver),
-                "changelog_sync",
-            );
-        }
-    }
 
     // === Stage 3: Working tree check ===
     if let Some(ref info) = version_info {
@@ -570,13 +565,14 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         &mut hints,
     )?;
 
-    // Embed pending changelog entries in the version step config so the executor
-    // can generate and finalize them atomically — no ## Unreleased disk round-trip.
-    if let Some(ref entries) = pending_entries {
+    // Embed the generated changelog entries in the version step config so the
+    // executor can finalize them directly into a `## [X.Y.Z]` section — no
+    // `## Unreleased` round-trip.
+    if !pending_entries.is_empty() {
         if let Some(version_step) = steps.iter_mut().find(|s| s.id == "version") {
             version_step.config.insert(
                 "changelog_entries".to_string(),
-                changelog_entries_to_json(entries),
+                changelog_entries_to_json(&pending_entries),
             );
         }
     }
@@ -708,43 +704,6 @@ pub(super) fn resolve_tag_and_commits(
             Ok((latest_tag, commits))
         }
     }
-}
-
-fn validate_changelog(component: &Component) -> Result<()> {
-    let changelog_path = changelog::resolve_changelog_path(component)?;
-    let changelog_content = crate::engine::local_files::local().read(&changelog_path)?;
-    let settings = changelog::resolve_effective_settings(Some(component));
-
-    if let Some(status) =
-        changelog::check_next_section_content(&changelog_content, &settings.next_section_aliases)?
-    {
-        match status.as_str() {
-            "empty" => {
-                return Err(Error::validation_invalid_argument(
-                    "changelog",
-                    "Changelog has no unreleased entries",
-                    None,
-                    Some(vec![
-                        "Add changelog entries: homeboy changelog add <component> -m \"...\""
-                            .to_string(),
-                    ]),
-                ));
-            }
-            "subsection_headers_only" => {
-                return Err(Error::validation_invalid_argument(
-                    "changelog",
-                    "Changelog has subsection headers but no items",
-                    None,
-                    Some(vec![
-                        "Add changelog entries: homeboy changelog add <component> -m \"...\""
-                            .to_string(),
-                    ]),
-                ));
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 /// Fetch from remote and fast-forward if behind.
@@ -908,46 +867,56 @@ fn validate_code_quality(component: &Component) -> Result<()> {
     ))
 }
 
-/// Validate that commits since the last tag have corresponding changelog entries.
-/// Returns Ok(Some(entries)) when entries need to be auto-generated (passed to executor),
-/// Ok(None) if all entries already exist, or Err on failure.
-/// Never writes to disk — the executor handles writes via finalize_with_generated_entries.
-fn validate_commits_vs_changelog(
+/// Generate changelog entries from the commits since the last tag.
+///
+/// Returns `Ok(Some(entries))` when commits produced entries to finalize.
+/// Returns `Ok(Some(empty_map))` when the changelog is already ahead of the
+/// latest tag (fully-automated repos that commit the release *before* tagging)
+/// — nothing to generate but the release still proceeds.
+/// Returns `Err` when there are no commits since the last tag at all — a zero-
+/// commit release is a clean gate, no special cases.
+///
+/// Pure computation: never writes to disk. The writes happen in
+/// `bump_component_version` → `finalize_with_generated_entries`.
+fn generate_changelog_entries(
     component: &Component,
+    component_id: &str,
     dry_run: bool,
     monorepo: Option<&git::MonorepoContext>,
-) -> Result<Option<std::collections::HashMap<String, Vec<String>>>> {
-    // Get latest tag and commits (scoped to component in monorepo)
+) -> Result<std::collections::HashMap<String, Vec<String>>> {
     let (latest_tag, commits) = resolve_tag_and_commits(&component.local_path, monorepo)?;
 
-    // If no commits, nothing to validate
+    // Clean gate: no commits → no release. Users never hand-curate changelogs
+    // anymore (the homeboy changelog add path is deprecated — see #1205), so
+    // "commits = no release" is the only correct answer.
     if commits.is_empty() {
-        return Ok(None);
+        let tag_desc = latest_tag
+            .as_deref()
+            .map(|t| format!("tag '{}'", t))
+            .unwrap_or_else(|| "the initial commit".to_string());
+        return Err(Error::validation_invalid_argument(
+            "commits",
+            format!("No commits since {} — nothing to release", tag_desc),
+            Some(format!("Component: {}", component_id)),
+            Some(vec![
+                "Homeboy releases are driven by commits. Commit a change, then re-run."
+                    .to_string(),
+                format!(
+                    "Check status: git log {}..HEAD --oneline",
+                    latest_tag.as_deref().unwrap_or("")
+                )
+                .trim_end_matches(' ')
+                .to_string(),
+            ]),
+        ));
     }
 
-    // Read unreleased changelog entries
+    // If the changelog is already finalized ahead of the latest tag, the
+    // release commit was produced in a prior run that got interrupted before
+    // tagging. No new entries to generate; let the rest of the pipeline
+    // (tag + push) finish the job.
     let changelog_path = changelog::resolve_changelog_path(component)?;
     let changelog_content = crate::engine::local_files::local().read(&changelog_path)?;
-    let settings = changelog::resolve_effective_settings(Some(component));
-    let unreleased_entries =
-        changelog::get_unreleased_entries(&changelog_content, &settings.next_section_aliases);
-
-    let missing_commits = find_uncovered_commits(&commits, &unreleased_entries);
-
-    // If all relevant commits are already represented in the changelog, no new
-    // entries needed. Return an empty map (not None) so will_auto_generate stays
-    // true — this prevents changelog_sync from running and failing when there's
-    // no ## Unreleased section (fully automated changelogs never have one).
-    if missing_commits.is_empty() {
-        return Ok(Some(std::collections::HashMap::new()));
-    }
-
-    // Check if changelog is already finalized ahead of the latest tag.
-    // This handles fully automated changelogs where entries are generated from
-    // commits and finalized into a versioned section — no ## Unreleased section
-    // ever exists on disk. Return an empty entries map so will_auto_generate is
-    // true, which skips changelog_sync validation (it would fail looking for a
-    // non-existent ## Unreleased section).
     let latest_changelog_version = changelog::get_latest_finalized_version(&changelog_content);
     if let (Some(latest_tag), Some(changelog_ver_str)) = (&latest_tag, latest_changelog_version) {
         let tag_version = latest_tag.trim_start_matches('v');
@@ -962,43 +931,28 @@ fn validate_commits_vs_changelog(
                     changelog_ver_str,
                     latest_tag
                 );
-                return Ok(Some(std::collections::HashMap::new()));
+                return Ok(std::collections::HashMap::new());
             }
         }
     }
 
-    // Build entries from commits — pure computation, no disk writes.
-    let entries = group_commits_for_changelog(&missing_commits);
+    // Filter to commits that produce changelog entries (skip docs/chore/merge).
+    let releasable: Vec<git::CommitInfo> = commits
+        .into_iter()
+        .filter(|c| c.category.to_changelog_entry_type().is_some())
+        .collect();
+
+    let entries = group_commits_for_changelog(&releasable);
     let count: usize = entries.values().map(|v| v.len()).sum();
 
-    if dry_run {
-        log_status!(
-            "release",
-            "Would auto-generate {} changelog entries from commits (dry run)",
-            count
-        );
-    } else {
-        log_status!(
-            "release",
-            "Will auto-generate {} changelog entries from commits",
-            count
-        );
-    }
+    log_status!(
+        "release",
+        "{} auto-generate {} changelog entries from commits",
+        if dry_run { "Would" } else { "Will" },
+        count,
+    );
 
-    Ok(Some(entries))
-}
-
-fn normalize_changelog_text(value: &str) -> String {
-    // Strip trailing PR/issue references like (#123) before normalizing
-    let stripped = strip_pr_reference(value);
-    stripped
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    Ok(entries)
 }
 
 /// Strip trailing PR/issue references like "(#123)" or "(#123, #456)" from text.
@@ -1016,35 +970,6 @@ fn strip_pr_reference(value: &str) -> String {
         }
     }
     trimmed.to_string()
-}
-
-fn find_uncovered_commits(
-    commits: &[git::CommitInfo],
-    unreleased_entries: &[String],
-) -> Vec<git::CommitInfo> {
-    let normalized_entries: Vec<String> = unreleased_entries
-        .iter()
-        .map(|entry| normalize_changelog_text(entry))
-        .collect();
-
-    commits
-        .iter()
-        .filter(|commit| commit.category.to_changelog_entry_type().is_some())
-        .filter(|commit| {
-            let normalized_subject =
-                normalize_changelog_text(git::strip_conventional_prefix(&commit.subject));
-
-            // Check both directions: entry contains subject OR subject contains entry.
-            // This handles cases where the manual changelog entry is a substring of the
-            // commit message or vice versa.
-            !normalized_entries.iter().any(|entry| {
-                !entry.is_empty()
-                    && (entry.contains(&normalized_subject)
-                        || normalized_subject.contains(entry.as_str()))
-            })
-        })
-        .cloned()
-        .collect()
 }
 
 /// Generate changelog entries from conventional commit messages.
@@ -1446,29 +1371,20 @@ fn validate_working_tree_fail_fast(component: &Component) -> Result<()> {
 }
 
 /// First-release bootstrap: if the component's configured `changelog_target`
-/// doesn't exist on disk (and no fallback candidate exists either), synthesize
-/// a minimal changelog so the downstream release stages have a file to read
-/// and finalize.
+/// doesn't exist on disk (and no fallback candidate exists), create an empty
+/// changelog scaffold so `resolve_changelog_path` + `finalize_with_generated_entries`
+/// downstream have a file to work with.
 ///
-/// Without this, three stages below all fail with the same `File not found`
-/// error — `commits`, `changelog`, and `changelog_sync` each read the
-/// changelog independently — and none of their hints point at
-/// `homeboy changelog init`. See #1172.
-///
-/// Writes a template matching `homeboy changelog init`: a `# Changelog` title
-/// and a `## Unreleased` section. The downstream `finalize_with_generated_entries`
-/// or `finalize_next_section` then replaces `## Unreleased` with the real
-/// `## [x.y.z] - YYYY-MM-DD` section, so the template is transient — it
-/// lands on disk only for the span of one release run.
+/// Writes only a `# Changelog` title — no `## Unreleased` section. The
+/// downstream `finalize_with_generated_entries` handles inserting the new
+/// `## [x.y.z] - YYYY-MM-DD` section directly. See #1172 + #1205.
 ///
 /// No-op when:
-/// - `changelog_target` is unset (resolver already fails with a teaching error),
+/// - `changelog_target` is unset (resolver emits a teaching error downstream),
 /// - the configured path exists,
 /// - a fallback candidate exists (resolver's discovery covers this case).
 fn ensure_changelog_initialized(component: &Component) -> Result<()> {
     let Some(ref target) = component.changelog_target else {
-        // No target configured — let resolve_changelog_path() emit its
-        // existing "No changelog configured" teaching error downstream.
         return Ok(());
     };
 
@@ -1477,22 +1393,18 @@ fn ensure_changelog_initialized(component: &Component) -> Result<()> {
         return Ok(());
     }
 
-    // If a fallback candidate exists, resolve_changelog_path() will pick
-    // it up — don't overwrite it with a fresh template.
     let repo_root = std::path::Path::new(&component.local_path);
     if changelog::discover_changelog_relative_path(repo_root).is_some() {
         return Ok(());
     }
 
-    // Create the parent directory (e.g. `docs/`) before writing the file.
     if let Some(parent) = configured_path.parent() {
         crate::engine::local_files::local().ensure_dir(parent)?;
     }
 
-    let settings = changelog::resolve_effective_settings(Some(component));
-    let template = format!("# Changelog\n\n## {}\n\n", settings.next_section_label,);
-
-    crate::engine::local_files::local().write(&configured_path, &template)?;
+    // Title only. `finalize_with_generated_entries` will create the
+    // `## [X.Y.Z]` section directly on top of this.
+    crate::engine::local_files::local().write(&configured_path, "# Changelog\n\n")?;
 
     log_status!(
         "release",
@@ -1561,9 +1473,8 @@ fn get_unexpected_uncommitted_files(
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_changelog_initialized, filter_homeboy_managed, find_uncovered_commits,
-        get_unexpected_uncommitted_files, is_homeboy_managed_path, normalize_changelog_text,
-        strip_pr_reference,
+        ensure_changelog_initialized, filter_homeboy_managed, get_unexpected_uncommitted_files,
+        is_homeboy_managed_path, strip_pr_reference,
     };
     use crate::component::Component;
     use crate::git::{CommitCategory, CommitInfo, UncommittedChanges};
@@ -1574,68 +1485,6 @@ mod tests {
             subject: subject.to_string(),
             category,
         }
-    }
-
-    #[test]
-    fn test_normalize_changelog_text() {
-        assert_eq!(
-            normalize_changelog_text(
-                "Fixed scoped audit exit codes to ignore unchanged legacy outliers"
-            ),
-            "fixed scoped audit exit codes to ignore unchanged legacy outliers"
-        );
-        assert_eq!(
-            normalize_changelog_text("fix(audit): use scoped findings for changed-since exit"),
-            "fix audit use scoped findings for changed since exit"
-        );
-    }
-
-    #[test]
-    fn test_find_uncovered_commits_ignores_covered_fix_commit() {
-        let commits = vec![commit(
-            "fix(audit): use scoped findings for changed-since exit",
-            CommitCategory::Fix,
-        )];
-        let unreleased = vec![
-            "use scoped findings for changed-since exit".to_string(),
-            "another manual note".to_string(),
-        ];
-
-        let uncovered = find_uncovered_commits(&commits, &unreleased);
-        assert!(uncovered.is_empty());
-    }
-
-    #[test]
-    fn test_find_uncovered_commits_requires_feature_coverage() {
-        let commits = vec![
-            commit(
-                "fix(audit): use scoped findings for changed-since exit",
-                CommitCategory::Fix,
-            ),
-            commit(
-                "feat(refactor): apply decompose plans with audit impact projection",
-                CommitCategory::Feature,
-            ),
-        ];
-        let unreleased = vec!["use scoped findings for changed-since exit".to_string()];
-
-        let uncovered = find_uncovered_commits(&commits, &unreleased);
-        assert_eq!(uncovered.len(), 1);
-        assert_eq!(
-            uncovered[0].subject,
-            "feat(refactor): apply decompose plans with audit impact projection"
-        );
-    }
-
-    #[test]
-    fn test_find_uncovered_commits_skips_docs_and_merge() {
-        let commits = vec![
-            commit("docs: update release notes", CommitCategory::Docs),
-            commit("Merge pull request #1 from branch", CommitCategory::Merge),
-        ];
-
-        let uncovered = find_uncovered_commits(&commits, &[]);
-        assert!(uncovered.is_empty());
     }
 
     #[test]
@@ -1652,43 +1501,6 @@ mod tests {
         assert_eq!(
             strip_pr_reference("has parens (not a pr ref)"),
             "has parens (not a pr ref)"
-        );
-    }
-
-    #[test]
-    fn test_normalize_strips_pr_reference() {
-        assert_eq!(
-            normalize_changelog_text("fix something (#526)"),
-            normalize_changelog_text("fix something")
-        );
-    }
-
-    #[test]
-    fn test_find_uncovered_commits_deduplicates_with_pr_suffix() {
-        // Scenario: manual changelog entry without PR ref, commit has PR ref
-        let commits = vec![commit(
-            "fix: version bump dry-run no longer mutates changelog (#526)",
-            CommitCategory::Fix,
-        )];
-        let unreleased = vec!["version bump dry-run no longer mutates changelog".to_string()];
-
-        let uncovered = find_uncovered_commits(&commits, &unreleased);
-        assert!(
-            uncovered.is_empty(),
-            "Should detect commit as covered by manual entry (PR ref stripped)"
-        );
-    }
-
-    #[test]
-    fn test_find_uncovered_commits_bidirectional_match() {
-        // Entry is longer/more descriptive than the commit message
-        let commits = vec![commit("feat: enable autofix", CommitCategory::Feature)];
-        let unreleased = vec!["enable autofix on PR and release CI workflows".to_string()];
-
-        let uncovered = find_uncovered_commits(&commits, &unreleased);
-        assert!(
-            uncovered.is_empty(),
-            "Should match when commit subject is contained in the entry"
         );
     }
 
@@ -1822,6 +1634,10 @@ mod tests {
     /// Regression for #1172: first release with `changelog_target` configured
     /// but no file on disk. The preflight must create the file so downstream
     /// stages don't all fail with "File not found".
+    ///
+    /// Post-#1205: the scaffold only contains the `# Changelog` title, not a
+    /// `## Unreleased` section. `finalize_with_generated_entries` inserts the
+    /// `## [X.Y.Z]` section directly.
     #[test]
     fn ensure_changelog_initialized_creates_missing_file() {
         let temp = tempfile::tempdir().unwrap();
@@ -1835,8 +1651,8 @@ mod tests {
         let content = std::fs::read_to_string(&changelog_path).expect("file created");
         assert!(content.contains("# Changelog"), "has title: {}", content);
         assert!(
-            content.contains("## Unreleased"),
-            "has unreleased: {}",
+            !content.contains("## Unreleased"),
+            "should NOT pre-create Unreleased section (legacy): {}",
             content
         );
     }
