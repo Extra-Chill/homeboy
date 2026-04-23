@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.11.0] - 2026-04-23
+
+### Added
+- retire host-PHP test backend — Playground only (Phase 3 of #214)
+
 ## [2.10.18] - 2026-04-23
 
 ### Changed
