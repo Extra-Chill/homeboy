@@ -1,27 +1,17 @@
 <phpunit
-    bootstrap="tests/bootstrap.php"
     colors="true"
     verbose="false"
     stopOnFailure="false">
 
     <testsuites>
-        <testsuite name="WordPress Plugin Tests">
+        <testsuite name="WordPress Extension Tests">
             <directory>tests/</directory>
         </testsuite>
     </testsuites>
 
-    <coverage processUncoveredFiles="true">
-        <include>
-            <directory suffix=".php">.</directory>
-        </include>
-        <exclude>
-            <directory>tests</directory>
-            <directory>vendor</directory>
-        </exclude>
-    </coverage>
-
     <php>
-        <env name="WP_TESTS_DIR" value="{{modulePath}}/vendor/wp-phpunit/wp-phpunit/tests/phpunit"/>
-        <env name="ABSPATH" value="{{modulePath}}/vendor/wp-phpunit/wp-phpunit/wordpress"/>
+        <!-- Extension tests run via the Playground smoke test (scripts/test/playground-dropin-smoke.sh).
+             PHPUnit is invoked inside Playground, not on the host. This config is kept for
+             tooling compatibility but the bootstrap is handled by playground-runner.php. -->
     </php>
 </phpunit>
