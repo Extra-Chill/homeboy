@@ -195,17 +195,6 @@ fn resolve_effective_glob(
 
         if changed_files.is_empty() {
             println!("No files changed since {}", git_ref);
-            return Ok(Some(String::new()));
-        }
-
-        let abs_files: Vec<String> = changed_files
-            .iter()
-            .map(|f| format!("{}/{}", component.local_path, f))
-            .collect();
-
-        if abs_files.len() == 1 {
-            Ok(Some(abs_files[0].clone()))
-        } else {
             Ok(Some(format!("{{{}}}", abs_files.join(","))))
         }
     } else {
