@@ -1,7 +1,6 @@
 pub mod changelog;
 mod executor;
 mod pipeline;
-mod resolver;
 mod types;
 mod utils;
 pub mod version;
@@ -12,7 +11,7 @@ pub use types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseArtifact,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary,
     ReleaseOptions, ReleasePlan, ReleasePlanStatus, ReleasePlanStep, ReleaseProjectDeployResult,
-    ReleaseRun,
+    ReleaseRun, ReleaseRunResult, ReleaseRunSummary, ReleaseStepResult, ReleaseStepStatus,
 };
 pub use utils::{extract_latest_notes, parse_release_artifacts};
 pub use workflow::{run_batch, run_command};

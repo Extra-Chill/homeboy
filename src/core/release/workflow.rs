@@ -762,7 +762,7 @@ pub fn run_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::pipeline::{PipelineRunResult, PipelineRunStatus, PipelineStepResult};
+    use crate::release::{ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus};
     use std::collections::HashMap;
 
     #[test]
@@ -798,18 +798,18 @@ mod tests {
         let run = ReleaseRun {
             component_id: "demo".to_string(),
             enabled: true,
-            result: PipelineRunResult {
-                steps: vec![PipelineStepResult {
+            result: ReleaseRunResult {
+                steps: vec![ReleaseStepResult {
                     id: "post_release".to_string(),
                     step_type: "post_release".to_string(),
-                    status: PipelineRunStatus::Success,
+                    status: ReleaseStepStatus::Success,
                     missing: vec![],
                     warnings: vec![],
                     hints: vec![],
                     data: Some(serde_json::json!({ "all_succeeded": false })),
                     error: None,
                 }],
-                status: PipelineRunStatus::Success,
+                status: ReleaseStepStatus::Success,
                 warnings: vec![],
                 summary: None,
             },

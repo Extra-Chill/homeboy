@@ -1,44 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::engine::pipeline::{self, PipelinePlanStep, PipelineRunResult};
 use crate::is_zero_u32;
 
-/// Internal step types for the release pipeline.
-/// These are used internally - the core flow is non-configurable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReleaseStepType {
-    Version,
-    GitCommit,
-    GitTag,
-    GitPush,
-    Package,
-    Publish(String),
-    Cleanup,
-    PostRelease,
-    GitHubRelease,
-}
-
-impl ReleaseStepType {
-    pub(crate) fn from_str(s: &str) -> Self {
-        match s {
-            "version" => ReleaseStepType::Version,
-            "git.commit" => ReleaseStepType::GitCommit,
-            "git.tag" => ReleaseStepType::GitTag,
-            "git.push" => ReleaseStepType::GitPush,
-            "package" => ReleaseStepType::Package,
-            "cleanup" => ReleaseStepType::Cleanup,
-            "post_release" => ReleaseStepType::PostRelease,
-            "github.release" => ReleaseStepType::GitHubRelease,
-            other => {
-                // Strip "publish." prefix at source - single source of truth for format parsing
-                let target = other.strip_prefix("publish.").unwrap_or(other);
-                ReleaseStepType::Publish(target.to_string())
-            }
-        }
-    }
-}
-
+/// Dry-run description of a release step.
+///
+/// `ReleasePlan` is a *preview* shape — it exists to render human-readable
+/// step lists in `--dry-run` mode and in `--json` output. It does NOT drive
+/// execution. The actual release runs through a straight-line function in
+/// `pipeline::execute()` that calls each step directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleasePlan {
     pub component_id: String,
@@ -73,11 +43,65 @@ pub struct ReleaseSemverRecommendation {
     pub reasons: Vec<String>,
 }
 
+/// Run result for a single release. Shape is preserved from the pre-refactor
+/// `ReleaseRun { component_id, enabled, result: PipelineRunResult }` so `--json`
+/// consumers see no change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseRun {
     pub component_id: String,
     pub enabled: bool,
-    pub result: PipelineRunResult,
+    pub result: ReleaseRunResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseRunResult {
+    pub steps: Vec<ReleaseStepResult>,
+    pub status: ReleaseStepStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ReleaseRunSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseStepResult {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub step_type: String,
+    pub status: ReleaseStepStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<crate::error::Hint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseStepStatus {
+    Success,
+    PartialSuccess,
+    Failed,
+    Skipped,
+    Missing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseRunSummary {
+    pub total_steps: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub missing: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub success_summary: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,8 +113,15 @@ pub struct ReleaseArtifact {
     pub platform: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct ReleaseContext {
+/// Mutable state threaded through the straight-line release execution.
+///
+/// Every step that produces a downstream value (the new version, the tag name,
+/// the release notes, the built artifacts) stores it here and the next step
+/// reads it back. This was previously a `Mutex<ReleaseContext>` accessed
+/// through a generic pipeline DAG — a pattern the execution never actually
+/// needed because every step runs sequentially.
+#[derive(Debug, Clone, Default)]
+pub struct ReleaseState {
     pub version: Option<String>,
     pub tag: Option<String>,
     pub notes: Option<String>,
@@ -111,26 +142,6 @@ pub struct ReleasePlanStep {
     pub status: ReleasePlanStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
-}
-
-impl From<PipelinePlanStep> for ReleasePlanStep {
-    fn from(step: PipelinePlanStep) -> Self {
-        let status = match step.status {
-            pipeline::PipelineStepStatus::Ready => ReleasePlanStatus::Ready,
-            pipeline::PipelineStepStatus::Missing => ReleasePlanStatus::Missing,
-            pipeline::PipelineStepStatus::Disabled => ReleasePlanStatus::Disabled,
-        };
-
-        Self {
-            id: step.id,
-            step_type: step.step_type,
-            label: step.label,
-            needs: step.needs,
-            config: step.config,
-            status,
-            missing: step.missing,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

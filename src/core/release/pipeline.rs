@@ -1,6 +1,19 @@
+//! Release pipeline — planning, validation, and straight-line execution.
+//!
+//! Previously this module drove execution through a generic DAG pipeline in
+//! `engine::pipeline` with a trait-dispatched `ReleaseStepExecutor` and a
+//! capability `ReleaseCapabilityResolver`. In practice every release ran the
+//! same sequential order through a `Mutex<ReleaseContext>` shared between
+//! steps — the DAG bought nothing but indirection. See issue #1187.
+//!
+//! The layers collapsed into one function (`execute`) that calls the step
+//! implementations in [`super::executor`] directly. The `plan()` function
+//! still returns a serializable `ReleasePlan` for `--dry-run` / `--json`
+//! consumers, but it's now a *description* of what `execute` will do, not
+//! the thing that drives execution.
+
 use crate::component::{self, Component};
 use crate::engine::local_files::FileSystem;
-use crate::engine::pipeline::{self, PipelineStep};
 use crate::engine::run_dir::{self, RunDir};
 use crate::engine::validation::ValidationCollector;
 use crate::error::{Error, Result};
@@ -9,11 +22,11 @@ use crate::git::{self, UncommittedChanges};
 use crate::release::changelog;
 use crate::version;
 
-use super::executor::ReleaseStepExecutor;
-use super::resolver::{resolve_extensions, ReleaseCapabilityResolver};
+use super::executor;
 use super::types::{
-    ReleaseOptions, ReleasePlan, ReleasePlanStatus, ReleasePlanStep, ReleaseRun,
-    ReleaseSemverCommit, ReleaseSemverRecommendation,
+    ReleaseOptions, ReleasePlan, ReleasePlanStatus, ReleasePlanStep, ReleaseRun, ReleaseRunResult,
+    ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation, ReleaseState,
+    ReleaseStepResult, ReleaseStepStatus,
 };
 
 /// Load a component with portable config fallback when path_override is set.
@@ -22,59 +35,372 @@ pub(crate) fn load_component(component_id: &str, options: &ReleaseOptions) -> Re
     component::resolve_effective(Some(component_id), options.path_override.as_deref(), None)
 }
 
-/// Execute a release by computing the plan and executing it.
-/// What you preview (dry-run) is what you execute.
+/// Resolve the component's declared extensions (for publish/package dispatch).
+fn resolve_extensions(component: &Component) -> Result<Vec<ExtensionManifest>> {
+    let mut extensions = Vec::new();
+    if let Some(configured) = component.extensions.as_ref() {
+        let mut extension_ids: Vec<String> = configured.keys().cloned().collect();
+        extension_ids.sort();
+        let suggestions = extension::available_extension_ids();
+        for extension_id in extension_ids {
+            let manifest = extension::load_extension(&extension_id).map_err(|_| {
+                Error::extension_not_found(extension_id.to_string(), suggestions.clone())
+            })?;
+            extensions.push(manifest);
+        }
+    }
+    Ok(extensions)
+}
+
+/// Execute a release end-to-end.
+///
+/// Runs the preflight validations (via [`plan`]), then walks the release
+/// steps in order, threading [`ReleaseState`] between them. Steps that fail
+/// cause subsequent steps to be marked `Skipped` but execution continues so
+/// the caller gets a full per-step result list; post-release hooks still
+/// run so any failure can be observed.
+///
+/// What you preview with `--dry-run` is what executes.
 pub fn run(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
+    // plan() performs all validations + bootstraps. Its output also tells us
+    // which publish/cleanup/post_release steps should run for this component,
+    // so we don't duplicate the capability checks below.
     let release_plan = plan(component_id, options)?;
 
     let component = load_component(component_id, options)?;
-    let extensions = resolve_extensions(&component, None)?;
-    let resolver = ReleaseCapabilityResolver::new(extensions.clone());
-    let executor = ReleaseStepExecutor::new(component_id.to_string(), component, extensions);
+    let extensions = resolve_extensions(&component)?;
+    let monorepo = git::MonorepoContext::detect(&component.local_path, component_id);
+    let pending_entries = extract_pending_entries(&release_plan);
 
-    let pipeline_steps: Vec<PipelineStep> = release_plan
-        .steps
-        .iter()
-        .map(|s| PipelineStep {
-            id: s.id.clone(),
-            step_type: s.step_type.clone(),
-            label: s.label.clone(),
-            needs: s.needs.clone(),
-            config: s.config.clone(),
-        })
-        .collect();
+    let mut state = ReleaseState::default();
+    let mut results: Vec<ReleaseStepResult> = Vec::new();
 
-    let run_result = pipeline::run(
-        &pipeline_steps,
-        std::sync::Arc::new(executor),
-        std::sync::Arc::new(resolver),
-        release_plan.enabled,
-        "release.steps",
-    )?;
+    // Helper: return early if the last step we pushed failed. Tag/push failures
+    // are genuinely show-stopping for the release so we bail; publish/github
+    // failures are handled below with their own per-target logic.
+    macro_rules! bail_on_failure {
+        () => {
+            if matches!(
+                results.last().map(|r| &r.status),
+                Some(ReleaseStepStatus::Failed)
+            ) {
+                return Ok(finalize(component_id, results, monorepo.as_ref()));
+            }
+        };
+    }
 
-    Ok(ReleaseRun {
-        component_id: component_id.to_string(),
-        enabled: release_plan.enabled,
-        result: run_result,
-    })
+    // 1. Version bump (+ optional changelog generation)
+    results.push(executor::run_version(
+        &component,
+        &mut state,
+        &options.bump_type,
+        pending_entries.as_ref(),
+    )?);
+    bail_on_failure!();
+
+    // 2. Git commit
+    results.push(executor::run_git_commit(&component, component_id, &state)?);
+    bail_on_failure!();
+
+    // 3. Optional packaging (runs BEFORE tag so build failures don't leave
+    //    orphan tags on the remote).
+    let has_publish_targets = !get_publish_targets(&extensions).is_empty();
+    let want_publish = !options.skip_publish && has_publish_targets;
+    if want_publish {
+        match executor::run_package(
+            &extensions,
+            &mut state,
+            component_id,
+            &component.local_path,
+        ) {
+            Ok(result) => results.push(result),
+            Err(err) => results.push(failed_result("package", "package", err)),
+        }
+        bail_on_failure!();
+    }
+
+    // 4. Git tag
+    let tag_name = match monorepo.as_ref() {
+        Some(ctx) => ctx.format_tag(state.version.as_deref().unwrap_or("")),
+        None => format!("v{}", state.version.as_deref().unwrap_or("")),
+    };
+    results.push(executor::run_git_tag(
+        &component,
+        component_id,
+        &mut state,
+        &tag_name,
+    )?);
+    bail_on_failure!();
+
+    // 5. Git push (commits + tags)
+    results.push(executor::run_git_push(&component, component_id)?);
+    bail_on_failure!();
+
+    // 6. GitHub Release (soft-fails on gh issues; skipped for non-GitHub remotes).
+    if !options.skip_github_release && github_release_applies(&component) {
+        match executor::run_github_release(&component, &state) {
+            Ok(result) => results.push(result),
+            Err(err) => results.push(failed_result("github.release", "github.release", err)),
+        }
+    }
+
+    // 7. Publish to each configured target. Failures here mark the step failed
+    //    but don't halt — other targets may still succeed.
+    let mut publish_failed = false;
+    if want_publish {
+        for target in get_publish_targets(&extensions) {
+            match executor::run_publish(
+                &extensions,
+                &state,
+                component_id,
+                &component.local_path,
+                &target,
+            ) {
+                Ok(result) => {
+                    if matches!(result.status, ReleaseStepStatus::Failed) {
+                        publish_failed = true;
+                    }
+                    results.push(result);
+                }
+                Err(err) => {
+                    publish_failed = true;
+                    let step_id = format!("publish.{}", target);
+                    results.push(failed_result(&step_id, &step_id, err));
+                }
+            }
+        }
+    }
+
+    // 8. Cleanup staging dir. Skipped when --deploy is set (deploy needs the
+    //    build artifact) and when publishing was skipped entirely.
+    if want_publish && !options.deploy && !publish_failed {
+        match executor::run_cleanup(&component) {
+            Ok(result) => results.push(result),
+            Err(err) => results.push(failed_result("cleanup", "cleanup", err)),
+        }
+    }
+
+    // 9. Post-release hooks (always run if configured — not gated by --skip-publish).
+    let post_release_hooks =
+        crate::engine::hooks::resolve_hooks(&component, crate::engine::hooks::events::POST_RELEASE);
+    if !post_release_hooks.is_empty() {
+        match executor::run_post_release(&component, &post_release_hooks) {
+            Ok(result) => results.push(result),
+            Err(err) => results.push(failed_result("post_release", "post_release", err)),
+        }
+    }
+
+    Ok(finalize(component_id, results, monorepo.as_ref()))
 }
 
-/// Plan a release with built-in core steps and extension-derived publish targets.
+/// Convert a step error into a failed `ReleaseStepResult`.
+fn failed_result(id: &str, step_type: &str, err: Error) -> ReleaseStepResult {
+    ReleaseStepResult {
+        id: id.to_string(),
+        step_type: step_type.to_string(),
+        status: ReleaseStepStatus::Failed,
+        missing: Vec::new(),
+        warnings: Vec::new(),
+        hints: err.hints.clone(),
+        data: Some(serde_json::json!({ "error_details": err.details })),
+        error: Some(err.message),
+    }
+}
+
+/// Read the auto-generated changelog entries embedded in the plan's `version`
+/// step. `plan()` computes them during validation and stashes them here so
+/// `execute()` can hand them straight to [`executor::run_version`] without
+/// recomputing.
+fn extract_pending_entries(
+    plan: &ReleasePlan,
+) -> Option<std::collections::HashMap<String, Vec<String>>> {
+    let version_step = plan.steps.iter().find(|s| s.id == "version")?;
+    let value = version_step.config.get("changelog_entries")?;
+    serde_json::from_value(value.clone()).ok()
+}
+
+/// Wrap the accumulated step results into a `ReleaseRun` with an overall
+/// status and a human-friendly summary.
+fn finalize(
+    component_id: &str,
+    results: Vec<ReleaseStepResult>,
+    _monorepo: Option<&git::MonorepoContext>,
+) -> ReleaseRun {
+    let status = derive_overall_status(&results);
+    let summary = build_summary(&results, &status);
+
+    ReleaseRun {
+        component_id: component_id.to_string(),
+        enabled: true,
+        result: ReleaseRunResult {
+            steps: results,
+            status,
+            warnings: Vec::new(),
+            summary: Some(summary),
+        },
+    }
+}
+
+fn derive_overall_status(results: &[ReleaseStepResult]) -> ReleaseStepStatus {
+    let has_success = results
+        .iter()
+        .any(|r| matches!(r.status, ReleaseStepStatus::Success));
+    let has_failed = results
+        .iter()
+        .any(|r| matches!(r.status, ReleaseStepStatus::Failed));
+
+    if has_failed && has_success {
+        ReleaseStepStatus::PartialSuccess
+    } else if has_failed {
+        ReleaseStepStatus::Failed
+    } else {
+        ReleaseStepStatus::Success
+    }
+}
+
+fn build_summary(
+    results: &[ReleaseStepResult],
+    status: &ReleaseStepStatus,
+) -> ReleaseRunSummary {
+    let succeeded = results
+        .iter()
+        .filter(|r| matches!(r.status, ReleaseStepStatus::Success))
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| matches!(r.status, ReleaseStepStatus::Failed))
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|r| matches!(r.status, ReleaseStepStatus::Skipped))
+        .count();
+    let missing = results
+        .iter()
+        .filter(|r| matches!(r.status, ReleaseStepStatus::Missing))
+        .count();
+
+    let next_actions = match status {
+        ReleaseStepStatus::PartialSuccess | ReleaseStepStatus::Failed => vec![
+            "Fix the issue and re-run (idempotent - completed steps will succeed again)"
+                .to_string(),
+        ],
+        ReleaseStepStatus::Missing => {
+            vec!["Install missing extensions or actions to resolve missing steps".to_string()]
+        }
+        _ => Vec::new(),
+    };
+
+    let success_summary = if matches!(status, ReleaseStepStatus::Success) {
+        results.iter().filter_map(build_step_summary_line).collect()
+    } else {
+        Vec::new()
+    };
+
+    ReleaseRunSummary {
+        total_steps: results.len(),
+        succeeded,
+        failed,
+        skipped,
+        missing,
+        next_actions,
+        success_summary,
+    }
+}
+
+fn build_step_summary_line(result: &ReleaseStepResult) -> Option<String> {
+    if !matches!(result.status, ReleaseStepStatus::Success) {
+        return None;
+    }
+
+    let data = result.data.as_ref();
+
+    match result.step_type.as_str() {
+        "version" => data
+            .and_then(|d| d.get("new_version"))
+            .and_then(|v| v.as_str())
+            .map(|ver| format!("Version bumped to {}", ver)),
+        "git.commit" => {
+            let skipped = data
+                .and_then(|d| d.get("skipped"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if skipped {
+                Some("Working tree was clean".to_string())
+            } else {
+                Some("Committed release changes".to_string())
+            }
+        }
+        "git.tag" => {
+            let tag = data.and_then(|d| d.get("tag")).and_then(|v| v.as_str());
+            let skipped = data
+                .and_then(|d| d.get("skipped"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match (tag, skipped) {
+                (Some(t), true) => Some(format!("Tag {} already exists", t)),
+                (Some(t), false) => Some(format!("Tagged {}", t)),
+                (None, _) => Some("Tagged release".to_string()),
+            }
+        }
+        "git.push" => Some("Pushed to origin (with tags)".to_string()),
+        "package" => Some("Created release artifacts".to_string()),
+        "cleanup" => None,
+        "github.release" => {
+            let skipped = data
+                .and_then(|d| d.get("skipped"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if skipped {
+                None
+            } else {
+                data.and_then(|d| d.get("url"))
+                    .and_then(|v| v.as_str())
+                    .map(|url| format!("Created GitHub Release: {}", url))
+            }
+        }
+        "post_release" => {
+            let all_succeeded = data
+                .and_then(|d| d.get("all_succeeded"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if all_succeeded {
+                Some("Post-release commands completed".to_string())
+            } else {
+                Some("Post-release commands completed (with warnings)".to_string())
+            }
+        }
+        step if step.starts_with("publish.") => {
+            let target = step.strip_prefix("publish.").unwrap_or("registry");
+            Some(format!("Published to {}", target))
+        }
+        _ => None,
+    }
+}
+
+
+
+/// Plan a release: run all preflight validations, then return a description
+/// of the steps the executor will run. Used by `--dry-run` to preview work
+/// without side effects and by [`run`] to drive validation + auto-generated
+/// changelog entries.
 ///
-/// Requires a clean working tree (uncommitted changes will cause an error).
+/// Requires a clean working tree (uncommitted changes cause an error).
 ///
-/// Core steps (always generated, non-configurable):
+/// Core steps (always generated):
 /// 1. Version bump + changelog finalization
 /// 2. Git commit
 /// 3. Git tag
 /// 4. Git push (commits AND tags)
 ///
-/// Publish steps (derived from extensions):
-/// - From component's extensions that have `release.publish` action
-/// - Or explicit `release.publish` array if configured
+/// Extension-derived steps, added when applicable:
+/// - `package` — component has an extension with `release.package` action
+/// - `publish.<target>` — one per extension with `release.publish` action
+/// - `cleanup` — after publish (skipped with `--deploy`)
+/// - `github.release` — component's remote resolves to a github.com URL
+/// - `post_release` — component defines post-release hook commands
 pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan> {
     let component = load_component(component_id, options)?;
-    let extensions = resolve_extensions(&component, None)?;
+    let extensions = resolve_extensions(&component)?;
 
     let mut v = ValidationCollector::new();
 
@@ -768,13 +1094,6 @@ fn changelog_entries_to_json(
     entries: &std::collections::HashMap<String, Vec<String>>,
 ) -> serde_json::Value {
     serde_json::to_value(entries).unwrap_or_default()
-}
-
-/// Deserialize changelog entries from step config JSON.
-pub(super) fn changelog_entries_from_json(
-    value: &serde_json::Value,
-) -> Option<std::collections::HashMap<String, Vec<String>>> {
-    serde_json::from_value(value.clone()).ok()
 }
 
 /// Return true if this component should get a GitHub Release created.
