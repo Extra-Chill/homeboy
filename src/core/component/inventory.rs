@@ -194,12 +194,63 @@ pub fn load(id: &str) -> Result<Component> {
         return Ok(component);
     }
 
+    // Component not in full inventory. Check if a standalone registration
+    // file exists — this means the component was created but isn't loaded
+    // into inventory (e.g., local_path doesn't exist or portable config
+    // is missing). Return a specific "not attached" error with guidance.
+    if let Some(standalone) = read_standalone_file(id) {
+        let project_suggestion = suggest_project_for_attachment();
+        return Err(Error::component_not_attached(
+            id.to_string(),
+            standalone.local_path,
+            project_suggestion,
+        ));
+    }
+
     let suggestions = list_ids().unwrap_or_default();
     Err(Error::component_not_found(id.to_string(), suggestions))
 }
 
 pub fn exists(id: &str) -> bool {
     load(id).is_ok()
+}
+
+/// Read a standalone registration file for a component ID without loading
+/// it into the full inventory. Returns a minimal struct with `local_path`
+/// for error messaging when the component exists on disk but isn't loadable.
+fn read_standalone_file(id: &str) -> Option<StandaloneFileInfo> {
+    let dir = match crate::paths::components() {
+        Ok(d) if d.exists() => d,
+        _ => return None,
+    };
+
+    let path = dir.join(format!("{}.json", id));
+    if !path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let local_path = json.get("local_path").and_then(|v| v.as_str())?;
+
+    Some(StandaloneFileInfo {
+        local_path: local_path.to_string(),
+    })
+}
+
+/// Minimal info extracted from a standalone registration file for error messages.
+struct StandaloneFileInfo {
+    local_path: String,
+}
+
+/// If exactly one project exists, return its ID for the attach hint.
+fn suggest_project_for_attachment() -> Option<String> {
+    let projects = project::list().unwrap_or_default();
+    if projects.len() == 1 {
+        Some(projects[0].id.clone())
+    } else {
+        None
+    }
 }
 
 /// Write a standalone component registration to `~/.config/homeboy/components/<id>.json`.

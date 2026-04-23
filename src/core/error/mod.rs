@@ -25,6 +25,7 @@ pub enum ErrorCode {
     ProjectNoActive,
     ServerNotFound,
     ComponentNotFound,
+    ComponentNotAttached,
     FleetNotFound,
     ExtensionNotFound,
     DocsTopicNotFound,
@@ -65,6 +66,7 @@ impl ErrorCode {
             ErrorCode::ProjectNoActive => "project.no_active",
             ErrorCode::ServerNotFound => "server.not_found",
             ErrorCode::ComponentNotFound => "component.not_found",
+            ErrorCode::ComponentNotAttached => "component.not_attached",
             ErrorCode::FleetNotFound => "fleet.not_found",
             ErrorCode::ExtensionNotFound => "extension.not_found",
             ErrorCode::DocsTopicNotFound => "docs.topic_not_found",
@@ -345,6 +347,42 @@ impl Error {
 
     pub fn component_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
         Self::entity_not_found(ErrorCode::ComponentNotFound, "Component", id, suggestions)
+    }
+
+    pub fn component_not_attached(
+        id: impl Into<String>,
+        local_path: impl Into<String>,
+        project_suggestion: Option<String>,
+    ) -> Self {
+        let id = id.into();
+        let lp = local_path.into();
+        let details = to_details(NotFoundDetails { id: id.clone() });
+        let mut err = Self::new(
+            ErrorCode::ComponentNotAttached,
+            format!(
+                "Component '{}' is registered but not attached to any project. Release and deploy require project attachment.",
+                id
+            ),
+            details,
+        );
+        if let Some(proj) = project_suggestion {
+            err = err
+                .with_hint(format!(
+                    "Attach: homeboy project components attach-path {} {}",
+                    proj, lp
+                ))
+                .with_hint(format!(
+                    "If only one project exists, run: homeboy project components attach-path {} {}",
+                    proj, lp
+                ));
+        } else {
+            err = err.with_hint(format!(
+                "Attach to a project: homeboy project components attach-path <project> {}",
+                lp
+            ));
+        }
+        err = err.with_hint("List projects: homeboy project list".to_string());
+        err
     }
 
     pub fn extension_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
