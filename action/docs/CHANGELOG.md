@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.4] - 2026-04-23
+
+### Fixed
+- make autofix strictly opt-in, not opt-out
+
 ## [1.16.3] - 2026-04-23
 
 ### Fixed
