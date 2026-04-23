@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.6] - 2026-04-23
+
+### Fixed
+- paginate issue fetch, deduplicate stale audit/test issues
+
 ## [1.16.5] - 2026-04-23
 
 ### Changed
