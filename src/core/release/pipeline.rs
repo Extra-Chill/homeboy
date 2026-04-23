@@ -586,20 +586,68 @@ fn build_semver_recommendation(
     requested_bump: &str,
     monorepo: Option<&git::MonorepoContext>,
 ) -> Result<Option<ReleaseSemverRecommendation>> {
-    let requested = git::SemverBump::parse(requested_bump).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "bump_type",
-            format!("Invalid bump type: {}", requested_bump),
-            None,
-            Some(vec!["Use one of: patch, minor, major".to_string()]),
-        )
-    })?;
-
     let (latest_tag, commits) = resolve_tag_and_commits(&component.local_path, monorepo)?;
 
     if commits.is_empty() {
         return Ok(None);
     }
+
+    // Explicit version strings (e.g. "2.0.0") skip semver keyword parsing.
+    // The version is used verbatim — no underbump check, no rank comparison.
+    let is_explicit_version = requested_bump.contains('.')
+        && requested_bump
+            .split('.')
+            .all(|p| p.parse::<u32>().is_ok());
+
+    if is_explicit_version {
+        let range = latest_tag
+            .as_ref()
+            .map(|t| format!("{}..HEAD", t))
+            .unwrap_or_else(|| "HEAD".to_string());
+
+        let commit_rows: Vec<ReleaseSemverCommit> = commits
+            .iter()
+            .map(|c| ReleaseSemverCommit {
+                sha: c.hash.clone(),
+                subject: c.subject.clone(),
+                commit_type: match c.category {
+                    git::CommitCategory::Breaking => "breaking",
+                    git::CommitCategory::Feature => "feature",
+                    git::CommitCategory::Fix => "fix",
+                    git::CommitCategory::Docs => "docs",
+                    git::CommitCategory::Chore => "chore",
+                    git::CommitCategory::Merge => "merge",
+                    git::CommitCategory::Release => "release",
+                    git::CommitCategory::Other => "other",
+                }
+                .to_string(),
+                breaking: c.category == git::CommitCategory::Breaking,
+            })
+            .collect();
+
+        let recommended = git::recommended_bump_from_commits(&commits);
+
+        return Ok(Some(ReleaseSemverRecommendation {
+            latest_tag,
+            range,
+            commits: commit_rows,
+            recommended_bump: recommended.map(|r| r.as_str().to_string()),
+            requested_bump: requested_bump.to_string(),
+            is_underbump: false,
+            reasons: Vec::new(),
+        }));
+    }
+
+    let requested = git::SemverBump::parse(requested_bump).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "bump_type",
+            format!("Invalid bump type: {}", requested_bump),
+            None,
+            Some(vec![
+                "Use one of: patch, minor, major, or an explicit version like 2.0.0".to_string(),
+            ]),
+        )
+    })?;
 
     let recommended = git::recommended_bump_from_commits(&commits);
     let is_underbump = recommended
