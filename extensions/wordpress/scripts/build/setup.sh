@@ -1,29 +1,32 @@
 #!/bin/bash
 set -euo pipefail
 
-# Derive extension path from current working directory
+# Setup script for WordPress Homeboy extension.
+#
+# Installs npm dependencies (including @wp-playground/cli for the Playground
+# test backend) and PHP dev dependencies (PHPCS, PHPStan for linting).
+#
+# The legacy wp-phpunit dependency was removed in Phase 3 (#214) — test
+# execution now runs entirely inside WordPress Playground.
+
 EXTENSION_PATH="$(pwd)"
 
-echo "Setting up WordPress test infrastructure..."
+echo "Setting up WordPress extension..."
 
-# Install PHP dependencies (host backend: wp-phpunit, phpcs, phpunit)
-cd "$EXTENSION_PATH"
-composer install --quiet --no-interaction
+# Install PHP dev dependencies (PHPCS, PHPStan, PHPUnit — used for linting
+# and the extension's own self-tests, not for running component tests).
+if [ -f "composer.json" ]; then
+    echo "Installing PHP dependencies..."
+    composer install --quiet --no-interaction
+fi
 
-# Install npm dependencies (ESLint + Playground CLI)
+# Install npm dependencies (Playground CLI, ESLint).
 if [ -f "package.json" ]; then
-    echo "Installing npm dependencies (ESLint + @wp-playground/cli)..."
+    echo "Installing npm dependencies (including @wp-playground/cli)..."
     npm install --quiet --no-fund --no-audit 2>&1 || {
-        echo "Warning: npm install failed, ESLint and Playground backend will be unavailable"
+        echo "Warning: npm install failed — Playground test backend will not be available"
     }
 fi
 
-echo "WordPress test infrastructure installed successfully"
-echo ""
-echo "Host backend (default):"
-echo "  WP_TESTS_DIR: $EXTENSION_PATH/vendor/wp-phpunit/wp-phpunit/tests/phpunit"
-echo "  ABSPATH: cached WordPress (downloaded on first run)"
-echo ""
-echo "Playground backend (opt-in):"
-echo "  CLI: $EXTENSION_PATH/node_modules/.bin/wp-playground"
-echo "  Activate: homeboy component set <id> test_backend playground"
+echo "WordPress extension setup complete."
+echo "Test backend: Playground (PHP-WASM + embedded SQLite)"

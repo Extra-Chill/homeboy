@@ -274,7 +274,7 @@
   "executable": {
     "runtime": {
       "setup_command": "bash {{extension_path}}/scripts/build/setup.sh",
-      "ready_check": "test -f {{extension_path}}/vendor/wp-phpunit/wp-phpunit/includes/bootstrap.php",
+      "ready_check": "test -f {{extension_path}}/node_modules/.bin/wp-playground-cli",
       "run_command": "bash {{extension_path}}/scripts/test/test-runner.sh"
     }
   },
@@ -321,11 +321,8 @@
     "extension_script": "scripts/test/test-runner.sh"
   },
   "testing": {
-    "supported_databases": [
-      "sqlite",
-      "mysql"
-    ],
-    "default_database": "auto"
+    "backend": "playground",
+    "description": "All tests run inside WordPress Playground (PHP-WASM + embedded SQLite). Zero host setup required."
   },
   "settings": [
     {
@@ -341,48 +338,6 @@
       "type": "string",
       "default": "",
       "description": "WordPress user for WP-CLI commands (email, login, or ID). When configured, automatically appended as --user flag."
-    },
-    {
-      "id": "test_backend",
-      "label": "Test Backend",
-      "type": "string",
-      "default": "host",
-      "description": "Test execution backend. 'host' (default) runs PHPUnit with host PHP + wp-phpunit. 'playground' runs inside WordPress Playground (PHP-WASM + embedded SQLite)."
-    },
-    {
-      "id": "database_type",
-      "label": "Database Type",
-      "type": "string",
-      "default": "auto",
-      "description": "Database backend for tests (host backend only). 'auto' tries MySQL first, falls back to SQLite. Ignored when test_backend is 'playground'."
-    },
-    {
-      "id": "mysql_host",
-      "label": "MySQL Host",
-      "type": "string",
-      "default": "127.0.0.1",
-      "description": "MySQL host (when using mysql database type)"
-    },
-    {
-      "id": "mysql_database",
-      "label": "MySQL Database",
-      "type": "string",
-      "default": "homeboy_wptests",
-      "description": "MySQL database name (when using mysql database type)"
-    },
-    {
-      "id": "mysql_user",
-      "label": "MySQL User",
-      "type": "string",
-      "default": "root",
-      "description": "MySQL user (when using mysql database type)"
-    },
-    {
-      "id": "mysql_password",
-      "label": "MySQL Password",
-      "type": "string",
-      "default": "",
-      "description": "MySQL password (when using mysql database type)"
     }
   ]
 }
