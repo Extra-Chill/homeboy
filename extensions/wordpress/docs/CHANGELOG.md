@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.14] - 2026-04-23
+
+### Changed
+- add Playground as opt-in test backend (Phase 1 of #214)
+
 ## [2.10.13] - 2026-04-20
 
 ### Fixed
