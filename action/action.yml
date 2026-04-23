@@ -519,7 +519,6 @@ runs:
         always()
         && github.event_name != 'pull_request'
         && steps.select-results.outputs.results != ''
-        && steps.autofix-open-pr.outputs.created != 'true'
         && (inputs.auto-issue == 'true' || (inputs.auto-issue == '' && github.event_name != 'pull_request'))
       continue-on-error: true
       shell: bash
@@ -539,7 +538,6 @@ runs:
         && github.event_name != 'pull_request'
         && steps.select-results.outputs.results != ''
         && contains(steps.select-results.outputs.results, '"fail"')
-        && steps.autofix-open-pr.outputs.created != 'true'
         && steps.categorized-issues.outcome != 'success'
         && (inputs.auto-issue == 'true' || (inputs.auto-issue == '' && github.event_name != 'pull_request'))
       shell: bash

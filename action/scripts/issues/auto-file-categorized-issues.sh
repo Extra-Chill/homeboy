@@ -408,14 +408,18 @@ close_resolved_issues() {
 
 Resolved by the [code factory pipeline](${RUN_URL}). If findings reappear, a new issue will be filed."
 
-    gh api "repos/${REPO}/issues/${issue_num}/comments" \
+    if ! gh api "repos/${REPO}/issues/${issue_num}/comments" \
       --method POST \
-      --field body="${close_comment}" > /dev/null 2>&1 || true
+      --field body="${close_comment}" > /dev/null 2>&1; then
+      echo "::warning::Failed to comment on issue #${issue_num} during close"
+    fi
 
-    gh api "repos/${REPO}/issues/${issue_num}" \
+    if ! gh api "repos/${REPO}/issues/${issue_num}" \
       --method PATCH \
       --field state="closed" \
-      --field state_reason="completed" > /dev/null 2>&1 || true
+      --field state_reason="completed" > /dev/null 2>&1; then
+      echo "::warning::Failed to close issue #${issue_num}: ${issue_title}"
+    fi
 
     closed=$((closed + 1))
     echo "  Closed issue #${issue_num}: ${issue_title} (zero findings remaining)"
@@ -559,10 +563,12 @@ TABLEEOF
 *Updated automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action) on each CI run until resolved.*
 UPDATEFOOTEREOF
 
-      gh api "repos/${REPO}/issues/${existing_number}" \
+      if ! gh api "repos/${REPO}/issues/${existing_number}" \
         --method PATCH \
         --field title="${issue_title}" \
-        -F body=@"${body_file}" > /dev/null 2>&1 || true
+        -F body=@"${body_file}" > /dev/null 2>&1; then
+        echo "::warning::Failed to update issue #${existing_number}: ${issue_title}"
+      fi
 
       TOTAL_ISSUES_UPDATED=$((TOTAL_ISSUES_UPDATED + 1))
       echo "  Updated issue #${existing_number}: ${issue_title}"
@@ -680,6 +686,21 @@ for CMD in "${CMD_ARRAY[@]}"; do
   # File issues for this command type
   file_categorized_issues "${CMD}" "${FINDINGS_JSON}" "${local_comp_id}"
   COMMANDS_PROCESSED=$((COMMANDS_PROCESSED + 1))
+done
+
+# ── Reconciliation: close orphaned issues for command types not in this run ──
+# If a command was removed from the workflow, its issues are never updated or
+# closed because the main loop only processes commands that ran this time.
+# Close any open issues for command types that were NOT in this CI run.
+
+ALL_CMD_TYPES=('audit' 'lint' 'test')
+for CMD_TYPE in "${ALL_CMD_TYPES[@]}"; do
+  # Skip if this command type was processed in the main loop
+  if echo ",${CMD_ARRAY[*]}," | grep -q ",${CMD_TYPE},"; then
+    continue
+  fi
+  echo "Reconciling orphaned ${CMD_TYPE} issues for ${COMP_ID}..."
+  close_resolved_issues "${CMD_TYPE}" "${COMP_ID}" ""  # empty current_kinds = close all
 done
 
 echo ""
