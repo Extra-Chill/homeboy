@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.17] - 2026-04-23
+
+### Changed
+- playground db.php drop-in coexistence — fixture + smoke test
+
 ## [2.10.16] - 2026-04-23
 
 ### Changed
