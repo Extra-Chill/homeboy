@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.15] - 2026-04-23
+
+### Changed
+- playground diagnostics — structured stage logging + classified failures
+
 ## [2.10.14] - 2026-04-23
 
 ### Changed
