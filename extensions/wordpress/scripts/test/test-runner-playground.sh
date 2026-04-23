@@ -231,67 +231,128 @@ if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] && [ -f "$PARSE_FAILURES" ]; then
     fi
 fi
 
-if [ $playground_exit -ne 0 ]; then
-    if echo "$PHPUNIT_OUTPUT" | grep -q "SOME TESTS FAILED"; then
-        FAILED_STEP="PHPUnit tests (playground backend)"
-        FAILURE_REPLAY_MODE="none"
-        rm -f "$RESULT_FILE"
-        exit $playground_exit
-    elif echo "$PHPUNIT_STDOUT" | grep -qE 'FAILURES|ERRORS'; then
-        FAILED_STEP="PHPUnit tests (playground backend)"
-        FAILURE_REPLAY_MODE="none"
-        rm -f "$RESULT_FILE"
-        exit $playground_exit
-    elif echo "$PHPUNIT_OUTPUT" | grep -q "FATAL:"; then
-        FAILED_STEP="Playground bootstrap"
-        FAILURE_OUTPUT=$(echo "$PHPUNIT_OUTPUT" | grep "FATAL:")
-        rm -f "$RESULT_FILE"
-        exit $playground_exit
-    else
+# ----------------------------------------------------------------------------
+# Failure classification
+#
+# The playground-runner.php template writes a structured log to $RESULT_FILE
+# with these patterns (see playground-runner.php docblock for full contract):
+#
+#   STAGE_BEGIN:<stage>       - entered a bootstrap phase
+#   STAGE_OK:<stage>          - phase completed
+#   STAGE_FAIL:<stage>:<msg>  - caught Throwable during phase
+#   STAGE_FATAL:<stage>:<msg> - uncatchable fatal (shutdown handler)
+#   SOME TESTS FAILED         - PHPUnit ran, some assertions failed
+#   ALL TESTS PASSED          - PHPUnit ran, all assertions passed
+#
+# Classification order (first match wins):
+#   1. STAGE_FATAL/STAGE_FAIL in result file  -> bootstrap failure, show stage+msg
+#   2. SOME TESTS FAILED in result file       -> PHPUnit assertion failures
+#   3. Parse/fatal patterns in stdout         -> PHP crashed before writing log
+#   4. playground_exit != 0 with no log       -> unknown crash, dump raw output
+#   5. NO_TEST_FILES in result file           -> discovery found nothing
+#   6. Zero-test PHPUnit run                  -> suite empty
+# ----------------------------------------------------------------------------
+
+dump_diagnostics() {
+    local label="$1"
+    echo ""
+    echo "============================================"
+    echo "$label"
+    echo "============================================"
+    if [ -n "$PHPUNIT_OUTPUT" ]; then
         echo ""
-        echo "============================================"
-        echo "NOTE: Playground exited with code $playground_exit"
-        echo "============================================"
-        if [ -n "$PHPUNIT_OUTPUT" ]; then
-            echo "Last log: $(echo "$PHPUNIT_OUTPUT" | tail -1)"
-        else
-            echo "No result file produced. Playground may have crashed during boot."
-        fi
+        echo "--- Structured log ($RESULT_FILE) ---"
+        echo "$PHPUNIT_OUTPUT"
     fi
+    if [ -n "$PHPUNIT_STDOUT" ]; then
+        echo ""
+        echo "--- Playground stdout/stderr ---"
+        echo "$PHPUNIT_STDOUT"
+    fi
+}
+
+# Case 1: bootstrap failure captured in the structured log (STAGE_FAIL/STAGE_FATAL).
+if echo "$PHPUNIT_OUTPUT" | grep -qE '^STAGE_(FAIL|FATAL):'; then
+    FAILED_STAGE_LINE=$(echo "$PHPUNIT_OUTPUT" | grep -E '^STAGE_(FAIL|FATAL):' | head -1)
+    # Extract "<stage>:<msg>" (strip "STAGE_FAIL:" or "STAGE_FATAL:" prefix)
+    FAILED_STAGE_DETAIL=$(echo "$FAILED_STAGE_LINE" | sed -E 's/^STAGE_(FAIL|FATAL)://')
+    FAILED_STEP="Playground bootstrap (${FAILED_STAGE_DETAIL%%:*} stage)"
+    FAILURE_OUTPUT="$FAILED_STAGE_LINE"
+    dump_diagnostics "BOOTSTRAP FAILURE: $FAILED_STAGE_DETAIL"
+    rm -f "$RESULT_FILE"
+    exit ${playground_exit:-1}
 fi
 
+# Case 2: PHPUnit ran, some tests failed.
+if echo "$PHPUNIT_OUTPUT" | grep -q "SOME TESTS FAILED"; then
+    FAILED_STEP="PHPUnit tests (playground backend)"
+    FAILURE_REPLAY_MODE="none"
+    rm -f "$RESULT_FILE"
+    exit ${playground_exit:-1}
+fi
+
+# Case 3: PHPUnit emitted FAILURES/ERRORS on stdout (belt-and-suspenders for
+# the rare path where the result file was written but SOME TESTS FAILED line
+# was somehow dropped).
+if [ $playground_exit -ne 0 ] && echo "$PHPUNIT_STDOUT" | grep -qE '^(FAILURES|ERRORS)!'; then
+    FAILED_STEP="PHPUnit tests (playground backend)"
+    FAILURE_REPLAY_MODE="none"
+    rm -f "$RESULT_FILE"
+    exit $playground_exit
+fi
+
+# Case 4: PHP crashed before our template could write to the result file.
+# Parse/fatal errors from Playground go to stderr (captured in $PHPUNIT_STDOUT
+# via the tee'd pipe) — surface them clearly instead of failing silently.
+if [ $playground_exit -ne 0 ] && echo "$PHPUNIT_STDOUT" | grep -qE '^(PHP Parse error|Parse error:|PHP Fatal error|Fatal error:)'; then
+    FAILED_STEP="Playground PHP crash (before runner took control)"
+    FAILURE_OUTPUT=$(echo "$PHPUNIT_STDOUT" | grep -E '^(PHP Parse error|Parse error:|PHP Fatal error|Fatal error:)' | head -5)
+    dump_diagnostics "PHP CRASH"
+    rm -f "$RESULT_FILE"
+    exit $playground_exit
+fi
+
+# Case 5: playground exited non-zero and we still can't classify it.
+# Don't exit 0 here — that's the bug the old code had.
+if [ $playground_exit -ne 0 ]; then
+    FAILED_STEP="Playground exited with code $playground_exit (unclassified)"
+    dump_diagnostics "UNCLASSIFIED PLAYGROUND FAILURE (exit=$playground_exit)"
+    rm -f "$RESULT_FILE"
+    exit $playground_exit
+fi
+
+# Case 6: no output at all (not even a result file). Shouldn't happen on a
+# clean exit, but guard anyway.
 if [ -z "$PHPUNIT_OUTPUT" ] && [ -z "$PHPUNIT_STDOUT" ]; then
-    echo ""
-    echo "============================================"
-    echo "WARNING: No test output captured (playground)"
-    echo "============================================"
-    echo ""
+    dump_diagnostics "NO OUTPUT CAPTURED"
     FAILED_STEP="PHPUnit tests (no output, playground)"
     rm -f "$RESULT_FILE"
     exit 1
 fi
 
-if echo "$PHPUNIT_OUTPUT" | grep -q "NO_TEST_FILES"; then
-    echo ""
-    echo "============================================"
-    echo "WARNING: No test files discovered"
-    echo "============================================"
-    echo ""
+# Case 7: discovery found zero test files.
+if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
+    dump_diagnostics "NO TEST FILES DISCOVERED"
     FAILED_STEP="PHPUnit tests (no test files, playground)"
     rm -f "$RESULT_FILE"
     exit 1
 fi
 
-# Detect zero-test runs from PHPUnit stdout
+# Case 8: PHPUnit ran but executed zero tests (class didn't extend TestCase,
+# all tests excluded, etc.).
 if echo "$PHPUNIT_STDOUT" | grep -qE 'No tests executed|OK \(0 tests'; then
-    echo ""
-    echo "============================================"
-    echo "WARNING: PHPUnit ran 0 tests (playground)"
-    echo "============================================"
-    echo ""
+    dump_diagnostics "ZERO TESTS EXECUTED"
     FAILED_STEP="PHPUnit tests (zero tests executed, playground)"
     rm -f "$RESULT_FILE"
     exit 1
+fi
+
+# Surface any non-fatal NOTICEs captured during bootstrap even on success —
+# warnings inside WP setup have historically masked real problems.
+if echo "$PHPUNIT_OUTPUT" | grep -q "^NOTICE:"; then
+    echo ""
+    echo "--- Bootstrap notices (non-fatal) ---"
+    echo "$PHPUNIT_OUTPUT" | grep "^NOTICE:"
 fi
 
 rm -f "$RESULT_FILE"

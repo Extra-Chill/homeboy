@@ -467,7 +467,33 @@ SQLite) instead of host PHP. Does not replace the host backend.
 | Update README with backend docs | README.md | ✅ Complete |
 | In-process WP install (replace `system()` call) | — | ✅ Complete |
 | PHPUnit stdout forwarding | — | ✅ Complete |
+| Structured stage logging + diagnostics | scripts/test/playground-runner.php, test-runner-playground.sh | ✅ Complete (Phase 2) |
+| Parse extension phpunit.xml.dist in runner | — | 🔲 Pending |
 | db.php drop-in support (MDI test) | — | 🔲 Pending |
+
+**Diagnostics contract (Phase 2):**
+
+The template writes a structured log (`.pg-test-result.txt`) with these line patterns:
+
+| Line | Meaning |
+|------|---------|
+| `STAGE_BEGIN:<stage>` | Entered a bootstrap phase |
+| `STAGE_OK:<stage>` | Phase completed cleanly |
+| `STAGE_FAIL:<stage>:<msg>` | Throwable caught during phase |
+| `STAGE_FATAL:<stage>:<msg>` | Uncatchable fatal (shutdown handler) |
+| `NOTICE:<msg>` | PHP warning/notice (not swallowed) |
+| `PLUGIN_DETECTED <file>` / `THEME_DETECTED` | Component load success |
+| `NO_TEST_FILES` | Discovery found nothing |
+| `ALL TESTS PASSED` / `SOME TESTS FAILED` | PHPUnit outcome |
+
+Stages (in execution order): `boot` → `install` → `load_fixtures` → `load_deps`
+→ `load_component` → `discover_tests` → `load_tests` → `run_tests`.
+
+The bash runner classifies failures in priority order: bootstrap stage failure
+→ PHPUnit assertion failure → pre-runner PHP crash (parse/fatal on stderr) →
+unclassified non-zero exit. Unclassified non-zero exits used to silently
+report success; they now dump the structured log + raw stdout/stderr and exit
+with the playground's own exit code.
 
 **Architecture:**
 
@@ -489,7 +515,7 @@ SQLite) instead of host PHP. Does not replace the host backend.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Known Gaps (Phase 1):**
+**Known Gaps (remaining after Phase 2 diagnostics):**
 
 1. **WP version pinning.** The `--wp` flag must match the wp-phpunit package
    version (currently 6.9.x). Mismatch causes missing class errors in the
@@ -499,10 +525,12 @@ SQLite) instead of host PHP. Does not replace the host backend.
    integration) can be mounted into the Playground VFS, but Playground's built-in
    SQLite integration may conflict. Needs per-case testing.
 
-3. **No host bootstrap.** The Playground backend does not use `tests/bootstrap.php`.
-    It runs `install.php` in-process and loads test case classes directly. Any
-   customizations in the host bootstrap (e.g., additional `tests_add_filter` calls)
-   won't apply.
+3. **No host bootstrap, no phpunit.xml.dist parsing.** The Playground backend
+   does not use `tests/bootstrap.php` or the extension's `phpunit.xml.dist`.
+   It runs `install.php` in-process and discovers test files via hand-rolled
+   glob (`test-*.php`, `*Test.php`). Any customizations in the host bootstrap
+   or phpunit config (e.g., additional `tests_add_filter` calls, custom
+   suites, coverage rules) won't apply. Tracked as a follow-up task above.
 
 **References:**
 - Issue: Extra-Chill/homeboy-extensions#214
