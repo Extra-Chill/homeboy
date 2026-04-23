@@ -167,10 +167,24 @@ fn pre_validate_version_targets(
         // Validate all versions in this file match expected
         let found = text::require_identical(&versions, &target.file)?;
         if found != expected_version {
-            return Err(Error::internal_unexpected(format!(
-                "Version mismatch in {}: found {}, expected {}",
-                target.file, found, expected_version
-            )));
+            return Err(Error::validation_invalid_argument(
+                "version",
+                format!(
+                    "Version mismatch in {}: found {}, expected {}",
+                    target.file, found, expected_version
+                ),
+                None,
+                Some(vec![
+                    format!(
+                        "All version targets must be at {} before release proceeds.",
+                        expected_version
+                    ),
+                    format!(
+                        "Update {} from {} to {}, then re-run `homeboy release`.",
+                        target.file, found, expected_version
+                    ),
+                ]),
+            ));
         }
 
         target_infos.push(VersionTargetInfo {
@@ -244,7 +258,12 @@ pub(crate) fn validate_and_finalize_changelog(
                     ),
                     None,
                     Some(vec![
-                        "Ensure changelog and version files are in sync before updating version.".to_string(),
+                        format!("The changelog has a finalized section for {} but the version files are still at {}.", prev, current_version),
+                        "This usually means a previous release was partially prepared.".to_string(),
+                        String::new(),
+                        "To resolve:".to_string(),
+                        format!("  1. Update all version_targets to {} (to match the changelog), commit, and re-run", prev),
+                        format!("  2. Or revert the changelog {} section and re-run to let homeboy regenerate it", prev),
                     ]),
                 ));
             }
@@ -277,18 +296,47 @@ pub(crate) fn validate_and_finalize_changelog(
     if changelog_changed {
         local_files::local().write(&changelog_path, &finalized_changelog)?;
     } else if component.changelog_target.is_some() {
+        let changelog_file = component.changelog_target.as_deref().unwrap_or("CHANGELOG.md");
+        let version_targets_list: Vec<String> = component
+            .version_targets
+            .as_ref()
+            .map(|targets| {
+                targets
+                    .iter()
+                    .map(|t| format!("  - {}", t.file))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         return Err(Error::validation_invalid_argument(
             "changelog",
             format!(
                 "Configured changelog target '{}' was not updated for release {}",
-                component.changelog_target.as_deref().unwrap_or("CHANGELOG.md"),
-                new_version
+                changelog_file, new_version
             ),
             None,
             Some(vec![
-                "Release aborted before version files were modified because the configured changelog target stayed stale.".to_string(),
-                "Add unreleased entries or fix changelog generation before retrying homeboy release.".to_string(),
-            ]),
+                format!(
+                    "Planned release: {} → {} (bump: {})",
+                    current_version, new_version,
+                    if current_version == new_version { "none" } else { "auto" }
+                ),
+                "Pre-flight contract — before running `homeboy release`, the target component must have:".to_string(),
+                format!("  1. A `## [{}]` section at the top of {}", new_version, changelog_file),
+                "  2. Every version_targets file updated to match".to_string(),
+                "  3. All changes committed".to_string(),
+                String::new(),
+                "To preview the target version without running the pipeline:".to_string(),
+                format!("  homeboy release {} --dry-run", component.id),
+                String::new(),
+                "Or let homeboy manage the changelog automatically:".to_string(),
+                format!("  homeboy release {} (homeboy generates entries from conventional commits)", component.id),
+                if !version_targets_list.is_empty() {
+                    format!("Version target files:\n{}", version_targets_list.join("\n"))
+                } else {
+                    String::new()
+                },
+            ].into_iter().filter(|s| !s.is_empty()).collect()),
         ));
     }
 
