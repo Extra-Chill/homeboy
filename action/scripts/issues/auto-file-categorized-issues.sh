@@ -61,39 +61,12 @@ COMMANDS_PROCESSED=0
 
 normalize_audit_json() {
   local json_file="$1"
-  python3 -c "
-import json, sys
-payload = json.load(open(sys.argv[1]))
-data = payload.get('data', {})
-findings = data.get('findings', [])
-component = data.get('component_id', '')
-groups = {}
-for f in findings:
-    kind = f.get('kind', 'unknown')
-    groups.setdefault(kind, []).append({
-        'file': f.get('file', 'unknown'),
-        'description': f.get('description', ''),
-        'suggestion': f.get('suggestion', '')
-    })
-
-# Extract per-kind fixability from audit output
-fixability_by_kind = {}
-fixability = data.get('fixability') or {}
-if fixability:
-    for kind_key, breakdown in fixability.get('by_kind', {}).items():
-        fixability_by_kind[kind_key] = {
-            'total': breakdown.get('total', 0),
-            'safe': breakdown.get('safe', 0),
-            'plan_only': breakdown.get('plan_only', 0),
-        }
-
-print(json.dumps({
-    'groups': {k: v for k, v in sorted(groups.items(), key=lambda x: -len(x[1]))},
-    'component_id': component,
-    'total_findings': len(findings),
-    'fixability': fixability_by_kind,
-}))
-" "${json_file}" 2>/dev/null
+  jq '{
+    groups: (if .data.findings then (.data.findings | group_by(.kind) | map({key: .[0].kind, value: [.[] | {file: (.file // "unknown"), description: (.description // ""), suggestion: (.suggestion // "")}]}) | from_entries | to_entries | sort_by(-(.value | length)) | from_entries) else {} end),
+    component_id: (.data.component_id // ""),
+    total_findings: (.data.findings | length),
+    fixability: (if .data.fixability and .data.fixability.by_kind then (.data.fixability.by_kind | map_values({total: (.total // 0), safe: (.automated // 0), plan_only: (.manual_only // 0)})) else {} end)
+  }' "${json_file}" 2>/dev/null
 }
 
 normalize_lint_json() {
